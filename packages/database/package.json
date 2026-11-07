@@ -1,0 +1,31 @@
+{
+  "name": "@hosting-panel/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json && node -e \"import('node:fs').then((fs) => fs.cpSync('migrations', 'dist/migrations', { recursive: true }))\""
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "catalog:",
+    "@hosting-panel/contracts": "workspace:*",
+    "drizzle-orm": "catalog:",
+    "pg": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/pg": "catalog:",
+    "drizzle-kit": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}
