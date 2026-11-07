@@ -1,5 +1,6 @@
-# HCP-SPEC-001 §0.2 #8, §11.2, §13.1 — Local Docker Compose Topology
-# Non-negotiable security: containers strictly bound to 127.0.0.1, pinned image tags, segregated networks.
+# HCP-SPEC-002 Fase 1 — Local Docker Compose Backing Services Topology
+# Servizi di supporto al Control Plane locale: PostgreSQL 18.1 alpine, Redis 7.4 alpine, Keycloak 26.2.0.
+# Vincoli di sicurezza non-negoziabili: container vincolati strettamente su 127.0.0.1, tag immagini fissati, reti segregate.
 
 name: hosting-panel-local
 

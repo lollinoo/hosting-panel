@@ -67,7 +67,7 @@ Execute a complete, clean-room implementation of **`HCP-SPEC-002` Fase 1 — Hos
 - [x] `/grill-me` Round 1 & Round 2: All architectural forks (`Q1`..`Q8`) settled with user
 - [ ] Wave 1 (Parallel Isolated Worktrees):
   - [ ] Unit A (`swarm-editor`): Workspace deps (`shadcn@4.23.0`), removal of `coolify-adapter`, and clean implementation of all 8 `packages/*` + tests
-  - [ ] Unit D (`swarm-editor`): Normative `docs/*` (Step 0 audit, `ADR-001..012`, ER/boundary diagrams, `AC-F1-08` outage/security plan, Phase 2 open decisions), `.env.example`, `infra/local/docker-compose.yml`, `README.md`
+  - [x] Unit D (`swarm-editor`): Normative `docs/*` (Step 0 audit, `ADR-001..012`, ER/boundary diagrams, `AC-F1-08` outage/security plan, Phase 2 open decisions), `.env.example`, `infra/local/docker-compose.yml`, `README.md`
 - [ ] Wave 2 (Parallel Isolated Worktrees on top of Wave 1):
   - [ ] Unit B (`swarm-editor`): Clean `apps/api` (`/v1` Phase 1 Control Plane) + `docs/api/openapi.yaml` + `AC-F1-01..10` integration tests
   - [ ] Unit C (`swarm-editor`): Clean `apps/web` (`shadcn@4.23.0` Italian 3-console UI + JWE BFF) + BFF integration tests
