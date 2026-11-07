@@ -20,10 +20,16 @@ export const FORBIDDEN_PUBLIC_DTO_KEYS = [
   "refreshToken",
   "privateKey",
   "apiKey",
+  "ciphertext",
+  "ciphertextBase64",
+  "ivBase64",
+  "authTagBase64",
+  "secretValue",
+  "resolvedSecrets",
 ] as const;
 
 const FORBIDDEN_KEY_PATTERN =
-  /^(dockerContainerId|dockerNetworkId|dockerVolumeName|internalDockerRef|socketPath|dockerSocket|hostPath|bindMount|secretRef|password|passwordHash|accessToken|refreshToken|privateKey|apiKey|docker_container_id|docker_network_id|docker_volume_name|internal_docker_ref|socket_path|docker_socket|host_path|bind_mount|secret_ref|password_hash|access_token|refresh_token|private_key|api_key)$/i;
+  /^(dockerContainerId|dockerNetworkId|dockerVolumeName|internalDockerRef|socketPath|dockerSocket|hostPath|bindMount|secretRef|password|passwordHash|accessToken|refreshToken|privateKey|apiKey|ciphertext|ciphertextBase64|ivBase64|authTagBase64|secretValue|resolvedSecrets|docker_container_id|docker_network_id|docker_volume_name|internal_docker_ref|socket_path|docker_socket|host_path|bind_mount|secret_ref|password_hash|access_token|refresh_token|private_key|api_key|ciphertext_base64|iv_base64|auth_tag_base64|secret_value|resolved_secrets)$/i;
 
 export function findForbiddenPublicDtoKeys(value: unknown): string[] {
   const found: string[] = [];
@@ -121,7 +127,7 @@ export function findUnsafeDockerInputFields(value: unknown): string[] {
 }
 
 const PLAINTEXT_SECRET_KEY_PATTERN =
-  /^(password|secret|apiKey|privateKey|token|connectionString|api_key|private_key|connection_string|client_secret|auth_token)$/i;
+  /^(password|secret|apiKey|privateKey|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
 
 export function findPlaintextSecretKeys(value: unknown): string[] {
   const violations: string[] = [];
@@ -208,12 +214,17 @@ export function createPaginatedListSchema<T extends z.ZodTypeAny>(itemSchema: T)
 }
 
 // Capabilities
+export const RUNTIME_BACKENDS = ["linux-systemd", "local-simulator", "disabled"] as const;
+export const RuntimeBackendSchema = z.enum(RUNTIME_BACKENDS);
+export type RuntimeBackend = z.infer<typeof RuntimeBackendSchema>;
+
 export const PlatformCapabilitiesDtoSchema = z.object({
-  phase: z.literal("phase-1"),
+  phase: z.enum(["phase-1", "phase-2"]),
+  runtimeBackend: RuntimeBackendSchema.default("disabled"),
   hostingMode: z.literal("dedicated"),
   sharedHostingEnabled: z.literal(false),
-  dockerExecutorRuntimeAvailable: z.literal(false),
-  hostAgentRuntimeAvailable: z.literal(false),
+  dockerExecutorRuntimeAvailable: z.boolean(),
+  hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.literal(false),
   sftpAvailable: z.literal(false),
   productionBackupRuntimeAvailable: z.literal(false),
@@ -222,6 +233,7 @@ export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSche
 
 export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.freeze({
   phase: "phase-1",
+  runtimeBackend: "disabled",
   hostingMode: "dedicated",
   sharedHostingEnabled: false,
   dockerExecutorRuntimeAvailable: false,
@@ -230,6 +242,35 @@ export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.fre
   sftpAvailable: false,
   productionBackupRuntimeAvailable: false,
 });
+
+export interface CreatePlatformCapabilitiesOptions {
+  readonly runtimeBackend: RuntimeBackend;
+  readonly dockerExecutorRuntimeAvailable?: boolean;
+  readonly hostAgentRuntimeAvailable?: boolean;
+}
+
+export function createPlatformCapabilities(
+  options: CreatePlatformCapabilitiesOptions,
+): PlatformCapabilitiesDto {
+  const isDisabled = options.runtimeBackend === "disabled";
+  return Object.freeze(
+    PlatformCapabilitiesDtoSchema.parse({
+      phase: isDisabled ? "phase-1" : "phase-2",
+      runtimeBackend: options.runtimeBackend,
+      hostingMode: "dedicated",
+      sharedHostingEnabled: false,
+      dockerExecutorRuntimeAvailable: isDisabled
+        ? false
+        : Boolean(options.dockerExecutorRuntimeAvailable),
+      hostAgentRuntimeAvailable: isDisabled
+        ? false
+        : Boolean(options.hostAgentRuntimeAvailable),
+      acmeTlsRuntimeAvailable: false,
+      sftpAvailable: false,
+      productionBackupRuntimeAvailable: false,
+    }),
+  );
+}
 
 export const OrganizationCapabilitiesDtoSchema = z.object({
   hostingMode: z.enum(["dedicated", "shared"]),
@@ -622,3 +663,61 @@ export const AuditEventDtoSchema = z.object({
   timestamp: IsoDateTimeSchema,
 });
 export type AuditEventDto = z.infer<typeof AuditEventDtoSchema>;
+
+// Phase 2 — Encrypted Secrets Metadata (Write-Only) & Host Daemon / Telemetry DTOs
+export const SECRET_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+export const SecretKeySchema = z.string().regex(SECRET_KEY_PATTERN);
+export type SecretKey = z.infer<typeof SecretKeySchema>;
+
+export const EncryptedSecretMetadataDtoSchema = z.object({
+  id: EntityIdSchema,
+  organizationId: EntityIdSchema,
+  siteId: EntityIdSchema.nullable(),
+  secretKey: SecretKeySchema,
+  keyVersion: z.string().min(1),
+  version: z.number().int().positive(),
+  createdByUserId: EntityIdSchema.nullable(),
+  createdAt: IsoDateTimeSchema,
+  updatedAt: IsoDateTimeSchema,
+});
+export type EncryptedSecretMetadataDto = z.infer<typeof EncryptedSecretMetadataDtoSchema>;
+
+export const UpsertEncryptedSecretInputSchema = z.object({
+  secretKey: SecretKeySchema,
+  value: z.string().min(1).max(16384),
+  siteId: z.string().min(1).max(128).nullable().optional(),
+});
+export type UpsertEncryptedSecretInput = z.infer<typeof UpsertEncryptedSecretInputSchema>;
+
+export const HOST_DAEMON_COMPONENTS = ["docker_executor", "host_agent"] as const;
+export const HostDaemonComponentSchema = z.enum(HOST_DAEMON_COMPONENTS);
+export type HostDaemonComponent = z.infer<typeof HostDaemonComponentSchema>;
+
+export const HOST_DAEMON_STATUSES = ["online", "degraded", "offline"] as const;
+export const HostDaemonStatusSchema = z.enum(HOST_DAEMON_STATUSES);
+export type HostDaemonStatus = z.infer<typeof HostDaemonStatusSchema>;
+
+export const HostDaemonHeartbeatDtoSchema = z.object({
+  hostId: EntityIdSchema,
+  component: HostDaemonComponentSchema,
+  status: HostDaemonStatusSchema,
+  version: z.string().min(1),
+  lastSeenAt: IsoDateTimeSchema,
+  telemetrySnapshot: z.record(z.string(), z.unknown()),
+});
+export type HostDaemonHeartbeatDto = z.infer<typeof HostDaemonHeartbeatDtoSchema>;
+
+export const HostTelemetryDtoSchema = z.object({
+  hostId: EntityIdSchema,
+  cpuUsagePercent: z.number().min(0).max(100),
+  memoryUsedBytes: z.string().regex(/^\d+$/),
+  memoryTotalBytes: z.string().regex(/^\d+$/),
+  storageUsedBytes: z.string().regex(/^\d+$/),
+  storageTotalBytes: z.string().regex(/^\d+$/),
+  uptimeSeconds: z.number().nonnegative(),
+  kernelVersion: z.string().min(1),
+  dockerEngineReachable: z.boolean(),
+  collectedAt: IsoDateTimeSchema,
+});
+export type HostTelemetryDto = z.infer<typeof HostTelemetryDtoSchema>;
+

@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import {
   canTransitionOperation,
+  findForbiddenPublicDtoKeys,
+  findPlaintextSecretKeys,
   isTerminalOperationStatus,
   type AuditActorType,
   type ErrorCode,
@@ -778,6 +780,49 @@ export async function rebindDockerResourceTransactional(
   });
 }
 
+export const ACTIVE_OPERATION_LOCK_STATUSES = [
+  "queued",
+  "processing",
+  "accepted",
+  "reconciling",
+  "unknown",
+] as const satisfies readonly OperationStatus[];
+
+export const DEFAULT_OPERATION_LEASE_DURATION_MS = 60_000;
+
+function createRepoError(message: string, code: ErrorCode): Error {
+  const err = new Error(message);
+  (err as unknown as { code: ErrorCode }).code = code;
+  return err;
+}
+
+function extractPgUniqueConstraintText(err: unknown): string | null {
+  const top = err as {
+    code?: string;
+    constraint?: string;
+    message?: string;
+    cause?: unknown;
+  } | null;
+  const cause = (top?.cause ?? null) as {
+    code?: string;
+    constraint?: string;
+    message?: string;
+  } | null;
+
+  const pgCode = cause?.code ?? top?.code ?? "";
+  const combined = [
+    top?.constraint ?? "",
+    cause?.constraint ?? "",
+    top?.message ?? "",
+    cause?.message ?? "",
+  ].join(" ");
+
+  if (pgCode === "23505" || /duplicate key value violates unique constraint/i.test(combined)) {
+    return combined;
+  }
+  return null;
+}
+
 export interface EnqueueOperationInput {
   readonly organizationId: string;
   readonly kind: OperationKind;
@@ -786,6 +831,9 @@ export interface EnqueueOperationInput {
   readonly requestedByUserId?: string;
   readonly idempotencyKey?: string;
   readonly lockKey?: string;
+  readonly leaseDurationMs?: number;
+  readonly leaseExpiresAt?: Date | null;
+  readonly outboxPayload?: Record<string, unknown>;
   readonly steps?: readonly { key: string; label: string }[];
 }
 
@@ -794,22 +842,133 @@ export async function enqueueOperationTransactional(
   input: EnqueueOperationInput,
 ) {
   return db.transaction(async (tx) => {
-    const operationId = generatePrefixedId("op");
+    // 1. Idempotent replay check per (organizationId, idempotencyKey)
+    if (input.idempotencyKey) {
+      const existingOps = await tx
+        .select()
+        .from(operations)
+        .where(
+          and(
+            eq(operations.organizationId, input.organizationId),
+            eq(operations.idempotencyKey, input.idempotencyKey),
+          ),
+        );
 
-    const [operation] = await tx
-      .insert(operations)
-      .values({
-        id: operationId,
-        organizationId: input.organizationId,
-        kind: input.kind,
-        status: "queued",
-        resourceType: input.resourceType,
-        resourceId: input.resourceId,
-        requestedByUserId: input.requestedByUserId ?? null,
-        idempotencyKey: input.idempotencyKey ?? null,
-        lockKey: input.lockKey ?? null,
-      })
-      .returning();
+      const existingOp = existingOps[0];
+      if (existingOp) {
+        if (
+          existingOp.kind !== input.kind ||
+          existingOp.resourceType !== input.resourceType ||
+          existingOp.resourceId !== input.resourceId
+        ) {
+          throw createRepoError(
+            `Idempotency key '${input.idempotencyKey}' was already used for a different operation target`,
+            "IDEMPOTENCY_CONFLICT",
+          );
+        }
+
+        const existingSteps = await tx
+          .select()
+          .from(operationSteps)
+          .where(eq(operationSteps.operationId, existingOp.id))
+          .orderBy(asc(operationSteps.id));
+
+        return {
+          operation: existingOp,
+          steps: existingSteps,
+          outbox: null,
+          idempotentReplay: true,
+        };
+      }
+    }
+
+    // 2. Active lockKey contention check (AC-F2-06)
+    if (input.lockKey) {
+      const conflictingOps = await tx
+        .select({ id: operations.id, status: operations.status })
+        .from(operations)
+        .where(
+          and(
+            eq(operations.lockKey, input.lockKey),
+            inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
+          ),
+        );
+
+      if (conflictingOps[0]) {
+        throw createRepoError(
+          `Resource lock '${input.lockKey}' is currently held by active operation '${conflictingOps[0].id}' (${conflictingOps[0].status})`,
+          "RESOURCE_LOCKED",
+        );
+      }
+    }
+
+    const operationId = generatePrefixedId("op");
+    const now = new Date();
+    const leaseExpiresAt =
+      input.leaseExpiresAt !== undefined
+        ? input.leaseExpiresAt
+        : new Date(now.getTime() + (input.leaseDurationMs ?? DEFAULT_OPERATION_LEASE_DURATION_MS));
+
+    // 3. Enforce zero secrets or forbidden internal references in outbox_events.payload
+    const outboxPayload: Record<string, unknown> = {
+      ...(input.outboxPayload ?? {}),
+      operationId,
+      organizationId: input.organizationId,
+      kind: input.kind,
+      resourceType: input.resourceType,
+      resourceId: input.resourceId,
+    };
+
+    const secretViolations = findPlaintextSecretKeys(outboxPayload);
+    const forbiddenViolations = findForbiddenPublicDtoKeys(outboxPayload);
+    if (secretViolations.length > 0 || forbiddenViolations.length > 0) {
+      throw createRepoError(
+        `Outbox payload must never contain secrets or forbidden internal keys (${[
+          ...secretViolations,
+          ...forbiddenViolations,
+        ].join(", ")})`,
+        "VALIDATION_ERROR",
+      );
+    }
+
+    let operation;
+    try {
+      const inserted = await tx
+        .insert(operations)
+        .values({
+          id: operationId,
+          organizationId: input.organizationId,
+          kind: input.kind,
+          status: "queued",
+          resourceType: input.resourceType,
+          resourceId: input.resourceId,
+          requestedByUserId: input.requestedByUserId ?? null,
+          idempotencyKey: input.idempotencyKey ?? null,
+          lockKey: input.lockKey ?? null,
+          leaseExpiresAt,
+          submittedAt: now,
+          updatedAt: now,
+        })
+        .returning();
+      operation = inserted[0];
+    } catch (err) {
+      const uniqueText = extractPgUniqueConstraintText(err);
+      if (uniqueText !== null) {
+        if (uniqueText.includes("uq_operations_active_lock")) {
+          throw createRepoError(
+            `Resource lock '${String(input.lockKey)}' is already held by an active operation`,
+            "RESOURCE_LOCKED",
+          );
+        }
+        if (uniqueText.includes("uq_operations_org_idempotency")) {
+          throw createRepoError(
+            `Idempotency conflict for key '${String(input.idempotencyKey)}'`,
+            "IDEMPOTENCY_CONFLICT",
+          );
+        }
+      }
+      throw err;
+    }
 
     const createdSteps = [];
     for (const step of input.steps ?? []) {
@@ -824,7 +983,9 @@ export async function enqueueOperationTransactional(
           status: "pending",
         })
         .returning();
-      createdSteps.push(s);
+      if (s) {
+        createdSteps.push(s);
+      }
     }
 
     const [outbox] = await tx
@@ -834,15 +995,16 @@ export async function enqueueOperationTransactional(
         eventType: `operation.queued.${input.kind}`,
         aggregateType: input.resourceType,
         aggregateId: input.resourceId,
-        payload: {
-          operationId,
-          organizationId: input.organizationId,
-          kind: input.kind,
-        },
+        payload: outboxPayload,
       })
       .returning();
 
-    return { operation: operation!, steps: createdSteps, outbox: outbox! };
+    return {
+      operation: operation!,
+      steps: createdSteps,
+      outbox: outbox!,
+      idempotentReplay: false,
+    };
   });
 }
 
@@ -850,7 +1012,12 @@ export async function transitionOperation(
   db: HostingPanelDatabase,
   operationId: string,
   targetStatus: OperationStatus,
-  options?: { errorCode?: ErrorCode; errorMessage?: string },
+  options?: {
+    errorCode?: ErrorCode | null;
+    errorMessage?: string | null;
+    leaseDurationMs?: number;
+    leaseExpiresAt?: Date | null;
+  },
 ) {
   return db.transaction(async (tx) => {
     const opRows = await tx
@@ -861,17 +1028,29 @@ export async function transitionOperation(
 
     const op = opRows[0];
     if (!op) {
-      throw new Error(`Operation '${operationId}' not found`);
+      throw createRepoError(`Operation '${operationId}' not found`, "NOT_FOUND");
     }
 
     if (!canTransitionOperation(op.status, targetStatus)) {
-      throw new Error(
+      throw createRepoError(
         `Invalid operation status transition from '${op.status}' to '${targetStatus}'`,
+        "VALIDATION_ERROR",
       );
     }
 
     const isTerminal = isTerminalOperationStatus(targetStatus);
     const now = new Date();
+
+    let nextLeaseExpiresAt: Date | null = op.leaseExpiresAt;
+    if (isTerminal) {
+      nextLeaseExpiresAt = null;
+    } else if (options?.leaseExpiresAt !== undefined) {
+      nextLeaseExpiresAt = options.leaseExpiresAt;
+    } else if (options?.leaseDurationMs !== undefined) {
+      nextLeaseExpiresAt = new Date(now.getTime() + options.leaseDurationMs);
+    } else if (targetStatus === "processing" || targetStatus === "accepted") {
+      nextLeaseExpiresAt = new Date(now.getTime() + DEFAULT_OPERATION_LEASE_DURATION_MS);
+    }
 
     const [updated] = await tx
       .update(operations)
@@ -879,8 +1058,9 @@ export async function transitionOperation(
         status: targetStatus,
         startedAt: op.startedAt ?? (targetStatus === "processing" ? now : null),
         completedAt: isTerminal ? now : null,
-        errorCode: options?.errorCode ?? op.errorCode,
-        errorMessage: options?.errorMessage ?? op.errorMessage,
+        leaseExpiresAt: nextLeaseExpiresAt,
+        errorCode: options?.errorCode !== undefined ? options.errorCode : op.errorCode,
+        errorMessage: options?.errorMessage !== undefined ? options.errorMessage : op.errorMessage,
         updatedAt: now,
       })
       .where(eq(operations.id, operationId))
@@ -893,6 +1073,7 @@ export async function transitionOperation(
 export async function claimPendingOutboxEvents(
   db: HostingPanelDatabase,
   batchSize: number = 10,
+  leaseDurationMs: number = DEFAULT_OPERATION_LEASE_DURATION_MS,
 ) {
   return db.transaction(async (tx) => {
     const pending = await tx
@@ -901,9 +1082,46 @@ export async function claimPendingOutboxEvents(
       .where(eq(outboxEvents.status, "pending"))
       .orderBy(asc(outboxEvents.createdAt))
       .limit(batchSize)
-      .for("update");
+      .for("update", { skipLocked: true });
 
-    return pending;
+    if (pending.length === 0) {
+      return [];
+    }
+
+    const now = new Date();
+    const claimedIds = pending.map((row) => row.id);
+
+    const updated = await tx
+      .update(outboxEvents)
+      .set({
+        status: "processing",
+        lockedAt: now,
+      })
+      .where(inArray(outboxEvents.id, claimedIds))
+      .returning();
+
+    const queuedOpIds: string[] = [];
+    for (const row of pending) {
+      const payload = row.payload as Record<string, unknown> | null;
+      if (payload && typeof payload.operationId === "string" && payload.operationId.length > 0) {
+        queuedOpIds.push(payload.operationId);
+      }
+    }
+
+    if (queuedOpIds.length > 0 && leaseDurationMs > 0) {
+      await tx
+        .update(operations)
+        .set({
+          leaseExpiresAt: new Date(now.getTime() + leaseDurationMs),
+          updatedAt: now,
+        })
+        .where(and(inArray(operations.id, queuedOpIds), eq(operations.status, "queued")));
+    }
+
+    const byId = new Map(updated.map((row) => [row.id, row]));
+    return claimedIds
+      .map((id) => byId.get(id))
+      .filter((row): row is NonNullable<typeof row> => row !== undefined);
   });
 }
 
@@ -941,3 +1159,6 @@ export async function appendAuditEvent(
 
   return event;
 }
+
+export * from "./phase2-repository.js";
+

@@ -16,6 +16,8 @@ import type {
   ErrorCode,
   GrantEffect,
   HostAllocationStatus,
+  HostDaemonComponent,
+  HostDaemonStatus,
   HostStatus,
   HostingMode,
   OperationKind,
@@ -455,6 +457,7 @@ export const operations = pgTable(
     }),
     idempotencyKey: text("idempotency_key"),
     lockKey: text("lock_key"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     errorCode: text("error_code").$type<ErrorCode>(),
     errorMessage: text("error_message"),
     submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
@@ -491,10 +494,68 @@ export const outboxEvents = pgTable(
     payload: jsonb("payload").notNull(),
     status: text("status").notNull().default("pending"),
     retryCount: integer("retry_count").notNull().default(0),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    lastError: text("last_error"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     publishedAt: timestamp("published_at", { withTimezone: true }),
   },
   (t) => [index("idx_outbox_events_status").on(t.status)],
+);
+
+export const schemaMigrations = pgTable("schema_migrations", {
+  filename: text("filename").primaryKey(),
+  appliedAt: timestamp("applied_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const encryptedSecrets = pgTable(
+  "encrypted_secrets",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    siteId: text("site_id"),
+    secretKey: text("secret_key").notNull(),
+    ciphertextBase64: text("ciphertext_base64").notNull(),
+    ivBase64: text("iv_base64").notNull(),
+    authTagBase64: text("auth_tag_base64").notNull(),
+    keyVersion: text("key_version").notNull().default("v1"),
+    version: integer("version").notNull().default(1),
+    createdByUserId: text("created_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_encrypted_secrets_id_org").on(t.id, t.organizationId),
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_encrypted_secrets_site_org",
+    }).onDelete("cascade"),
+    index("idx_encrypted_secrets_org_site").on(t.organizationId, t.siteId),
+  ],
+);
+
+export const hostAgentHeartbeats = pgTable(
+  "host_agent_heartbeats",
+  {
+    id: text("id").primaryKey(),
+    hostId: text("host_id")
+      .notNull()
+      .references(() => hosts.id, { onDelete: "cascade" }),
+    component: text("component").$type<HostDaemonComponent>().notNull(),
+    status: text("status").$type<HostDaemonStatus>().notNull(),
+    version: text("version").notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    telemetrySnapshot: jsonb("telemetry_snapshot").notNull().default({}),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_host_agent_heartbeats_host_component").on(t.hostId, t.component),
+    index("idx_host_agent_heartbeats_host").on(t.hostId),
+  ],
 );
 
 export const auditEvents = pgTable(

@@ -54,6 +54,13 @@ export interface DatabaseClient {
   close(): Promise<void>;
 }
 
+const CREATE_SCHEMA_MIGRATIONS_SQL = `
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  filename TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+`;
+
 export function resolveMigrationsDirectory(): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [
@@ -99,10 +106,34 @@ export function createDatabaseClient(config: DatabaseClientConfig): DatabaseClie
       db,
       async migrate(): Promise<string[]> {
         await pglite.waitReady;
+        await pglite.exec(CREATE_SCHEMA_MIGRATIONS_SQL);
+
+        const appliedRes = await pglite.query<{ filename: string }>(
+          "SELECT filename FROM schema_migrations ORDER BY filename ASC",
+        );
+        const alreadyApplied = new Set(appliedRes.rows.map((row) => row.filename));
+
         const migrations = loadMigrationFiles();
         for (const migration of migrations) {
-          await pglite.exec(migration.sql);
+          if (alreadyApplied.has(migration.filename)) {
+            continue;
+          }
+
+          await pglite.exec("BEGIN");
+          try {
+            await pglite.exec(migration.sql);
+            await pglite.query(
+              "INSERT INTO schema_migrations (filename) VALUES ($1)",
+              [migration.filename],
+            );
+            await pglite.exec("COMMIT");
+            alreadyApplied.add(migration.filename);
+          } catch (error) {
+            await pglite.exec("ROLLBACK");
+            throw error;
+          }
         }
+
         return migrations.map((migration) => migration.filename);
       },
       async close(): Promise<void> {
@@ -132,11 +163,26 @@ export function createDatabaseClient(config: DatabaseClientConfig): DatabaseClie
       const migrations = loadMigrationFiles();
       const client = await pool.connect();
       try {
+        await client.query(CREATE_SCHEMA_MIGRATIONS_SQL);
+        const appliedRes = await client.query<{ filename: string }>(
+          "SELECT filename FROM schema_migrations ORDER BY filename ASC",
+        );
+        const alreadyApplied = new Set(appliedRes.rows.map((row) => row.filename));
+
         for (const migration of migrations) {
+          if (alreadyApplied.has(migration.filename)) {
+            continue;
+          }
+
           await client.query("BEGIN");
           try {
             await client.query(migration.sql);
+            await client.query(
+              "INSERT INTO schema_migrations (filename) VALUES ($1)",
+              [migration.filename],
+            );
             await client.query("COMMIT");
+            alreadyApplied.add(migration.filename);
           } catch (error) {
             await client.query("ROLLBACK");
             throw error;

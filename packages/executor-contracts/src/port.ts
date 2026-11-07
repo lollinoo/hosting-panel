@@ -6,6 +6,9 @@ export interface DockerExecutionResult {
   readonly operationId: string;
   readonly status: OperationStatus;
   readonly message?: string;
+  readonly internalDockerRef?: string;
+  readonly containerStatus?: "running" | "stopped";
+  readonly ingressConfigured?: boolean;
 }
 
 export interface DockerExecutorPort {

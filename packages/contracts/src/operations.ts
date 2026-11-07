@@ -40,6 +40,7 @@ export const OPERATION_KINDS = [
   "service.stop",
   "site.deploy",
   "host.maintenance",
+  "host.security",
   "host.allocate",
 ] as const;
 

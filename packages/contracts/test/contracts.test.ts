@@ -4,9 +4,13 @@ import {
   DEFAULT_PLATFORM_CAPABILITIES,
   ERROR_CODES,
   ERROR_CODE_HTTP_STATUS,
+  EncryptedSecretMetadataDtoSchema,
   GrantEffectSchema,
   HostAllocationDtoSchema,
+  HostDaemonHeartbeatDtoSchema,
   HostDtoSchema,
+  HostTelemetryDtoSchema,
+  OPERATION_KINDS,
   OPERATION_STATUSES,
   OperationDtoSchema,
   PERMISSION_KEYS,
@@ -14,10 +18,13 @@ import {
   PRESET_ROLE_PERMISSIONS,
   PermissionKeySchema,
   PlatformCapabilitiesDtoSchema,
+  RUNTIME_BACKENDS,
   ServiceTemplateDtoSchema,
   SiteDetailDtoSchema,
+  UpsertEncryptedSecretInputSchema,
   canTransitionOperation,
   createErrorEnvelope,
+  createPlatformCapabilities,
   findForbiddenPublicDtoKeys,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
@@ -123,7 +130,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
 });
 
 describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
-  it("defines all canonical HCP-SPEC-002 error codes with zero legacy artifacts", () => {
+  it("defines all canonical HCP-SPEC-002 & HCP-SPEC-003 error codes with zero legacy artifacts", () => {
     expect(ERROR_CODES).toEqual([
       "UNAUTHENTICATED",
       "PERMISSION_DENIED",
@@ -139,6 +146,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "DOMAIN_CONFLICT",
       "LAST_OWNER_PROTECTED",
       "NOT_SUPPORTED",
+      "OPERATION_INTERRUPTED",
       "OPERATION_AMBIGUOUS",
       "DOCKER_ENGINE_UNAVAILABLE",
       "HOST_AGENT_UNAVAILABLE",
@@ -150,6 +158,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       expect(ERROR_CODE_HTTP_STATUS[code]).toBeGreaterThanOrEqual(400);
       expect(ERROR_CODE_HTTP_STATUS[code]).toBeLessThan(600);
     }
+    expect(ERROR_CODE_HTTP_STATUS.OPERATION_INTERRUPTED).toBe(409);
   });
 
   it("maps status codes accurately", () => {
@@ -260,11 +269,24 @@ describe("@hosting-panel/contracts — Operations & State Transitions", () => {
 });
 
 describe("@hosting-panel/contracts — Security Guards & Redaction", () => {
-  it("detects forbidden public DTO keys including internal docker refs and secrets", () => {
+  it("detects forbidden public DTO keys including internal docker refs, ciphertext fields, and resolved secrets", () => {
     const payload = {
       name: "WordPress",
       dockerContainerId: "cnt-123456",
       internalDockerRef: "dock-ref",
+      ciphertext: "abc",
+      ciphertextBase64: "YWJj",
+      ivBase64: "MTIzNDU2Nzg5MDEy",
+      authTagBase64: "MTIzNDU2Nzg5MDEyMzQ1Ng==",
+      secretValue: "raw-val",
+      resolvedSecrets: { DB_PASS: "top-secret" },
+      snake: {
+        ciphertext_base64: "YWJj",
+        iv_base64: "MTIz",
+        auth_tag_base64: "NDU2",
+        secret_value: "raw",
+        resolved_secrets: { A: "B" },
+      },
       config: {
         password: "secret-value",
         bindMount: "/var/lib/data",
@@ -275,6 +297,17 @@ describe("@hosting-panel/contracts — Security Guards & Redaction", () => {
     const violations = findForbiddenPublicDtoKeys(payload);
     expect(violations).toContain("dockerContainerId");
     expect(violations).toContain("internalDockerRef");
+    expect(violations).toContain("ciphertext");
+    expect(violations).toContain("ciphertextBase64");
+    expect(violations).toContain("ivBase64");
+    expect(violations).toContain("authTagBase64");
+    expect(violations).toContain("secretValue");
+    expect(violations).toContain("resolvedSecrets");
+    expect(violations).toContain("snake.ciphertext_base64");
+    expect(violations).toContain("snake.iv_base64");
+    expect(violations).toContain("snake.auth_tag_base64");
+    expect(violations).toContain("snake.secret_value");
+    expect(violations).toContain("snake.resolved_secrets");
     expect(violations).toContain("config.password");
     expect(violations).toContain("config.bindMount");
     expect(violations).toContain("list[0].apiKey");
@@ -357,15 +390,121 @@ describe("@hosting-panel/contracts — Security Guards & Redaction", () => {
 });
 
 describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
-  it("validates PlatformCapabilitiesDto with truthful Phase 1 defaults", () => {
+  it("validates PlatformCapabilitiesDto with truthful Phase 1 defaults & Phase 2 runtime factory", () => {
+    expect(RUNTIME_BACKENDS).toEqual(["linux-systemd", "local-simulator", "disabled"]);
+    expect(OPERATION_KINDS).toContain("host.security");
+
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,
     );
     expect(DEFAULT_PLATFORM_CAPABILITIES.phase).toBe("phase-1");
+    expect(DEFAULT_PLATFORM_CAPABILITIES.runtimeBackend).toBe("disabled");
     expect(DEFAULT_PLATFORM_CAPABILITIES.hostingMode).toBe("dedicated");
     expect(DEFAULT_PLATFORM_CAPABILITIES.sharedHostingEnabled).toBe(false);
     expect(DEFAULT_PLATFORM_CAPABILITIES.dockerExecutorRuntimeAvailable).toBe(false);
     expect(DEFAULT_PLATFORM_CAPABILITIES.hostAgentRuntimeAvailable).toBe(false);
+
+    // Legacy payloads omitting runtimeBackend default cleanly to "disabled"
+    const legacyParsed = PlatformCapabilitiesDtoSchema.parse({
+      phase: "phase-1",
+      hostingMode: "dedicated",
+      sharedHostingEnabled: false,
+      dockerExecutorRuntimeAvailable: false,
+      hostAgentRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: false,
+      sftpAvailable: false,
+      productionBackupRuntimeAvailable: false,
+    });
+    expect(legacyParsed.runtimeBackend).toBe("disabled");
+
+    const disabledCaps = createPlatformCapabilities({
+      runtimeBackend: "disabled",
+      dockerExecutorRuntimeAvailable: true,
+    });
+    expect(disabledCaps).toEqual(DEFAULT_PLATFORM_CAPABILITIES);
+    expect(Object.isFrozen(disabledCaps)).toBe(true);
+
+    const p2Caps = createPlatformCapabilities({
+      runtimeBackend: "linux-systemd",
+      dockerExecutorRuntimeAvailable: true,
+      hostAgentRuntimeAvailable: true,
+    });
+    expect(p2Caps).toEqual({
+      phase: "phase-2",
+      runtimeBackend: "linux-systemd",
+      hostingMode: "dedicated",
+      sharedHostingEnabled: false,
+      dockerExecutorRuntimeAvailable: true,
+      hostAgentRuntimeAvailable: true,
+      acmeTlsRuntimeAvailable: false,
+      sftpAvailable: false,
+      productionBackupRuntimeAvailable: false,
+    });
+    expect(Object.isFrozen(p2Caps)).toBe(true);
+
+    // Shared / ACME / SFTP / Backups MUST remain strictly gated false (AC-F2-10)
+    expect(
+      PlatformCapabilitiesDtoSchema.safeParse({
+        ...p2Caps,
+        sharedHostingEnabled: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("validates Phase 2 EncryptedSecretMetadataDto, UpsertEncryptedSecretInput, HostDaemonHeartbeatDto & HostTelemetryDto", () => {
+    const secretMeta = EncryptedSecretMetadataDtoSchema.parse({
+      id: "sec_01",
+      organizationId: "org_acme",
+      siteId: "site_shop",
+      secretKey: "WORDPRESS_DB_PASSWORD",
+      keyVersion: "v1",
+      version: 2,
+      createdByUserId: "usr_elena",
+      createdAt: SAMPLE_TIMESTAMP,
+      updatedAt: SAMPLE_TIMESTAMP,
+    });
+    expect(findForbiddenPublicDtoKeys(secretMeta)).toHaveLength(0);
+
+    expect(
+      UpsertEncryptedSecretInputSchema.parse({
+        secretKey: "WORDPRESS_DB_PASSWORD",
+        value: "s3cr3t-pass!",
+        siteId: null,
+      }),
+    ).toBeTruthy();
+
+    expect(
+      UpsertEncryptedSecretInputSchema.safeParse({
+        secretKey: "123_INVALID_START",
+        value: "abc",
+      }).success,
+    ).toBe(false);
+
+    expect(
+      HostDaemonHeartbeatDtoSchema.parse({
+        hostId: "hst_ded_01",
+        component: "docker_executor",
+        status: "online",
+        version: "0.2.0",
+        lastSeenAt: SAMPLE_TIMESTAMP,
+        telemetrySnapshot: { activeContainers: 3 },
+      }),
+    ).toBeTruthy();
+
+    expect(
+      HostTelemetryDtoSchema.parse({
+        hostId: "hst_ded_01",
+        cpuUsagePercent: 18.5,
+        memoryUsedBytes: "4294967296",
+        memoryTotalBytes: "17179869184",
+        storageUsedBytes: "21474836480",
+        storageTotalBytes: "107374182400",
+        uptimeSeconds: 86400,
+        kernelVersion: "6.8.0-45-generic",
+        dockerEngineReachable: true,
+        collectedAt: SAMPLE_TIMESTAMP,
+      }),
+    ).toBeTruthy();
   });
 
   it("validates HostDto & Allocation DTOs", () => {

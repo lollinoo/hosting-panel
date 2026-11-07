@@ -36,6 +36,7 @@ describe("@hosting-panel/database — Phase 1 Docker-Native Architecture & Invar
     client = createDatabaseClient({ mode: "pglite" });
     const applied = await client.migrate();
     expect(applied).toContain("0001_phase1_docker_native.sql");
+    expect(applied).toContain("0002_phase2_runtime_and_secrets.sql");
     await seedPhase1Dataset(client.db);
   });
 
@@ -333,7 +334,7 @@ describe("@hosting-panel/database — Phase 1 Docker-Native Architecture & Invar
 
     expect(operation.status).toBe("queued");
     expect(steps).toHaveLength(2);
-    expect(outbox.status).toBe("pending");
+    expect(outbox?.status).toBe("pending");
 
     // Transition queued -> processing -> reconciling -> succeeded
     const op1 = await transitionOperation(client.db, operation.id, "processing");
