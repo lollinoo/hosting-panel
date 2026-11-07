@@ -35,9 +35,12 @@ export default async function OrgOperationsPage({
         return "success" as const;
       case "failed":
         return "destructive" as const;
-      case "processing":
-      case "reconciling":
+      case "unknown":
         return "warning" as const;
+      case "processing":
+      case "accepted":
+      case "reconciling":
+        return "default" as const;
       default:
         return "secondary" as const;
     }

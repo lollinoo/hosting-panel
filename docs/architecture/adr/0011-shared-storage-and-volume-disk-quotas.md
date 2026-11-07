@@ -50,5 +50,5 @@ Creazione di un file pre-allocato di dimensione fissa (es. `volume.raw` da 5 GB)
    Nella Fase 1, la piattaforma opera esclusivamente in modalità `Dedicated`. Poiché un host è interamente riservato a un singolo tenant cliente, le quote specificate nel modello relazionale (`ResourceQuota`) agiscono come massimali contrattuali e limiti logici, non richiedendo il partizionamento a livello di blocco o filesystem tra tenant concorrenti.
 2. **Divieto di Scelta Implicita**:
    È espressamente vietato scegliere o vincolare il codice di Fase 1 a uno specifico filesystem (es. forzare ZFS o XFS) prima di aver condotto i benchmark prestazionali e verificato i prerequisiti di installazione sulle distribuzioni Linux target (Ubuntu 24.04 LTS vs AlmaLinux 9).
-3. **Precondizione Tassativa per la Fase 2**:
-   L'attivazione della modalità Shared Hosting (`ADR-007`) è subordinata alla chiusura formale di questo ADR con l'adozione e l'integrazione di una soluzione di storage comprovata.
+3. **Conferma di Chiusura Differita anche in Fase 2 (`HCP-SPEC-003` §1.2, `AC-F2-10`)**:
+   Anche con l'attivazione del runtime `Dedicated` in Fase 2 (`HCP-SPEC-003`), questo ADR rimane tassativamente in stato **`OPEN — prima di Shared`**. La modalità Shared Hosting resta bloccata (`sharedHostingEnabled: false`, `409 SHARED_MODE_GATED`) fino alla futura specifica dedicata (`HCP-SPEC-007`) e al superamento integrale del Security Gate (`ADR-007`).

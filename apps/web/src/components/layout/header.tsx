@@ -13,7 +13,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Server, Layers, Building2, LogOut, ChevronDown } from "lucide-react";
+import {
+  Server,
+  Layers,
+  Building2,
+  LogOut,
+  ChevronDown,
+  Lock,
+  Cpu,
+} from "lucide-react";
 import type { PublicSessionDto } from "@/lib/session";
 
 export interface HeaderProps {
@@ -70,6 +78,16 @@ export function Header({ session }: HeaderProps) {
   const isHostingAdmin =
     session.user?.globalRoles.includes("hosting_admin") || isInfraAdmin;
 
+  const caps = session.platformCapabilities;
+  const phaseLabel = caps?.phase === "phase-2" ? "Fase 2" : "Fase 1";
+  const runtimeBackend = caps?.runtimeBackend ?? "disabled";
+
+  const getRuntimeBadgeVariant = () => {
+    if (runtimeBackend === "linux-systemd") return "success" as const;
+    if (runtimeBackend === "local-simulator") return "default" as const;
+    return "secondary" as const;
+  };
+
   const currentConsoleLabel = () => {
     if (session.activeConsole === "infra") return "Console Infrastructure Admin";
     if (session.activeConsole === "hosting") return "Console Hosting Admin";
@@ -83,15 +101,25 @@ export function Header({ session }: HeaderProps) {
   return (
     <header className="sticky top-0 z-40 w-full border-b bg-card/95 backdrop-blur">
       <div className="flex h-16 items-center justify-between px-6">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <Link href="/" className="flex items-center gap-2 font-bold tracking-tight text-lg">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-extrabold text-sm shadow">
               HCP
             </span>
             <span>Hosting Control Panel</span>
           </Link>
-          <Badge variant="outline" className="hidden sm:inline-flex border-primary/20 text-xs">
-            Docker-Native Fase 1
+          <Badge
+            variant={caps?.phase === "phase-2" ? "default" : "outline"}
+            className="hidden sm:inline-flex text-xs"
+          >
+            Docker-Native {phaseLabel}
+          </Badge>
+          <Badge
+            variant={getRuntimeBadgeVariant()}
+            className="hidden lg:inline-flex font-mono text-[11px] gap-1"
+          >
+            <Cpu className="h-3 w-3" />
+            <span>runtime: {runtimeBackend}</span>
           </Badge>
         </div>
 
@@ -110,7 +138,7 @@ export function Header({ session }: HeaderProps) {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-64">
-                  <DropdownMenuLabel className="text-xs">Passa a un'altra Console</DropdownMenuLabel>
+                  <DropdownMenuLabel className="text-xs">Passa a un&apos;altra Console</DropdownMenuLabel>
                   <DropdownMenuSeparator />
 
                   {isInfraAdmin && (
@@ -121,7 +149,7 @@ export function Header({ session }: HeaderProps) {
                       <Server className="h-4 w-4 text-blue-500" />
                       <div>
                         <div className="font-medium">Infrastructure Admin</div>
-                        <div className="text-[10px] text-muted-foreground">Host fisici & confini runtime</div>
+                        <div className="text-[10px] text-muted-foreground">Host fisici &amp; confini runtime</div>
                       </div>
                     </DropdownMenuItem>
                   )}
@@ -134,7 +162,7 @@ export function Header({ session }: HeaderProps) {
                       <Layers className="h-4 w-4 text-emerald-500" />
                       <div>
                         <div className="font-medium">Hosting Admin</div>
-                        <div className="text-[10px] text-muted-foreground">Allocazioni & Service Templates</div>
+                        <div className="text-[10px] text-muted-foreground">Allocazioni &amp; Service Templates</div>
                       </div>
                     </DropdownMenuItem>
                   )}
@@ -183,6 +211,54 @@ export function Header({ session }: HeaderProps) {
           )}
         </div>
       </div>
+
+      {/* Truthful Capability Banner (HCP-SPEC-003 §8 / AC-F2-10) */}
+      {session.authenticated && (
+        <div className="border-t bg-muted/30 px-6 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-foreground">
+              Stato Piattaforma ({phaseLabel}):
+            </span>
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 font-mono">
+              Mode: dedicated
+            </Badge>
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 font-mono">
+              Backend: {runtimeBackend}
+            </Badge>
+            <Badge
+              variant={caps?.dockerExecutorRuntimeAvailable ? "success" : "secondary"}
+              className="text-[10px] py-0 px-1.5"
+            >
+              Executor: {caps?.dockerExecutorRuntimeAvailable ? "Attivo" : "Disabilitato"}
+            </Badge>
+            <Badge
+              variant={caps?.hostAgentRuntimeAvailable ? "success" : "secondary"}
+              className="text-[10px] py-0 px-1.5"
+            >
+              Host Agent: {caps?.hostAgentRuntimeAvailable ? "Attivo" : "Disabilitato"}
+            </Badge>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Lock className="h-3 w-3 text-amber-600" />
+            <span className="font-medium text-amber-800 dark:text-amber-300">
+              Chiusi (AC-F2-10):
+            </span>
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-amber-500/30 text-amber-700 dark:text-amber-300">
+              Shared Hosting: Non attivo
+            </Badge>
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-amber-500/30 text-amber-700 dark:text-amber-300">
+              ACME/TLS: Non attivo
+            </Badge>
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-amber-500/30 text-amber-700 dark:text-amber-300">
+              SFTP: Non attivo
+            </Badge>
+            <Badge variant="outline" className="text-[10px] py-0 px-1.5 border-amber-500/30 text-amber-700 dark:text-amber-300">
+              Backup: Non attivo
+            </Badge>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
