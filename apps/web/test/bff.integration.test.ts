@@ -5,7 +5,14 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import {
   findForbiddenPublicDtoKeys,
   ApiErrorEnvelopeSchema,
+  AsyncAcceptedEnvelopeSchema,
+  EncryptedSecretMetadataDtoSchema,
+  HostDaemonHeartbeatDtoSchema,
+  HostTelemetryDtoSchema,
+  OperationDtoSchema,
+  PlatformCapabilitiesDtoSchema,
   createErrorEnvelope,
+  type RuntimeBackend,
 } from "@hosting-panel/contracts";
 import { decryptSession, SESSION_COOKIE_NAME } from "../src/lib/session";
 import { GET as getSession } from "../src/app/api/session/route";
@@ -14,11 +21,20 @@ import { POST as postLogout } from "../src/app/api/session/logout/route";
 import { POST as postSwitchContext } from "../src/app/api/session/switch-context/route";
 import { PATCH as patchHostMode } from "../src/app/api/bff/hosts/[hostId]/mode/route";
 import { POST as postHostMaintenance } from "../src/app/api/bff/hosts/[hostId]/maintenance/route";
+import { POST as postHostSecurity } from "../src/app/api/bff/hosts/[hostId]/security/route";
+import { GET as getHostTelemetry } from "../src/app/api/bff/hosts/[hostId]/telemetry/route";
+import { GET as getHostOperation } from "../src/app/api/bff/hosts/[hostId]/operations/[opId]/route";
 import { POST as postHostAllocations } from "../src/app/api/bff/hosts/[hostId]/allocations/route";
 import { POST as postOrgSites } from "../src/app/api/bff/orgs/[orgId]/sites/route";
 import { POST as postOrgServices } from "../src/app/api/bff/orgs/[orgId]/sites/[siteId]/services/route";
 import { POST as postOrgRevisions } from "../src/app/api/bff/orgs/[orgId]/services/[serviceId]/revisions/route";
 import { POST as postOrgLifecycle } from "../src/app/api/bff/orgs/[orgId]/services/[serviceId]/lifecycle/route";
+import {
+  GET as getOrgSecrets,
+  POST as postOrgSecrets,
+} from "../src/app/api/bff/orgs/[orgId]/secrets/route";
+import { DELETE as deleteOrgSecret } from "../src/app/api/bff/orgs/[orgId]/secrets/[secretId]/route";
+import { GET as getOrgOperation } from "../src/app/api/bff/orgs/[orgId]/operations/[opId]/route";
 
 function extractCookiePair(res: Response): string {
   const setCookie = res.headers.get("set-cookie") || "";
@@ -32,17 +48,51 @@ function extractRawCookieValue(res: Response): string {
   return match ? match[1] || "" : "";
 }
 
+const ALLOWLISTED_MAINTENANCE = new Set([
+  "collect_diagnostics",
+  "verify_storage_posture",
+  "refresh_host_inventory",
+]);
+
+const ALLOWLISTED_SECURITY_POLICIES = new Set([
+  "verify_baseline_firewall",
+  "apply_dedicated_nftables_22_80_443",
+]);
+
 describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration", () => {
   let server: http.Server;
   let serverUrl: string;
   let revokeCalled = false;
+  let mockRuntimeBackend: RuntimeBackend = "disabled";
+  let lastReceivedIdempotencyKey: string | undefined;
+  const storedSecrets = new Map<
+    string,
+    {
+      id: string;
+      organizationId: string;
+      siteId: string | null;
+      secretKey: string;
+      keyVersion: string;
+      version: number;
+      createdByUserId: string | null;
+      createdAt: string;
+      updatedAt: string;
+    }
+  >();
   const previousApiUrl = process.env.API_INTERNAL_URL;
 
   beforeAll(async () => {
     revokeCalled = false;
+    mockRuntimeBackend = "disabled";
+    storedSecrets.clear();
+
     server = http.createServer((req, res) => {
       const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
       const method = req.method || "GET";
+      lastReceivedIdempotencyKey =
+        typeof req.headers["idempotency-key"] === "string"
+          ? req.headers["idempotency-key"]
+          : undefined;
 
       let bodyRaw = "";
       req.on("data", (chunk) => {
@@ -100,6 +150,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           }
 
           const isCustomer = auth.includes("mock-customer-token");
+          const isPhase2 = mockRuntimeBackend !== "disabled";
 
           const responseData = {
             data: {
@@ -121,11 +172,12 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
                 },
               ],
               platformCapabilities: {
-                phase: "phase-1",
+                phase: isPhase2 ? "phase-2" : "phase-1",
+                runtimeBackend: mockRuntimeBackend,
                 hostingMode: "dedicated",
                 sharedHostingEnabled: false,
-                dockerExecutorRuntimeAvailable: false,
-                hostAgentRuntimeAvailable: false,
+                dockerExecutorRuntimeAvailable: isPhase2,
+                hostAgentRuntimeAvailable: isPhase2,
                 acmeTlsRuntimeAvailable: false,
                 sftpAvailable: false,
                 productionBackupRuntimeAvailable: false,
@@ -151,7 +203,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
               JSON.stringify(
                 createErrorEnvelope({
                   code: "SHARED_MODE_GATED",
-                  message: "La modalità Shared è disabilitata nella Fase 1 del piano di controllo (AC-F1-06).",
+                  message: "La modalità Shared è disabilitata anche in Fase 2 (AC-F1-06 / AC-F2-10).",
                   requestId: "req-mode-gated",
                 })
               )
@@ -163,16 +215,225 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           return;
         }
 
-        if (method === "POST" && url.pathname.includes("/v1/hosts/") && url.pathname.endsWith("/maintenance")) {
-          res.writeHead(422, { "Content-Type": "application/json" });
+        // Host Telemetry (Phase 2)
+        if (method === "GET" && url.pathname.startsWith("/v1/hosts/") && url.pathname.endsWith("/telemetry")) {
+          const parts = url.pathname.split("/");
+          const hostId = parts[3] || "host-1";
+          const nowIso = new Date().toISOString();
+
+          res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
-            JSON.stringify(
-              createErrorEnvelope({
-                code: "NOT_SUPPORTED",
-                message: "Host agent maintenance runtime non attivo in Fase 1 (AC-F1-10).",
-                requestId: "req-maint-unsupported",
-              })
-            )
+            JSON.stringify({
+              data: {
+                hostId,
+                runtimeBackend: mockRuntimeBackend,
+                telemetry:
+                  mockRuntimeBackend === "disabled"
+                    ? null
+                    : {
+                        hostId,
+                        cpuUsagePercent: 18.4,
+                        memoryUsedBytes: "2147483648",
+                        memoryTotalBytes: "8589934592",
+                        storageUsedBytes: "10737418240",
+                        storageTotalBytes: "107374182400",
+                        uptimeSeconds: 86420,
+                        kernelVersion: "6.8.0-48-generic",
+                        dockerEngineReachable: true,
+                        collectedAt: nowIso,
+                      },
+                daemons:
+                  mockRuntimeBackend === "disabled"
+                    ? []
+                    : [
+                        {
+                          hostId,
+                          component: "docker_executor",
+                          status: "online",
+                          version: "0.2.0",
+                          lastSeenAt: nowIso,
+                          telemetrySnapshot: { backend: mockRuntimeBackend },
+                        },
+                        {
+                          hostId,
+                          component: "host_agent",
+                          status: "online",
+                          version: "0.2.0",
+                          lastSeenAt: nowIso,
+                          telemetrySnapshot: { backend: mockRuntimeBackend },
+                        },
+                      ],
+              },
+            })
+          );
+          return;
+        }
+
+        // Host Maintenance (Phase 1 disabled -> 422; Phase 2 -> 202 or 403)
+        if (method === "POST" && url.pathname.includes("/v1/hosts/") && url.pathname.endsWith("/maintenance")) {
+          if (!req.headers["idempotency-key"]) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "VALIDATION_ERROR",
+                  message: "Idempotency-Key mancante",
+                  requestId: "req-maint-idem",
+                })
+              )
+            );
+            return;
+          }
+
+          if (mockRuntimeBackend === "disabled") {
+            res.writeHead(422, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "NOT_SUPPORTED",
+                  message: "Host agent maintenance runtime non attivo in Fase 1 (AC-F1-10).",
+                  requestId: "req-maint-unsupported",
+                })
+              )
+            );
+            return;
+          }
+
+          const action = String(body.action || "");
+          if (!ALLOWLISTED_MAINTENANCE.has(action)) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "HOST_POLICY_DENIED",
+                  message: `Azione '${action}' fuori dall'allowlist di hp-host-agent (AC-F2-04).`,
+                  requestId: "req-maint-denied",
+                })
+              )
+            );
+            return;
+          }
+
+          const parts = url.pathname.split("/");
+          const hostId = parts[3] || "host-1";
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              data: {
+                operationId: "op_host_maint_01",
+                status: "queued",
+                resourceId: hostId,
+                submittedAt: new Date().toISOString(),
+              },
+              links: {
+                self: `/v1/hosts/${hostId}/operations/op_host_maint_01`,
+              },
+            })
+          );
+          return;
+        }
+
+        // Host Security / nftables (Phase 2)
+        if (method === "POST" && url.pathname.includes("/v1/hosts/") && url.pathname.endsWith("/security")) {
+          if (!req.headers["idempotency-key"]) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "VALIDATION_ERROR",
+                  message: "Idempotency-Key mancante",
+                  requestId: "req-sec-idem",
+                })
+              )
+            );
+            return;
+          }
+
+          if (mockRuntimeBackend === "disabled") {
+            res.writeHead(422, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "NOT_SUPPORTED",
+                  message: "Host agent security runtime non attivo con runtimeBackend=disabled.",
+                  requestId: "req-sec-unsupported",
+                })
+              )
+            );
+            return;
+          }
+
+          const policyRef = String(body.policyRef || "");
+          if (!ALLOWLISTED_SECURITY_POLICIES.has(policyRef)) {
+            res.writeHead(403, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "HOST_POLICY_DENIED",
+                  message: `Policy '${policyRef}' non consentita.`,
+                  requestId: "req-sec-denied",
+                })
+              )
+            );
+            return;
+          }
+
+          const parts = url.pathname.split("/");
+          const hostId = parts[3] || "host-1";
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              data: {
+                operationId: "op_host_sec_01",
+                status: "queued",
+                resourceId: hostId,
+                submittedAt: new Date().toISOString(),
+              },
+              links: {
+                self: `/v1/hosts/${hostId}/operations/op_host_sec_01`,
+              },
+            })
+          );
+          return;
+        }
+
+        // Host Operation Polling (Phase 2)
+        if (method === "GET" && /^\/v1\/hosts\/[^/]+\/operations\/[^/]+$/.test(url.pathname)) {
+          const parts = url.pathname.split("/");
+          const hostId = parts[3] || "host-1";
+          const opId = parts[5] || "op_host_01";
+          const nowIso = new Date().toISOString();
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              data: {
+                id: opId,
+                organizationId: "platform-system",
+                kind: opId.includes("sec") ? "host.security" : "host.maintenance",
+                status: "succeeded",
+                resourceType: "host",
+                resourceId: hostId,
+                requestedByUserId: "usr_admin_1",
+                errorCode: null,
+                errorMessage: null,
+                submittedAt: nowIso,
+                startedAt: nowIso,
+                completedAt: nowIso,
+                updatedAt: nowIso,
+                steps: [
+                  {
+                    id: "step_1",
+                    key: "ipc_dispatch",
+                    label: "Invio comando firmato a hp-host-agent",
+                    status: "succeeded",
+                    message: "Completato senza errori",
+                    startedAt: nowIso,
+                    completedAt: nowIso,
+                  },
+                ],
+              },
+            })
           );
           return;
         }
@@ -190,6 +451,128 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
                 dedicatedScope: true,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
+              },
+            })
+          );
+          return;
+        }
+
+        // Organization Secrets (Phase 2 — Write-Only AES-256-GCM)
+        if (method === "GET" && /^\/v1\/organizations\/[^/]+\/secrets$/.test(url.pathname)) {
+          const parts = url.pathname.split("/");
+          const orgId = parts[3] || "org-acme";
+          const siteFilter = url.searchParams.get("siteId");
+          const items = [...storedSecrets.values()].filter(
+            (s) =>
+              s.organizationId === orgId &&
+              (siteFilter === null || s.siteId === siteFilter || s.siteId === null)
+          );
+          const nowIso = new Date().toISOString();
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              data: items,
+              meta: {
+                total: items.length,
+                cursor: null,
+                requestId: "req-secrets-list",
+                timestamp: nowIso,
+              },
+              page: {
+                nextCursor: null,
+                hasMore: false,
+              },
+            })
+          );
+          return;
+        }
+
+        if (method === "POST" && /^\/v1\/organizations\/[^/]+\/secrets$/.test(url.pathname)) {
+          if (!req.headers["idempotency-key"]) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "VALIDATION_ERROR",
+                  message: "Idempotency-Key mancante",
+                  requestId: "req-secret-idem",
+                })
+              )
+            );
+            return;
+          }
+
+          const parts = url.pathname.split("/");
+          const orgId = parts[3] || "org-acme";
+          const secretKey = String(body.secretKey || "DB_PASS");
+          const siteId = typeof body.siteId === "string" ? body.siteId : null;
+          const nowIso = new Date().toISOString();
+          const existing = [...storedSecrets.values()].find(
+            (s) => s.organizationId === orgId && s.siteId === siteId && s.secretKey === secretKey
+          );
+          const meta = {
+            id: existing?.id ?? `sec_${storedSecrets.size + 1}`,
+            organizationId: orgId,
+            siteId,
+            secretKey,
+            keyVersion: "v1",
+            version: existing ? existing.version + 1 : 1,
+            createdByUserId: "usr_customer_1",
+            createdAt: existing?.createdAt ?? nowIso,
+            updatedAt: nowIso,
+          };
+          storedSecrets.set(meta.id, meta);
+
+          res.writeHead(201, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: meta }));
+          return;
+        }
+
+        if (method === "DELETE" && /^\/v1\/organizations\/[^/]+\/secrets\/[^/]+$/.test(url.pathname)) {
+          const parts = url.pathname.split("/");
+          const secretId = parts[5] || "sec_1";
+          storedSecrets.delete(secretId);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: { deleted: true, secretId } }));
+          return;
+        }
+
+        // Organization Operation Polling (Phase 2)
+        if (method === "GET" && /^\/v1\/organizations\/[^/]+\/operations\/[^/]+$/.test(url.pathname)) {
+          const parts = url.pathname.split("/");
+          const orgId = parts[3] || "org-acme";
+          const opId = parts[5] || "op_svc_01";
+          const nowIso = new Date().toISOString();
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              data: {
+                id: opId,
+                organizationId: orgId,
+                kind: "service.deploy",
+                status: "succeeded",
+                resourceType: "service",
+                resourceId: "svc-1",
+                requestedByUserId: "usr_customer_1",
+                errorCode: null,
+                errorMessage: null,
+                submittedAt: nowIso,
+                startedAt: nowIso,
+                completedAt: nowIso,
+                updatedAt: nowIso,
+                steps: [
+                  {
+                    id: "step_outbox_1",
+                    key: "deploy_ipc",
+                    label: "Deploy container tramite hp-docker-executor",
+                    status: "succeeded",
+                    message: "Container allineato a specHash",
+                    startedAt: nowIso,
+                    completedAt: nowIso,
+                  },
+                ],
               },
             })
           );
@@ -257,15 +640,51 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         }
 
         if (method === "POST" && url.pathname.endsWith("/lifecycle")) {
-          res.writeHead(422, { "Content-Type": "application/json" });
+          if (!req.headers["idempotency-key"]) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "VALIDATION_ERROR",
+                  message: "Idempotency-Key mancante",
+                  requestId: "req-lifecycle-idem",
+                })
+              )
+            );
+            return;
+          }
+
+          if (mockRuntimeBackend === "disabled") {
+            res.writeHead(422, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "NOT_SUPPORTED",
+                  message: "Docker executor runtime non attivo in Fase 1 (AC-F1-10).",
+                  requestId: "req-lifecycle-unsupported",
+                })
+              )
+            );
+            return;
+          }
+
+          const parts = url.pathname.split("/");
+          const orgId = parts[3] || "org-acme";
+          const serviceId = parts[5] || "svc-1";
+          const action = String(body.action || "deploy");
+          res.writeHead(202, { "Content-Type": "application/json" });
           res.end(
-            JSON.stringify(
-              createErrorEnvelope({
-                code: "NOT_SUPPORTED",
-                message: "Docker executor runtime non attivo in Fase 1 (AC-F1-10).",
-                requestId: "req-lifecycle-unsupported",
-              })
-            )
+            JSON.stringify({
+              data: {
+                operationId: `op_${action}_01`,
+                status: "queued",
+                resourceId: serviceId,
+                submittedAt: new Date().toISOString(),
+              },
+              links: {
+                self: `/v1/organizations/${orgId}/operations/op_${action}_01`,
+              },
+            })
           );
           return;
         }
@@ -490,6 +909,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
   });
 
   it("4. Mutating BFF routes enforce Idempotency-Key, Shared Mode Gating (409), and Lifecycle Boundary (422 NOT_SUPPORTED)", async () => {
+    mockRuntimeBackend = "disabled";
     const loginRes = await postLogin(
       new Request("http://localhost:3000/api/session/login", {
         method: "POST",
@@ -575,7 +995,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     const modeErr = ApiErrorEnvelopeSchema.parse(modeJson);
     expect(modeErr.error.code).toBe("SHARED_MODE_GATED");
 
-    // D. POST /api/bff/orgs/:orgId/services/:serviceId/lifecycle returns 422 NOT_SUPPORTED (AC-F1-10)
+    // D. POST /api/bff/orgs/:orgId/services/:serviceId/lifecycle returns 422 NOT_SUPPORTED when disabled (AC-F1-10)
     const lifecycleRes = await postOrgLifecycle(
       new Request("http://localhost:3000/api/bff/orgs/org-acme/services/svc-1/lifecycle", {
         method: "POST",
@@ -591,11 +1011,13 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       { params: Promise.resolve({ orgId: "org-acme", serviceId: "svc-1" }) }
     );
     expect(lifecycleRes.status).toBe(422);
+    expect(typeof lastReceivedIdempotencyKey).toBe("string");
+    expect(lastReceivedIdempotencyKey!.length).toBeGreaterThan(8);
     const lifecycleJson = await lifecycleRes.json();
     const lifecycleErr = ApiErrorEnvelopeSchema.parse(lifecycleJson);
     expect(lifecycleErr.error.code).toBe("NOT_SUPPORTED");
 
-    // E. POST /api/bff/hosts/:hostId/maintenance returns 422 NOT_SUPPORTED (AC-F1-10)
+    // E. POST /api/bff/hosts/:hostId/maintenance returns 422 NOT_SUPPORTED when disabled (AC-F1-10)
     const maintRes = await postHostMaintenance(
       new Request("http://localhost:3000/api/bff/hosts/host-1/maintenance", {
         method: "POST",
@@ -697,7 +1119,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     expect(revokeCalled).toBe(true);
   });
 
-  it("6. Static scan test asserts ZERO occurrences of legacy POC brand across apps/web/src and explicit AC-F1-10 Phase 1 boundary notices", () => {
+  it("6. Static scan test asserts ZERO occurrences of legacy POC brand across apps/web/src and explicit AC-F1-10 / AC-F2-10 boundary notices", () => {
     const webSrcDir = path.resolve(__dirname, "../src");
     expect(fs.existsSync(webSrcDir)).toBe(true);
 
@@ -723,7 +1145,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       expect(content.toLowerCase()).not.toContain(forbiddenLegacyBrand);
     }
 
-    // Explicit AC-F1-10 Phase 1 boundary notices verified
+    // Explicit AC-F1-10 & AC-F2-10 boundary notices verified
     const hostDetailPage = fs.readFileSync(
       path.join(webSrcDir, "app/admin/hosts/[hostId]/page.tsx"),
       "utf-8"
@@ -736,7 +1158,366 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       "utf-8"
     );
     expect(overviewPage).toContain("AC-F1-10");
+    expect(overviewPage).toContain("AC-F2-10");
     expect(overviewPage).toContain("Matrice Disponibilità Fase 1");
     expect(overviewPage).toContain("Non attivo in Fase 1 (Previsto Fase 2+)");
+  });
+
+  it("7. Phase 2 Async Lifecycle (deploy/restart/stop) & Org Operation polling: enforces CSRF, forwards Idempotency-Key, and preserves 202 Accepted", async () => {
+    mockRuntimeBackend = "local-simulator";
+    try {
+      const loginRes = await postLogin(
+        new Request("http://localhost:3000/api/session/login", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ personaId: "persona-customer-owner" }),
+        })
+      );
+      const cookiePair = extractCookiePair(loginRes);
+
+      const sessionRes = await getSession(
+        new Request("http://localhost:3000/api/session", {
+          headers: { Host: "localhost:3000", Cookie: cookiePair },
+        })
+      );
+      const sessionJson = (await sessionRes.json()) as {
+        csrfToken: string;
+        platformCapabilities: unknown;
+      };
+      const caps = PlatformCapabilitiesDtoSchema.parse(sessionJson.platformCapabilities);
+      expect(caps.phase).toBe("phase-2");
+      expect(caps.runtimeBackend).toBe("local-simulator");
+      expect(caps.sharedHostingEnabled).toBe(false);
+      expect(caps.acmeTlsRuntimeAvailable).toBe(false);
+      expect(caps.sftpAvailable).toBe(false);
+      expect(caps.productionBackupRuntimeAvailable).toBe(false);
+
+      // Missing CSRF on lifecycle must fail with 403
+      const noCsrfRes = await postOrgLifecycle(
+        new Request("http://localhost:3000/api/bff/orgs/org-acme/services/svc-1/lifecycle", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+            Cookie: cookiePair,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "stop" }),
+        }),
+        { params: Promise.resolve({ orgId: "org-acme", serviceId: "svc-1" }) }
+      );
+      expect(noCsrfRes.status).toBe(403);
+
+      // Valid lifecycle stop with explicit Idempotency-Key -> 202 Accepted
+      const stopRes = await postOrgLifecycle(
+        new Request("http://localhost:3000/api/bff/orgs/org-acme/services/svc-1/lifecycle", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+            Cookie: cookiePair,
+            "X-CSRF-Token": sessionJson.csrfToken,
+            "Idempotency-Key": "idem-stop-explicit-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "stop", reason: "Test arresto servizio" }),
+        }),
+        { params: Promise.resolve({ orgId: "org-acme", serviceId: "svc-1" }) }
+      );
+      expect(stopRes.status).toBe(202);
+      expect(lastReceivedIdempotencyKey).toBe("idem-stop-explicit-01");
+
+      const stopEnvelope = AsyncAcceptedEnvelopeSchema.parse(await stopRes.json());
+      expect(stopEnvelope.data.operationId).toBe("op_stop_01");
+      expect(findForbiddenPublicDtoKeys(stopEnvelope)).toEqual([]);
+
+      // Poll GET /api/bff/orgs/:orgId/operations/:opId
+      const opRes = await getOrgOperation(
+        new Request("http://localhost:3000/api/bff/orgs/org-acme/operations/op_stop_01", {
+          headers: { Host: "localhost:3000", Cookie: cookiePair },
+        }),
+        { params: Promise.resolve({ orgId: "org-acme", opId: "op_stop_01" }) }
+      );
+      expect(opRes.status).toBe(200);
+      const opPayload = (await opRes.json()) as { data: unknown };
+      const parsedOp = OperationDtoSchema.parse(opPayload.data);
+      expect(parsedOp.id).toBe("op_stop_01");
+      expect(findForbiddenPublicDtoKeys(opPayload)).toEqual([]);
+    } finally {
+      mockRuntimeBackend = "disabled";
+    }
+  });
+
+  it("8. Phase 2 Write-Only Encrypted Secrets BFF routes (GET, POST, DELETE): enforce CSRF & path validation, never leak plaintext value (AC-F2-05)", async () => {
+    const loginRes = await postLogin(
+      new Request("http://localhost:3000/api/session/login", {
+        method: "POST",
+        headers: {
+          Host: "localhost:3000",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ personaId: "persona-customer-owner" }),
+      })
+    );
+    const cookiePair = extractCookiePair(loginRes);
+    const sessionRes = await getSession(
+      new Request("http://localhost:3000/api/session", {
+        headers: { Host: "localhost:3000", Cookie: cookiePair },
+      })
+    );
+    const { csrfToken } = (await sessionRes.json()) as { csrfToken: string };
+
+    // Unauthenticated GET secrets -> 401
+    const unauthGet = await getOrgSecrets(
+      new Request("http://localhost:3000/api/bff/orgs/org-acme/secrets", {
+        headers: { Host: "localhost:3000" },
+      }),
+      { params: Promise.resolve({ orgId: "org-acme" }) }
+    );
+    expect(unauthGet.status).toBe(401);
+
+    // Missing CSRF on POST secrets -> 403
+    const noCsrfPost = await postOrgSecrets(
+      new Request("http://localhost:3000/api/bff/orgs/org-acme/secrets", {
+        method: "POST",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          secretKey: "WORDPRESS_DB_PASSWORD",
+          value: "super-secret-plaintext-never-echo-me!",
+          siteId: "site-01",
+        }),
+      }),
+      { params: Promise.resolve({ orgId: "org-acme" }) }
+    );
+    expect(noCsrfPost.status).toBe(403);
+
+    // Valid POST secret -> 201 write-only metadata
+    const sentinelPlaintext = "super-secret-plaintext-never-echo-me!";
+    const createRes = await postOrgSecrets(
+      new Request("http://localhost:3000/api/bff/orgs/org-acme/secrets", {
+        method: "POST",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Idempotency-Key": "idem-secret-create-01",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          secretKey: "WORDPRESS_DB_PASSWORD",
+          value: sentinelPlaintext,
+          siteId: "site-01",
+        }),
+      }),
+      { params: Promise.resolve({ orgId: "org-acme" }) }
+    );
+    expect(createRes.status).toBe(201);
+    const createRawText = await createRes.text();
+    expect(createRawText).not.toContain(sentinelPlaintext);
+    const createJson = JSON.parse(createRawText) as { data: unknown };
+    const createdMeta = EncryptedSecretMetadataDtoSchema.parse(createJson.data);
+    expect(createdMeta.secretKey).toBe("WORDPRESS_DB_PASSWORD");
+    expect(findForbiddenPublicDtoKeys(createJson)).toEqual([]);
+
+    // Invalid siteId query parameter rejected with 400
+    const badQueryRes = await getOrgSecrets(
+      new Request("http://localhost:3000/api/bff/orgs/org-acme/secrets?siteId=../escape", {
+        headers: { Host: "localhost:3000", Cookie: cookiePair },
+      }),
+      { params: Promise.resolve({ orgId: "org-acme" }) }
+    );
+    expect(badQueryRes.status).toBe(400);
+
+    // Valid GET secrets -> 200 metadata list without plaintext
+    const listRes = await getOrgSecrets(
+      new Request("http://localhost:3000/api/bff/orgs/org-acme/secrets?siteId=site-01", {
+        headers: { Host: "localhost:3000", Cookie: cookiePair },
+      }),
+      { params: Promise.resolve({ orgId: "org-acme" }) }
+    );
+    expect(listRes.status).toBe(200);
+    const listRawText = await listRes.text();
+    expect(listRawText).not.toContain(sentinelPlaintext);
+    const listJson = JSON.parse(listRawText) as { data: unknown[] };
+    expect(listJson.data.length).toBe(1);
+    expect(findForbiddenPublicDtoKeys(listJson)).toEqual([]);
+
+    // Missing CSRF on DELETE secret -> 403
+    const noCsrfDel = await deleteOrgSecret(
+      new Request(`http://localhost:3000/api/bff/orgs/org-acme/secrets/${createdMeta.id}`, {
+        method: "DELETE",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+        },
+      }),
+      { params: Promise.resolve({ orgId: "org-acme", secretId: createdMeta.id }) }
+    );
+    expect(noCsrfDel.status).toBe(403);
+
+    // Valid DELETE secret -> 200
+    const delRes = await deleteOrgSecret(
+      new Request(`http://localhost:3000/api/bff/orgs/org-acme/secrets/${createdMeta.id}`, {
+        method: "DELETE",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+        },
+      }),
+      { params: Promise.resolve({ orgId: "org-acme", secretId: createdMeta.id }) }
+    );
+    expect(delRes.status).toBe(200);
+    const delJson = (await delRes.json()) as { data: { deleted: boolean; secretId: string } };
+    expect(delJson.data.deleted).toBe(true);
+    expect(delJson.data.secretId).toBe(createdMeta.id);
+  });
+
+  it("9. Phase 2 Host Telemetry, Allowlisted Maintenance, nftables Security & Host Operations polling (AC-F2-04, AC-F2-06)", async () => {
+    mockRuntimeBackend = "linux-systemd";
+    try {
+      const loginRes = await postLogin(
+        new Request("http://localhost:3000/api/session/login", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ personaId: "persona-infra-admin" }),
+        })
+      );
+      const cookiePair = extractCookiePair(loginRes);
+      const sessionRes = await getSession(
+        new Request("http://localhost:3000/api/session", {
+          headers: { Host: "localhost:3000", Cookie: cookiePair },
+        })
+      );
+      const { csrfToken } = (await sessionRes.json()) as { csrfToken: string };
+
+      // 1. GET /api/bff/hosts/:hostId/telemetry
+      const telRes = await getHostTelemetry(
+        new Request("http://localhost:3000/api/bff/hosts/host-1/telemetry", {
+          headers: { Host: "localhost:3000", Cookie: cookiePair },
+        }),
+        { params: Promise.resolve({ hostId: "host-1" }) }
+      );
+      expect(telRes.status).toBe(200);
+      const telJson = (await telRes.json()) as {
+        data: {
+          hostId: string;
+          runtimeBackend: string;
+          telemetry: unknown;
+          daemons: unknown[];
+        };
+      };
+      expect(telJson.data.runtimeBackend).toBe("linux-systemd");
+      HostTelemetryDtoSchema.parse(telJson.data.telemetry);
+      expect(telJson.data.daemons.length).toBe(2);
+      for (const daemon of telJson.data.daemons) {
+        HostDaemonHeartbeatDtoSchema.parse(daemon);
+      }
+      expect(findForbiddenPublicDtoKeys(telJson)).toEqual([]);
+
+      // 2. Allowlisted maintenance -> 202 Accepted
+      const maintOkRes = await postHostMaintenance(
+        new Request("http://localhost:3000/api/bff/hosts/host-1/maintenance", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+            Cookie: cookiePair,
+            "X-CSRF-Token": csrfToken,
+            "Idempotency-Key": "idem-maint-diag-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "collect_diagnostics" }),
+        }),
+        { params: Promise.resolve({ hostId: "host-1" }) }
+      );
+      expect(maintOkRes.status).toBe(202);
+      const maintEnvelope = AsyncAcceptedEnvelopeSchema.parse(await maintOkRes.json());
+      expect(maintEnvelope.data.operationId).toBe("op_host_maint_01");
+
+      // 3. Disallowed maintenance -> 403 HOST_POLICY_DENIED
+      const maintDenyRes = await postHostMaintenance(
+        new Request("http://localhost:3000/api/bff/hosts/host-1/maintenance", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+            Cookie: cookiePair,
+            "X-CSRF-Token": csrfToken,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ action: "kernel_patch_drain" }),
+        }),
+        { params: Promise.resolve({ hostId: "host-1" }) }
+      );
+      expect(maintDenyRes.status).toBe(403);
+      const maintDenyErr = ApiErrorEnvelopeSchema.parse(await maintDenyRes.json());
+      expect(maintDenyErr.error.code).toBe("HOST_POLICY_DENIED");
+
+      // 4. POST /api/bff/hosts/:hostId/security without CSRF -> 403, with CSRF -> 202 Accepted
+      const secNoCsrfRes = await postHostSecurity(
+        new Request("http://localhost:3000/api/bff/hosts/host-1/security", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+            Cookie: cookiePair,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ policyRef: "verify_baseline_firewall" }),
+        }),
+        { params: Promise.resolve({ hostId: "host-1" }) }
+      );
+      expect(secNoCsrfRes.status).toBe(403);
+
+      const secOkRes = await postHostSecurity(
+        new Request("http://localhost:3000/api/bff/hosts/host-1/security", {
+          method: "POST",
+          headers: {
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+            Cookie: cookiePair,
+            "X-CSRF-Token": csrfToken,
+            "Idempotency-Key": "idem-sec-nft-01",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ policyRef: "apply_dedicated_nftables_22_80_443" }),
+        }),
+        { params: Promise.resolve({ hostId: "host-1" }) }
+      );
+      expect(secOkRes.status).toBe(202);
+      expect(lastReceivedIdempotencyKey).toBe("idem-sec-nft-01");
+      const secEnvelope = AsyncAcceptedEnvelopeSchema.parse(await secOkRes.json());
+      expect(secEnvelope.data.operationId).toBe("op_host_sec_01");
+
+      // 5. GET /api/bff/hosts/:hostId/operations/:opId
+      const hostOpRes = await getHostOperation(
+        new Request("http://localhost:3000/api/bff/hosts/host-1/operations/op_host_sec_01", {
+          headers: { Host: "localhost:3000", Cookie: cookiePair },
+        }),
+        { params: Promise.resolve({ hostId: "host-1", opId: "op_host_sec_01" }) }
+      );
+      expect(hostOpRes.status).toBe(200);
+      const hostOpJson = (await hostOpRes.json()) as { data: unknown };
+      const parsedHostOp = OperationDtoSchema.parse(hostOpJson.data);
+      expect(parsedHostOp.kind).toBe("host.security");
+      expect(findForbiddenPublicDtoKeys(hostOpJson)).toEqual([]);
+    } finally {
+      mockRuntimeBackend = "disabled";
+    }
   });
 });

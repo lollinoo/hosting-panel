@@ -13,7 +13,18 @@ import type {
   OperationDto,
   MeDto,
   DevPersonaDto,
+  EncryptedSecretMetadataDto,
+  HostTelemetryDto,
+  HostDaemonHeartbeatDto,
+  RuntimeBackend,
 } from "@hosting-panel/contracts";
+
+export interface HostTelemetryOverviewDto {
+  hostId: string;
+  runtimeBackend: RuntimeBackend;
+  telemetry: HostTelemetryDto | null;
+  daemons: HostDaemonHeartbeatDto[];
+}
 
 export async function fetchServerPersonas(): Promise<DevPersonaDto[]> {
   const res = await fetchUpstream<{ data: DevPersonaDto[] }>("v1/dev/auth/personas");
@@ -189,4 +200,30 @@ export async function fetchServerOrgOperations(orgId: string): Promise<Operation
     { accessToken: session.accessToken }
   );
   return res.ok && res.data?.data ? res.data.data : [];
+}
+
+export async function fetchServerOrgSecrets(
+  orgId: string,
+  siteId?: string
+): Promise<EncryptedSecretMetadataDto[]> {
+  const session = await getServerSession();
+  if (!session) return [];
+  const query = siteId ? `?siteId=${encodeURIComponent(siteId)}` : "";
+  const res = await fetchUpstream<{ data: EncryptedSecretMetadataDto[] }>(
+    `v1/organizations/${orgId}/secrets${query}`,
+    { accessToken: session.accessToken }
+  );
+  return res.ok && res.data?.data ? res.data.data : [];
+}
+
+export async function fetchServerHostTelemetry(
+  hostId: string
+): Promise<HostTelemetryOverviewDto | null> {
+  const session = await getServerSession();
+  if (!session) return null;
+  const res = await fetchUpstream<{ data: HostTelemetryOverviewDto }>(
+    `v1/hosts/${hostId}/telemetry`,
+    { accessToken: session.accessToken }
+  );
+  return res.ok && res.data?.data ? res.data.data : null;
 }

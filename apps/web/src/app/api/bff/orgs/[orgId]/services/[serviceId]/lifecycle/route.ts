@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { getSessionFromRequest } from "@/lib/server-session";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
 import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
@@ -26,7 +27,11 @@ export async function POST(
     );
   }
 
-  const idempotencyKey = req.headers.get("idempotency-key");
+  const rawIdempotencyKey = req.headers.get("idempotency-key")?.trim();
+  const idempotencyKey =
+    rawIdempotencyKey && rawIdempotencyKey.length > 0
+      ? rawIdempotencyKey
+      : randomUUID();
 
   const upstreamRes = await fetchUpstream(
     `v1/organizations/${orgId}/services/${serviceId}/lifecycle`,
