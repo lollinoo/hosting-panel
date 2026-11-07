@@ -375,9 +375,6 @@ importers:
         specifier: 'catalog:'
         version: 4.6.7
     devDependencies:
-      '@hosting-panel/api':
-        specifier: workspace:*
-        version: link:../api
       '@tailwindcss/postcss':
         specifier: 'catalog:'
         version: 4.3.5

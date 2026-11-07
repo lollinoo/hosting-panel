@@ -1,127 +1,93 @@
-import { z } from "zod";
-import { fetchMe, issueDevAccessToken } from "../../../../lib/bff-client";
-import {
-  bffErrorResponse,
-  bffJsonResponse,
-  generateCsrfToken,
-  resolveBffRequestId,
-  sealSession,
-  serializeSessionCookie,
-  verifyRequestOrigin,
-} from "../../../../lib/session";
+import { generateCsrfToken, type ConsoleContext, type SessionData } from "@/lib/session";
+import { setSessionCookie } from "@/lib/server-session";
+import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
+import { fetchUpstream } from "@/lib/upstream";
+import type { MeDto } from "@hosting-panel/contracts";
 
-export const dynamic = "force-dynamic";
-
-const LoginBodySchema = z
-  .strictObject({
-    userId: z.string().trim().min(1).max(128).optional(),
-    email: z.email().optional(),
-    preferredOrgSlug: z.string().trim().min(1).max(128).optional(),
-  })
-  .refine((val) => Boolean(val.userId || val.email), {
-    message: "Specificare userId oppure email per effettuare l'accesso.",
-  });
-
-export async function POST(request: Request): Promise<Response> {
-  const requestId = resolveBffRequestId(request);
-
-  const originCheck = verifyRequestOrigin(request);
-  if (!originCheck.ok) {
-    return bffErrorResponse({
-      code: "PERMISSION_DENIED",
-      message: originCheck.reason ?? "Origine della richiesta non autorizzata.",
-      requestId,
-    });
-  }
-
-  let rawBody: unknown;
+export async function POST(req: Request) {
+  let body: Record<string, unknown> = {};
   try {
-    rawBody = await request.json();
+    body = (await req.json()) as Record<string, unknown>;
   } catch {
-    return bffErrorResponse({
-      code: "VALIDATION_ERROR",
-      message: "Corpo JSON della richiesta di login non valido.",
-      requestId,
-    });
+    // Body is optional or empty
   }
 
-  const parsedInput = LoginBodySchema.safeParse(rawBody);
-  if (!parsedInput.success) {
-    return bffErrorResponse({
-      code: "VALIDATION_ERROR",
-      message: "Parametri di accesso non validi.",
-      requestId,
-      details: parsedInput.error.issues.map((issue) => ({
-        field: issue.path.join(".") || undefined,
-        message: issue.message,
-      })),
-    });
-  }
-
-  const issued = await issueDevAccessToken({
-    userId: parsedInput.data.userId,
-    email: parsedInput.data.email,
-    requestId,
+  const tokenRes = await fetchUpstream<{
+    data?: { accessToken: string; user?: unknown };
+    accessToken?: string;
+  }>("v1/dev/auth/token", {
+    method: "POST",
+    body,
   });
-  if (!issued.ok) {
-    return bffJsonResponse(issued.error, {
-      status: issued.status,
-      requestId: issued.requestId,
-    });
+
+  if (!tokenRes.ok || !tokenRes.data) {
+    const errorData = tokenRes.error as { error?: { message?: string; code?: string } } | undefined;
+    return bffErrorResponse(
+      "UNAUTHENTICATED",
+      errorData?.error?.message || "Autenticazione fallita",
+      tokenRes.status || 401
+    );
   }
 
-  const meRes = await fetchMe(issued.data.accessToken, issued.requestId);
-  if (!meRes.ok) {
-    return bffJsonResponse(meRes.error, {
-      status: meRes.status,
-      requestId: meRes.requestId,
-    });
+  const accessToken =
+    tokenRes.data.data?.accessToken || tokenRes.data.accessToken;
+
+  if (!accessToken) {
+    return bffErrorResponse(
+      "INTERNAL_ERROR",
+      "Token di accesso non restituito dal servizio upstream",
+      500
+    );
+  }
+
+  const meRes = await fetchUpstream<{ data: MeDto }>("v1/me", {
+    accessToken,
+  });
+
+  if (!meRes.ok || !meRes.data?.data) {
+    return bffErrorResponse(
+      "UNAUTHENTICATED",
+      "Impossibile recuperare il profilo utente",
+      401
+    );
   }
 
   const me = meRes.data.data;
-  const preferredSlug = parsedInput.data.preferredOrgSlug ?? null;
-  const matchedPreferred = preferredSlug
-    ? me.memberships.find((m) => m.organizationSlug === preferredSlug)
-    : undefined;
-
-  let activeOrgSlug: string | null = null;
-  if (matchedPreferred) {
-    activeOrgSlug = matchedPreferred.organizationSlug;
-  } else if (me.memberships.length === 1 && me.memberships[0]) {
-    activeOrgSlug = me.memberships[0].organizationSlug;
-  }
-
-  let redirectTo = "/choose-organization";
-  if (me.user.isPlatformAdmin && me.memberships.length === 0) {
-    redirectTo = "/admin/overview";
-  } else if (activeOrgSlug !== null) {
-    redirectTo = `/o/${activeOrgSlug}/overview`;
-  }
-
   const csrfToken = generateCsrfToken();
-  const sealed = await sealSession(
-    {
-      accessToken: issued.data.accessToken,
-      csrfToken,
-      activeOrgSlug,
-      user: me.user,
-    },
-    issued.data.expiresIn,
-  );
 
-  return bffJsonResponse(
-    {
-      authenticated: true,
-      user: me.user,
-      activeOrgSlug,
-      csrfToken,
-      redirectTo,
+  let activeConsole: ConsoleContext = "org";
+  let activeOrgSlug: string | null = null;
+
+  if (me.globalRoles.includes("infrastructure_admin")) {
+    activeConsole = "infra";
+  } else if (me.globalRoles.includes("hosting_admin")) {
+    activeConsole = "hosting";
+  } else if (me.memberships.length > 0) {
+    activeConsole = "org";
+    activeOrgSlug = me.memberships[0]?.organizationSlug ?? null;
+  }
+
+  const sessionData: SessionData = {
+    accessToken,
+    csrfToken,
+    activeConsole,
+    activeOrgSlug,
+    user: {
+      id: me.user.id,
+      email: me.user.email,
+      name: me.user.name,
+      globalRoles: me.globalRoles,
+      hostingAdminOrgIds: me.hostingAdminOrgIds,
     },
-    {
-      status: 200,
-      requestId: meRes.requestId,
-      allowCsrfTokenField: true,
-      setCookie: serializeSessionCookie(sealed, issued.data.expiresIn),
-    },
-  );
+  };
+
+  const response = bffJsonResponse({
+    ok: true,
+    activeConsole,
+    activeOrgSlug,
+    user: sessionData.user,
+  });
+
+  await setSessionCookie(response, sessionData);
+  return response;
 }

@@ -1,109 +1,122 @@
-import Link from "next/link";
-import { OperationStatusBadge } from "@/components/badges";
-import { CapabilityNotice } from "@/components/capability-notice";
-import { fetchOperations } from "@/lib/bff-client";
-import { formatDateTimeIt, formatOperationKindIt } from "@/lib/format";
-import { resolveOrgServerContext } from "@/lib/org-context";
+import { fetchServerMe, fetchServerOrgOperations } from "@/lib/server-api";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableHead,
+  TableRow,
+  TableCell,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
 
 export const dynamic = "force-dynamic";
 
-export interface OperationsPageProps {
-  readonly params: Promise<{ readonly orgSlug: string }>;
-}
-
-export default async function OrganizationOperationsPage({
+export default async function OrgOperationsPage({
   params,
-}: OperationsPageProps) {
+}: {
+  params: Promise<{ orgSlug: string }>;
+}) {
   const { orgSlug } = await params;
-  const { session, membership } = await resolveOrgServerContext(orgSlug);
+  const me = await fetchServerMe();
+  const membership = me?.memberships.find((m) => m.organizationSlug === orgSlug);
+  const orgId = membership?.organizationId || orgSlug;
+  const operations = await fetchServerOrgOperations(orgId);
 
-  const opsRes = await fetchOperations(
-    session.accessToken,
-    membership.organizationId,
-  );
-
-  if (!opsRes.ok) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-slate-900">Registro Operazioni</h1>
-        <CapabilityNotice
-          tone="warning"
-          title="Registro operazioni non accessibile"
-          description={opsRes.error.error.message}
-        />
-      </div>
-    );
-  }
-
-  const operations = opsRes.data.data;
+  const getStatusBadgeVariant = (status: string) => {
+    switch (status) {
+      case "succeeded":
+        return "success" as const;
+      case "failed":
+        return "destructive" as const;
+      case "processing":
+      case "reconciling":
+        return "warning" as const;
+      default:
+        return "secondary" as const;
+    }
+  };
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">
-          Registro Operazioni Asincrone
-        </h1>
-        <p className="mt-1 text-sm text-slate-600">
-          Tracciamento completo a 8 stati delle mutazioni inviate al motore di esecuzione
-          tramite Outbox transazionale.
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Cronologia Operazioni Asincrone</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Registro delle riconciliazioni, lifecycle dei servizi e deploy eseguiti nello stack (HCP-SPEC-002 §4.3).
+          </p>
+        </div>
+        <Badge variant="outline" className="text-xs">
+          {operations.length} Operazioni Registrate
+        </Badge>
       </div>
 
-      {operations.length === 0 ? (
-        <div className="rounded-xl border border-slate-200 bg-white p-6 text-sm text-slate-600">
-          Nessuna operazione registrata finora per questa organizzazione.
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xs">
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-slate-200 text-sm">
-              <thead className="bg-slate-50 text-left text-xs font-semibold tracking-wider text-slate-500 uppercase">
-                <tr>
-                  <th className="px-4 py-3">Operazione</th>
-                  <th className="px-4 py-3">Risorsa</th>
-                  <th className="px-4 py-3">Stato Verificato</th>
-                  <th className="px-4 py-3">Inviata il</th>
-                  <th className="px-4 py-3">Conclusa il</th>
-                  <th className="px-4 py-3 text-right">Timeline</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {operations.map((op) => (
-                  <tr key={op.id} className="hover:bg-slate-50/70">
-                    <td className="px-4 py-3.5">
-                      <p className="font-semibold text-slate-900">
-                        {formatOperationKindIt(op.kind)}
-                      </p>
-                      <code className="text-xs text-slate-500">{op.id}</code>
-                    </td>
-                    <td className="px-4 py-3.5 text-xs text-slate-700">
-                      <span className="uppercase">{op.resourceType}</span> ·{" "}
-                      <code>{op.resourceId}</code>
-                    </td>
-                    <td className="px-4 py-3.5">
-                      <OperationStatusBadge status={op.status} />
-                    </td>
-                    <td className="px-4 py-3.5 text-xs text-slate-600">
-                      {formatDateTimeIt(op.submittedAt)}
-                    </td>
-                    <td className="px-4 py-3.5 text-xs text-slate-600">
-                      {op.completedAt ? formatDateTimeIt(op.completedAt) : "In corso"}
-                    </td>
-                    <td className="px-4 py-3.5 text-right">
-                      <Link
-                        href={`/o/${orgSlug}/operations/${op.id}`}
-                        className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-800 hover:bg-slate-50"
-                      >
-                        Dettaglio passi
-                      </Link>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base">Eventi Operativi</CardTitle>
+              <CardDescription className="text-xs">
+                Transizioni di stato tracciate dal Transactional Outbox e dal Reconciler.
+              </CardDescription>
+            </div>
           </div>
-        </div>
-      )}
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Operazione ID</TableHead>
+                <TableHead>Tipo Operazione</TableHead>
+                <TableHead>Risorsa Coinvolta</TableHead>
+                <TableHead>Stato</TableHead>
+                <TableHead>Sottomessa il</TableHead>
+                <TableHead>Completata il</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {operations.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={6} className="text-center py-6 text-muted-foreground text-xs">
+                    Nessuna operazione asincrona registrata per questa organizzazione.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                operations.map((op) => (
+                  <TableRow key={op.id}>
+                    <TableCell className="font-mono text-xs font-semibold">{op.id}</TableCell>
+                    <TableCell className="font-mono text-xs">
+                      <Badge variant="outline" className="text-[10px]">
+                        {op.kind}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-xs font-mono text-muted-foreground">
+                      {op.resourceType}: {op.resourceId}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={getStatusBadgeVariant(op.status)} className="text-[10px]">
+                        {op.status}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground font-mono">
+                      {new Date(op.submittedAt).toLocaleString("it-IT")}
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground font-mono">
+                      {op.completedAt ? new Date(op.completedAt).toLocaleString("it-IT") : "-"}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
     </div>
   );
 }
