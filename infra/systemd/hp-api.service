@@ -1,0 +1,50 @@
+[Unit]
+Description=Hosting Panel Control Plane API, Outbox Worker & Drift Reconciler (HCP-SPEC-003 Domain 1)
+Documentation=https://hosting-panel.internal/docs/hcp-spec-003
+After=network-online.target hp-docker-executor.service hp-host-agent.service
+Wants=network-online.target hp-docker-executor.service hp-host-agent.service
+
+[Service]
+Type=simple
+User=hp-api
+Group=hp-api
+SupplementaryGroups=hp-ipc
+WorkingDirectory=/opt/hosting-panel/apps/api
+EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+Environment=NODE_ENV=production
+Environment=HP_RUNTIME_BACKEND=linux-systemd
+Environment=HP_EXECUTOR_SOCKET=/run/hosting-panel/executor.sock
+Environment=HP_HOST_AGENT_SOCKET=/run/hosting-panel/host-agent.sock
+Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
+Environment=HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key
+ExecStart=/usr/bin/node /opt/hosting-panel/apps/api/dist/main.js
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+
+# Runtime directory (/run/hosting-panel tmpfs for signed UDS IPC)
+RuntimeDirectory=hosting-panel
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/run/hosting-panel
+
+# HCP-SPEC-003 §5.2 Mandatory Hardening Matrix
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+InaccessiblePaths=/var/run/docker.sock
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

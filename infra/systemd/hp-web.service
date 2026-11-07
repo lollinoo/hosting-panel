@@ -1,0 +1,45 @@
+[Unit]
+Description=Hosting Panel Web Console & BFF (HCP-SPEC-003 Domain 1)
+Documentation=https://hosting-panel.internal/docs/hcp-spec-003
+After=network-online.target hp-api.service
+Wants=network-online.target hp-api.service
+
+[Service]
+Type=simple
+User=hp-web
+Group=hp-web
+WorkingDirectory=/opt/hosting-panel/apps/web
+EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node /opt/hosting-panel/apps/web/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+
+# Runtime directory (/run is tmpfs; shared runtime state dir)
+RuntimeDirectory=hosting-panel
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+# HCP-SPEC-003 §5.2 Mandatory Hardening Matrix
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+InaccessiblePaths=/var/run/docker.sock
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
