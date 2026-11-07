@@ -194,6 +194,27 @@ function sendHttpHostRequest(agent, port, hostHeader, pathUrl = "/") {
   });
 }
 
+async function waitForIngressHost200(port, hostHeader, timeoutMs = 20_000) {
+  const probeAgent = new http.Agent({ keepAlive: false });
+  const deadline = Date.now() + timeoutMs;
+  let lastDetail = "no response";
+  try {
+    while (Date.now() < deadline) {
+      const sample = await sendHttpHostRequest(probeAgent, port, hostHeader, "/");
+      if (sample.ok && sample.statusCode === 200) {
+        return;
+      }
+      lastDetail = sample.statusCode > 0 ? `HTTP ${String(sample.statusCode)}` : String(sample.errorCode);
+      await sleep(200);
+    }
+  } finally {
+    probeAgent.destroy();
+  }
+  throw new Error(
+    `Timed out waiting for ingress 200 OK on Host=${hostHeader} port=${String(port)} (${lastDetail})`,
+  );
+}
+
 function computePercentile(sortedValues, percentile) {
   if (sortedValues.length === 0) {
     return 0;
@@ -991,12 +1012,8 @@ async function main() {
     }
 
     // Wait for Traefik file-provider hot-reload to serve 200 OK on both tenant domains
-    await waitForHttpStatus(`http://127.0.0.1:${String(ingressPort)}/`, 200, 15_000, {
-      Host: domainAlpha,
-    });
-    await waitForHttpStatus(`http://127.0.0.1:${String(ingressPort)}/`, 200, 15_000, {
-      Host: domainBravo,
-    });
+    await waitForIngressHost200(ingressPort, domainAlpha, 20_000);
+    await waitForIngressHost200(ingressPort, domainBravo, 20_000);
 
     // Start continuous 50 req/s HTTP load across both tenant sites
     loadGen = new PhaseLoadGenerator({

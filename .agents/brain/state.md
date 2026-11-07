@@ -21,16 +21,16 @@ Implement **`HCP-SPEC-003` Fase 2 — Runtime Operativo `Dedicated`, Split Agent
 ## Bounded Contract Deliverables & Planned Swarm Waves
 
 - [x] **Step 0**: `/grill-me` (`Q1`–`Q9`) completed & `docs/architecture/hcp-spec-003-phase-2.md` persisted on `main`
-- [ ] **Wave 1 (Core Contracts, IPC Signing, Secrets & DB Migration `0002`)**:
+- [x] **Wave 1 (Core Contracts, IPC Signing, Secrets & DB Migration `0002`)**:
   - Update `packages/contracts`, `packages/executor-contracts`, `packages/host-agent-contracts` (dynamic `PlatformCapabilitiesDto`, IPC envelope/signing utilities, `resolvedSecrets` transient mount contract, `nftables` security policy enum).
   - Add `packages/database/migrations/0002_phase2_runtime_and_secrets.sql` + Drizzle tables/repositories (`encrypted_secrets` with `AES-256-GCM`, `host_agent_heartbeats`, `FOR UPDATE SKIP LOCKED` Outbox claim/complete, `uq_operations_active_lock`).
-- [ ] **Wave 2 (Parallel Isolated Daemons & Infra)**:
+- [x] **Wave 2 (Parallel Isolated Daemons & Infra)**:
   - **Unit 2A (`apps/docker-executor`)**: Signed UDS/pipe HTTP server, native Docker Engine API (`v1.45+`) client with container hardening (`CapDrop: ["ALL"]`, `no-new-privileges`, `PidsLimit`, per-site bridge networks, `:ro` `tmpfs` `0400` secret mounts), atomic Traefik v3 dynamic file-provider generator (zero `docker.sock` in proxy), and `InMemoryDockerSimulatorAdapter` + contract/adversarial tests.
   - **Unit 2B (`apps/host-agent` + `infra/systemd/` + `infra/linux/`)**: Signed UDS/pipe HTTP server, `/proc` & `statfs` telemetry, `ALLOWLISTED_HOST_MAINTENANCE_ACTIONS` and static `nftables` verification via `execFile` (zero shell), `InMemoryHostSimulatorAdapter`, `systemd` hardened units, `bootstrap-dedicated.sh`, and `run-outage-ac-f1-08.mjs` + tests.
-- [ ] **Wave 3 (Control Plane API, Web Consoles & Normative ADRs)**:
+- [x] **Wave 3 (Control Plane API, Web Consoles & Normative ADRs)**:
   - **Unit 3A (`apps/api` + `docs/api/openapi.yaml`)**: Signed IPC clients, PostgreSQL Outbox Worker, `unknown` state read-only recovery (`TH-08`), observe-only Drift Reconciler (`TH-10`), encrypted secrets CRUD (write-only), `202 Accepted` mutations (`lifecycle`, `maintenance`, `security`), break-glass CLI, and `AC-F2-01..10` integration tests.
   - **Unit 3B (`apps/web` + `docs/architecture/adr/*` + `HARNESS.md` + `README.md`)**: BFF routes & `shadcn@4.23.0` UI unlock (`202` lifecycle + `OperationTimeline`, write-only secrets, `in_sync`/`drifted` badges, `InfrastructureAdmin` telemetry/daemon status/maintenance/security, truthful `runtimeBackend` banner), close `ADR-010`, add `ADR-013..015`.
-- [ ] **Wave 4 (Live Linux Execution of `AC-F1-08` & Two-Pass Adversarial Verification)**:
-  - Run `build`, `lint`, `typecheck`, `test` (`0` exit code).
-  - Execute `infra/linux/run-outage-ac-f1-08.mjs` against real Docker Engine + Traefik v3 + tenant site containers on the dedicated Linux host and record verified metrics in `docs/security/ac-f1-08-execution-report.md`.
-  - Independent `swarm-verifier` Pass 2 review + user sign-off (`"go"`).
+- [x] **Wave 4 (Live Linux Execution of `AC-F1-08` & Two-Pass Adversarial Verification)**:
+  - Run `build`, `lint`, `typecheck`, `test` (`0` exit code — `15/15` suites, `164/164` tests).
+  - Execute `infra/linux/run-outage-ac-f1-08.mjs` against real Docker Engine `29.9.3` + PostgreSQL `18.1` + Traefik `v3.3` + tenant site containers on the dedicated Linux host and record verified metrics (`1521/1521` `200 OK`, `0` restarts, `2.81s` `in_sync` convergence) in `docs/security/ac-f1-08-execution-report.md`.
+  - Independent `swarm-verifier` Pass 2 review + pending user sign-off (`"go"`).
