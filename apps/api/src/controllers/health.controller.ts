@@ -1,6 +1,5 @@
 import { Controller, Get, Inject } from "@nestjs/common";
 import { sql, type DatabaseClient } from "@hosting-panel/database";
-import { ControlPlaneError } from "../common/control-plane.error.js";
 import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
 
 @Controller("health")
@@ -10,39 +9,24 @@ export class HealthController {
   ) {}
 
   @Get("live")
-  public getLive(): {
-    readonly status: "ok";
-    readonly service: "hosting-panel-api";
-    readonly timestamp: string;
-  } {
+  public getLive(): Record<string, unknown> {
     return {
       status: "ok",
       service: "hosting-panel-api",
+      spec: "HCP-SPEC-002",
+      phase: "phase-1",
       timestamp: new Date().toISOString(),
     };
   }
 
   @Get("ready")
-  public async getReady(): Promise<{
-    readonly status: "ready";
-    readonly database: "up";
-    readonly mode: "pglite" | "postgres";
-    readonly timestamp: string;
-  }> {
-    try {
-      await this.dbClient.db.execute(sql`SELECT 1`);
-      return {
-        status: "ready",
-        database: "up",
-        mode: this.dbClient.mode,
-        timestamp: new Date().toISOString(),
-      };
-    } catch {
-      throw new ControlPlaneError(
-        "INTERNAL_ERROR",
-        "Database readiness check failed.",
-        { retryable: true },
-      );
-    }
+  public async getReady(): Promise<Record<string, unknown>> {
+    await this.dbClient.db.execute(sql`SELECT 1`);
+    return {
+      status: "ready",
+      database: "up",
+      mode: this.dbClient.mode,
+      timestamp: new Date().toISOString(),
+    };
   }
 }

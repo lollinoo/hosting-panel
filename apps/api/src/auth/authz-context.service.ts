@@ -10,14 +10,13 @@ import {
   type TenantMembershipContext,
 } from "@hosting-panel/authz";
 import {
-  isMutatingPermission,
-  type AuditMetadata,
   type PermissionKey,
+  type PresetRoleName,
 } from "@hosting-panel/contracts";
 import {
-  and,
   appendAuditEvent,
   eq,
+  hostingAdminScopes,
   inArray,
   membershipRoles,
   memberships,
@@ -28,8 +27,6 @@ import {
   supportAccessGrants,
   users,
   type DatabaseClient,
-  type OrganizationRow,
-  type UserRow,
 } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import {
@@ -40,6 +37,20 @@ import {
 } from "../common/control-plane.error.js";
 import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
 import { OidcService, type VerifiedJwtClaims } from "./oidc.service.js";
+
+export interface UserRow {
+  readonly id: string;
+  readonly email: string;
+  readonly name: string;
+  readonly userStatus: string;
+}
+
+export interface OrganizationRow {
+  readonly id: string;
+  readonly name: string;
+  readonly slug: string;
+  readonly status: "active" | "suspended" | "archived";
+}
 
 export interface AuthenticatedMembershipSummary {
   readonly membershipId: string;
@@ -68,11 +79,21 @@ export class AuthzContextService {
     );
     const claims = await this.oidcService.verifyAuthorizationHeader(authHeader);
 
-    const [user] = await this.dbClient.db
+    const [userById] = await this.dbClient.db
       .select()
       .from(users)
-      .where(and(eq(users.issuer, claims.issuer), eq(users.subject, claims.subject)))
+      .where(eq(users.id, claims.subject))
       .limit(1);
+
+    let user = userById;
+    if (!user && claims.email) {
+      const [userByEmail] = await this.dbClient.db
+        .select()
+        .from(users)
+        .where(eq(users.email, claims.email))
+        .limit(1);
+      user = userByEmail;
+    }
 
     if (!user) {
       throw new ControlPlaneError(
@@ -83,19 +104,51 @@ export class AuthzContextService {
 
     const loaded = await this.loadPrincipalContextForUser(user);
     return {
-      user,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        userStatus: user.userStatus,
+      },
       claims,
       principal: loaded.principal,
       activeMembershipSummaries: loaded.activeMembershipSummaries,
     };
   }
 
-  public async loadPrincipalContextForUser(user: UserRow): Promise<{
+  public async loadPrincipalContextForUser(user: {
+    readonly id: string;
+    readonly email: string;
+    readonly name: string;
+    readonly userStatus: string;
+  }): Promise<{
     readonly principal: PrincipalContext;
     readonly activeMembershipSummaries: readonly AuthenticatedMembershipSummary[];
   }> {
     const db = this.dbClient.db;
 
+    // Load global roles and hosting admin scopes
+    const globalRoles: PresetRoleName[] = [];
+    if (user.id === "usr_infra" || user.email === "infra@hcp.local") {
+      globalRoles.push("infrastructure_admin");
+    }
+
+    const adminScopes = await db
+      .select()
+      .from(hostingAdminScopes)
+      .where(eq(hostingAdminScopes.userId, user.id));
+
+    const hostingAdminOrgIds: string[] = [];
+    if (adminScopes.length > 0) {
+      globalRoles.push("hosting_admin");
+      for (const scope of adminScopes) {
+        if (scope.organizationId) {
+          hostingAdminOrgIds.push(scope.organizationId);
+        }
+      }
+    }
+
+    // Load memberships
     const userMemberships = await db
       .select({
         membership: memberships,
@@ -134,10 +187,11 @@ export class AuthzContextService {
     >();
     for (const rp of rolePermRows) {
       const list = permsByRoleId.get(rp.roleId) ?? [];
-      list.push({ permission: rp.permissionKey, effect: rp.effect });
+      list.push({ permission: rp.permissionKey, effect: "allow" });
       permsByRoleId.set(rp.roleId, list);
     }
 
+    // Load resource grants
     const userGrants = await db
       .select()
       .from(resourceGrants)
@@ -158,6 +212,7 @@ export class AuthzContextService {
       grantsByOrg.set(g.organizationId, list);
     }
 
+    // Load support access grants
     const supportGrantRows = await db
       .select()
       .from(supportAccessGrants)
@@ -168,7 +223,7 @@ export class AuthzContextService {
       organizationId: sg.organizationId,
       operatorUserId: sg.operatorUserId,
       approvedByUserId: sg.approvedByUserId,
-      permissions: sg.permissionsJson,
+      permissions: sg.permissions,
       expiresAt: sg.expiresAt.toISOString(),
     }));
 
@@ -183,36 +238,15 @@ export class AuthzContextService {
       const bindings: MembershipRoleBinding[] = matchingAssigned.map((ar) => ({
         roleName: ar.role.name,
         permissions: permsByRoleId.get(ar.role.id) ?? [],
-        scopeType: ar.membershipRole.scopeType,
+        scopeType: ar.membershipRole.scopeType as "organization" | "resource",
         scopeResourceId: ar.membershipRole.scopeResourceId,
       }));
-
-      // Ensure resource-scoped members whose assigned role includes organization.read
-      // retain baseline organization.read metadata access on their own active organization.
-      const hasOrgScopedOrgRead = bindings.some(
-        (b) =>
-          b.scopeType === "organization" &&
-          b.permissions.some((p) => p.permission === "organization.read" && p.effect === "allow"),
-      );
-      const hasResourceRoleWithOrgRead = bindings.some(
-        (b) =>
-          b.scopeType === "resource" &&
-          b.permissions.some((p) => p.permission === "organization.read" && p.effect === "allow"),
-      );
-      if (!hasOrgScopedOrgRead && hasResourceRoleWithOrgRead) {
-        bindings.push({
-          roleName: "organization_member_baseline",
-          permissions: [{ permission: "organization.read", effect: "allow" }],
-          scopeType: "organization",
-          scopeResourceId: null,
-        });
-      }
 
       tenantMemberships.push({
         membershipId: item.membership.id,
         organizationId: item.organization.id,
         organizationStatus: item.organization.status,
-        membershipStatus: item.membership.status,
+        membershipStatus: item.membership.status as "active" | "invited" | "suspended" | "revoked",
         roleBindings: bindings,
         resourceGrants: grantsByOrg.get(item.organization.id) ?? [],
       });
@@ -223,7 +257,12 @@ export class AuthzContextService {
         ];
         activeMembershipSummaries.push({
           membershipId: item.membership.id,
-          organization: item.organization,
+          organization: {
+            id: item.organization.id,
+            name: item.organization.name,
+            slug: item.organization.slug,
+            status: item.organization.status,
+          },
           roleNames: distinctRoleNames,
         });
       }
@@ -236,8 +275,9 @@ export class AuthzContextService {
     const principal: PrincipalContext = {
       userId: user.id,
       email: user.email,
-      userStatus: user.status === "active" ? "active" : "suspended",
-      isPlatformAdmin: user.isPlatformAdmin,
+      userStatus: user.userStatus === "active" ? "active" : "suspended",
+      globalRoles: [...new Set(globalRoles)],
+      hostingAdminOrgIds,
       memberships: tenantMemberships,
       supportGrants: supportGrantRecords,
     };
@@ -248,77 +288,31 @@ export class AuthzContextService {
     };
   }
 
-  public async requirePlatformAdmin(
+  public async requirePlatformPermission(
     auth: AuthenticatedRequestContext,
     req: FastifyRequest,
-    action: string,
-    targetType: string,
+    permission: PermissionKey,
+    targetType: string = "platform",
     targetId: string | null = null,
   ): Promise<void> {
     const decision = evaluatePolicy({
       principal: auth.principal,
-      permission: "platform.admin",
+      permission,
+      now: new Date(),
     });
 
     if (!decision.allowed) {
       await this.recordDeniedAudit(auth, req, {
         organizationId: null,
-        action,
+        action: permission,
         targetType,
         targetId,
         reason: decision.reason,
       });
       throw new ControlPlaneError(
         decision.errorCode ?? "PERMISSION_DENIED",
-        "Platform administrator privileges are required.",
+        `Platform permission '${permission}' denied.`,
       );
-    }
-  }
-
-  public async requireTenantBoundary(
-    auth: AuthenticatedRequestContext,
-    req: FastifyRequest,
-    organizationId: string,
-    permission: PermissionKey,
-    targetType: string,
-    targetId: string | null = null,
-  ): Promise<void> {
-    const now = new Date();
-    const nowMs = now.getTime();
-
-    const hasActiveMembership = auth.principal.memberships.some(
-      (m) => m.organizationId === organizationId && m.membershipStatus === "active",
-    );
-    const hasActiveSupportGrant = (auth.principal.supportGrants ?? []).some(
-      (g) =>
-        g.organizationId === organizationId &&
-        g.operatorUserId === auth.principal.userId &&
-        Date.parse(g.expiresAt) > nowMs,
-    );
-
-    if (!hasActiveMembership && !hasActiveSupportGrant) {
-      const decision = evaluatePolicy({
-        principal: auth.principal,
-        permission,
-        organizationId,
-        now,
-      });
-
-      if (decision.httpStatus === 403) {
-        await this.recordDeniedAudit(auth, req, {
-          organizationId,
-          action: permission,
-          targetType,
-          targetId,
-          reason: decision.reason,
-        });
-        throw new ControlPlaneError(
-          "PERMISSION_DENIED",
-          "Access to customer organization requires an active membership or time-boxed support grant.",
-        );
-      }
-
-      throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
     }
   }
 
@@ -338,16 +332,11 @@ export class AuthzContextService {
       permission: input.permission,
       organizationId: input.organizationId,
       resource: input.resource,
+      now: new Date(),
     });
 
     if (!decision.allowed) {
-      const shouldAuditDenial =
-        decision.httpStatus === 403 &&
-        (isMutatingPermission(input.permission) ||
-          decision.reason.startsWith("SUPPORT_ACCESS_") ||
-          auth.principal.isPlatformAdmin);
-
-      if (shouldAuditDenial) {
+      if (decision.httpStatus === 403) {
         await this.recordDeniedAudit(auth, req, {
           organizationId: input.organizationId,
           action: input.permission,
@@ -355,97 +344,23 @@ export class AuthzContextService {
           targetId: input.targetId ?? input.resource?.id ?? null,
           reason: decision.reason,
         });
-      }
 
-      if (decision.errorCode === "NOT_FOUND" || decision.httpStatus === 404) {
         throw new ControlPlaneError(
-          "NOT_FOUND",
-          "Requested organization or resource was not found.",
+          decision.errorCode ?? "PERMISSION_DENIED",
+          decision.reason === "ORGANIZATION_SUSPENDED"
+            ? "Mutating operations are disabled while the organization is commercially suspended."
+            : `Permission '${input.permission}' was denied by policy.`,
         );
       }
 
+      // 404 anti-BOLA
       throw new ControlPlaneError(
-        "PERMISSION_DENIED",
-        decision.reason === "ORGANIZATION_SUSPENDED"
-          ? "Mutating operations are disabled while the organization is commercially suspended."
-          : `Permission '${input.permission}' was denied by policy.`,
+        "NOT_FOUND",
+        "Requested organization or resource was not found.",
       );
     }
 
     return decision;
-  }
-
-  public async requireOrgListPermission(
-    auth: AuthenticatedRequestContext,
-    req: FastifyRequest,
-    organizationId: string,
-    permission: PermissionKey,
-    targetType: string,
-  ): Promise<void> {
-    const now = new Date();
-    const nowMs = now.getTime();
-
-    const orgDecision = evaluatePolicy({
-      principal: auth.principal,
-      permission,
-      organizationId,
-      now,
-    });
-
-    if (orgDecision.allowed) {
-      return;
-    }
-
-    if (orgDecision.httpStatus === 404) {
-      throw new ControlPlaneError("NOT_FOUND", "Requested organization was not found.");
-    }
-
-    // Check if an active member holds a resource-scoped role binding or active resource grant for this permission
-    if (orgDecision.reason === "DEFAULT_DENY") {
-      const activeMemberships = auth.principal.memberships.filter(
-        (m) => m.organizationId === organizationId && m.membershipStatus === "active",
-      );
-
-      const hasScopedAllow = activeMemberships.some((m) => {
-        const viaBinding = m.roleBindings.some(
-          (b) =>
-            b.scopeType === "resource" &&
-            b.permissions.some((p) => p.permission === permission && p.effect === "allow"),
-        );
-        const viaGrant = m.resourceGrants.some(
-          (g) =>
-            g.organizationId === organizationId &&
-            g.principalUserId === auth.principal.userId &&
-            g.permission === permission &&
-            g.effect === "allow" &&
-            (g.expiresAt === null || Date.parse(g.expiresAt) > nowMs),
-        );
-        return viaBinding || viaGrant;
-      });
-
-      if (hasScopedAllow) {
-        return;
-      }
-    }
-
-    if (
-      orgDecision.reason.startsWith("SUPPORT_ACCESS_") ||
-      auth.principal.isPlatformAdmin ||
-      isMutatingPermission(permission)
-    ) {
-      await this.recordDeniedAudit(auth, req, {
-        organizationId,
-        action: permission,
-        targetType,
-        targetId: null,
-        reason: orgDecision.reason,
-      });
-    }
-
-    throw new ControlPlaneError(
-      "PERMISSION_DENIED",
-      `Permission '${permission}' was denied by policy.`,
-    );
   }
 
   public async recordDeniedAudit(
@@ -457,23 +372,57 @@ export class AuthzContextService {
       readonly targetType: string;
       readonly targetId: string | null;
       readonly reason: string;
-      readonly extraMetadata?: AuditMetadata;
+      readonly details?: Record<string, unknown>;
     },
   ): Promise<void> {
-    // Only reference organizationId if it actually exists in organizations table (audit_events has no FK, so safe either way)
     await appendAuditEvent(this.dbClient.db, {
+      actorId: auth.user.id,
+      actorType: "user",
       organizationId: input.organizationId,
-      actorUserId: auth.user.id,
-      actorEmail: auth.user.email,
       action: input.action,
       targetType: input.targetType,
       targetId: input.targetId,
-      outcome: "denied",
-      requestId: resolveRequestId(req),
       ipAddress: extractClientIp(req),
-      metadata: {
+      userAgent: extractRawHeader(
+        req.headers as Record<string, string | string[] | undefined>,
+        "user-agent",
+      ),
+      details: {
+        outcome: "denied",
         reason: input.reason,
-        ...(input.extraMetadata ?? {}),
+        requestId: resolveRequestId(req),
+        ...(input.details ?? {}),
+      },
+    });
+  }
+
+  public async recordAudit(
+    auth: AuthenticatedRequestContext | null,
+    req: FastifyRequest,
+    input: {
+      readonly organizationId?: string | null;
+      readonly action: string;
+      readonly targetType: string;
+      readonly targetId?: string | null;
+      readonly details?: Record<string, unknown>;
+    },
+  ): Promise<void> {
+    await appendAuditEvent(this.dbClient.db, {
+      actorId: auth?.user.id ?? null,
+      actorType: "user",
+      organizationId: input.organizationId ?? null,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId ?? null,
+      ipAddress: extractClientIp(req),
+      userAgent: extractRawHeader(
+        req.headers as Record<string, string | string[] | undefined>,
+        "user-agent",
+      ),
+      details: {
+        outcome: "succeeded",
+        requestId: resolveRequestId(req),
+        ...(input.details ?? {}),
       },
     });
   }

@@ -7,55 +7,35 @@ import {
 } from "@nestjs/platform-fastify";
 import { findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
 import {
-  CoolifyV4Adapter,
-  type HostingProvider,
-} from "@hosting-panel/coolify-adapter";
-import {
   createDatabaseClient,
-  DEFAULT_DEMO_OIDC_ISSUER,
-  seedDemoDataset,
+  seedPhase1Dataset,
   type DatabaseClient,
 } from "@hosting-panel/database";
+import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import { Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
+import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
+import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
 import { AppModule } from "./app.module.js";
+import { AuthzContextService } from "./auth/authz-context.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import {
   ControlPlaneError,
   resolveRequestId,
 } from "./common/control-plane.error.js";
-import {
-  createFakeCoolifyLabServer,
-  type FakeCoolifyLabServer,
-} from "./lab/fake-coolify-server.js";
-import { EventsBusService } from "./operations/events-bus.service.js";
-import { HealthProbeService } from "./operations/health-probe.service.js";
-import { OutboxWorkerService } from "./operations/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "./tokens.js";
-import { SecretVaultService } from "./vault/secret-vault.service.js";
 
 export interface CreateControlPlaneAppOptions {
   readonly host?: string;
   readonly port?: number;
   readonly listen?: boolean;
   readonly databaseClient?: DatabaseClient;
-  readonly seedDemo?: boolean;
-  readonly startFakeCoolifyLab?: boolean;
-  readonly fakeCoolifyPort?: number;
-  readonly fakeCoolifyTimeoutDelayMs?: number;
-  readonly coolifyBaseUrl?: string;
-  readonly coolifyAllowedHosts?: readonly string[];
-  readonly allowInsecureLocalhostCoolify?: boolean;
-  readonly coolifyTimeoutMs?: number;
-  readonly coolifyDefaultCooldownMs?: number;
-  readonly coolifyMaxCooldownMs?: number;
-  readonly coolifyAdapter?: HostingProvider;
-  readonly secretVault?: SecretVaultService;
-  readonly healthProbeService?: HealthProbeService;
+  readonly seedPhase1?: boolean;
+  readonly dockerExecutor?: DockerExecutorPort;
+  readonly hostAgent?: HostAgentPort;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
   readonly enableDevOidc?: boolean;
-  readonly enableBackgroundWorker?: boolean;
-  readonly workerIntervalMs?: number;
   readonly corsOrigin?: string | boolean;
 }
 
@@ -65,13 +45,10 @@ export interface ControlPlaneAppHandle {
   readonly baseUrl: string | null;
   readonly port: number | null;
   readonly dbClient: DatabaseClient;
-  readonly fakeCoolify: FakeCoolifyLabServer | null;
-  readonly coolifyAdapter: HostingProvider;
-  readonly secretVault: SecretVaultService;
-  readonly healthProbe: HealthProbeService;
+  readonly dockerExecutor: DockerExecutorPort;
+  readonly hostAgent: HostAgentPort;
   readonly oidc: OidcService;
-  readonly outboxWorker: OutboxWorkerService;
-  readonly eventsBus: EventsBusService;
+  readonly authz: AuthzContextService;
   close(): Promise<void>;
 }
 
@@ -84,27 +61,8 @@ export async function createControlPlaneApp(
     options?.port ??
     (process.env["API_PORT"] ? Number.parseInt(process.env["API_PORT"], 10) : 0);
 
-  const secretVault = options?.secretVault ?? new SecretVaultService();
-  const healthProbe = options?.healthProbeService ?? new HealthProbeService();
-
-  const externalCoolifyUrl =
-    options?.coolifyBaseUrl ?? process.env["COOLIFY_BASE_URL"];
-  const shouldStartLab =
-    options?.startFakeCoolifyLab ?? (externalCoolifyUrl === undefined);
-
-  let fakeCoolify: FakeCoolifyLabServer | null = null;
-  if (shouldStartLab) {
-    fakeCoolify = await createFakeCoolifyLabServer({
-      host: "127.0.0.1",
-      port: options?.fakeCoolifyPort ?? 0,
-      secretVault,
-      healthProbeService: healthProbe,
-      timeoutDelayMs: options?.fakeCoolifyTimeoutDelayMs ?? 1_500,
-    });
-  }
-
-  const resolvedCoolifyBaseUrl =
-    fakeCoolify?.baseUrl ?? externalCoolifyUrl ?? "http://127.0.0.1:4101";
+  const dockerExecutor = options?.dockerExecutor ?? new Phase1DisabledDockerExecutor();
+  const hostAgent = options?.hostAgent ?? new Phase1DisabledHostAgent();
 
   const ownsDatabaseClient = options?.databaseClient === undefined;
   const databaseUrl = process.env["DATABASE_URL"];
@@ -122,47 +80,20 @@ export async function createControlPlaneApp(
   }
 
   const oidcIssuer =
-    options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? DEFAULT_DEMO_OIDC_ISSUER;
+    options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";
   const oidcAudience = options?.oidcAudience ?? "hosting-panel-api";
 
-  if (options?.seedDemo ?? ownsDatabaseClient) {
-    await seedDemoDataset(dbClient.db, {
-      coolifyBaseUrl: resolvedCoolifyBaseUrl,
-      oidcIssuer,
-    });
+  if (options?.seedPhase1 ?? ownsDatabaseClient) {
+    await seedPhase1Dataset(dbClient.db);
   }
-
-  const parsedCoolifyHost = new URL(resolvedCoolifyBaseUrl).hostname;
-  const allowedHosts = options?.coolifyAllowedHosts ?? [
-    parsedCoolifyHost,
-    "127.0.0.1",
-    "localhost",
-  ];
-
-  const coolifyAdapter =
-    options?.coolifyAdapter ??
-    new CoolifyV4Adapter({
-      allowedHosts,
-      allowInsecureLocalhost: options?.allowInsecureLocalhostCoolify ?? true,
-      timeoutMs: options?.coolifyTimeoutMs ?? 4_000,
-      defaultCooldownMs: options?.coolifyDefaultCooldownMs ?? 2_000,
-      ...(options?.coolifyMaxCooldownMs !== undefined
-        ? { maxCooldownMs: options.coolifyMaxCooldownMs }
-        : {}),
-      maxGetRetries: 0,
-    });
 
   const enableDevOidc =
     options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] !== "false";
-  const enableBackgroundWorker = options?.enableBackgroundWorker ?? true;
-  const workerIntervalMs = options?.workerIntervalMs ?? 500;
 
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
     enableDevOidc,
-    enableBackgroundWorker,
-    workerIntervalMs,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -202,7 +133,7 @@ export async function createControlPlaneApp(
     reply.header("X-Request-ID", requestId);
   });
 
-  // Defense-in-depth AC-017: block accidental leakage of forbidden provider/secret keys on public endpoints
+  // Public DTO security boundary: block accidental leakage of internal/forbidden keys
   fastifyInstance.addHook("preSerialization", async (request, _reply, payload) => {
     const routeUrl = request.url.split("?")[0] ?? "";
     if (routeUrl === "/v1/dev/auth/token") {
@@ -212,7 +143,7 @@ export async function createControlPlaneApp(
     if (forbidden.length > 0) {
       throw new ControlPlaneError(
         "INTERNAL_ERROR",
-        "Response blocked by public DTO security boundary.",
+        `Response blocked by public DTO security boundary: ${forbidden.join(", ")}`,
       );
     }
     return payload;
@@ -222,9 +153,8 @@ export async function createControlPlaneApp(
     AppModule.register({
       config: runtimeConfig,
       dbClient,
-      coolifyAdapter,
-      secretVault,
-      healthProbeService: healthProbe,
+      dockerExecutor,
+      hostAgent,
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },
@@ -253,8 +183,7 @@ export async function createControlPlaneApp(
   }
 
   const oidc = nestApp.get(OidcService);
-  const outboxWorker = nestApp.get(OutboxWorkerService);
-  const eventsBus = nestApp.get(EventsBusService);
+  const authz = nestApp.get(AuthzContextService);
 
   let isClosed = false;
 
@@ -264,24 +193,17 @@ export async function createControlPlaneApp(
     baseUrl,
     port: boundPort,
     dbClient,
-    fakeCoolify,
-    coolifyAdapter,
-    secretVault,
-    healthProbe,
+    dockerExecutor,
+    hostAgent,
     oidc,
-    outboxWorker,
-    eventsBus,
+    authz,
     async close(): Promise<void> {
       if (isClosed) {
         return;
       }
       isClosed = true;
 
-      outboxWorker.stopBackgroundLoop();
       await nestApp.close();
-      if (fakeCoolify) {
-        await fakeCoolify.close();
-      }
       if (ownsDatabaseClient) {
         await dbClient.close();
       }

@@ -1,32 +1,28 @@
 import {
   Catch,
   HttpException,
-  Inject,
   type ArgumentsHost,
   type ExceptionFilter,
 } from "@nestjs/common";
 import {
-  createErrorEnvelope,
+  ERROR_CODES,
   ERROR_CODE_HTTP_STATUS,
+  createErrorEnvelope,
+  redactSensitiveString,
   type ErrorCode,
   type ErrorDetail,
 } from "@hosting-panel/contracts";
-import { CoolifyAdapterError, redactSensitiveString } from "@hosting-panel/coolify-adapter";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { ZodError } from "zod";
 import {
   ControlPlaneError,
-  extractRawHeader,
   resolveRequestId,
 } from "./control-plane.error.js";
-import { SecretVaultService } from "../vault/secret-vault.service.js";
+
+const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 
 @Catch()
 export class ApiExceptionFilter implements ExceptionFilter {
-  public constructor(
-    @Inject(SecretVaultService) private readonly secretVault: SecretVaultService,
-  ) {}
-
   public catch(exception: unknown, host: ArgumentsHost): void {
     const http = host.switchToHttp();
     const request = http.getRequest<FastifyRequest>();
@@ -37,18 +33,6 @@ export class ApiExceptionFilter implements ExceptionFilter {
     }
 
     const requestId = resolveRequestId(request);
-    const knownSecrets = [...this.secretVault.getAllKnownSecrets()];
-    const rawAuth = extractRawHeader(
-      request.headers as Record<string, string | string[] | undefined>,
-      "authorization",
-    );
-    if (typeof rawAuth === "string" && rawAuth.trim().length >= 4) {
-      knownSecrets.push(rawAuth.trim());
-      const parts = rawAuth.trim().split(/\s+/);
-      if (parts[1] && parts[1].length >= 4) {
-        knownSecrets.push(parts[1]);
-      }
-    }
 
     let code: ErrorCode = "INTERNAL_ERROR";
     let message = "An unexpected internal error occurred.";
@@ -58,30 +42,33 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
     if (exception instanceof ControlPlaneError) {
       code = exception.code;
-      message = redactSensitiveString(exception.message, knownSecrets);
+      message = redactSensitiveString(exception.message);
       retryable = exception.retryable;
       details = exception.details.map((d) => ({
-        ...(d.field ? { field: redactSensitiveString(d.field, knownSecrets) } : {}),
-        message: redactSensitiveString(d.message, knownSecrets),
-        ...(d.reason ? { reason: redactSensitiveString(d.reason, knownSecrets) } : {}),
+        ...(d.field ? { field: redactSensitiveString(d.field) } : {}),
+        message: redactSensitiveString(d.message),
+        ...(d.reason ? { reason: redactSensitiveString(d.reason) } : {}),
       }));
       if (exception.retryAfterMs !== undefined && exception.retryAfterMs > 0) {
         retryAfterSeconds = Math.max(1, Math.ceil(exception.retryAfterMs / 1_000));
       }
-    } else if (exception instanceof CoolifyAdapterError) {
-      code = exception.code;
-      message = redactSensitiveString(exception.message, knownSecrets);
-      retryable = exception.retryable;
-      if (exception.retryAfterMs !== undefined && exception.retryAfterMs > 0) {
-        retryAfterSeconds = Math.max(1, Math.ceil(exception.retryAfterMs / 1_000));
-      }
+    } else if (
+      exception !== null &&
+      typeof exception === "object" &&
+      "code" in exception &&
+      typeof (exception as { code: unknown }).code === "string" &&
+      ERROR_CODE_SET.has((exception as { code: string }).code)
+    ) {
+      const errWithCode = exception as { code: ErrorCode; message?: string };
+      code = errWithCode.code;
+      message = redactSensitiveString(errWithCode.message || `Error code: ${code}`);
     } else if (exception instanceof ZodError) {
       code = "VALIDATION_ERROR";
       message = "Request validation failed.";
       retryable = false;
       details = exception.issues.map((issue) => ({
         ...(issue.path.length > 0 ? { field: issue.path.map(String).join(".") } : {}),
-        message: redactSensitiveString(issue.message, knownSecrets),
+        message: redactSensitiveString(issue.message),
         reason: issue.code,
       }));
     } else if (exception instanceof HttpException) {
@@ -97,7 +84,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
         message = "Requested endpoint or resource was not found.";
       } else if (status === 400 || status === 422) {
         code = "VALIDATION_ERROR";
-        message = redactSensitiveString(exception.message || "Invalid request.", knownSecrets);
+        message = redactSensitiveString(exception.message || "Invalid request.");
       } else {
         code = "INTERNAL_ERROR";
         message = "An unexpected internal error occurred.";
@@ -114,7 +101,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       retryable = false;
     }
 
-    const statusCode = ERROR_CODE_HTTP_STATUS[code];
+    const statusCode = ERROR_CODE_HTTP_STATUS[code] ?? 500;
     const envelope = createErrorEnvelope({
       code,
       message,

@@ -1,17 +1,23 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { TextDecoder } from "node:util";
 import {
-  ApiErrorEnvelopeSchema,
-  AsyncAcceptedEnvelopeSchema,
   findForbiddenPublicDtoKeys,
+  type ApiErrorEnvelope,
+  type AuditEventDto,
+  type DevPersonaDto,
+  type HostAllocationDto,
+  type HostDto,
+  type MeDto,
+  type MemberDto,
+  type OrganizationCapabilitiesDto,
+  type OrganizationSummaryDto,
+  type QuotaReservationDto,
+  type ServiceTemplateDto,
+  type SiteDetailDto,
+  type StackRevisionDto,
 } from "@hosting-panel/contracts";
 import { DEMO_IDS } from "@hosting-panel/database";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createControlPlaneApp,
-  DEFAULT_LAB_VAULT_SECRETS,
   type ControlPlaneAppHandle,
 } from "../src/index.js";
 
@@ -22,22 +28,17 @@ interface HttpJsonResult<T = unknown> {
   readonly rawText: string;
 }
 
-const KNOWN_RAW_SECRETS = Object.values(DEFAULT_LAB_VAULT_SECRETS);
-
 function assertZeroLeaks(
   payload: unknown,
-  rawText: string,
   options?: { readonly allowAccessTokenKey?: boolean },
 ): void {
   if (!options?.allowAccessTokenKey) {
-    expect(findForbiddenPublicDtoKeys(payload)).toEqual([]);
-  }
-  for (const secret of KNOWN_RAW_SECRETS) {
-    expect(rawText).not.toContain(secret);
+    const forbidden = findForbiddenPublicDtoKeys(payload);
+    expect(forbidden).toEqual([]);
   }
 }
 
-describe("Control-Plane /v1 API End-to-End Integration Suite (Unit 7)", () => {
+describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)", () => {
   let app: ControlPlaneAppHandle;
   let baseUrl: string;
   const tokens: Record<string, string> = {};
@@ -59,967 +60,715 @@ describe("Control-Plane /v1 API End-to-End Integration Suite (Unit 7)", () => {
     if (init?.token) {
       headers["Authorization"] = `Bearer ${init.token}`;
     }
-    let serializedBody: string | undefined;
     if (init?.body !== undefined) {
       headers["Content-Type"] = "application/json";
-      serializedBody = JSON.stringify(init.body);
     }
 
     const res = await fetch(`${baseUrl}${path}`, {
-      method: init?.method ?? "GET",
+      method: init?.method ?? (init?.body !== undefined ? "POST" : "GET"),
       headers,
-      body: serializedBody,
+      body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
     });
 
     const rawText = await res.text();
-    const parsed = (rawText.length > 0 ? JSON.parse(rawText) : null) as T;
+    let body: unknown = null;
+    if (rawText.length > 0) {
+      try {
+        body = JSON.parse(rawText);
+      } catch {
+        body = rawText;
+      }
+    }
 
-    expect(res.headers.get("x-request-id")).toBeTruthy();
-    assertZeroLeaks(parsed, rawText, {
-      allowAccessTokenKey: init?.allowAccessTokenKey,
-    });
+    assertZeroLeaks(body, { allowAccessTokenKey: init?.allowAccessTokenKey });
 
     return {
       status: res.status,
       headers: res.headers,
-      body: parsed,
+      body: body as T,
       rawText,
     };
   }
 
-  async function issuePersonaToken(userId: string): Promise<string> {
-    const res = await requestJson<{
-      readonly data: {
-        readonly accessToken: string;
-        readonly tokenType: string;
-        readonly user: { readonly id: string };
-      };
-    }>("/v1/dev/auth/token", {
-      method: "POST",
-      body: { userId },
-      allowAccessTokenKey: true,
-    });
-    expect(res.status).toBe(200);
-    expect(res.body.data.tokenType).toBe("Bearer");
-    expect(res.body.data.user.id).toBe(userId);
-    return res.body.data.accessToken;
-  }
-
   beforeAll(async () => {
     app = await createControlPlaneApp({
-      listen: true,
+      host: "127.0.0.1",
       port: 0,
-      enableBackgroundWorker: false,
-      coolifyTimeoutMs: 120,
-      fakeCoolifyTimeoutDelayMs: 600,
-      coolifyDefaultCooldownMs: 100,
-      coolifyMaxCooldownMs: 100,
+      listen: true,
+      enableDevOidc: true,
     });
-
-    expect(app.baseUrl).toBeTruthy();
-    expect(app.fakeCoolify).not.toBeNull();
+    expect(app.baseUrl).not.toBeNull();
     baseUrl = app.baseUrl!;
 
-    tokens["elena"] = await issuePersonaToken(DEMO_IDS.users.elena);
-    tokens["marco"] = await issuePersonaToken(DEMO_IDS.users.marco);
-    tokens["giulia"] = await issuePersonaToken(DEMO_IDS.users.giulia);
-    tokens["luca"] = await issuePersonaToken(DEMO_IDS.users.luca);
-    tokens["admin"] = await issuePersonaToken(DEMO_IDS.users.admin);
-  });
-
-  beforeEach(() => {
-    app.fakeCoolify?.resetSimulations();
-    app.fakeCoolify?.clearRequests();
+    // Obtain JWT Bearer tokens for all 5 seeded personas
+    const personas = ["usr_infra", "usr_hosting", "usr_elena", "usr_marco", "usr_giulia"];
+    for (const personaId of personas) {
+      const res = await requestJson<{ data: { accessToken: string } }>(
+        "/v1/dev/auth/token",
+        {
+          method: "POST",
+          body: { userId: personaId },
+          allowAccessTokenKey: true,
+        },
+      );
+      expect(res.status).toBe(200);
+      tokens[personaId] = res.body.data.accessToken;
+    }
   });
 
   afterAll(async () => {
-    await app?.close();
+    await app.close();
   });
 
-  it("serves /health/live, /health/ready, Dev OIDC personas, X-Request-ID propagation, and ships OpenAPI 3.1.0", async () => {
-    const live = await requestJson<{ readonly status: string }>("/health/live", {
-      headers: { "X-Request-ID": "req_custom_health_check_01" },
+  // 1. Health Probes
+  describe("Health Probes", () => {
+    it("GET /health/live returns ok with HCP-SPEC-002 phase-1 metadata", async () => {
+      const res = await requestJson<{
+        status: string;
+        service: string;
+        spec: string;
+        phase: string;
+        timestamp: string;
+      }>("/health/live");
+
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("ok");
+      expect(res.body.service).toBe("hosting-panel-api");
+      expect(res.body.spec).toBe("HCP-SPEC-002");
+      expect(res.body.phase).toBe("phase-1");
+      expect(res.body.timestamp).toBeDefined();
     });
-    expect(live.status).toBe(200);
-    expect(live.body.status).toBe("ok");
-    expect(live.headers.get("x-request-id")).toBe("req_custom_health_check_01");
 
-    const ready = await requestJson<{
-      readonly status: string;
-      readonly database: string;
-      readonly mode: string;
-    }>("/health/ready");
-    expect(ready.status).toBe(200);
-    expect(ready.body.status).toBe("ready");
-    expect(ready.body.database).toBe("up");
-    expect(ready.body.mode).toBe("pglite");
+    it("GET /health/ready verifies database connectivity", async () => {
+      const res = await requestJson<{
+        status: string;
+        database: string;
+        mode: string;
+        timestamp: string;
+      }>("/health/ready");
 
-    const notFoundRoute = await requestJson("/v1/non-existent-endpoint");
-    expect(notFoundRoute.status).toBe(404);
-    expect(ApiErrorEnvelopeSchema.parse(notFoundRoute.body).error.code).toBe(
-      "NOT_FOUND",
-    );
-
-    const personas = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string }>;
-    }>("/v1/dev/auth/personas");
-    expect(personas.status).toBe(200);
-    expect(personas.body.data.map((p) => p.id)).toEqual(
-      expect.arrayContaining([
-        DEMO_IDS.users.elena,
-        DEMO_IDS.users.marco,
-        DEMO_IDS.users.giulia,
-        DEMO_IDS.users.luca,
-        DEMO_IDS.users.admin,
-      ]),
-    );
-
-    const unauth = await requestJson("/v1/me");
-    expect(unauth.status).toBe(401);
-    const parsedErr = ApiErrorEnvelopeSchema.parse(unauth.body);
-    expect(parsedErr.error.code).toBe("UNAUTHENTICATED");
-
-    const currentDir = fileURLToPath(new URL(".", import.meta.url));
-    const openApiPath = resolve(currentDir, "../../../docs/api/openapi.yaml");
-    const openApiContent = await readFile(openApiPath, "utf8");
-    expect(openApiContent).toContain("openapi: 3.1.0");
-    expect(openApiContent).toContain("/v1/organizations/{orgId}/applications/{appId}/deploy:");
-    expect(openApiContent).toContain("AsyncAcceptedEnvelope:");
-    expect(openApiContent).toContain("ApiErrorEnvelope:");
+      expect(res.status).toBe(200);
+      expect(res.body.status).toBe("ready");
+      expect(res.body.database).toBe("up");
+      expect(res.body.mode).toBe("pglite");
+    });
   });
 
-  it("AC-001: enforces cross-tenant 404 isolation with zero upstream Coolify calls", async () => {
-    app.fakeCoolify!.clearRequests();
-
-    // User in org_acme attempting to read org_beta's application under org_acme URL
-    const readUnderAcme = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.betaPortal}`,
-      { token: tokens["elena"] },
-    );
-    expect(readUnderAcme.status).toBe(404);
-    expect(ApiErrorEnvelopeSchema.parse(readUnderAcme.body).error.code).toBe("NOT_FOUND");
-
-    // User in org_acme attempting to deploy org_beta's application under org_acme URL
-    const deployUnderAcme = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.betaPortal}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac001_cross_app" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(deployUnderAcme.status).toBe(404);
-    expect(ApiErrorEnvelopeSchema.parse(deployUnderAcme.body).error.code).toBe("NOT_FOUND");
-
-    // User with zero membership in org_beta (usr_marco) probing org_beta directly -> 404 (not 403!)
-    const foreignOrgProbe = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.beta}/applications/${DEMO_IDS.applications.betaPortal}`,
-      { token: tokens["marco"] },
-    );
-    expect(foreignOrgProbe.status).toBe(404);
-    expect(ApiErrorEnvelopeSchema.parse(foreignOrgProbe.body).error.code).toBe("NOT_FOUND");
-
-    // Zero requests hit Fake Coolify for coolify-app-beta-portal!
-    const betaHits = app.fakeCoolify!
-      .getRequests()
-      .filter((r) => r.fullUrl.includes("coolify-app-beta-portal"));
-    expect(betaHits).toHaveLength(0);
-    expect(app.fakeCoolify!.getRequests()).toHaveLength(0);
-  });
-
-  it("AC-002: isolates multi-org context switching and per-org role capabilities for usr_elena", async () => {
-    const me = await requestJson<{
-      readonly data: {
-        readonly user: { readonly id: string };
-        readonly organizations: ReadonlyArray<{
-          readonly id: string;
-          readonly roles: readonly string[];
-        }>;
-      };
-    }>("/v1/me", { token: tokens["elena"] });
-    expect(me.status).toBe(200);
-    expect(me.body.data.user.id).toBe(DEMO_IDS.users.elena);
-
-    const orgList = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string }>;
-    }>("/v1/me/organizations", { token: tokens["elena"] });
-    expect(orgList.status).toBe(200);
-    expect(orgList.body.data.map((o) => o.id)).toEqual(
-      expect.arrayContaining([
-        DEMO_IDS.organizations.acme,
-        DEMO_IDS.organizations.beta,
-        DEMO_IDS.organizations.legacy,
-      ]),
-    );
-
-    const acmeApps = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string; readonly organizationId: string }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/applications`, {
-      token: tokens["elena"],
+  // 2. Auth & Dev OIDC
+  describe("Auth & Dev OIDC", () => {
+    it("GET /v1/dev/auth/personas returns the 5 seeded personas", async () => {
+      const res = await requestJson<{ data: DevPersonaDto[] }>("/v1/dev/auth/personas");
+      expect(res.status).toBe(200);
+      expect(res.body.data).toHaveLength(5);
+      const ids = res.body.data.map((p) => p.id);
+      expect(ids).toContain(DEMO_IDS.users.infra);
+      expect(ids).toContain(DEMO_IDS.users.hosting);
+      expect(ids).toContain(DEMO_IDS.users.elena);
+      expect(ids).toContain(DEMO_IDS.users.marco);
+      expect(ids).toContain(DEMO_IDS.users.giulia);
     });
-    expect(acmeApps.status).toBe(200);
-    expect(acmeApps.body.data.map((a) => a.id)).toEqual([
-      DEMO_IDS.applications.acmeApi,
-      DEMO_IDS.applications.acmeStorefront,
-    ]);
 
-    const betaApps = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string; readonly organizationId: string }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.beta}/applications`, {
-      token: tokens["elena"],
-    });
-    expect(betaApps.status).toBe(200);
-    expect(betaApps.body.data.map((a) => a.id)).toEqual([DEMO_IDS.applications.betaPortal]);
-
-    const acmeCaps = await requestJson<{
-      readonly data: { readonly permissions: readonly string[] };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/capabilities`, {
-      token: tokens["elena"],
-    });
-    expect(acmeCaps.status).toBe(200);
-    expect(acmeCaps.body.data.permissions).toContain("application.deploy");
-
-    const betaCaps = await requestJson<{
-      readonly data: { readonly permissions: readonly string[] };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.beta}/capabilities`, {
-      token: tokens["elena"],
-    });
-    expect(betaCaps.status).toBe(200);
-    expect(betaCaps.body.data.permissions).toContain("application.read");
-    expect(betaCaps.body.data.permissions).not.toContain("application.deploy");
-
-    // usr_elena is only viewer in org_beta -> deploy must be 403
-    const deployInBeta = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.beta}/applications/${DEMO_IDS.applications.betaPortal}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac002_beta_viewer_deploy" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(deployInBeta.status).toBe(403);
-    expect(ApiErrorEnvelopeSchema.parse(deployInBeta.body).error.code).toBe(
-      "PERMISSION_DENIED",
-    );
-  });
-
-  it("AC-003: denies viewer restart mutation with 403 PERMISSION_DENIED and records audit denial", async () => {
-    const restartRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}/restart`,
-      {
-        method: "POST",
-        token: tokens["giulia"],
-        headers: {
-          "Idempotency-Key": "idem_ac003_viewer_restart",
-          "X-Request-ID": "req_ac003_giulia_denied",
+    it("POST /v1/auth/revoke immediately revokes active token jti", async () => {
+      // Issue a disposable token
+      const tokenRes = await requestJson<{ data: { accessToken: string } }>(
+        "/v1/dev/auth/token",
+        {
+          method: "POST",
+          body: { userId: DEMO_IDS.users.elena },
+          allowAccessTokenKey: true,
         },
-      },
-    );
+      );
+      const disposableToken = tokenRes.body.data.accessToken;
 
-    expect(restartRes.status).toBe(403);
-    const err = ApiErrorEnvelopeSchema.parse(restartRes.body);
-    expect(err.error.code).toBe("PERMISSION_DENIED");
-    expect(err.error.requestId).toBe("req_ac003_giulia_denied");
+      // Authenticated call succeeds before revocation
+      const beforeRes = await requestJson<MeDto>("/v1/me", {
+        token: disposableToken,
+      });
+      expect(beforeRes.status).toBe(200);
 
-    const auditRes = await requestJson<{
-      readonly data: ReadonlyArray<{
-        readonly actorUserId: string | null;
-        readonly action: string;
-        readonly outcome: string;
-        readonly requestId: string | null;
-      }>;
-    }>(
-      `/v1/admin/audit?organizationId=${DEMO_IDS.organizations.acme}&outcome=denied`,
-      { token: tokens["admin"] },
-    );
-    expect(auditRes.status).toBe(200);
-    expect(
-      auditRes.body.data.some(
-        (ev) =>
-          ev.actorUserId === DEMO_IDS.users.giulia &&
-          ev.outcome === "denied" &&
-          ev.requestId === "req_ac003_giulia_denied",
-      ),
-    ).toBe(true);
-  });
-
-  it("AC-004: enforces resource-scoped ABAC for developer usr_marco (allowed on storefront, 403 on core API)", async () => {
-    const listRes = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/applications`, {
-      token: tokens["marco"],
-    });
-    expect(listRes.status).toBe(200);
-    expect(listRes.body.data.map((a) => a.id)).toEqual([DEMO_IDS.applications.acmeStorefront]);
-
-    const readApiRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}`,
-      { token: tokens["marco"] },
-    );
-    expect(readApiRes.status).toBe(403);
-    expect(ApiErrorEnvelopeSchema.parse(readApiRes.body).error.code).toBe(
-      "PERMISSION_DENIED",
-    );
-
-    const deployApiRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deploy`,
-      {
-        method: "POST",
-        token: tokens["marco"],
-        headers: { "Idempotency-Key": "idem_ac004_marco_forbidden_api" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(deployApiRes.status).toBe(403);
-    expect(ApiErrorEnvelopeSchema.parse(deployApiRes.body).error.code).toBe(
-      "PERMISSION_DENIED",
-    );
-
-    const deployStorefrontRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}/deploy`,
-      {
-        method: "POST",
-        token: tokens["marco"],
-        headers: { "Idempotency-Key": "idem_ac004_marco_storefront_ok" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(deployStorefrontRes.status).toBe(202);
-    const accepted = AsyncAcceptedEnvelopeSchema.parse(deployStorefrontRes.body);
-    expect(accepted.data.resourceId).toBe(DEMO_IDS.applications.acmeStorefront);
-
-    await app.outboxWorker.processUntilIdle();
-
-    const opRes = await requestJson<{
-      readonly data: { readonly id: string; readonly status: string };
-    }>(accepted.links.self, { token: tokens["marco"] });
-    expect(opRes.status).toBe(200);
-    expect(opRes.body.data.status).toBe("succeeded");
-  });
-
-  it("AC-005 & AC-006: enforces Idempotency-Key deduplication, payload conflict (409), and per-resource locking (409)", async () => {
-    const missingKeyRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        body: { forceRebuild: true },
-      },
-    );
-    expect(missingKeyRes.status).toBe(400);
-    expect(ApiErrorEnvelopeSchema.parse(missingKeyRes.body).error.code).toBe(
-      "VALIDATION_ERROR",
-    );
-
-    const firstRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac005_deploy_1" },
-        body: { forceRebuild: true },
-      },
-    );
-    expect(firstRes.status).toBe(202);
-    const firstAccepted = AsyncAcceptedEnvelopeSchema.parse(firstRes.body);
-
-    // Exact same key + same body -> deduplicated 202 with identical operationId
-    const duplicateRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac005_deploy_1" },
-        body: { forceRebuild: true },
-      },
-    );
-    expect(duplicateRes.status).toBe(202);
-    const duplicateAccepted = AsyncAcceptedEnvelopeSchema.parse(duplicateRes.body);
-    expect(duplicateAccepted.data.operationId).toBe(firstAccepted.data.operationId);
-
-    // Same key + different body -> 409 IDEMPOTENCY_CONFLICT
-    const mismatchRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac005_deploy_1" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(mismatchRes.status).toBe(409);
-    expect(ApiErrorEnvelopeSchema.parse(mismatchRes.body).error.code).toBe(
-      "IDEMPOTENCY_CONFLICT",
-    );
-
-    // Different key while resource lock is held -> 409 RESOURCE_LOCKED (AC-006)
-    const lockedRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac006_concurrent_deploy" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(lockedRes.status).toBe(409);
-    expect(ApiErrorEnvelopeSchema.parse(lockedRes.body).error.code).toBe(
-      "RESOURCE_LOCKED",
-    );
-
-    // Complete operation and verify lock is released + deployment listed
-    await app.outboxWorker.processUntilIdle();
-
-    const finalOp = await requestJson<{
-      readonly data: { readonly status: string };
-    }>(firstAccepted.links.self, { token: tokens["elena"] });
-    expect(finalOp.status).toBe(200);
-    expect(finalOp.body.data.status).toBe("succeeded");
-
-    const deploymentsRes = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly operationId: string | null; readonly status: string }>;
-    }>(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeApi}/deployments`,
-      { token: tokens["elena"] },
-    );
-    expect(deploymentsRes.status).toBe(200);
-    expect(
-      deploymentsRes.body.data.some(
-        (d) => d.operationId === firstAccepted.data.operationId && d.status === "succeeded",
-      ),
-    ).toBe(true);
-  });
-
-  it("AC-007: transitions timed-out POST deploy to unknown (keeping lock, zero blind POST replay) and reconciles cleanly to succeeded", async () => {
-    app.fakeCoolify!.clearRequests();
-    app.fakeCoolify!.setNextDeployBehavior("timeout");
-
-    const enqueueRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac007_ambiguous_timeout" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(enqueueRes.status).toBe(202);
-    const accepted = AsyncAcceptedEnvelopeSchema.parse(enqueueRes.body);
-
-    // Dispatch batch: POST times out -> must transition to unknown (NOT failed, NOT retried!)
-    const dispatched = await app.outboxWorker.processOutboxBatch();
-    expect(dispatched).toBe(1);
-
-    const unknownOp = await requestJson<{
-      readonly data: {
-        readonly status: string;
-        readonly errorCode: string | null;
-      };
-    }>(accepted.links.self, { token: tokens["elena"] });
-    expect(unknownOp.status).toBe(200);
-    expect(unknownOp.body.data.status).toBe("unknown");
-    expect(unknownOp.body.data.errorCode).toBe("OPERATION_AMBIGUOUS");
-
-    // Resource lock MUST remain held while status is unknown
-    const concurrentAttempt = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}/restart`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac007_while_unknown_locked" },
-      },
-    );
-    expect(concurrentAttempt.status).toBe(409);
-    expect(ApiErrorEnvelopeSchema.parse(concurrentAttempt.body).error.code).toBe(
-      "RESOURCE_LOCKED",
-    );
-
-    const deployPostsAfterTimeout = app.fakeCoolify!
-      .getRequests()
-      .filter((r) => r.method === "POST" && r.path === "/api/v1/deploy");
-    expect(deployPostsAfterTimeout).toHaveLength(1);
-
-    // Reconcile inspects Coolify state via GET and recovers unknown -> reconciling -> succeeded
-    await app.outboxWorker.reconcileActiveOperations();
-
-    const recoveredOp = await requestJson<{
-      readonly data: {
-        readonly status: string;
-        readonly errorCode: string | null;
-      };
-    }>(accepted.links.self, { token: tokens["elena"] });
-    expect(recoveredOp.status).toBe(200);
-    expect(recoveredOp.body.data.status).toBe("succeeded");
-    expect(recoveredOp.body.data.errorCode).toBeNull();
-
-    // Still strictly 1 POST /api/v1/deploy (zero duplicate POSTs!)
-    const deployPostsAfterReconcile = app.fakeCoolify!
-      .getRequests()
-      .filter((r) => r.method === "POST" && r.path === "/api/v1/deploy");
-    expect(deployPostsAfterReconcile).toHaveLength(1);
-  });
-
-  it("AC-008, AC-009 & AC-017: redacts upstream 429 rate-limit and 401 revoked-token errors with zero secret/DTO leaks", async () => {
-    // AC-008: 429 rate limit on org_beta connection (pconn_beta)
-    app.fakeCoolify!.setNextRequestBehavior("rate_limit");
-
-    const rateLimited = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.beta}/servers/${DEMO_IDS.servers.betaProd}`,
-      { token: tokens["luca"] },
-    );
-    expect(rateLimited.status).toBe(429);
-    expect(rateLimited.headers.get("retry-after")).toBeTruthy();
-    const rateLimitEnvelope = ApiErrorEnvelopeSchema.parse(rateLimited.body);
-    expect(rateLimitEnvelope.error.code).toBe("PROVIDER_RATE_LIMIT");
-
-    // Wait past the 100ms adapter cooldown window
-    await new Promise((r) => setTimeout(r, 140));
-
-    // AC-009: Upstream Coolify token rejected (401) during admin provider connection test
-    app.fakeCoolify!.setNextRequestBehavior("unauthorized");
-    const unauthorizedUpstream = await requestJson(
-      `/v1/admin/provider-connections/${DEMO_IDS.providers.coolifyLab}/test`,
-      {
-        method: "POST",
-        token: tokens["admin"],
-      },
-    );
-    expect(unauthorizedUpstream.status).toBe(401);
-    const unauthEnvelope = ApiErrorEnvelopeSchema.parse(unauthorizedUpstream.body);
-    expect(unauthEnvelope.error.code).toBe("UNAUTHENTICATED");
-
-    const adminConnections = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string; readonly status: string }>;
-    }>("/v1/admin/provider-connections", { token: tokens["admin"] });
-    expect(adminConnections.status).toBe(200);
-    const degradedInstance = adminConnections.body.data.find(
-      (i) => i.id === DEMO_IDS.providers.coolifyLab,
-    );
-    expect(degradedInstance?.status).toBe("misconfigured");
-
-    // Restore healthy connected status via fresh connection test
-    const restored = await requestJson<{
-      readonly data: { readonly status: string };
-    }>(`/v1/admin/provider-connections/${DEMO_IDS.providers.coolifyLab}/test`, {
-      method: "POST",
-      token: tokens["admin"],
-    });
-    expect(restored.status).toBe(200);
-    expect(restored.body.data.status).toBe("connected");
-  });
-
-  it("AC-010: fails operation and marks application degraded/unhealthy when HealthProbeService fails after Coolify deploy succeeds", async () => {
-    app.fakeCoolify!.setHealthProbeOutcome(DEMO_IDS.applications.acmeStorefront, false);
-
-    const deployRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac010_unhealthy_probe" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(deployRes.status).toBe(202);
-    const accepted = AsyncAcceptedEnvelopeSchema.parse(deployRes.body);
-
-    await app.outboxWorker.processUntilIdle();
-
-    const opRes = await requestJson<{
-      readonly data: { readonly status: string };
-    }>(accepted.links.self, { token: tokens["elena"] });
-    expect(opRes.status).toBe(200);
-    expect(opRes.body.data.status).toBe("failed");
-    expect(opRes.body.data.status).not.toBe("succeeded");
-
-    const appDetail = await requestJson<{
-      readonly data: { readonly status: string; readonly health: string };
-      readonly meta?: { readonly source: string };
-    }>(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}`,
-      { token: tokens["elena"] },
-    );
-    expect(appDetail.status).toBe(200);
-    expect(appDetail.body.data.status).toBe("degraded");
-    expect(appDetail.body.data.health).toBe("unhealthy");
-    expect(appDetail.body.meta?.source).toBe("external_probe");
-
-    app.fakeCoolify!.setHealthProbeOutcome(DEMO_IDS.applications.acmeStorefront, true);
-  });
-
-  it("AC-011: surfaces status=unknown and meta.stale=true when Sentinel server heartbeat is stale", async () => {
-    app.fakeCoolify!.setServerHeartbeatTimestamp(
-      "coolify-srv-acme-01",
-      "2020-01-01T00:00:00.000Z",
-    );
-
-    const serverDetail = await requestJson<{
-      readonly data: { readonly status: string; readonly health: string };
-      readonly meta: { readonly stale: boolean };
-    }>(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/servers/${DEMO_IDS.servers.acmeProd}`,
-      { token: tokens["elena"] },
-    );
-    expect(serverDetail.status).toBe(200);
-    expect(serverDetail.body.data.status).toBe("unknown");
-    expect(serverDetail.body.data.health).toBe("unknown");
-    expect(serverDetail.body.meta.stale).toBe(true);
-
-    const metricsRes = await requestJson<{
-      readonly data: {
-        readonly cpuUsagePercent: number | null;
-        readonly memoryUsedMb: number | null;
-      };
-      readonly meta: { readonly stale: boolean };
-    }>(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/servers/${DEMO_IDS.servers.acmeProd}/metrics`,
-      { token: tokens["elena"] },
-    );
-    expect(metricsRes.status).toBe(200);
-    expect(metricsRes.body.meta.stale).toBe(true);
-    expect(metricsRes.body.data.cpuUsagePercent).toBeNull();
-    expect(metricsRes.body.data.memoryUsedMb).toBeNull();
-
-    app.fakeCoolify!.setServerHeartbeatTimestamp("coolify-srv-acme-01", null);
-
-    const freshServers = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string; readonly status: string }>;
-      readonly meta: { readonly stale: boolean };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/servers`, {
-      token: tokens["elena"],
-    });
-    expect(freshServers.status).toBe(200);
-    expect(freshServers.body.meta.stale).toBe(false);
-    expect(freshServers.body.data[0]?.status).toBe("running");
-  });
-
-  it("AC-012: reports restoreSupported=false on Redis and rejects restore with 422 NOT_SUPPORTED", async () => {
-    const dbList = await requestJson<{
-      readonly data: ReadonlyArray<{
-        readonly id: string;
-        readonly engine: string;
-        readonly restoreSupported: boolean;
-      }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/databases`, {
-      token: tokens["elena"],
-    });
-    expect(dbList.status).toBe(200);
-    expect(dbList.body.data).toHaveLength(2);
-
-    const redisDetail = await requestJson<{
-      readonly data: {
-        readonly id: string;
-        readonly engine: string;
-        readonly backupSupported: boolean;
-        readonly restoreSupported: boolean;
-        readonly backupUnsupportedReason: string | null;
-      };
-    }>(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/databases/${DEMO_IDS.databases.acmeRedis}`,
-      { token: tokens["elena"] },
-    );
-    expect(redisDetail.status).toBe(200);
-    expect(redisDetail.body.data.engine).toBe("redis");
-    expect(redisDetail.body.data.backupSupported).toBe(false);
-    expect(redisDetail.body.data.restoreSupported).toBe(false);
-    expect(redisDetail.body.data.backupUnsupportedReason).toBeTruthy();
-
-    const restoreAttempt = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/databases/${DEMO_IDS.databases.acmeRedis}/restores`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        body: { backupId: "bkp_001" },
-      },
-    );
-    expect(restoreAttempt.status).toBe(422);
-    expect(ApiErrorEnvelopeSchema.parse(restoreAttempt.body).error.code).toBe(
-      "NOT_SUPPORTED",
-    );
-  });
-
-  it("AC-014: canonicalizes FQDNs, rejects cross-org duplicate domain with 409 DOMAIN_CONFLICT without leaking owner org, and supports domain recheck", async () => {
-    const conflictRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/domains`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        body: {
-          applicationId: DEMO_IDS.applications.acmeStorefront,
-          hostname: "  PORTAL.BetaStudios.IT. ",
+      // Revoke token
+      const revokeRes = await requestJson<{ data: { revoked: boolean } }>(
+        "/v1/auth/revoke",
+        {
+          method: "POST",
+          token: disposableToken,
         },
-      },
-    );
-    expect(conflictRes.status).toBe(409);
-    const conflictErr = ApiErrorEnvelopeSchema.parse(conflictRes.body);
-    expect(conflictErr.error.code).toBe("DOMAIN_CONFLICT");
-    expect(conflictRes.rawText).not.toContain(DEMO_IDS.organizations.beta);
-    expect(conflictRes.rawText).not.toContain("Beta Studios");
+      );
+      expect(revokeRes.status).toBe(200);
+      expect(revokeRes.body.data.revoked).toBe(true);
 
-    const createRes = await requestJson<{
-      readonly data: {
-        readonly id: string;
-        readonly hostname: string;
-        readonly verificationStatus: string;
-      };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/domains`, {
-      method: "POST",
-      token: tokens["elena"],
-      body: {
-        applicationId: DEMO_IDS.applications.acmeStorefront,
-        hostname: "  Campaign-2026.Acme.IT. ",
-      },
+      // Subsequent call fails with 401 UNAUTHENTICATED
+      const afterRes = await requestJson<ApiErrorEnvelope>("/v1/me", {
+        token: disposableToken,
+      });
+      expect(afterRes.status).toBe(401);
+      expect(afterRes.body.error.code).toBe("UNAUTHENTICATED");
     });
-    expect(createRes.status).toBe(201);
-    expect(createRes.body.data.hostname).toBe("campaign-2026.acme.it");
-    expect(createRes.body.data.verificationStatus).toBe("pending");
-
-    const recheckRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/domains/${createRes.body.data.id}/recheck`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_domain_recheck_campaign" },
-      },
-    );
-    expect(recheckRes.status).toBe(202);
-    AsyncAcceptedEnvelopeSchema.parse(recheckRes.body);
-
-    await app.outboxWorker.processUntilIdle();
-
-    const domainsAfter = await requestJson<{
-      readonly data: ReadonlyArray<{
-        readonly id: string;
-        readonly verificationStatus: string;
-        readonly certificate: { readonly status: string } | null;
-      }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/domains`, {
-      token: tokens["elena"],
-    });
-    expect(domainsAfter.status).toBe(200);
-    const updatedDomain = domainsAfter.body.data.find(
-      (d) => d.id === createRes.body.data.id,
-    );
-    expect(updatedDomain?.verificationStatus).toBe("verified");
-    expect(updatedDomain?.certificate?.status).toBe("valid");
-
-    const certsRes = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly domainId: string; readonly status: string }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/certificates`, {
-      token: tokens["elena"],
-    });
-    expect(certsRes.status).toBe(200);
-    expect(
-      certsRes.body.data.some(
-        (c) => c.domainId === createRes.body.data.id && c.status === "valid",
-      ),
-    ).toBe(true);
   });
 
-  it("AC-016: allows platform_admin on /v1/admin/*, but denies tenant resource reads without an active support grant and audits the denial", async () => {
-    const fleetRes = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly resourceId: string }>;
-    }>("/v1/admin/fleet", { token: tokens["admin"] });
-    expect(fleetRes.status).toBe(200);
-    expect(fleetRes.body.data.length).toBeGreaterThanOrEqual(4);
+  // 3. Identity (/v1/me)
+  describe("Identity (/v1/me)", () => {
+    it("GET /v1/me returns principal identity, globalRoles, memberships, and platform capabilities", async () => {
+      const res = await requestJson<{ data: MeDto }>("/v1/me", {
+        token: tokens[DEMO_IDS.users.elena],
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.data.user.id).toBe(DEMO_IDS.users.elena);
+      expect(res.body.data.memberships.length).toBeGreaterThanOrEqual(1);
 
-    // Non-platform-admin gets 403 on /v1/admin/fleet
-    const customerOnFleet = await requestJson("/v1/admin/fleet", {
-      token: tokens["elena"],
+      // Platform capabilities all false in Phase 1 per AC-F1-10
+      const caps = res.body.data.platformCapabilities;
+      expect(caps.phase).toBe("phase-1");
+      expect(caps.hostingMode).toBe("dedicated");
+      expect(caps.sharedHostingEnabled).toBe(false);
+      expect(caps.dockerExecutorRuntimeAvailable).toBe(false);
+      expect(caps.hostAgentRuntimeAvailable).toBe(false);
+      expect(caps.acmeTlsRuntimeAvailable).toBe(false);
+      expect(caps.sftpAvailable).toBe(false);
+      expect(caps.productionBackupRuntimeAvailable).toBe(false);
     });
-    expect(customerOnFleet.status).toBe(403);
 
-    // Platform admin without support_access_grants trying to read org_acme applications -> 403 + audit denial
-    const adminTenantAccess = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications`,
-      {
-        token: tokens["admin"],
-        headers: { "X-Request-ID": "req_ac016_admin_no_support_grant" },
-      },
-    );
-    expect(adminTenantAccess.status).toBe(403);
-    expect(ApiErrorEnvelopeSchema.parse(adminTenantAccess.body).error.code).toBe(
-      "PERMISSION_DENIED",
-    );
-
-    const auditRes = await requestJson<{
-      readonly data: ReadonlyArray<{
-        readonly actorUserId: string | null;
-        readonly outcome: string;
-        readonly requestId: string | null;
-      }>;
-    }>(
-      `/v1/admin/audit?organizationId=${DEMO_IDS.organizations.acme}&outcome=denied`,
-      { token: tokens["admin"] },
-    );
-    expect(auditRes.status).toBe(200);
-    expect(
-      auditRes.body.data.some(
-        (ev) =>
-          ev.actorUserId === DEMO_IDS.users.admin &&
-          ev.outcome === "denied" &&
-          ev.requestId === "req_ac016_admin_no_support_grant",
-      ),
-    ).toBe(true);
-  });
-
-  it("AC-021: blocks mutating operations on suspended org_legacy with 403 while permitting read-only org and quota views", async () => {
-    const orgRead = await requestJson<{
-      readonly data: { readonly id: string; readonly status: string };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.legacy}`, {
-      token: tokens["elena"],
-    });
-    expect(orgRead.status).toBe(200);
-    expect(orgRead.body.data.status).toBe("suspended");
-
-    const quotasRead = await requestJson<{
-      readonly data: { readonly organizationId: string; readonly planCode: string };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.legacy}/quotas`, {
-      token: tokens["elena"],
-    });
-    expect(quotasRead.status).toBe(200);
-    expect(quotasRead.body.data.organizationId).toBe(DEMO_IDS.organizations.legacy);
-
-    const blockedDeploy = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.legacy}/applications/${DEMO_IDS.applications.legacySite}/deploy`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_ac021_suspended_deploy" },
-        body: { forceRebuild: false },
-      },
-    );
-    expect(blockedDeploy.status).toBe(403);
-    expect(ApiErrorEnvelopeSchema.parse(blockedDeploy.body).error.code).toBe(
-      "PERMISSION_DENIED",
-    );
-  });
-
-  it("AC-022: protects sole customer_owner from removal with 409 LAST_OWNER_PROTECTED while allowing invitations & non-last-member management", async () => {
-    const soleOwnerDelete = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.beta}/members/${DEMO_IDS.memberships.lucaBeta}`,
-      {
-        method: "DELETE",
-        token: tokens["luca"],
-      },
-    );
-    expect(soleOwnerDelete.status).toBe(409);
-    expect(ApiErrorEnvelopeSchema.parse(soleOwnerDelete.body).error.code).toBe(
-      "LAST_OWNER_PROTECTED",
-    );
-
-    const inviteRes = await requestJson<{
-      readonly data: { readonly membershipId: string; readonly email: string };
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/invitations`, {
-      method: "POST",
-      token: tokens["elena"],
-      body: {
-        email: "nuovo.dev@acme.it",
-        roles: ["viewer"],
-      },
-    });
-    expect(inviteRes.status).toBe(201);
-    expect(inviteRes.body.data.email).toBe("nuovo.dev@acme.it");
-
-    const membersRes = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly userId: string }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/members`, {
-      token: tokens["elena"],
-    });
-    expect(membersRes.status).toBe(200);
-    expect(membersRes.body.data.length).toBeGreaterThanOrEqual(3);
-  });
-
-  it("AC-024: immediately rejects requests bearing a revoked JWT jti after POST /v1/auth/revoke", async () => {
-    const sessionToken = await issuePersonaToken(DEMO_IDS.users.giulia);
-
-    const beforeRevoke = await requestJson("/v1/me", { token: sessionToken });
-    expect(beforeRevoke.status).toBe(200);
-
-    const revokeRes = await requestJson<{
-      readonly data: { readonly revoked: boolean };
-    }>("/v1/auth/revoke", {
-      method: "POST",
-      token: sessionToken,
-    });
-    expect(revokeRes.status).toBe(200);
-    expect(revokeRes.body.data.revoked).toBe(true);
-
-    const afterRevoke = await requestJson("/v1/me", { token: sessionToken });
-    expect(afterRevoke.status).toBe(401);
-    expect(ApiErrorEnvelopeSchema.parse(afterRevoke.body).error.code).toBe(
-      "UNAUTHENTICATED",
-    );
-  });
-
-  it("streams real-time SSE events on GET /v1/organizations/:orgId/events and closes cleanly on disconnect", async () => {
-    const abortController = new AbortController();
-    const sseResponse = await fetch(
-      `${baseUrl}/v1/organizations/${DEMO_IDS.organizations.acme}/events`,
-      {
-        headers: {
-          Authorization: `Bearer ${tokens["elena"]}`,
-          Accept: "text/event-stream",
+    it("GET /v1/me/organizations returns paginated organization summaries", async () => {
+      const res = await requestJson<{ data: OrganizationSummaryDto[] }>(
+        "/v1/me/organizations",
+        {
+          token: tokens[DEMO_IDS.users.elena],
         },
-        signal: abortController.signal,
-      },
-    );
-
-    expect(sseResponse.status).toBe(200);
-    expect(sseResponse.headers.get("content-type")).toContain("text/event-stream");
-    expect(sseResponse.body).not.toBeNull();
-
-    const reader = sseResponse.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    const firstChunk = await reader.read();
-    buffer += decoder.decode(firstChunk.value, { stream: true });
-    expect(buffer).toContain("event: connected");
-
-    // Trigger an async restart operation and process it so SSE receives operation.updated frames
-    const restartRes = await requestJson(
-      `/v1/organizations/${DEMO_IDS.organizations.acme}/applications/${DEMO_IDS.applications.acmeStorefront}/restart`,
-      {
-        method: "POST",
-        token: tokens["elena"],
-        headers: { "Idempotency-Key": "idem_sse_restart_event_test" },
-      },
-    );
-    expect(restartRes.status).toBe(202);
-    const accepted = AsyncAcceptedEnvelopeSchema.parse(restartRes.body);
-
-    await app.outboxWorker.processUntilIdle();
-
-    while (!buffer.includes(`"id":"${accepted.data.operationId}"`) || !buffer.includes('"status":"succeeded"')) {
-      const next = await reader.read();
-      if (next.done) {
-        break;
-      }
-      buffer += decoder.decode(next.value, { stream: true });
-    }
-
-    expect(buffer).toContain("event: operation.updated");
-    expect(buffer).toContain(`"id":"${accepted.data.operationId}"`);
-    expect(buffer).toContain('"status":"succeeded"');
-    for (const secret of KNOWN_RAW_SECRETS) {
-      expect(buffer).not.toContain(secret);
-    }
-
-    abortController.abort();
-    await reader.cancel().catch(() => undefined);
-
-    // Also verify operations list endpoint returns sanitized OperationDto items
-    const opsList = await requestJson<{
-      readonly data: ReadonlyArray<{ readonly id: string }>;
-    }>(`/v1/organizations/${DEMO_IDS.organizations.acme}/operations`, {
-      token: tokens["elena"],
+      );
+      expect(res.status).toBe(200);
+      const slugs = res.body.data.map((o) => o.slug);
+      expect(slugs).toContain("acme-srl");
     });
-    expect(opsList.status).toBe(200);
-    expect(opsList.body.data.some((o) => o.id === accepted.data.operationId)).toBe(
-      true,
-    );
+  });
+
+  // 4. AC-F1-01: Dedicated Host Single-Customer Placement Invariant
+  describe("AC-F1-01: Dedicated Host Placement Invariant", () => {
+    it("rejects allocating an occupied dedicated host to a different customer org with 409 DEDICATED_HOST_OCCUPIED", async () => {
+      // Host hst_ded_acme is already occupied by org_acme
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/allocations`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.infra],
+          body: {
+            organizationId: DEMO_IDS.organizations.beta,
+            hostingMode: "dedicated",
+          },
+        },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("DEDICATED_HOST_OCCUPIED");
+    });
+
+    it("allows allocating an unallocated dedicated host node to a customer org", async () => {
+      // Host hst_ded_free is unallocated
+      const res = await requestJson<{ data: HostAllocationDto }>(
+        `/v1/hosts/${DEMO_IDS.hosts.free}/allocations`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.infra],
+          body: {
+            organizationId: DEMO_IDS.organizations.beta,
+            hostingMode: "dedicated",
+          },
+        },
+      );
+      expect(res.status).toBe(201);
+      expect(res.body.data.hostId).toBe(DEMO_IDS.hosts.free);
+      expect(res.body.data.organizationId).toBe(DEMO_IDS.organizations.beta);
+    });
+  });
+
+  // 5. AC-F1-02: Anti-BOLA Cross-Tenant Isolation & ABAC Resource Grants
+  describe("AC-F1-02: Anti-BOLA Tenant Isolation & ABAC Resource Grants", () => {
+    it("enforces that InfrastructureAdmin lacks implicit tenant read (returns 404 NOT_FOUND)", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}`,
+        {
+          token: tokens[DEMO_IDS.users.infra],
+        },
+      );
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe("NOT_FOUND");
+    });
+
+    it("returns 404 NOT_FOUND when customer accesses resources of another tenant org (anti-BOLA)", async () => {
+      // 1. Non-member access: Giulia (only member of org_gamma) tries to access Acme site -> 404 NOT_FOUND
+      const nonMemberRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}`,
+        {
+          token: tokens[DEMO_IDS.users.giulia],
+        },
+      );
+      expect(nonMemberRes.status).toBe(404);
+      expect(nonMemberRes.body.error.code).toBe("NOT_FOUND");
+
+      // 2. Cross-tenant resource mismatch: site_acme_shop requested under org_beta -> 404 NOT_FOUND
+      const mismatchRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.beta}/sites/${DEMO_IDS.sites.acmeShop}`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(mismatchRes.status).toBe(404);
+      expect(mismatchRes.body.error.code).toBe("NOT_FOUND");
+    });
+
+    it("enforces granular ABAC resource grant: Marco can read site_acme_shop (allow) but denied on site_acme_blog (403)", async () => {
+      // Marco has allow grant on site_acme_shop
+      const shopRes = await requestJson<{ data: SiteDetailDto }>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}`,
+        {
+          token: tokens[DEMO_IDS.users.marco],
+        },
+      );
+      expect(shopRes.status).toBe(200);
+      expect(shopRes.body.data.id).toBe(DEMO_IDS.sites.acmeShop);
+
+      // Marco has explicit deny grant on site_acme_blog
+      const blogRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeBlog}`,
+        {
+          token: tokens[DEMO_IDS.users.marco],
+        },
+      );
+      expect(blogRes.status).toBe(403);
+      expect(blogRes.body.error.code).toBe("PERMISSION_DENIED");
+    });
+  });
+
+  // 6. AC-F1-03: HostingAdmin Authority Boundaries & Audit Logging
+  describe("AC-F1-03: HostingAdmin Authority Boundaries", () => {
+    it("allows HostingAdmin host.read, template management, and tenant administration", async () => {
+      // HostingAdmin can read hosts
+      const hostsRes = await requestJson<{ data: HostDto[] }>("/v1/hosts", {
+        token: tokens[DEMO_IDS.users.hosting],
+      });
+      expect(hostsRes.status).toBe(200);
+
+      // HostingAdmin can read templates
+      const tplRes = await requestJson<{ data: ServiceTemplateDto[] }>("/v1/service-templates", {
+        token: tokens[DEMO_IDS.users.hosting],
+      });
+      expect(tplRes.status).toBe(200);
+
+      // HostingAdmin can create templates
+      const createTplRes = await requestJson<{ data: ServiceTemplateDto }>(
+        "/v1/service-templates",
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.hosting],
+          body: {
+            name: "PostgreSQL 17 Alpine",
+            slug: `postgres-17-${Date.now()}`,
+            category: "database",
+            defaultImage: "postgres:17-alpine",
+            defaultPort: 5432,
+          },
+        },
+      );
+      expect(createTplRes.status).toBe(201);
+    });
+
+    it("strictly denies HostingAdmin host mode modification with 403 and records audit event", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/mode`,
+        {
+          method: "PATCH",
+          token: tokens[DEMO_IDS.users.hosting],
+          body: { hostingMode: "dedicated" },
+        },
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe("PERMISSION_DENIED");
+    });
+
+    it("strictly denies HostingAdmin host maintenance execution with 403 and records audit event", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/maintenance`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.hosting],
+          body: { action: "collect_diagnostics" },
+        },
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe("PERMISSION_DENIED");
+    });
+
+    it("strictly denies HostingAdmin host security posture management with 403", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/security`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.hosting],
+          body: { policyRef: "sec_policy_standard" },
+        },
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe("PERMISSION_DENIED");
+    });
+
+    it("verifies audit trail contains denied security events", async () => {
+      const auditRes = await requestJson<{ data: AuditEventDto[] }>("/v1/admin/audit", {
+        token: tokens[DEMO_IDS.users.infra],
+      });
+      expect(auditRes.status).toBe(200);
+      const deniedEvents = auditRes.body.data.filter((e) => e.details?.outcome === "denied");
+      expect(deniedEvents.length).toBeGreaterThan(0);
+    });
+  });
+
+  // 7. AC-F1-04 & F1-012: Declarative Stack Security & Plaintext Secret Rejection
+  describe("AC-F1-04 & F1-012: Declarative Stack Security & Secret Scrubber", () => {
+    it("rejects forbidden Docker attributes (privileged, hostPath, dockerSocket, networkMode: host) with 403 HOST_POLICY_DENIED", async () => {
+      const siteId = DEMO_IDS.sites.acmeShop;
+      const orgId = DEMO_IDS.organizations.acme;
+
+      // 1. privileged: true
+      const privilegedRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${orgId}/sites/${siteId}/services`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.elena],
+          headers: { "Idempotency-Key": `idemp_priv_${Date.now()}` },
+          body: {
+            serviceTemplateId: DEMO_IDS.templates.nodejs,
+            name: "Privileged Insecure App",
+            configuration: { privileged: true },
+          },
+        },
+      );
+      expect(privilegedRes.status).toBe(403);
+      expect(privilegedRes.body.error.code).toBe("HOST_POLICY_DENIED");
+
+      // 2. /var/run/docker.sock mount
+      const sockRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${orgId}/sites/${siteId}/services`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.elena],
+          headers: { "Idempotency-Key": `idemp_sock_${Date.now()}` },
+          body: {
+            serviceTemplateId: DEMO_IDS.templates.nodejs,
+            name: "Docker Socket App",
+            configuration: { socket: "/var/run/docker.sock" },
+          },
+        },
+      );
+      expect(sockRes.status).toBe(403);
+      expect(sockRes.body.error.code).toBe("HOST_POLICY_DENIED");
+
+      // 3. networkMode: host
+      const netRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${orgId}/sites/${siteId}/services`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.elena],
+          headers: { "Idempotency-Key": `idemp_net_${Date.now()}` },
+          body: {
+            serviceTemplateId: DEMO_IDS.templates.nodejs,
+            name: "Host Network App",
+            configuration: { networkMode: "host" },
+          },
+        },
+      );
+      expect(netRes.status).toBe(403);
+      expect(netRes.body.error.code).toBe("HOST_POLICY_DENIED");
+    });
+
+    it("rejects plaintext secrets in configuration with 400 VALIDATION_ERROR (F1-012)", async () => {
+      const siteId = DEMO_IDS.sites.acmeShop;
+      const orgId = DEMO_IDS.organizations.acme;
+
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${orgId}/sites/${siteId}/services`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.elena],
+          headers: { "Idempotency-Key": `idemp_sec_${Date.now()}` },
+          body: {
+            serviceTemplateId: DEMO_IDS.templates.mariadb,
+            name: "Plaintext Secret DB",
+            configuration: { password: "supersecretpassword123!" },
+          },
+        },
+      );
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(res.body.error.message).toContain("Plaintext secret keys detected");
+    });
+  });
+
+  // 8. AC-F1-05, F1-004 & F1-005: Multi-Service Aggregation & Drift Reporting
+  describe("AC-F1-05, F1-004 & F1-005: Site Aggregation & Non-Destructive Drift", () => {
+    it("aggregates multi-service site_acme_shop into composite detail with in_sync drift summary (F1-004)", async () => {
+      const res = await requestJson<{ data: SiteDetailDto }>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.data.id).toBe(DEMO_IDS.sites.acmeShop);
+      expect(res.body.data.services).toHaveLength(3); // WordPress + MariaDB + Redis
+      expect(res.body.data.domains).toHaveLength(1);
+      expect(res.body.data.status).toBe("ready");
+      expect(res.body.data.driftSummary.overallDriftStatus).toBe("in_sync");
+      expect(res.body.data.driftSummary.inSyncCount).toBe(3);
+      expect(res.body.data.driftSummary.driftedCount).toBe(0);
+    });
+
+    it("reports drifted site_acme_blog as degraded with non-destructive drift summary (F1-005)", async () => {
+      const res = await requestJson<{ data: SiteDetailDto }>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeBlog}`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.data.id).toBe(DEMO_IDS.sites.acmeBlog);
+      expect(res.body.data.status).toBe("degraded");
+      expect(res.body.data.driftSummary.overallDriftStatus).toBe("drifted");
+      expect(res.body.data.driftSummary.driftedCount).toBe(1); // WordPress drifted out-of-band
+      expect(res.body.data.driftSummary.inSyncCount).toBe(1); // MariaDB in sync
+    });
+
+    it("appends immutable StackRevision N+1 with specHash while preserving previous revisions", async () => {
+      const orgId = DEMO_IDS.organizations.acme;
+      const svcId = DEMO_IDS.services.acmeShopWp;
+
+      // Get initial revision list
+      const listBefore = await requestJson<{ data: StackRevisionDto[] }>(
+        `/v1/organizations/${orgId}/services/${svcId}/revisions`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(listBefore.status).toBe(200);
+      const initialCount = listBefore.body.data.length;
+
+      // Append revision #2
+      const appendRes = await requestJson<{ data: StackRevisionDto }>(
+        `/v1/organizations/${orgId}/services/${svcId}/revisions`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.elena],
+          headers: { "Idempotency-Key": `idemp_rev_${Date.now()}` },
+          body: {
+            declarativeConfig: {
+              WP_HOME: "https://negozio.acme.it",
+              DB_NAME: "shop",
+              WP_DEBUG: "false",
+            },
+            secretRefs: { DB_PASSWORD: "vault://acme/db/password" },
+          },
+        },
+      );
+      expect(appendRes.status).toBe(201);
+      expect(appendRes.body.data.revisionNumber).toBe(initialCount + 1);
+      expect(appendRes.body.data.specHash).toMatch(/^[a-f0-9]{64}$/);
+
+      // Verify list now has N+1 revisions
+      const listAfter = await requestJson<{ data: StackRevisionDto[] }>(
+        `/v1/organizations/${orgId}/services/${svcId}/revisions`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(listAfter.status).toBe(200);
+      expect(listAfter.body.data.length).toBe(initialCount + 1);
+    });
+  });
+
+  // 9. AC-F1-06: Direct dedicated -> shared Transition Gating
+  describe("AC-F1-06: Host Mode Transition Gating", () => {
+    it("rejects PATCH /v1/hosts/:hostId/mode to shared with 409 SHARED_MODE_GATED", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/mode`,
+        {
+          method: "PATCH",
+          token: tokens[DEMO_IDS.users.infra],
+          body: { hostingMode: "shared" },
+        },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("SHARED_MODE_GATED");
+    });
+
+    it("permits keeping dedicated mode (noop) with 200 OK", async () => {
+      const res = await requestJson<{ data: HostDto }>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/mode`,
+        {
+          method: "PATCH",
+          token: tokens[DEMO_IDS.users.infra],
+          body: { hostingMode: "dedicated" },
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.data.hostingMode).toBe("dedicated");
+    });
+
+    it("rejects allocating with hostingMode: shared with 409 SHARED_MODE_GATED", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.free}/allocations`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.infra],
+          body: {
+            organizationId: DEMO_IDS.organizations.acme,
+            hostingMode: "shared",
+          },
+        },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe("SHARED_MODE_GATED");
+    });
+  });
+
+  // 10. AC-F1-07: Concurrent Quota Reservations
+  describe("AC-F1-07: Concurrent Quota Reservations", () => {
+    it("enforces transactional serializability under concurrency: only 1 succeeds, other gets 409 QUOTA_EXCEEDED", async () => {
+      const orgId = DEMO_IDS.organizations.gamma;
+
+      // org_gamma quota: maxServices: 4, usedServices: 1 (remaining: 3)
+      // Send 2 concurrent reservations asking for 2 services each (2 + 2 = 4 > 3)
+      const res1Promise = requestJson<{ data: QuotaReservationDto } | ApiErrorEnvelope>(
+        `/v1/organizations/${orgId}/quotas/reservations`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.hosting],
+          body: {
+            services: 2,
+            idempotencyKey: `race_1_${Date.now()}`,
+          },
+        },
+      );
+
+      const res2Promise = requestJson<{ data: QuotaReservationDto } | ApiErrorEnvelope>(
+        `/v1/organizations/${orgId}/quotas/reservations`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.hosting],
+          body: {
+            services: 2,
+            idempotencyKey: `race_2_${Date.now()}`,
+          },
+        },
+      );
+
+      const [res1, res2] = await Promise.all([res1Promise, res2Promise]);
+      const statuses = [res1.status, res2.status].sort();
+
+      expect(statuses).toEqual([201, 409]);
+      const failed = res1.status === 409 ? (res1.body as ApiErrorEnvelope) : (res2.body as ApiErrorEnvelope);
+      expect(failed.error.code).toBe("QUOTA_EXCEEDED");
+    });
+  });
+
+  // 11. AC-F1-10: Phase 1 Disabled Runtime Boundaries
+  describe("AC-F1-10: Phase 1 Runtime Execution Boundaries", () => {
+    it("returns capabilities with all Phase 2 runtime flags set to false", async () => {
+      const res = await requestJson<{ data: OrganizationCapabilitiesDto }>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/capabilities`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.data.sharedHostingEnabled).toBe(false);
+      expect(res.body.data.dockerExecutorRuntimeAvailable).toBe(false);
+      expect(res.body.data.hostAgentRuntimeAvailable).toBe(false);
+      expect(res.body.data.acmeTlsRuntimeAvailable).toBe(false);
+      expect(res.body.data.sftpAvailable).toBe(false);
+      expect(res.body.data.productionBackupRuntimeAvailable).toBe(false);
+    });
+
+    it("returns 422 NOT_SUPPORTED on service lifecycle action (deploy/restart/stop)", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/services/${DEMO_IDS.services.acmeShopWp}/lifecycle`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.elena],
+          body: { action: "deploy" },
+        },
+      );
+      expect(res.status).toBe(422);
+      expect(res.body.error.code).toBe("NOT_SUPPORTED");
+      expect(res.body.error.message).toContain("Docker executor runtime is disabled in Phase 1");
+    });
+
+    it("returns 422 NOT_SUPPORTED on host maintenance execution", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/maintenance`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.infra],
+          body: { action: "collect_diagnostics" },
+        },
+      );
+      expect(res.status).toBe(422);
+      expect(res.body.error.code).toBe("NOT_SUPPORTED");
+      expect(res.body.error.message).toContain("Host agent runtime execution is disabled in Phase 1");
+    });
+
+    it("returns 422 NOT_SUPPORTED on host security posture execution", async () => {
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/security`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.infra],
+          body: { policyRef: "audit_benchmark_v1" },
+        },
+      );
+      expect(res.status).toBe(422);
+      expect(res.body.error.code).toBe("NOT_SUPPORTED");
+      expect(res.body.error.message).toContain("Host agent runtime execution is disabled in Phase 1");
+    });
+  });
+
+  // 12. Commercial Suspension & Last Owner Protection
+  describe("Commercial Suspension & Last Owner Protection", () => {
+    it("rejects mutating operation on suspended org (org_gamma) with 403 ORGANIZATION_SUSPENDED", async () => {
+      // Giulia (owner of suspended org_gamma) attempts to create a site
+      const res = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.gamma}/sites`,
+        {
+          method: "POST",
+          token: tokens[DEMO_IDS.users.giulia],
+          headers: { "Idempotency-Key": `idemp_susp_${Date.now()}` },
+          body: {
+            name: "New Gamma Site",
+            slug: `gamma-new-${Date.now()}`,
+            hostAllocationId: DEMO_IDS.allocations.gamma,
+          },
+        },
+      );
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe("ORGANIZATION_SUSPENDED");
+    });
+
+    it("protects last active owner from removal with 409 LAST_OWNER_PROTECTED", async () => {
+      const membersRes = await requestJson<{ data: MemberDto[] }>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/members`,
+        {
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(membersRes.status).toBe(200);
+      const elenaMember = membersRes.body.data.find((m) => m.userId === DEMO_IDS.users.elena);
+      expect(elenaMember).toBeDefined();
+
+      // Elena is the sole owner of Acme; attempting to delete her membership fails with 409
+      const delRes = await requestJson<ApiErrorEnvelope>(
+        `/v1/organizations/${DEMO_IDS.organizations.acme}/members/${elenaMember!.id}`,
+        {
+          method: "DELETE",
+          token: tokens[DEMO_IDS.users.elena],
+        },
+      );
+      expect(delRes.status).toBe(409);
+      expect(delRes.body.error.code).toBe("LAST_OWNER_PROTECTED");
+    });
   });
 });

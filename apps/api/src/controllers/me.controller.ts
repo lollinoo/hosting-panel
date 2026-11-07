@@ -1,91 +1,94 @@
 import { Controller, Get, Inject, Query, Req } from "@nestjs/common";
-import { resolveEffectiveOrgPermissions } from "@hosting-panel/authz";
 import {
-  MeDtoSchema,
-  OrganizationSummaryDtoSchema,
+  DEFAULT_PLATFORM_CAPABILITIES,
   type MeDto,
   type OrganizationSummaryDto,
-  type PaginatedListEnvelope,
-  type SingleReadEnvelope,
+  type PresetRoleName,
+  type ReadMeta,
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import {
   paginateItems,
   parsePaginationQuery,
+  resolveRequestId,
 } from "../common/control-plane.error.js";
 
 @Controller("v1/me")
 export class MeController {
   public constructor(
-    @Inject(AuthzContextService) private readonly authzContext: AuthzContextService,
+    @Inject(AuthzContextService) private readonly authzService: AuthzContextService,
   ) {}
 
   @Get()
-  public async getMe(@Req() req: FastifyRequest): Promise<SingleReadEnvelope<MeDto>> {
-    const auth = await this.authzContext.authenticateRequest(req);
-    const now = new Date();
-    const nowMs = now.getTime();
+  public async getMe(@Req() req: FastifyRequest): Promise<{ data: MeDto }> {
+    const auth = await this.authzService.authenticateRequest(req);
 
-    const activeSupportGrant =
-      (auth.principal.supportGrants ?? []).find(
-        (g) => Date.parse(g.expiresAt) > nowMs,
-      ) ?? null;
+    const memberships = auth.activeMembershipSummaries.map((m) => ({
+      id: m.membershipId,
+      organizationId: m.organization.id,
+      organizationName: m.organization.name,
+      organizationSlug: m.organization.slug,
+      role: (m.roleNames[0] ?? "customer_collaborator") as PresetRoleName,
+      organizationStatus: m.organization.status,
+    }));
 
-    const dto = MeDtoSchema.parse({
-      user: {
-        id: auth.user.id,
-        email: auth.user.email,
-        displayName: auth.user.displayName,
-        isPlatformAdmin: auth.user.isPlatformAdmin,
+    return {
+      data: {
+        user: {
+          id: auth.user.id,
+          email: auth.user.email,
+          name: auth.user.name,
+        },
+        globalRoles: (auth.principal.globalRoles ?? []) as PresetRoleName[],
+        hostingAdminOrgIds: (auth.principal.hostingAdminOrgIds ?? []) as string[],
+        memberships,
+        platformCapabilities: DEFAULT_PLATFORM_CAPABILITIES,
       },
-      memberships: auth.activeMembershipSummaries.map((item) => ({
-        organizationId: item.organization.id,
-        organizationSlug: item.organization.slug,
-        organizationName: item.organization.name,
-        organizationType: item.organization.type,
-        organizationStatus: item.organization.status,
-        roles: [...item.roleNames],
-        permissions: resolveEffectiveOrgPermissions(
-          auth.principal,
-          item.organization.id,
-          now,
-        ),
-      })),
-      impersonation: {
-        active: activeSupportGrant !== null,
-        sessionId: activeSupportGrant?.id ?? null,
-        targetOrganizationId: activeSupportGrant?.organizationId ?? null,
-        expiresAt: activeSupportGrant?.expiresAt ?? null,
-      },
-    });
-
-    return { data: dto };
+    };
   }
 
   @Get("organizations")
   public async getMyOrganizations(
     @Req() req: FastifyRequest,
-    @Query() query: Record<string, unknown>,
-  ): Promise<PaginatedListEnvelope<OrganizationSummaryDto>> {
-    const auth = await this.authzContext.authenticateRequest(req);
-    const pagination = parsePaginationQuery(query);
+    @Query() rawQuery?: Record<string, unknown>,
+  ): Promise<{
+    data: OrganizationSummaryDto[];
+    meta: ReadMeta;
+    page: { nextCursor: string | null; hasMore: boolean };
+  }> {
+    const auth = await this.authzService.authenticateRequest(req);
+    const pagination = parsePaginationQuery(rawQuery);
 
-    const items = auth.activeMembershipSummaries.map((item) =>
-      OrganizationSummaryDtoSchema.parse({
-        id: item.organization.id,
-        slug: item.organization.slug,
-        name: item.organization.name,
-        type: item.organization.type,
-        status: item.organization.status,
-        createdAt: item.organization.createdAt.toISOString(),
-      }),
+    const orgsMap = new Map<string, OrganizationSummaryDto>();
+    for (const m of auth.activeMembershipSummaries) {
+      if (!orgsMap.has(m.organization.id)) {
+        orgsMap.set(m.organization.id, {
+          id: m.organization.id,
+          name: m.organization.name,
+          slug: m.organization.slug,
+          status: m.organization.status,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    const orgList = Array.from(orgsMap.values()).sort((a, b) =>
+      a.slug.localeCompare(b.slug),
     );
 
-    const paged = paginateItems(items, pagination);
+    const paginated = paginateItems(orgList, pagination);
+
     return {
-      data: paged.data,
-      page: paged.page,
+      data: paginated.data,
+      meta: {
+        total: orgList.length,
+        cursor: pagination.cursor ?? null,
+        requestId: resolveRequestId(req),
+        timestamp: new Date().toISOString(),
+      },
+      page: paginated.page,
     };
   }
 }

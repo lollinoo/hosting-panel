@@ -2,12 +2,12 @@ openapi: 3.1.0
 info:
   title: Hosting Control Panel API
   version: 0.1.0
-  summary: Multi-tenant Coolify v4 SaaS Control-Plane API (HCP-SPEC-001)
+  summary: Docker-Native Control Plane API (HCP-SPEC-002 Phase 1)
   description: >-
-    Versioned `/v1` control-plane REST and SSE API enforcing strict organization
-    isolation, default-deny RBAC/ABAC authorization, transactional outbox
-    mutations (`202 Accepted`), reconciliation with post-deploy health probes,
-    and complete provider credential redaction.
+    Versioned `/v1` Docker-native control-plane REST API enforcing strict tenant
+    organization isolation, default-deny RBAC/ABAC authorization, transactional
+    host placement and quota reservations, immutable stack revisions, and Phase 1
+    disabled runtime execution boundaries.
 servers:
   - url: http://127.0.0.1:4000
     description: Local embedded control-plane development server
@@ -17,15 +17,25 @@ security:
 
 tags:
   - name: Health
+    description: Liveness and database readiness probes
   - name: Auth
+    description: Authentication, Dev OIDC token issuance, and token revocation
   - name: Identity
+    description: Principal identity, assigned roles, and tenant memberships
+  - name: Hosts
+    description: Linux host nodes, maintenance, security posture, and allocations
+  - name: Service Templates
+    description: Approved service catalog templates
+  - name: Admin Audit
+    description: Platform-wide immutable audit trail
   - name: Organizations
-  - name: Servers
-  - name: Applications
-  - name: Databases
-  - name: Domains
+    description: Tenant organizations, capabilities, quotas, and members
+  - name: Sites
+    description: Composite application sites, domains, and aggregate drift status
+  - name: Services
+    description: Declarative service instances, immutable revisions, and lifecycle
   - name: Operations
-  - name: Admin
+    description: Asynchronous operations and timeline progress
 
 paths:
   /health/live:
@@ -44,7 +54,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [status, service, timestamp]
+                required: [status, service, spec, phase, timestamp]
                 properties:
                   status:
                     type: string
@@ -52,6 +62,12 @@ paths:
                   service:
                     type: string
                     const: hosting-panel-api
+                  spec:
+                    type: string
+                    const: HCP-SPEC-002
+                  phase:
+                    type: string
+                    const: phase-1
                   timestamp:
                     type: string
                     format: date-time
@@ -89,16 +105,105 @@ paths:
         "500":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/dev/auth/personas:
+    get:
+      tags: [Auth]
+      operationId: getDevPersonas
+      summary: List seeded personas for local development authentication
+      security: []
+      responses:
+        "200":
+          description: List of available personas
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DevPersonaDto"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/dev/auth/token:
+    post:
+      tags: [Auth]
+      operationId: issueDevToken
+      summary: Mint an RS256 Bearer JWT for a development persona
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                userId:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                expiresInSeconds:
+                  type: integer
+                  minimum: 1
+                  maximum: 86400
+      responses:
+        "200":
+          description: Token successfully issued
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [accessToken, tokenType, expiresIn, expiresAt, issuer, audience, user]
+                    properties:
+                      accessToken:
+                        type: string
+                      tokenType:
+                        type: string
+                        const: Bearer
+                      expiresIn:
+                        type: integer
+                      expiresAt:
+                        type: string
+                        format: date-time
+                      issuer:
+                        type: string
+                      audience:
+                        type: string
+                      user:
+                        type: object
+                        required: [id, email, name]
+                        properties:
+                          id:
+                            type: string
+                          email:
+                            type: string
+                            format: email
+                          name:
+                            type: string
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/auth/revoke:
     post:
       tags: [Auth]
       operationId: revokeCurrentToken
-      summary: Immediately revoke the caller's active JWT jti (AC-024)
-      parameters:
-        - $ref: "#/components/parameters/RequestIdHeader"
+      summary: Immediately revoke the caller's active JWT jti
       responses:
         "200":
-          description: Token jti added to revocation set
+          description: Token successfully revoked
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -121,72 +226,14 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
 
-  /v1/dev/auth/personas:
-    get:
-      tags: [Auth]
-      operationId: listDevPersonas
-      summary: List seeded demo personas when Dev OIDC is enabled
-      security: []
-      responses:
-        "200":
-          description: Seeded demo personas with organizations and roles
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/DevPersonaDto"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/dev/auth/token:
-    post:
-      tags: [Auth]
-      operationId: issueDevToken
-      summary: Mint a signed RS256 OIDC JWT for a seeded demo persona
-      security: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/DevIssueTokenInput"
-      responses:
-        "200":
-          description: Signed RS256 Bearer token for local POC testing
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/DevIssuedTokenDto"
-        "400":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
   /v1/me:
     get:
       tags: [Identity]
       operationId: getMe
-      summary: Return authenticated principal profile, memberships, and impersonation context
-      parameters:
-        - $ref: "#/components/parameters/RequestIdHeader"
+      summary: Retrieve current authenticated principal details and memberships
       responses:
         "200":
-          description: Current principal identity and effective permissions
+          description: Principal context
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -204,10 +251,9 @@ paths:
   /v1/me/organizations:
     get:
       tags: [Identity]
-      operationId: listMyOrganizations
-      summary: List organizations where the caller holds an active membership
+      operationId: getMyOrganizations
+      summary: List organizations where caller holds active membership
       parameters:
-        - $ref: "#/components/parameters/RequestIdHeader"
         - $ref: "#/components/parameters/CursorQuery"
         - $ref: "#/components/parameters/LimitQuery"
       responses:
@@ -220,28 +266,388 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [data, page]
+                required: [data, meta, page]
                 properties:
                   data:
                     type: array
                     items:
                       $ref: "#/components/schemas/OrganizationSummaryDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
                   page:
                     $ref: "#/components/schemas/CursorPage"
         "401":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts:
+    get:
+      tags: [Hosts]
+      operationId: listHosts
+      summary: List managed physical/virtual Linux host nodes (host.read)
+      parameters:
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated host nodes
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HostDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts/{hostId}:
+    get:
+      tags: [Hosts]
+      operationId: getHost
+      summary: Retrieve specific host details (host.read)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+      responses:
+        "200":
+          description: Host details
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/HostDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts/{hostId}/mode:
+    patch:
+      tags: [Hosts]
+      operationId: updateHostMode
+      summary: Update host hosting mode transition (host.security.manage)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateHostModeInput"
+      responses:
+        "200":
+          description: Host mode updated or noop
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/HostDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Shared mode transition gated (AC-F1-06)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts/{hostId}/maintenance:
+    post:
+      tags: [Hosts]
+      operationId: executeHostMaintenance
+      summary: Request host maintenance action (host.maintenance.execute)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostMaintenanceInput"
+      responses:
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Permission denied or unapproved maintenance action
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Host agent runtime disabled in Phase 1 (AC-F1-10)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts/{hostId}/security:
+    post:
+      tags: [Hosts]
+      operationId: executeHostSecurity
+      summary: Execute host security posture verification (host.security.manage)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HostSecurityInput"
+      responses:
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Host agent runtime disabled in Phase 1 (AC-F1-10)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/allocations:
+    get:
+      tags: [Hosts]
+      operationId: listAllocations
+      summary: List all host allocations across platform (allocation.read)
+      parameters:
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated host allocations
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HostAllocationDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts/{hostId}/allocations:
+    get:
+      tags: [Hosts]
+      operationId: listHostAllocations
+      summary: List allocations for a specific host (allocation.read)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated host allocations for host
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HostAllocationDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Hosts]
+      operationId: createHostAllocation
+      summary: Allocate a host node to a tenant organization (allocation.create)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [organizationId]
+              properties:
+                organizationId:
+                  type: string
+                hostingMode:
+                  type: string
+                  enum: [dedicated, shared]
+                  default: dedicated
+      responses:
+        "201":
+          description: Host successfully allocated
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/HostAllocationDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Dedicated host occupied (AC-F1-01) or shared mode gated (AC-F1-06)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/service-templates:
+    get:
+      tags: [Service Templates]
+      operationId: listServiceTemplates
+      summary: List catalog service templates (template.read)
+      parameters:
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated service templates
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ServiceTemplateDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Service Templates]
+      operationId: createServiceTemplate
+      summary: Register a new service template (template.manage)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServiceTemplateInput"
+      responses:
+        "201":
+          description: Service template registered
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ServiceTemplateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/audit:
+    get:
+      tags: [Admin Audit]
+      operationId: listAdminAudit
+      summary: Query platform immutable audit events (audit.read)
+      parameters:
+        - in: query
+          name: organizationId
+          schema:
+            type: string
+        - in: query
+          name: action
+          schema:
+            type: string
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated audit events
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditEventDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}:
     get:
       tags: [Organizations]
       operationId: getOrganization
-      summary: Inspect organization details and resource counts
+      summary: Retrieve tenant organization details and quotas (organization.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
       responses:
         "200":
-          description: Organization detail
+          description: Organization details
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -255,22 +661,20 @@ paths:
                     $ref: "#/components/schemas/OrganizationDetailDto"
         "401":
           $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: Anti-BOLA not found if caller lacks access (AC-F1-02)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/capabilities:
     get:
       tags: [Organizations]
       operationId: getOrganizationCapabilities
-      summary: Evaluate caller effective permissions and provider capability matrix
+      summary: Retrieve organization runtime feature capabilities (organization.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
       responses:
         "200":
-          description: Evaluated organization capabilities
+          description: Organization capabilities (Phase 1 flags all false per AC-F1-10)
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -284,24 +688,21 @@ paths:
                     $ref: "#/components/schemas/OrganizationCapabilitiesDto"
         "401":
           $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
 
-  /v1/organizations/{orgId}/members:
+  /v1/organizations/{orgId}/allocations:
     get:
       tags: [Organizations]
-      operationId: listOrganizationMembers
-      summary: List active organization members and assigned roles
+      operationId: getOrganizationAllocations
+      summary: List dedicated host allocations assigned to organization (allocation.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
         - $ref: "#/components/parameters/CursorQuery"
         - $ref: "#/components/parameters/LimitQuery"
       responses:
         "200":
-          description: Paginated organization members
+          description: Paginated host allocations
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -309,17 +710,113 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [data, page]
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/HostAllocationDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/quotas:
+    get:
+      tags: [Organizations]
+      operationId: getOrganizationQuotas
+      summary: Retrieve organization resource quotas and usage (quota.read)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+      responses:
+        "200":
+          description: Organization resource quota limits and current usage
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ResourceQuotaDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/quotas/reservations:
+    post:
+      tags: [Organizations]
+      operationId: createQuotaReservation
+      summary: Transactionally reserve quota capacity (site.create or quota.manage)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateQuotaReservationInput"
+      responses:
+        "201":
+          description: Quota successfully reserved
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/QuotaReservationDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Quota exceeded under concurrency (AC-F1-07)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/members:
+    get:
+      tags: [Organizations]
+      operationId: listOrganizationMembers
+      summary: List members of organization (organization.read)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated member list
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
                 properties:
                   data:
                     type: array
                     items:
                       $ref: "#/components/schemas/MemberDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
                   page:
                     $ref: "#/components/schemas/CursorPage"
         "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
@@ -327,11 +824,10 @@ paths:
   /v1/organizations/{orgId}/invitations:
     post:
       tags: [Organizations]
-      operationId: createOrganizationInvitation
-      summary: Invite a user to join the organization with preset roles
+      operationId: createInvitation
+      summary: Invite or add a member to the organization (organization.members.manage)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
       requestBody:
         required: true
         content:
@@ -340,7 +836,7 @@ paths:
               $ref: "#/components/schemas/CreateInvitationInput"
       responses:
         "201":
-          description: Invitation created
+          description: Member invited
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -352,8 +848,6 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/MemberDto"
-        "400":
-          $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
@@ -364,15 +858,18 @@ paths:
   /v1/organizations/{orgId}/members/{memberId}:
     delete:
       tags: [Organizations]
-      operationId: removeOrganizationMember
-      summary: Remove an organization member (enforces AC-022 last-owner protection)
+      operationId: deleteMember
+      summary: Remove member from organization (organization.members.manage)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/MemberIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
+        - in: path
+          name: memberId
+          required: true
+          schema:
+            type: string
       responses:
         "200":
-          description: Member removed
+          description: Member successfully removed
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -398,50 +895,21 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: Last owner protected from removal
           $ref: "#/components/responses/ErrorResponse"
 
-  /v1/organizations/{orgId}/quotas:
+  /v1/organizations/{orgId}/sites:
     get:
-      tags: [Organizations]
-      operationId: getOrganizationQuotas
-      summary: Read plan quota usage and limits
+      tags: [Sites]
+      operationId: listSites
+      summary: List sites filtered by caller authorization (site.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: Quota allocation summary
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/QuotaAllocationDto"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/servers:
-    get:
-      tags: [Servers]
-      operationId: listOrganizationServers
-      summary: List allocated servers with live Sentinel staleness metadata
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
         - $ref: "#/components/parameters/CursorQuery"
         - $ref: "#/components/parameters/LimitQuery"
       responses:
         "200":
-          description: Paginated server allocations
+          description: Paginated site summaries
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -449,406 +917,36 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [data, page]
+                required: [data, meta, page]
                 properties:
                   data:
                     type: array
                     items:
-                      $ref: "#/components/schemas/ServerDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
+                      $ref: "#/components/schemas/SiteSummaryDto"
                   meta:
                     $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-        "429":
-          $ref: "#/components/responses/RateLimitErrorResponse"
-
-  /v1/organizations/{orgId}/servers/{serverId}:
-    get:
-      tags: [Servers]
-      operationId: getOrganizationServer
-      summary: Inspect single server allocation and Sentinel heartbeat status (AC-011)
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/ServerIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: Server detail with freshness metadata
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/ServerDto"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-        "429":
-          $ref: "#/components/responses/RateLimitErrorResponse"
-
-  /v1/organizations/{orgId}/servers/{serverId}/metrics:
-    get:
-      tags: [Servers]
-      operationId: getOrganizationServerMetrics
-      summary: Read server resource utilization metrics
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/ServerIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: Server CPU, memory, disk, and uptime metrics
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/ServerMetricsDto"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/applications:
-    get:
-      tags: [Applications]
-      operationId: listOrganizationApplications
-      summary: List authorized applications within the organization
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-      responses:
-        "200":
-          description: Paginated application summaries
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/ApplicationSummaryDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/applications/{appId}:
-    get:
-      tags: [Applications]
-      operationId: getOrganizationApplication
-      summary: Inspect application detail, allowed actions, and recent deployments
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/AppIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: Application detail
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/ApplicationDetailDto"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/applications/{appId}/deployments:
-    get:
-      tags: [Applications]
-      operationId: listApplicationDeployments
-      summary: List deployment history for an application
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/AppIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-      responses:
-        "200":
-          description: Paginated deployment records
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/DeploymentRecordDto"
                   page:
                     $ref: "#/components/schemas/CursorPage"
         "401":
           $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/applications/{appId}/deploy:
     post:
-      tags: [Applications]
-      operationId: deployApplication
-      summary: Enqueue an asynchronous application deployment via transactional outbox
+      tags: [Sites]
+      operationId: createSite
+      summary: Create a site container on an allocated dedicated host (site.create)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/AppIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TriggerOperationInput"
-      responses:
-        "202":
-          $ref: "#/components/responses/AsyncAcceptedResponse"
-        "400":
-          $ref: "#/components/responses/ErrorResponse"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-        "409":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/applications/{appId}/restart:
-    post:
-      tags: [Applications]
-      operationId: restartApplication
-      summary: Enqueue an asynchronous application restart via transactional outbox
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/AppIdParam"
-        - $ref: "#/components/parameters/IdempotencyKeyHeader"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/TriggerOperationInput"
-      responses:
-        "202":
-          $ref: "#/components/responses/AsyncAcceptedResponse"
-        "400":
-          $ref: "#/components/responses/ErrorResponse"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-        "409":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/databases:
-    get:
-      tags: [Databases]
-      operationId: listOrganizationDatabases
-      summary: List managed databases and per-engine backup capabilities
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-      responses:
-        "200":
-          description: Paginated database summaries
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/DatabaseSummaryDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/databases/{dbId}:
-    get:
-      tags: [Databases]
-      operationId: getOrganizationDatabase
-      summary: Inspect managed database detail and restore capability (AC-012)
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/DbIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: Database detail
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/DatabaseDetailDto"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/databases/{dbId}/restores:
-    post:
-      tags: [Databases]
-      operationId: triggerDatabaseRestore
-      summary: Request database restore (returns 422 NOT_SUPPORTED for unsupported engines/API)
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/DbIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              properties:
-                backupId:
-                  type: string
-      responses:
-        "202":
-          $ref: "#/components/responses/AsyncAcceptedResponse"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-        "422":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/domains:
-    get:
-      tags: [Domains]
-      operationId: listOrganizationDomains
-      summary: List custom domains and attached TLS certificate observations
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-      responses:
-        "200":
-          description: Paginated domains
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/DomainDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-    post:
-      tags: [Domains]
-      operationId: createOrganizationDomain
-      summary: Register a canonicalized lowercase FQDN (enforces AC-014 cross-org uniqueness)
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateDomainInput"
+              $ref: "#/components/schemas/CreateSiteInput"
       responses:
         "201":
-          description: Domain registered
+          description: Site created
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -859,7 +957,7 @@ paths:
                 required: [data]
                 properties:
                   data:
-                    $ref: "#/components/schemas/DomainDto"
+                    $ref: "#/components/schemas/SiteDetailDto"
         "400":
           $ref: "#/components/responses/ErrorResponse"
         "401":
@@ -869,40 +967,20 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: Domain hostname conflict or slug conflict
           $ref: "#/components/responses/ErrorResponse"
 
-  /v1/organizations/{orgId}/domains/{domainId}/recheck:
-    post:
-      tags: [Domains]
-      operationId: recheckOrganizationDomain
-      summary: Enqueue asynchronous DNS and TLS certificate verification
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/DomainIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "202":
-          $ref: "#/components/responses/AsyncAcceptedResponse"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/certificates:
+  /v1/organizations/{orgId}/sites/{siteId}:
     get:
-      tags: [Domains]
-      operationId: listOrganizationCertificates
-      summary: List TLS certificate observations across organization domains
+      tags: [Sites]
+      operationId: getSite
+      summary: Retrieve composite site aggregate with services and drift summary (site.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
+        - $ref: "#/components/parameters/SiteIdParam"
       responses:
         "200":
-          description: Paginated certificate observations
+          description: Aggregated site detail
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -910,29 +988,204 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [data, page]
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDetailDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Explicit deny (e.g. ABAC resource grant deny)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Anti-BOLA not found for unauthorized/mismatched orgs
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/sites/{siteId}/services:
+    get:
+      tags: [Services]
+      operationId: listSiteServices
+      summary: List services belonging to site (service.read)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated service instances
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
                 properties:
                   data:
                     type: array
                     items:
-                      $ref: "#/components/schemas/CertificateObservationDto"
+                      $ref: "#/components/schemas/ServiceInstanceDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
                   page:
                     $ref: "#/components/schemas/CursorPage"
         "401":
           $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Services]
+      operationId: createService
+      summary: Instantiate service with initial stack revision #1 (service.create)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateServiceInstanceInput"
+      responses:
+        "201":
+          description: Service and immutable revision #1 created
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [service, revision]
+                    properties:
+                      service:
+                        $ref: "#/components/schemas/ServiceInstanceDto"
+                      revision:
+                        $ref: "#/components/schemas/StackRevisionDto"
+        "400":
+          description: Plaintext secrets detected in configuration (F1-012)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: Forbidden Docker input attributes detected (AC-F1-04)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/services/{serviceId}/revisions:
+    get:
+      tags: [Services]
+      operationId: listServiceRevisions
+      summary: Retrieve immutable stack revision history (service.read)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/ServiceIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated stack revisions
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StackRevisionDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Services]
+      operationId: appendServiceRevision
+      summary: Append immutable revision N+1 (service.configuration.manage)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/ServiceIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateStackRevisionInput"
+      responses:
+        "201":
+          description: New stack revision appended
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/StackRevisionDto"
+        "400":
+          description: Plaintext secrets detected (F1-012)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Forbidden Docker input attributes (AC-F1-04)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/services/{serviceId}/lifecycle:
+    post:
+      tags: [Services]
+      operationId: executeServiceLifecycle
+      summary: Request service runtime lifecycle action (deploy, restart, stop)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/ServiceIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceLifecycleInput"
+      responses:
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Commercial suspension or permission denied
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Docker executor runtime disabled in Phase 1 (AC-F1-10)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/operations:
     get:
       tags: [Operations]
-      operationId: listOrganizationOperations
-      summary: List asynchronous operations and timeline steps
+      operationId: listOperations
+      summary: List asynchronous operations for organization (operation.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
         - $ref: "#/components/parameters/CursorQuery"
         - $ref: "#/components/parameters/LimitQuery"
       responses:
@@ -945,17 +1198,17 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [data, page]
+                required: [data, meta, page]
                 properties:
                   data:
                     type: array
                     items:
                       $ref: "#/components/schemas/OperationDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
                   page:
                     $ref: "#/components/schemas/CursorPage"
         "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
@@ -963,15 +1216,18 @@ paths:
   /v1/organizations/{orgId}/operations/{opId}:
     get:
       tags: [Operations]
-      operationId: getOrganizationOperation
-      summary: Inspect single asynchronous operation and step timeline
+      operationId: getOperation
+      summary: Retrieve specific operation timeline and progress (operation.read)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/OpIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
+        - in: path
+          name: opId
+          required: true
+          schema:
+            type: string
       responses:
         "200":
-          description: Operation detail
+          description: Operation details and timeline steps
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -985,176 +1241,7 @@ paths:
                     $ref: "#/components/schemas/OperationDto"
         "401":
           $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
         "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/organizations/{orgId}/events:
-    get:
-      tags: [Operations]
-      operationId: streamOrganizationEvents
-      summary: Subscribe to Server-Sent Events (SSE) for real-time operation updates
-      parameters:
-        - $ref: "#/components/parameters/OrgIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: SSE stream emitting `connected` and `operation.updated` events
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            text/event-stream:
-              schema:
-                type: string
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/admin/provider-connections:
-    get:
-      tags: [Admin]
-      operationId: listAdminProviderConnections
-      summary: List configured Coolify v4 provider instances (platform.admin)
-      parameters:
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-      responses:
-        "200":
-          description: Paginated provider instances without URLs or credentials
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AdminProviderConnectionDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/admin/provider-connections/{id}/test:
-    post:
-      tags: [Admin]
-      operationId: testAdminProviderConnection
-      summary: Verify provider connectivity and refresh version metadata (platform.admin)
-      parameters:
-        - $ref: "#/components/parameters/ProviderIdParam"
-        - $ref: "#/components/parameters/RequestIdHeader"
-      responses:
-        "200":
-          description: Updated provider connection health summary
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    $ref: "#/components/schemas/AdminProviderConnectionDto"
-                  meta:
-                    $ref: "#/components/schemas/ReadMeta"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-        "404":
-          $ref: "#/components/responses/ErrorResponse"
-        "429":
-          $ref: "#/components/responses/RateLimitErrorResponse"
-        "503":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/admin/fleet:
-    get:
-      tags: [Admin]
-      operationId: listAdminFleet
-      summary: Read cross-organization fleet health summary (platform.admin, zero customer secrets)
-      parameters:
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-      responses:
-        "200":
-          description: Paginated fleet health overview
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AdminFleetItemDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
-          $ref: "#/components/responses/ErrorResponse"
-
-  /v1/admin/audit:
-    get:
-      tags: [Admin]
-      operationId: listAdminAuditEvents
-      summary: Query immutable platform and tenant audit events (platform.admin)
-      parameters:
-        - $ref: "#/components/parameters/RequestIdHeader"
-        - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
-        - name: organizationId
-          in: query
-          required: false
-          schema:
-            type: string
-        - name: outcome
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [allowed, denied, succeeded, failed]
-      responses:
-        "200":
-          description: Paginated immutable audit log entries
-          headers:
-            X-Request-ID:
-              $ref: "#/components/headers/XRequestId"
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data, page]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/AuditEventDto"
-                  page:
-                    $ref: "#/components/schemas/CursorPage"
-        "401":
-          $ref: "#/components/responses/ErrorResponse"
-        "403":
           $ref: "#/components/responses/ErrorResponse"
 
 components:
@@ -1163,94 +1250,52 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: RS256 OIDC Bearer token (`aud = hosting-panel-api`)
 
   headers:
     XRequestId:
-      description: Correlation identifier echoed or generated for every request
-      schema:
-        type: string
-    RetryAfter:
-      description: Seconds to wait before retrying rate-limited requests
+      description: Unique correlation request ID
       schema:
         type: string
 
   parameters:
     OrgIdParam:
+      in: path
       name: orgId
-      in: path
       required: true
       schema:
         type: string
-    AppIdParam:
-      name: appId
+    HostIdParam:
       in: path
+      name: hostId
       required: true
       schema:
         type: string
-    ServerIdParam:
-      name: serverId
+    SiteIdParam:
       in: path
+      name: siteId
       required: true
       schema:
         type: string
-    DbIdParam:
-      name: dbId
+    ServiceIdParam:
       in: path
-      required: true
-      schema:
-        type: string
-    DomainIdParam:
-      name: domainId
-      in: path
-      required: true
-      schema:
-        type: string
-    OpIdParam:
-      name: opId
-      in: path
-      required: true
-      schema:
-        type: string
-    MemberIdParam:
-      name: memberId
-      in: path
-      required: true
-      schema:
-        type: string
-    ProviderIdParam:
-      name: id
-      in: path
+      name: serviceId
       required: true
       schema:
         type: string
     IdempotencyKeyHeader:
+      in: header
       name: Idempotency-Key
-      in: header
       required: true
-      description: Unique client-generated key enforcing idempotent mutation submission
       schema:
         type: string
-        minLength: 1
-        maxLength: 255
-    RequestIdHeader:
-      name: X-Request-ID
-      in: header
-      required: false
-      description: Optional client-supplied correlation identifier
-      schema:
-        type: string
-        maxLength: 128
     CursorQuery:
-      name: cursor
       in: query
-      required: false
+      name: cursor
       schema:
         type: string
     LimitQuery:
-      name: limit
       in: query
-      required: false
+      name: limit
       schema:
         type: integer
         minimum: 1
@@ -1258,55 +1303,59 @@ components:
         default: 50
 
   responses:
-    AsyncAcceptedResponse:
-      description: Asynchronous operation persisted in transactional outbox
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/XRequestId"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/AsyncAcceptedEnvelope"
     ErrorResponse:
-      description: Normalized redacted API error envelope
+      description: Standard normalized RFC-style error envelope
       headers:
         X-Request-ID:
           $ref: "#/components/headers/XRequestId"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/ApiErrorEnvelope"
-    RateLimitErrorResponse:
-      description: Upstream provider rate limit exceeded
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/XRequestId"
-        Retry-After:
-          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ApiErrorEnvelope"
 
   schemas:
-    ErrorCode:
-      type: string
-      enum:
-        - UNAUTHENTICATED
-        - PERMISSION_DENIED
-        - NOT_FOUND
-        - VALIDATION_ERROR
-        - IDEMPOTENCY_CONFLICT
-        - PLAN_LIMIT
-        - RESOURCE_LOCKED
-        - COOLIFY_UNAVAILABLE
-        - PROVIDER_RATE_LIMIT
-        - OPERATION_AMBIGUOUS
-        - DOMAIN_CONFLICT
-        - NOT_SUPPORTED
-        - BACKUP_UNAVAILABLE
-        - LAST_OWNER_PROTECTED
-        - INTERNAL_ERROR
+    ApiErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ApiErrorBody"
+
+    ApiErrorBody:
+      type: object
+      required: [code, message, requestId, retryable, details]
+      properties:
+        code:
+          type: string
+          enum:
+            - UNAUTHENTICATED
+            - PERMISSION_DENIED
+            - HOST_POLICY_DENIED
+            - ORGANIZATION_SUSPENDED
+            - NOT_FOUND
+            - VALIDATION_ERROR
+            - IDEMPOTENCY_CONFLICT
+            - RESOURCE_LOCKED
+            - QUOTA_EXCEEDED
+            - DEDICATED_HOST_OCCUPIED
+            - SHARED_MODE_GATED
+            - DOMAIN_CONFLICT
+            - LAST_OWNER_PROTECTED
+            - NOT_SUPPORTED
+            - OPERATION_AMBIGUOUS
+            - DOCKER_ENGINE_UNAVAILABLE
+            - HOST_AGENT_UNAVAILABLE
+            - INTERNAL_ERROR
+        message:
+          type: string
+        requestId:
+          type: string
+        retryable:
+          type: boolean
+        details:
+          type: array
+          items:
+            $ref: "#/components/schemas/ErrorDetail"
 
     ErrorDetail:
       type: object
@@ -1319,101 +1368,800 @@ components:
         reason:
           type: string
 
-    ApiErrorBody:
-      type: object
-      required: [code, message, requestId, retryable, details]
-      properties:
-        code:
-          $ref: "#/components/schemas/ErrorCode"
-        message:
-          type: string
-        requestId:
-          type: string
-        retryable:
-          type: boolean
-        details:
-          type: array
-          items:
-            $ref: "#/components/schemas/ErrorDetail"
-
-    ApiErrorEnvelope:
-      type: object
-      required: [error]
-      properties:
-        error:
-          $ref: "#/components/schemas/ApiErrorBody"
-
     ReadMeta:
       type: object
-      required: [observedAt, source, stale]
+      required: [requestId, timestamp]
       properties:
-        observedAt:
-          type: ["string", "null"]
-          format: date-time
-        source:
+        total:
+          type: integer
+        cursor:
           type: string
-          enum: [coolify, monitoring, external_probe]
-        stale:
-          type: boolean
+          nullable: true
+        requestId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
 
     CursorPage:
       type: object
       required: [nextCursor, hasMore]
       properties:
         nextCursor:
-          type: ["string", "null"]
+          type: string
+          nullable: true
         hasMore:
           type: boolean
 
-    AsyncAcceptedData:
+    PlatformCapabilitiesDto:
       type: object
-      required: [operationId, status, resourceId, submittedAt]
+      required:
+        - phase
+        - hostingMode
+        - sharedHostingEnabled
+        - dockerExecutorRuntimeAvailable
+        - hostAgentRuntimeAvailable
+        - acmeTlsRuntimeAvailable
+        - sftpAvailable
+        - productionBackupRuntimeAvailable
       properties:
-        operationId:
+        phase:
           type: string
+          const: phase-1
+        hostingMode:
+          type: string
+          const: dedicated
+        sharedHostingEnabled:
+          type: boolean
+          const: false
+        dockerExecutorRuntimeAvailable:
+          type: boolean
+          const: false
+        hostAgentRuntimeAvailable:
+          type: boolean
+          const: false
+        acmeTlsRuntimeAvailable:
+          type: boolean
+          const: false
+        sftpAvailable:
+          type: boolean
+          const: false
+        productionBackupRuntimeAvailable:
+          type: boolean
+          const: false
+
+    OrganizationCapabilitiesDto:
+      type: object
+      required:
+        - hostingMode
+        - sharedHostingEnabled
+        - dockerExecutorRuntimeAvailable
+        - hostAgentRuntimeAvailable
+        - acmeTlsRuntimeAvailable
+        - sftpAvailable
+        - productionBackupRuntimeAvailable
+      properties:
+        hostingMode:
+          type: string
+          enum: [dedicated, shared]
+        sharedHostingEnabled:
+          type: boolean
+        dockerExecutorRuntimeAvailable:
+          type: boolean
+        hostAgentRuntimeAvailable:
+          type: boolean
+        acmeTlsRuntimeAvailable:
+          type: boolean
+        sftpAvailable:
+          type: boolean
+        productionBackupRuntimeAvailable:
+          type: boolean
+
+    DevPersonaDto:
+      type: object
+      required: [id, email, name, description, role, globalRoles]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        description:
+          type: string
+        role:
+          type: string
+        organizationId:
+          type: string
+          nullable: true
+        globalRoles:
+          type: array
+          items:
+            type: string
+
+    MeMembershipDto:
+      type: object
+      required: [id, organizationId, organizationName, organizationSlug, role, organizationStatus]
+      properties:
+        id:
+          type: string
+        organizationId:
+          type: string
+        organizationName:
+          type: string
+        organizationSlug:
+          type: string
+        role:
+          type: string
+        organizationStatus:
+          type: string
+          enum: [active, suspended, archived]
+
+    MeDto:
+      type: object
+      required: [user, globalRoles, hostingAdminOrgIds, memberships, platformCapabilities]
+      properties:
+        user:
+          type: object
+          required: [id, email, name]
+          properties:
+            id:
+              type: string
+            email:
+              type: string
+              format: email
+            name:
+              type: string
+        globalRoles:
+          type: array
+          items:
+            type: string
+        hostingAdminOrgIds:
+          type: array
+          items:
+            type: string
+        memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/MeMembershipDto"
+        platformCapabilities:
+          $ref: "#/components/schemas/PlatformCapabilitiesDto"
+
+    HostDto:
+      type: object
+      required:
+        - id
+        - name
+        - hostname
+        - ipv4Address
+        - status
+        - hostingMode
+        - totalCpuMilli
+        - totalMemoryBytes
+        - totalStorageBytes
+        - securityReviewed
+        - sharedApproved
+        - metadata
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        hostname:
+          type: string
+        ipv4Address:
+          type: string
+        ipv6Address:
+          type: string
+          nullable: true
         status:
-          $ref: "#/components/schemas/OperationStatus"
-        resourceId:
           type: string
-        submittedAt:
+          enum: [ready, maintenance, provisioning, drained, offline]
+        hostingMode:
+          type: string
+          enum: [dedicated, shared]
+        totalCpuMilli:
+          type: integer
+        totalMemoryBytes:
+          type: string
+        totalStorageBytes:
+          type: string
+        securityReviewed:
+          type: boolean
+        sharedApproved:
+          type: boolean
+        metadata:
+          type: object
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
           type: string
           format: date-time
 
-    AsyncAcceptedLinks:
+    UpdateHostModeInput:
       type: object
-      required: [self]
+      required: [hostingMode]
       properties:
-        self:
+        hostingMode:
+          type: string
+          enum: [dedicated, shared]
+        reason:
           type: string
 
-    AsyncAcceptedEnvelope:
+    HostMaintenanceInput:
       type: object
-      required: [data, links]
+      required: [action]
       properties:
-        data:
-          $ref: "#/components/schemas/AsyncAcceptedData"
-        links:
-          $ref: "#/components/schemas/AsyncAcceptedLinks"
+        action:
+          type: string
+        reason:
+          type: string
 
-    OperationStatus:
-      type: string
-      enum:
-        - queued
-        - processing
-        - accepted_by_provider
-        - reconciling
-        - succeeded
-        - failed
-        - cancelled
-        - unknown
+    HostSecurityInput:
+      type: object
+      required: [policyRef]
+      properties:
+        policyRef:
+          type: string
+        reason:
+          type: string
 
-    OperationKind:
-      type: string
-      enum:
-        - application.deploy
-        - application.restart
-        - domain.recheck
-        - provider.connection.test
+    HostAllocationDto:
+      type: object
+      required: [id, hostId, organizationId, status, hostingMode, dedicatedScope, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        hostId:
+          type: string
+        organizationId:
+          type: string
+        status:
+          type: string
+          enum: [pending, active, suspended, released]
+        hostingMode:
+          type: string
+          enum: [dedicated, shared]
+        dedicatedScope:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ServiceTemplateDto:
+      type: object
+      required:
+        - id
+        - name
+        - slug
+        - category
+        - defaultImage
+        - environmentSchema
+        - defaultConfiguration
+        - approvedForDedicated
+        - approvedForShared
+        - minCpuMilli
+        - minMemoryBytes
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+          nullable: true
+        category:
+          type: string
+        defaultImage:
+          type: string
+        defaultPort:
+          type: integer
+          nullable: true
+        environmentSchema:
+          type: object
+        defaultConfiguration:
+          type: object
+        approvedForDedicated:
+          type: boolean
+        approvedForShared:
+          type: boolean
+        minCpuMilli:
+          type: integer
+        minMemoryBytes:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateServiceTemplateInput:
+      type: object
+      required: [name, slug, category, defaultImage]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        defaultImage:
+          type: string
+        defaultPort:
+          type: integer
+        environmentSchema:
+          type: object
+        defaultConfiguration:
+          type: object
+        approvedForDedicated:
+          type: boolean
+        approvedForShared:
+          type: boolean
+        minCpuMilli:
+          type: integer
+        minMemoryBytes:
+          type: string
+
+    OrganizationSummaryDto:
+      type: object
+      required: [id, name, slug, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+          enum: [active, suspended, archived]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ResourceQuotaDto:
+      type: object
+      required:
+        - id
+        - organizationId
+        - maxSites
+        - maxServices
+        - maxCpuMilli
+        - maxMemoryBytes
+        - maxStorageBytes
+        - usedSites
+        - usedServices
+        - usedCpuMilli
+        - usedMemoryBytes
+        - usedStorageBytes
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        organizationId:
+          type: string
+        hostAllocationId:
+          type: string
+          nullable: true
+        maxSites:
+          type: integer
+        maxServices:
+          type: integer
+        maxCpuMilli:
+          type: integer
+        maxMemoryBytes:
+          type: string
+        maxStorageBytes:
+          type: string
+        usedSites:
+          type: integer
+        usedServices:
+          type: integer
+        usedCpuMilli:
+          type: integer
+        usedMemoryBytes:
+          type: string
+        usedStorageBytes:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    OrganizationDetailDto:
+      allOf:
+        - $ref: "#/components/schemas/OrganizationSummaryDto"
+        - type: object
+          required: [capabilities, siteCount, serviceCount]
+          properties:
+            capabilities:
+              $ref: "#/components/schemas/OrganizationCapabilitiesDto"
+            quotas:
+              $ref: "#/components/schemas/ResourceQuotaDto"
+              nullable: true
+            siteCount:
+              type: integer
+            serviceCount:
+              type: integer
+
+    MemberDto:
+      type: object
+      required: [id, organizationId, userId, email, name, role, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        organizationId:
+          type: string
+        userId:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        role:
+          type: string
+          enum: [customer_owner, customer_collaborator]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateInvitationInput:
+      type: object
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [customer_owner, customer_collaborator]
+
+    QuotaReservationDto:
+      type: object
+      required:
+        - id
+        - organizationId
+        - resourceQuotaId
+        - sites
+        - services
+        - cpuMilli
+        - memoryBytes
+        - storageBytes
+        - status
+        - idempotencyKey
+        - expiresAt
+        - createdAt
+      properties:
+        id:
+          type: string
+        organizationId:
+          type: string
+        resourceQuotaId:
+          type: string
+        sites:
+          type: integer
+        services:
+          type: integer
+        cpuMilli:
+          type: integer
+        memoryBytes:
+          type: string
+        storageBytes:
+          type: string
+        status:
+          type: string
+          enum: [pending, committed, released]
+        idempotencyKey:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateQuotaReservationInput:
+      type: object
+      required: [idempotencyKey]
+      properties:
+        sites:
+          type: integer
+          default: 0
+        services:
+          type: integer
+          default: 0
+        cpuMilli:
+          type: integer
+          default: 0
+        memoryBytes:
+          type: string
+          default: "0"
+        storageBytes:
+          type: string
+          default: "0"
+        idempotencyKey:
+          type: string
+
+    DomainDto:
+      type: object
+      required: [id, siteId, organizationId, hostname, isPrimary, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        siteId:
+          type: string
+        organizationId:
+          type: string
+        hostname:
+          type: string
+        isPrimary:
+          type: boolean
+        status:
+          type: string
+          enum: [pending, active, failed]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    StackRevisionDto:
+      type: object
+      required:
+        - id
+        - serviceInstanceId
+        - organizationId
+        - revisionNumber
+        - specHash
+        - declarativeConfig
+        - secretRefs
+        - resourceLimits
+        - authorId
+        - createdAt
+      properties:
+        id:
+          type: string
+        serviceInstanceId:
+          type: string
+        organizationId:
+          type: string
+        revisionNumber:
+          type: integer
+        specHash:
+          type: string
+        declarativeConfig:
+          type: object
+        secretRefs:
+          type: object
+          additionalProperties:
+            type: string
+        resourceLimits:
+          type: object
+          nullable: true
+          required: [cpuMilli, memoryBytes]
+          properties:
+            cpuMilli:
+              type: integer
+            memoryBytes:
+              type: string
+        authorId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    ServiceInstanceDto:
+      type: object
+      required: [id, siteId, organizationId, serviceTemplateId, name, desiredStatus, currentRevisionId, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        siteId:
+          type: string
+        organizationId:
+          type: string
+        serviceTemplateId:
+          type: string
+        name:
+          type: string
+        desiredStatus:
+          type: string
+          enum: [running, stopped]
+        currentRevisionId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    DriftSummary:
+      type: object
+      required: [totalServices, inSyncCount, driftedCount, unknownCount, overallDriftStatus]
+      properties:
+        totalServices:
+          type: integer
+        inSyncCount:
+          type: integer
+        driftedCount:
+          type: integer
+        unknownCount:
+          type: integer
+        overallDriftStatus:
+          type: string
+          enum: [in_sync, drifted, unknown]
+
+    SiteSummaryDto:
+      type: object
+      required: [id, organizationId, hostAllocationId, name, slug, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        organizationId:
+          type: string
+        hostAllocationId:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        status:
+          type: string
+          enum: [ready, deploying, degraded, stopped, maintenance]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    SiteDetailDto:
+      allOf:
+        - $ref: "#/components/schemas/SiteSummaryDto"
+        - type: object
+          required: [services, domains, driftSummary]
+          properties:
+            services:
+              type: array
+              items:
+                $ref: "#/components/schemas/ServiceInstanceDto"
+            domains:
+              type: array
+              items:
+                $ref: "#/components/schemas/DomainDto"
+            driftSummary:
+              $ref: "#/components/schemas/DriftSummary"
+
+    CreateSiteInput:
+      type: object
+      required: [name, slug, hostAllocationId]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+        hostAllocationId:
+          type: string
+        initialDomain:
+          type: string
+
+    CreateServiceInstanceInput:
+      type: object
+      required: [serviceTemplateId, name, configuration]
+      properties:
+        serviceTemplateId:
+          type: string
+        name:
+          type: string
+        desiredStatus:
+          type: string
+          enum: [running, stopped]
+          default: running
+        configuration:
+          type: object
+        secretRefs:
+          type: object
+          additionalProperties:
+            type: string
+        resourceLimits:
+          type: object
+          properties:
+            cpuMilli:
+              type: integer
+            memoryBytes:
+              type: string
+
+    CreateStackRevisionInput:
+      type: object
+      required: [declarativeConfig]
+      properties:
+        declarativeConfig:
+          type: object
+        secretRefs:
+          type: object
+          additionalProperties:
+            type: string
+        resourceLimits:
+          type: object
+          properties:
+            cpuMilli:
+              type: integer
+            memoryBytes:
+              type: string
+        reason:
+          type: string
+
+    ServiceLifecycleInput:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [deploy, restart, stop]
+        reason:
+          type: string
+
+    AuditEventDto:
+      type: object
+      required: [id, actorId, actorType, organizationId, action, targetType, targetId, ipAddress, userAgent, details, timestamp]
+      properties:
+        id:
+          type: string
+        actorId:
+          type: string
+          nullable: true
+        actorType:
+          type: string
+          enum: [user, system, service_account]
+        organizationId:
+          type: string
+          nullable: true
+        action:
+          type: string
+        targetType:
+          type: string
+        targetId:
+          type: string
+          nullable: true
+        ipAddress:
+          type: string
+          nullable: true
+        userAgent:
+          type: string
+          nullable: true
+        details:
+          type: object
+        timestamp:
+          type: string
+          format: date-time
 
     OperationTimelineStep:
       type: object
@@ -1429,13 +2177,16 @@ components:
           type: string
           enum: [pending, running, succeeded, failed, cancelled, skipped, unknown]
         message:
-          type: ["string", "null"]
+          type: string
+          nullable: true
         startedAt:
-          type: ["string", "null"]
+          type: string
           format: date-time
+          nullable: true
         completedAt:
-          type: ["string", "null"]
+          type: string
           format: date-time
+          nullable: true
 
     OperationDto:
       type: object
@@ -1460,31 +2211,50 @@ components:
         organizationId:
           type: string
         kind:
-          $ref: "#/components/schemas/OperationKind"
+          type: string
+          enum:
+            - service.deploy
+            - service.restart
+            - service.stop
+            - site.deploy
+            - host.maintenance
+            - host.allocate
         status:
-          $ref: "#/components/schemas/OperationStatus"
+          type: string
+          enum:
+            - queued
+            - processing
+            - accepted
+            - reconciling
+            - succeeded
+            - failed
+            - unknown
+            - cancelled
         resourceType:
           type: string
-          enum: [application, database, domain, server, provider]
+          enum: [host, allocation, site, service, domain, quota]
         resourceId:
           type: string
         requestedByUserId:
-          type: ["string", "null"]
+          type: string
+          nullable: true
         errorCode:
-          oneOf:
-            - $ref: "#/components/schemas/ErrorCode"
-            - type: "null"
+          type: string
+          nullable: true
         errorMessage:
-          type: ["string", "null"]
+          type: string
+          nullable: true
         submittedAt:
           type: string
           format: date-time
         startedAt:
-          type: ["string", "null"]
+          type: string
           format: date-time
+          nullable: true
         completedAt:
-          type: ["string", "null"]
+          type: string
           format: date-time
+          nullable: true
         updatedAt:
           type: string
           format: date-time
@@ -1492,862 +2262,3 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/OperationTimelineStep"
-
-    MeMembershipDto:
-      type: object
-      required:
-        - organizationId
-        - organizationSlug
-        - organizationName
-        - organizationType
-        - organizationStatus
-        - roles
-        - permissions
-      properties:
-        organizationId:
-          type: string
-        organizationSlug:
-          type: string
-        organizationName:
-          type: string
-        organizationType:
-          type: string
-          enum: [customer, reseller, platform]
-        organizationStatus:
-          type: string
-          enum: [active, past_due, suspended, cancelled]
-        roles:
-          type: array
-          items:
-            type: string
-        permissions:
-          type: array
-          items:
-            type: string
-
-    MeImpersonationContext:
-      type: object
-      required: [active, sessionId, targetOrganizationId, expiresAt]
-      properties:
-        active:
-          type: boolean
-        sessionId:
-          type: ["string", "null"]
-        targetOrganizationId:
-          type: ["string", "null"]
-        expiresAt:
-          type: ["string", "null"]
-          format: date-time
-
-    MeDto:
-      type: object
-      required: [user, memberships]
-      properties:
-        user:
-          type: object
-          required: [id, email, displayName, isPlatformAdmin]
-          properties:
-            id:
-              type: string
-            email:
-              type: string
-              format: email
-            displayName:
-              type: string
-            isPlatformAdmin:
-              type: boolean
-        memberships:
-          type: array
-          items:
-            $ref: "#/components/schemas/MeMembershipDto"
-        impersonation:
-          $ref: "#/components/schemas/MeImpersonationContext"
-
-    OrganizationSummaryDto:
-      type: object
-      required: [id, slug, name, type, status, createdAt]
-      properties:
-        id:
-          type: string
-        slug:
-          type: string
-        name:
-          type: string
-        type:
-          type: string
-          enum: [customer, reseller, platform]
-        status:
-          type: string
-          enum: [active, past_due, suspended, cancelled]
-        createdAt:
-          type: string
-          format: date-time
-
-    OrganizationDetailDto:
-      allOf:
-        - $ref: "#/components/schemas/OrganizationSummaryDto"
-        - type: object
-          required:
-            - primaryLocale
-            - memberCount
-            - serverCount
-            - applicationCount
-            - databaseCount
-            - updatedAt
-          properties:
-            primaryLocale:
-              type: string
-            memberCount:
-              type: integer
-            serverCount:
-              type: integer
-            applicationCount:
-              type: integer
-            databaseCount:
-              type: integer
-            updatedAt:
-              type: string
-              format: date-time
-
-    ProviderCapabilityEntry:
-      type: object
-      required: [supported]
-      properties:
-        supported:
-          type: boolean
-        reason:
-          type: ["string", "null"]
-
-    ProviderCapabilities:
-      type: object
-      required:
-        - applicationDeploy
-        - applicationRestart
-        - applicationStop
-        - applicationLogs
-        - domainManage
-        - certificateRecheck
-        - serverMetrics
-        - databaseBackupByEngine
-      properties:
-        applicationDeploy:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        applicationRestart:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        applicationStop:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        applicationLogs:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        domainManage:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        certificateRecheck:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        serverMetrics:
-          $ref: "#/components/schemas/ProviderCapabilityEntry"
-        databaseBackupByEngine:
-          type: object
-          required: [postgresql, mysql, mariadb, mongodb, redis]
-          properties:
-            postgresql:
-              $ref: "#/components/schemas/ProviderCapabilityEntry"
-            mysql:
-              $ref: "#/components/schemas/ProviderCapabilityEntry"
-            mariadb:
-              $ref: "#/components/schemas/ProviderCapabilityEntry"
-            mongodb:
-              $ref: "#/components/schemas/ProviderCapabilityEntry"
-            redis:
-              $ref: "#/components/schemas/ProviderCapabilityEntry"
-
-    OrganizationCapabilitiesDto:
-      type: object
-      required: [organizationId, permissions, features, evaluatedAt]
-      properties:
-        organizationId:
-          type: string
-        permissions:
-          type: array
-          items:
-            type: string
-        features:
-          $ref: "#/components/schemas/ProviderCapabilities"
-        evaluatedAt:
-          type: string
-          format: date-time
-
-    MemberDto:
-      type: object
-      required: [membershipId, organizationId, userId, email, displayName, roles, joinedAt]
-      properties:
-        membershipId:
-          type: string
-        organizationId:
-          type: string
-        userId:
-          type: string
-        email:
-          type: string
-          format: email
-        displayName:
-          type: string
-        roles:
-          type: array
-          items:
-            type: string
-        joinedAt:
-          type: string
-          format: date-time
-
-    CreateInvitationInput:
-      type: object
-      additionalProperties: false
-      required: [email, roles]
-      properties:
-        email:
-          type: string
-          format: email
-        roles:
-          type: array
-          minItems: 1
-          items:
-            type: string
-            enum:
-              - customer_owner
-              - hosting_manager
-              - developer
-              - database_manager
-              - billing_manager
-              - viewer
-
-    ServerDto:
-      type: object
-      required:
-        - id
-        - organizationId
-        - name
-        - region
-        - publicIpv4
-        - status
-        - health
-        - vcpuCount
-        - memoryMb
-        - diskGb
-        - lastObservedAt
-        - createdAt
-      properties:
-        id:
-          type: string
-        organizationId:
-          type: string
-        name:
-          type: string
-        region:
-          type: string
-        publicIpv4:
-          type: ["string", "null"]
-        status:
-          type: string
-          enum: [running, stopped, deploying, degraded, failed, unknown]
-        health:
-          type: string
-          enum: [healthy, unhealthy, unknown]
-        vcpuCount:
-          type: integer
-        memoryMb:
-          type: integer
-        diskGb:
-          type: integer
-        lastObservedAt:
-          type: ["string", "null"]
-          format: date-time
-        createdAt:
-          type: string
-          format: date-time
-
-    ServerMetricsDto:
-      type: object
-      required:
-        - serverId
-        - cpuUsagePercent
-        - memoryUsedMb
-        - memoryTotalMb
-        - diskUsedGb
-        - diskTotalGb
-        - uptimeSeconds
-        - observedAt
-      properties:
-        serverId:
-          type: string
-        cpuUsagePercent:
-          type: ["number", "null"]
-        memoryUsedMb:
-          type: ["number", "null"]
-        memoryTotalMb:
-          type: ["number", "null"]
-        diskUsedGb:
-          type: ["number", "null"]
-        diskTotalGb:
-          type: ["number", "null"]
-        uptimeSeconds:
-          type: ["integer", "null"]
-        observedAt:
-          type: ["string", "null"]
-          format: date-time
-
-    ApplicationSummaryDto:
-      type: object
-      required:
-        - id
-        - organizationId
-        - serverId
-        - name
-        - slug
-        - environment
-        - status
-        - health
-        - primaryDomain
-        - lastDeployedAt
-        - lastObservedAt
-        - lockedByOperationId
-        - createdAt
-      properties:
-        id:
-          type: string
-        organizationId:
-          type: string
-        serverId:
-          type: string
-        name:
-          type: string
-        slug:
-          type: string
-        environment:
-          type: string
-        status:
-          type: string
-          enum: [running, stopped, deploying, degraded, failed, unknown]
-        health:
-          type: string
-          enum: [healthy, unhealthy, unknown]
-        primaryDomain:
-          type: ["string", "null"]
-        lastDeployedAt:
-          type: ["string", "null"]
-          format: date-time
-        lastObservedAt:
-          type: ["string", "null"]
-          format: date-time
-        lockedByOperationId:
-          type: ["string", "null"]
-        createdAt:
-          type: string
-          format: date-time
-
-    ApplicationAllowedActions:
-      type: object
-      required: [canDeploy, canRestart, canStop, canReadLogs]
-      properties:
-        canDeploy:
-          type: boolean
-        canRestart:
-          type: boolean
-        canStop:
-          type: boolean
-        canReadLogs:
-          type: boolean
-
-    DeploymentRecordDto:
-      type: object
-      required:
-        - id
-        - applicationId
-        - operationId
-        - commitSha
-        - imageTag
-        - status
-        - triggeredByUserId
-        - startedAt
-        - finishedAt
-        - createdAt
-      properties:
-        id:
-          type: string
-        applicationId:
-          type: string
-        operationId:
-          type: ["string", "null"]
-        commitSha:
-          type: ["string", "null"]
-        imageTag:
-          type: ["string", "null"]
-        status:
-          $ref: "#/components/schemas/OperationStatus"
-        triggeredByUserId:
-          type: ["string", "null"]
-        startedAt:
-          type: ["string", "null"]
-          format: date-time
-        finishedAt:
-          type: ["string", "null"]
-          format: date-time
-        createdAt:
-          type: string
-          format: date-time
-
-    ApplicationDetailDto:
-      allOf:
-        - $ref: "#/components/schemas/ApplicationSummaryDto"
-        - type: object
-          required:
-            - repositoryUrl
-            - branch
-            - buildPack
-            - domains
-            - allowedActions
-            - recentDeployments
-            - updatedAt
-          properties:
-            repositoryUrl:
-              type: ["string", "null"]
-            branch:
-              type: ["string", "null"]
-            buildPack:
-              type: string
-            domains:
-              type: array
-              items:
-                type: string
-            allowedActions:
-              $ref: "#/components/schemas/ApplicationAllowedActions"
-            recentDeployments:
-              type: array
-              items:
-                $ref: "#/components/schemas/DeploymentRecordDto"
-            updatedAt:
-              type: string
-              format: date-time
-
-    TriggerOperationInput:
-      type: object
-      additionalProperties: false
-      properties:
-        reason:
-          type: string
-          maxLength: 500
-        forceRebuild:
-          type: boolean
-
-    DatabaseSummaryDto:
-      type: object
-      required:
-        - id
-        - organizationId
-        - serverId
-        - name
-        - engine
-        - engineVersion
-        - status
-        - health
-        - backupSupported
-        - restoreSupported
-        - lastBackupAt
-        - lastObservedAt
-        - createdAt
-      properties:
-        id:
-          type: string
-        organizationId:
-          type: string
-        serverId:
-          type: string
-        name:
-          type: string
-        engine:
-          type: string
-          enum: [postgresql, mysql, mariadb, mongodb, redis]
-        engineVersion:
-          type: string
-        status:
-          type: string
-          enum: [running, stopped, deploying, degraded, failed, unknown]
-        health:
-          type: string
-          enum: [healthy, unhealthy, unknown]
-        backupSupported:
-          type: boolean
-        restoreSupported:
-          type: boolean
-        lastBackupAt:
-          type: ["string", "null"]
-          format: date-time
-        lastObservedAt:
-          type: ["string", "null"]
-          format: date-time
-        createdAt:
-          type: string
-          format: date-time
-
-    DatabaseDetailDto:
-      allOf:
-        - $ref: "#/components/schemas/DatabaseSummaryDto"
-        - type: object
-          required:
-            - storageAllocatedGb
-            - internalHostname
-            - port
-            - backupUnsupportedReason
-            - updatedAt
-          properties:
-            storageAllocatedGb:
-              type: integer
-            internalHostname:
-              type: ["string", "null"]
-            port:
-              type: ["integer", "null"]
-            backupUnsupportedReason:
-              type: ["string", "null"]
-            updatedAt:
-              type: string
-              format: date-time
-
-    CertificateObservationDto:
-      type: object
-      required:
-        - id
-        - domainId
-        - organizationId
-        - hostname
-        - status
-        - issuer
-        - validFrom
-        - expiresAt
-        - observedAt
-        - source
-      properties:
-        id:
-          type: string
-        domainId:
-          type: string
-        organizationId:
-          type: string
-        hostname:
-          type: string
-        status:
-          type: string
-          enum: [valid, expiring_soon, expired, mismatch, missing, unknown]
-        issuer:
-          type: ["string", "null"]
-        validFrom:
-          type: ["string", "null"]
-          format: date-time
-        expiresAt:
-          type: ["string", "null"]
-          format: date-time
-        observedAt:
-          type: ["string", "null"]
-          format: date-time
-        source:
-          type: string
-          enum: [coolify, monitoring, external_probe]
-
-    DomainDto:
-      type: object
-      required:
-        - id
-        - organizationId
-        - applicationId
-        - hostname
-        - isPrimary
-        - verificationStatus
-        - httpsEnabled
-        - certificate
-        - createdAt
-        - updatedAt
-      properties:
-        id:
-          type: string
-        organizationId:
-          type: string
-        applicationId:
-          type: string
-        hostname:
-          type: string
-        isPrimary:
-          type: boolean
-        verificationStatus:
-          type: string
-          enum: [pending, verified, conflict, failed]
-        httpsEnabled:
-          type: boolean
-        certificate:
-          oneOf:
-            - $ref: "#/components/schemas/CertificateObservationDto"
-            - type: "null"
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-
-    CreateDomainInput:
-      type: object
-      additionalProperties: false
-      required: [applicationId, hostname]
-      properties:
-        applicationId:
-          type: string
-        hostname:
-          type: string
-        isPrimary:
-          type: boolean
-        httpsEnabled:
-          type: boolean
-
-    QuotaAllocationDto:
-      type: object
-      required:
-        - organizationId
-        - planCode
-        - serversUsed
-        - serversLimit
-        - applicationsUsed
-        - applicationsLimit
-        - databasesUsed
-        - databasesLimit
-        - domainsUsed
-        - domainsLimit
-        - updatedAt
-      properties:
-        organizationId:
-          type: string
-        planCode:
-          type: string
-        serversUsed:
-          type: integer
-        serversLimit:
-          type: integer
-        applicationsUsed:
-          type: integer
-        applicationsLimit:
-          type: integer
-        databasesUsed:
-          type: integer
-        databasesLimit:
-          type: integer
-        domainsUsed:
-          type: integer
-        domainsLimit:
-          type: integer
-        updatedAt:
-          type: string
-          format: date-time
-
-    AdminProviderConnectionDto:
-      type: object
-      required:
-        - id
-        - displayName
-        - driver
-        - status
-        - version
-        - capabilities
-        - boundOrganizationCount
-        - lastCheckedAt
-        - createdAt
-      properties:
-        id:
-          type: string
-        displayName:
-          type: string
-        driver:
-          type: string
-          const: coolify-v4
-        status:
-          type: string
-          enum: [connected, degraded, unreachable, misconfigured, unknown]
-        version:
-          type: ["string", "null"]
-        capabilities:
-          $ref: "#/components/schemas/ProviderCapabilities"
-        boundOrganizationCount:
-          type: integer
-        lastCheckedAt:
-          type: ["string", "null"]
-          format: date-time
-        createdAt:
-          type: string
-          format: date-time
-
-    AdminFleetItemDto:
-      type: object
-      required:
-        - resourceId
-        - resourceType
-        - resourceName
-        - organizationId
-        - organizationName
-        - serverId
-        - serverName
-        - status
-        - health
-        - stale
-        - lastObservedAt
-      properties:
-        resourceId:
-          type: string
-        resourceType:
-          type: string
-          enum: [application, database]
-        resourceName:
-          type: string
-        organizationId:
-          type: string
-        organizationName:
-          type: string
-        serverId:
-          type: string
-        serverName:
-          type: string
-        status:
-          type: string
-          enum: [running, stopped, deploying, degraded, failed, unknown]
-        health:
-          type: string
-          enum: [healthy, unhealthy, unknown]
-        stale:
-          type: boolean
-        lastObservedAt:
-          type: ["string", "null"]
-          format: date-time
-
-    AuditEventDto:
-      type: object
-      required:
-        - id
-        - organizationId
-        - actorUserId
-        - actorEmail
-        - impersonatedByUserId
-        - action
-        - targetType
-        - targetId
-        - outcome
-        - requestId
-        - ipAddress
-        - metadata
-        - occurredAt
-      properties:
-        id:
-          type: string
-        organizationId:
-          type: ["string", "null"]
-        actorUserId:
-          type: ["string", "null"]
-        actorEmail:
-          type: ["string", "null"]
-        impersonatedByUserId:
-          type: ["string", "null"]
-        action:
-          type: string
-        targetType:
-          type: string
-        targetId:
-          type: ["string", "null"]
-        outcome:
-          type: string
-          enum: [allowed, denied, succeeded, failed]
-        requestId:
-          type: string
-        ipAddress:
-          type: ["string", "null"]
-        metadata:
-          type: object
-          additionalProperties:
-            type: ["string", "number", "boolean", "null"]
-        occurredAt:
-          type: string
-          format: date-time
-
-    DevPersonaDto:
-      type: object
-      required: [id, email, displayName, isPlatformAdmin, organizations]
-      properties:
-        id:
-          type: string
-        email:
-          type: string
-          format: email
-        displayName:
-          type: string
-        isPlatformAdmin:
-          type: boolean
-        organizations:
-          type: array
-          items:
-            type: object
-            required:
-              - organizationId
-              - organizationSlug
-              - organizationName
-              - organizationStatus
-              - roles
-            properties:
-              organizationId:
-                type: string
-              organizationSlug:
-                type: string
-              organizationName:
-                type: string
-              organizationStatus:
-                type: string
-              roles:
-                type: array
-                items:
-                  type: string
-
-    DevIssueTokenInput:
-      type: object
-      additionalProperties: false
-      properties:
-        userId:
-          type: string
-        email:
-          type: string
-          format: email
-        expiresInSeconds:
-          type: integer
-          minimum: 1
-          maximum: 86400
-
-    DevIssuedTokenDto:
-      type: object
-      required: [accessToken, tokenType, expiresIn, expiresAt, issuer, audience, user]
-      properties:
-        accessToken:
-          type: string
-        tokenType:
-          type: string
-          const: Bearer
-        expiresIn:
-          type: integer
-        expiresAt:
-          type: string
-          format: date-time
-        issuer:
-          type: string
-        audience:
-          type: string
-        user:
-          type: object
-          required: [id, email, displayName, isPlatformAdmin]
-          properties:
-            id:
-              type: string
-            email:
-              type: string
-              format: email
-            displayName:
-              type: string
-            isPlatformAdmin:
-              type: boolean

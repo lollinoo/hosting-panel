@@ -8,27 +8,17 @@ async function bootstrap(): Promise<void> {
       ? Number.parseInt(process.env["API_PORT"], 10)
       : 4000;
   const host = process.env["API_HOST"] ?? "127.0.0.1";
-  const fakeCoolifyPort = process.env["FAKE_COOLIFY_PORT"]
-    ? Number.parseInt(process.env["FAKE_COOLIFY_PORT"], 10)
-    : 4101;
 
   const handle = await createControlPlaneApp({
     host,
     port,
     listen: true,
-    fakeCoolifyPort,
-    enableBackgroundWorker: true,
     corsOrigin: process.env["WEB_ORIGIN"] ?? "http://127.0.0.1:3000",
   });
 
   console.log(
     `[hosting-panel-api] Control Plane API listening on ${handle.baseUrl ?? `${host}:${String(port)}`}`,
   );
-  if (handle.fakeCoolify) {
-    console.log(
-      `[hosting-panel-api] Embedded Fake Coolify v4 Lab listening on ${handle.fakeCoolify.baseUrl}`,
-    );
-  }
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
