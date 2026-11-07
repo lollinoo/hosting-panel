@@ -1,91 +1,111 @@
-import { CapabilityNotice } from "@/components/capability-notice";
-import { fetchOrganizationMembers } from "@/lib/bff-client";
-import { formatDateTimeIt, formatRoleLabelIt } from "@/lib/format";
-import { resolveOrgServerContext } from "@/lib/org-context";
+import { fetchServerMe, fetchServerOrgMembers } from "@/lib/server-api";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableHead,
+  TableRow,
+  TableCell,
+} from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
+import { Users, UserCheck } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
-export interface MembersPageProps {
-  readonly params: Promise<{ readonly orgSlug: string }>;
-}
-
-export default async function OrganizationMembersPage({
+export default async function OrgMembersPage({
   params,
-}: MembersPageProps) {
+}: {
+  params: Promise<{ orgSlug: string }>;
+}) {
   const { orgSlug } = await params;
-  const { session, membership } = await resolveOrgServerContext(orgSlug);
-
-  const membersRes = await fetchOrganizationMembers(
-    session.accessToken,
-    membership.organizationId,
-  );
-
-  if (!membersRes.ok) {
-    return (
-      <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-slate-900">Membri Organizzazione</h1>
-        <CapabilityNotice
-          tone="warning"
-          title="Elenco membri non accessibile"
-          description={membersRes.error.error.message}
-        />
-      </div>
-    );
-  }
-
-  const members = membersRes.data.data;
+  const me = await fetchServerMe();
+  const membership = me?.memberships.find((m) => m.organizationSlug === orgSlug);
+  const orgId = membership?.organizationId || orgSlug;
+  const members = await fetchServerOrgMembers(orgId);
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-slate-900">
-          Membri &amp; Ruoli — {membership.organizationName}
-        </h1>
-        <p className="mt-1 text-sm text-slate-600">
-          Utenti attivi nell&apos;organizzazione e ruoli predefiniti assegnati con
-          protezione dell&apos;ultimo titolare (AC-022).
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Membri & Ruoli Organizzazione</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Gestione degli account autorizzati e controllo degli accessi basato su ruoli (AC-F1-02).
+          </p>
+        </div>
+        <Badge variant="outline" className="text-xs">
+          {members.length} Membri
+        </Badge>
       </div>
 
-      <div className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xs">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200 text-sm">
-            <thead className="bg-slate-50 text-left text-xs font-semibold tracking-wider text-slate-500 uppercase">
-              <tr>
-                <th className="px-4 py-3">Nome Utente</th>
-                <th className="px-4 py-3">Indirizzo Email</th>
-                <th className="px-4 py-3">Ruoli Assegnati</th>
-                <th className="px-4 py-3">Membro dal</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {members.map((member) => (
-                <tr key={member.membershipId} className="hover:bg-slate-50/70">
-                  <td className="px-4 py-3.5 font-semibold text-slate-900">
-                    {member.displayName}
-                  </td>
-                  <td className="px-4 py-3.5 text-slate-600">{member.email}</td>
-                  <td className="px-4 py-3.5">
-                    <div className="flex flex-wrap gap-1.5">
-                      {member.roles.map((role) => (
-                        <span
-                          key={role}
-                          className="inline-flex items-center rounded-full bg-indigo-50 px-2.5 py-0.5 text-xs font-medium text-indigo-800 ring-1 ring-inset ring-indigo-600/20"
-                        >
-                          {formatRoleLabelIt(role)}
-                        </span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3.5 text-xs text-slate-600">
-                    {formatDateTimeIt(member.joinedAt)}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base">Utenti Registrati</CardTitle>
+              <CardDescription className="text-xs">
+                La distinzione tra CustomerOwner e CustomerCollaborator garantisce il principio di minimo privilegio.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Nome & Cognome</TableHead>
+                <TableHead>Email</TableHead>
+                <TableHead>Ruolo Assegnato</TableHead>
+                <TableHead>Data Inserimento</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {members.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={4} className="text-center py-6 text-muted-foreground text-xs">
+                    Nessun membro trovato per questa organizzazione.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                members.map((member) => (
+                  <TableRow key={member.id}>
+                    <TableCell className="font-semibold text-xs">
+                      <div className="flex items-center gap-2">
+                        {member.role === "customer_owner" ? (
+                          <UserCheck className="h-4 w-4 text-amber-500" />
+                        ) : (
+                          <Users className="h-4 w-4 text-purple-500" />
+                        )}
+                        <span>{member.name}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground font-mono">
+                      {member.email}
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={member.role === "customer_owner" ? "warning" : "secondary"}
+                        className="text-[10px]"
+                      >
+                        {member.role}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground font-mono">
+                      {new Date(member.createdAt).toLocaleDateString("it-IT")}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </CardContent>
+      </Card>
     </div>
   );
 }

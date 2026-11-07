@@ -25,7 +25,6 @@
     "zod": "catalog:"
   },
   "devDependencies": {
-    "@hosting-panel/api": "workspace:*",
     "@tailwindcss/postcss": "catalog:",
     "@types/node": "catalog:",
     "@types/react": "catalog:",

@@ -1,70 +1,39 @@
-import { fetchMe } from "../../../lib/bff-client";
-import {
-  bffJsonResponse,
-  readSessionFromRequest,
-  resolveBffRequestId,
-  serializeClearSessionCookie,
-  type PublicSessionView,
-} from "../../../lib/session";
+import { getSessionFromRequest, clearSessionCookie } from "@/lib/server-session";
+import { bffJsonResponse } from "@/lib/bff-response";
+import { fetchUpstream } from "@/lib/upstream";
+import type { MeDto } from "@hosting-panel/contracts";
 
-export const dynamic = "force-dynamic";
-
-export async function GET(request: Request): Promise<Response> {
-  const requestId = resolveBffRequestId(request);
-  const session = await readSessionFromRequest(request);
-
+export async function GET(req: Request) {
+  const session = await getSessionFromRequest(req);
   if (!session) {
-    const unauthenticated: PublicSessionView = {
-      authenticated: false,
-      user: null,
-      activeOrgSlug: null,
-      csrfToken: null,
-    };
-    return bffJsonResponse(unauthenticated, {
-      status: 200,
-      requestId,
-      allowCsrfTokenField: true,
-    });
+    return bffJsonResponse({ authenticated: false });
   }
 
-  const meRes = await fetchMe(session.accessToken, requestId);
-  if (!meRes.ok) {
-    if (meRes.status === 401) {
-      const unauthenticated: PublicSessionView = {
-        authenticated: false,
-        user: null,
-        activeOrgSlug: null,
-        csrfToken: null,
-      };
-      return bffJsonResponse(unauthenticated, {
-        status: 200,
-        requestId: meRes.requestId,
-        allowCsrfTokenField: true,
-        setCookie: serializeClearSessionCookie(),
-      });
-    }
+  const upstreamRes = await fetchUpstream<{ data: MeDto }>("v1/me", {
+    accessToken: session.accessToken,
+  });
 
-    return bffJsonResponse(meRes.error, {
-      status: meRes.status,
-      requestId: meRes.requestId,
-    });
+  if (!upstreamRes.ok || !upstreamRes.data?.data) {
+    const res = bffJsonResponse({ authenticated: false });
+    clearSessionCookie(res);
+    return res;
   }
 
-  const me = meRes.data.data;
-  const stillMemberOfActiveOrg =
-    session.activeOrgSlug !== null &&
-    me.memberships.some((m) => m.organizationSlug === session.activeOrgSlug);
+  const me = upstreamRes.data.data;
 
-  const view: PublicSessionView = {
+  return bffJsonResponse({
     authenticated: true,
-    user: me.user,
-    activeOrgSlug: stillMemberOfActiveOrg ? session.activeOrgSlug : null,
     csrfToken: session.csrfToken,
-  };
-
-  return bffJsonResponse(view, {
-    status: 200,
-    requestId: meRes.requestId,
-    allowCsrfTokenField: true,
+    activeConsole: session.activeConsole,
+    activeOrgSlug: session.activeOrgSlug,
+    user: {
+      id: me.user.id,
+      email: me.user.email,
+      name: me.user.name,
+      globalRoles: me.globalRoles,
+      hostingAdminOrgIds: me.hostingAdminOrgIds,
+    },
+    memberships: me.memberships,
+    platformCapabilities: me.platformCapabilities,
   });
 }

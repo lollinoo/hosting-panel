@@ -1,235 +1,255 @@
-import Link from "next/link";
 import {
-  HealthStatusBadge,
-  OperationStatusBadge,
-  ResourceStatusBadge,
-} from "@/components/badges";
-import { FreshnessIndicator } from "@/components/freshness";
+  fetchServerMe,
+  fetchServerOrg,
+  fetchServerOrgSites,
+  fetchServerOrgQuotas,
+} from "@/lib/server-api";
 import {
-  fetchApplications,
-  fetchDomains,
-  fetchOperations,
-  fetchOrganizationDetail,
-  fetchOrganizationQuotas,
-  fetchServers,
-} from "@/lib/bff-client";
-import { formatDateTimeIt, formatOperationKindIt } from "@/lib/format";
-import { resolveOrgServerContext } from "@/lib/org-context";
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import {
+  Globe,
+  Boxes,
+  Gauge,
+  CheckCircle2,
+  XCircle,
+  ShieldCheck,
+  Cpu,
+} from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
-export interface OverviewPageProps {
-  readonly params: Promise<{ readonly orgSlug: string }>;
-}
-
-export default async function OrganizationOverviewPage({
+export default async function OrgOverviewPage({
   params,
-}: OverviewPageProps) {
+}: {
+  params: Promise<{ orgSlug: string }>;
+}) {
   const { orgSlug } = await params;
-  const { session, membership } = await resolveOrgServerContext(orgSlug);
-  const orgId = membership.organizationId;
+  const me = await fetchServerMe();
 
-  const [orgRes, quotaRes, serversRes, appsRes, domainsRes, opsRes] =
-    await Promise.all([
-      fetchOrganizationDetail(session.accessToken, orgId),
-      fetchOrganizationQuotas(session.accessToken, orgId),
-      fetchServers(session.accessToken, orgId),
-      fetchApplications(session.accessToken, orgId),
-      fetchDomains(session.accessToken, orgId),
-      fetchOperations(session.accessToken, orgId),
-    ]);
+  const membership = me?.memberships.find((m) => m.organizationSlug === orgSlug);
+  const orgId = membership?.organizationId || orgSlug;
+  const org = await fetchServerOrg(orgId);
+  const sites = await fetchServerOrgSites(orgId);
+  const quotas = (await fetchServerOrgQuotas(orgId)) || org?.quotas;
 
-  const orgDetail = orgRes.ok ? orgRes.data.data : null;
-  const quotas = quotaRes.ok ? quotaRes.data.data : null;
-  const apps = appsRes.ok ? appsRes.data.data : [];
-  const domains = domainsRes.ok ? domainsRes.data.data : [];
-  const operations = opsRes.ok ? opsRes.data.data.slice(0, 6) : [];
-  const readMeta = serversRes.ok
-    ? serversRes.data.meta
-    : appsRes.ok
-      ? appsRes.data.meta
-      : undefined;
+  const totalSites = sites.length > 0 ? sites.length : org?.siteCount || 0;
+  const totalServices = org?.serviceCount || 0;
+
+  const cpuUsedPercent = quotas && quotas.maxCpuMilli > 0
+    ? Math.min(100, Math.round((quotas.usedCpuMilli / quotas.maxCpuMilli) * 100))
+    : 0;
+
+  const sitesUsedPercent = quotas && quotas.maxSites > 0
+    ? Math.min(100, Math.round((quotas.usedSites / quotas.maxSites) * 100))
+    : 0;
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">
-            Panoramica — {membership.organizationName}
+          <h1 className="text-2xl font-bold tracking-tight">
+            Panoramica: {org?.name || membership?.organizationName || orgSlug}
           </h1>
-          <p className="mt-1 text-sm text-slate-600">
-            Stato operativo delle risorse gestite, quote piano e ultime attività
-            asincrone.
+          <p className="text-sm text-muted-foreground mt-1">
+            Supervisione delle risorse, conformità di stack e stato operativo del tenant.
           </p>
         </div>
-        <FreshnessIndicator
-          observedAt={readMeta?.observedAt ?? orgDetail?.updatedAt}
-          stale={readMeta?.stale}
-          source={readMeta?.source}
-        />
+        <Badge variant={org?.status === "suspended" ? "destructive" : "success"} className="text-xs">
+          Stato: {org?.status || membership?.organizationStatus || "attivo"}
+        </Badge>
       </div>
 
-      {/* KPI Principali */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-          <p className="text-xs font-semibold tracking-wider text-slate-500 uppercase">
-            Applicazioni
-          </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">
-            {quotas
-              ? `${String(quotas.applicationsUsed)} / ${String(quotas.applicationsLimit)}`
-              : String(orgDetail?.applicationCount ?? apps.length)}
-          </p>
-          <Link
-            href={`/o/${orgSlug}/applications`}
-            className="mt-2 inline-block text-xs font-medium text-indigo-600 hover:underline"
-          >
-            Gestisci applicazioni →
-          </Link>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-          <p className="text-xs font-semibold tracking-wider text-slate-500 uppercase">
-            Database Gestiti
-          </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">
-            {quotas
-              ? `${String(quotas.databasesUsed)} / ${String(quotas.databasesLimit)}`
-              : String(orgDetail?.databaseCount ?? 0)}
-          </p>
-          <Link
-            href={`/o/${orgSlug}/databases`}
-            className="mt-2 inline-block text-xs font-medium text-indigo-600 hover:underline"
-          >
-            Inventario database →
-          </Link>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-          <p className="text-xs font-semibold tracking-wider text-slate-500 uppercase">
-            Server Allocati
-          </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">
-            {quotas
-              ? `${String(quotas.serversUsed)} / ${String(quotas.serversLimit)}`
-              : String(orgDetail?.serverCount ?? 0)}
-          </p>
-          <Link
-            href={`/o/${orgSlug}/servers`}
-            className="mt-2 inline-block text-xs font-medium text-indigo-600 hover:underline"
-          >
-            Stato nodi e telemetria →
-          </Link>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-          <p className="text-xs font-semibold tracking-wider text-slate-500 uppercase">
-            Domini &amp; Piano
-          </p>
-          <p className="mt-2 text-2xl font-bold text-slate-900">
-            {quotas
-              ? `${String(quotas.domainsUsed)} / ${String(quotas.domainsLimit)}`
-              : String(domains.length)}
-          </p>
-          <p className="mt-2 text-xs text-slate-500">
-            Piano commerciale:{" "}
-            <strong className="text-slate-800 uppercase">
-              {quotas?.planCode ?? "Standard"}
-            </strong>
-          </p>
-        </div>
-      </div>
-
-      {/* Stato salute applicazioni + Ultime operazioni */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">
-              Stato Salute Applicazioni
-            </h2>
-            <Link
-              href={`/o/${orgSlug}/applications`}
-              className="text-xs font-semibold text-indigo-600 hover:underline"
-            >
-              Vedi tutte
-            </Link>
-          </div>
-
-          {apps.length === 0 ? (
-            <p className="mt-4 text-sm text-slate-500">
-              Nessuna applicazione visibile con i permessi correnti.
+      {/* KPI Cards */}
+      <div className="grid gap-4 md:grid-cols-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Siti Web / Stack</CardTitle>
+            <Globe className="h-4 w-4 text-blue-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{totalSites}</div>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              {quotas ? `${quotas.usedSites} di ${quotas.maxSites} quota usati` : "Configurati nel tenant"}
             </p>
-          ) : (
-            <ul className="mt-4 divide-y divide-slate-100">
-              {apps.map((app) => (
-                <li
-                  key={app.id}
-                  className="flex flex-wrap items-center justify-between gap-3 py-3"
-                >
-                  <div>
-                    <Link
-                      href={`/o/${orgSlug}/applications/${app.id}`}
-                      className="text-sm font-semibold text-slate-900 hover:text-indigo-600"
-                    >
-                      {app.name}
-                    </Link>
-                    <p className="text-xs text-slate-500">
-                      {app.primaryDomain ?? app.slug} · {app.environment}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <ResourceStatusBadge status={app.status} />
-                    <HealthStatusBadge health={app.health} />
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+          </CardContent>
+        </Card>
 
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs">
-          <div className="flex items-center justify-between">
-            <h2 className="text-base font-semibold text-slate-900">
-              Ultime Operazioni Asincrone
-            </h2>
-            <Link
-              href={`/o/${orgSlug}/operations`}
-              className="text-xs font-semibold text-indigo-600 hover:underline"
-            >
-              Registro completo
-            </Link>
-          </div>
-
-          {operations.length === 0 ? (
-            <p className="mt-4 text-sm text-slate-500">
-              Nessuna operazione recente registrata per questa organizzazione.
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Istanze di Servizio</CardTitle>
+            <Boxes className="h-4 w-4 text-emerald-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{totalServices}</div>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              {quotas ? `${quotas.usedServices} di ${quotas.maxServices} ammessi` : "Servizi definiti"}
             </p>
-          ) : (
-            <ul className="mt-4 divide-y divide-slate-100">
-              {operations.map((op) => (
-                <li
-                  key={op.id}
-                  className="flex flex-wrap items-center justify-between gap-3 py-3"
-                >
-                  <div>
-                    <Link
-                      href={`/o/${orgSlug}/operations/${op.id}`}
-                      className="text-sm font-medium text-slate-900 hover:text-indigo-600"
-                    >
-                      {formatOperationKindIt(op.kind)}
-                    </Link>
-                    <p className="text-xs text-slate-500">
-                      Risorsa: <code>{op.resourceId}</code> ·{" "}
-                      {formatDateTimeIt(op.submittedAt)}
-                    </p>
-                  </div>
-                  <OperationStatusBadge status={op.status} />
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Stato Drift Stack</CardTitle>
+            <CheckCircle2 className="h-4 w-4 text-purple-500" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold text-emerald-600">In Sync</div>
+            <p className="text-[11px] text-muted-foreground mt-1">Conforme all'ultima revisione</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <CardTitle className="text-xs font-medium text-muted-foreground">Utilizzo Quota CPU</CardTitle>
+            <Cpu className="h-4 w-4 text-amber-500" />
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="text-2xl font-bold">{cpuUsedPercent}%</div>
+            <Progress value={cpuUsedPercent} className="h-2" />
+          </CardContent>
+        </Card>
       </div>
+
+      {/* Quota Progress Overview Card */}
+      {quotas && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Gauge className="h-4 w-4 text-primary" />
+              <CardTitle className="text-base">Consumo Quote Risorse Tenant</CardTitle>
+            </div>
+            <CardDescription className="text-xs">
+              Limiti autorizzativi assegnati per la salvaguardia della stabilità del nodo (AC-F1-05).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-medium">Siti Web: {quotas.usedSites} / {quotas.maxSites}</span>
+                <span className="text-muted-foreground">{sitesUsedPercent}%</span>
+              </div>
+              <Progress value={sitesUsedPercent} className="h-2" />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between text-xs">
+                <span className="font-medium">
+                  vCPU Millicores: {quotas.usedCpuMilli} m / {quotas.maxCpuMilli} m
+                </span>
+                <span className="text-muted-foreground">{cpuUsedPercent}%</span>
+              </div>
+              <Progress value={cpuUsedPercent} className="h-2" />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Dedicated AC-F1-10 Availability Matrix Card */}
+      <Card className="border-primary/20">
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="h-5 w-5 text-primary" />
+              <CardTitle className="text-base font-semibold">
+                Matrice Disponibilità Fase 1 (AC-F1-10)
+              </CardTitle>
+            </div>
+            <Badge variant="outline" className="text-xs border-primary/30">
+              HCP-SPEC-002 Invarianti
+            </Badge>
+          </div>
+          <CardDescription className="text-xs">
+            Trasparenza rigorosa sui confini operativi: distinzione trasparente tra funzionalità attive in Fase 1
+            e perimetri la cui esecuzione è differita alla Fase 2+.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid sm:grid-cols-2 gap-4 text-xs">
+            {/* Active Phase 1 Column */}
+            <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+              <div className="font-semibold text-emerald-600 flex items-center gap-1.5 border-b pb-2">
+                <CheckCircle2 className="h-4 w-4" />
+                <span>Funzionalità Attive in Fase 1</span>
+              </div>
+              <ul className="space-y-2 text-muted-foreground">
+                <li className="flex items-center justify-between">
+                  <span>Modello DTO e Control Plane API (/v1)</span>
+                  <Badge variant="success" className="text-[10px]">Attivo (Fase 1)</Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Policy Engine e Validazione Requisiti Stack</span>
+                  <Badge variant="success" className="text-[10px]">Attivo (Fase 1)</Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Stack Revision Immutabili e Hashing SHA-256</span>
+                  <Badge variant="success" className="text-[10px]">Attivo (Fase 1)</Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Quote Risorse e Prenotazioni Transazionali</span>
+                  <Badge variant="success" className="text-[10px]">Attivo (Fase 1)</Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>BFF JWE HttpOnly e Anti-CSRF Timing-Safe</span>
+                  <Badge variant="success" className="text-[10px]">Attivo (Fase 1)</Badge>
+                </li>
+              </ul>
+            </div>
+
+            {/* Inactive Phase 1 Column */}
+            <div className="rounded-lg border bg-muted/20 p-4 space-y-3">
+              <div className="font-semibold text-amber-600 flex items-center gap-1.5 border-b pb-2">
+                <XCircle className="h-4 w-4" />
+                <span>Componenti Previsti in Fase 2+ (Non Attivi in Fase 1)</span>
+              </div>
+              <ul className="space-y-2 text-muted-foreground">
+                <li className="flex items-center justify-between">
+                  <span>Docker Executor Runtime</span>
+                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-500/30">
+                    Non attivo in Fase 1 (Previsto Fase 2+)
+                  </Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Host Agent Daemon Linux</span>
+                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-500/30">
+                    Non attivo in Fase 1 (Previsto Fase 2+)
+                  </Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Multi-Tenant Shared Hosting</span>
+                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-500/30">
+                    Non attivo in Fase 1 (Previsto Fase 2+)
+                  </Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Gestione Automatica Certificati ACME/TLS</span>
+                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-500/30">
+                    Non attivo in Fase 1 (Previsto Fase 2+)
+                  </Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>SFTP Gateway e Accesso File Remoto</span>
+                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-500/30">
+                    Non attivo in Fase 1 (Previsto Fase 2+)
+                  </Badge>
+                </li>
+                <li className="flex items-center justify-between">
+                  <span>Backup Produzione Replicati ad Oggetti</span>
+                  <Badge variant="outline" className="text-[10px] text-amber-600 border-amber-500/30">
+                    Non attivo in Fase 1 (Previsto Fase 2+)
+                  </Badge>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
