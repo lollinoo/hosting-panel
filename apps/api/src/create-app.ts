@@ -1,18 +1,33 @@
 import "reflect-metadata";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { NestFactory } from "@nestjs/core";
 import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from "@nestjs/platform-fastify";
-import { findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
+import {
+  findForbiddenPublicDtoKeys,
+  type IpcSigningKey,
+  type RuntimeBackend,
+} from "@hosting-panel/contracts";
 import {
   createDatabaseClient,
+  parseSecretsMasterKey,
   seedPhase1Dataset,
   type DatabaseClient,
 } from "@hosting-panel/database";
+import {
+  InMemoryDockerSimulatorAdapter,
+  SignedDockerExecutorIpcClient,
+} from "@hosting-panel/docker-executor";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
+import {
+  InMemoryHostSimulatorAdapter,
+  SignedHostAgentIpcClient,
+} from "@hosting-panel/host-agent";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -23,7 +38,103 @@ import {
   ControlPlaneError,
   resolveRequestId,
 } from "./common/control-plane.error.js";
+import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
+import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "./tokens.js";
+
+const DEFAULT_EXECUTOR_SOCKET = "/run/hosting-panel/executor.sock";
+const DEFAULT_HOST_AGENT_SOCKET = "/run/hosting-panel/host-agent.sock";
+const DEFAULT_IPC_KEY_FILE = "/etc/hosting-panel/ipc.key";
+const DEFAULT_SECRETS_MASTER_KEY_FILE = "/etc/hosting-panel/secrets-master.key";
+
+const DEV_FALLBACK_MASTER_KEY = createHash("sha256")
+  .update("hosting-panel-dev-simulator-secrets-master-key-v1")
+  .digest();
+
+function resolveRuntimeBackend(options?: CreateControlPlaneAppOptions): RuntimeBackend {
+  if (
+    options?.runtimeBackend === "disabled" ||
+    options?.runtimeBackend === "local-simulator" ||
+    options?.runtimeBackend === "linux-systemd"
+  ) {
+    return options.runtimeBackend;
+  }
+
+  const envBackend = process.env["HP_RUNTIME_BACKEND"]?.trim();
+  if (
+    envBackend === "disabled" ||
+    envBackend === "local-simulator" ||
+    envBackend === "linux-systemd"
+  ) {
+    return envBackend;
+  }
+
+  if (
+    options?.dockerExecutor?.isRuntimeAvailable ||
+    options?.hostAgent?.isRuntimeAvailable
+  ) {
+    return "local-simulator";
+  }
+
+  return "disabled";
+}
+
+async function resolveLinuxIpcSigningKey(): Promise<IpcSigningKey> {
+  const keyId = process.env["HP_IPC_KEY_ID"]?.trim() || "ipc-v1";
+  const inlineKey = (
+    process.env["HP_IPC_KEY"] ??
+    process.env["HP_IPC_HMAC_SECRET"] ??
+    process.env["HP_IPC_SECRET"]
+  )?.trim();
+
+  let secretMaterial: string;
+  if (inlineKey && inlineKey.length > 0) {
+    secretMaterial = inlineKey;
+  } else {
+    const keyFile = process.env["HP_IPC_KEY_FILE"]?.trim() || DEFAULT_IPC_KEY_FILE;
+    const content = await readFile(keyFile, "utf8");
+    secretMaterial = content.trim();
+  }
+
+  if (!secretMaterial || Buffer.byteLength(secretMaterial, "utf8") < 32) {
+    throw new Error(
+      "Linux systemd runtime backend requires an IPC HMAC signing key of at least 32 bytes (HP_IPC_KEY or HP_IPC_KEY_FILE).",
+    );
+  }
+
+  return {
+    keyId,
+    algorithm: "hmac-sha256",
+    secret: secretMaterial,
+  };
+}
+
+async function resolveSecretsMasterKey(
+  runtimeBackend: RuntimeBackend,
+  explicitKey?: string | Buffer | Uint8Array,
+): Promise<Buffer> {
+  if (explicitKey !== undefined) {
+    return parseSecretsMasterKey(explicitKey);
+  }
+
+  const envKey = process.env["HP_SECRETS_MASTER_KEY"]?.trim();
+  if (envKey && envKey.length > 0) {
+    return parseSecretsMasterKey(envKey);
+  }
+
+  const envKeyFile = process.env["HP_SECRETS_MASTER_KEY_FILE"]?.trim();
+  if (envKeyFile && envKeyFile.length > 0) {
+    const raw = (await readFile(envKeyFile, "utf8")).trim();
+    return parseSecretsMasterKey(raw);
+  }
+
+  if (runtimeBackend === "linux-systemd") {
+    const raw = (await readFile(DEFAULT_SECRETS_MASTER_KEY_FILE, "utf8")).trim();
+    return parseSecretsMasterKey(raw);
+  }
+
+  return Buffer.from(DEV_FALLBACK_MASTER_KEY);
+}
 
 export interface CreateControlPlaneAppOptions {
   readonly host?: string;
@@ -31,8 +142,14 @@ export interface CreateControlPlaneAppOptions {
   readonly listen?: boolean;
   readonly databaseClient?: DatabaseClient;
   readonly seedPhase1?: boolean;
+  readonly runtimeBackend?: RuntimeBackend;
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
+  readonly secretsMasterKey?: string | Buffer | Uint8Array;
+  readonly autoProcessOutbox?: boolean;
+  readonly outboxPollIntervalMs?: number | null;
+  readonly driftReconcileIntervalMs?: number | null;
+  readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
   readonly enableDevOidc?: boolean;
@@ -44,11 +161,14 @@ export interface ControlPlaneAppHandle {
   readonly fastify: FastifyInstance;
   readonly baseUrl: string | null;
   readonly port: number | null;
+  readonly runtimeBackend: RuntimeBackend;
   readonly dbClient: DatabaseClient;
   readonly dockerExecutor: DockerExecutorPort;
   readonly hostAgent: HostAgentPort;
   readonly oidc: OidcService;
   readonly authz: AuthzContextService;
+  readonly outboxWorker: OutboxWorkerService;
+  readonly driftReconciler: DriftReconcilerService;
   close(): Promise<void>;
 }
 
@@ -61,8 +181,48 @@ export async function createControlPlaneApp(
     options?.port ??
     (process.env["API_PORT"] ? Number.parseInt(process.env["API_PORT"], 10) : 0);
 
-  const dockerExecutor = options?.dockerExecutor ?? new Phase1DisabledDockerExecutor();
-  const hostAgent = options?.hostAgent ?? new Phase1DisabledHostAgent();
+  const runtimeBackend = resolveRuntimeBackend(options);
+  const secretsMasterKey = await resolveSecretsMasterKey(
+    runtimeBackend,
+    options?.secretsMasterKey,
+  );
+
+  let dockerExecutor = options?.dockerExecutor;
+  let hostAgent = options?.hostAgent;
+
+  if (!dockerExecutor || !hostAgent) {
+    if (runtimeBackend === "disabled") {
+      dockerExecutor = dockerExecutor ?? new Phase1DisabledDockerExecutor();
+      hostAgent = hostAgent ?? new Phase1DisabledHostAgent();
+    } else if (runtimeBackend === "local-simulator") {
+      dockerExecutor = dockerExecutor ?? new InMemoryDockerSimulatorAdapter();
+      hostAgent = hostAgent ?? new InMemoryHostSimulatorAdapter();
+    } else {
+      const signingKey = await resolveLinuxIpcSigningKey();
+      const executorSocketPath =
+        process.env["HP_EXECUTOR_SOCKET_PATH"]?.trim() ||
+        process.env["HP_EXECUTOR_SOCKET"]?.trim() ||
+        DEFAULT_EXECUTOR_SOCKET;
+      const hostAgentSocketPath =
+        process.env["HP_HOST_AGENT_SOCKET_PATH"]?.trim() ||
+        process.env["HP_HOST_AGENT_SOCKET"]?.trim() ||
+        DEFAULT_HOST_AGENT_SOCKET;
+
+      dockerExecutor =
+        dockerExecutor ??
+        new SignedDockerExecutorIpcClient({
+          signingKey,
+          transport: "uds",
+          socketPath: executorSocketPath,
+        });
+      hostAgent =
+        hostAgent ??
+        new SignedHostAgentIpcClient({
+          signingKey,
+          socketPath: hostAgentSocketPath,
+        });
+    }
+  }
 
   const ownsDatabaseClient = options?.databaseClient === undefined;
   const databaseUrl = process.env["DATABASE_URL"];
@@ -90,10 +250,29 @@ export async function createControlPlaneApp(
   const enableDevOidc =
     options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] !== "false";
 
+  const autoProcessOutbox = options?.autoProcessOutbox ?? true;
+  const defaultBackgroundInterval =
+    shouldListen && runtimeBackend !== "disabled" ? 5_000 : null;
+  const outboxPollIntervalMs =
+    options?.outboxPollIntervalMs !== undefined
+      ? options.outboxPollIntervalMs
+      : defaultBackgroundInterval;
+  const driftReconcileIntervalMs =
+    options?.driftReconcileIntervalMs !== undefined
+      ? options.driftReconcileIntervalMs
+      : shouldListen && runtimeBackend !== "disabled"
+        ? 15_000
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
     enableDevOidc,
+    runtimeBackend,
+    secretsMasterKey,
+    autoProcessOutbox,
+    outboxPollIntervalMs,
+    driftReconcileIntervalMs,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -184,6 +363,15 @@ export async function createControlPlaneApp(
 
   const oidc = nestApp.get(OidcService);
   const authz = nestApp.get(AuthzContextService);
+  const outboxWorker = nestApp.get(OutboxWorkerService);
+  const driftReconciler = nestApp.get(DriftReconcilerService);
+
+  if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
+    await outboxWorker.recoverUnknownOperations().catch(() => undefined);
+  }
+
+  outboxWorker.startBackgroundLoop();
+  driftReconciler.startBackgroundLoop();
 
   let isClosed = false;
 
@@ -192,17 +380,22 @@ export async function createControlPlaneApp(
     fastify: fastifyInstance,
     baseUrl,
     port: boundPort,
+    runtimeBackend,
     dbClient,
     dockerExecutor,
     hostAgent,
     oidc,
     authz,
+    outboxWorker,
+    driftReconciler,
     async close(): Promise<void> {
       if (isClosed) {
         return;
       }
       isClosed = true;
 
+      await outboxWorker.stop();
+      await driftReconciler.stop();
       await nestApp.close();
       if (ownsDatabaseClient) {
         await dbClient.close();

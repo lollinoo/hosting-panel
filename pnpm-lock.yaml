@@ -286,9 +286,15 @@ importers:
       '@hosting-panel/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@hosting-panel/docker-executor':
+        specifier: workspace:*
+        version: link:../docker-executor
       '@hosting-panel/executor-contracts':
         specifier: workspace:*
         version: link:../../packages/executor-contracts
+      '@hosting-panel/host-agent':
+        specifier: workspace:*
+        version: link:../host-agent
       '@hosting-panel/host-agent-contracts':
         specifier: workspace:*
         version: link:../../packages/host-agent-contracts

@@ -15,6 +15,8 @@ import { HostsController } from "./controllers/hosts.controller.js";
 import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
+import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
+import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -66,6 +68,8 @@ export class AppModule {
         },
         OidcService,
         AuthzContextService,
+        OutboxWorkerService,
+        DriftReconcilerService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,
@@ -78,6 +82,8 @@ export class AppModule {
         HOST_AGENT_TOKEN,
         OidcService,
         AuthzContextService,
+        OutboxWorkerService,
+        DriftReconcilerService,
       ],
     };
   }

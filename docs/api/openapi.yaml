@@ -1,13 +1,16 @@
 openapi: 3.1.0
 info:
   title: Hosting Control Panel API
-  version: 0.1.0
-  summary: Docker-Native Control Plane API (HCP-SPEC-002 Phase 1)
+  version: 0.2.0
+  summary: Docker-Native Control Plane API (HCP-SPEC-003 Phase 2)
   description: >-
     Versioned `/v1` Docker-native control-plane REST API enforcing strict tenant
     organization isolation, default-deny RBAC/ABAC authorization, transactional
-    host placement and quota reservations, immutable stack revisions, and Phase 1
-    disabled runtime execution boundaries.
+    host placement and quota reservations, immutable stack revisions, write-only
+    AES-256-GCM encrypted secrets, transactional outbox lifecycle operations over
+    signed Unix Domain Socket IPC (`docker-executor` and `host-agent`), `unknown`
+    crash recovery, and observe-only drift reconciliation. Shared hosting, ACME
+    TLS, SFTP, and production backups remain gated (`false`).
 servers:
   - url: http://127.0.0.1:4000
     description: Local embedded control-plane development server
@@ -23,17 +26,19 @@ tags:
   - name: Identity
     description: Principal identity, assigned roles, and tenant memberships
   - name: Hosts
-    description: Linux host nodes, maintenance, security posture, and allocations
+    description: Linux host nodes, telemetry, maintenance, security posture, operations, and allocations
   - name: Service Templates
     description: Approved service catalog templates
   - name: Admin Audit
     description: Platform-wide immutable audit trail
   - name: Organizations
     description: Tenant organizations, capabilities, quotas, and members
+  - name: Secrets
+    description: Write-only AES-256-GCM encrypted secrets metadata
   - name: Sites
     description: Composite application sites, domains, and aggregate drift status
   - name: Services
-    description: Declarative service instances, immutable revisions, and lifecycle
+    description: Declarative service instances, immutable revisions, and async lifecycle
   - name: Operations
     description: Asynchronous operations and timeline progress
 
@@ -64,10 +69,12 @@ paths:
                     const: hosting-panel-api
                   spec:
                     type: string
-                    const: HCP-SPEC-002
+                    enum: [HCP-SPEC-002, HCP-SPEC-003]
                   phase:
                     type: string
-                    const: phase-1
+                    enum: [phase-1, phase-2]
+                  runtimeBackend:
+                    $ref: "#/components/schemas/RuntimeBackend"
                   timestamp:
                     type: string
                     format: date-time
@@ -340,6 +347,47 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/hosts/{hostId}/telemetry:
+    get:
+      tags: [Hosts]
+      operationId: getHostTelemetry
+      summary: Retrieve host telemetry snapshot and daemon heartbeats (host.metrics.read)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+      responses:
+        "200":
+          description: Host telemetry and daemon heartbeats
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [hostId, runtimeBackend, telemetry, daemons]
+                    properties:
+                      hostId:
+                        type: string
+                      runtimeBackend:
+                        $ref: "#/components/schemas/RuntimeBackend"
+                      telemetry:
+                        $ref: "#/components/schemas/HostTelemetryDto"
+                        nullable: true
+                      daemons:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/HostDaemonHeartbeatDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/hosts/{hostId}/mode:
     patch:
       tags: [Hosts]
@@ -374,16 +422,17 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Shared mode transition gated (AC-F1-06)
+          description: Shared mode transition gated (AC-F1-06 / AC-F2-10)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/hosts/{hostId}/maintenance:
     post:
       tags: [Hosts]
       operationId: executeHostMaintenance
-      summary: Request host maintenance action (host.maintenance.execute)
+      summary: Enqueue allowlisted host maintenance operation (host.maintenance.execute)
       parameters:
         - $ref: "#/components/parameters/HostIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyRuntimeHeader"
       requestBody:
         required: true
         content:
@@ -391,24 +440,39 @@ paths:
             schema:
               $ref: "#/components/schemas/HostMaintenanceInput"
       responses:
+        "202":
+          description: Host maintenance operation queued via transactional outbox (AC-F2-04)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
-          description: Permission denied or unapproved maintenance action
+          description: Permission denied or unapproved maintenance action (HOST_POLICY_DENIED)
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Resource locked or idempotency conflict (RESOURCE_LOCKED / IDEMPOTENCY_CONFLICT)
+          $ref: "#/components/responses/ErrorResponse"
         "422":
-          description: Host agent runtime disabled in Phase 1 (AC-F1-10)
+          description: Host agent runtime disabled (NOT_SUPPORTED)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/hosts/{hostId}/security:
     post:
       tags: [Hosts]
       operationId: executeHostSecurity
-      summary: Execute host security posture verification (host.security.manage)
+      summary: Enqueue allowlisted host security posture operation (host.security.manage)
       parameters:
         - $ref: "#/components/parameters/HostIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyRuntimeHeader"
       requestBody:
         required: true
         content:
@@ -416,14 +480,98 @@ paths:
             schema:
               $ref: "#/components/schemas/HostSecurityInput"
       responses:
+        "202":
+          description: Host security operation queued via transactional outbox (AC-F2-04)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Permission denied or unapproved security policy (HOST_POLICY_DENIED)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Resource locked or idempotency conflict (RESOURCE_LOCKED / IDEMPOTENCY_CONFLICT)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Host agent runtime disabled (NOT_SUPPORTED)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/hosts/{hostId}/operations:
+    get:
+      tags: [Hosts, Operations]
+      operationId: listHostOperations
+      summary: List asynchronous operations targeting a host (operation.read)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated host operations
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/OperationDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
-        "422":
-          description: Host agent runtime disabled in Phase 1 (AC-F1-10)
+
+  /v1/hosts/{hostId}/operations/{opId}:
+    get:
+      tags: [Hosts, Operations]
+      operationId: getHostOperation
+      summary: Retrieve specific host operation timeline and progress (operation.read)
+      parameters:
+        - $ref: "#/components/parameters/HostIdParam"
+        - in: path
+          name: opId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Host operation details and timeline steps
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/OperationDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/allocations:
@@ -674,7 +822,7 @@ paths:
         - $ref: "#/components/parameters/OrgIdParam"
       responses:
         "200":
-          description: Organization capabilities (Phase 1 flags all false per AC-F1-10)
+          description: Organization runtime and deferred capability flags (AC-F2-10)
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -687,6 +835,121 @@ paths:
                   data:
                     $ref: "#/components/schemas/OrganizationCapabilitiesDto"
         "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/secrets:
+    get:
+      tags: [Secrets]
+      operationId: listOrganizationSecrets
+      summary: List write-only encrypted secrets metadata for organization (service.configuration.manage)
+      description: >-
+        Returns metadata only (`secretKey`, `version`, `keyVersion`, `siteId`, timestamps).
+        Plaintext secret values, ciphertexts, IVs, and authentication tags are never returned (AC-F2-05).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - in: query
+          name: siteId
+          required: false
+          schema:
+            type: string
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated encrypted secret metadata list
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EncryptedSecretMetadataDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Secrets]
+      operationId: upsertOrganizationSecret
+      summary: Create or rotate an AES-256-GCM encrypted secret (service.configuration.manage)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertEncryptedSecretInput"
+      responses:
+        "201":
+          description: Encrypted secret created or rotated (metadata only)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EncryptedSecretMetadataDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/secrets/{secretId}:
+    delete:
+      tags: [Secrets]
+      operationId: deleteOrganizationSecret
+      summary: Delete an encrypted secret from organization store (service.configuration.manage)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SecretIdParam"
+      responses:
+        "200":
+          description: Encrypted secret deleted
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [deleted, secretId]
+                    properties:
+                      deleted:
+                        type: boolean
+                        const: true
+                      secretId:
+                        type: string
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
@@ -1157,10 +1420,11 @@ paths:
     post:
       tags: [Services]
       operationId: executeServiceLifecycle
-      summary: Request service runtime lifecycle action (deploy, restart, stop)
+      summary: Enqueue service runtime lifecycle operation (deploy, restart, stop)
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/ServiceIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyRuntimeHeader"
       requestBody:
         required: true
         content:
@@ -1168,6 +1432,17 @@ paths:
             schema:
               $ref: "#/components/schemas/ServiceLifecycleInput"
       responses:
+        "202":
+          description: Service lifecycle operation queued via transactional outbox (AC-F2-06)
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/XRequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsyncAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
@@ -1175,8 +1450,11 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "404":
           $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Service locked by in-flight operation or idempotency conflict (RESOURCE_LOCKED / IDEMPOTENCY_CONFLICT)
+          $ref: "#/components/responses/ErrorResponse"
         "422":
-          description: Docker executor runtime disabled in Phase 1 (AC-F1-10)
+          description: Docker executor runtime disabled (NOT_SUPPORTED)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/operations:
@@ -1282,10 +1560,23 @@ components:
       required: true
       schema:
         type: string
+    SecretIdParam:
+      in: path
+      name: secretId
+      required: true
+      schema:
+        type: string
     IdempotencyKeyHeader:
       in: header
       name: Idempotency-Key
       required: true
+      schema:
+        type: string
+    IdempotencyKeyRuntimeHeader:
+      in: header
+      name: Idempotency-Key
+      required: false
+      description: Required when runtime execution is enabled (`runtimeBackend != 'disabled'`)
       schema:
         type: string
     CursorQuery:
@@ -1342,6 +1633,7 @@ components:
             - DOMAIN_CONFLICT
             - LAST_OWNER_PROTECTED
             - NOT_SUPPORTED
+            - OPERATION_INTERRUPTED
             - OPERATION_AMBIGUOUS
             - DOCKER_ENGINE_UNAVAILABLE
             - HOST_AGENT_UNAVAILABLE
@@ -1393,10 +1685,15 @@ components:
         hasMore:
           type: boolean
 
+    RuntimeBackend:
+      type: string
+      enum: [linux-systemd, local-simulator, disabled]
+
     PlatformCapabilitiesDto:
       type: object
       required:
         - phase
+        - runtimeBackend
         - hostingMode
         - sharedHostingEnabled
         - dockerExecutorRuntimeAvailable
@@ -1407,7 +1704,9 @@ components:
       properties:
         phase:
           type: string
-          const: phase-1
+          enum: [phase-1, phase-2]
+        runtimeBackend:
+          $ref: "#/components/schemas/RuntimeBackend"
         hostingMode:
           type: string
           const: dedicated
@@ -1416,10 +1715,8 @@ components:
           const: false
         dockerExecutorRuntimeAvailable:
           type: boolean
-          const: false
         hostAgentRuntimeAvailable:
           type: boolean
-          const: false
         acmeTlsRuntimeAvailable:
           type: boolean
           const: false
@@ -2163,6 +2460,165 @@ components:
           type: string
           format: date-time
 
+    EncryptedSecretMetadataDto:
+      type: object
+      description: Write-only encrypted secret metadata (never includes plaintext or ciphertext)
+      required:
+        - id
+        - organizationId
+        - siteId
+        - secretKey
+        - keyVersion
+        - version
+        - createdByUserId
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        organizationId:
+          type: string
+        siteId:
+          type: string
+          nullable: true
+        secretKey:
+          type: string
+          pattern: "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+        keyVersion:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        createdByUserId:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    UpsertEncryptedSecretInput:
+      type: object
+      required: [secretKey, value]
+      properties:
+        secretKey:
+          type: string
+          pattern: "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+        value:
+          type: string
+          minLength: 1
+          maxLength: 16384
+          writeOnly: true
+        siteId:
+          type: string
+          nullable: true
+
+    HostDaemonHeartbeatDto:
+      type: object
+      required:
+        - hostId
+        - component
+        - status
+        - version
+        - lastSeenAt
+        - telemetrySnapshot
+      properties:
+        hostId:
+          type: string
+        component:
+          type: string
+          enum: [docker_executor, host_agent]
+        status:
+          type: string
+          enum: [online, degraded, offline]
+        version:
+          type: string
+        lastSeenAt:
+          type: string
+          format: date-time
+        telemetrySnapshot:
+          type: object
+
+    HostTelemetryDto:
+      type: object
+      required:
+        - hostId
+        - cpuUsagePercent
+        - memoryUsedBytes
+        - memoryTotalBytes
+        - storageUsedBytes
+        - storageTotalBytes
+        - uptimeSeconds
+        - kernelVersion
+        - dockerEngineReachable
+        - collectedAt
+      properties:
+        hostId:
+          type: string
+        cpuUsagePercent:
+          type: number
+          minimum: 0
+          maximum: 100
+        memoryUsedBytes:
+          type: string
+        memoryTotalBytes:
+          type: string
+        storageUsedBytes:
+          type: string
+        storageTotalBytes:
+          type: string
+        uptimeSeconds:
+          type: number
+          minimum: 0
+        kernelVersion:
+          type: string
+        dockerEngineReachable:
+          type: boolean
+        collectedAt:
+          type: string
+          format: date-time
+
+    AsyncAcceptedData:
+      type: object
+      required: [operationId, status, resourceId, submittedAt]
+      properties:
+        operationId:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - processing
+            - accepted
+            - reconciling
+            - succeeded
+            - failed
+            - unknown
+            - cancelled
+        resourceId:
+          type: string
+        submittedAt:
+          type: string
+          format: date-time
+
+    AsyncAcceptedLinks:
+      type: object
+      required: [self]
+      properties:
+        self:
+          type: string
+
+    AsyncAcceptedEnvelope:
+      type: object
+      required: [data, links]
+      properties:
+        data:
+          $ref: "#/components/schemas/AsyncAcceptedData"
+        links:
+          $ref: "#/components/schemas/AsyncAcceptedLinks"
+
     OperationTimelineStep:
       type: object
       required: [id, key, label, status, message, startedAt, completedAt]
@@ -2218,6 +2674,7 @@ components:
             - service.stop
             - site.deploy
             - host.maintenance
+            - host.security
             - host.allocate
         status:
           type: string

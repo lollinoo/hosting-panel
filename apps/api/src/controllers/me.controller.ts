@@ -1,11 +1,13 @@
 import { Controller, Get, Inject, Query, Req } from "@nestjs/common";
 import {
-  DEFAULT_PLATFORM_CAPABILITIES,
+  createPlatformCapabilities,
   type MeDto,
   type OrganizationSummaryDto,
   type PresetRoleName,
   type ReadMeta,
 } from "@hosting-panel/contracts";
+import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import {
@@ -13,11 +15,20 @@ import {
   parsePaginationQuery,
   resolveRequestId,
 } from "../common/control-plane.error.js";
+import {
+  CONTROL_PLANE_CONFIG_TOKEN,
+  DOCKER_EXECUTOR_TOKEN,
+  HOST_AGENT_TOKEN,
+  type ControlPlaneRuntimeConfig,
+} from "../tokens.js";
 
 @Controller("v1/me")
 export class MeController {
   public constructor(
     @Inject(AuthzContextService) private readonly authzService: AuthzContextService,
+    @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
+    @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
+    @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
   ) {}
 
   @Get()
@@ -43,7 +54,11 @@ export class MeController {
         globalRoles: (auth.principal.globalRoles ?? []) as PresetRoleName[],
         hostingAdminOrgIds: (auth.principal.hostingAdminOrgIds ?? []) as string[],
         memberships,
-        platformCapabilities: DEFAULT_PLATFORM_CAPABILITIES,
+        platformCapabilities: createPlatformCapabilities({
+          runtimeBackend: this.config.runtimeBackend,
+          dockerExecutorRuntimeAvailable: this.dockerExecutor.isRuntimeAvailable,
+          hostAgentRuntimeAvailable: this.hostAgent.isRuntimeAvailable,
+        }),
       },
     };
   }
