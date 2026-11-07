@@ -12,21 +12,35 @@ Build POC v0.1 of the Coolify-based Multi-Tenant Hosting Control Panel (`HCP-SPE
 
 ## Atomic Commit Plan & Status
 - [x] Branch renamed `mainBranch` -> `main`
-- [ ] **Unit 1**: `chore: initialize harness, project brain, and foundational ADRs`
+- [x] **Unit 1**: `chore: initialize harness, project brain, and foundational ADRs`
   - Deliverables: `HARNESS.md`, `.agents/brain/decisions.md`, `.agents/brain/state.md`, `.gitignore`, `.editorconfig`, `.node-version`, `docs/architecture/adr/0001-poc-architecture-and-runtime.md`
-- [ ] **Unit 2**: `build: configure monorepo workspace and shared TypeScript tooling`
+- [x] **Unit 2**: `build: configure monorepo workspace and shared TypeScript tooling`
   - Deliverables: `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `tsconfig.base.json`, `eslint.config.mjs`, `vitest.workspace.ts` / root scripts, `packages/config/*`
-- [ ] **Unit 3**: `feat(contracts): define v1 API schemas, permissions, and error codes`
+- [x] **Unit 3**: `feat(contracts): define v1 API schemas, permissions, and error codes`
   - Deliverables: `packages/contracts/*` + unit tests
-- [ ] **Unit 4**: `feat(authz): implement default-deny RBAC/ABAC policy engine`
+- [x] **Unit 4**: `feat(authz): implement default-deny RBAC/ABAC policy engine`
   - Deliverables: `packages/authz/*` + unit tests (roles, grants, deny precedence, cross-tenant deny)
-- [ ] **Unit 5**: `feat(database): add Drizzle PostgreSQL schema, migrations, and PGlite driver`
+- [x] **Unit 5**: `feat(database): add Drizzle PostgreSQL schema, migrations, and PGlite driver`
   - Deliverables: `packages/database/*` + SQL migration + composite tenant ownership constraints + seed + transactional outbox/lock integration tests
-- [ ] **Unit 6**: `feat(coolify-adapter): implement typed Coolify v4 client with secret redaction`
+- [x] **Unit 6**: `feat(coolify-adapter): implement typed Coolify v4 client with secret redaction`
   - Deliverables: `packages/coolify-adapter/*` + §7.5 contract test suite (`200`, `401`, `403`, `404`, `409`, `429 Retry-After`, redirect block, host allowlist, secret redaction)
-- [ ] **Unit 7**: `feat(api): implement v1 control-plane API, outbox worker, and fake Coolify lab`
+- [x] **Unit 7**: `feat(api): implement v1 control-plane API, outbox worker, and fake Coolify lab`
   - Deliverables: `apps/api/*`, `docs/api/openapi.yaml`, Fake Coolify v4 Lab server, OIDC `jose` issuer/verifier, Outbox worker & reconciler, integration tests for `AC-001`..`AC-011`, `AC-017`, `AC-022`
-- [ ] **Unit 8**: `feat(web): build Next.js 16 BFF session layer and Italian MVP control panel`
+- [x] **Unit 8**: `feat(web): build Next.js 16 BFF session layer and Italian MVP control panel`
   - Deliverables: `apps/web/*` (`HttpOnly` BFF cookie/proxy allowlist, Italian UI screens: Login, Choose Org, Overview, Servers, Applications, Application Detail + Deploy/Restart + Timeline, Databases, Domains/TLS, Operations, Admin) + tests & production build check
-- [ ] **Unit 9**: `chore(infra): add local Docker Compose topology, CI workflow, and documentation`
-  - Deliverables: `infra/local/docker-compose.yml`, `.env.example`, `.github/workflows/ci.yml`, `README.md`
+- [x] **Unit 9**: `chore(infra): add local Docker Compose topology, CI workflow, and documentation`
+  - Deliverables: `infra/local/docker-compose.yml`, `.env.example`, `.github/workflows/ci.yml`, `docs/runbooks/poc-operations.md`, `README.md`
+
+## Automated Sensor Verification Summary
+- **Test Suites**: 7 passed (7 total)
+- **Tests**: 81 passed (81 total across packages and apps)
+  - `packages/config/test/config.test.ts` (2 tests)
+  - `packages/contracts/test/contracts.test.ts` (17 tests)
+  - `packages/authz/test/authz.test.ts` (18 tests)
+  - `packages/coolify-adapter/test/coolify-adapter.contract.test.ts` (15 tests)
+  - `packages/database/test/database.test.ts` (6 tests)
+  - `apps/web/test/bff.integration.test.ts` (6 tests)
+  - `apps/api/test/api.integration.test.ts` (17 tests)
+- **Linter**: ESLint clean (0 errors, 0 warnings)
+- **Typecheck**: Monorepo TypeScript check clean across all packages and apps
+- **Production Build**: Built all packages (`dist/`) and Next.js 16 production bundle successfully
