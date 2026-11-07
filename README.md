@@ -1,102 +1,117 @@
-# Hosting Panel (`hosting-panel`)
+# Hosting Control Panel (`hosting-panel`)
 
-> **Multi-Tenant Coolify v4 SaaS Control Panel — Proof of Concept v0.1**  
-> Riferimento normativo di progetto: **`HCP-SPEC-001` rev. 1.0**
+> **Piattaforma di Hosting Docker-Native Standalone & Multi-Tenant — Fase 1**  
+> Riferimento normativo di progetto: **`HCP-SPEC-002` rev. 1.0**
 
 ---
 
 ## 1. Visione e Principi Architetturali
 
-Il progetto **Hosting Panel** nasce per trasformare un'infrastruttura gestita tramite Coolify v4 in una vera piattaforma SaaS di Hosting multi-tenant sicura, moderna e pronta per la produzione.
+Il progetto **Hosting Control Panel (HCP)** è una piattaforma di hosting moderna, sicura e nativamente integrata con l'ecosistema container Docker. Progettata per superare le fragilità e la complessità dei pannelli tradizionali, adotta un approccio rigoroso orientato alla sovranità dei dati, alla riproducibilità dichiarativa e alla separazione dei domini di guasto.
 
-In molte implementazioni naive, il frontend comunica direttamente con Coolify o attraverso un proxy HTTP generico (*pass-through*). Questo approccio introduce vulnerabilità critiche di sicurezza: esposizione dei token API Coolify, falle BOLA/IDOR (Broken Object Level Authorization) tra tenant e lock contention distruttiva durante le mutazioni infrastrutturali.
+L'architettura di Fase 1 (`HCP-SPEC-002`) si fonda sui seguenti pilastri ingegneristici:
 
-**Hosting Panel adotta un'architettura rigorosamente orientata alla sicurezza e all'affidabilità**:
-
-1. **Anti-BOLA & Default-Deny Assoluto (`AC-001`)**:
-   Ogni richiesta HTTP valida prima l'appartenenza del chiamante all'organizzazione (`organization_id`), l'effettiva titolarità della risorsa all'interno dell'organizzazione e la conformità al modello RBAC + ABAC. Le risorse appartenenti ad altri tenant restituiscono invariabilmente `404 Not Found`, impedendo qualsiasi fuga di informazioni (*tenant isolation*). Le richieste verso Coolify vengono inoltrate solo e soltanto dopo che tutte le verifiche di autorizzazione sono superate.
-2. **BFF (Backend-For-Frontend) & Zero Client Secrets (`AC-017`)**:
-   Il browser interagisce unicamente con l'applicazione Next.js 16 (`apps/web`) tramite un cookie di sessione sicuro e criptato (`HttpOnly`, `SameSite=Lax`). Nessun token Bearer Coolify, nessun URL interno di provider e nessun identificativo univoco Coolify (`coolify_uuid`) viene mai esposto ai client browser né memorizzato nel DOM.
-3. **Outbox Transazionale & Ciclo a 8 Stati (`AC-005`..`AC-007`)**:
-   Tutte le mutazioni infrastrutturali (es. deploy, riavvii) vengono accettate con `202 Accepted` e gestite tramite Transactional Outbox. L'operazione, i relativi step, l'evento outbox e l'acquisizione del lock di risorsa (`resource_mutation_locks`) vengono persistiti atomicamente in un'unica transazione PostgreSQL. Gli stati seguono la macchina a stati finiti formale:  
-   `queued -> processing -> accepted_by_provider -> reconciling -> succeeded | failed | unknown | cancelled`.
-4. **Divieto di Blind POST Replay (`AC-007`)**:
-   In caso di timeout o errore transitorio di rete durante una mutazione verso Coolify, l'operazione transita nello stato `unknown` mantenendo il lock attivo. È categoricamente vietato riemettere una seconda chiamata `POST` alla cieca; il reconciler effettua esclusivamente polling idempotente `GET` per verificare lo stato effettivo del provider.
-5. **Adattatore Coolify v4 Tipizzato & Redazione Ricorsiva (`AC-008`, `AC-009`)**:
-   Tutte le interazioni upstream avvengono tramite un client tipizzato (`packages/coolify-adapter`) provvisto di allowlist statica degli host, rifiuto dei redirect con header di autorizzazione, gestione nativa del rate-limit `429` (rispetto di `Retry-After` e cooldown esponenziale) e sanificazione ricorsiva di tutti i token o segreti presenti nelle risposte.
-6. **Dual-Mode Runtime (Zero-Docker Standalone & Docker Staging) (ADR-002)**:
-   La piattaforma supporta l'avvio immediato senza Docker tramite `@electric-sql/pglite` (eseguendo il medesimo schema PostgreSQL 18 e i vincoli Drizzle), un emulatore OIDC locale basato su `jose`, e un Fake Coolify v4 Lab HTTP Server; parallelamente, la topologia Docker Compose (`infra/local/docker-compose.yml`) fornisce PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2 per ambienti standard di staging e produzione.
-
-### Perimetro di Progetto: Distinzione tra POC v0.1 e R1/R2
-
-In ottemperanza alla nota iniziale di `HCP-SPEC-001`, si chiarisce la netta demarcazione tra quanto implementato nella presente POC e quanto pianificato per le release successive:
-
-| Funzionalità / Ambito | Stato POC v0.1 (Stage 0 + MVP Core) | Pianificato per R1 / R2 |
-| :--- | :---: | :---: |
-| **Architettura Monorepo & Contratti Condivisi** | ✅ Implementato (`contracts`, `authz`, `database`, `coolify-adapter`, `config`) | Consolidamento ed estensioni di scala |
-| **Control Plane API `/v1`** | ✅ Implementato (NestJS 12 + Fastify 5, OpenAPI 3.1) | Espansione endpoint avanzati |
-| **UI Control Panel in Italiano** | ✅ Implementato (Next.js 16, App Router, Tailwind CSS, TanStack Query) | Temi personalizzabili e dark mode completa |
-| **Autenticazione OIDC & BFF Session** | ✅ Implementato (Cookie `HttpOnly`, Dev OIDC locale, compatibile Keycloak) | Integrazione Multi-IdP aziendale (SAML, Google) |
-| **Autorizzazione RBAC + ABAC & Anti-BOLA** | ✅ Implementato (5 ruoli, grant per risorsa, precedenza deny, isolamento tenant) | Ruoli custom definiti dall'utente |
-| **Transactional Outbox & 8-State Reconciler** | ✅ Implementato (Lock risorsa, idempotency key deduplication, zero blind POST replay) | Code distribuite su cluster Redis con BullMQ |
-| **Deploy & Restart Applicazioni (`202 Accepted`)** | ✅ Implementato con timeline dell'operazione in tempo reale | Rollback automatico con snapshot |
-| **Visualizzazione Risorse & Server Fleet** | ✅ Implementato (Server, Applicazioni, Database sola lettura, Domini/TLS, Operazioni) | Metriche grafiche CPU/RAM in tempo reale |
-| **Pannello Admin Piattaforma** | ✅ Implementato (Stato provider Coolify, test connessione, audit log immutabile) | Gestione quote multi-cluster avanzata |
-| **Provisioning Self-Service Cloud VPS (Hetzner)** | ❌ Non-Goal POC (infrastruttura pre-assegnata) | 🗓️ Pianificato per R1 |
-| **Creazione App/DB da Git Privato Arbitrario** | ❌ Non-Goal POC (catalogo istanze gestito) | 🗓️ Pianificato per R1 |
-| **Backup / Restore S3 Distruttivo** | ❌ Non-Goal POC (bloccato esplicitamente per Redis `AC-012`) | 🗓️ Pianificato per R1/R2 |
-| **Billing & Integrazione Stripe Live** | ❌ Non-Goal POC (quote simulate su database) | 🗓️ Pianificato per R2 |
-| **Portale Reseller / White-Label** | ❌ Non-Goal POC | 🗓️ Pianificato per R2 |
-| **Hosting Email Integrato (Mailcow/Stalwart)** | ❌ Non-Goal POC | 🗓️ Pianificato per R2 |
+1. **Doppia Modalità di Hosting (`Dedicated` e `Shared`) (ADR-001)**:
+   La piattaforma modella nativamente due modalità di erogazione:
+   - **`Dedicated` (Target MVP Fase 1)**: Ciascun host fisico o VPS è assegnato in esclusiva a una singola organizzazione cliente (`AC-F1-01`), garantendo l'isolamento hardware a livello hypervisor.
+   - **`Shared` (Pianificato per Fase 2)**: Molteplici organizzazioni condividono le risorse di calcolo del medesimo host, con partizionamento rigido e vincoli di storage (`ADR-007`, `ADR-011`).
+2. **Indipendenza tra Control Plane e Data Plane (Invariante `CP-01` / `AC-F1-08`)**:
+   I processi del pannello di controllo (interfaccia web, API NestJS, worker e database interno) operano in domini di fallimento completamente disaccoppiati rispetto al traffico applicativo dei clienti. Un arresto, riavvio o aggiornamento del Control Plane **non interrompe in alcun modo l'erogazione dei siti web attivi** sul Data Plane.
+3. **Isolamento Multi-Tenant Nativo & Prevenzione BOLA (`AC-F1-02`)**:
+   La protezione dei dati dei clienti è implementata su tre livelli invalicabili:
+   - Filtro di contesto obbligatorio su `organization_id` in tutte le rotte REST.
+   - Vincoli di chiave composta relazionale `(organization_id, id)` e chiavi esterne composte su database PostgreSQL.
+   - Risposte `404 Not Found` per qualsiasi risorsa appartenente a un altro tenant, eliminando all'origine la possibilità di attacchi IDOR/BOLA ed enumerazione di risorse altrui.
+4. **Backend-For-Frontend (BFF) con Cookie JWE Cifrati**:
+   L'interfaccia utente Next.js 16 (`apps/web`) agisce come perimetro di sicurezza insuperabile. Il browser dialoga unicamente con il BFF tramite cookie di sessione sicuri e crittografati (`HttpOnly`, `SameSite=Lax`, algoritmo JWE via `jose`). Nessun token Bearer, credenziale di database o ID interno dell'infrastruttura viene mai esposto nel DOM o al codice JavaScript client.
+5. **Specifiche Dichiarative Immutabili (`StackRevision`) & Riconciliazione Drift (`AC-F1-05`)**:
+   Tutte le modifiche ai servizi generano una nuova revisione immutabile con hash crittografico SHA-256 (`spec_hash`), protetta da trigger PostgreSQL anti-aggiornamento. Lo stato dichiarato (*Desired State*) viene continuamente comparato con lo stato rilevato (*Observed State*) per segnalare tempestivamente situazioni di *drift*.
+6. **Validatore Dichiarativo di Sicurezza dello Stack (`AC-F1-04`, `F1-012`)**:
+   Il `PolicyEngine` analizza ogni manifest prima dell'ammissione, bloccando container privilegiati (`privileged: true`), mount del socket Docker (`/var/run/docker.sock`), mount di percorsi arbitrari dell'host, modalità di rete host (`network_mode: host`) e capability Linux pericolose (`CAP_SYS_ADMIN`).
+7. **Tre Console Utente Distinte con `shadcn@4.23.0`**:
+   Interfaccia moderna e interamente in lingua italiana, segmentata per livello di responsabilità:
+   - **Console Infrastruttura** (`/admin/*`): Riservata agli amministratori infrastrutturali per stato host, nodi, allocazioni e log di audit globale.
+   - **Console Hosting** (`/hosting/*`): Riservata agli amministratori del servizio di hosting per catalogo template, allocazione tenant e monitoraggio quote.
+   - **Workspace Cliente** (`/o/[orgSlug]/*`): Dedicato ai clienti e sviluppatori per la gestione autonoma dei propri siti, servizi, domini e revisioni applicative.
 
 ---
 
-## 2. Mappa del Monorepo
+## 2. Stato di Implementazione: Fase 1 vs Fase 2 (`AC-F1-10`)
 
-Il repository è strutturato come monorepo gestito tramite `pnpm` workspaces:
+In ottemperanza al criterio di trasparenza contrattuale **`AC-F1-10`** e ai non-goal stabiliti in `HCP-SPEC-002` (§1.3), la seguente tabella formalizza con precisione cosa è pienamente operativo nella presente versione (Fase 1) e cosa è differito alla Fase 2:
+
+| Componente / Funzionalità | Stato Fase 1 (`HCP-SPEC-002`) | Riferimento Normativo / Pianificazione |
+| :--- | :---: | :--- |
+| **Architettura Monorepo a 8 Pacchetti + 2 App** | ✅ **Operativo** | `@hosting-panel/*`, `apps/api`, `apps/web` |
+| **Modello di Dominio Canonico Multi-Tenant** | ✅ **Operativo** | `Host`, `HostAllocation`, `Site`, `ServiceInstance`, `StackRevision` |
+| **Persistenza Dual-Mode (PGlite / PostgreSQL 18)** | ✅ **Operativo** | Driver `@electric-sql/pglite` embedded e pool `pg` nativo (`AC-F1-09`) |
+| **Autorizzazione a 4 Livelli (RBAC + ABAC)** | ✅ **Operativo** | `infrastructure_admin`, `hosting_admin`, `customer_owner`, `customer_collaborator` (`AC-F1-02`, `AC-F1-03`) |
+| **Politica di Allocazione Dedicated-First** | ✅ **Operativo** | Ammissione transazionale single-tenant per host dedicated (`AC-F1-01`) |
+| **Blocco Transizione Diretta `dedicated -> shared`** | ✅ **Operativo** | Diniego rigido a livello di policy engine (`AC-F1-06`) |
+| **Revisioni Immutabili con Hash SHA-256** | ✅ **Operativo** | Versionamento progressivo protetto da trigger SQL (`AC-F1-05`) |
+| **Validatore di Sicurezza Manifest dei Container** | ✅ **Operativo** | Rifiuto `privileged`, `docker.sock`, raw capabilities (`AC-F1-04`) |
+| **Gestione Transazionale delle Quote Risorse** | ✅ **Operativo** | Calcolo atomico e riserva quota `FOR UPDATE` (`AC-F1-07`) |
+| **Tre Console Web UI in Italiano con `shadcn@4.23.0`** | ✅ **Operativo** | Navigazione segmentata e protetta da perimetro BFF JWE (`AC-F1-10`) |
+| **Protocollo Normativo Outage Control Plane** | ✅ **Documentato** | Specifica vincolante per l'invariante `CP-01` (`AC-F1-08`) |
+| **Esecuzione Live sul Socket Docker (`docker.sock`)** | ❌ **Non in Fase 1** | Astrazione contrattuale tipizzata; stub `NOT_SUPPORTED` (Fase 2) |
+| **Host Agent Root Privilegiato su Linux** | ❌ **Non in Fase 1** | Astrazione contrattuale tipizzata; stub `NOT_SUPPORTED` (Fase 2) |
+| **Reverse Proxy Data Plane Dinamico (Traefik/Caddy)** | ❌ **Non in Fase 1** | Configurazione e routing a caldo previsti per la Fase 2 |
+| **Rilascio Automatizzato Certificati ACME/TLS** | ❌ **Non in Fase 1** | Risoluzione sfide crittografiche Let's Encrypt prevista per la Fase 2 |
+| **Server SFTP con Chroot e Web File Manager** | ❌ **Non in Fase 1** | Isolamento storage e gestione file prevista per la Fase 2 |
+| **Database Gestiti per Clienti & Backup S3** | ❌ **Non in Fase 1** | Motori MariaDB/PostgreSQL e snapshot S3 previsti per la Fase 2 |
+| **Modalità Shared Hosting in Produzione (GA)** | ❌ **Non in Fase 1** | Vincolata ai 5 controlli del Security Gate (`ADR-007`, `ADR-011`) |
+| **Multi-Host Management Hub Federato** | ❌ **Non in Fase 1** | Coordinatore opzionale con Single-Writer Fencing (`ADR-008`) |
+
+---
+
+## 3. Mappa del Monorepo
+
+Il progetto è strutturato come monorepo basato su workspaces `pnpm`:
 
 ```text
 hosting-panel/
 ├── apps/
-│   ├── api/                      # Control Plane API: NestJS 12 + Fastify 5, Dev OIDC, Outbox Worker, Fake Coolify Lab
-│   └── web/                      # Frontend UI & BFF: Next.js 16 (App Router), sessioni HttpOnly, lingua italiana
+│   ├── api/                      # Control Plane API: NestJS 12 + Fastify 5, Dev OIDC jose, Outbox Reconciler
+│   └── web/                      # Console Web UI: Next.js 16 (App Router), shadcn@4.23.0, Radix UI, Tailwind v4, BFF
 ├── packages/
-│   ├── contracts/                # Single Source of Truth: DTO Zod, permessi, codici errore normalizzati
-│   ├── authz/                    # Policy Engine: RBAC + ABAC default-deny, resource grants, precedenza deny
-│   ├── database/                 # Schema PostgreSQL Drizzle, migrazioni SQL, seed demo, driver dual-mode (PGlite / pg)
-│   ├── coolify-adapter/          # Client Coolify v4 tipizzato, allowlist host, blocco redirect, redazione secret
-│   └── config/                   # Configurazioni condivise TypeScript, ESLint e costanti HCP-SPEC-001
+│   ├── config/                   # Metadati di piattaforma HCP-SPEC-002, configurazioni condivise TS ed ESLint
+│   ├── contracts/                # Single Source of Truth: schemi Zod, ruoli, permessi, codici errore normalizzati
+│   ├── authz/                    # Policy Engine: RBAC + ABAC default-deny, resource grants, isolamento tenant
+│   ├── hosting-domain/           # Entità di dominio, Site aggregate, StackRevision builder/hasher, drift detector
+│   ├── policy-engine/            # Ammissione Dedicated/Shared, validatore sicurezza stack, calcolo quote
+│   ├── executor-contracts/       # Interfaccia logica DockerExecutorPort e implementazione stub Fase 1 (NOT_SUPPORTED)
+│   ├── host-agent-contracts/     # Interfaccia logica HostAgentPort e implementazione stub Fase 1 (NOT_SUPPORTED)
+│   └── database/                 # Schema PostgreSQL Drizzle, migrazione 0001, vincoli composti, client dual-mode PGlite/pg
 ├── docs/
-│   ├── api/
-│   │   └── openapi.yaml          # Specifica contrattuale OpenAPI 3.1.0 completa
-│   ├── architecture/adr/         # Architectural Decision Records (ADR 0001)
-│   └── runbooks/
-│       └── poc-operations.md     # Runbook operativo: rotazione token, rate-limit 429, recupero unknown, health probe
+│   ├── architecture/             # Audit architetturale Fase 1, diagrammi ER e confini di fiducia, decisioni Fase 2
+│   │   ├── adr/                  # Registro delle 12 Architectural Decision Records (ADR 0001..0012)
+│   │   └── diagrams/             # Diagramma di flusso a 8 trust boundaries e schema ER completo
+│   ├── security/                 # Matrice delle minacce e protocollo di test per outage del Control Plane (AC-F1-08)
+│   └── api/                      # Specifica contrattuale OpenAPI 3.1
 ├── infra/
-│   └── local/
-│       └── docker-compose.yml    # Topologia locale: PostgreSQL 18.1 alpine, Redis 7.4 alpine, Keycloak 26.2.0
-├── .agents/brain/                # Memoria persistente dell'architettura (decisions.md, state.md)
+│   └── local/                    # Topologia locale di supporto: PostgreSQL 18.1 alpine, Redis 7.4 alpine, Keycloak 26.2.0
+├── .agents/brain/                # Memoria persistente dello swarm: decisions.md e state.md
 ├── .github/workflows/ci.yml      # Pipeline CI GitHub Actions con esecuzione di tutti i sensori
 ├── .env.example                  # Template variabili d'ambiente per Zero-Docker e Docker Compose
-├── HARNESS.md                    # Contratto operativo e protocollo di verifica
-└── package.json                  # Script root del workspace
+├── HARNESS.md                    # Contratto operativo e protocollo di verifica meccanica
+└── package.json                  # Script e configurazione root del monorepo
 ```
 
 ---
 
-## 3. Avvio Rapido
+## 4. Avvio Rapido
 
-### Prerequisiti
-- **Node.js**: Versione `>= 24.0.0` (raccomandata `24.22.0`, consultare `.node-version`)
-- **Package Manager**: `corepack pnpm` (pnpm `12.18.0`)
+### Prerequisiti di Sistema
+- **Node.js**: Versione `>= 24.0.0` (raccomandata `24.22.0+`, verificare con `.node-version`)
+- **Package Manager**: `corepack pnpm` (v12)
 
 ---
 
-### Opzione A: Modalità Zero-Docker Standalone (Consigliata)
-Non richiede Docker né servizi esterni in esecuzione. Utilizza il motore PostgreSQL 18 in-process `@electric-sql/pglite`, il server Fake Coolify Lab integrato (porta 4101) e l'emulatore OIDC locale:
+### Opzione A: Modalità Zero-Docker Standalone (Predefinita e Consigliata)
+Questa modalità non richiede l'avvio di container Docker esterni né la presenza di un daemon Linux locale. Utilizza il motore PostgreSQL 18 in-process `@electric-sql/pglite` (compilato in WebAssembly) e l'emulatore Dev OIDC integrato basato su `jose`:
 
 ```bash
-# 1. Abilitare il gestore di pacchetti pnpm tramite Corepack
+# 1. Abilitare il gestore pnpm tramite Corepack
 corepack enable
 
 # 2. Installare tutte le dipendenze del monorepo
@@ -105,23 +120,23 @@ corepack pnpm install
 # 3. Compilare i pacchetti e l'applicazione web
 corepack pnpm run build
 
-# 4. In una finestra di terminale, avviare il Control Plane API (porta 4000 + Lab porta 4101)
+# 4. In un terminale, avviare il Control Plane API (porta 4000)
 corepack pnpm run dev:api
 
-# 5. In una seconda finestra di terminale, avviare il Frontend Web BFF (porta 3000)
+# 5. In un secondo terminale, avviare il Frontend Web BFF (porta 3000)
 corepack pnpm run dev:web
 ```
 
 Aprire il browser su **`http://127.0.0.1:3000`**.  
-Nella schermata di login, selezionare una delle demo persona pre-caricate per accedere istantaneamente con un click!
+Nella schermata di login, selezionare una delle demo persona pre-configurate per accedere istantaneamente con un click!
 
 ---
 
-### Opzione B: Modalità Docker Compose / External Staging
-Per eseguire la piattaforma con container reali dedicati a PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 (tutti rigorosamente vincolati a `127.0.0.1` per sicurezza):
+### Opzione B: Modalità Docker Compose Locale / External Staging
+Per eseguire il Control Plane collegato a container reali dedicati a PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 (tutti rigorosamente vincolati su `127.0.0.1` per sicurezza):
 
 ```bash
-# 1. Avviare la topologia dei container locali
+# 1. Avviare la topologia dei container di supporto
 docker compose -f infra/local/docker-compose.yml up -d
 
 # 2. Configurare il file d'ambiente
@@ -137,49 +152,22 @@ corepack pnpm run dev:web
 
 ---
 
-## 4. Demo Persona Pre-caricate & Matrice di Accettazione
+## 5. Modello dei Ruoli di Autorizzazione & Demo Persona
 
-Il database viene inizializzato automaticamente con un dataset di test conforme a `HCP-SPEC-001` che include 3 organizzazioni (`Acme Corp`, `Beta Studios`, `Legacy Corp Sospesa`) e 5 utenti con differenti livelli di autorizzazione:
+Il database viene inizializzato con un dataset demo conforme a `HCP-SPEC-002` articolato sui 4 livelli di autorità:
 
-### Tabella delle Persona Demo
-
-| Utente | Email Demo | Organizzazioni & Ruoli | Comportamento Atteso nel Control Panel |
+| Ruolo di Piattaforma | Persona Demo | Console Assegnata | Privilegi e Comportamento Atteso |
 | :--- | :--- | :--- | :--- |
-| **Elena Rossi** | `elena.rossi@acme.it` | • **Acme Corp**: `customer_owner`<br>• **Beta Studios**: `viewer`<br>• **Legacy Corp**: `customer_owner` | Accesso completo come owner su Acme Corp (deploy, riavvii, gestione membri). Quando passa a Beta Studios, i permessi di mutazione vengono bloccati (sola lettura). Su Legacy Corp le mutazioni sono disabilitate per sospensione (`AC-021`). |
-| **Marco Bianchi** | `marco.bianchi@acme.it` | • **Acme Corp**: `developer` (con ABAC su Storefront) | Può visualizzare e lanciare deploy/riavvii sull'applicazione **Acme Storefront**, ma riceve `403 PERMISSION_DENIED` se tenta mutazioni su **Acme Core API** (`AC-004`). |
-| **Giulia Verdi** | `giulia.verdi@acme.it` | • **Acme Corp**: `viewer` | Accesso globale in sola lettura. Tutti i pulsanti di azione (Deploy, Riavvia) sono disabilitati o restituiscono `403` con audit immediato della violazione (`AC-003`). |
-| **Luca Neri** | `luca.neri@betastudios.it` | • **Beta Studios**: `customer_owner` | Tenant completamente separato. Non può visualizzare né interagire con le risorse di Acme Corp: ogni tentativo di accesso restituisce `404 Not Found` (`AC-001`). |
-| **Admin Piattaforma** | `admin@hosting-panel.it` | • Piattaforma: `isPlatformAdmin = true` | Accesso esclusivo alla sezione `/admin` (gestione provider Coolify, audit log immutabile di sistema, statistiche flotta). Vietato l'accesso ai dati tenant senza grant di supporto attivo (`AC-016`). |
+| **`infrastructure_admin`** | `infra.admin@hosting-panel.internal` | `/admin/*` | Accesso esclusivo alla gestione hardware dell'host, allocazioni globali e consultazione del registro di audit immutabile. |
+| **`hosting_admin`** | `hosting.admin@hosting-panel.internal` | `/hosting/*` | Gestione catalogo service template, allocazione tenant e monitoraggio quote. **Rigido diniego (`deny`) su manutenzione e sicurezza dell'OS host (`AC-F1-03`)**. |
+| **`customer_owner`** | `elena.rossi@acme.internal` | `/o/acme-corp/*` | Pieno controllo dell'organizzazione cliente: creazione siti, istanze di servizio, revisioni stack e gestione dei collaboratori. |
+| **`customer_collaborator`** | `marco.bianchi@acme.internal` | `/o/acme-corp/*` | Collaboratore a privilegi minimi regolato da `ResourceGrant` ABAC; accesso consentito solo sui siti e servizi autorizzati. |
 
 ---
 
-### Matrice di Copertura Criteri di Accettazione (`AC-001` .. `AC-024`)
+## 6. Comandi di Verifica Meccanica (Objective Sensors)
 
-La suite di test automatizzati valida programmaticamente tutti gli scenari critici:
-
-- **`AC-001` (Isolamento Multi-Tenant)**: Richieste verso risorse di un'altra organizzazione restituiscono `404` senza contattare Coolify.
-- **`AC-002` (Context Switching)**: Commutazione di organizzazione via sessione con ricalcolo immediato dei ruoli e permessi.
-- **`AC-003` (Enforcement Viewer)**: Diniego `403` su tentativi di mutazione da utenti con ruolo `viewer` e registrazione nel log di audit.
-- **`AC-004` (ABAC Granulare per Risorsa)**: Sviluppatore abilitato solo sulle risorse specificate nel `ResourceGrant`.
-- **`AC-005` & `AC-006` (Idempotency Key & Lock di Risorsa)**: Rifiuto di payload conflittuali su medesima chiave con `409 Conflict`; blocco delle mutazioni concorrenti sulla stessa risorsa finché l'operazione in corso non termina.
-- **`AC-007` (Operazioni Unknown & Divieto Blind Replay)**: Timeout verso Coolify porta l'operazione in `unknown` con mantenimento del lock; riconciliazione automatica via polling idempotente `GET`.
-- **`AC-008` (Rate-Limit Upstream 429)**: Rispetto del cooldown `Retry-After` con sospensione temporanea delle chiamate e messaggio sanificato al client.
-- **`AC-009` (Revoca Token Coolify)**: Rilevazione del token revocato (`401`), mascheramento del segreto e segnalazione di allarme.
-- **`AC-010` (Verifica Health Probe Post-Deploy)**: Se Coolify conferma il deploy ma la verifica HTTP indipendente fallisce, l'operazione viene marcata `failed` e l'applicazione posta in stato `degraded`.
-- **`AC-011` (Heartbeat Stale)**: Segnalazione visiva di stato `unknown` e metadato `stale: true` quando l'heartbeat del server supera la soglia consentita.
-- **`AC-012` (Vincoli Database Engine)**: Rigetto immediato (`422 NOT_SUPPORTED`) dei tentativi di ripristino su istanze Redis (backup e restore non supportati su Redis).
-- **`AC-014` (Gestione Domini FQDN)**: Canonicalizzazione lowercase, validazione FQDN e rigetto di duplicati cross-tenant con `409 DOMAIN_CONFLICT` senza divulgare l'organizzazione proprietaria.
-- **`AC-016` (Protezione Accesso Admin)**: L'amministratore di piattaforma può accedere a `/v1/admin/*`, ma non può leggere le risorse del tenant senza un grant di supporto esplicito.
-- **`AC-017` (Redazione Segreti)**: Nessuna credenziale, token Bearer o stringa di connessione con password appare in chiaro nei body DTO o nei log di sistema.
-- **`AC-021` (Organizzazioni Sospese)**: Blocco di tutte le operazioni di mutazione (`403`) su tenant in stato sospeso, consentendo la sola consultazione dello stato e delle quote.
-- **`AC-022` (Protezione Ultimo Owner)**: Impossibilità di rimuovere o degradare l'unico owner di un'organizzazione (`409 LAST_OWNER_PROTECTED`).
-- **`AC-024` (Revoca Immediata JWT)**: Invocazione di `POST /v1/auth/revoke` invalida istantaneamente il token `jti` memorizzato nel registro di revoca.
-
----
-
-## 5. Comandi di Verifica (Objective Sensors)
-
-Tutti i sensori di qualità del codice devono essere eseguiti e superati con successo:
+Tutti i sensori di qualità del codice devono essere eseguiti e superati con codice di uscita `0`:
 
 ```bash
 # 1. Linter statico ESLint
@@ -188,7 +176,7 @@ corepack pnpm run lint
 # 2. Controllo statico dei tipi TypeScript (su tutti i pacchetti e le app)
 corepack pnpm run typecheck
 
-# 3. Esecuzione suite completa di test Vitest (81 test su 7 suite)
+# 3. Esecuzione suite completa di test Vitest (unitari, di dominio, concorrenza e BFF)
 corepack pnpm run test
 
 # 4. Compilazione di produzione di tutti i pacchetti e dell'app Next.js
@@ -197,11 +185,12 @@ corepack pnpm run build
 
 ---
 
-## 6. Documentazione Correlata
+## 7. Indice della Documentazione Architetturale
 
-- **Specifica OpenAPI 3.1**: [`docs/api/openapi.yaml`](docs/api/openapi.yaml)
-- **Runbook Operativo**: [`docs/runbooks/poc-operations.md`](docs/runbooks/poc-operations.md)
-- **Decisioni Architetturali**: [`docs/architecture/adr/0001-poc-architecture-and-runtime.md`](docs/architecture/adr/0001-poc-architecture-and-runtime.md)
-- **Contratto Operativo (Harness)**: [`HARNESS.md`](HARNESS.md)
-- **Topologia Docker Locale**: [`infra/local/docker-compose.yml`](infra/local/docker-compose.yml)
-- **Workflow CI GitHub Actions**: [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+Per approfondimenti normativi e progettuali, consultare i seguenti documenti di riferimento:
+
+- [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi del repository, tecnologie e demarcazione dei confini.
+- [Registro delle ADR (ADR 0001..0012)](docs/architecture/adr/): Tutte le decisioni architetturali registrate con i relativi stati formali.
+- [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Gli 8 confini di fiducia e lo schema relazionale PostgreSQL completo.
+- [Piano di Sicurezza e Protocollo di Outage](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01` (`AC-F1-08`).
+- [Registro delle Decisioni Aperte per la Fase 2](docs/architecture/phase-2-open-decisions.md): Analisi dei 10 argomenti tecnici aperti per la successiva fase di sviluppo.

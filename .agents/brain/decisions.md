@@ -1,23 +1,44 @@
-# Architectural Decisions Log (`hosting-panel`)
+# Architectural Decisions Log (`hosting-panel` — `HCP-SPEC-002` Phase 1)
 
-Settled architectural and product boundary decisions derived from `HCP-SPEC-001` (rev 1.0) and user alignment on 2026-11-07.
+Settled architectural and product boundary decisions aligned via `/grill-me` with the user on 2026-11-07 for `HCP-SPEC-002` rev. 1.0 («Hosting Control Panel Docker-native — Fase 1»).
 
 ---
 
-## ADR-001: Vertical Slice POC v0.1 Scope (Stage 0 + MVP Core)
-- **Decision**: Deliver a complete end-to-end vertical slice covering `PLAT-00`, `AUTH-00`, `AUTH-01`, `COOLF-00`, `OPS-00`, `OBS-00`, and the Italian Next.js 16 MVP UI (`Login`, `OrgSwitcher`, `Dashboard Overview`, `Servers`, `Applications` + `Application Detail` with `202 Accepted` Deploy/Restart + live `OperationTimeline`, read-only `Databases`, `Domains & TLS`, `Operations`, and `Admin Providers & Audit`).
-- **Rationale**: Absence of the legacy `coolify-hosting-backend` starter allows adopting target `/v1/organizations/:orgId/...` routes cleanly from commit 1 without legacy `/resources/:resourceId` debt.
-- **Non-Goals (Deferred to R1/R2)**: Self-service cloud VPS provisioning, self-service app/DB creation from private Git, destructive S3 backup/restore execution, live Stripe/billing integration, reseller/white-label portal, email hosting.
+## Settled `/grill-me` Design Decisions (2026-11-07)
 
-## ADR-002: Dual-Mode Local Infrastructure (Zero-Docker Embedded + Docker Compose Ready)
-- **Decision**: Support embedded `@electric-sql/pglite` (running the exact PostgreSQL Drizzle schema and SQL constraints), an in-process Transactional Outbox Worker/Reconciler, a local `jose`-backed OIDC issuer, and a Fake Coolify v4 Lab HTTP Server for zero-Docker local execution and deterministic Vitest suites, alongside `pg`/`bullmq`-compatible abstractions and `infra/local/docker-compose.yml` for external PostgreSQL 18 + Redis + Keycloak environments.
-- **Rationale**: Docker is not installed on the local development host; dual-mode guarantees 100% runnable integration tests and interactive POC demo out of the box without sacrificing PostgreSQL fidelity.
+1. **Zero Coolify / Clean-Room Replacement (`Q1`, `Q3`, `Q5`)**:
+   - Eliminate all Coolify references, `packages/coolify-adapter`, `FakeCoolifyLabServer`, `COOLIFY_*` environment variables, and `0001_initial_poc.sql` legacy tables (`provider_instances`, `provider_connections`, `server_allocations`, `hosting_resources`).
+   - Do not retain legacy compatibility shims or `@deprecated` POC code; recreate the monorepo cleanly around the canonical `HCP-SPEC-002` domain model with a single clean SQL baseline (`0001_phase1_docker_native.sql`).
+   - Retain dual-mode local persistence (`@electric-sql/pglite` embedded + `pg` external pool) and local `jose` OIDC dev issuer so deterministic tests and local UI workflows run without requiring a live Linux Docker daemon.
 
-## ADR-003: Toolchain & Dependency Pinning
-- **Decision**: Use `pnpm` (`12.18.0` via `corepack pnpm`) workspaces, Node `24.22.0` (`>=24`), `typescript@6.0.3` (ensuring full compatibility with NestJS 12 decorator metadata per `HCP-SPEC-001` §11.1 gate), `@nestjs/core@12.4.0` + `@nestjs/platform-fastify@12.4.0` (`fastify@5.12.8`), `next@16.4.5` + `react@19.3.1`, `drizzle-orm@0.45.4`, `zod@4.6.7`, `jose@6.2.15`, and `vitest@5.1.0`.
+2. **Strict Separation of Authority Roles (`Q2` — `HCP-SPEC-002` §4.1–4.2, `AC-F1-03`)**:
+   - Define four explicit role tiers:
+     - `infrastructure_admin`: Host lifecycle, Linux maintenance, security posture, Docker Engine status, allocations, operations & audit read (`host.*`, `allocation.*`, `template.read`, `quota.read`, `operation.read`, `audit.read`). No implicit unrestricted customer secret/data access without policy/audit.
+     - `hosting_admin`: Service templates, allocations, tenant sites/services/quotas within installation/assigned scopes (`host.read`, `host.metrics.read`, `host.docker.read`, `allocation.*`, `template.*`, `site.*`, `service.*`, `quota.*`, `operation.read`, `audit.read`), **strictly denied** `host.maintenance.*`, `host.security.manage`, and `host.docker.engine.manage` (`AC-F1-03`).
+     - `customer_owner`: Organization-scoped management of own sites, services, stack revisions, quotas read, operations read, and organization members (`AC-F1-02`, `AC-F1-04`).
+     - `customer_collaborator`: Least-privilege collaborator governed by explicit `ResourceGrant` / scoped bindings (ABAC + deny precedence).
 
-## ADR-004: Non-Negotiable Security & Operational Invariants (`HCP-SPEC-001` §0.2)
-1. **Default-Deny & Anti-BOLA**: Every endpoint resolves `organization_id` membership, RBAC+ABAC policy (explicit `deny` overrides `allow`), and internal resource ownership *before* touching Coolify. Cross-tenant resource lookups return `404` (`AC-001`).
-2. **BFF Session & Zero Client Secrets**: Browser holds only an `HttpOnly` session cookie on Next.js; browser never receives Coolify tokens, provider URLs, or internal `provider_id` / `coolify_uuid` values.
-3. **Typed Coolify Adapter Only**: Static admin host allowlist, HTTPS enforcement (with explicit localhost lab override only in test/dev), redirect rejection with `Authorization`, finite timeouts, `429 Retry-After` handling, and recursive secret/token redaction (`AC-008`, `AC-009`, `AC-017`).
-4. **Transactional Outbox & 8-State Operations**: Mutations persist `operations` + `operation_steps` + `outbox_events` + resource lock + `Idempotency-Key` (`request_hash` mismatch -> `409`, `AC-005`/`AC-006`) atomically, returning `202 Accepted` and reconciling `queued -> processing -> accepted_by_provider -> reconciling -> succeeded | failed | unknown | cancelled` (`AC-007`, `AC-010`).
+3. **Explicit 8-Package Monorepo Boundaries (`Q6` — `HCP-SPEC-002` §9)**:
+   - `@hosting-panel/config`, `@hosting-panel/contracts`, `@hosting-panel/authz`, `@hosting-panel/hosting-domain`, `@hosting-panel/policy-engine`, `@hosting-panel/executor-contracts`, `@hosting-panel/host-agent-contracts`, `@hosting-panel/database`.
+   - `executor-contracts` and `host-agent-contracts` expose strictly typed internal interfaces (`ApprovedServiceSpec`, `DockerExecutorPort`, `HostAgentPort`) with Phase 1 disabled implementations returning `NOT_SUPPORTED` (zero `/var/run/docker.sock` or shell calls).
+
+4. **Phase 1 API Surface & New `shadcn@4.23.0` Italian UI (`Q4`, `Q7`, `Q8` — `AC-F1-10`)**:
+   - Approved UI dependencies added to workspace: `shadcn@4.23.0`, `radix-ui@1.8.1`, `class-variance-authority@0.7.1`, `clsx@2.1.1`, `tailwind-merge@3.7.0`, `tw-animate-css@1.4.0`.
+   - Build three distinct authority consoles (`Infrastructure Admin`, `Hosting Admin`, `Customer Workspace`) with `shadcn` components over the encrypted `HttpOnly` JWE BFF boundary, strictly honoring `AC-F1-10` (clearly marking `Shared Hosting`, `Docker Executor`, `Host Agent`, `ACME/TLS`, `SFTP`, and production backups as Phase 2 / non-active in Phase 1).
+   - Deliver all normative `HCP-SPEC-002` §8 & §10 documents, keeping `ADR-010` (agent/executor process topology & IPC) and `ADR-011` (shared storage & disk quota mechanism) explicitly `OPEN`.
+
+---
+
+## Canonical ADR Register (`HCP-SPEC-002` §10)
+- **ADR-001**: Dual Hosting Mode (`Dedicated` & `Shared`) in a Unified Domain — **APPROVED**
+- **ADR-002**: `Dedicated` Standalone VPS as First Release (MVP) — **APPROVED**
+- **ADR-003**: Local Standalone Appliance Baseline without Mandatory Central SaaS — **BASELINE**
+- **ADR-004**: Single Multi-Tenant Canonical Domain (`Host -> HostAllocation -> Site -> ServiceInstance -> StackRevision`) — **BASELINE**
+- **ADR-005**: `Docker Executor` as Isolated Logical Boundary — **LOGICAL BASELINE**
+- **ADR-006**: `Host Agent` as Isolated Privileged Boundary — **LOGICAL BASELINE**
+- **ADR-007**: Controlled `Shared` Hosting Behind Mandatory Security Gate — **BASELINE**
+- **ADR-008**: Optional Multi-Host Management Hub with Single-Writer Fencing — **OPTIONAL FUTURE**
+- **ADR-009**: Immutable Declarative `StackRevision` & Desired vs Observed Drift Model — **BASELINE**
+- **ADR-010**: Concrete Process Topology & IPC for `Docker Executor` / `Host Agent` — **OPEN (Phase 2)**
+- **ADR-011**: Filesystem & Volume Disk Quota Enforcement for `Shared` Hosting — **OPEN (Before Shared)**
+- **ADR-012**: Threat Model Constraint on Untrusted Workloads (WordPress Plugins / Custom Code) in Shared Hosting — **CONSTRAINT**
