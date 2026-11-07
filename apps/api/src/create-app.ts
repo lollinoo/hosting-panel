@@ -35,6 +35,10 @@ import { AppModule } from "./app.module.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import {
+  DEFAULT_BREAKGLASS_KEY_FILE,
+  parseBreakglassSigningKey,
+} from "./cli/break-glass.js";
+import {
   ControlPlaneError,
   resolveRequestId,
 } from "./common/control-plane.error.js";
@@ -136,6 +140,41 @@ async function resolveSecretsMasterKey(
   return Buffer.from(DEV_FALLBACK_MASTER_KEY);
 }
 
+async function resolveBreakglassSigningKey(
+  runtimeBackend: RuntimeBackend,
+  explicitKey?: string | Buffer | Uint8Array,
+): Promise<Uint8Array | undefined> {
+  if (explicitKey !== undefined) {
+    return parseBreakglassSigningKey(explicitKey);
+  }
+
+  const envKey = process.env["HP_BREAKGLASS_KEY"]?.trim();
+  if (envKey && envKey.length > 0) {
+    return parseBreakglassSigningKey(envKey);
+  }
+
+  const envKeyFile = process.env["HP_BREAKGLASS_KEY_FILE"]?.trim();
+  if (envKeyFile && envKeyFile.length > 0) {
+    const raw = await readFile(envKeyFile, "utf8");
+    return parseBreakglassSigningKey(raw);
+  }
+
+  if (runtimeBackend === "linux-systemd") {
+    try {
+      const raw = await readFile(DEFAULT_BREAKGLASS_KEY_FILE, "utf8");
+      return parseBreakglassSigningKey(raw);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (code === "ENOENT" || code === "EACCES") {
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
+  return undefined;
+}
+
 export interface CreateControlPlaneAppOptions {
   readonly host?: string;
   readonly port?: number;
@@ -146,6 +185,7 @@ export interface CreateControlPlaneAppOptions {
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
+  readonly breakglassSigningKey?: string | Buffer | Uint8Array;
   readonly autoProcessOutbox?: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
@@ -185,6 +225,10 @@ export async function createControlPlaneApp(
   const secretsMasterKey = await resolveSecretsMasterKey(
     runtimeBackend,
     options?.secretsMasterKey,
+  );
+  const breakglassSigningKey = await resolveBreakglassSigningKey(
+    runtimeBackend,
+    options?.breakglassSigningKey,
   );
 
   let dockerExecutor = options?.dockerExecutor;
@@ -275,6 +319,7 @@ export async function createControlPlaneApp(
     enableDevOidc,
     runtimeBackend,
     secretsMasterKey,
+    ...(breakglassSigningKey !== undefined ? { breakglassSigningKey } : {}),
     autoProcessOutbox,
     outboxPollIntervalMs,
     driftReconcileIntervalMs,

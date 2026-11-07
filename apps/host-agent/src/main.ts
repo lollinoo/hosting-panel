@@ -15,6 +15,7 @@ import { InMemoryHostSimulatorAdapter } from "./simulator-adapter.js";
 export interface BootstrapHostAgentEnv {
   readonly HP_RUNTIME_BACKEND?: string;
   readonly HP_IPC_TRANSPORT?: string;
+  readonly HP_HOST_AGENT_SOCKET_PATH?: string;
   readonly HP_HOST_AGENT_SOCKET?: string;
   readonly HP_HOST_AGENT_PIPE?: string;
   readonly HP_IPC_KEY_ID?: string;
@@ -59,7 +60,10 @@ function buildTransportConfigFromEnv(env: BootstrapHostAgentEnv): HostAgentTrans
   if (transport === "uds") {
     return {
       transport: "uds",
-      socketPath: env.HP_HOST_AGENT_SOCKET?.trim() || DEFAULT_HOST_AGENT_SOCKET_PATH,
+      socketPath:
+        env.HP_HOST_AGENT_SOCKET_PATH?.trim() ||
+        env.HP_HOST_AGENT_SOCKET?.trim() ||
+        DEFAULT_HOST_AGENT_SOCKET_PATH,
     };
   }
   if (transport === "pipe") {

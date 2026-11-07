@@ -1,7 +1,7 @@
 [Unit]
 Description=Hosting Panel Control Plane API, Outbox Worker & Drift Reconciler (HCP-SPEC-003 Domain 1)
 Documentation=https://hosting-panel.internal/docs/hcp-spec-003
-After=network-online.target hp-docker-executor.service hp-host-agent.service
+After=systemd-tmpfiles-setup.service network-online.target hp-docker-executor.service hp-host-agent.service
 Wants=network-online.target hp-docker-executor.service hp-host-agent.service
 
 [Service]
@@ -13,19 +13,17 @@ WorkingDirectory=/opt/hosting-panel/apps/api
 EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
 Environment=NODE_ENV=production
 Environment=HP_RUNTIME_BACKEND=linux-systemd
-Environment=HP_EXECUTOR_SOCKET=/run/hosting-panel/executor.sock
-Environment=HP_HOST_AGENT_SOCKET=/run/hosting-panel/host-agent.sock
+Environment=HP_EXECUTOR_SOCKET_PATH=/run/hosting-panel/executor.sock
+Environment=HP_HOST_AGENT_SOCKET_PATH=/run/hosting-panel/host-agent.sock
 Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key
+Environment=HP_BREAKGLASS_KEY_FILE=/etc/hosting-panel/breakglass-jwt.key
 ExecStart=/usr/bin/node /opt/hosting-panel/apps/api/dist/main.js
 Restart=on-failure
 RestartSec=5s
 UMask=0027
 
-# Runtime directory (/run/hosting-panel tmpfs for signed UDS IPC)
-RuntimeDirectory=hosting-panel
-RuntimeDirectoryMode=0750
-RuntimeDirectoryPreserve=yes
+# Shared UDS IPC directory (/run/hosting-panel 2750 root:hp-ipc managed via tmpfiles.d)
 ReadWritePaths=/run/hosting-panel
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix

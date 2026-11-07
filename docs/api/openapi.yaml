@@ -1743,16 +1743,20 @@ components:
           enum: [dedicated, shared]
         sharedHostingEnabled:
           type: boolean
+          const: false
         dockerExecutorRuntimeAvailable:
           type: boolean
         hostAgentRuntimeAvailable:
           type: boolean
         acmeTlsRuntimeAvailable:
           type: boolean
+          const: false
         sftpAvailable:
           type: boolean
+          const: false
         productionBackupRuntimeAvailable:
           type: boolean
+          const: false
 
     DevPersonaDto:
       type: object

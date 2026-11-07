@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
 import {
+  decodeProtectedHeader,
   exportJWK,
   generateKeyPair,
   jwtVerify,
@@ -44,6 +45,8 @@ export interface VerifiedJwtClaims {
 }
 
 const KEY_ID = "dev-oidc-rs256-1";
+export const BREAKGLASS_KEY_ID = "breakglass-hs256-v1";
+const MAX_BREAKGLASS_TTL_SECONDS = 300;
 
 @Injectable()
 export class OidcService implements OnModuleInit {
@@ -122,6 +125,53 @@ export class OidcService implements OnModuleInit {
     };
   }
 
+  public async issueBreakGlassToken(input: IssueJwtInput): Promise<IssuedJwtResult> {
+    const expiresIn = Math.max(
+      1,
+      Math.min(
+        MAX_BREAKGLASS_TTL_SECONDS,
+        Math.floor(input.expiresInSeconds ?? MAX_BREAKGLASS_TTL_SECONDS),
+      ),
+    );
+    const jti = input.jti ?? `jti_bg_${randomUUID().replace(/-/g, "")}`;
+
+    if (
+      this.config.breakglassSigningKey &&
+      this.config.breakglassSigningKey.byteLength >= 32
+    ) {
+      const nowEpoch = Math.floor(Date.now() / 1_000);
+      const expEpoch = nowEpoch + expiresIn;
+      const accessToken = await new SignJWT({
+        email: input.email,
+        name: input.displayName,
+        amr: ["breakglass"],
+      })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT", kid: BREAKGLASS_KEY_ID })
+        .setIssuer(this.config.oidcIssuer)
+        .setSubject(input.subject)
+        .setAudience(this.config.oidcAudience)
+        .setJti(jti)
+        .setIssuedAt(nowEpoch)
+        .setExpirationTime(expEpoch)
+        .sign(this.config.breakglassSigningKey);
+
+      return {
+        accessToken,
+        jti,
+        expiresIn,
+        expiresAt: new Date(expEpoch * 1_000).toISOString(),
+        issuer: this.config.oidcIssuer,
+        audience: this.config.oidcAudience,
+      };
+    }
+
+    return this.issueToken({
+      ...input,
+      expiresInSeconds: expiresIn,
+      jti,
+    });
+  }
+
   public revokeTokenJti(jti: string, expiresAtEpochSeconds?: number): void {
     const trimmed = jti.trim();
     if (trimmed.length > 0) {
@@ -152,16 +202,46 @@ export class OidcService implements OnModuleInit {
       );
     }
 
-    const { publicKey } = await this.#ensureKeys();
+    let headerKid: string | undefined;
+    let headerAlg: string | undefined;
+    try {
+      const protectedHeader = decodeProtectedHeader(rawJwt);
+      headerKid = protectedHeader.kid;
+      headerAlg = protectedHeader.alg;
+    } catch {
+      throw new ControlPlaneError(
+        "UNAUTHENTICATED",
+        "Authentication token is invalid or expired.",
+      );
+    }
 
     let payload: JWTPayload;
     try {
-      const verified = await jwtVerify(rawJwt, publicKey, {
-        issuer: this.config.oidcIssuer,
-        audience: this.config.oidcAudience,
-        algorithms: ["RS256"],
-      });
-      payload = verified.payload;
+      if (headerKid === BREAKGLASS_KEY_ID || headerAlg === "HS256") {
+        if (
+          headerKid !== BREAKGLASS_KEY_ID ||
+          headerAlg !== "HS256" ||
+          !this.config.breakglassSigningKey ||
+          this.config.breakglassSigningKey.byteLength < 32
+        ) {
+          throw new Error("Break-glass signing key is unavailable or header mismatched");
+        }
+        const verified = await jwtVerify(rawJwt, this.config.breakglassSigningKey, {
+          issuer: this.config.oidcIssuer,
+          audience: this.config.oidcAudience,
+          algorithms: ["HS256"],
+          maxTokenAge: `${String(MAX_BREAKGLASS_TTL_SECONDS)}s`,
+        });
+        payload = verified.payload;
+      } else {
+        const { publicKey } = await this.#ensureKeys();
+        const verified = await jwtVerify(rawJwt, publicKey, {
+          issuer: this.config.oidcIssuer,
+          audience: this.config.oidcAudience,
+          algorithms: ["RS256"],
+        });
+        payload = verified.payload;
+      }
     } catch {
       throw new ControlPlaneError(
         "UNAUTHENTICATED",

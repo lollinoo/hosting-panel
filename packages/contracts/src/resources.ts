@@ -274,12 +274,12 @@ export function createPlatformCapabilities(
 
 export const OrganizationCapabilitiesDtoSchema = z.object({
   hostingMode: z.enum(["dedicated", "shared"]),
-  sharedHostingEnabled: z.boolean(),
+  sharedHostingEnabled: z.literal(false),
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
-  acmeTlsRuntimeAvailable: z.boolean(),
-  sftpAvailable: z.boolean(),
-  productionBackupRuntimeAvailable: z.boolean(),
+  acmeTlsRuntimeAvailable: z.literal(false),
+  sftpAvailable: z.literal(false),
+  productionBackupRuntimeAvailable: z.literal(false),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;
 

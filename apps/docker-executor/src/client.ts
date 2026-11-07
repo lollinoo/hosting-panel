@@ -59,12 +59,19 @@ const IngressEnsureDataEnvelopeSchema = z.object({
 export class ExecutorIpcClientError extends Error {
   public readonly code: ErrorCode;
   public readonly statusCode: number;
+  public readonly ambiguousOutcome: boolean;
 
-  public constructor(message: string, code: ErrorCode, statusCode: number) {
+  public constructor(
+    message: string,
+    code: ErrorCode,
+    statusCode: number,
+    ambiguousOutcome: boolean = false,
+  ) {
     super(message);
     this.name = "ExecutorIpcClientError";
     this.code = code;
     this.statusCode = statusCode;
+    this.ambiguousOutcome = ambiguousOutcome;
   }
 }
 
@@ -141,7 +148,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
 
     this.transport = transport;
     this.signingKey = options.signingKey;
-    this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.timeoutMs = options.timeoutMs ?? 35_000;
     this.isRuntimeAvailable = options.isRuntimeAvailable ?? true;
   }
 
@@ -259,6 +266,20 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     }
 
     const response = await new Promise<{ statusCode: number; body: Buffer }>((resolve, reject) => {
+      const isMutating = method !== "GET";
+      let socketConnected = false;
+      let writeStarted = false;
+      let timedOut = false;
+      let settled = false;
+
+      const rejectOnce = (err: ExecutorIpcClientError): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        reject(err);
+      };
+
       const requestOptions: http.RequestOptions =
         this.transport === "loopback-test"
           ? {
@@ -283,43 +304,98 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
           chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
         });
         res.on("end", () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
           resolve({
             statusCode: res.statusCode ?? 500,
             body: Buffer.concat(chunks),
           });
         });
         res.on("error", () => {
-          reject(
-            new ExecutorIpcClientError(
-              "Failed while reading IPC response from docker-executor daemon",
-              "DOCKER_ENGINE_UNAVAILABLE",
-              503,
-            ),
+          rejectOnce(
+            isMutating
+              ? new ExecutorIpcClientError(
+                  "IPC response stream dropped after mutating command was dispatched to docker-executor",
+                  "OPERATION_AMBIGUOUS",
+                  502,
+                  true,
+                )
+              : new ExecutorIpcClientError(
+                  "Failed while reading IPC response from docker-executor daemon",
+                  "DOCKER_ENGINE_UNAVAILABLE",
+                  503,
+                  false,
+                ),
           );
         });
       });
 
+      req.on("socket", (sock) => {
+        if (!sock.connecting) {
+          socketConnected = true;
+        } else {
+          sock.once("connect", () => {
+            socketConnected = true;
+          });
+        }
+      });
+
       req.on("timeout", () => {
+        timedOut = true;
         req.destroy();
-        reject(
-          new ExecutorIpcClientError(
-            "Timed out waiting for docker-executor IPC response",
-            "DOCKER_ENGINE_UNAVAILABLE",
-            503,
-          ),
+        rejectOnce(
+          isMutating && (socketConnected || writeStarted)
+            ? new ExecutorIpcClientError(
+                "Timed out waiting for docker-executor IPC response after mutating command dispatch",
+                "OPERATION_AMBIGUOUS",
+                502,
+                true,
+              )
+            : new ExecutorIpcClientError(
+                "Timed out waiting for docker-executor IPC response",
+                "DOCKER_ENGINE_UNAVAILABLE",
+                503,
+                false,
+              ),
         );
       });
 
-      req.on("error", () => {
-        reject(
+      req.on("error", (err) => {
+        const errno = (err as NodeJS.ErrnoException | null)?.code;
+        const preConnectDefiniteRefusal =
+          !socketConnected &&
+          (errno === "ENOENT" ||
+            errno === "ECONNREFUSED" ||
+            errno === "EACCES" ||
+            errno === "ENOTSOCK");
+        if (
+          isMutating &&
+          !preConnectDefiniteRefusal &&
+          (timedOut || (socketConnected && writeStarted))
+        ) {
+          rejectOnce(
+            new ExecutorIpcClientError(
+              "Connection to docker-executor IPC daemon dropped after mutating command dispatch",
+              "OPERATION_AMBIGUOUS",
+              502,
+              true,
+            ),
+          );
+          return;
+        }
+        rejectOnce(
           new ExecutorIpcClientError(
             "Docker executor IPC daemon is unreachable",
             "DOCKER_ENGINE_UNAVAILABLE",
             503,
+            false,
           ),
         );
       });
 
+      writeStarted = true;
       if (bodyBuffer !== undefined) {
         req.write(bodyBuffer);
       }

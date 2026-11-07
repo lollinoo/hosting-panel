@@ -31,6 +31,6 @@ Implement **`HCP-SPEC-003` Fase 2 — Runtime Operativo `Dedicated`, Split Agent
   - **Unit 3A (`apps/api` + `docs/api/openapi.yaml`)**: Signed IPC clients, PostgreSQL Outbox Worker, `unknown` state read-only recovery (`TH-08`), observe-only Drift Reconciler (`TH-10`), encrypted secrets CRUD (write-only), `202 Accepted` mutations (`lifecycle`, `maintenance`, `security`), break-glass CLI, and `AC-F2-01..10` integration tests.
   - **Unit 3B (`apps/web` + `docs/architecture/adr/*` + `HARNESS.md` + `README.md`)**: BFF routes & `shadcn@4.23.0` UI unlock (`202` lifecycle + `OperationTimeline`, write-only secrets, `in_sync`/`drifted` badges, `InfrastructureAdmin` telemetry/daemon status/maintenance/security, truthful `runtimeBackend` banner), close `ADR-010`, add `ADR-013..015`.
 - [x] **Wave 4 (Live Linux Execution of `AC-F1-08` & Two-Pass Adversarial Verification)**:
-  - Run `build`, `lint`, `typecheck`, `test` (`0` exit code — `15/15` suites, `164/164` tests).
+  - Run `build`, `lint`, `typecheck`, `test` (`0` exit code — `15/15` suites, `167/167` tests).
   - Execute `infra/linux/run-outage-ac-f1-08.mjs` against real Docker Engine `29.9.3` + PostgreSQL `18.1` + Traefik `v3.3` + tenant site containers on the dedicated Linux host and record verified metrics (`1521/1521` `200 OK`, `0` restarts, `2.81s` `in_sync` convergence) in `docs/security/ac-f1-08-execution-report.md`.
-  - Independent `swarm-verifier` Pass 2 review + pending user sign-off (`"go"`).
+  - Independent `swarm-verifier` Pass 2 adversarial findings (`F-01`..`F-05`) remediated & regression-tested (`167/167` green); awaiting final verifier sign-off + user `"go"` to merge `feat/hcp-spec-003-phase-2` into `main`.

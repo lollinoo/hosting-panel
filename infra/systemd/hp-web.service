@@ -18,10 +18,9 @@ Restart=on-failure
 RestartSec=5s
 UMask=0027
 
-# Runtime directory (/run is tmpfs; shared runtime state dir)
-RuntimeDirectory=hosting-panel
+# Isolated private runtime directory (never touches /run/hosting-panel)
+RuntimeDirectory=hp-web
 RuntimeDirectoryMode=0750
-RuntimeDirectoryPreserve=yes
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix
 NoNewPrivileges=yes
@@ -30,7 +29,7 @@ AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-InaccessiblePaths=/var/run/docker.sock
+InaccessiblePaths=/var/run/docker.sock /run/hosting-panel
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes

@@ -100,8 +100,21 @@ export async function bootstrapDockerExecutorDaemon(
   const useSimulator = rawBackend === "simulator" || rawBackend === "local-simulator";
   const runtimeBackend: RuntimeBackend = useSimulator ? "local-simulator" : "linux-systemd";
 
-  const secretsRootDir = env.HP_SECRETS_ROOT_DIR?.trim() || DEFAULT_SECRETS_ROOT_DIR;
-  const ingressRootDir = env.HP_INGRESS_ROOT_DIR?.trim() || DEFAULT_INGRESS_ROOT_DIR;
+  const secretsRootDir =
+    env.HP_SECRETS_ROOT_DIR?.trim() ||
+    env.HP_SECRETS_TMPFS_DIR?.trim() ||
+    DEFAULT_SECRETS_ROOT_DIR;
+  const legacyDynamicDir = env.HP_TRAEFIK_DYNAMIC_DIR?.trim();
+  const resolvedLegacyIngressRoot =
+    legacyDynamicDir && legacyDynamicDir.length > 0
+      ? path.basename(path.resolve(legacyDynamicDir)) === "dynamic"
+        ? path.dirname(path.resolve(legacyDynamicDir))
+        : path.resolve(legacyDynamicDir)
+      : "";
+  const ingressRootDir =
+    env.HP_INGRESS_ROOT_DIR?.trim() ||
+    resolvedLegacyIngressRoot ||
+    DEFAULT_INGRESS_ROOT_DIR;
   const traefikImage = env.HP_TRAEFIK_IMAGE?.trim() || DEFAULT_TRAEFIK_IMAGE;
   const ingressHttpPort = env.HP_INGRESS_HTTP_PORT
     ? Number(env.HP_INGRESS_HTTP_PORT)
@@ -127,6 +140,7 @@ export async function bootstrapDockerExecutorDaemon(
     transport === "loopback-test"
       ? undefined
       : env.HP_EXECUTOR_SOCKET_PATH?.trim() ||
+        env.HP_EXECUTOR_SOCKET?.trim() ||
         env.HP_IPC_SOCKET_PATH?.trim() ||
         DEFAULT_EXECUTOR_SOCKET_PATH;
 

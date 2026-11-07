@@ -149,8 +149,9 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would install /etc/hosting-panel/nftables-dedicated.conf (0640 root:hp-ipc)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/ipc.key (0440 root:hp-ipc)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/secrets-master.key (0400 hp-api:root)"
+  log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
   log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750)"
-  log_dry "Would ensure tmpfs runtime directories /run/hosting-panel (0750) and /run/hosting-panel/secrets (0700)"
+  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (2750 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
   done
@@ -239,14 +240,31 @@ else
   log_info "Preserved existing AES-256-GCM master key at ${SECRETS_MASTER_KEY_PATH} (0400)"
 fi
 
-# 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs
+BREAKGLASS_KEY_PATH="/etc/hosting-panel/breakglass-jwt.key"
+if [[ ! -s "${BREAKGLASS_KEY_PATH}" ]]; then
+  tmp_bg_key="$(mktemp /etc/hosting-panel/.breakglass-jwt.key.XXXXXX)"
+  chmod 0400 "${tmp_bg_key}"
+  printf '%s' "$(generate_32_byte_hex_key)" > "${tmp_bg_key}"
+  chown hp-api:root "${tmp_bg_key}"
+  chmod 0400 "${tmp_bg_key}"
+  mv -f "${tmp_bg_key}" "${BREAKGLASS_KEY_PATH}"
+  log_info "Generated new 32-byte break-glass JWT signing key at ${BREAKGLASS_KEY_PATH}"
+else
+  chown hp-api:root "${BREAKGLASS_KEY_PATH}"
+  chmod 0400 "${BREAKGLASS_KEY_PATH}"
+  log_info "Preserved existing break-glass JWT signing key at ${BREAKGLASS_KEY_PATH} (0400)"
+fi
+
+# 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid 2750 root:hp-ipc)
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/static
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/dynamic
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/sites
 
-install -d -m 0750 -o root -g hp-ipc /run/hosting-panel
+install -m 0644 -o root -g root "${SYSTEMD_SRC_DIR}/hosting-panel-tmpfiles.conf" /etc/tmpfiles.d/hosting-panel.conf
+install -d -m 2750 -o root -g hp-ipc /run/hosting-panel
+chmod 2750 /run/hosting-panel
 install -d -m 0700 -o hp-executor -g hp-executor /run/hosting-panel/secrets
 
 # 9. Install and reload systemd units

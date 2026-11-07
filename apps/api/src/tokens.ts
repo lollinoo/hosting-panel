@@ -11,6 +11,7 @@ export interface ControlPlaneRuntimeConfig {
   readonly enableDevOidc: boolean;
   readonly runtimeBackend: RuntimeBackend;
   readonly secretsMasterKey: Buffer;
+  readonly breakglassSigningKey?: Uint8Array;
   readonly autoProcessOutbox: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;

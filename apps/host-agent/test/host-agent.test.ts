@@ -887,9 +887,17 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         expect(map.get("Service.PrivateTmp"), `${spec.file} PrivateTmp=`).toEqual(["yes"]);
 
         if (spec.inaccessibleDockerSock) {
-          expect(map.get("Service.InaccessiblePaths"), `${spec.file} InaccessiblePaths=`).toEqual([
-            "/var/run/docker.sock",
-          ]);
+          const inaccessible = map.get("Service.InaccessiblePaths")?.[0] ?? "";
+          expect(
+            inaccessible.split(/\s+/),
+            `${spec.file} InaccessiblePaths= must block /var/run/docker.sock`,
+          ).toContain("/var/run/docker.sock");
+          if (spec.file === "hp-web.service") {
+            expect(
+              inaccessible.split(/\s+/),
+              "hp-web.service must also isolate /run/hosting-panel",
+            ).toContain("/run/hosting-panel");
+          }
         } else {
           expect(map.get("Service.InaccessiblePaths"), `${spec.file} must access docker.sock`).toBeUndefined();
         }
@@ -904,19 +912,29 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         expect(map.get("Service.SystemCallFilter"), `${spec.file} SystemCallFilter=`).toEqual([
           "@system-service",
         ]);
-        expect(map.get("Service.RuntimeDirectory"), `${spec.file} RuntimeDirectory=`).toEqual([
-          "hosting-panel",
-        ]);
-        expect(map.get("Service.RuntimeDirectoryMode"), `${spec.file} RuntimeDirectoryMode=`).toEqual([
-          "0750",
-        ]);
+
+        // Prevent multi-user RuntimeDirectory=hosting-panel chown clobber (F-02)
+        expect(
+          map.get("Service.RuntimeDirectory"),
+          `${spec.file} must not clobber shared /run/hosting-panel via RuntimeDirectory=hosting-panel`,
+        ).not.toEqual(["hosting-panel"]);
       }
+
+      const tmpfilesContent = await readFile(
+        join(SYSTEMD_DIR, "hosting-panel-tmpfiles.conf"),
+        "utf8",
+      );
+      expect(tmpfilesContent).toContain("d /run/hosting-panel 2750 root hp-ipc -");
+      expect(tmpfilesContent).toContain(
+        "d /run/hosting-panel/secrets 0700 hp-executor hp-executor -",
+      );
 
       const executorContent = await readFile(
         join(SYSTEMD_DIR, "hp-docker-executor.service"),
         "utf8",
       );
       expect(executorContent).toContain("/run/hosting-panel/secrets");
+      expect(executorContent).toContain("HP_EXECUTOR_SOCKET_PATH=/run/hosting-panel/executor.sock");
     });
   });
 

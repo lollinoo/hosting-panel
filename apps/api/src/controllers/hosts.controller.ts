@@ -264,6 +264,11 @@ export class HostsController {
     }
 
     const daemons = await listHostAgentHeartbeats(this.dbClient.db, hostId);
+    const executorDaemon = daemons.find((d) => d.component === "docker_executor");
+    const executorDockerReachable =
+      executorDaemon?.status === "online" &&
+      executorDaemon.telemetrySnapshot["dockerEngineReachable"] !== false;
+
     const rawTelemetry = this.hostAgent.isRuntimeAvailable
       ? await this.hostAgent.getHostTelemetry(hostId)
       : null;
@@ -278,7 +283,9 @@ export class HostsController {
           storageTotalBytes: rawTelemetry.storageTotalBytes ?? host.totalStorageBytes,
           uptimeSeconds: rawTelemetry.uptimeSeconds ?? 0,
           kernelVersion: rawTelemetry.kernelVersion ?? "unknown",
-          dockerEngineReachable: rawTelemetry.dockerEngineReachable ?? false,
+          dockerEngineReachable: Boolean(
+            rawTelemetry.dockerEngineReachable || executorDockerReachable,
+          ),
           collectedAt: rawTelemetry.collectedAt,
         }
       : null;

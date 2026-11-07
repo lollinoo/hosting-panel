@@ -1,7 +1,7 @@
 [Unit]
 Description=Hosting Panel Confined Host Agent Daemon (HCP-SPEC-003 Domain 3)
 Documentation=https://hosting-panel.internal/docs/hcp-spec-003
-After=network-online.target
+After=systemd-tmpfiles-setup.service network-online.target
 Wants=network-online.target
 
 [Service]
@@ -14,18 +14,15 @@ EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
 Environment=NODE_ENV=production
 Environment=HP_RUNTIME_BACKEND=linux-systemd
 Environment=HP_IPC_TRANSPORT=uds
-Environment=HP_HOST_AGENT_SOCKET=/run/hosting-panel/host-agent.sock
+Environment=HP_HOST_AGENT_SOCKET_PATH=/run/hosting-panel/host-agent.sock
 Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_NFTABLES_RULESET_PATH=/etc/hosting-panel/nftables-dedicated.conf
 ExecStart=/usr/bin/node /opt/hosting-panel/apps/host-agent/dist/main.js
 Restart=on-failure
 RestartSec=5s
-UMask=0027
+UMask=0007
 
-# Runtime directory (/run/hosting-panel tmpfs for signed UDS IPC)
-RuntimeDirectory=hosting-panel
-RuntimeDirectoryMode=0750
-RuntimeDirectoryPreserve=yes
+# Shared UDS IPC dir (/run/hosting-panel 2750 root:hp-ipc managed via tmpfiles.d)
 ReadWritePaths=/run/hosting-panel
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix

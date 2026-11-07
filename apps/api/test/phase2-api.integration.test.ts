@@ -30,6 +30,7 @@ import {
 import {
   DockerExecutorIpcServer,
   InMemoryDockerSimulatorAdapter,
+  SignedDockerExecutorIpcClient,
 } from "@hosting-panel/docker-executor";
 import {
   HostAgentIpcServer,
@@ -39,6 +40,8 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   createControlPlaneApp,
   issueBreakGlassEmergencyToken,
+  OidcService,
+  parseBreakglassSigningKey,
   runBreakGlassUnlock,
   type ControlPlaneAppHandle,
 } from "../src/index.js";
@@ -1077,6 +1080,332 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       expect(finalStatus).toBe("succeeded");
     } finally {
       await simApp.close();
+    }
+  });
+
+  it("9. Cross-process break-glass token (F-01): standalone OidcService with shared breakglassSigningKey verifies on API and denies non-infrastructure_admin principals", async () => {
+    const sharedBreakglassHex = randomBytes(32).toString("hex");
+    const bgApp = await createControlPlaneApp({
+      listen: true,
+      host: "127.0.0.1",
+      port: 0,
+      enableDevOidc: false,
+      runtimeBackend: "local-simulator",
+      breakglassSigningKey: sharedBreakglassHex,
+      autoProcessOutbox: false,
+      outboxPollIntervalMs: null,
+      driftReconcileIntervalMs: null,
+    });
+
+    try {
+      // Simulate standalone CLI process instantiating its own OidcService (separate RSA keypair, shared HS256 break-glass key)
+      const standaloneCliOidc = new OidcService({
+        oidcIssuer: bgApp.oidc.issuer,
+        oidcAudience: bgApp.oidc.audience,
+        enableDevOidc: false,
+        runtimeBackend: "disabled",
+        secretsMasterKey: Buffer.alloc(32, 0),
+        breakglassSigningKey: parseBreakglassSigningKey(sharedBreakglassHex),
+        autoProcessOutbox: false,
+      });
+      await standaloneCliOidc.onModuleInit();
+
+      // Non-infrastructure_admin principals MUST be denied
+      await expect(
+        issueBreakGlassEmergencyToken({
+          dbClient: bgApp.dbClient,
+          oidcService: standaloneCliOidc,
+          userId: DEMO_IDS.users.elena,
+          reason: "Attempted tenant escalation",
+        }),
+      ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+
+      await expect(
+        issueBreakGlassEmergencyToken({
+          dbClient: bgApp.dbClient,
+          oidcService: standaloneCliOidc,
+          userId: DEMO_IDS.users.hosting,
+          reason: "Attempted hosting_admin escalation",
+        }),
+      ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+
+      // Active infrastructure_admin succeeds and works across distinct OidcService instances
+      const issued = await issueBreakGlassEmergencyToken({
+        dbClient: bgApp.dbClient,
+        oidcService: standaloneCliOidc,
+        userId: DEMO_IDS.users.infra,
+        ttlSeconds: 180,
+        reason: "External IdP unreachable — cross-process CLI verification",
+      });
+      expect(issued.ttlSeconds).toBe(180);
+
+      const hostsRes = await fetch(`${bgApp.baseUrl}/v1/hosts`, {
+        headers: { Authorization: `Bearer ${issued.token.accessToken}` },
+      });
+      expect(hostsRes.status).toBe(200);
+
+      const deniedAuditRes = await fetch(
+        `${bgApp.baseUrl}/v1/admin/audit?action=breakglass.token.denied`,
+        {
+          headers: { Authorization: `Bearer ${issued.token.accessToken}` },
+        },
+      );
+      expect(deniedAuditRes.status).toBe(200);
+      const deniedBody = (await deniedAuditRes.json()) as { data: AuditEventDto[] };
+      expect(deniedBody.data.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await bgApp.close();
+    }
+  });
+
+  it("10. In-flight IPC timeout (F-03 / TH-08): post-dispatch socket timeout marks operation 'unknown', preserves lockKey, prevents blind replay, and converges via read-only recovery", async () => {
+    const netMod = await import("node:net");
+    const httpMod = await import("node:http");
+    const slowTmpDir = await mkdtemp(path.join(os.tmpdir(), "hp-f03-timeout-"));
+    const slowSocketPath = path.join(slowTmpDir, "slow-executor.sock");
+    const innerSim = new InMemoryDockerSimulatorAdapter();
+    const signingKey = {
+      keyId: "ipc-f03-key",
+      algorithm: "hmac-sha256" as const,
+      secret: randomBytes(32).toString("hex"),
+    };
+
+    let deployCalls = 0;
+    let observedCalls = 0;
+    let shouldHangDeployResponse = true;
+    const openSockets = new Set<import("node:net").Socket>();
+
+    const rawServer = httpMod.default.createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        void (async () => {
+          const url = req.url ?? "/";
+          if (req.method === "POST" && url === "/v1/services/deploy") {
+            deployCalls += 1;
+            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+              spec: Parameters<InMemoryDockerSimulatorAdapter["deployService"]>[0];
+            };
+            const result = await innerSim.deployService(parsed.spec);
+            if (shouldHangDeployResponse) {
+              // Intentionally withhold response past client timeoutMs to simulate post-execution socket stall
+              return;
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ data: result }));
+            return;
+          }
+
+          if (req.method === "GET" && url.endsWith("/observed-state")) {
+            observedCalls += 1;
+            const parts = url.split("/");
+            const svcId = decodeURIComponent(parts[3] ?? "");
+            const obs = await innerSim.getObservedState(svcId);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ data: obs }));
+            return;
+          }
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              status: "ok",
+              daemon: "hp-docker-executor",
+              dockerReachable: true,
+              timestamp: new Date().toISOString(),
+            }),
+          );
+        })();
+      });
+    });
+
+    rawServer.on("connection", (sock: import("node:net").Socket) => {
+      openSockets.add(sock);
+      sock.on("close", () => openSockets.delete(sock));
+    });
+
+    await new Promise<void>((resolve) => rawServer.listen(slowSocketPath, resolve));
+
+    const ipcClient = new SignedDockerExecutorIpcClient({
+      signingKey,
+      transport: "uds",
+      socketPath: slowSocketPath,
+      timeoutMs: 120,
+    });
+
+    const f03App = await createControlPlaneApp({
+      listen: true,
+      host: "127.0.0.1",
+      port: 0,
+      enableDevOidc: true,
+      runtimeBackend: "local-simulator",
+      dockerExecutor: ipcClient,
+      autoProcessOutbox: false,
+      outboxPollIntervalMs: null,
+      driftReconcileIntervalMs: null,
+      recoverUnknownOnStart: false,
+    });
+
+    try {
+      const tokRes = await fetch(`${f03App.baseUrl}/v1/dev/auth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: "usr_elena" }),
+      });
+      const elenaJwt = ((await tokRes.json()) as { data: { accessToken: string } }).data
+        .accessToken;
+
+      const createSvcRes = await fetch(
+        `${f03App.baseUrl}/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${elenaJwt}`,
+            "Content-Type": "application/json",
+            "Idempotency-Key": "idem-f03-svc-create",
+          },
+          body: JSON.stringify({
+            serviceTemplateId: DEMO_IDS.templates.wordpress,
+            name: "f03-ambiguous-timeout-svc",
+            configuration: { image: "wordpress:6.6-apache", exposeHttp: false },
+          }),
+        },
+      );
+      expect(createSvcRes.status).toBe(201);
+      const svcId = (
+        (await createSvcRes.json()) as { data: { service: ServiceInstanceDto } }
+      ).data.service.id;
+
+      const deployRes = await fetch(
+        `${f03App.baseUrl}/v1/organizations/${DEMO_IDS.organizations.acme}/services/${svcId}/lifecycle`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${elenaJwt}`,
+            "Content-Type": "application/json",
+            "Idempotency-Key": "idem-f03-svc-deploy",
+          },
+          body: JSON.stringify({ action: "deploy" }),
+        },
+      );
+      expect(deployRes.status).toBe(202);
+      const deployEnvelope = (await deployRes.json()) as AsyncAcceptedEnvelope;
+
+      // 1. Outbox dispatches mutating POST; socket times out AFTER executor mutated state
+      await f03App.outboxWorker.processPendingOnce();
+      expect(deployCalls).toBe(1);
+
+      const opAfterTimeoutRes = await fetch(
+        `${f03App.baseUrl}${deployEnvelope.links.self}`,
+        { headers: { Authorization: `Bearer ${elenaJwt}` } },
+      );
+      const opAfterTimeout = (
+        (await opAfterTimeoutRes.json()) as { data: OperationDto }
+      ).data;
+
+      // MUST transition to 'unknown' (OPERATION_AMBIGUOUS), NOT 'failed'!
+      expect(opAfterTimeout.status).toBe("unknown");
+      expect(opAfterTimeout.errorCode).toBe("OPERATION_AMBIGUOUS");
+
+      // 2. Resource lock MUST still be held while status is 'unknown'
+      const conflictingRes = await fetch(
+        `${f03App.baseUrl}/v1/organizations/${DEMO_IDS.organizations.acme}/services/${svcId}/lifecycle`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${elenaJwt}`,
+            "Content-Type": "application/json",
+            "Idempotency-Key": "idem-f03-conflict-while-unknown",
+          },
+          body: JSON.stringify({ action: "restart" }),
+        },
+      );
+      expect(conflictingRes.status).toBe(409);
+      const conflictErr = (await conflictingRes.json()) as ApiErrorEnvelope;
+      expect(conflictErr.error.code).toBe("RESOURCE_LOCKED");
+
+      // 3. Subsequent outbox poll MUST NOT re-dispatch the mutating deploy
+      await f03App.outboxWorker.processPendingOnce();
+      expect(deployCalls).toBe(1);
+
+      // 4. Read-only crash recovery converges the operation to 'succeeded' with ZERO extra deploys
+      shouldHangDeployResponse = false;
+      const recovery = await f03App.outboxWorker.recoverUnknownOperations();
+      expect(recovery.convergedSucceeded).toBe(1);
+      expect(deployCalls).toBe(1);
+      expect(observedCalls).toBeGreaterThanOrEqual(1);
+
+      const opConvergedRes = await fetch(
+        `${f03App.baseUrl}${deployEnvelope.links.self}`,
+        { headers: { Authorization: `Bearer ${elenaJwt}` } },
+      );
+      const opConverged = ((await opConvergedRes.json()) as { data: OperationDto }).data;
+      expect(opConverged.status).toBe("succeeded");
+      void netMod;
+    } finally {
+      await f03App.close();
+      for (const s of openSockets) {
+        s.destroy();
+      }
+      await new Promise<void>((resolve) => rawServer.close(() => resolve()));
+      await rm(slowTmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("11. Host telemetry coalesces dockerEngineReachable from online docker_executor heartbeat when host-agent isolates docker.sock (F-05)", async () => {
+    const isolatedHostSim = new InMemoryHostSimulatorAdapter();
+    vi.spyOn(isolatedHostSim, "getHostTelemetry").mockResolvedValueOnce({
+      hostId: DEMO_IDS.hosts.acme,
+      cpuUsagePercent: 12.4,
+      memoryUsedBytes: "2147483648",
+      memoryTotalBytes: "17179869184",
+      storageUsedBytes: "10737418240",
+      storageTotalBytes: "107374182400",
+      uptimeSeconds: 86_400,
+      kernelVersion: "Linux 7.3.3-1-cachyos",
+      dockerEngineReachable: false,
+      collectedAt: new Date().toISOString(),
+    });
+
+    const f05App = await createControlPlaneApp({
+      listen: true,
+      host: "127.0.0.1",
+      port: 0,
+      enableDevOidc: true,
+      runtimeBackend: "local-simulator",
+      hostAgent: isolatedHostSim,
+      autoProcessOutbox: false,
+      outboxPollIntervalMs: null,
+      driftReconcileIntervalMs: null,
+    });
+
+    try {
+      await f05App.driftReconciler.reconcileAllOnce();
+
+      const tokRes = await fetch(`${f05App.baseUrl}/v1/dev/auth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: "usr_infra" }),
+      });
+      const infraJwt = ((await tokRes.json()) as { data: { accessToken: string } }).data
+        .accessToken;
+
+      const telRes = await fetch(
+        `${f05App.baseUrl}/v1/hosts/${DEMO_IDS.hosts.acme}/telemetry`,
+        { headers: { Authorization: `Bearer ${infraJwt}` } },
+      );
+      expect(telRes.status).toBe(200);
+      const telBody = (await telRes.json()) as {
+        data: { telemetry: HostTelemetryDto; daemons: HostDaemonHeartbeatDto[] };
+      };
+      expect(
+        telBody.data.daemons.some(
+          (d) => d.component === "docker_executor" && d.status === "online",
+        ),
+      ).toBe(true);
+      expect(telBody.data.telemetry.dockerEngineReachable).toBe(true);
+    } finally {
+      await f05App.close();
     }
   });
 });

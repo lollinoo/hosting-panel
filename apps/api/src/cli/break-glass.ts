@@ -1,9 +1,14 @@
+import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { redactSensitiveString } from "@hosting-panel/contracts";
 import {
+  and,
   appendAuditEvent,
   createDatabaseClient,
   eq,
+  membershipRoles,
+  memberships,
+  roles,
   unlockOperationBreakGlassTransactional,
   users,
   type DatabaseClient,
@@ -13,6 +18,47 @@ import { ControlPlaneError } from "../common/control-plane.error.js";
 
 export const MAX_BREAK_GLASS_TOKEN_TTL_SECONDS = 300;
 export const DEFAULT_BREAK_GLASS_USER_ID = "usr_infra";
+export const DEFAULT_BREAKGLASS_KEY_FILE = "/etc/hosting-panel/breakglass-jwt.key";
+
+export function parseBreakglassSigningKey(
+  raw: string | Buffer | Uint8Array,
+): Uint8Array {
+  let bytes: Buffer;
+  if (Buffer.isBuffer(raw)) {
+    bytes = Buffer.from(raw);
+  } else if (raw instanceof Uint8Array) {
+    bytes = Buffer.from(raw);
+  } else if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (/^[0-9a-fA-F]{64,}$/.test(trimmed) && trimmed.length % 2 === 0) {
+      bytes = Buffer.from(trimmed, "hex");
+    } else {
+      bytes = Buffer.from(trimmed, "utf8");
+    }
+  } else {
+    throw new Error("Break-glass signing key must be a non-empty string or byte buffer.");
+  }
+
+  if (bytes.byteLength < 32) {
+    throw new Error(
+      "Break-glass JWT signing key must be at least 32 bytes (HP_BREAKGLASS_KEY or HP_BREAKGLASS_KEY_FILE).",
+    );
+  }
+
+  return new Uint8Array(bytes);
+}
+
+export async function resolveRequiredBreakglassSigningKey(): Promise<Uint8Array> {
+  const inlineKey = process.env["HP_BREAKGLASS_KEY"]?.trim();
+  if (inlineKey && inlineKey.length > 0) {
+    return parseBreakglassSigningKey(inlineKey);
+  }
+
+  const keyFile =
+    process.env["HP_BREAKGLASS_KEY_FILE"]?.trim() || DEFAULT_BREAKGLASS_KEY_FILE;
+  const content = await readFile(keyFile, "utf8");
+  return parseBreakglassSigningKey(content);
+}
 
 export interface RunBreakGlassUnlockInput {
   readonly dbClient: DatabaseClient;
@@ -82,14 +128,76 @@ export async function issueBreakGlassEmergencyToken(
     );
   }
 
-  const token = await input.oidcService.issueToken({
+  const sanitizedReason = redactSensitiveString(trimmedReason);
+
+  if (user.userStatus !== "active") {
+    await appendAuditEvent(input.dbClient.db, {
+      actorId: null,
+      actorType: "system",
+      organizationId: null,
+      action: "breakglass.token.denied",
+      targetType: "user",
+      targetId: user.id,
+      details: {
+        userId: user.id,
+        email: user.email,
+        userStatus: user.userStatus,
+        reason: sanitizedReason,
+      },
+    });
+    throw new ControlPlaneError(
+      "PERMISSION_DENIED",
+      `Break-glass principal '${user.id}' is not active.`,
+    );
+  }
+
+  const isSeededInfraAdmin =
+    user.id === "usr_infra" || user.email === "infra@hcp.local";
+  let hasInfraRoleInDb = false;
+  if (!isSeededInfraAdmin) {
+    const infraRows = await input.dbClient.db
+      .select({ roleName: roles.name })
+      .from(memberships)
+      .innerJoin(membershipRoles, eq(membershipRoles.membershipId, memberships.id))
+      .innerJoin(roles, eq(roles.id, membershipRoles.roleId))
+      .where(
+        and(
+          eq(memberships.userId, user.id),
+          eq(memberships.status, "active"),
+          eq(roles.name, "infrastructure_admin"),
+        ),
+      )
+      .limit(1);
+    hasInfraRoleInDb = infraRows.length > 0;
+  }
+
+  if (!isSeededInfraAdmin && !hasInfraRoleInDb) {
+    await appendAuditEvent(input.dbClient.db, {
+      actorId: null,
+      actorType: "system",
+      organizationId: null,
+      action: "breakglass.token.denied",
+      targetType: "user",
+      targetId: user.id,
+      details: {
+        userId: user.id,
+        email: user.email,
+        reason: sanitizedReason,
+      },
+    });
+    throw new ControlPlaneError(
+      "PERMISSION_DENIED",
+      `Break-glass emergency tokens may only be issued for active infrastructure_admin principals ('${user.id}' denied).`,
+    );
+  }
+
+  const token = await input.oidcService.issueBreakGlassToken({
     subject: user.id,
     email: user.email,
     displayName: user.name,
     expiresInSeconds: clampedTtlSeconds,
   });
 
-  const sanitizedReason = redactSensitiveString(trimmedReason);
   const auditEvent = await appendAuditEvent(input.dbClient.db, {
     actorId: null,
     actorType: "system",
@@ -160,12 +268,14 @@ async function runCli(argv: readonly string[]): Promise<void> {
       const userId = parseCliFlag(argv, "--user-id");
       const ttlSeconds = rawTtl !== undefined ? Number.parseInt(rawTtl, 10) : undefined;
 
+      const breakglassSigningKey = await resolveRequiredBreakglassSigningKey();
       const oidcService = new OidcService({
         oidcIssuer: process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local",
         oidcAudience: process.env["OIDC_AUDIENCE"] ?? "hosting-panel-api",
         enableDevOidc: false,
         runtimeBackend: "disabled",
         secretsMasterKey: Buffer.alloc(32, 0),
+        breakglassSigningKey,
         autoProcessOutbox: false,
       });
       await oidcService.onModuleInit();

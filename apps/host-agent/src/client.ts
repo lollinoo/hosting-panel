@@ -50,18 +50,21 @@ export class HostAgentIpcClientError extends Error {
   public readonly code: ErrorCode;
   public readonly statusCode: number;
   public readonly retryable: boolean;
+  public readonly ambiguousOutcome: boolean;
 
   public constructor(
     code: ErrorCode,
     statusCode: number,
     message: string,
     retryable: boolean = false,
+    ambiguousOutcome: boolean = false,
   ) {
     super(message);
     this.name = "HostAgentIpcClientError";
     this.code = code;
     this.statusCode = statusCode;
     this.retryable = retryable;
+    this.ambiguousOutcome = ambiguousOutcome;
   }
 }
 
@@ -127,7 +130,7 @@ export class SignedHostAgentIpcClient implements HostAgentPort {
   public constructor(options: SignedHostAgentIpcClientOptions) {
     this.signingKey = options.signingKey;
     this.endpoint = normalizeClientEndpoint(options);
-    this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.timeoutMs = options.timeoutMs ?? 20_000;
     this.nowProvider = options.nowProvider;
   }
 
@@ -178,44 +181,124 @@ export class SignedHostAgentIpcClient implements HostAgentPort {
 
     return await new Promise<{ readonly statusCode: number; readonly bodyText: string }>(
       (resolveReq, rejectReq) => {
+        const isMutating = method !== "GET";
+        let socketConnected = false;
+        let writeStarted = false;
+        let timedOut = false;
+        let settled = false;
+
+        const rejectOnce = (err: HostAgentIpcClientError): void => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          rejectReq(err);
+        };
+
         const req = http.request(requestOptions, (res) => {
           const chunks: Buffer[] = [];
           res.on("data", (chunk: Buffer | Uint8Array) => {
             chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
           });
           res.on("end", () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
             resolveReq({
               statusCode: res.statusCode ?? 500,
               bodyText: Buffer.concat(chunks).toString("utf8"),
             });
           });
           res.on("error", (err) => {
-            rejectReq(
-              new HostAgentIpcClientError(
-                "HOST_AGENT_UNAVAILABLE",
-                503,
-                `Host agent IPC response stream failed: ${err.message}`,
-                true,
-              ),
+            rejectOnce(
+              isMutating
+                ? new HostAgentIpcClientError(
+                    "OPERATION_AMBIGUOUS",
+                    502,
+                    `Host agent IPC response stream dropped after mutating command dispatch: ${err.message}`,
+                    false,
+                    true,
+                  )
+                : new HostAgentIpcClientError(
+                    "HOST_AGENT_UNAVAILABLE",
+                    503,
+                    `Host agent IPC response stream failed: ${err.message}`,
+                    true,
+                    false,
+                  ),
             );
           });
         });
 
+        req.on("socket", (sock) => {
+          if (!sock.connecting) {
+            socketConnected = true;
+          } else {
+            sock.once("connect", () => {
+              socketConnected = true;
+            });
+          }
+        });
+
         req.on("timeout", () => {
+          timedOut = true;
           req.destroy(new Error("IPC request timed out"));
+          rejectOnce(
+            isMutating && (socketConnected || writeStarted)
+              ? new HostAgentIpcClientError(
+                  "OPERATION_AMBIGUOUS",
+                  502,
+                  "Timed out waiting for host-agent IPC response after mutating command dispatch",
+                  false,
+                  true,
+                )
+              : new HostAgentIpcClientError(
+                  "HOST_AGENT_UNAVAILABLE",
+                  503,
+                  "Timed out waiting for host-agent IPC response",
+                  true,
+                  false,
+                ),
+          );
         });
 
         req.on("error", (err) => {
-          rejectReq(
+          const errno = (err as NodeJS.ErrnoException | null)?.code;
+          const preConnectDefiniteRefusal =
+            !socketConnected &&
+            (errno === "ENOENT" ||
+              errno === "ECONNREFUSED" ||
+              errno === "EACCES" ||
+              errno === "ENOTSOCK");
+          if (
+            isMutating &&
+            !preConnectDefiniteRefusal &&
+            (timedOut || (socketConnected && writeStarted))
+          ) {
+            rejectOnce(
+              new HostAgentIpcClientError(
+                "OPERATION_AMBIGUOUS",
+                502,
+                `Host agent IPC connection dropped after mutating command dispatch: ${err.message}`,
+                false,
+                true,
+              ),
+            );
+            return;
+          }
+          rejectOnce(
             new HostAgentIpcClientError(
               "HOST_AGENT_UNAVAILABLE",
               503,
               `Host agent IPC transport unavailable: ${err.message}`,
               true,
+              false,
             ),
           );
         });
 
+        writeStarted = true;
         if (bodyString !== undefined) {
           req.write(bodyString, "utf8");
         }

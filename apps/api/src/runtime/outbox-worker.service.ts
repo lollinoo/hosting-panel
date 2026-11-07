@@ -299,16 +299,58 @@ export class OutboxWorkerService {
       return "succeeded";
     } catch (err) {
       const errorCode = extractErrorCode(err, "INTERNAL_ERROR");
+      const explicitAmbiguous =
+        errorCode === "OPERATION_AMBIGUOUS" ||
+        Boolean(
+          err !== null &&
+            typeof err === "object" &&
+            (err as { ambiguousOutcome?: unknown }).ambiguousOutcome === true,
+        );
       const rawMessage = err instanceof Error ? err.message : "Operation execution failed";
       const sanitizedMessage = sanitizePublicErrorMessage(rawMessage).slice(0, 1024);
-
-      await this.#failRemainingSteps(op.id, sanitizedMessage);
 
       const [latestOp] = await db
         .select()
         .from(operations)
         .where(eq(operations.id, op.id))
         .limit(1);
+
+      const postDispatchReconcileInterrupted =
+        latestOp?.status === "reconciling" && errorCode === "DOCKER_ENGINE_UNAVAILABLE";
+
+      if (
+        (explicitAmbiguous || postDispatchReconcileInterrupted) &&
+        latestOp &&
+        !isTerminalOperationStatus(latestOp.status) &&
+        canTransitionOperation(latestOp.status, "unknown")
+      ) {
+        await this.#markRunningStepsUnknown(op.id, sanitizedMessage);
+        await transitionOperation(db, op.id, "unknown", {
+          errorCode: "OPERATION_AMBIGUOUS",
+          errorMessage: sanitizedMessage,
+          leaseExpiresAt: null,
+        });
+        // Park outbox event without automatic mutating replay (TH-08 / AC-F2-07)
+        await failOutboxEvent(db, event.id, sanitizedMessage);
+        await appendAuditEvent(db, {
+          actorId: null,
+          actorType: "system",
+          organizationId: op.organizationId,
+          action: "operation.ambiguous",
+          targetType: "operation",
+          targetId: op.id,
+          details: {
+            kind: op.kind,
+            resourceType: op.resourceType,
+            resourceId: op.resourceId,
+            errorCode: "OPERATION_AMBIGUOUS",
+            reason: sanitizedMessage,
+          },
+        });
+        return "failed";
+      }
+
+      await this.#failRemainingSteps(op.id, sanitizedMessage);
 
       if (
         latestOp &&
@@ -927,7 +969,13 @@ export class OutboxWorkerService {
             : [undefined];
 
         // Strictly read-only inspection (AC-F2-07)
-        const obs = await this.dockerExecutor.getObservedState(op.resourceId);
+        let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
+        try {
+          obs = await this.dockerExecutor.getObservedState(op.resourceId);
+        } catch {
+          // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
+          continue;
+        }
 
         const targetMatched =
           op.kind === "service.stop"
@@ -1089,6 +1137,27 @@ export class OutboxWorkerService {
       );
     } catch {
       // Ignore if operation was enqueued without this optional step key
+    }
+  }
+
+  async #markRunningStepsUnknown(operationId: string, message: string): Promise<void> {
+    const db = this.dbClient.db;
+    const steps = await db
+      .select()
+      .from(operationSteps)
+      .where(eq(operationSteps.operationId, operationId))
+      .orderBy(asc(operationSteps.id));
+
+    for (const step of steps) {
+      if (step.status === "running") {
+        await updateOperationStepTransactional(
+          db,
+          operationId,
+          step.key,
+          "unknown",
+          message,
+        );
+      }
     }
   }
 
