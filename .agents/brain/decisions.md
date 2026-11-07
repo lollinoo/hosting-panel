@@ -1,10 +1,10 @@
-# Architectural Decisions Log (`hosting-panel` — `HCP-SPEC-002` Phase 1)
+# Architectural Decisions Log (`hosting-panel` — `HCP-SPEC-002` & `HCP-SPEC-003`)
 
-Settled architectural and product boundary decisions aligned via `/grill-me` with the user on 2026-11-07 for `HCP-SPEC-002` rev. 1.0 («Hosting Control Panel Docker-native — Fase 1»).
+Durable log of settled architectural and product boundary decisions aligned via `/grill-me` with the user.
 
 ---
 
-## Settled `/grill-me` Design Decisions (2026-11-07)
+## Phase 1 Settled `/grill-me` Design Decisions (`HCP-SPEC-002` — 2026-11-07)
 
 1. **Clean-Room Docker-Native Baseline (`Q1`, `Q3`, `Q5`)**:
    - Eliminate all external third-party orchestrator adapters, simulation servers, legacy environment variables, and POC tables.
@@ -20,25 +20,57 @@ Settled architectural and product boundary decisions aligned via `/grill-me` wit
 
 3. **Explicit 8-Package Monorepo Boundaries (`Q6` — `HCP-SPEC-002` §9)**:
    - `@hosting-panel/config`, `@hosting-panel/contracts`, `@hosting-panel/authz`, `@hosting-panel/hosting-domain`, `@hosting-panel/policy-engine`, `@hosting-panel/executor-contracts`, `@hosting-panel/host-agent-contracts`, `@hosting-panel/database`.
-   - `executor-contracts` and `host-agent-contracts` expose strictly typed internal interfaces (`ApprovedServiceSpec`, `DockerExecutorPort`, `HostAgentPort`) with Phase 1 disabled implementations returning `NOT_SUPPORTED` (zero `/var/run/docker.sock` or shell calls).
+   - In Phase 1, `executor-contracts` and `host-agent-contracts` exposed strictly typed internal interfaces (`ApprovedServiceSpec`, `DockerExecutorPort`, `HostAgentPort`) with disabled stubs returning `NOT_SUPPORTED`.
 
-4. **Phase 1 API Surface & New `shadcn@4.23.0` Italian UI (`Q4`, `Q7`, `Q8` — `AC-F1-10`)**:
+4. **Phase 1 API Surface & `shadcn@4.23.0` Italian UI (`Q4`, `Q7`, `Q8` — `AC-F1-10`)**:
    - Approved UI dependencies added to workspace: `shadcn@4.23.0`, `radix-ui@1.8.1`, `class-variance-authority@0.7.1`, `clsx@2.1.1`, `tailwind-merge@3.7.0`, `tw-animate-css@1.4.0`.
-   - Build three distinct authority consoles (`Infrastructure Admin`, `Hosting Admin`, `Customer Workspace`) with `shadcn` components over the encrypted `HttpOnly` JWE BFF boundary, strictly honoring `AC-F1-10` (clearly marking `Shared Hosting`, `Docker Executor`, `Host Agent`, `ACME/TLS`, `SFTP`, and production backups as Phase 2 / non-active in Phase 1).
-   - Deliver all normative `HCP-SPEC-002` §8 & §10 documents, keeping `ADR-010` (agent/executor process topology & IPC) and `ADR-011` (shared storage & disk quota mechanism) explicitly `OPEN`.
+   - Built three distinct authority consoles (`Infrastructure Admin`, `Hosting Admin`, `Customer Workspace`) with `shadcn` components over the encrypted `HttpOnly` JWE BFF boundary.
 
 ---
 
-## Canonical ADR Register (`HCP-SPEC-002` §10)
-- **ADR-001**: Dual Hosting Mode (`Dedicated` & `Shared`) in a Unified Domain — **APPROVATO**
-- **ADR-002**: `Dedicated` Standalone VPS as First Release (MVP) — **APPROVATO**
-- **ADR-003**: Local Standalone Appliance Baseline without Mandatory Central SaaS — **BASELINE**
-- **ADR-004**: Single Multi-Tenant Canonical Domain (`Host -> HostAllocation -> Site -> ServiceInstance -> StackRevision`) — **BASELINE**
-- **ADR-005**: `Docker Executor` as Isolated Logical Boundary — **BASELINE LOGICA**
-- **ADR-006**: `Host Agent` as Isolated Privileged Boundary — **BASELINE LOGICA**
-- **ADR-007**: Controlled `Shared` Hosting Behind Mandatory Security Gate — **BASELINE**
-- **ADR-008**: Optional Multi-Host Management Hub with Single-Writer Fencing — **OPZIONALE FUTURO**
-- **ADR-009**: Immutable Declarative `StackRevision` & Desired vs Observed Drift Model — **BASELINE**
-- **ADR-010**: Concrete Process Topology & IPC for `Docker Executor` / `Host Agent` — **OPEN — Fase 2**
-- **ADR-011**: Filesystem & Volume Disk Quota Enforcement for `Shared` Hosting — **OPEN — prima di Shared**
-- **ADR-012**: Threat Model Constraint on Untrusted Workloads (WordPress Plugins / Custom Code) in Shared Hosting — **VINCOLO**
+## Phase 2 Settled `/grill-me` Design Decisions (`HCP-SPEC-003` — 2026-11-07)
+
+1. **Scope & Deliverable Boundary (`Q1`)**:
+   - Author the normative specification `docs/architecture/hcp-spec-003-phase-2.md`, close `ADR-010`, and implement the full Phase 2 runtime inside the monorepo (`apps/docker-executor`, `apps/host-agent`, authenticated IPC, Outbox/Reconciler, minimal `Dedicated` ingress proxy, `systemd` units, Linux bootstrap/break-glass scripts, and `AC-F1-08` outage harness), while keeping `Shared Hosting`, `ADR-011`, `ACME/TLS`, `SFTP`, and production `Backups` strictly closed/gated.
+
+2. **Split-Agent Process Topology & Toolchain (`Q2` — Closing `ADR-010` Part 1)**:
+   - Enforce three separate privilege domains (`hp-api`/`hp-web`, `hp-docker-executor`, `hp-host-agent`) deployed as independent `systemd` services.
+   - Implement `apps/docker-executor` and `apps/host-agent` as lightweight standalone Node.js 24 + TypeScript daemons (zero NestJS, zero new external dependencies), directly sharing `@hosting-panel/contracts`, `@hosting-panel/executor-contracts`, `@hosting-panel/host-agent-contracts`, and `zod`.
+
+3. **Authenticated Local IPC Channel (`Q3` — Closing `ADR-010` Part 2 + `ADR-008` Readiness)**:
+   - Use Unix Domain Sockets (`/run/hosting-panel/executor.sock` and `/run/hosting-panel/host-agent.sock`, directory `0750`, socket `0660` confined to group `hp-ipc`, zero open TCP ports) combined with per-request cryptographic signing (`node:crypto` HMAC-SHA256 / Ed25519 over method, path, timestamp, nonce, and SHA-256 body digest, with ±30s clock-skew check and anti-replay nonce cache).
+   - Retain portable Named Pipe / ephemeral loopback transport fallback for isolated test suites and non-Linux dev runs.
+
+4. **Docker Engine Boundary & Zero-Sock Data Plane Ingress (`Q4` — `TH-02`, `TH-04`, `CP-01`)**:
+   - Confine `/var/run/docker.sock` access exclusively to `hp-docker-executor` via a native `node:http` Docker Engine API (`v1.45+`) client enforcing `Privileged: false`, `CapDrop: ["ALL"]`, `no-new-privileges:true`, `PidsLimit`, CPU/RAM cgroup v2 limits, and isolated per-site bridge networks (`hp_site_<siteId>_net`).
+   - Run **Traefik v3 with a read-only Dynamic File Provider** (`/var/lib/hosting-panel/ingress/dynamic:ro`, `watch: true`, `restart: unless-stopped`, **zero `docker.sock` mount**) for atomic hot-reloaded domain routing and 100% Data Plane survival during Control Plane outages (`CP-01`).
+
+5. **Zero-Root Linux Privilege Model & `systemd` Hardening (`Q5` — `TH-03`, `ADR-006`)**:
+   - Zero services run as `root`: provision dedicated `/usr/sbin/nologin` system users (`hp-web`, `hp-api`, `hp-executor`, `hp-agent`) and group `hp-ipc`.
+   - Mask `/var/run/docker.sock` from Control Plane processes (`InaccessiblePaths=/var/run/docker.sock`) with empty `CapabilityBoundingSet=`.
+   - Grant `hp-host-agent` only `AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH` with `NoNewPrivileges=yes`, `ProtectSystem=strict`, `SystemCallFilter=@system-service`, and strict `execFile` execution on fixed binary paths without shell invocation (`ALLOWLISTED_HOST_MAINTENANCE_ACTIONS` + static `nftables` `22/80/443` posture checks).
+
+6. **PostgreSQL Transactional Outbox, `unknown` Recovery & Observe-Only Drift Reconciler (`Q6` — `TH-08`, `TH-10`)**:
+   - Use PostgreSQL `SELECT ... FOR UPDATE SKIP LOCKED` for the Transactional Outbox Worker (compatible with both `pg` and `PGlite`, zero mandatory Redis/BullMQ dependency), returning `202 Accepted` (`AsyncAcceptedEnvelope`) and enforcing active operation locks (`409 CONFLICT`).
+   - Recover interrupted mutations via the `unknown` state using read-only `getObservedState` inspection (never blind `POST` replay).
+   - Keep the Drift Reconciler strictly **observe-only** (`in_sync` / `drifted` + `audit_event`, zero autonomous container restarts or recreations).
+
+7. **Target Linux OS & Live Execution of `AC-F1-08` on Dedicated Linux Environment (`Q7`)**:
+   - Standardize on **Ubuntu 24.04 LTS / Debian 12** (`systemd`, `cgroups v2`, `nftables`, Docker Engine CE).
+   - Deliver `infra/systemd/*.service`, `infra/linux/bootstrap-dedicated.sh`, break-glass CLI, and `infra/linux/run-outage-ac-f1-08.mjs`, and **execute `AC-F1-08` (`T0..T5` with `SIGKILL` on Web/API/Worker + DB stop under HTTP load) live on the dedicated Linux environment**, recording real measurements in `docs/security/ac-f1-08-execution-report.md`.
+
+8. **Additive Phase 2 DB Migration & `AES-256-GCM` `tmpfs` Secrets (`Q8` — `F1-012`)**:
+   - Add non-destructive migration `0002_phase2_runtime_and_secrets.sql` (`encrypted_secrets` encrypted at rest with `AES-256-GCM`, agent heartbeats, and partial unique index on active operation `lock_key`).
+   - Mount resolved secrets JIT as read-only `0400` files on `tmpfs` (`/run/hosting-panel/secrets/<serviceId>/<ref>`, Docker `*_FILE` pattern) so plaintext secrets never appear in `stack_revisions`, `outbox_events`, `Config.Env` (`docker inspect`), DTOs, or logs.
+
+9. **Dynamic `PlatformCapabilitiesDto` & Truthful 3-Console `shadcn@4.23.0` Unlock (`Q9` — `AC-F1-10`)**:
+   - Evolve `PlatformCapabilitiesDto` to expose `phase: "phase-1" | "phase-2"` and `runtimeBackend: "linux-systemd" | "local-simulator" | "disabled"`, keeping `sharedHostingEnabled`, `acmeTlsRuntimeAvailable`, `sftpAvailable`, and `productionBackupRuntimeAvailable` strictly `false`.
+   - Unlock async `202 Accepted` lifecycle controls, `OperationTimeline`, write-only encrypted secret refs, `in_sync`/`drifted` badges, and `InfrastructureAdmin` host telemetry/maintenance/security controls across `apps/web`.
+
+---
+
+## Canonical ADR Register (`HCP-SPEC-002` & `HCP-SPEC-003`)
+- **ADR-001..009**: Phase 1 Approved / Baseline ADRs (`docs/architecture/adr/0001..0009`)
+- **ADR-010**: Concrete Process Topology & IPC (`Split Agents` + Signed UDS IPC) — **To transition from `OPEN` to `APPROVATO — Fase 2` during `HCP-SPEC-003` implementation**
+- **ADR-011**: Filesystem & Volume Disk Quota Enforcement for `Shared` Hosting — **Remains `OPEN — prima di Shared`**
+- **ADR-012**: Threat Model Constraint on Untrusted Workloads in Shared Hosting — **VINCOLO**
