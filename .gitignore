@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build & Next.js outputs
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# Local runtime data & PGlite state
+.data/
+*.db
+*.sqlite
+
+# Test & coverage artifacts
+coverage/
+playwright-report/
+test-results/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# OS & IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
