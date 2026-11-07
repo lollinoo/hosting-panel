@@ -1,0 +1,26 @@
+{
+  "name": "hosting-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "typecheck": "node packages/config/scripts/run-workspaces.mjs typecheck",
+    "test": "vitest run",
+    "build": "node packages/config/scripts/run-workspaces.mjs build",
+    "dev:api": "corepack pnpm -C apps/api run dev",
+    "dev:web": "corepack pnpm -C apps/web run dev"
+  },
+  "devDependencies": {
+    "@eslint/js": "catalog:",
+    "@types/node": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "typescript-eslint": "catalog:",
+    "vitest": "catalog:"
+  }
+}
