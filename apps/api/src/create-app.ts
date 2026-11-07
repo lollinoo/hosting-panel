@@ -257,11 +257,16 @@ export async function createControlPlaneApp(
     options?.outboxPollIntervalMs !== undefined
       ? options.outboxPollIntervalMs
       : defaultBackgroundInterval;
+  const envDriftIntervalRaw = process.env["HP_DRIFT_RECONCILE_INTERVAL_MS"]?.trim();
+  const parsedEnvDriftInterval =
+    envDriftIntervalRaw && /^\d+$/.test(envDriftIntervalRaw)
+      ? Number.parseInt(envDriftIntervalRaw, 10)
+      : undefined;
   const driftReconcileIntervalMs =
     options?.driftReconcileIntervalMs !== undefined
       ? options.driftReconcileIntervalMs
       : shouldListen && runtimeBackend !== "disabled"
-        ? 15_000
+        ? (parsedEnvDriftInterval ?? 15_000)
         : null;
 
   const runtimeConfig: ControlPlaneRuntimeConfig = {
@@ -371,6 +376,9 @@ export async function createControlPlaneApp(
   }
 
   outboxWorker.startBackgroundLoop();
+  if (driftReconcileIntervalMs !== null && driftReconcileIntervalMs > 0) {
+    void driftReconciler.reconcileAllOnce().catch(() => undefined);
+  }
   driftReconciler.startBackgroundLoop();
 
   let isClosed = false;

@@ -486,10 +486,13 @@ export class OutboxWorkerService {
           ? Number.parseInt(rawPort.trim(), 10)
           : tpl.defaultPort || 80;
 
+    const isInternalBackingCategory =
+      tpl.category === "database" || tpl.category === "cache";
     const exposeHttp =
       typeof cfg["exposeHttp"] === "boolean"
         ? cfg["exposeHttp"]
-        : Boolean(domainHostnames.length > 0 || (tpl.defaultPort ?? 0) > 0);
+        : !isInternalBackingCategory &&
+          Boolean(domainHostnames.length > 0 || (tpl.defaultPort ?? 0) > 0);
 
     const pidsLimit =
       typeof cfg["pidsLimit"] === "number" ? cfg["pidsLimit"] : undefined;
@@ -521,7 +524,7 @@ export class OutboxWorkerService {
       resourceLimits,
       revisionNumber: rev.revisionNumber,
       specHash: rev.specHash,
-      domains: domainHostnames,
+      domains: exposeHttp ? domainHostnames : [],
       exposeHttp,
       internalPort: parsedPort,
       ...(pidsLimit !== undefined ? { pidsLimit } : {}),
