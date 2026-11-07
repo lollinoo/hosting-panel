@@ -333,6 +333,34 @@ importers:
         specifier: 'catalog:'
         version: 5.1.0(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
 
+  apps/docker-executor:
+    dependencies:
+      '@hosting-panel/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@hosting-panel/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@hosting-panel/executor-contracts':
+        specifier: workspace:*
+        version: link:../../packages/executor-contracts
+      '@hosting-panel/hosting-domain':
+        specifier: workspace:*
+        version: link:../../packages/hosting-domain
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.7
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.19.2
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 5.1.0(@types/node@24.19.2)(vite@8.3.6(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15))
+
   apps/host-agent:
     dependencies:
       '@hosting-panel/config':
