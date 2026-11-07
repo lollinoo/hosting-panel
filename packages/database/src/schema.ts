@@ -1,5 +1,4 @@
 import {
-  type AnyPgColumn,
   boolean,
   foreignKey,
   index,
@@ -12,104 +11,94 @@ import {
   unique,
 } from "drizzle-orm/pg-core";
 import type {
-  AuditEventOutcome,
-  AuditMetadata,
-  CertificateStatus,
-  DatabaseEngine,
-  DomainVerificationStatus,
+  AuditActorType,
+  DomainStatus,
   ErrorCode,
   GrantEffect,
-  ObservationSource,
-  ObservedResourceStatus,
+  HostAllocationStatus,
+  HostStatus,
+  HostingMode,
   OperationKind,
   OperationResourceType,
-  OperationStepStatus,
   OperationStatus,
+  OperationStepStatus,
   OrganizationStatus,
-  OrganizationType,
   PermissionKey,
-  ProviderCapabilities,
-  ProviderConnectionStatus,
-  ResourceHealthStatus,
-  ResourceType,
+  PresetRoleName,
+  QuotaReservationStatus,
+  ServiceDesiredStatus,
+  SiteStatus,
 } from "@hosting-panel/contracts";
 
-export type UserStatus = "active" | "disabled";
-export type MembershipStatus = "active" | "invited" | "suspended";
-export type PermissionRiskLevel = "low" | "medium" | "high" | "critical";
-export type MembershipRoleScopeType = "organization" | "resource";
-export type DesiredResourceState = "running" | "stopped";
-
-export const users = pgTable(
-  "users",
-  {
-    id: text("id").primaryKey(),
-    issuer: text("issuer").notNull(),
-    subject: text("subject").notNull(),
-    email: text("email").notNull(),
-    emailVerified: boolean("email_verified").notNull().default(true),
-    displayName: text("display_name").notNull(),
-    status: text("status").$type<UserStatus>().notNull().default("active"),
-    isPlatformAdmin: boolean("is_platform_admin").notNull().default(false),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("users_issuer_subject_unique").on(t.issuer, t.subject),
-    unique("users_email_unique").on(t.email),
-  ],
-);
-
-export const organizations = pgTable("organizations", {
+export const platformInstallations = pgTable("platform_installations", {
   id: text("id").primaryKey(),
-  slug: text("slug").notNull().unique("organizations_slug_unique"),
   name: text("name").notNull(),
-  type: text("type").$type<OrganizationType>().notNull().default("customer"),
-  status: text("status").$type<OrganizationStatus>().notNull().default("active"),
-  primaryLocale: text("primary_locale").notNull().default("it-IT"),
-  parentResellerId: text("parent_reseller_id").references((): AnyPgColumn => organizations.id, {
-    onDelete: "set null",
-  }),
+  specVersion: text("spec_version").notNull().default("HCP-SPEC-002"),
+  phase: text("phase").notNull().default("phase-1"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const memberships = pgTable(
-  "memberships",
+export const hosts = pgTable(
+  "hosts",
   {
     id: text("id").primaryKey(),
-    organizationId: text("organization_id")
+    platformInstallationId: text("platform_installation_id")
       .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    status: text("status").$type<MembershipStatus>().notNull().default("active"),
+      .references(() => platformInstallations.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    hostname: text("hostname").notNull().unique(),
+    ipv4Address: text("ipv4_address").notNull(),
+    ipv6Address: text("ipv6_address"),
+    status: text("status").$type<HostStatus>().notNull().default("ready"),
+    hostingMode: text("hosting_mode").$type<HostingMode>().notNull().default("dedicated"),
+    totalCpuMilli: integer("total_cpu_milli").notNull(),
+    totalMemoryBytes: text("total_memory_bytes").notNull(),
+    totalStorageBytes: text("total_storage_bytes").notNull(),
+    securityReviewed: boolean("security_reviewed").notNull().default(false),
+    sharedApproved: boolean("shared_approved").notNull().default(false),
+    metadata: jsonb("metadata").notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    unique("memberships_organization_user_unique").on(t.organizationId, t.userId),
-    index("idx_memberships_user_id").on(t.userId),
-  ],
+  (t) => [index("idx_hosts_status_mode").on(t.status, t.hostingMode)],
 );
 
-export const roles = pgTable(
-  "roles",
+export const organizations = pgTable(
+  "organizations",
   {
     id: text("id").primaryKey(),
-    organizationId: text("organization_id").references(() => organizations.id, {
-      onDelete: "cascade",
-    }),
+    platformInstallationId: text("platform_installation_id")
+      .notNull()
+      .references(() => platformInstallations.id, { onDelete: "restrict" }),
     name: text("name").notNull(),
-    isSystem: boolean("is_system").notNull().default(false),
-    version: integer("version").notNull().default(1),
+    slug: text("slug").notNull().unique(),
+    status: text("status").$type<OrganizationStatus>().notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_roles_organization_id").on(t.organizationId)],
+  (t) => [index("idx_organizations_slug").on(t.slug)],
 );
+
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull().unique(),
+  name: text("name").notNull(),
+  userStatus: text("user_status").notNull().default("active"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const roles = pgTable("roles", {
+  id: text("id").primaryKey(),
+  name: text("name").$type<PresetRoleName>().notNull().unique(),
+  description: text("description").notNull(),
+  isPreset: boolean("is_preset").notNull().default(true),
+});
 
 export const permissions = pgTable("permissions", {
   key: text("key").$type<PermissionKey>().primaryKey(),
   description: text("description").notNull(),
-  riskLevel: text("risk_level").$type<PermissionRiskLevel>().notNull().default("low"),
 });
 
 export const rolePermissions = pgTable(
@@ -122,9 +111,28 @@ export const rolePermissions = pgTable(
       .$type<PermissionKey>()
       .notNull()
       .references(() => permissions.key, { onDelete: "cascade" }),
-    effect: text("effect").$type<GrantEffect>().notNull().default("allow"),
   },
-  (t) => [primaryKey({ name: "role_permissions_pkey", columns: [t.roleId, t.permissionKey] })],
+  (t) => [primaryKey({ columns: [t.roleId, t.permissionKey] })],
+);
+
+export const memberships = pgTable(
+  "memberships",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("active"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_memberships_org_user").on(t.organizationId, t.userId),
+    index("idx_memberships_user").on(t.userId),
+  ],
 );
 
 export const membershipRoles = pgTable(
@@ -137,13 +145,27 @@ export const membershipRoles = pgTable(
     roleId: text("role_id")
       .notNull()
       .references(() => roles.id, { onDelete: "cascade" }),
-    scopeType: text("scope_type")
-      .$type<MembershipRoleScopeType>()
-      .notNull()
-      .default("organization"),
+    scopeType: text("scope_type").notNull().default("organization"),
     scopeResourceId: text("scope_resource_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_membership_roles_membership_id").on(t.membershipId)],
+  (t) => [index("idx_membership_roles_membership").on(t.membershipId)],
+);
+
+export const hostingAdminScopes = pgTable(
+  "hosting_admin_scopes",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id"),
+    installationId: text("installation_id")
+      .notNull()
+      .references(() => platformInstallations.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_hosting_admin_scopes_user").on(t.userId)],
 );
 
 export const supportAccessGrants = pgTable(
@@ -159,180 +181,12 @@ export const supportAccessGrants = pgTable(
     approvedByUserId: text("approved_by_user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    permissions: jsonb("permissions").$type<readonly PermissionKey[]>().notNull(),
     reason: text("reason").notNull(),
-    permissionsJson: jsonb("permissions_json").$type<PermissionKey[]>().notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_support_access_grants_org_operator").on(t.organizationId, t.operatorUserId)],
-);
-
-export const quotaAllocations = pgTable("quota_allocations", {
-  id: text("id").primaryKey(),
-  organizationId: text("organization_id")
-    .notNull()
-    .unique("quota_allocations_organization_unique")
-    .references(() => organizations.id, { onDelete: "cascade" }),
-  planCode: text("plan_code").notNull(),
-  serversUsed: integer("servers_used").notNull().default(0),
-  serversLimit: integer("servers_limit").notNull().default(0),
-  applicationsUsed: integer("applications_used").notNull().default(0),
-  applicationsLimit: integer("applications_limit").notNull().default(0),
-  databasesUsed: integer("databases_used").notNull().default(0),
-  databasesLimit: integer("databases_limit").notNull().default(0),
-  domainsUsed: integer("domains_used").notNull().default(0),
-  domainsLimit: integer("domains_limit").notNull().default(0),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-export const providerInstances = pgTable("provider_instances", {
-  id: text("id").primaryKey(),
-  displayName: text("display_name").notNull(),
-  kind: text("kind").$type<"coolify-v4">().notNull().default("coolify-v4"),
-  baseUrl: text("base_url").notNull(),
-  status: text("status").$type<ProviderConnectionStatus>().notNull().default("connected"),
-  version: text("version"),
-  capabilitiesJson: jsonb("capabilities_json").$type<ProviderCapabilities>().notNull(),
-  lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
-
-export const providerConnections = pgTable(
-  "provider_connections",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    providerInstanceId: text("provider_instance_id")
-      .notNull()
-      .references(() => providerInstances.id, { onDelete: "restrict" }),
-    teamId: text("team_id").notNull(),
-    secretRefRead: text("secret_ref_read").notNull(),
-    secretRefWrite: text("secret_ref_write"),
-    secretRefDeploy: text("secret_ref_deploy"),
-    status: text("status").$type<ProviderConnectionStatus>().notNull().default("connected"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("provider_connections_id_org_unique").on(t.id, t.organizationId),
-    index("idx_provider_connections_org_id").on(t.organizationId),
-  ],
-);
-
-export const serverAllocations = pgTable(
-  "server_allocations",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    providerConnectionId: text("provider_connection_id").notNull(),
-    providerServerId: text("provider_server_id").notNull(),
-    name: text("name").notNull(),
-    region: text("region").notNull(),
-    publicIpv4: text("public_ipv4"),
-    status: text("status").$type<ObservedResourceStatus>().notNull().default("unknown"),
-    health: text("health").$type<ResourceHealthStatus>().notNull().default("unknown"),
-    vcpuCount: integer("vcpu_count").notNull(),
-    memoryMb: integer("memory_mb").notNull(),
-    diskGb: integer("disk_gb").notNull(),
-    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("server_allocations_id_org_unique").on(t.id, t.organizationId),
-    foreignKey({
-      name: "fk_server_allocations_connection_org",
-      columns: [t.providerConnectionId, t.organizationId],
-      foreignColumns: [providerConnections.id, providerConnections.organizationId],
-    }).onDelete("restrict"),
-    index("idx_server_allocations_org_id").on(t.organizationId),
-  ],
-);
-
-export const operations = pgTable(
-  "operations",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    resourceType: text("resource_type").$type<OperationResourceType>().notNull(),
-    resourceId: text("resource_id").notNull(),
-    kind: text("kind").$type<OperationKind>().notNull(),
-    status: text("status").$type<OperationStatus>().notNull().default("queued"),
-    requestedByUserId: text("requested_by_user_id").references(() => users.id, {
-      onDelete: "set null",
-    }),
-    idempotencyKey: text("idempotency_key").notNull(),
-    requestHash: text("request_hash").notNull(),
-    payloadJson: jsonb("payload_json").$type<Record<string, unknown>>().notNull().default({}),
-    providerOperationId: text("provider_operation_id"),
-    errorCode: text("error_code").$type<ErrorCode>(),
-    errorMessage: text("error_message"),
-    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("operations_org_kind_idempotency_unique").on(
-      t.organizationId,
-      t.kind,
-      t.idempotencyKey,
-    ),
-    index("idx_operations_org_submitted").on(t.organizationId, t.submittedAt),
-    index("idx_operations_resource").on(t.organizationId, t.resourceId),
-  ],
-);
-
-export const hostingResources = pgTable(
-  "hosting_resources",
-  {
-    id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    connectionId: text("connection_id").notNull(),
-    serverAllocationId: text("server_allocation_id").notNull(),
-    type: text("type").$type<ResourceType>().notNull(),
-    name: text("name").notNull(),
-    slug: text("slug").notNull(),
-    providerId: text("provider_id").notNull(),
-    desiredState: text("desired_state").$type<DesiredResourceState>().notNull().default("running"),
-    observedStatus: text("observed_status")
-      .$type<ObservedResourceStatus>()
-      .notNull()
-      .default("unknown"),
-    health: text("health").$type<ResourceHealthStatus>().notNull().default("unknown"),
-    observedSource: text("observed_source")
-      .$type<ObservationSource>()
-      .notNull()
-      .default("coolify"),
-    lastObservedAt: timestamp("last_observed_at", { withTimezone: true }),
-    lockedByOperationId: text("locked_by_operation_id").references(() => operations.id, {
-      onDelete: "set null",
-    }),
-    version: integer("version").notNull().default(1),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    unique("hosting_resources_connection_provider_unique").on(t.connectionId, t.providerId),
-    unique("hosting_resources_id_org_unique").on(t.id, t.organizationId),
-    foreignKey({
-      name: "fk_hosting_resources_connection_org",
-      columns: [t.connectionId, t.organizationId],
-      foreignColumns: [providerConnections.id, providerConnections.organizationId],
-    }).onDelete("restrict"),
-    foreignKey({
-      name: "fk_hosting_resources_server_org",
-      columns: [t.serverAllocationId, t.organizationId],
-      foreignColumns: [serverAllocations.id, serverAllocations.organizationId],
-    }).onDelete("restrict"),
-    index("idx_hosting_resources_org_type").on(t.organizationId, t.type),
-  ],
+  (t) => [index("idx_support_grants_org_operator").on(t.organizationId, t.operatorUserId)],
 );
 
 export const resourceGrants = pgTable(
@@ -350,247 +204,315 @@ export const resourceGrants = pgTable(
       .$type<PermissionKey>()
       .notNull()
       .references(() => permissions.key, { onDelete: "cascade" }),
-    effect: text("effect").$type<GrantEffect>().notNull(),
+    effect: text("effect").$type<GrantEffect>().notNull().default("allow"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    foreignKey({
-      name: "fk_resource_grants_resource_org",
-      columns: [t.resourceId, t.organizationId],
-      foreignColumns: [hostingResources.id, hostingResources.organizationId],
-    }).onDelete("cascade"),
-    index("idx_resource_grants_org_principal").on(t.organizationId, t.principalUserId),
-  ],
+  (t) => [index("idx_resource_grants_lookup").on(t.organizationId, t.principalUserId, t.resourceId)],
 );
 
-export const applications = pgTable("applications", {
-  resourceId: text("resource_id")
-    .primaryKey()
-    .references(() => hostingResources.id, { onDelete: "cascade" }),
-  environment: text("environment").notNull().default("production"),
-  repositoryUrl: text("repository_url"),
-  branch: text("branch"),
-  buildPack: text("build_pack").notNull().default("nixpacks"),
-  primaryDomain: text("primary_domain"),
-  lastDeployedAt: timestamp("last_deployed_at", { withTimezone: true }),
-});
-
-export const databases = pgTable("databases", {
-  resourceId: text("resource_id")
-    .primaryKey()
-    .references(() => hostingResources.id, { onDelete: "cascade" }),
-  engine: text("engine").$type<DatabaseEngine>().notNull(),
-  engineVersion: text("engine_version").notNull(),
-  storageAllocatedGb: integer("storage_allocated_gb").notNull(),
-  internalHostname: text("internal_hostname"),
-  port: integer("port"),
-  lastBackupAt: timestamp("last_backup_at", { withTimezone: true }),
-});
-
-export const deploymentRecords = pgTable(
-  "deployment_records",
+export const hostAllocations = pgTable(
+  "host_allocations",
   {
     id: text("id").primaryKey(),
-    applicationResourceId: text("application_resource_id")
+    hostId: text("host_id")
       .notNull()
-      .references(() => applications.resourceId, { onDelete: "cascade" }),
+      .references(() => hosts.id, { onDelete: "restrict" }),
     organizationId: text("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    operationId: text("operation_id").references(() => operations.id, { onDelete: "set null" }),
-    providerDeploymentId: text("provider_deployment_id"),
-    commitSha: text("commit_sha"),
-    imageTag: text("image_tag"),
-    status: text("status").$type<OperationStatus>().notNull(),
-    triggeredByUserId: text("triggered_by_user_id").references(() => users.id, {
-      onDelete: "set null",
-    }),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    status: text("status").$type<HostAllocationStatus>().notNull().default("pending"),
+    hostingMode: text("hosting_mode").$type<HostingMode>().notNull().default("dedicated"),
+    dedicatedScope: boolean("dedicated_scope").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_host_allocations_id_org").on(t.id, t.organizationId),
+    index("idx_host_allocations_host_status").on(t.hostId, t.status),
+  ],
+);
+
+export const sites = pgTable(
+  "sites",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    hostAllocationId: text("host_allocation_id").notNull(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    status: text("status").$type<SiteStatus>().notNull().default("ready"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_sites_id_org").on(t.id, t.organizationId),
+    unique("uq_sites_org_slug").on(t.organizationId, t.slug),
+    foreignKey({
+      columns: [t.hostAllocationId, t.organizationId],
+      foreignColumns: [hostAllocations.id, hostAllocations.organizationId],
+      name: "fk_sites_host_allocation_org",
+    }).onDelete("restrict"),
+  ],
+);
+
+export const serviceTemplates = pgTable("service_templates", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  slug: text("slug").notNull().unique(),
+  description: text("description"),
+  category: text("category").notNull(),
+  defaultImage: text("default_image").notNull(),
+  defaultPort: integer("default_port"),
+  environmentSchema: jsonb("environment_schema").notNull().default({}),
+  defaultConfiguration: jsonb("default_configuration").notNull().default({}),
+  approvedForDedicated: boolean("approved_for_dedicated").notNull().default(true),
+  approvedForShared: boolean("approved_for_shared").notNull().default(false),
+  minCpuMilli: integer("min_cpu_milli").notNull().default(100),
+  minMemoryBytes: text("min_memory_bytes").notNull().default("134217728"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const serviceInstances = pgTable(
+  "service_instances",
+  {
+    id: text("id").primaryKey(),
+    siteId: text("site_id").notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    serviceTemplateId: text("service_template_id")
+      .notNull()
+      .references(() => serviceTemplates.id, { onDelete: "restrict" }),
+    name: text("name").notNull(),
+    desiredStatus: text("desired_status").$type<ServiceDesiredStatus>().notNull().default("running"),
+    currentRevisionId: text("current_revision_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_service_instances_id_org").on(t.id, t.organizationId),
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_service_instances_site_org",
+    }).onDelete("cascade"),
+  ],
+);
+
+export const stackRevisions = pgTable(
+  "stack_revisions",
+  {
+    id: text("id").primaryKey(),
+    serviceInstanceId: text("service_instance_id").notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    revisionNumber: integer("revision_number").notNull(),
+    specHash: text("spec_hash").notNull(),
+    declarativeConfig: jsonb("declarative_config").notNull(),
+    secretRefs: jsonb("secret_refs").notNull().default({}),
+    resourceLimits: jsonb("resource_limits"),
+    authorId: text("author_id").references(() => users.id, { onDelete: "set null" }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    unique("uq_stack_revisions_service_rev").on(t.serviceInstanceId, t.revisionNumber),
     foreignKey({
-      name: "fk_deployment_records_resource_org",
-      columns: [t.applicationResourceId, t.organizationId],
-      foreignColumns: [hostingResources.id, hostingResources.organizationId],
+      columns: [t.serviceInstanceId, t.organizationId],
+      foreignColumns: [serviceInstances.id, serviceInstances.organizationId],
+      name: "fk_stack_revisions_service_instance_org",
     }).onDelete("cascade"),
-    index("idx_deployment_records_app_created").on(t.applicationResourceId, t.createdAt),
   ],
 );
+
+export const dockerResources = pgTable(
+  "docker_resources",
+  {
+    id: text("id").primaryKey(),
+    siteId: text("site_id")
+      .notNull()
+      .references(() => sites.id, { onDelete: "cascade" }),
+    serviceInstanceId: text("service_instance_id")
+      .notNull()
+      .references(() => serviceInstances.id, { onDelete: "cascade" }),
+    internalDockerRef: text("internal_docker_ref").notNull(),
+    resourceType: text("resource_type").notNull().default("container"),
+    status: text("status").notNull().default("running"),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_docker_resources_service").on(t.serviceInstanceId),
+    index("idx_docker_resources_site").on(t.siteId),
+  ],
+);
+
+export const observedStates = pgTable("observed_states", {
+  id: text("id").primaryKey(),
+  serviceInstanceId: text("service_instance_id")
+    .notNull()
+    .unique()
+    .references(() => serviceInstances.id, { onDelete: "cascade" }),
+  observedStatus: text("observed_status").notNull(),
+  observedRevisionHash: text("observed_revision_hash"),
+  outOfBandModified: boolean("out_of_band_modified").notNull().default(false),
+  rawState: jsonb("raw_state").notNull().default({}),
+  observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const domains = pgTable(
   "domains",
   {
     id: text("id").primaryKey(),
+    siteId: text("site_id").notNull(),
     organizationId: text("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    applicationResourceId: text("application_resource_id")
-      .notNull()
-      .references(() => applications.resourceId, { onDelete: "cascade" }),
-    hostname: text("hostname").notNull().unique("domains_hostname_unique"),
+    hostname: text("hostname").notNull().unique(),
     isPrimary: boolean("is_primary").notNull().default(false),
-    verificationStatus: text("verification_status")
-      .$type<DomainVerificationStatus>()
-      .notNull()
-      .default("pending"),
-    httpsEnabled: boolean("https_enabled").notNull().default(true),
+    status: text("status").$type<DomainStatus>().notNull().default("pending"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique("domains_id_org_unique").on(t.id, t.organizationId),
     foreignKey({
-      name: "fk_domains_app_resource_org",
-      columns: [t.applicationResourceId, t.organizationId],
-      foreignColumns: [hostingResources.id, hostingResources.organizationId],
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_domains_site_org",
     }).onDelete("cascade"),
-    index("idx_domains_org_id").on(t.organizationId),
   ],
 );
 
-export const certificateObservations = pgTable(
-  "certificate_observations",
+export const resourceQuotas = pgTable(
+  "resource_quotas",
   {
     id: text("id").primaryKey(),
-    domainId: text("domain_id")
-      .notNull()
-      .references(() => domains.id, { onDelete: "cascade" }),
     organizationId: text("organization_id")
       .notNull()
       .references(() => organizations.id, { onDelete: "cascade" }),
-    hostname: text("hostname").notNull(),
-    status: text("status").$type<CertificateStatus>().notNull().default("unknown"),
-    issuer: text("issuer"),
-    validFrom: timestamp("valid_from", { withTimezone: true }),
-    expiresAt: timestamp("expires_at", { withTimezone: true }),
-    observedAt: timestamp("observed_at", { withTimezone: true }),
-    source: text("source").$type<ObservationSource>().notNull().default("coolify"),
+    hostAllocationId: text("host_allocation_id").references(() => hostAllocations.id, {
+      onDelete: "set null",
+    }),
+    maxSites: integer("max_sites").notNull(),
+    maxServices: integer("max_services").notNull(),
+    maxCpuMilli: integer("max_cpu_milli").notNull(),
+    maxMemoryBytes: text("max_memory_bytes").notNull(),
+    maxStorageBytes: text("max_storage_bytes").notNull(),
+    usedSites: integer("used_sites").notNull().default(0),
+    usedServices: integer("used_services").notNull().default(0),
+    usedCpuMilli: integer("used_cpu_milli").notNull().default(0),
+    usedMemoryBytes: text("used_memory_bytes").notNull().default("0"),
+    usedStorageBytes: text("used_storage_bytes").notNull().default("0"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_resource_quotas_org").on(t.organizationId)],
+);
+
+export const quotaReservations = pgTable(
+  "quota_reservations",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    resourceQuotaId: text("resource_quota_id")
+      .notNull()
+      .references(() => resourceQuotas.id, { onDelete: "cascade" }),
+    sites: integer("sites").notNull().default(0),
+    services: integer("services").notNull().default(0),
+    cpuMilli: integer("cpu_milli").notNull().default(0),
+    memoryBytes: text("memory_bytes").notNull().default("0"),
+    storageBytes: text("storage_bytes").notNull().default("0"),
+    status: text("status").$type<QuotaReservationStatus>().notNull().default("pending"),
+    idempotencyKey: text("idempotency_key").notNull().unique(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("idx_quota_reservations_quota_status").on(t.resourceQuotaId, t.status)],
+);
+
+export const operations = pgTable(
+  "operations",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<OperationKind>().notNull(),
+    status: text("status").$type<OperationStatus>().notNull().default("queued"),
+    resourceType: text("resource_type").$type<OperationResourceType>().notNull(),
+    resourceId: text("resource_id").notNull(),
+    requestedByUserId: text("requested_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    idempotencyKey: text("idempotency_key"),
+    lockKey: text("lock_key"),
+    errorCode: text("error_code").$type<ErrorCode>(),
+    errorMessage: text("error_message"),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    foreignKey({
-      name: "fk_certificate_observations_domain_org",
-      columns: [t.domainId, t.organizationId],
-      foreignColumns: [domains.id, domains.organizationId],
-    }).onDelete("cascade"),
-    index("idx_certificate_observations_org_id").on(t.organizationId),
+    index("idx_operations_org_status").on(t.organizationId, t.status),
+    index("idx_operations_lock_key").on(t.lockKey),
   ],
 );
 
-export const operationSteps = pgTable(
-  "operation_steps",
-  {
-    id: text("id").primaryKey(),
-    operationId: text("operation_id")
-      .notNull()
-      .references(() => operations.id, { onDelete: "cascade" }),
-    stepOrder: integer("step_order").notNull(),
-    key: text("key").notNull(),
-    label: text("label").notNull(),
-    status: text("status").$type<OperationStepStatus>().notNull().default("pending"),
-    message: text("message"),
-    startedAt: timestamp("started_at", { withTimezone: true }),
-    completedAt: timestamp("completed_at", { withTimezone: true }),
-  },
-  (t) => [
-    unique("operation_steps_operation_key_unique").on(t.operationId, t.key),
-    index("idx_operation_steps_operation_order").on(t.operationId, t.stepOrder),
-  ],
-);
+export const operationSteps = pgTable("operation_steps", {
+  id: text("id").primaryKey(),
+  operationId: text("operation_id")
+    .notNull()
+    .references(() => operations.id, { onDelete: "cascade" }),
+  key: text("key").notNull(),
+  label: text("label").notNull(),
+  status: text("status").$type<OperationStepStatus>().notNull().default("pending"),
+  message: text("message"),
+  startedAt: timestamp("started_at", { withTimezone: true }),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+});
 
 export const outboxEvents = pgTable(
   "outbox_events",
   {
     id: text("id").primaryKey(),
-    organizationId: text("organization_id")
-      .notNull()
-      .references(() => organizations.id, { onDelete: "cascade" }),
-    operationId: text("operation_id")
-      .notNull()
-      .unique("outbox_events_operation_unique")
-      .references(() => operations.id, { onDelete: "cascade" }),
     eventType: text("event_type").notNull(),
-    payloadJson: jsonb("payload_json").$type<Record<string, unknown>>().notNull().default({}),
-    publishedAt: timestamp("published_at", { withTimezone: true }),
-    attempts: integer("attempts").notNull().default(0),
+    aggregateType: text("aggregate_type").notNull(),
+    aggregateId: text("aggregate_id").notNull(),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("pending"),
+    retryCount: integer("retry_count").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp("published_at", { withTimezone: true }),
   },
-  (t) => [index("idx_outbox_events_pending").on(t.publishedAt, t.createdAt)],
+  (t) => [index("idx_outbox_events_status").on(t.status)],
 );
 
 export const auditEvents = pgTable(
   "audit_events",
   {
     id: text("id").primaryKey(),
-    organizationId: text("organization_id"),
-    actorUserId: text("actor_user_id"),
-    actorEmail: text("actor_email"),
-    impersonatedByUserId: text("impersonated_by_user_id"),
+    actorId: text("actor_id").references(() => users.id, { onDelete: "set null" }),
+    actorType: text("actor_type").$type<AuditActorType>().notNull().default("user"),
+    organizationId: text("organization_id").references(() => organizations.id, {
+      onDelete: "set null",
+    }),
     action: text("action").notNull(),
     targetType: text("target_type").notNull(),
     targetId: text("target_id"),
-    outcome: text("outcome").$type<AuditEventOutcome>().notNull(),
-    requestId: text("request_id").notNull(),
     ipAddress: text("ip_address"),
-    metadataJson: jsonb("metadata_json").$type<AuditMetadata>().notNull().default({}),
-    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+    userAgent: text("user_agent"),
+    details: jsonb("details").notNull().default({}),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [
-    index("idx_audit_events_org_occurred").on(t.organizationId, t.occurredAt),
-    index("idx_audit_events_occurred").on(t.occurredAt),
-  ],
+  (t) => [index("idx_audit_events_org_timestamp").on(t.organizationId, t.timestamp)],
 );
-
-export const databaseTables = {
-  users,
-  organizations,
-  memberships,
-  roles,
-  permissions,
-  rolePermissions,
-  membershipRoles,
-  resourceGrants,
-  supportAccessGrants,
-  quotaAllocations,
-  providerInstances,
-  providerConnections,
-  serverAllocations,
-  hostingResources,
-  applications,
-  databases,
-  deploymentRecords,
-  domains,
-  certificateObservations,
-  operations,
-  operationSteps,
-  outboxEvents,
-  auditEvents,
-} as const;
-
-export type UserRow = typeof users.$inferSelect;
-export type NewUserRow = typeof users.$inferInsert;
-export type OrganizationRow = typeof organizations.$inferSelect;
-export type NewOrganizationRow = typeof organizations.$inferInsert;
-export type MembershipRow = typeof memberships.$inferSelect;
-export type RoleRow = typeof roles.$inferSelect;
-export type PermissionRow = typeof permissions.$inferSelect;
-export type RolePermissionRow = typeof rolePermissions.$inferSelect;
-export type MembershipRoleRow = typeof membershipRoles.$inferSelect;
-export type ResourceGrantRow = typeof resourceGrants.$inferSelect;
-export type SupportAccessGrantRow = typeof supportAccessGrants.$inferSelect;
-export type QuotaAllocationRow = typeof quotaAllocations.$inferSelect;
-export type ProviderInstanceRow = typeof providerInstances.$inferSelect;
-export type ProviderConnectionRow = typeof providerConnections.$inferSelect;
-export type ServerAllocationRow = typeof serverAllocations.$inferSelect;
-export type HostingResourceRow = typeof hostingResources.$inferSelect;
-export type ApplicationRow = typeof applications.$inferSelect;
-export type DatabaseRow = typeof databases.$inferSelect;
-export type DeploymentRecordRow = typeof deploymentRecords.$inferSelect;
-export type DomainRow = typeof domains.$inferSelect;
-export type CertificateObservationRow = typeof certificateObservations.$inferSelect;
-export type OperationRow = typeof operations.$inferSelect;
-export type OperationStepRow = typeof operationSteps.$inferSelect;
-export type OutboxEventRow = typeof outboxEvents.$inferSelect;
-export type AuditEventRow = typeof auditEvents.$inferSelect;

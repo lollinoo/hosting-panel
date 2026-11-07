@@ -1,17 +1,17 @@
 import { z } from "zod";
 import { ErrorCodeSchema } from "./errors.js";
 
-const IsoDateTimeSchema = z.iso.datetime({ offset: true });
+const IsoDateTimeSchema = z.string().datetime({ offset: true });
 
 export const OPERATION_STATUSES = [
   "queued",
   "processing",
-  "accepted_by_provider",
+  "accepted",
   "reconciling",
   "succeeded",
   "failed",
-  "cancelled",
   "unknown",
+  "cancelled",
 ] as const;
 
 export const OperationStatusSchema = z.enum(OPERATION_STATUSES);
@@ -35,10 +35,12 @@ export function isTerminalOperationStatus(
 }
 
 export const OPERATION_KINDS = [
-  "application.deploy",
-  "application.restart",
-  "domain.recheck",
-  "provider.connection.test",
+  "service.deploy",
+  "service.restart",
+  "service.stop",
+  "site.deploy",
+  "host.maintenance",
+  "host.allocate",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);
@@ -49,11 +51,12 @@ export const ALLOWED_OPERATION_TRANSITIONS: Readonly<
 > = Object.freeze({
   queued: Object.freeze<readonly OperationStatus[]>(["processing", "cancelled"]),
   processing: Object.freeze<readonly OperationStatus[]>([
-    "accepted_by_provider",
+    "accepted",
+    "reconciling",
     "failed",
     "unknown",
   ]),
-  accepted_by_provider: Object.freeze<readonly OperationStatus[]>(["reconciling", "unknown"]),
+  accepted: Object.freeze<readonly OperationStatus[]>(["reconciling", "failed", "unknown"]),
   reconciling: Object.freeze<readonly OperationStatus[]>([
     "succeeded",
     "failed",
@@ -84,11 +87,12 @@ export const OperationStepStatusSchema = z.enum(OPERATION_STEP_STATUSES);
 export type OperationStepStatus = z.infer<typeof OperationStepStatusSchema>;
 
 export const OPERATION_RESOURCE_TYPES = [
-  "application",
-  "database",
+  "host",
+  "allocation",
+  "site",
+  "service",
   "domain",
-  "server",
-  "provider",
+  "quota",
 ] as const;
 
 export const OperationResourceTypeSchema = z.enum(OPERATION_RESOURCE_TYPES);

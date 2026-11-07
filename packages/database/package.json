@@ -18,6 +18,8 @@
   "dependencies": {
     "@electric-sql/pglite": "catalog:",
     "@hosting-panel/contracts": "workspace:*",
+    "@hosting-panel/hosting-domain": "workspace:*",
+    "@hosting-panel/policy-engine": "workspace:*",
     "drizzle-orm": "catalog:",
     "pg": "catalog:"
   },

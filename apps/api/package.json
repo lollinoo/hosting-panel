@@ -20,8 +20,11 @@
   "dependencies": {
     "@hosting-panel/authz": "workspace:*",
     "@hosting-panel/contracts": "workspace:*",
-    "@hosting-panel/coolify-adapter": "workspace:*",
     "@hosting-panel/database": "workspace:*",
+    "@hosting-panel/executor-contracts": "workspace:*",
+    "@hosting-panel/host-agent-contracts": "workspace:*",
+    "@hosting-panel/hosting-domain": "workspace:*",
+    "@hosting-panel/policy-engine": "workspace:*",
     "@nestjs/common": "catalog:",
     "@nestjs/core": "catalog:",
     "@nestjs/platform-fastify": "catalog:",

@@ -1,5 +1,5 @@
 {
-  "name": "@hosting-panel/coolify-adapter",
+  "name": "@hosting-panel/policy-engine",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "@hosting-panel/contracts": "workspace:*",
-    "zod": "catalog:"
+    "@hosting-panel/hosting-domain": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "catalog:",

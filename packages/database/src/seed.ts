@@ -1,1127 +1,800 @@
-import { sql } from "drizzle-orm";
 import {
-  AuditMetadataSchema,
-  DEFAULT_COOLIFY_V4_CAPABILITIES,
-  isMutatingPermission,
   PERMISSION_KEYS,
-  type PermissionKey,
   PRESET_ROLE_NAMES,
   PRESET_ROLE_PERMISSIONS,
-  type PresetRoleName,
 } from "@hosting-panel/contracts";
+import { buildImmutableStackRevision } from "@hosting-panel/hosting-domain";
 import type { HostingPanelDatabase } from "./client.js";
 import {
-  applications,
   auditEvents,
-  certificateObservations,
-  databases,
-  deploymentRecords,
+  dockerResources,
   domains,
-  hostingResources,
+  hostAllocations,
+  hostingAdminScopes,
+  hosts,
   membershipRoles,
   memberships,
+  observedStates,
   organizations,
-  type PermissionRiskLevel,
   permissions,
-  providerConnections,
-  providerInstances,
-  quotaAllocations,
+  platformInstallations,
   resourceGrants,
+  resourceQuotas,
   rolePermissions,
   roles,
-  serverAllocations,
+  serviceInstances,
+  serviceTemplates,
+  sites,
+  stackRevisions,
   users,
 } from "./schema.js";
 
-export const DEFAULT_DEMO_COOLIFY_BASE_URL = "http://127.0.0.1:4101";
-export const DEFAULT_DEMO_OIDC_ISSUER = "http://127.0.0.1:4000/oidc";
-
 export const DEMO_IDS = Object.freeze({
+  installation: "inst_local_01",
+  hosts: Object.freeze({
+    acme: "hst_ded_acme",
+    beta: "hst_ded_beta",
+    gamma: "hst_ded_gamma",
+    free: "hst_ded_free",
+    maint: "hst_maint_01",
+  }),
   organizations: Object.freeze({
     acme: "org_acme",
     beta: "org_beta",
-    legacy: "org_legacy",
+    gamma: "org_gamma",
   }),
   users: Object.freeze({
+    infra: "usr_infra",
+    hosting: "usr_hosting",
     elena: "usr_elena",
     marco: "usr_marco",
     giulia: "usr_giulia",
-    luca: "usr_luca",
-    admin: "usr_admin",
   }),
   roles: Object.freeze({
+    infrastructure_admin: "role_infrastructure_admin",
+    hosting_admin: "role_hosting_admin",
     customer_owner: "role_customer_owner",
-    hosting_manager: "role_hosting_manager",
-    developer: "role_developer",
-    database_manager: "role_database_manager",
-    billing_manager: "role_billing_manager",
-    viewer: "role_viewer",
-    platform_admin: "role_platform_admin",
-  }) satisfies Readonly<Record<PresetRoleName, string>>,
-  memberships: Object.freeze({
-    elenaAcme: "mbr_elena_acme",
-    elenaBeta: "mbr_elena_beta",
-    elenaLegacy: "mbr_elena_legacy",
-    marcoAcme: "mbr_marco_acme",
-    giuliaAcme: "mbr_giulia_acme",
-    lucaBeta: "mbr_luca_beta",
+    customer_collaborator: "role_customer_collaborator",
   }),
-  membershipRoles: Object.freeze({
-    elenaAcmeOwner: "mrole_elena_acme_owner",
-    elenaBetaViewer: "mrole_elena_beta_viewer",
-    elenaLegacyOwner: "mrole_elena_legacy_owner",
-    marcoAcmeStorefrontDev: "mrole_marco_acme_storefront_dev",
-    giuliaAcmeViewer: "mrole_giulia_acme_viewer",
-    lucaBetaOwner: "mrole_luca_beta_owner",
+  templates: Object.freeze({
+    wordpress: "tpl_wordpress_83",
+    nodejs: "tpl_nodejs_24",
+    mariadb: "tpl_mariadb_11",
+    redis: "tpl_redis_7",
   }),
-  resourceGrants: Object.freeze({
-    marcoStorefrontRead: "rgrant_marco_storefront_read",
-    marcoStorefrontDeploy: "rgrant_marco_storefront_deploy",
-    marcoStorefrontRestart: "rgrant_marco_storefront_restart",
-    marcoStorefrontLogs: "rgrant_marco_storefront_logs",
+  allocations: Object.freeze({
+    acme: "alloc_ded_acme",
+    beta: "alloc_ded_beta",
+    gamma: "alloc_ded_gamma",
   }),
-  providers: Object.freeze({
-    coolifyLab: "prv_coolify_lab",
+  sites: Object.freeze({
+    acmeShop: "site_acme_shop",
+    acmeBlog: "site_acme_blog",
+    betaPortal: "site_beta_portal",
+    gammaLegacy: "site_gamma_legacy",
   }),
-  providerConnections: Object.freeze({
-    acme: "pconn_acme",
-    beta: "pconn_beta",
-    legacy: "pconn_legacy",
-  }),
-  servers: Object.freeze({
-    acmeProd: "srv_acme_prod",
-    betaProd: "srv_beta_prod",
-    legacyProd: "srv_legacy_prod",
-  }),
-  applications: Object.freeze({
-    acmeStorefront: "app_acme_storefront",
-    acmeApi: "app_acme_api",
-    betaPortal: "app_beta_portal",
-    legacySite: "app_legacy_site",
-  }),
-  databases: Object.freeze({
-    acmePostgres: "db_acme_postgres",
-    acmeRedis: "db_acme_redis",
-  }),
-  deployments: Object.freeze({
-    acmeStorefrontInitial: "dep_acme_storefront_01",
-    acmeApiInitial: "dep_acme_api_01",
-    betaPortalInitial: "dep_beta_portal_01",
-  }),
-  domains: Object.freeze({
-    acmeStore: "dom_acme_store",
-    acmeApi: "dom_acme_api",
-    betaPortal: "dom_beta_portal",
-  }),
-  certificates: Object.freeze({
-    acmeStore: "cert_acme_store",
-    acmeApi: "cert_acme_api",
-    betaPortal: "cert_beta_portal",
-  }),
-  quotas: Object.freeze({
-    acme: "qta_acme",
-    beta: "qta_beta",
-    legacy: "qta_legacy",
-  }),
-  auditEvents: Object.freeze({
-    acmeBootstrap: "aud_seed_acme_bootstrap",
-    providerHealthCheck: "aud_seed_provider_health",
+  services: Object.freeze({
+    acmeShopWp: "svc_acme_shop_wp",
+    acmeShopDb: "svc_acme_shop_db",
+    acmeShopRedis: "svc_acme_shop_redis",
+    acmeBlogWp: "svc_acme_blog_wp",
+    acmeBlogDb: "svc_acme_blog_db",
+    betaPortalNode: "svc_beta_portal_node",
+    gammaLegacyApp: "svc_gamma_legacy_app",
   }),
 });
 
-export interface SeedDemoDatasetOptions {
-  readonly coolifyBaseUrl?: string;
-  readonly oidcIssuer?: string;
-  readonly now?: Date;
-}
+export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void> {
+  const now = new Date();
 
-function classifyPermissionRisk(permission: PermissionKey): PermissionRiskLevel {
-  if (
-    permission === "platform.admin" ||
-    permission === "support.impersonation.request" ||
-    permission === "support.impersonation.approve" ||
-    permission === "database.backup.restore"
-  ) {
-    return "critical";
-  }
+  // 1. Platform Installation
+  await db
+    .insert(platformInstallations)
+    .values({
+      id: DEMO_IDS.installation,
+      name: "Hosting Control Panel Local Appliance",
+      specVersion: "HCP-SPEC-002",
+      phase: "phase-1",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing();
 
-  if (
-    permission.endsWith(".delete") ||
-    permission.endsWith(".decommission") ||
-    permission === "secrets.write" ||
-    permission === "database.credentials.rotate" ||
-    permission === "organization.roles.manage" ||
-    permission === "organization.members.manage"
-  ) {
-    return "high";
-  }
-
-  if (isMutatingPermission(permission)) {
-    return "medium";
-  }
-
-  return "low";
-}
-
-export async function seedDemoDataset(
-  db: HostingPanelDatabase,
-  options?: SeedDemoDatasetOptions,
-): Promise<void> {
-  const baseNow = options?.now ?? new Date("2026-11-07T09:00:00.000Z");
-  const coolifyBaseUrl = options?.coolifyBaseUrl ?? DEFAULT_DEMO_COOLIFY_BASE_URL;
-  const oidcIssuer = options?.oidcIssuer ?? DEFAULT_DEMO_OIDC_ISSUER;
-
-  const oneDayMs = 24 * 60 * 60 * 1000;
-  const recentDeployAt = new Date(baseNow.getTime() - 2 * 60 * 60 * 1000);
-  const recentObservedAt = new Date(baseNow.getTime() - 5 * 60 * 1000);
-  const lastBackupAt = new Date(baseNow.getTime() - 6 * 60 * 60 * 1000);
-  const validFromDate = new Date(baseNow.getTime() - 15 * oneDayMs);
-  const validCertExpiry = new Date(baseNow.getTime() + 75 * oneDayMs);
-  const expiringSoonCertExpiry = new Date(baseNow.getTime() + 7 * oneDayMs);
-
-  await db.transaction(async (tx) => {
-    await tx
-      .insert(permissions)
-      .values(
-        PERMISSION_KEYS.map((key) => ({
-          key,
-          description: `Permesso di controllo per ${key}`,
-          riskLevel: classifyPermissionRisk(key),
-        })),
-      )
-      .onConflictDoUpdate({
-        target: permissions.key,
-        set: {
-          description: sql`excluded.description`,
-          riskLevel: sql`excluded.risk_level`,
-        },
-      });
-
-    await tx
+  // 2. Roles & Permissions
+  for (const roleName of PRESET_ROLE_NAMES) {
+    await db
       .insert(roles)
-      .values(
-        PRESET_ROLE_NAMES.map((roleName) => ({
-          id: DEMO_IDS.roles[roleName],
-          organizationId: null,
-          name: roleName,
-          isSystem: true,
-          version: 1,
-        })),
-      )
-      .onConflictDoUpdate({
-        target: roles.id,
-        set: {
-          name: sql`excluded.name`,
-          isSystem: sql`excluded.is_system`,
-          version: sql`excluded.version`,
-        },
-      });
+      .values({
+        id: DEMO_IDS.roles[roleName],
+        name: roleName,
+        description: `Preset role: ${roleName}`,
+        isPreset: true,
+      })
+      .onConflictDoNothing();
+  }
 
-    const rolePermissionRows = PRESET_ROLE_NAMES.flatMap((roleName) =>
-      PRESET_ROLE_PERMISSIONS[roleName].map((permissionKey) => ({
-        roleId: DEMO_IDS.roles[roleName],
-        permissionKey,
-        effect: "allow" as const,
-      })),
-    );
+  for (const permKey of PERMISSION_KEYS) {
+    await db
+      .insert(permissions)
+      .values({
+        key: permKey,
+        description: `Permission key: ${permKey}`,
+      })
+      .onConflictDoNothing();
+  }
 
-    await tx
-      .insert(rolePermissions)
-      .values(rolePermissionRows)
-      .onConflictDoUpdate({
-        target: [rolePermissions.roleId, rolePermissions.permissionKey],
-        set: {
-          effect: sql`excluded.effect`,
-        },
-      });
+  for (const roleName of PRESET_ROLE_NAMES) {
+    const roleId = DEMO_IDS.roles[roleName];
+    const perms = PRESET_ROLE_PERMISSIONS[roleName];
+    for (const permKey of perms) {
+      await db
+        .insert(rolePermissions)
+        .values({
+          roleId,
+          permissionKey: permKey,
+        })
+        .onConflictDoNothing();
+    }
+  }
 
-    await tx
-      .insert(organizations)
-      .values([
-        {
-          id: DEMO_IDS.organizations.acme,
-          slug: "acme-cloud",
-          name: "Acme Cloud S.r.l.",
-          type: "customer",
-          status: "active",
-          primaryLocale: "it-IT",
-          parentResellerId: null,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.organizations.beta,
-          slug: "beta-studios",
-          name: "Beta Studios S.r.l.",
-          type: "customer",
-          status: "active",
-          primaryLocale: "it-IT",
-          parentResellerId: null,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.organizations.legacy,
-          slug: "legacy-corp",
-          name: "Legacy Corp S.p.A.",
-          type: "customer",
-          status: "suspended",
-          primaryLocale: "it-IT",
-          parentResellerId: null,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: organizations.id,
-        set: {
-          slug: sql`excluded.slug`,
-          name: sql`excluded.name`,
-          type: sql`excluded.type`,
-          status: sql`excluded.status`,
-          primaryLocale: sql`excluded.primary_locale`,
-          updatedAt: sql`excluded.updated_at`,
-        },
-      });
+  // 3. Demo Users
+  await db
+    .insert(users)
+    .values([
+      {
+        id: DEMO_IDS.users.infra,
+        email: "infra@hcp.local",
+        name: "Admin Infrastruttura",
+        userStatus: "active",
+      },
+      {
+        id: DEMO_IDS.users.hosting,
+        email: "hosting@hcp.local",
+        name: "Admin Hosting",
+        userStatus: "active",
+      },
+      {
+        id: DEMO_IDS.users.elena,
+        email: "elena@acme.it",
+        name: "Elena Rossi (Acme Owner)",
+        userStatus: "active",
+      },
+      {
+        id: DEMO_IDS.users.marco,
+        email: "marco@acme.it",
+        name: "Marco Bianchi (Acme Dev)",
+        userStatus: "active",
+      },
+      {
+        id: DEMO_IDS.users.giulia,
+        email: "giulia@gamma.it",
+        name: "Giulia Verdi (Gamma Suspended)",
+        userStatus: "active",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(users)
-      .values([
-        {
-          id: DEMO_IDS.users.elena,
-          issuer: oidcIssuer,
-          subject: DEMO_IDS.users.elena,
-          email: "elena.rossi@acme.it",
-          emailVerified: true,
-          displayName: "Elena Rossi",
-          status: "active",
-          isPlatformAdmin: false,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.users.marco,
-          issuer: oidcIssuer,
-          subject: DEMO_IDS.users.marco,
-          email: "marco.bianchi@acme.it",
-          emailVerified: true,
-          displayName: "Marco Bianchi",
-          status: "active",
-          isPlatformAdmin: false,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.users.giulia,
-          issuer: oidcIssuer,
-          subject: DEMO_IDS.users.giulia,
-          email: "giulia.verdi@acme.it",
-          emailVerified: true,
-          displayName: "Giulia Verdi",
-          status: "active",
-          isPlatformAdmin: false,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.users.luca,
-          issuer: oidcIssuer,
-          subject: DEMO_IDS.users.luca,
-          email: "luca.neri@betastudios.it",
-          emailVerified: true,
-          displayName: "Luca Neri",
-          status: "active",
-          isPlatformAdmin: false,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.users.admin,
-          issuer: oidcIssuer,
-          subject: DEMO_IDS.users.admin,
-          email: "admin@hosting-panel.it",
-          emailVerified: true,
-          displayName: "Amministratore Piattaforma",
-          status: "active",
-          isPlatformAdmin: true,
-          createdAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: users.id,
-        set: {
-          issuer: sql`excluded.issuer`,
-          subject: sql`excluded.subject`,
-          email: sql`excluded.email`,
-          displayName: sql`excluded.display_name`,
-          status: sql`excluded.status`,
-          isPlatformAdmin: sql`excluded.is_platform_admin`,
-        },
-      });
+  // 4. Demo Organizations
+  await db
+    .insert(organizations)
+    .values([
+      {
+        id: DEMO_IDS.organizations.acme,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Acme S.r.l.",
+        slug: "acme-srl",
+        status: "active",
+      },
+      {
+        id: DEMO_IDS.organizations.beta,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Beta Digital S.r.l.",
+        slug: "beta-digital",
+        status: "active",
+      },
+      {
+        id: DEMO_IDS.organizations.gamma,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Gamma Archivio S.r.l.",
+        slug: "gamma-archivio",
+        status: "suspended", // Commercial suspension
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(memberships)
-      .values([
-        {
-          id: DEMO_IDS.memberships.elenaAcme,
-          organizationId: DEMO_IDS.organizations.acme,
-          userId: DEMO_IDS.users.elena,
-          status: "active",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.memberships.elenaBeta,
-          organizationId: DEMO_IDS.organizations.beta,
-          userId: DEMO_IDS.users.elena,
-          status: "active",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.memberships.elenaLegacy,
-          organizationId: DEMO_IDS.organizations.legacy,
-          userId: DEMO_IDS.users.elena,
-          status: "active",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.memberships.marcoAcme,
-          organizationId: DEMO_IDS.organizations.acme,
-          userId: DEMO_IDS.users.marco,
-          status: "active",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.memberships.giuliaAcme,
-          organizationId: DEMO_IDS.organizations.acme,
-          userId: DEMO_IDS.users.giulia,
-          status: "active",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.memberships.lucaBeta,
-          organizationId: DEMO_IDS.organizations.beta,
-          userId: DEMO_IDS.users.luca,
-          status: "active",
-          createdAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: memberships.id,
-        set: {
-          status: sql`excluded.status`,
-        },
-      });
+  // 5. Memberships & Roles
+  await db
+    .insert(memberships)
+    .values([
+      {
+        id: "mem_elena_acme",
+        organizationId: DEMO_IDS.organizations.acme,
+        userId: DEMO_IDS.users.elena,
+        status: "active",
+      },
+      {
+        id: "mem_elena_beta",
+        organizationId: DEMO_IDS.organizations.beta,
+        userId: DEMO_IDS.users.elena,
+        status: "active",
+      },
+      {
+        id: "mem_marco_acme",
+        organizationId: DEMO_IDS.organizations.acme,
+        userId: DEMO_IDS.users.marco,
+        status: "active",
+      },
+      {
+        id: "mem_giulia_gamma",
+        organizationId: DEMO_IDS.organizations.gamma,
+        userId: DEMO_IDS.users.giulia,
+        status: "active",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(membershipRoles)
-      .values([
-        {
-          id: DEMO_IDS.membershipRoles.elenaAcmeOwner,
-          membershipId: DEMO_IDS.memberships.elenaAcme,
-          roleId: DEMO_IDS.roles.customer_owner,
-          scopeType: "organization",
-          scopeResourceId: null,
-        },
-        {
-          id: DEMO_IDS.membershipRoles.elenaBetaViewer,
-          membershipId: DEMO_IDS.memberships.elenaBeta,
-          roleId: DEMO_IDS.roles.viewer,
-          scopeType: "organization",
-          scopeResourceId: null,
-        },
-        {
-          id: DEMO_IDS.membershipRoles.elenaLegacyOwner,
-          membershipId: DEMO_IDS.memberships.elenaLegacy,
-          roleId: DEMO_IDS.roles.customer_owner,
-          scopeType: "organization",
-          scopeResourceId: null,
-        },
-        {
-          id: DEMO_IDS.membershipRoles.marcoAcmeStorefrontDev,
-          membershipId: DEMO_IDS.memberships.marcoAcme,
-          roleId: DEMO_IDS.roles.developer,
-          scopeType: "resource",
-          scopeResourceId: DEMO_IDS.applications.acmeStorefront,
-        },
-        {
-          id: DEMO_IDS.membershipRoles.giuliaAcmeViewer,
-          membershipId: DEMO_IDS.memberships.giuliaAcme,
-          roleId: DEMO_IDS.roles.viewer,
-          scopeType: "organization",
-          scopeResourceId: null,
-        },
-        {
-          id: DEMO_IDS.membershipRoles.lucaBetaOwner,
-          membershipId: DEMO_IDS.memberships.lucaBeta,
-          roleId: DEMO_IDS.roles.customer_owner,
-          scopeType: "organization",
-          scopeResourceId: null,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: membershipRoles.id,
-        set: {
-          roleId: sql`excluded.role_id`,
-          scopeType: sql`excluded.scope_type`,
-          scopeResourceId: sql`excluded.scope_resource_id`,
-        },
-      });
+  await db
+    .insert(membershipRoles)
+    .values([
+      {
+        id: "mr_elena_acme_owner",
+        membershipId: "mem_elena_acme",
+        roleId: DEMO_IDS.roles.customer_owner,
+        scopeType: "organization",
+      },
+      {
+        id: "mr_elena_beta_collab",
+        membershipId: "mem_elena_beta",
+        roleId: DEMO_IDS.roles.customer_collaborator,
+        scopeType: "organization",
+      },
+      {
+        id: "mr_marco_acme_collab",
+        membershipId: "mem_marco_acme",
+        roleId: DEMO_IDS.roles.customer_collaborator,
+        scopeType: "organization",
+      },
+      {
+        id: "mr_giulia_gamma_owner",
+        membershipId: "mem_giulia_gamma",
+        roleId: DEMO_IDS.roles.customer_owner,
+        scopeType: "organization",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(providerInstances)
-      .values([
-        {
-          id: DEMO_IDS.providers.coolifyLab,
-          displayName: "Coolify Lab Principale",
-          kind: "coolify-v4",
-          baseUrl: coolifyBaseUrl,
-          status: "connected",
-          version: "4.0.0-beta.380",
-          capabilitiesJson: DEFAULT_COOLIFY_V4_CAPABILITIES,
-          lastCheckedAt: recentObservedAt,
-          createdAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: providerInstances.id,
-        set: {
-          displayName: sql`excluded.display_name`,
-          baseUrl: sql`excluded.base_url`,
-          status: sql`excluded.status`,
-          version: sql`excluded.version`,
-          capabilitiesJson: sql`excluded.capabilities_json`,
-          lastCheckedAt: sql`excluded.last_checked_at`,
-        },
-      });
+  // Hosting Admin global scope
+  await db
+    .insert(hostingAdminScopes)
+    .values({
+      id: "scope_hosting_all",
+      userId: DEMO_IDS.users.hosting,
+      organizationId: "*",
+      installationId: DEMO_IDS.installation,
+    })
+    .onConflictDoNothing();
 
-    await tx
-      .insert(providerConnections)
-      .values([
-        {
-          id: DEMO_IDS.providerConnections.acme,
-          organizationId: DEMO_IDS.organizations.acme,
-          providerInstanceId: DEMO_IDS.providers.coolifyLab,
-          teamId: "team_acme",
-          secretRefRead: "vault://coolify/acme/read",
-          secretRefWrite: "vault://coolify/acme/write",
-          secretRefDeploy: "vault://coolify/acme/deploy",
-          status: "connected",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.providerConnections.beta,
-          organizationId: DEMO_IDS.organizations.beta,
-          providerInstanceId: DEMO_IDS.providers.coolifyLab,
-          teamId: "team_beta",
-          secretRefRead: "vault://coolify/beta/read",
-          secretRefWrite: "vault://coolify/beta/write",
-          secretRefDeploy: "vault://coolify/beta/deploy",
-          status: "connected",
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.providerConnections.legacy,
-          organizationId: DEMO_IDS.organizations.legacy,
-          providerInstanceId: DEMO_IDS.providers.coolifyLab,
-          teamId: "team_legacy",
-          secretRefRead: "vault://coolify/legacy/read",
-          secretRefWrite: null,
-          secretRefDeploy: "vault://coolify/legacy/deploy",
-          status: "degraded",
-          createdAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: providerConnections.id,
-        set: {
-          secretRefRead: sql`excluded.secret_ref_read`,
-          secretRefWrite: sql`excluded.secret_ref_write`,
-          secretRefDeploy: sql`excluded.secret_ref_deploy`,
-          status: sql`excluded.status`,
-        },
-      });
+  // 6. Marco's ABAC Resource Grants on Acme
+  await db
+    .insert(resourceGrants)
+    .values([
+      {
+        id: "rg_marco_shop_allow",
+        organizationId: DEMO_IDS.organizations.acme,
+        principalUserId: DEMO_IDS.users.marco,
+        resourceId: DEMO_IDS.sites.acmeShop,
+        permission: "site.read",
+        effect: "allow",
+        expiresAt: null,
+      },
+      {
+        id: "rg_marco_blog_deny",
+        organizationId: DEMO_IDS.organizations.acme,
+        principalUserId: DEMO_IDS.users.marco,
+        resourceId: DEMO_IDS.sites.acmeBlog,
+        permission: "site.read",
+        effect: "deny",
+        expiresAt: null,
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(serverAllocations)
-      .values([
-        {
-          id: DEMO_IDS.servers.acmeProd,
-          organizationId: DEMO_IDS.organizations.acme,
-          providerConnectionId: DEMO_IDS.providerConnections.acme,
-          providerServerId: "coolify-srv-acme-01",
-          name: "milano-prod-01",
-          region: "eu-south-1",
-          publicIpv4: "198.51.100.10",
-          status: "running",
-          health: "healthy",
-          vcpuCount: 8,
-          memoryMb: 16384,
-          diskGb: 160,
-          lastObservedAt: recentObservedAt,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.servers.betaProd,
-          organizationId: DEMO_IDS.organizations.beta,
-          providerConnectionId: DEMO_IDS.providerConnections.beta,
-          providerServerId: "coolify-srv-beta-01",
-          name: "torino-prod-01",
-          region: "eu-south-1",
-          publicIpv4: "198.51.100.20",
-          status: "running",
-          health: "healthy",
-          vcpuCount: 4,
-          memoryMb: 8192,
-          diskGb: 80,
-          lastObservedAt: recentObservedAt,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.servers.legacyProd,
-          organizationId: DEMO_IDS.organizations.legacy,
-          providerConnectionId: DEMO_IDS.providerConnections.legacy,
-          providerServerId: "coolify-srv-legacy-01",
-          name: "roma-legacy-01",
-          region: "eu-south-1",
-          publicIpv4: "198.51.100.30",
-          status: "stopped",
-          health: "unknown",
-          vcpuCount: 2,
-          memoryMb: 4096,
-          diskGb: 40,
-          lastObservedAt: recentObservedAt,
-          createdAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: serverAllocations.id,
-        set: {
-          name: sql`excluded.name`,
-          status: sql`excluded.status`,
-          health: sql`excluded.health`,
-          lastObservedAt: sql`excluded.last_observed_at`,
-        },
-      });
+  // 7. Demo Hosts
+  await db
+    .insert(hosts)
+    .values([
+      {
+        id: DEMO_IDS.hosts.acme,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Dedicated Node Acme",
+        hostname: "node-acme.internal",
+        ipv4Address: "192.168.10.11",
+        status: "ready",
+        hostingMode: "dedicated",
+        totalCpuMilli: 8000,
+        totalMemoryBytes: "17179869184", // 16GB
+        totalStorageBytes: "107374182400", // 100GB
+        securityReviewed: true,
+        sharedApproved: false,
+      },
+      {
+        id: DEMO_IDS.hosts.beta,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Dedicated Node Beta",
+        hostname: "node-beta.internal",
+        ipv4Address: "192.168.10.12",
+        status: "ready",
+        hostingMode: "dedicated",
+        totalCpuMilli: 8000,
+        totalMemoryBytes: "17179869184",
+        totalStorageBytes: "107374182400",
+        securityReviewed: true,
+        sharedApproved: false,
+      },
+      {
+        id: DEMO_IDS.hosts.gamma,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Dedicated Node Gamma",
+        hostname: "node-gamma.internal",
+        ipv4Address: "192.168.10.15",
+        status: "ready",
+        hostingMode: "dedicated",
+        totalCpuMilli: 4000,
+        totalMemoryBytes: "8589934592",
+        totalStorageBytes: "53687091200",
+        securityReviewed: true,
+        sharedApproved: false,
+      },
+      {
+        id: DEMO_IDS.hosts.free,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Free Unallocated Dedicated Node",
+        hostname: "node-free.internal",
+        ipv4Address: "192.168.10.13",
+        status: "ready",
+        hostingMode: "dedicated",
+        totalCpuMilli: 8000,
+        totalMemoryBytes: "17179869184",
+        totalStorageBytes: "107374182400",
+        securityReviewed: true,
+        sharedApproved: false,
+      },
+      {
+        id: DEMO_IDS.hosts.maint,
+        platformInstallationId: DEMO_IDS.installation,
+        name: "Maintenance Dedicated Node",
+        hostname: "node-maint.internal",
+        ipv4Address: "192.168.10.14",
+        status: "maintenance",
+        hostingMode: "dedicated",
+        totalCpuMilli: 4000,
+        totalMemoryBytes: "8589934592",
+        totalStorageBytes: "53687091200",
+        securityReviewed: false,
+        sharedApproved: false,
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(hostingResources)
-      .values([
-        {
-          id: DEMO_IDS.applications.acmeStorefront,
-          organizationId: DEMO_IDS.organizations.acme,
-          connectionId: DEMO_IDS.providerConnections.acme,
-          serverAllocationId: DEMO_IDS.servers.acmeProd,
-          type: "application",
-          name: "Acme Storefront",
-          slug: "acme-storefront",
-          providerId: "coolify-app-acme-storefront",
-          desiredState: "running",
-          observedStatus: "running",
-          health: "healthy",
-          observedSource: "coolify",
-          lastObservedAt: recentObservedAt,
-          lockedByOperationId: null,
-          version: 1,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.applications.acmeApi,
-          organizationId: DEMO_IDS.organizations.acme,
-          connectionId: DEMO_IDS.providerConnections.acme,
-          serverAllocationId: DEMO_IDS.servers.acmeProd,
-          type: "application",
-          name: "Acme Core API",
-          slug: "acme-core-api",
-          providerId: "coolify-app-acme-api",
-          desiredState: "running",
-          observedStatus: "running",
-          health: "healthy",
-          observedSource: "coolify",
-          lastObservedAt: recentObservedAt,
-          lockedByOperationId: null,
-          version: 1,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.applications.betaPortal,
-          organizationId: DEMO_IDS.organizations.beta,
-          connectionId: DEMO_IDS.providerConnections.beta,
-          serverAllocationId: DEMO_IDS.servers.betaProd,
-          type: "application",
-          name: "Beta Client Portal",
-          slug: "beta-client-portal",
-          providerId: "coolify-app-beta-portal",
-          desiredState: "running",
-          observedStatus: "running",
-          health: "healthy",
-          observedSource: "coolify",
-          lastObservedAt: recentObservedAt,
-          lockedByOperationId: null,
-          version: 1,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.applications.legacySite,
-          organizationId: DEMO_IDS.organizations.legacy,
-          connectionId: DEMO_IDS.providerConnections.legacy,
-          serverAllocationId: DEMO_IDS.servers.legacyProd,
-          type: "application",
-          name: "Legacy Corporate Site",
-          slug: "legacy-corporate-site",
-          providerId: "coolify-app-legacy-site",
-          desiredState: "stopped",
-          observedStatus: "stopped",
-          health: "unknown",
-          observedSource: "coolify",
-          lastObservedAt: recentObservedAt,
-          lockedByOperationId: null,
-          version: 1,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.databases.acmePostgres,
-          organizationId: DEMO_IDS.organizations.acme,
-          connectionId: DEMO_IDS.providerConnections.acme,
-          serverAllocationId: DEMO_IDS.servers.acmeProd,
-          type: "database",
-          name: "Acme Primary PostgreSQL",
-          slug: "acme-primary-postgres",
-          providerId: "coolify-db-acme-pg",
-          desiredState: "running",
-          observedStatus: "running",
-          health: "healthy",
-          observedSource: "coolify",
-          lastObservedAt: recentObservedAt,
-          lockedByOperationId: null,
-          version: 1,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.databases.acmeRedis,
-          organizationId: DEMO_IDS.organizations.acme,
-          connectionId: DEMO_IDS.providerConnections.acme,
-          serverAllocationId: DEMO_IDS.servers.acmeProd,
-          type: "database",
-          name: "Acme Session Redis",
-          slug: "acme-session-redis",
-          providerId: "coolify-db-acme-redis",
-          desiredState: "running",
-          observedStatus: "running",
-          health: "healthy",
-          observedSource: "coolify",
-          lastObservedAt: recentObservedAt,
-          lockedByOperationId: null,
-          version: 1,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: hostingResources.id,
-        set: {
-          name: sql`excluded.name`,
-          slug: sql`excluded.slug`,
-          desiredState: sql`excluded.desired_state`,
-          observedStatus: sql`excluded.observed_status`,
-          health: sql`excluded.health`,
-          lastObservedAt: sql`excluded.last_observed_at`,
-          updatedAt: sql`excluded.updated_at`,
-        },
-      });
+  // 8. Host Allocations
+  await db
+    .insert(hostAllocations)
+    .values([
+      {
+        id: DEMO_IDS.allocations.acme,
+        hostId: DEMO_IDS.hosts.acme,
+        organizationId: DEMO_IDS.organizations.acme,
+        status: "active",
+        hostingMode: "dedicated",
+        dedicatedScope: true,
+      },
+      {
+        id: DEMO_IDS.allocations.beta,
+        hostId: DEMO_IDS.hosts.beta,
+        organizationId: DEMO_IDS.organizations.beta,
+        status: "active",
+        hostingMode: "dedicated",
+        dedicatedScope: true,
+      },
+      {
+        id: DEMO_IDS.allocations.gamma,
+        hostId: DEMO_IDS.hosts.gamma,
+        organizationId: DEMO_IDS.organizations.gamma,
+        status: "active",
+        hostingMode: "dedicated",
+        dedicatedScope: true,
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(applications)
-      .values([
-        {
-          resourceId: DEMO_IDS.applications.acmeStorefront,
-          environment: "production",
-          repositoryUrl: "https://git.acme.it/acme/storefront",
-          branch: "main",
-          buildPack: "nixpacks",
-          primaryDomain: "store.acme.it",
-          lastDeployedAt: recentDeployAt,
-        },
-        {
-          resourceId: DEMO_IDS.applications.acmeApi,
-          environment: "production",
-          repositoryUrl: "https://git.acme.it/acme/core-api",
-          branch: "main",
-          buildPack: "dockerfile",
-          primaryDomain: "api.acme.it",
-          lastDeployedAt: recentDeployAt,
-        },
-        {
-          resourceId: DEMO_IDS.applications.betaPortal,
-          environment: "production",
-          repositoryUrl: "https://git.betastudios.it/beta/portal",
-          branch: "main",
-          buildPack: "nixpacks",
-          primaryDomain: "portal.betastudios.it",
-          lastDeployedAt: recentDeployAt,
-        },
-        {
-          resourceId: DEMO_IDS.applications.legacySite,
-          environment: "production",
-          repositoryUrl: "https://git.legacycorp.it/web/site",
-          branch: "master",
-          buildPack: "static",
-          primaryDomain: "www.legacycorp.it",
-          lastDeployedAt: null,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: applications.resourceId,
-        set: {
-          environment: sql`excluded.environment`,
-          repositoryUrl: sql`excluded.repository_url`,
-          branch: sql`excluded.branch`,
-          buildPack: sql`excluded.build_pack`,
-          primaryDomain: sql`excluded.primary_domain`,
-          lastDeployedAt: sql`excluded.last_deployed_at`,
-        },
-      });
+  // 9. Resource Quotas
+  await db
+    .insert(resourceQuotas)
+    .values([
+      {
+        id: "qta_acme",
+        organizationId: DEMO_IDS.organizations.acme,
+        hostAllocationId: DEMO_IDS.allocations.acme,
+        maxSites: 10,
+        maxServices: 20,
+        maxCpuMilli: 8000,
+        maxMemoryBytes: "17179869184",
+        maxStorageBytes: "107374182400",
+        usedSites: 2,
+        usedServices: 5,
+        usedCpuMilli: 3500,
+        usedMemoryBytes: "4294967296",
+        usedStorageBytes: "21474836480",
+      },
+      {
+        id: "qta_beta",
+        organizationId: DEMO_IDS.organizations.beta,
+        hostAllocationId: DEMO_IDS.allocations.beta,
+        maxSites: 5,
+        maxServices: 10,
+        maxCpuMilli: 8000,
+        maxMemoryBytes: "17179869184",
+        maxStorageBytes: "107374182400",
+        usedSites: 1,
+        usedServices: 1,
+        usedCpuMilli: 1000,
+        usedMemoryBytes: "1073741824",
+        usedStorageBytes: "5368709120",
+      },
+      {
+        id: "qta_gamma",
+        organizationId: DEMO_IDS.organizations.gamma,
+        hostAllocationId: DEMO_IDS.allocations.gamma,
+        maxSites: 2,
+        maxServices: 4,
+        maxCpuMilli: 2000,
+        maxMemoryBytes: "4294967296",
+        maxStorageBytes: "21474836480",
+        usedSites: 1,
+        usedServices: 1,
+        usedCpuMilli: 500,
+        usedMemoryBytes: "536870912",
+        usedStorageBytes: "1073741824",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(databases)
-      .values([
-        {
-          resourceId: DEMO_IDS.databases.acmePostgres,
-          engine: "postgresql",
-          engineVersion: "18.1",
-          storageAllocatedGb: 50,
-          internalHostname: "acme-postgres.internal",
-          port: 5432,
-          lastBackupAt,
-        },
-        {
-          resourceId: DEMO_IDS.databases.acmeRedis,
-          engine: "redis",
-          engineVersion: "7.4",
-          storageAllocatedGb: 10,
-          internalHostname: "acme-redis.internal",
-          port: 6379,
-          lastBackupAt: null,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: databases.resourceId,
-        set: {
-          engine: sql`excluded.engine`,
-          engineVersion: sql`excluded.engine_version`,
-          storageAllocatedGb: sql`excluded.storage_allocated_gb`,
-          internalHostname: sql`excluded.internal_hostname`,
-          port: sql`excluded.port`,
-          lastBackupAt: sql`excluded.last_backup_at`,
-        },
-      });
+  // 10. Service Templates
+  await db
+    .insert(serviceTemplates)
+    .values([
+      {
+        id: DEMO_IDS.templates.wordpress,
+        name: "WordPress 6.4 + PHP 8.3",
+        slug: "wordpress-83",
+        description: "Official WordPress image configured for production",
+        category: "cms",
+        defaultImage: "wordpress:6.4-php8.3",
+        defaultPort: 80,
+        environmentSchema: {},
+        defaultConfiguration: { tablePrefix: "wp_" },
+        approvedForDedicated: true,
+        approvedForShared: false,
+        minCpuMilli: 500,
+        minMemoryBytes: "536870912",
+      },
+      {
+        id: DEMO_IDS.templates.nodejs,
+        name: "Node.js 24 LTS",
+        slug: "nodejs-24",
+        description: "Node.js 24 runtime container",
+        category: "runtime",
+        defaultImage: "node:24-alpine",
+        defaultPort: 3000,
+        environmentSchema: {},
+        defaultConfiguration: { NODE_ENV: "production" },
+        approvedForDedicated: true,
+        approvedForShared: false,
+        minCpuMilli: 250,
+        minMemoryBytes: "268435456",
+      },
+      {
+        id: DEMO_IDS.templates.mariadb,
+        name: "MariaDB 11.4 LTS",
+        slug: "mariadb-11",
+        description: "MariaDB database engine",
+        category: "database",
+        defaultImage: "mariadb:11.4",
+        defaultPort: 3306,
+        environmentSchema: {},
+        defaultConfiguration: { characterSet: "utf8mb4" },
+        approvedForDedicated: true,
+        approvedForShared: false,
+        minCpuMilli: 500,
+        minMemoryBytes: "1073741824",
+      },
+      {
+        id: DEMO_IDS.templates.redis,
+        name: "Redis 7.4",
+        slug: "redis-7",
+        description: "In-memory cache and message store",
+        category: "cache",
+        defaultImage: "redis:7.4-alpine",
+        defaultPort: 6379,
+        environmentSchema: {},
+        defaultConfiguration: { maxmemoryPolicy: "allkeys-lru" },
+        approvedForDedicated: true,
+        approvedForShared: false,
+        minCpuMilli: 200,
+        minMemoryBytes: "268435456",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(resourceGrants)
-      .values([
-        {
-          id: DEMO_IDS.resourceGrants.marcoStorefrontRead,
-          organizationId: DEMO_IDS.organizations.acme,
-          principalUserId: DEMO_IDS.users.marco,
-          resourceId: DEMO_IDS.applications.acmeStorefront,
-          permission: "application.read",
-          effect: "allow",
-          expiresAt: null,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.resourceGrants.marcoStorefrontDeploy,
-          organizationId: DEMO_IDS.organizations.acme,
-          principalUserId: DEMO_IDS.users.marco,
-          resourceId: DEMO_IDS.applications.acmeStorefront,
-          permission: "application.deploy",
-          effect: "allow",
-          expiresAt: null,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.resourceGrants.marcoStorefrontRestart,
-          organizationId: DEMO_IDS.organizations.acme,
-          principalUserId: DEMO_IDS.users.marco,
-          resourceId: DEMO_IDS.applications.acmeStorefront,
-          permission: "application.restart",
-          effect: "allow",
-          expiresAt: null,
-          createdAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.resourceGrants.marcoStorefrontLogs,
-          organizationId: DEMO_IDS.organizations.acme,
-          principalUserId: DEMO_IDS.users.marco,
-          resourceId: DEMO_IDS.applications.acmeStorefront,
-          permission: "application.logs.read",
-          effect: "allow",
-          expiresAt: null,
-          createdAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: resourceGrants.id,
-        set: {
-          permission: sql`excluded.permission`,
-          effect: sql`excluded.effect`,
-          expiresAt: sql`excluded.expires_at`,
-        },
-      });
+  // 11. Sites
+  await db
+    .insert(sites)
+    .values([
+      {
+        id: DEMO_IDS.sites.acmeShop,
+        organizationId: DEMO_IDS.organizations.acme,
+        hostAllocationId: DEMO_IDS.allocations.acme,
+        name: "Acme E-Commerce Shop",
+        slug: "acme-shop",
+        status: "ready",
+      },
+      {
+        id: DEMO_IDS.sites.acmeBlog,
+        organizationId: DEMO_IDS.organizations.acme,
+        hostAllocationId: DEMO_IDS.allocations.acme,
+        name: "Acme Corporate Blog",
+        slug: "acme-blog",
+        status: "degraded", // Contains drifted service
+      },
+      {
+        id: DEMO_IDS.sites.betaPortal,
+        organizationId: DEMO_IDS.organizations.beta,
+        hostAllocationId: DEMO_IDS.allocations.beta,
+        name: "Beta Digital Client Portal",
+        slug: "beta-portal",
+        status: "ready",
+      },
+      {
+        id: DEMO_IDS.sites.gammaLegacy,
+        organizationId: DEMO_IDS.organizations.gamma,
+        hostAllocationId: DEMO_IDS.allocations.gamma,
+        name: "Gamma Archivio Documentale",
+        slug: "gamma-legacy",
+        status: "stopped",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(deploymentRecords)
-      .values([
-        {
-          id: DEMO_IDS.deployments.acmeStorefrontInitial,
-          applicationResourceId: DEMO_IDS.applications.acmeStorefront,
-          organizationId: DEMO_IDS.organizations.acme,
-          operationId: null,
-          providerDeploymentId: "coolify-dep-storefront-01",
-          commitSha: "a1b2c3d4e5f6",
-          imageTag: "v2.4.1",
-          status: "succeeded",
-          triggeredByUserId: DEMO_IDS.users.elena,
-          startedAt: new Date(recentDeployAt.getTime() - 90_000),
-          finishedAt: recentDeployAt,
-          createdAt: recentDeployAt,
-        },
-        {
-          id: DEMO_IDS.deployments.acmeApiInitial,
-          applicationResourceId: DEMO_IDS.applications.acmeApi,
-          organizationId: DEMO_IDS.organizations.acme,
-          operationId: null,
-          providerDeploymentId: "coolify-dep-api-01",
-          commitSha: "f6e5d4c3b2a1",
-          imageTag: "v1.12.0",
-          status: "succeeded",
-          triggeredByUserId: DEMO_IDS.users.elena,
-          startedAt: new Date(recentDeployAt.getTime() - 60_000),
-          finishedAt: recentDeployAt,
-          createdAt: recentDeployAt,
-        },
-        {
-          id: DEMO_IDS.deployments.betaPortalInitial,
-          applicationResourceId: DEMO_IDS.applications.betaPortal,
-          organizationId: DEMO_IDS.organizations.beta,
-          operationId: null,
-          providerDeploymentId: "coolify-dep-beta-01",
-          commitSha: "9876543210ab",
-          imageTag: "v1.0.3",
-          status: "succeeded",
-          triggeredByUserId: DEMO_IDS.users.luca,
-          startedAt: new Date(recentDeployAt.getTime() - 75_000),
-          finishedAt: recentDeployAt,
-          createdAt: recentDeployAt,
-        },
-      ])
-      .onConflictDoNothing({ target: deploymentRecords.id });
+  // 12. Domains
+  await db
+    .insert(domains)
+    .values([
+      {
+        id: "dom_acme_shop",
+        siteId: DEMO_IDS.sites.acmeShop,
+        organizationId: DEMO_IDS.organizations.acme,
+        hostname: "negozio.acme.it",
+        isPrimary: true,
+        status: "active",
+      },
+      {
+        id: "dom_acme_blog",
+        siteId: DEMO_IDS.sites.acmeBlog,
+        organizationId: DEMO_IDS.organizations.acme,
+        hostname: "blog.acme.it",
+        isPrimary: true,
+        status: "active",
+      },
+      {
+        id: "dom_beta_portal",
+        siteId: DEMO_IDS.sites.betaPortal,
+        organizationId: DEMO_IDS.organizations.beta,
+        hostname: "portale.betadigital.it",
+        isPrimary: true,
+        status: "active",
+      },
+      {
+        id: "dom_gamma_legacy",
+        siteId: DEMO_IDS.sites.gammaLegacy,
+        organizationId: DEMO_IDS.organizations.gamma,
+        hostname: "archivio.gamma.it",
+        isPrimary: true,
+        status: "active",
+      },
+    ])
+    .onConflictDoNothing();
 
-    await tx
-      .insert(domains)
-      .values([
-        {
-          id: DEMO_IDS.domains.acmeStore,
-          organizationId: DEMO_IDS.organizations.acme,
-          applicationResourceId: DEMO_IDS.applications.acmeStorefront,
-          hostname: "store.acme.it",
-          isPrimary: true,
-          verificationStatus: "verified",
-          httpsEnabled: true,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.domains.acmeApi,
-          organizationId: DEMO_IDS.organizations.acme,
-          applicationResourceId: DEMO_IDS.applications.acmeApi,
-          hostname: "api.acme.it",
-          isPrimary: true,
-          verificationStatus: "verified",
-          httpsEnabled: true,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.domains.betaPortal,
-          organizationId: DEMO_IDS.organizations.beta,
-          applicationResourceId: DEMO_IDS.applications.betaPortal,
-          hostname: "portal.betastudios.it",
-          isPrimary: true,
-          verificationStatus: "verified",
-          httpsEnabled: true,
-          createdAt: baseNow,
-          updatedAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: domains.id,
-        set: {
-          hostname: sql`excluded.hostname`,
-          isPrimary: sql`excluded.is_primary`,
-          verificationStatus: sql`excluded.verification_status`,
-          httpsEnabled: sql`excluded.https_enabled`,
-          updatedAt: sql`excluded.updated_at`,
-        },
-      });
-
-    await tx
-      .insert(certificateObservations)
-      .values([
-        {
-          id: DEMO_IDS.certificates.acmeStore,
-          domainId: DEMO_IDS.domains.acmeStore,
-          organizationId: DEMO_IDS.organizations.acme,
-          hostname: "store.acme.it",
-          status: "valid",
-          issuer: "Let's Encrypt R11",
-          validFrom: validFromDate,
-          expiresAt: validCertExpiry,
-          observedAt: recentObservedAt,
-          source: "coolify",
-        },
-        {
-          id: DEMO_IDS.certificates.acmeApi,
-          domainId: DEMO_IDS.domains.acmeApi,
-          organizationId: DEMO_IDS.organizations.acme,
-          hostname: "api.acme.it",
-          status: "expiring_soon",
-          issuer: "Let's Encrypt R11",
-          validFrom: validFromDate,
-          expiresAt: expiringSoonCertExpiry,
-          observedAt: recentObservedAt,
-          source: "coolify",
-        },
-        {
-          id: DEMO_IDS.certificates.betaPortal,
-          domainId: DEMO_IDS.domains.betaPortal,
-          organizationId: DEMO_IDS.organizations.beta,
-          hostname: "portal.betastudios.it",
-          status: "valid",
-          issuer: "Let's Encrypt E6",
-          validFrom: validFromDate,
-          expiresAt: validCertExpiry,
-          observedAt: recentObservedAt,
-          source: "coolify",
-        },
-      ])
-      .onConflictDoUpdate({
-        target: certificateObservations.id,
-        set: {
-          status: sql`excluded.status`,
-          issuer: sql`excluded.issuer`,
-          validFrom: sql`excluded.valid_from`,
-          expiresAt: sql`excluded.expires_at`,
-          observedAt: sql`excluded.observed_at`,
-          source: sql`excluded.source`,
-        },
-      });
-
-    await tx
-      .insert(quotaAllocations)
-      .values([
-        {
-          id: DEMO_IDS.quotas.acme,
-          organizationId: DEMO_IDS.organizations.acme,
-          planCode: "business-it",
-          serversUsed: 1,
-          serversLimit: 5,
-          applicationsUsed: 2,
-          applicationsLimit: 10,
-          databasesUsed: 2,
-          databasesLimit: 6,
-          domainsUsed: 2,
-          domainsLimit: 20,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.quotas.beta,
-          organizationId: DEMO_IDS.organizations.beta,
-          planCode: "starter-it",
-          serversUsed: 1,
-          serversLimit: 2,
-          applicationsUsed: 1,
-          applicationsLimit: 4,
-          databasesUsed: 0,
-          databasesLimit: 2,
-          domainsUsed: 1,
-          domainsLimit: 5,
-          updatedAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.quotas.legacy,
-          organizationId: DEMO_IDS.organizations.legacy,
-          planCode: "starter-it",
-          serversUsed: 1,
-          serversLimit: 1,
-          applicationsUsed: 1,
-          applicationsLimit: 2,
-          databasesUsed: 0,
-          databasesLimit: 1,
-          domainsUsed: 0,
-          domainsLimit: 2,
-          updatedAt: baseNow,
-        },
-      ])
-      .onConflictDoUpdate({
-        target: quotaAllocations.id,
-        set: {
-          planCode: sql`excluded.plan_code`,
-          serversUsed: sql`excluded.servers_used`,
-          serversLimit: sql`excluded.servers_limit`,
-          applicationsUsed: sql`excluded.applications_used`,
-          applicationsLimit: sql`excluded.applications_limit`,
-          databasesUsed: sql`excluded.databases_used`,
-          databasesLimit: sql`excluded.databases_limit`,
-          domainsUsed: sql`excluded.domains_used`,
-          domainsLimit: sql`excluded.domains_limit`,
-          updatedAt: sql`excluded.updated_at`,
-        },
-      });
-
-    const acmeAuditMeta = AuditMetadataSchema.parse({
-      environment: "poc-lab",
-      seeded: true,
-    });
-    const providerAuditMeta = AuditMetadataSchema.parse({
-      driver: "coolify-v4",
-      status: "connected",
+  // 13. Services, StackRevisions, ObservedStates, DockerResources
+  // Helpers to seed service stack
+  async function seedServiceStack(params: {
+    serviceId: string;
+    siteId: string;
+    organizationId: string;
+    templateId: string;
+    name: string;
+    config: Record<string, unknown>;
+    secretRefs?: Record<string, string>;
+    desiredStatus: "running" | "stopped";
+    observedStatus: string;
+    outOfBandModified: boolean;
+    dockerRef: string;
+  }) {
+    const revision = buildImmutableStackRevision({
+      serviceInstanceId: params.serviceId,
+      organizationId: params.organizationId,
+      currentRevisionNumber: 0,
+      declarativeConfig: params.config,
+      secretRefs: params.secretRefs,
+      authorId: DEMO_IDS.users.elena,
     });
 
-    await tx
-      .insert(auditEvents)
-      .values([
-        {
-          id: DEMO_IDS.auditEvents.acmeBootstrap,
-          organizationId: DEMO_IDS.organizations.acme,
-          actorUserId: DEMO_IDS.users.elena,
-          actorEmail: "elena.rossi@acme.it",
-          impersonatedByUserId: null,
-          action: "organization.bootstrap",
-          targetType: "organization",
-          targetId: DEMO_IDS.organizations.acme,
-          outcome: "succeeded",
-          requestId: "req_seed_acme_bootstrap",
-          ipAddress: "127.0.0.1",
-          metadataJson: acmeAuditMeta,
-          occurredAt: baseNow,
-        },
-        {
-          id: DEMO_IDS.auditEvents.providerHealthCheck,
-          organizationId: null,
-          actorUserId: DEMO_IDS.users.admin,
-          actorEmail: "admin@hosting-panel.it",
-          impersonatedByUserId: null,
-          action: "provider.connection.test",
-          targetType: "provider",
-          targetId: DEMO_IDS.providers.coolifyLab,
-          outcome: "succeeded",
-          requestId: "req_seed_provider_health",
-          ipAddress: "127.0.0.1",
-          metadataJson: providerAuditMeta,
-          occurredAt: recentObservedAt,
-        },
-      ])
-      .onConflictDoNothing({ target: auditEvents.id });
+    await db
+      .insert(serviceInstances)
+      .values({
+        id: params.serviceId,
+        siteId: params.siteId,
+        organizationId: params.organizationId,
+        serviceTemplateId: params.templateId,
+        name: params.name,
+        desiredStatus: params.desiredStatus,
+        currentRevisionId: revision.id,
+      })
+      .onConflictDoNothing();
+
+    await db
+      .insert(stackRevisions)
+      .values({
+        id: revision.id,
+        serviceInstanceId: params.serviceId,
+        organizationId: params.organizationId,
+        revisionNumber: revision.revisionNumber,
+        specHash: revision.specHash,
+        declarativeConfig: revision.declarativeConfig as Record<string, unknown>,
+        secretRefs: revision.secretRefs as Record<string, string>,
+        resourceLimits: revision.resourceLimits,
+        authorId: revision.authorId,
+      })
+      .onConflictDoNothing();
+
+    await db
+      .insert(observedStates)
+      .values({
+        id: `obs_${params.serviceId}`,
+        serviceInstanceId: params.serviceId,
+        observedStatus: params.observedStatus,
+        observedRevisionHash: revision.specHash,
+        outOfBandModified: params.outOfBandModified,
+        rawState: { container: params.dockerRef },
+        observedAt: now,
+      })
+      .onConflictDoNothing();
+
+    await db
+      .insert(dockerResources)
+      .values({
+        id: `dock_${params.serviceId}`,
+        siteId: params.siteId,
+        serviceInstanceId: params.serviceId,
+        internalDockerRef: params.dockerRef,
+        resourceType: "container",
+        status: params.observedStatus,
+        metadata: { image: params.templateId },
+      })
+      .onConflictDoNothing();
+  }
+
+  // Site 1: acmeShop (3 services: WordPress + MariaDB + Redis, all in_sync proving F1-004)
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.acmeShopWp,
+    siteId: DEMO_IDS.sites.acmeShop,
+    organizationId: DEMO_IDS.organizations.acme,
+    templateId: DEMO_IDS.templates.wordpress,
+    name: "Acme Shop WordPress Frontend",
+    config: { WP_HOME: "https://negozio.acme.it", DB_NAME: "shop" },
+    secretRefs: { DB_PASSWORD: "vault://acme/db/password" },
+    desiredStatus: "running",
+    observedStatus: "running",
+    outOfBandModified: false,
+    dockerRef: "cnt_acme_shop_wp_01",
   });
+
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.acmeShopDb,
+    siteId: DEMO_IDS.sites.acmeShop,
+    organizationId: DEMO_IDS.organizations.acme,
+    templateId: DEMO_IDS.templates.mariadb,
+    name: "Acme Shop MariaDB Database",
+    config: { MYSQL_DATABASE: "shop" },
+    secretRefs: { MYSQL_ROOT_PASSWORD: "vault://acme/db/root_password" },
+    desiredStatus: "running",
+    observedStatus: "running",
+    outOfBandModified: false,
+    dockerRef: "cnt_acme_shop_db_01",
+  });
+
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.acmeShopRedis,
+    siteId: DEMO_IDS.sites.acmeShop,
+    organizationId: DEMO_IDS.organizations.acme,
+    templateId: DEMO_IDS.templates.redis,
+    name: "Acme Shop Redis Cache",
+    config: { maxmemory: "256mb" },
+    desiredStatus: "running",
+    observedStatus: "running",
+    outOfBandModified: false,
+    dockerRef: "cnt_acme_shop_redis_01",
+  });
+
+  // Site 2: acmeBlog (WordPress with drifted ObservedState + MariaDB in_sync proving §4.4 drift)
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.acmeBlogWp,
+    siteId: DEMO_IDS.sites.acmeBlog,
+    organizationId: DEMO_IDS.organizations.acme,
+    templateId: DEMO_IDS.templates.wordpress,
+    name: "Acme Blog WordPress (Drifted)",
+    config: { WP_HOME: "https://blog.acme.it", DB_NAME: "blog" },
+    secretRefs: { DB_PASSWORD: "vault://acme/blog/password" },
+    desiredStatus: "running",
+    observedStatus: "running",
+    outOfBandModified: true, // DRIFTED out-of-band!
+    dockerRef: "cnt_acme_blog_wp_drifted",
+  });
+
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.acmeBlogDb,
+    siteId: DEMO_IDS.sites.acmeBlog,
+    organizationId: DEMO_IDS.organizations.acme,
+    templateId: DEMO_IDS.templates.mariadb,
+    name: "Acme Blog MariaDB",
+    config: { MYSQL_DATABASE: "blog" },
+    secretRefs: { MYSQL_ROOT_PASSWORD: "vault://acme/blog/root_password" },
+    desiredStatus: "running",
+    observedStatus: "running",
+    outOfBandModified: false,
+    dockerRef: "cnt_acme_blog_db_01",
+  });
+
+  // Site 3: betaPortal (Node.js service for AC-F1-02 cross-tenant tests)
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.betaPortalNode,
+    siteId: DEMO_IDS.sites.betaPortal,
+    organizationId: DEMO_IDS.organizations.beta,
+    templateId: DEMO_IDS.templates.nodejs,
+    name: "Beta Portal Node.js API",
+    config: { PORT: "3000" },
+    desiredStatus: "running",
+    observedStatus: "running",
+    outOfBandModified: false,
+    dockerRef: "cnt_beta_portal_01",
+  });
+
+  // Site 4: gammaLegacy (WordPress stopped on suspended org)
+  await seedServiceStack({
+    serviceId: DEMO_IDS.services.gammaLegacyApp,
+    siteId: DEMO_IDS.sites.gammaLegacy,
+    organizationId: DEMO_IDS.organizations.gamma,
+    templateId: DEMO_IDS.templates.wordpress,
+    name: "Gamma Archivio WordPress",
+    config: { WP_HOME: "https://archivio.gamma.it" },
+    desiredStatus: "stopped",
+    observedStatus: "stopped",
+    outOfBandModified: false,
+    dockerRef: "cnt_gamma_legacy_01",
+  });
+
+  // 14. Initial Audit Event
+  await db
+    .insert(auditEvents)
+    .values({
+      id: "aud_seed_01",
+      actorId: DEMO_IDS.users.infra,
+      actorType: "user",
+      organizationId: null,
+      action: "platform.seed",
+      targetType: "platform_installation",
+      targetId: DEMO_IDS.installation,
+      details: { spec: "HCP-SPEC-002", phase: "phase-1" },
+      timestamp: now,
+    })
+    .onConflictDoNothing();
 }

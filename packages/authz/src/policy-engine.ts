@@ -112,22 +112,32 @@ export function evaluatePolicy(input: AuthorizationCheckInput): AuthorizationDec
     };
   }
 
+  // Platform/Host checks (organizationId omitted)
   if (organizationId === undefined) {
-    if (permission === "platform.admin" && resource === undefined) {
-      if (principal.isPlatformAdmin) {
-        return {
-          allowed: true,
-          httpStatus: 200,
-          errorCode: null,
-          reason: "PLATFORM_ADMIN_ALLOWED",
-        };
-      }
-
+    const globalRoles = principal.globalRoles ?? [];
+    if (globalRoles.length === 0) {
       return {
         allowed: false,
         httpStatus: 403,
         errorCode: "PERMISSION_DENIED",
-        reason: "PLATFORM_ADMIN_REQUIRED",
+        reason: "PLATFORM_ROLE_REQUIRED",
+      };
+    }
+
+    const platformPerms = new Set<PermissionKey>();
+    for (const role of globalRoles) {
+      const perms = PRESET_ROLE_PERMISSIONS[role] ?? [];
+      for (const p of perms) {
+        platformPerms.add(p);
+      }
+    }
+
+    if (platformPerms.has(permission)) {
+      return {
+        allowed: true,
+        httpStatus: 200,
+        errorCode: null,
+        reason: "PLATFORM_ROLE_ALLOWED",
       };
     }
 
@@ -135,20 +145,22 @@ export function evaluatePolicy(input: AuthorizationCheckInput): AuthorizationDec
       allowed: false,
       httpStatus: 403,
       errorCode: "PERMISSION_DENIED",
-      reason: "ORGANIZATION_CONTEXT_REQUIRED",
+      reason: "PLATFORM_PERMISSION_DENIED",
     };
   }
 
+  // Tenant checks (organizationId provided)
   if (organizationId.length === 0) {
-    if (principal.isPlatformAdmin) {
-      return {
-        allowed: false,
-        httpStatus: 403,
-        errorCode: "PERMISSION_DENIED",
-        reason: "SUPPORT_ACCESS_GRANT_REQUIRED",
-      };
-    }
+    return {
+      allowed: false,
+      httpStatus: 404,
+      errorCode: "NOT_FOUND",
+      reason: "TENANT_OR_RESOURCE_NOT_FOUND",
+    };
+  }
 
+  // Resource cross-tenant mismatch check (AC-F1-02 anti-BOLA)
+  if (resource !== undefined && resource.organizationId !== organizationId) {
     return {
       allowed: false,
       httpStatus: 404,
@@ -173,6 +185,63 @@ export function evaluatePolicy(input: AuthorizationCheckInput): AuthorizationDec
     isFutureTimestamp(grant.expiresAt, nowMs),
   );
 
+  // Check hosting_admin global role with organization scope
+  const isHostingAdmin = (principal.globalRoles ?? []).includes("hosting_admin");
+  const hasHostingAdminScope =
+    isHostingAdmin &&
+    (principal.hostingAdminOrgIds?.includes("*") ||
+      principal.hostingAdminOrgIds?.includes(organizationId));
+
+  if (hasHostingAdminScope) {
+    const hostingAdminPerms = PRESET_ROLE_PERMISSIONS.hosting_admin;
+    if (hostingAdminPerms.includes(permission)) {
+      // Check for any explicit deny in resourceGrants/overrides for this principal
+      let hasExplicitDeny = false;
+      for (const membership of activeMemberships) {
+        for (const override of membership.policyOverrides ?? []) {
+          if (
+            override.organizationId === organizationId &&
+            override.permission === permission &&
+            override.effect === "deny"
+          ) {
+            hasExplicitDeny = true;
+          }
+        }
+        for (const grant of membership.resourceGrants) {
+          if (
+            doesResourceGrantMatchTarget(
+              grant,
+              organizationId,
+              principal.userId,
+              permission,
+              resource,
+              nowMs,
+            ) &&
+            grant.effect === "deny"
+          ) {
+            hasExplicitDeny = true;
+          }
+        }
+      }
+
+      if (hasExplicitDeny) {
+        return {
+          allowed: false,
+          httpStatus: 403,
+          errorCode: "PERMISSION_DENIED",
+          reason: "EXPLICIT_DENY",
+        };
+      }
+
+      return {
+        allowed: true,
+        httpStatus: 200,
+        errorCode: null,
+        reason: "ALLOWED_BY_HOSTING_ADMIN_SCOPE",
+      };
+    }
+  }
+
   if (activeMemberships.length === 0 && activeSupportGrants.length === 0) {
     if (matchingSupportGrants.length > 0) {
       return {
@@ -183,38 +252,12 @@ export function evaluatePolicy(input: AuthorizationCheckInput): AuthorizationDec
       };
     }
 
-    if (principal.isPlatformAdmin) {
-      return {
-        allowed: false,
-        httpStatus: 403,
-        errorCode: "PERMISSION_DENIED",
-        reason: "SUPPORT_ACCESS_GRANT_REQUIRED",
-      };
-    }
-
+    // Non-member without hosting_admin scope or active support grant -> 404 anti-BOLA
     return {
       allowed: false,
       httpStatus: 404,
       errorCode: "NOT_FOUND",
       reason: "TENANT_OR_RESOURCE_NOT_FOUND",
-    };
-  }
-
-  if (resource !== undefined && resource.organizationId !== organizationId) {
-    return {
-      allowed: false,
-      httpStatus: 404,
-      errorCode: "NOT_FOUND",
-      reason: "TENANT_OR_RESOURCE_NOT_FOUND",
-    };
-  }
-
-  if (permission === "platform.admin" && !principal.isPlatformAdmin) {
-    return {
-      allowed: false,
-      httpStatus: 403,
-      errorCode: "PERMISSION_DENIED",
-      reason: "PLATFORM_ADMIN_REQUIRED",
     };
   }
 
@@ -286,14 +329,10 @@ export function evaluatePolicy(input: AuthorizationCheckInput): AuthorizationDec
     const isCommerciallySuspended = activeMemberships.some(
       (membership) =>
         membership.organizationStatus === "suspended" ||
-        membership.organizationStatus === "cancelled",
+        membership.organizationStatus === "archived",
     );
 
-    if (
-      isCommerciallySuspended &&
-      isMutatingPermission(permission) &&
-      permission !== "billing.manage"
-    ) {
+    if (isCommerciallySuspended && isMutatingPermission(permission)) {
       const coveredBySupportGrant = activeSupportGrants.some((grant) =>
         grant.permissions.includes(permission),
       );
@@ -301,11 +340,13 @@ export function evaluatePolicy(input: AuthorizationCheckInput): AuthorizationDec
         return {
           allowed: false,
           httpStatus: 403,
-          errorCode: "PERMISSION_DENIED",
+          errorCode: "ORGANIZATION_SUSPENDED",
           reason: "ORGANIZATION_SUSPENDED",
         };
       }
-    } else if (hasAllow) {
+    }
+
+    if (hasAllow) {
       return {
         allowed: true,
         httpStatus: 200,

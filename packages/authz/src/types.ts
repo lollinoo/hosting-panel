@@ -1,4 +1,9 @@
-import type { GrantEffect, OrganizationStatus, PermissionKey } from "@hosting-panel/contracts";
+import type {
+  GrantEffect,
+  OrganizationStatus,
+  PermissionKey,
+  PresetRoleName,
+} from "@hosting-panel/contracts";
 
 export type RoleScopeType = "organization" | "resource";
 
@@ -12,7 +17,7 @@ export interface RolePermissionEntry {
 }
 
 export interface MembershipRoleBinding {
-  readonly roleName: string;
+  readonly roleName: PresetRoleName | string;
   readonly permissions: readonly RolePermissionEntry[];
   readonly scopeType: RoleScopeType;
   readonly scopeResourceId?: string | null;
@@ -58,7 +63,8 @@ export interface PrincipalContext {
   readonly userId: string;
   readonly email: string;
   readonly userStatus: UserStatus;
-  readonly isPlatformAdmin: boolean;
+  readonly globalRoles?: readonly PresetRoleName[];
+  readonly hostingAdminOrgIds?: readonly string[];
   readonly memberships: readonly TenantMembershipContext[];
   readonly supportGrants?: readonly SupportAccessGrantRecord[];
 }
@@ -79,7 +85,7 @@ export interface AuthorizationCheckInput {
 export interface AuthorizationDecision {
   readonly allowed: boolean;
   readonly httpStatus: 200 | 403 | 404;
-  readonly errorCode: "PERMISSION_DENIED" | "NOT_FOUND" | null;
+  readonly errorCode: "PERMISSION_DENIED" | "NOT_FOUND" | "ORGANIZATION_SUSPENDED" | null;
   readonly reason: string;
   readonly viaSupportGrant?: boolean;
 }

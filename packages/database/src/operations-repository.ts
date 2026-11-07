@@ -1,760 +1,943 @@
-import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { and, asc, eq } from "drizzle-orm";
 import {
-  type AuditEventDto,
-  type AuditEventOutcome,
-  type AuditMetadata,
-  AuditMetadataSchema,
   canTransitionOperation,
-  type ErrorCode,
   isTerminalOperationStatus,
-  type OperationDto,
+  type AuditActorType,
+  type ErrorCode,
+  type HostingMode,
   type OperationKind,
   type OperationResourceType,
   type OperationStatus,
-  type OperationStepStatus,
+  type ServiceDesiredStatus,
 } from "@hosting-panel/contracts";
+import {
+  buildImmutableStackRevision,
+  rebindDockerResource,
+} from "@hosting-panel/hosting-domain";
+import {
+  evaluateHostAllocationAdmission,
+  evaluateQuotaAdmission,
+  validateDeclarativeServiceInput,
+} from "@hosting-panel/policy-engine";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import {
-  type AuditEventRow,
   auditEvents,
-  hostingResources,
-  type OperationRow,
-  type OperationStepRow,
+  dockerResources,
+  domains,
+  hostAllocations,
+  hosts,
+  observedStates,
   operationSteps,
   operations,
-  type OutboxEventRow,
   outboxEvents,
+  quotaReservations,
+  resourceQuotas,
+  serviceInstances,
+  serviceTemplates,
+  sites,
+  stackRevisions,
 } from "./schema.js";
 
 function generatePrefixedId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/g, "")}`;
 }
 
-function canonicalizeJsonValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "null";
-  }
+export interface AllocateHostInput {
+  readonly hostId: string;
+  readonly organizationId: string;
+  readonly hostingMode?: HostingMode;
+  readonly actorId?: string;
+  readonly initialQuotaLimits?: {
+    readonly maxSites: number;
+    readonly maxServices: number;
+    readonly maxCpuMilli: number;
+    readonly maxMemoryBytes: string;
+    readonly maxStorageBytes: string;
+  };
+}
 
-  if (typeof value === "boolean" || typeof value === "number") {
-    return JSON.stringify(value);
-  }
+export async function allocateHostTransactional(
+  db: HostingPanelDatabase,
+  input: AllocateHostInput,
+) {
+  return db.transaction(async (tx) => {
+    // Lock host row FOR UPDATE to prevent concurrent races
+    const hostRows = await tx
+      .select()
+      .from(hosts)
+      .where(eq(hosts.id, input.hostId))
+      .for("update");
 
-  if (typeof value === "string") {
-    return JSON.stringify(value);
-  }
+    const host = hostRows[0];
+    if (!host) {
+      const err = new Error(`Host '${input.hostId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
 
-  if (value instanceof Date) {
-    return JSON.stringify(value.toISOString());
-  }
+    // Read existing allocations for this host
+    const existing = await tx
+      .select()
+      .from(hostAllocations)
+      .where(eq(hostAllocations.hostId, input.hostId));
 
-  if (Array.isArray(value)) {
-    const serializedItems = value.map((item) => canonicalizeJsonValue(item));
-    return `[${serializedItems.join(",")}]`;
-  }
-
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const sortedKeys = Object.keys(record)
-      .filter((key) => record[key] !== undefined)
-      .sort();
-    const entries = sortedKeys.map(
-      (key) => `${JSON.stringify(key)}:${canonicalizeJsonValue(record[key])}`,
+    // Enforce AC-F1-01 under concurrency
+    const targetMode = input.hostingMode ?? host.hostingMode;
+    const admission = evaluateHostAllocationAdmission(
+      host,
+      input.organizationId,
+      existing,
+      targetMode,
     );
-    return `{${entries.join(",")}}`;
-  }
 
-  return JSON.stringify(String(value));
-}
+    if (!admission.admitted) {
+      const err = new Error(admission.reason);
+      (err as unknown as { code: ErrorCode }).code = admission.errorCode ?? "HOST_POLICY_DENIED";
+      throw err;
+    }
 
-export function computeRequestHash(payload: unknown): string {
-  const normalizedPayload = payload === undefined ? {} : payload;
-  const canonicalJson = canonicalizeJsonValue(normalizedPayload);
-  return createHash("sha256").update(canonicalJson, "utf8").digest("hex");
-}
+    const allocationId = generatePrefixedId("alloc");
+    const [allocation] = await tx
+      .insert(hostAllocations)
+      .values({
+        id: allocationId,
+        hostId: input.hostId,
+        organizationId: input.organizationId,
+        status: "active",
+        hostingMode: targetMode,
+        dedicatedScope: targetMode === "dedicated",
+      })
+      .returning();
 
-export interface OperationWithSteps extends OperationRow {
-  readonly steps: readonly OperationStepRow[];
-}
+    const quotaId = generatePrefixedId("qta");
+    const limits = input.initialQuotaLimits ?? {
+      maxSites: 10,
+      maxServices: 20,
+      maxCpuMilli: host.totalCpuMilli,
+      maxMemoryBytes: host.totalMemoryBytes,
+      maxStorageBytes: host.totalStorageBytes,
+    };
 
-export function mapOperationToDto(operation: OperationWithSteps): OperationDto {
-  return {
-    id: operation.id,
-    organizationId: operation.organizationId,
-    kind: operation.kind,
-    status: operation.status,
-    resourceType: operation.resourceType,
-    resourceId: operation.resourceId,
-    requestedByUserId: operation.requestedByUserId,
-    errorCode: operation.errorCode,
-    errorMessage: operation.errorMessage,
-    submittedAt: operation.submittedAt.toISOString(),
-    startedAt: operation.startedAt ? operation.startedAt.toISOString() : null,
-    completedAt: operation.completedAt ? operation.completedAt.toISOString() : null,
-    updatedAt: operation.updatedAt.toISOString(),
-    steps: operation.steps.map((step) => ({
-      id: step.id,
-      key: step.key,
-      label: step.label,
-      status: step.status,
-      message: step.message,
-      startedAt: step.startedAt ? step.startedAt.toISOString() : null,
-      completedAt: step.completedAt ? step.completedAt.toISOString() : null,
-    })),
-  };
-}
+    const [quota] = await tx
+      .insert(resourceQuotas)
+      .values({
+        id: quotaId,
+        organizationId: input.organizationId,
+        hostAllocationId: allocationId,
+        maxSites: limits.maxSites,
+        maxServices: limits.maxServices,
+        maxCpuMilli: limits.maxCpuMilli,
+        maxMemoryBytes: limits.maxMemoryBytes,
+        maxStorageBytes: limits.maxStorageBytes,
+        usedSites: 0,
+        usedServices: 0,
+        usedCpuMilli: 0,
+        usedMemoryBytes: "0",
+        usedStorageBytes: "0",
+      })
+      .returning();
 
-export function mapAuditEventToDto(row: AuditEventRow): AuditEventDto {
-  return {
-    id: row.id,
-    organizationId: row.organizationId,
-    actorUserId: row.actorUserId,
-    actorEmail: row.actorEmail,
-    impersonatedByUserId: row.impersonatedByUserId,
-    action: row.action,
-    targetType: row.targetType,
-    targetId: row.targetId,
-    outcome: row.outcome,
-    requestId: row.requestId,
-    ipAddress: row.ipAddress,
-    metadata: AuditMetadataSchema.parse(row.metadataJson),
-    occurredAt: row.occurredAt.toISOString(),
-  };
-}
-
-export interface AppendAuditEventInput {
-  readonly id?: string;
-  readonly organizationId: string | null;
-  readonly actorUserId: string | null;
-  readonly actorEmail?: string | null;
-  readonly impersonatedByUserId?: string | null;
-  readonly action: string;
-  readonly targetType: string;
-  readonly targetId: string | null;
-  readonly outcome: AuditEventOutcome;
-  readonly requestId: string;
-  readonly ipAddress?: string | null;
-  readonly metadata?: AuditMetadata;
-  readonly occurredAt?: Date;
-}
-
-export async function appendAuditEvent(
-  db: DatabaseExecutor,
-  input: AppendAuditEventInput,
-): Promise<AuditEventRow> {
-  const validatedMetadata = AuditMetadataSchema.parse(input.metadata ?? {});
-  const [inserted] = await db
-    .insert(auditEvents)
-    .values({
-      id: input.id ?? generatePrefixedId("aud"),
+    await tx.insert(auditEvents).values({
+      id: generatePrefixedId("aud"),
+      actorId: input.actorId ?? null,
+      actorType: "user",
       organizationId: input.organizationId,
-      actorUserId: input.actorUserId,
-      actorEmail: input.actorEmail ?? null,
-      impersonatedByUserId: input.impersonatedByUserId ?? null,
-      action: input.action,
-      targetType: input.targetType,
-      targetId: input.targetId,
-      outcome: input.outcome,
-      requestId: input.requestId,
-      ipAddress: input.ipAddress ?? null,
-      metadataJson: validatedMetadata,
-      occurredAt: input.occurredAt ?? new Date(),
-    })
-    .returning();
+      action: "allocation.create",
+      targetType: "host_allocation",
+      targetId: allocationId,
+      details: {
+        hostId: input.hostId,
+        hostingMode: targetMode,
+      },
+    });
 
-  if (!inserted) {
-    throw new Error("Failed to insert audit event row.");
-  }
-
-  return inserted;
+    return { allocation: allocation!, quota: quota! };
+  });
 }
 
-async function loadStepsForOperation(
-  db: DatabaseExecutor,
-  operationId: string,
-): Promise<OperationStepRow[]> {
-  return db
-    .select()
-    .from(operationSteps)
-    .where(eq(operationSteps.operationId, operationId))
-    .orderBy(asc(operationSteps.stepOrder), asc(operationSteps.id));
-}
-
-export async function getOperationWithSteps(
-  db: DatabaseExecutor,
-  organizationId: string,
-  operationId: string,
-): Promise<OperationWithSteps | null> {
-  const [operation] = await db
-    .select()
-    .from(operations)
-    .where(and(eq(operations.id, operationId), eq(operations.organizationId, organizationId)))
-    .limit(1);
-
-  if (!operation) {
-    return null;
-  }
-
-  const steps = await loadStepsForOperation(db, operation.id);
-  return {
-    ...operation,
-    steps,
+export interface ReserveQuotaInput {
+  readonly organizationId: string;
+  readonly resourceQuotaId: string;
+  readonly idempotencyKey: string;
+  readonly demand: {
+    readonly sites?: number;
+    readonly services?: number;
+    readonly cpuMilli?: number;
+    readonly memoryBytes?: string;
+    readonly storageBytes?: string;
   };
+  readonly ttlSeconds?: number;
+  readonly actorId?: string;
+}
+
+export async function reserveQuotaTransactional(
+  db: HostingPanelDatabase,
+  input: ReserveQuotaInput,
+) {
+  return db.transaction(async (tx) => {
+    // Check idempotency key first
+    const existingReservations = await tx
+      .select()
+      .from(quotaReservations)
+      .where(eq(quotaReservations.idempotencyKey, input.idempotencyKey));
+
+    if (existingReservations[0]) {
+      return { reservation: existingReservations[0], idempotentReplay: true };
+    }
+
+    // Lock quota row FOR UPDATE
+    const quotaRows = await tx
+      .select()
+      .from(resourceQuotas)
+      .where(
+        and(
+          eq(resourceQuotas.id, input.resourceQuotaId),
+          eq(resourceQuotas.organizationId, input.organizationId),
+        ),
+      )
+      .for("update");
+
+    const quota = quotaRows[0];
+    if (!quota) {
+      const err = new Error(`Resource quota '${input.resourceQuotaId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    // Fetch active pending reservations
+    const pending = await tx
+      .select()
+      .from(quotaReservations)
+      .where(
+        and(
+          eq(quotaReservations.resourceQuotaId, input.resourceQuotaId),
+          eq(quotaReservations.status, "pending"),
+        ),
+      );
+
+    // Enforce AC-F1-07 concurrency check
+    const admission = evaluateQuotaAdmission(quota, input.demand, pending);
+    if (!admission.admitted) {
+      const err = new Error(admission.message);
+      (err as unknown as { code: ErrorCode }).code = admission.errorCode ?? "QUOTA_EXCEEDED";
+      throw err;
+    }
+
+    const reservationId = generatePrefixedId("qres");
+    const expiresAt = new Date(Date.now() + (input.ttlSeconds ?? 300) * 1000);
+
+    const [reservation] = await tx
+      .insert(quotaReservations)
+      .values({
+        id: reservationId,
+        organizationId: input.organizationId,
+        resourceQuotaId: input.resourceQuotaId,
+        sites: input.demand.sites ?? 0,
+        services: input.demand.services ?? 0,
+        cpuMilli: input.demand.cpuMilli ?? 0,
+        memoryBytes: input.demand.memoryBytes ?? "0",
+        storageBytes: input.demand.storageBytes ?? "0",
+        status: "pending",
+        idempotencyKey: input.idempotencyKey,
+        expiresAt,
+      })
+      .returning();
+
+    await tx.insert(auditEvents).values({
+      id: generatePrefixedId("aud"),
+      actorId: input.actorId ?? null,
+      actorType: "user",
+      organizationId: input.organizationId,
+      action: "quota.reserve",
+      targetType: "quota_reservation",
+      targetId: reservationId,
+      details: {
+        idempotencyKey: input.idempotencyKey,
+        demand: input.demand,
+      },
+    });
+
+    return { reservation: reservation!, idempotentReplay: false };
+  });
+}
+
+export async function commitQuotaReservationTransactional(
+  db: HostingPanelDatabase,
+  reservationId: string,
+) {
+  return db.transaction(async (tx) => {
+    const resRows = await tx
+      .select()
+      .from(quotaReservations)
+      .where(eq(quotaReservations.id, reservationId))
+      .for("update");
+
+    const reservation = resRows[0];
+    if (!reservation) {
+      const err = new Error(`Quota reservation '${reservationId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    if (reservation.status === "committed") {
+      return { reservation, alreadyCommitted: true };
+    }
+
+    const quotaRows = await tx
+      .select()
+      .from(resourceQuotas)
+      .where(eq(resourceQuotas.id, reservation.resourceQuotaId))
+      .for("update");
+
+    const quota = quotaRows[0];
+    if (!quota) {
+      const err = new Error(`Resource quota '${reservation.resourceQuotaId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    const updatedSites = quota.usedSites + reservation.sites;
+    const updatedServices = quota.usedServices + reservation.services;
+    const updatedCpu = quota.usedCpuMilli + reservation.cpuMilli;
+    const updatedMemory = (
+      BigInt(quota.usedMemoryBytes) + BigInt(reservation.memoryBytes)
+    ).toString();
+    const updatedStorage = (
+      BigInt(quota.usedStorageBytes) + BigInt(reservation.storageBytes)
+    ).toString();
+
+    const [updatedQuota] = await tx
+      .update(resourceQuotas)
+      .set({
+        usedSites: updatedSites,
+        usedServices: updatedServices,
+        usedCpuMilli: updatedCpu,
+        usedMemoryBytes: updatedMemory,
+        usedStorageBytes: updatedStorage,
+        updatedAt: new Date(),
+      })
+      .where(eq(resourceQuotas.id, quota.id))
+      .returning();
+
+    const [committedReservation] = await tx
+      .update(quotaReservations)
+      .set({
+        status: "committed",
+      })
+      .where(eq(quotaReservations.id, reservationId))
+      .returning();
+
+    return { reservation: committedReservation!, quota: updatedQuota!, alreadyCommitted: false };
+  });
+}
+
+export async function releaseQuotaReservationTransactional(
+  db: HostingPanelDatabase,
+  reservationId: string,
+) {
+  return db.transaction(async (tx) => {
+    const resRows = await tx
+      .select()
+      .from(quotaReservations)
+      .where(eq(quotaReservations.id, reservationId))
+      .for("update");
+
+    const reservation = resRows[0];
+    if (!reservation) {
+      const err = new Error(`Quota reservation '${reservationId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    if (reservation.status === "released") {
+      return { reservation, alreadyReleased: true };
+    }
+
+    if (reservation.status === "committed") {
+      // Revert quota usage
+      const quotaRows = await tx
+        .select()
+        .from(resourceQuotas)
+        .where(eq(resourceQuotas.id, reservation.resourceQuotaId))
+        .for("update");
+
+      const quota = quotaRows[0];
+      if (quota) {
+        const revertSites = Math.max(0, quota.usedSites - reservation.sites);
+        const revertServices = Math.max(0, quota.usedServices - reservation.services);
+        const revertCpu = Math.max(0, quota.usedCpuMilli - reservation.cpuMilli);
+        const memDiff = BigInt(quota.usedMemoryBytes) - BigInt(reservation.memoryBytes);
+        const revertMem = memDiff > 0n ? memDiff.toString() : "0";
+        const storDiff = BigInt(quota.usedStorageBytes) - BigInt(reservation.storageBytes);
+        const revertStor = storDiff > 0n ? storDiff.toString() : "0";
+
+        await tx
+          .update(resourceQuotas)
+          .set({
+            usedSites: revertSites,
+            usedServices: revertServices,
+            usedCpuMilli: revertCpu,
+            usedMemoryBytes: revertMem,
+            usedStorageBytes: revertStor,
+            updatedAt: new Date(),
+          })
+          .where(eq(resourceQuotas.id, quota.id));
+      }
+    }
+
+    const [releasedReservation] = await tx
+      .update(quotaReservations)
+      .set({
+        status: "released",
+      })
+      .where(eq(quotaReservations.id, reservationId))
+      .returning();
+
+    return { reservation: releasedReservation!, alreadyReleased: false };
+  });
+}
+
+export interface CreateSiteInput {
+  readonly organizationId: string;
+  readonly hostAllocationId: string;
+  readonly name: string;
+  readonly slug: string;
+  readonly initialDomain?: string;
+  readonly actorId?: string;
+}
+
+export async function createSiteTransactional(
+  db: HostingPanelDatabase,
+  input: CreateSiteInput,
+) {
+  return db.transaction(async (tx) => {
+    // Verify allocation belongs to organization
+    const allocRows = await tx
+      .select()
+      .from(hostAllocations)
+      .where(
+        and(
+          eq(hostAllocations.id, input.hostAllocationId),
+          eq(hostAllocations.organizationId, input.organizationId),
+        ),
+      );
+
+    if (!allocRows[0]) {
+      const err = new Error(
+        `Host allocation '${input.hostAllocationId}' not found for organization '${input.organizationId}'`,
+      );
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    const siteId = generatePrefixedId("site");
+    const [site] = await tx
+      .insert(sites)
+      .values({
+        id: siteId,
+        organizationId: input.organizationId,
+        hostAllocationId: input.hostAllocationId,
+        name: input.name,
+        slug: input.slug,
+        status: "ready",
+      })
+      .returning();
+
+    let domainRecord = null;
+    if (input.initialDomain) {
+      const domainId = generatePrefixedId("dom");
+      const [dom] = await tx
+        .insert(domains)
+        .values({
+          id: domainId,
+          siteId,
+          organizationId: input.organizationId,
+          hostname: input.initialDomain,
+          isPrimary: true,
+          status: "active",
+        })
+        .returning();
+      domainRecord = dom;
+    }
+
+    await tx.insert(auditEvents).values({
+      id: generatePrefixedId("aud"),
+      actorId: input.actorId ?? null,
+      actorType: "user",
+      organizationId: input.organizationId,
+      action: "site.create",
+      targetType: "site",
+      targetId: siteId,
+      details: {
+        slug: input.slug,
+        hostAllocationId: input.hostAllocationId,
+        initialDomain: input.initialDomain,
+      },
+    });
+
+    return { site: site!, domain: domainRecord };
+  });
+}
+
+export interface CreateServiceInput {
+  readonly siteId: string;
+  readonly organizationId: string;
+  readonly serviceTemplateId: string;
+  readonly name: string;
+  readonly desiredStatus?: ServiceDesiredStatus;
+  readonly configuration: Record<string, unknown>;
+  readonly secretRefs?: Record<string, string>;
+  readonly resourceLimits?: { cpuMilli: number; memoryBytes: string };
+  readonly actorId?: string;
+}
+
+export async function createServiceWithRevisionTransactional(
+  db: HostingPanelDatabase,
+  input: CreateServiceInput,
+) {
+  return db.transaction(async (tx) => {
+    // Verify site belongs to organization
+    const siteRows = await tx
+      .select()
+      .from(sites)
+      .where(and(eq(sites.id, input.siteId), eq(sites.organizationId, input.organizationId)));
+
+    const site = siteRows[0];
+    if (!site) {
+      const err = new Error(`Site '${input.siteId}' not found in organization '${input.organizationId}'`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    // Verify template
+    const tplRows = await tx
+      .select()
+      .from(serviceTemplates)
+      .where(eq(serviceTemplates.id, input.serviceTemplateId));
+
+    const tpl = tplRows[0];
+    if (!tpl) {
+      const err = new Error(`Service template '${input.serviceTemplateId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    // Validate declarative input
+    const validation = validateDeclarativeServiceInput(
+      tpl,
+      "dedicated",
+      input.configuration,
+      input.resourceLimits,
+    );
+
+    if (!validation.valid) {
+      const err = new Error(validation.message);
+      (err as unknown as { code: ErrorCode }).code = validation.errorCode ?? "VALIDATION_ERROR";
+      throw err;
+    }
+
+    const serviceId = generatePrefixedId("svc");
+    const desiredStatus = input.desiredStatus ?? "running";
+
+    // Build immutable stack revision #1
+    const revision = buildImmutableStackRevision({
+      serviceInstanceId: serviceId,
+      organizationId: input.organizationId,
+      currentRevisionNumber: 0,
+      declarativeConfig: input.configuration,
+      secretRefs: input.secretRefs,
+      resourceLimits: input.resourceLimits ?? null,
+      authorId: input.actorId,
+    });
+
+    const [service] = await tx
+      .insert(serviceInstances)
+      .values({
+        id: serviceId,
+        siteId: input.siteId,
+        organizationId: input.organizationId,
+        serviceTemplateId: input.serviceTemplateId,
+        name: input.name,
+        desiredStatus,
+        currentRevisionId: revision.id,
+      })
+      .returning();
+
+    const [revRecord] = await tx
+      .insert(stackRevisions)
+      .values({
+        id: revision.id,
+        serviceInstanceId: serviceId,
+        organizationId: input.organizationId,
+        revisionNumber: revision.revisionNumber,
+        specHash: revision.specHash,
+        declarativeConfig: revision.declarativeConfig as Record<string, unknown>,
+        secretRefs: revision.secretRefs as Record<string, string>,
+        resourceLimits: revision.resourceLimits,
+        authorId: revision.authorId,
+      })
+      .returning();
+
+    const [observed] = await tx
+      .insert(observedStates)
+      .values({
+        id: generatePrefixedId("obs"),
+        serviceInstanceId: serviceId,
+        observedStatus: desiredStatus,
+        observedRevisionHash: revision.specHash,
+        outOfBandModified: false,
+        rawState: {},
+      })
+      .returning();
+
+    const dockerRef = `cnt_${serviceId}_${revision.revisionNumber}`;
+    const [dockerRes] = await tx
+      .insert(dockerResources)
+      .values({
+        id: generatePrefixedId("dock"),
+        siteId: input.siteId,
+        serviceInstanceId: serviceId,
+        internalDockerRef: dockerRef,
+        resourceType: "container",
+        status: desiredStatus,
+        metadata: { image: tpl.defaultImage },
+      })
+      .returning();
+
+    await tx.insert(auditEvents).values({
+      id: generatePrefixedId("aud"),
+      actorId: input.actorId ?? null,
+      actorType: "user",
+      organizationId: input.organizationId,
+      action: "service.create",
+      targetType: "service_instance",
+      targetId: serviceId,
+      details: {
+        siteId: input.siteId,
+        revisionId: revision.id,
+      },
+    });
+
+    return {
+      service: service!,
+      revision: revRecord!,
+      observedState: observed!,
+      dockerResource: dockerRes!,
+    };
+  });
+}
+
+export interface AppendStackRevisionInput {
+  readonly serviceInstanceId: string;
+  readonly organizationId: string;
+  readonly declarativeConfig: Record<string, unknown>;
+  readonly secretRefs?: Record<string, string>;
+  readonly resourceLimits?: { cpuMilli: number; memoryBytes: string };
+  readonly authorId?: string;
+}
+
+export async function appendStackRevisionTransactional(
+  db: HostingPanelDatabase,
+  input: AppendStackRevisionInput,
+) {
+  return db.transaction(async (tx) => {
+    const svcRows = await tx
+      .select()
+      .from(serviceInstances)
+      .where(
+        and(
+          eq(serviceInstances.id, input.serviceInstanceId),
+          eq(serviceInstances.organizationId, input.organizationId),
+        ),
+      )
+      .for("update");
+
+    const service = svcRows[0];
+    if (!service) {
+      const err = new Error(
+        `Service instance '${input.serviceInstanceId}' not found in organization '${input.organizationId}'`,
+      );
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    // Get current max revisionNumber
+    const revRows = await tx
+      .select()
+      .from(stackRevisions)
+      .where(eq(stackRevisions.serviceInstanceId, input.serviceInstanceId))
+      .orderBy(asc(stackRevisions.revisionNumber));
+
+    const currentMaxRev = revRows.length > 0 ? revRows[revRows.length - 1]!.revisionNumber : 0;
+
+    const revision = buildImmutableStackRevision({
+      serviceInstanceId: input.serviceInstanceId,
+      organizationId: input.organizationId,
+      currentRevisionNumber: currentMaxRev,
+      declarativeConfig: input.declarativeConfig,
+      secretRefs: input.secretRefs,
+      resourceLimits: input.resourceLimits ?? null,
+      authorId: input.authorId,
+    });
+
+    const [newRevRecord] = await tx
+      .insert(stackRevisions)
+      .values({
+        id: revision.id,
+        serviceInstanceId: input.serviceInstanceId,
+        organizationId: input.organizationId,
+        revisionNumber: revision.revisionNumber,
+        specHash: revision.specHash,
+        declarativeConfig: revision.declarativeConfig as Record<string, unknown>,
+        secretRefs: revision.secretRefs as Record<string, string>,
+        resourceLimits: revision.resourceLimits,
+        authorId: revision.authorId,
+      })
+      .returning();
+
+    await tx
+      .update(serviceInstances)
+      .set({
+        currentRevisionId: revision.id,
+        updatedAt: new Date(),
+      })
+      .where(eq(serviceInstances.id, input.serviceInstanceId));
+
+    await tx.insert(auditEvents).values({
+      id: generatePrefixedId("aud"),
+      actorId: input.authorId ?? null,
+      actorType: "user",
+      organizationId: input.organizationId,
+      action: "service.configuration.manage",
+      targetType: "stack_revision",
+      targetId: revision.id,
+      details: {
+        serviceInstanceId: input.serviceInstanceId,
+        revisionNumber: revision.revisionNumber,
+        specHash: revision.specHash,
+      },
+    });
+
+    return newRevRecord!;
+  });
+}
+
+export async function rebindDockerResourceTransactional(
+  db: HostingPanelDatabase,
+  serviceInstanceId: string,
+  newInternalDockerRef: string,
+  newStatus?: string,
+) {
+  return db.transaction(async (tx) => {
+    const dockRows = await tx
+      .select()
+      .from(dockerResources)
+      .where(eq(dockerResources.serviceInstanceId, serviceInstanceId))
+      .for("update");
+
+    const existing = dockRows[0];
+    if (!existing) {
+      const err = new Error(`Docker resource for service '${serviceInstanceId}' not found`);
+      (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
+      throw err;
+    }
+
+    const { updatedResource, siteIdPreserved, serviceInstanceIdPreserved } = rebindDockerResource({
+      existingResource: {
+        id: existing.id,
+        siteId: existing.siteId,
+        serviceInstanceId: existing.serviceInstanceId,
+        internalDockerRef: existing.internalDockerRef,
+        resourceType: existing.resourceType as "container" | "volume" | "network",
+        status: existing.status,
+        metadata: existing.metadata as Record<string, unknown>,
+        createdAt: existing.createdAt.toISOString(),
+        updatedAt: existing.updatedAt.toISOString(),
+      },
+      newInternalDockerRef,
+      newStatus,
+    });
+
+    const [updated] = await tx
+      .update(dockerResources)
+      .set({
+        internalDockerRef: updatedResource.internalDockerRef,
+        status: updatedResource.status,
+        metadata: updatedResource.metadata as Record<string, unknown>,
+        updatedAt: new Date(),
+      })
+      .where(eq(dockerResources.id, existing.id))
+      .returning();
+
+    return {
+      updatedResource: updated!,
+      siteIdPreserved,
+      serviceInstanceIdPreserved,
+    };
+  });
 }
 
 export interface EnqueueOperationInput {
-  readonly operationId?: string;
   readonly organizationId: string;
+  readonly kind: OperationKind;
   readonly resourceType: OperationResourceType;
   readonly resourceId: string;
-  readonly kind: OperationKind;
-  readonly requestedByUserId: string | null;
-  readonly actorEmail?: string | null;
-  readonly impersonatedByUserId?: string | null;
-  readonly idempotencyKey: string;
-  readonly payload?: Record<string, unknown>;
-  readonly requestId?: string;
-  readonly ipAddress?: string | null;
-  readonly eventType?: string;
-  readonly auditMetadata?: AuditMetadata;
-  readonly now?: Date;
-}
-
-export type EnqueueOperationResult =
-  | {
-      readonly ok: true;
-      readonly deduplicated: false;
-      readonly operation: OperationWithSteps;
-      readonly outboxEventId: string;
-    }
-  | {
-      readonly ok: true;
-      readonly deduplicated: true;
-      readonly operation: OperationWithSteps;
-    }
-  | {
-      readonly ok: false;
-      readonly deduplicated: false;
-      readonly errorCode: "IDEMPOTENCY_CONFLICT" | "RESOURCE_LOCKED" | "NOT_FOUND";
-      readonly message: string;
-      readonly conflictingOperationId?: string;
-    };
-
-function requiresHostingResourceLock(resourceType: OperationResourceType): boolean {
-  return resourceType === "application" || resourceType === "database";
+  readonly requestedByUserId?: string;
+  readonly idempotencyKey?: string;
+  readonly lockKey?: string;
+  readonly steps?: readonly { key: string; label: string }[];
 }
 
 export async function enqueueOperationTransactional(
   db: HostingPanelDatabase,
   input: EnqueueOperationInput,
-): Promise<EnqueueOperationResult> {
-  const payload = input.payload ?? {};
-  const requestHash = computeRequestHash(payload);
-  const now = input.now ?? new Date();
-  const requestId = input.requestId ?? generatePrefixedId("req");
-  const validatedAuditMetadata = AuditMetadataSchema.parse(
-    input.auditMetadata ?? {
-      kind: input.kind,
-      resourceType: input.resourceType,
-    },
-  );
+) {
+  return db.transaction(async (tx) => {
+    const operationId = generatePrefixedId("op");
 
-  return db.transaction(async (tx): Promise<EnqueueOperationResult> => {
-    const [existing] = await tx
-      .select()
-      .from(operations)
-      .where(
-        and(
-          eq(operations.organizationId, input.organizationId),
-          eq(operations.kind, input.kind),
-          eq(operations.idempotencyKey, input.idempotencyKey),
-        ),
-      )
-      .for("update");
-
-    if (existing) {
-      if (existing.requestHash === requestHash) {
-        const existingSteps = await loadStepsForOperation(tx, existing.id);
-        return {
-          ok: true,
-          deduplicated: true,
-          operation: {
-            ...existing,
-            steps: existingSteps,
-          },
-        };
-      }
-
-      return {
-        ok: false,
-        deduplicated: false,
-        errorCode: "IDEMPOTENCY_CONFLICT",
-        message:
-          "Idempotency-Key has already been used for this operation kind with a different request payload.",
-        conflictingOperationId: existing.id,
-      };
-    }
-
-    const shouldLockResource = requiresHostingResourceLock(input.resourceType);
-
-    if (shouldLockResource) {
-      const [resource] = await tx
-        .select()
-        .from(hostingResources)
-        .where(
-          and(
-            eq(hostingResources.id, input.resourceId),
-            eq(hostingResources.organizationId, input.organizationId),
-          ),
-        )
-        .for("update");
-
-      if (!resource) {
-        return {
-          ok: false,
-          deduplicated: false,
-          errorCode: "NOT_FOUND",
-          message: `Target ${input.resourceType} '${input.resourceId}' was not found in organization '${input.organizationId}'.`,
-        };
-      }
-
-      if (resource.lockedByOperationId !== null) {
-        return {
-          ok: false,
-          deduplicated: false,
-          errorCode: "RESOURCE_LOCKED",
-          message: `Resource '${input.resourceId}' is currently locked by active operation '${resource.lockedByOperationId}'.`,
-          conflictingOperationId: resource.lockedByOperationId,
-        };
-      }
-    }
-
-    const operationId = input.operationId ?? generatePrefixedId("op");
-
-    const [insertedOperation] = await tx
+    const [operation] = await tx
       .insert(operations)
       .values({
         id: operationId,
         organizationId: input.organizationId,
-        resourceType: input.resourceType,
-        resourceId: input.resourceId,
         kind: input.kind,
         status: "queued",
-        requestedByUserId: input.requestedByUserId,
-        idempotencyKey: input.idempotencyKey,
-        requestHash,
-        payloadJson: payload,
-        providerOperationId: null,
-        errorCode: null,
-        errorMessage: null,
-        submittedAt: now,
-        startedAt: null,
-        completedAt: null,
-        updatedAt: now,
-      })
-      .onConflictDoNothing({
-        target: [operations.organizationId, operations.kind, operations.idempotencyKey],
-      })
-      .returning();
-
-    if (!insertedOperation) {
-      const [racedExisting] = await tx
-        .select()
-        .from(operations)
-        .where(
-          and(
-            eq(operations.organizationId, input.organizationId),
-            eq(operations.kind, input.kind),
-            eq(operations.idempotencyKey, input.idempotencyKey),
-          ),
-        )
-        .limit(1);
-
-      if (racedExisting && racedExisting.requestHash === requestHash) {
-        const steps = await loadStepsForOperation(tx, racedExisting.id);
-        return {
-          ok: true,
-          deduplicated: true,
-          operation: {
-            ...racedExisting,
-            steps,
-          },
-        };
-      }
-
-      return {
-        ok: false,
-        deduplicated: false,
-        errorCode: "IDEMPOTENCY_CONFLICT",
-        message:
-          "Idempotency-Key has already been used for this operation kind with a different request payload.",
-        ...(racedExisting ? { conflictingOperationId: racedExisting.id } : {}),
-      };
-    }
-
-    const insertedSteps = await tx
-      .insert(operationSteps)
-      .values([
-        {
-          id: generatePrefixedId("step"),
-          operationId,
-          stepOrder: 1,
-          key: "queued",
-          label: "Operazione accodata",
-          status: "succeeded",
-          message: "Richiesta registrata nella coda transazionale.",
-          startedAt: now,
-          completedAt: now,
-        },
-        {
-          id: generatePrefixedId("step"),
-          operationId,
-          stepOrder: 2,
-          key: "provider_dispatch",
-          label: "Invio al provider",
-          status: "pending",
-          message: null,
-          startedAt: null,
-          completedAt: null,
-        },
-        {
-          id: generatePrefixedId("step"),
-          operationId,
-          stepOrder: 3,
-          key: "reconcile_health",
-          label: "Verifica stato e salute",
-          status: "pending",
-          message: null,
-          startedAt: null,
-          completedAt: null,
-        },
-      ])
-      .returning();
-
-    const outboxEventId = generatePrefixedId("out");
-    await tx.insert(outboxEvents).values({
-      id: outboxEventId,
-      organizationId: input.organizationId,
-      operationId,
-      eventType: input.eventType ?? input.kind,
-      payloadJson: {
-        operationId,
-        organizationId: input.organizationId,
-        kind: input.kind,
         resourceType: input.resourceType,
         resourceId: input.resourceId,
-        payload,
-      },
-      publishedAt: null,
-      attempts: 0,
-      createdAt: now,
-    });
+        requestedByUserId: input.requestedByUserId ?? null,
+        idempotencyKey: input.idempotencyKey ?? null,
+        lockKey: input.lockKey ?? null,
+      })
+      .returning();
 
-    if (shouldLockResource) {
-      await tx
-        .update(hostingResources)
-        .set({
-          lockedByOperationId: operationId,
-          updatedAt: now,
+    const createdSteps = [];
+    for (const step of input.steps ?? []) {
+      const stepId = generatePrefixedId("step");
+      const [s] = await tx
+        .insert(operationSteps)
+        .values({
+          id: stepId,
+          operationId,
+          key: step.key,
+          label: step.label,
+          status: "pending",
         })
-        .where(
-          and(
-            eq(hostingResources.id, input.resourceId),
-            eq(hostingResources.organizationId, input.organizationId),
-          ),
-        );
+        .returning();
+      createdSteps.push(s);
     }
 
-    await appendAuditEvent(tx, {
-      organizationId: input.organizationId,
-      actorUserId: input.requestedByUserId,
-      actorEmail: input.actorEmail ?? null,
-      impersonatedByUserId: input.impersonatedByUserId ?? null,
-      action: input.kind,
-      targetType: input.resourceType,
-      targetId: input.resourceId,
-      outcome: "allowed",
-      requestId,
-      ipAddress: input.ipAddress ?? null,
-      metadata: validatedAuditMetadata,
-      occurredAt: now,
-    });
+    const [outbox] = await tx
+      .insert(outboxEvents)
+      .values({
+        id: generatePrefixedId("out"),
+        eventType: `operation.queued.${input.kind}`,
+        aggregateType: input.resourceType,
+        aggregateId: input.resourceId,
+        payload: {
+          operationId,
+          organizationId: input.organizationId,
+          kind: input.kind,
+        },
+      })
+      .returning();
 
-    const sortedSteps = [...insertedSteps].sort((a, b) => a.stepOrder - b.stepOrder);
+    return { operation: operation!, steps: createdSteps, outbox: outbox! };
+  });
+}
 
-    return {
-      ok: true,
-      deduplicated: false,
-      operation: {
-        ...insertedOperation,
-        steps: sortedSteps,
-      },
-      outboxEventId,
-    };
+export async function transitionOperation(
+  db: HostingPanelDatabase,
+  operationId: string,
+  targetStatus: OperationStatus,
+  options?: { errorCode?: ErrorCode; errorMessage?: string },
+) {
+  return db.transaction(async (tx) => {
+    const opRows = await tx
+      .select()
+      .from(operations)
+      .where(eq(operations.id, operationId))
+      .for("update");
+
+    const op = opRows[0];
+    if (!op) {
+      throw new Error(`Operation '${operationId}' not found`);
+    }
+
+    if (!canTransitionOperation(op.status, targetStatus)) {
+      throw new Error(
+        `Invalid operation status transition from '${op.status}' to '${targetStatus}'`,
+      );
+    }
+
+    const isTerminal = isTerminalOperationStatus(targetStatus);
+    const now = new Date();
+
+    const [updated] = await tx
+      .update(operations)
+      .set({
+        status: targetStatus,
+        startedAt: op.startedAt ?? (targetStatus === "processing" ? now : null),
+        completedAt: isTerminal ? now : null,
+        errorCode: options?.errorCode ?? op.errorCode,
+        errorMessage: options?.errorMessage ?? op.errorMessage,
+        updatedAt: now,
+      })
+      .where(eq(operations.id, operationId))
+      .returning();
+
+    return updated!;
   });
 }
 
 export async function claimPendingOutboxEvents(
   db: HostingPanelDatabase,
-  limit = 10,
-  now: Date = new Date(),
-): Promise<OutboxEventRow[]> {
-  if (limit <= 0) {
-    return [];
-  }
-
+  batchSize: number = 10,
+) {
   return db.transaction(async (tx) => {
     const pending = await tx
-      .select({ id: outboxEvents.id })
+      .select()
       .from(outboxEvents)
-      .where(isNull(outboxEvents.publishedAt))
-      .orderBy(asc(outboxEvents.createdAt), asc(outboxEvents.id))
-      .limit(limit)
-      .for("update", { skipLocked: true });
+      .where(eq(outboxEvents.status, "pending"))
+      .orderBy(asc(outboxEvents.createdAt))
+      .limit(batchSize)
+      .for("update");
 
-    if (pending.length === 0) {
-      return [];
-    }
-
-    const pendingIds = pending.map((row) => row.id);
-    const claimed = await tx
-      .update(outboxEvents)
-      .set({
-        publishedAt: now,
-        attempts: sql`${outboxEvents.attempts} + 1`,
-      })
-      .where(inArray(outboxEvents.id, pendingIds))
-      .returning();
-
-    const orderIndex = new Map(pendingIds.map((id, idx) => [id, idx]));
-    return [...claimed].sort(
-      (left, right) => (orderIndex.get(left.id) ?? 0) - (orderIndex.get(right.id) ?? 0),
-    );
+    return pending;
   });
 }
 
-export async function requeueOutboxEvent(
-  db: DatabaseExecutor,
-  outboxEventId: string,
-): Promise<void> {
-  await db
-    .update(outboxEvents)
-    .set({ publishedAt: null })
-    .where(eq(outboxEvents.id, outboxEventId));
+export interface AppendAuditEventInput {
+  readonly actorId?: string | null;
+  readonly actorType?: AuditActorType;
+  readonly organizationId?: string | null;
+  readonly action: string;
+  readonly targetType: string;
+  readonly targetId?: string | null;
+  readonly ipAddress?: string | null;
+  readonly userAgent?: string | null;
+  readonly details?: Record<string, unknown>;
 }
 
-export class OperationNotFoundError extends Error {
-  public readonly code = "NOT_FOUND" as const;
-  public readonly operationId: string;
+export async function appendAuditEvent(
+  executor: DatabaseExecutor,
+  input: AppendAuditEventInput,
+) {
+  const [event] = await executor
+    .insert(auditEvents)
+    .values({
+      id: generatePrefixedId("aud"),
+      actorId: input.actorId ?? null,
+      actorType: input.actorType ?? "user",
+      organizationId: input.organizationId ?? null,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId ?? null,
+      ipAddress: input.ipAddress ?? null,
+      userAgent: input.userAgent ?? null,
+      details: input.details ?? {},
+    })
+    .returning();
 
-  constructor(operationId: string) {
-    super(`Operation '${operationId}' was not found.`);
-    this.name = "OperationNotFoundError";
-    this.operationId = operationId;
-  }
-}
-
-export class InvalidOperationTransitionError extends Error {
-  public readonly code = "INVALID_OPERATION_TRANSITION" as const;
-  public readonly operationId: string;
-  public readonly fromStatus: OperationStatus;
-  public readonly toStatus: OperationStatus;
-
-  constructor(operationId: string, fromStatus: OperationStatus, toStatus: OperationStatus) {
-    super(
-      `Invalid operation state transition for '${operationId}': '${fromStatus}' -> '${toStatus}'.`,
-    );
-    this.name = "InvalidOperationTransitionError";
-    this.operationId = operationId;
-    this.fromStatus = fromStatus;
-    this.toStatus = toStatus;
-  }
-}
-
-export interface OperationStepUpdateInput {
-  readonly key: string;
-  readonly label?: string;
-  readonly status: OperationStepStatus;
-  readonly message?: string | null;
-  readonly startedAt?: Date | null;
-  readonly completedAt?: Date | null;
-}
-
-export interface TransitionOperationInput {
-  readonly operationId: string;
-  readonly organizationId?: string;
-  readonly toStatus: OperationStatus;
-  readonly providerOperationId?: string | null;
-  readonly errorCode?: ErrorCode | null;
-  readonly errorMessage?: string | null;
-  readonly step?: OperationStepUpdateInput;
-  readonly steps?: readonly OperationStepUpdateInput[];
-  readonly now?: Date;
-}
-
-function isTerminalStepStatus(status: OperationStepStatus): boolean {
-  return (
-    status === "succeeded" ||
-    status === "failed" ||
-    status === "cancelled" ||
-    status === "skipped"
-  );
-}
-
-export async function transitionOperation(
-  db: HostingPanelDatabase,
-  input: TransitionOperationInput,
-): Promise<OperationWithSteps> {
-  const now = input.now ?? new Date();
-
-  return db.transaction(async (tx) => {
-    const whereClause = input.organizationId
-      ? and(
-          eq(operations.id, input.operationId),
-          eq(operations.organizationId, input.organizationId),
-        )
-      : eq(operations.id, input.operationId);
-
-    const [current] = await tx.select().from(operations).where(whereClause).for("update");
-
-    if (!current) {
-      throw new OperationNotFoundError(input.operationId);
-    }
-
-    if (!canTransitionOperation(current.status, input.toStatus)) {
-      throw new InvalidOperationTransitionError(current.id, current.status, input.toStatus);
-    }
-
-    const enteringTerminal = isTerminalOperationStatus(input.toStatus);
-    const nextStartedAt =
-      current.startedAt ?? (input.toStatus !== "queued" ? now : null);
-    const nextCompletedAt = enteringTerminal ? now : current.completedAt;
-
-    const [updatedOperation] = await tx
-      .update(operations)
-      .set({
-        status: input.toStatus,
-        providerOperationId:
-          input.providerOperationId !== undefined
-            ? input.providerOperationId
-            : current.providerOperationId,
-        errorCode: input.errorCode !== undefined ? input.errorCode : current.errorCode,
-        errorMessage:
-          input.errorMessage !== undefined ? input.errorMessage : current.errorMessage,
-        startedAt: nextStartedAt,
-        completedAt: nextCompletedAt,
-        updatedAt: now,
-      })
-      .where(eq(operations.id, current.id))
-      .returning();
-
-    if (!updatedOperation) {
-      throw new OperationNotFoundError(current.id);
-    }
-
-    const stepUpdates: OperationStepUpdateInput[] = [
-      ...(input.step ? [input.step] : []),
-      ...(input.steps ?? []),
-    ];
-
-    if (stepUpdates.length > 0) {
-      const existingSteps = await loadStepsForOperation(tx, current.id);
-      const byKey = new Map(existingSteps.map((step) => [step.key, step]));
-      let maxStepOrder = existingSteps.reduce(
-        (max, step) => (step.stepOrder > max ? step.stepOrder : max),
-        0,
-      );
-
-      for (const stepUpdate of stepUpdates) {
-        const existingStep = byKey.get(stepUpdate.key);
-
-        if (existingStep) {
-          const startedAt =
-            stepUpdate.startedAt !== undefined
-              ? stepUpdate.startedAt
-              : existingStep.startedAt ??
-                (stepUpdate.status !== "pending" ? now : null);
-          const completedAt =
-            stepUpdate.completedAt !== undefined
-              ? stepUpdate.completedAt
-              : isTerminalStepStatus(stepUpdate.status)
-                ? now
-                : existingStep.completedAt;
-
-          const [updatedStep] = await tx
-            .update(operationSteps)
-            .set({
-              label: stepUpdate.label ?? existingStep.label,
-              status: stepUpdate.status,
-              message:
-                stepUpdate.message !== undefined ? stepUpdate.message : existingStep.message,
-              startedAt,
-              completedAt,
-            })
-            .where(eq(operationSteps.id, existingStep.id))
-            .returning();
-
-          if (updatedStep) {
-            byKey.set(updatedStep.key, updatedStep);
-          }
-        } else {
-          maxStepOrder += 1;
-          const startedAt =
-            stepUpdate.startedAt !== undefined
-              ? stepUpdate.startedAt
-              : stepUpdate.status !== "pending"
-                ? now
-                : null;
-          const completedAt =
-            stepUpdate.completedAt !== undefined
-              ? stepUpdate.completedAt
-              : isTerminalStepStatus(stepUpdate.status)
-                ? now
-                : null;
-
-          const [insertedStep] = await tx
-            .insert(operationSteps)
-            .values({
-              id: generatePrefixedId("step"),
-              operationId: current.id,
-              stepOrder: maxStepOrder,
-              key: stepUpdate.key,
-              label: stepUpdate.label ?? stepUpdate.key,
-              status: stepUpdate.status,
-              message: stepUpdate.message ?? null,
-              startedAt,
-              completedAt,
-            })
-            .returning();
-
-          if (insertedStep) {
-            byKey.set(insertedStep.key, insertedStep);
-          }
-        }
-      }
-    }
-
-    if (enteringTerminal && requiresHostingResourceLock(current.resourceType)) {
-      await tx
-        .update(hostingResources)
-        .set({
-          lockedByOperationId: null,
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(hostingResources.id, current.resourceId),
-            eq(hostingResources.organizationId, current.organizationId),
-            eq(hostingResources.lockedByOperationId, current.id),
-          ),
-        );
-    }
-
-    const finalSteps = await loadStepsForOperation(tx, current.id);
-
-    return {
-      ...updatedOperation,
-      steps: finalSteps,
-    };
-  });
+  return event;
 }

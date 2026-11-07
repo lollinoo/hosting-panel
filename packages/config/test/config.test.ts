@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   PLATFORM_API_VERSION,
   PLATFORM_DEFAULT_LOCALE,
+  PLATFORM_PHASE,
   PLATFORM_SPEC_ID,
   WORKSPACE_METADATA,
 } from "../src/index.js";
@@ -12,12 +13,14 @@ import {
 const currentDir = dirname(fileURLToPath(import.meta.url));
 
 describe("@hosting-panel/config", () => {
-  it("exports canonical HCP-SPEC-001 workspace metadata constants", () => {
-    expect(PLATFORM_SPEC_ID).toBe("HCP-SPEC-001");
+  it("exports canonical HCP-SPEC-002 workspace metadata constants", () => {
+    expect(PLATFORM_SPEC_ID).toBe("HCP-SPEC-002");
+    expect(PLATFORM_PHASE).toBe("phase-1");
     expect(PLATFORM_API_VERSION).toBe("v1");
     expect(PLATFORM_DEFAULT_LOCALE).toBe("it-IT");
     expect(WORKSPACE_METADATA).toEqual({
-      specId: "HCP-SPEC-001",
+      specId: "HCP-SPEC-002",
+      phase: "phase-1",
       apiVersion: "v1",
       defaultLocale: "it-IT",
     });

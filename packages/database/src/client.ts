@@ -62,7 +62,7 @@ export function resolveMigrationsDirectory(): string {
   ];
 
   for (const candidate of candidates) {
-    if (existsSync(join(candidate, "0001_initial_poc.sql"))) {
+    if (existsSync(join(candidate, "0001_phase1_docker_native.sql"))) {
       return candidate;
     }
   }
