@@ -1,0 +1,52 @@
+[Unit]
+Description=Hosting Panel Isolated Docker Executor Daemon (HCP-SPEC-003 Domain 2)
+Documentation=https://hosting-panel.internal/docs/hcp-spec-003
+After=network-online.target docker.service
+Requires=docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hp-executor
+Group=hp-executor
+SupplementaryGroups=docker hp-ipc
+WorkingDirectory=/opt/hosting-panel/apps/docker-executor
+EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+Environment=NODE_ENV=production
+Environment=HP_RUNTIME_BACKEND=linux-systemd
+Environment=HP_IPC_TRANSPORT=uds
+Environment=HP_EXECUTOR_SOCKET=/run/hosting-panel/executor.sock
+Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
+Environment=HP_SECRETS_TMPFS_DIR=/run/hosting-panel/secrets
+Environment=HP_TRAEFIK_DYNAMIC_DIR=/var/lib/hosting-panel/ingress/dynamic
+ExecStartPre=/usr/bin/install -d -m 0700 /run/hosting-panel/secrets
+ExecStart=/usr/bin/node /opt/hosting-panel/apps/docker-executor/dist/main.js
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+
+# Runtime directory & tmpfs secrets readiness (/run/hosting-panel/secrets mode 0700, files 0400)
+RuntimeDirectory=hosting-panel
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/var/lib/hosting-panel /run/hosting-panel
+
+# HCP-SPEC-003 §5.2 Mandatory Hardening Matrix (sole daemon permitted /var/run/docker.sock)
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

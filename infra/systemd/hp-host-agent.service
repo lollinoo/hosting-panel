@@ -1,0 +1,50 @@
+[Unit]
+Description=Hosting Panel Confined Host Agent Daemon (HCP-SPEC-003 Domain 3)
+Documentation=https://hosting-panel.internal/docs/hcp-spec-003
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hp-agent
+Group=hp-agent
+SupplementaryGroups=hp-ipc
+WorkingDirectory=/opt/hosting-panel/apps/host-agent
+EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+Environment=NODE_ENV=production
+Environment=HP_RUNTIME_BACKEND=linux-systemd
+Environment=HP_IPC_TRANSPORT=uds
+Environment=HP_HOST_AGENT_SOCKET=/run/hosting-panel/host-agent.sock
+Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
+Environment=HP_NFTABLES_RULESET_PATH=/etc/hosting-panel/nftables-dedicated.conf
+ExecStart=/usr/bin/node /opt/hosting-panel/apps/host-agent/dist/main.js
+Restart=on-failure
+RestartSec=5s
+UMask=0027
+
+# Runtime directory (/run/hosting-panel tmpfs for signed UDS IPC)
+RuntimeDirectory=hosting-panel
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+ReadWritePaths=/run/hosting-panel
+
+# HCP-SPEC-003 §5.2 Mandatory Hardening Matrix
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+InaccessiblePaths=/var/run/docker.sock
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
