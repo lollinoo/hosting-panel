@@ -3,7 +3,7 @@
 ## Operating Boundaries
 - Allowed scope: Modify only files explicitly assigned in the active task contract (`.agents/brain/state.md`).
 - Forbidden actions:
-  - Never retain or reintroduce any Coolify reference, adapter, environment variable, or legacy `HCP-SPEC-001` POC artifact.
+  - Never retain or reintroduce any external third-party orchestrator adapter, legacy POC artifact, or unapproved environment variable.
   - Never add unverified external dependencies outside the approved allowlist in `.agents/brain/state.md`.
   - Never implement live Docker Engine socket execution (`/var/run/docker.sock`), generic `POST /docker/*` endpoints, or arbitrary Linux root/shell execution in Phase 1 (`HCP-SPEC-002` §1.3, §5.2).
   - Never expose raw Docker container/network/volume IDs, host filesystem paths, or secrets in public DTOs, `StackRevision` specs, or logs (`F1-008`, `F1-012`).
@@ -32,7 +32,7 @@ Before marking any unit complete or merging into `main`, run these checks in ord
 2. Linter: `corepack pnpm run lint`
 3. Typecheck: `corepack pnpm run typecheck`
 4. Test Suite: `corepack pnpm run test`
-5. Zero-Coolify & Phase 1 Contract Check: Verify zero Coolify remnants in code/config and full compliance with `AC-F1-01`..`AC-F1-10` via independent `swarm-verifier`.
+5. Clean-Room & Phase 1 Contract Check: Verify zero legacy remnants in code/config and full compliance with `AC-F1-01`..`AC-F1-10` via independent `swarm-verifier`.
 
 ## Failure Escalation
 If a test or sensor fails twice consecutively on the exact same error with zero progress:
