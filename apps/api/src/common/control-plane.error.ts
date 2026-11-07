@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
-import type { CursorPage, ErrorCode, ErrorDetail } from "@hosting-panel/contracts";
+import {
+  redactSensitiveString,
+  type CursorPage,
+  type ErrorCode,
+  type ErrorDetail,
+} from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
+
+const HOST_PATH_LEAK_PATTERN = /(?:\/run|\/var|\/etc|\/tmp)\/[^\s"'`)]+/g;
+
+export function sanitizePublicErrorMessage(raw: string): string {
+  return redactSensitiveString(raw).replace(HOST_PATH_LEAK_PATTERN, "[REDACTED_PATH]");
+}
 
 export interface ControlPlaneErrorOptions {
   readonly details?: readonly ErrorDetail[];

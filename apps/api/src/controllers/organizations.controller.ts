@@ -22,13 +22,17 @@ import {
   CreateServiceInstanceInputSchema,
   CreateSiteInputSchema,
   CreateStackRevisionInputSchema,
+  ServiceLifecycleInputSchema,
+  UpsertEncryptedSecretInputSchema,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
-  ServiceLifecycleInputSchema,
+  type AsyncAcceptedEnvelope,
   type DomainDto,
+  type EncryptedSecretMetadataDto,
   type HostAllocationDto,
   type MemberDto,
   type OperationDto,
+  type OperationKind,
   type OrganizationCapabilitiesDto,
   type OrganizationDetailDto,
   type PermissionKey,
@@ -46,24 +50,28 @@ import {
   asc,
   createServiceWithRevisionTransactional,
   createSiteTransactional,
+  deleteEncryptedSecretTransactional,
   desc,
   domains,
+  enqueueOperationTransactional,
   eq,
   hostAllocations,
+  listEncryptedSecretsMetadata,
   membershipRoles,
   memberships,
   observedStates,
-  operations,
   operationSteps,
+  operations,
   organizations,
   quotaReservations,
+  reserveQuotaTransactional,
   resourceQuotas,
   roles,
-  reserveQuotaTransactional,
   serviceInstances,
   serviceTemplates,
   sites,
   stackRevisions,
+  upsertEncryptedSecretTransactional,
   users,
   type DatabaseClient,
 } from "@hosting-panel/database";
@@ -71,6 +79,7 @@ import {
   createApprovedServiceSpec,
   type DockerExecutorPort,
 } from "@hosting-panel/executor-contracts";
+import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import {
   computeSiteAggregateSummary,
   evaluateServiceDrift,
@@ -87,10 +96,20 @@ import {
   resolveOptionalIdempotencyKey,
   resolveRequestId,
 } from "../common/control-plane.error.js";
+import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import {
+  CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
   DOCKER_EXECUTOR_TOKEN,
+  HOST_AGENT_TOKEN,
+  type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+
+const SERVICE_OPERATION_STEPS = [
+  { key: "validate_spec", label: "Validate declarative specification" },
+  { key: "dispatch_ipc", label: "Dispatch signed request to docker-executor" },
+  { key: "reconcile_state", label: "Reconcile observed container state" },
+] as const;
 
 function toIsoString(date: Date | string | null | undefined): string {
   if (!date) return new Date().toISOString();
@@ -202,10 +221,35 @@ function mapDomainToDto(dom: typeof domains.$inferSelect): DomainDto {
   };
 }
 
+const STEP_KEY_ORDER: Readonly<Record<string, number>> = {
+  validate_spec: 0,
+  dispatch_ipc: 1,
+  reconcile_state: 2,
+};
+
+function sortOperationSteps(
+  steps: readonly (typeof operationSteps.$inferSelect)[],
+): (typeof operationSteps.$inferSelect)[] {
+  return [...steps].sort((a, b) => {
+    const rankA = STEP_KEY_ORDER[a.key] ?? 10;
+    const rankB = STEP_KEY_ORDER[b.key] ?? 10;
+    if (rankA !== rankB) {
+      return rankA - rankB;
+    }
+    const startA = a.startedAt ? a.startedAt.getTime() : Number.MAX_SAFE_INTEGER;
+    const startB = b.startedAt ? b.startedAt.getTime() : Number.MAX_SAFE_INTEGER;
+    if (startA !== startB) {
+      return startA - startB;
+    }
+    return a.id.localeCompare(b.id);
+  });
+}
+
 function mapOperationToDto(
   op: typeof operations.$inferSelect,
   steps: (typeof operationSteps.$inferSelect)[],
 ): OperationDto {
+  const orderedSteps = sortOperationSteps(steps);
   return {
     id: op.id,
     organizationId: op.organizationId,
@@ -220,7 +264,7 @@ function mapOperationToDto(
     startedAt: op.startedAt ? toIsoString(op.startedAt) : null,
     completedAt: op.completedAt ? toIsoString(op.completedAt) : null,
     updatedAt: toIsoString(op.updatedAt),
-    steps: steps.map((s) => ({
+    steps: orderedSteps.map((s) => ({
       id: s.id,
       key: s.key,
       label: s.label,
@@ -237,8 +281,26 @@ export class OrganizationsController {
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
+    @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
+    @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(AuthzContextService) private readonly authzService: AuthzContextService,
+    @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
   ) {}
+
+  #buildCapabilities(): OrganizationCapabilitiesDto {
+    const runtimeEnabled = this.config.runtimeBackend !== "disabled";
+    return {
+      hostingMode: "dedicated",
+      sharedHostingEnabled: false,
+      dockerExecutorRuntimeAvailable:
+        runtimeEnabled && this.dockerExecutor.isRuntimeAvailable,
+      hostAgentRuntimeAvailable:
+        runtimeEnabled && this.hostAgent.isRuntimeAvailable,
+      acmeTlsRuntimeAvailable: false,
+      sftpAvailable: false,
+      productionBackupRuntimeAvailable: false,
+    };
+  }
 
   @Get()
   public async getOrganization(
@@ -285,15 +347,7 @@ export class OrganizationsController {
         name: org.name,
         slug: org.slug,
         status: org.status,
-        capabilities: {
-          hostingMode: "dedicated",
-          sharedHostingEnabled: false,
-          dockerExecutorRuntimeAvailable: false,
-          hostAgentRuntimeAvailable: false,
-          acmeTlsRuntimeAvailable: false,
-          sftpAvailable: false,
-          productionBackupRuntimeAvailable: false,
-        },
+        capabilities: this.#buildCapabilities(),
         quotas: quota ? mapQuotaToDto(quota) : null,
         siteCount: orgSites.length,
         serviceCount: orgServices.length,
@@ -317,14 +371,166 @@ export class OrganizationsController {
     });
 
     return {
+      data: this.#buildCapabilities(),
+    };
+  }
+
+  @Get("secrets")
+  public async getSecrets(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Query() rawQuery?: Record<string, unknown>,
+  ): Promise<{
+    data: EncryptedSecretMetadataDto[];
+    meta: ReadMeta;
+    page: { nextCursor: string | null; hasMore: boolean };
+  }> {
+    const auth = await this.authzService.authenticateRequest(req);
+    const rawSiteId = rawQuery?.["siteId"];
+    const siteIdFilter =
+      typeof rawSiteId === "string" && rawSiteId.trim().length > 0
+        ? rawSiteId.trim()
+        : undefined;
+
+    if (siteIdFilter) {
+      const [site] = await this.dbClient.db
+        .select()
+        .from(sites)
+        .where(eq(sites.id, siteIdFilter))
+        .limit(1);
+
+      if (!site || site.organizationId !== orgId) {
+        throw new ControlPlaneError(
+          "NOT_FOUND",
+          "Requested organization or resource was not found.",
+        );
+      }
+
+      await this.authzService.requireOrgPermission(auth, req, {
+        organizationId: orgId,
+        permission: "service.configuration.manage",
+        targetType: "encrypted_secret",
+        targetId: siteIdFilter,
+        resource: { id: site.id, organizationId: site.organizationId },
+      });
+    } else {
+      await this.authzService.requireOrgPermission(auth, req, {
+        organizationId: orgId,
+        permission: "service.configuration.manage",
+        targetType: "encrypted_secret",
+        targetId: orgId,
+      });
+    }
+
+    const pagination = parsePaginationQuery(rawQuery);
+    const metadataList = await listEncryptedSecretsMetadata(this.dbClient.db, {
+      organizationId: orgId,
+      ...(siteIdFilter !== undefined ? { siteId: siteIdFilter } : {}),
+    });
+
+    const paginated = paginateItems(metadataList, pagination);
+
+    return {
+      data: paginated.data,
+      meta: {
+        total: metadataList.length,
+        cursor: pagination.cursor ?? null,
+        requestId: resolveRequestId(req),
+        timestamp: new Date().toISOString(),
+      },
+      page: paginated.page,
+    };
+  }
+
+  @Post("secrets")
+  @HttpCode(HttpStatus.CREATED)
+  public async upsertSecret(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Body() rawBody: unknown,
+  ): Promise<{ data: EncryptedSecretMetadataDto }> {
+    const auth = await this.authzService.authenticateRequest(req);
+    const candidateSiteId =
+      rawBody !== null &&
+      typeof rawBody === "object" &&
+      typeof (rawBody as Record<string, unknown>)["siteId"] === "string" &&
+      ((rawBody as Record<string, unknown>)["siteId"] as string).trim().length > 0
+        ? ((rawBody as Record<string, unknown>)["siteId"] as string).trim()
+        : null;
+
+    if (candidateSiteId !== null) {
+      const [site] = await this.dbClient.db
+        .select()
+        .from(sites)
+        .where(eq(sites.id, candidateSiteId))
+        .limit(1);
+
+      if (!site || site.organizationId !== orgId) {
+        throw new ControlPlaneError(
+          "NOT_FOUND",
+          "Requested organization or resource was not found.",
+        );
+      }
+
+      await this.authzService.requireOrgPermission(auth, req, {
+        organizationId: orgId,
+        permission: "service.configuration.manage",
+        targetType: "encrypted_secret",
+        targetId: candidateSiteId,
+        resource: { id: site.id, organizationId: site.organizationId },
+      });
+    } else {
+      await this.authzService.requireOrgPermission(auth, req, {
+        organizationId: orgId,
+        permission: "service.configuration.manage",
+        targetType: "encrypted_secret",
+        targetId: orgId,
+      });
+    }
+
+    requireIdempotencyKey(req.headers as Record<string, string | string[] | undefined>);
+    const body = UpsertEncryptedSecretInputSchema.parse(rawBody ?? {});
+    const normalizedSiteId =
+      typeof body.siteId === "string" && body.siteId.trim().length > 0
+        ? body.siteId.trim()
+        : null;
+
+    const saved = await upsertEncryptedSecretTransactional(this.dbClient.db, {
+      organizationId: orgId,
+      siteId: normalizedSiteId,
+      secretKey: body.secretKey,
+      value: body.value,
+      masterKey: this.config.secretsMasterKey,
+      actorId: auth.user.id,
+    });
+
+    return { data: saved };
+  }
+
+  @Delete("secrets/:secretId")
+  public async deleteSecret(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("secretId") secretId: string,
+  ): Promise<{ data: { deleted: true; secretId: string } }> {
+    const auth = await this.authzService.authenticateRequest(req);
+    await this.authzService.requireOrgPermission(auth, req, {
+      organizationId: orgId,
+      permission: "service.configuration.manage",
+      targetType: "encrypted_secret",
+      targetId: secretId,
+    });
+
+    await deleteEncryptedSecretTransactional(this.dbClient.db, {
+      organizationId: orgId,
+      secretId,
+      actorId: auth.user.id,
+    });
+
+    return {
       data: {
-        hostingMode: "dedicated",
-        sharedHostingEnabled: false,
-        dockerExecutorRuntimeAvailable: false,
-        hostAgentRuntimeAvailable: false,
-        acmeTlsRuntimeAvailable: false,
-        sftpAvailable: false,
-        productionBackupRuntimeAvailable: false,
+        deleted: true,
+        secretId,
       },
     };
   }
@@ -1153,12 +1359,13 @@ export class OrganizationsController {
   }
 
   @Post("services/:serviceId/lifecycle")
+  @HttpCode(HttpStatus.ACCEPTED)
   public async executeServiceLifecycle(
     @Req() req: FastifyRequest,
     @Param("orgId") orgId: string,
     @Param("serviceId") serviceId: string,
     @Body() rawBody: unknown,
-  ): Promise<never> {
+  ): Promise<AsyncAcceptedEnvelope> {
     const auth = await this.authzService.authenticateRequest(req);
     const body = ServiceLifecycleInputSchema.parse(rawBody ?? {});
 
@@ -1187,26 +1394,90 @@ export class OrganizationsController {
       resource: { id: svc.id, organizationId: svc.organizationId },
     });
 
-    // Invoke Phase1DisabledDockerExecutor -> throws 422 NOT_SUPPORTED per AC-F1-10
-    if (body.action === "deploy") {
-      const approvedSpec = createApprovedServiceSpec({
-        serviceInstanceId: serviceId,
-        siteId: svc.siteId,
-        organizationId: orgId,
-        image: "wordpress:latest",
-        containerName: `cnt_${serviceId}`,
-      });
-      await this.dockerExecutor.deployService(approvedSpec);
-    } else if (body.action === "restart") {
-      await this.dockerExecutor.restartService(serviceId);
-    } else {
-      await this.dockerExecutor.stopService(serviceId);
+    // Preserve Phase 1 disabled runtime behavior (AC-F1-10 -> 422 NOT_SUPPORTED)
+    if (!this.dockerExecutor.isRuntimeAvailable) {
+      if (body.action === "deploy") {
+        const approvedSpec = createApprovedServiceSpec({
+          serviceInstanceId: serviceId,
+          siteId: svc.siteId,
+          organizationId: orgId,
+          image: "wordpress:latest",
+          containerName: `cnt_${serviceId}`,
+        });
+        await this.dockerExecutor.deployService(approvedSpec);
+      } else if (body.action === "restart") {
+        await this.dockerExecutor.restartService(serviceId);
+      } else {
+        await this.dockerExecutor.stopService(serviceId);
+      }
+
+      throw new ControlPlaneError(
+        "NOT_SUPPORTED",
+        "Docker executor runtime is disabled in Phase 1 (HCP-SPEC-002 §1.3)",
+      );
     }
 
-    throw new ControlPlaneError(
-      "NOT_SUPPORTED",
-      "Docker executor runtime is disabled in Phase 1 (HCP-SPEC-002 §1.3)",
+    const idempotencyKey = requireIdempotencyKey(
+      req.headers as Record<string, string | string[] | undefined>,
     );
+
+    const operationKind: OperationKind =
+      body.action === "deploy"
+        ? "service.deploy"
+        : body.action === "restart"
+          ? "service.restart"
+          : "service.stop";
+
+    const enqueued = await enqueueOperationTransactional(this.dbClient.db, {
+      organizationId: orgId,
+      kind: operationKind,
+      resourceType: "service",
+      resourceId: serviceId,
+      requestedByUserId: auth.user.id,
+      idempotencyKey,
+      lockKey: `svc:${serviceId}`,
+      outboxPayload: {
+        ...(body.reason ? { reason: body.reason } : {}),
+      },
+      steps: SERVICE_OPERATION_STEPS,
+    });
+
+    if (!enqueued.idempotentReplay) {
+      const nextDesiredStatus = body.action === "stop" ? "stopped" : "running";
+      await this.dbClient.db
+        .update(serviceInstances)
+        .set({
+          desiredStatus: nextDesiredStatus,
+          updatedAt: new Date(),
+        })
+        .where(eq(serviceInstances.id, serviceId));
+
+      await this.authzService.recordAudit(auth, req, {
+        organizationId: orgId,
+        action: `service.lifecycle.${body.action}`,
+        targetType: "service_instance",
+        targetId: serviceId,
+        details: {
+          operationId: enqueued.operation.id,
+          action: body.action,
+          ...(body.reason ? { reason: body.reason } : {}),
+        },
+      });
+
+      this.outboxWorker.triggerAsync();
+    }
+
+    return {
+      data: {
+        operationId: enqueued.operation.id,
+        status: enqueued.operation.status,
+        resourceId: serviceId,
+        submittedAt: toIsoString(enqueued.operation.submittedAt),
+      },
+      links: {
+        self: `/v1/organizations/${orgId}/operations/${enqueued.operation.id}`,
+      },
+    };
   }
 
   @Get("operations")

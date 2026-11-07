@@ -17,6 +17,7 @@ import { ZodError } from "zod";
 import {
   ControlPlaneError,
   resolveRequestId,
+  sanitizePublicErrorMessage,
 } from "./control-plane.error.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
@@ -61,7 +62,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
     ) {
       const errWithCode = exception as { code: ErrorCode; message?: string };
       code = errWithCode.code;
-      message = redactSensitiveString(errWithCode.message || `Error code: ${code}`);
+      message = sanitizePublicErrorMessage(errWithCode.message || `Error code: ${code}`);
     } else if (exception instanceof ZodError) {
       code = "VALIDATION_ERROR";
       message = "Request validation failed.";
