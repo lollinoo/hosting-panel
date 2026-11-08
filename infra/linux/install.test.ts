@@ -31,6 +31,9 @@ function install(args: string[], env: Record<string, string> = {}) {
       HP_OS_RELEASE_FILE: osRelease("debian", "trixie"),
       HP_INSTALL_STATE_DIR: join(tmp(), "empty-state"),
       HP_ADMIN_PASSWORD: CANARY,
+      // Host-independent defaults (honoured only in --dry-run).
+      HP_SSHD_PORTS: "22",
+      HP_DOCKER0_IPV4: "172.17.0.1",
       ...env
     }
   });
@@ -114,6 +117,45 @@ describe("install.sh --dry-run", () => {
     expect(r.out).not.toMatch(/would create.*hosting_panel/i);
     expect(r.out).not.toMatch(/would generate.*keys/i);
     expect(r.out).not.toContain("secret@");
+  });
+});
+
+describe("install.sh SSH-safe firewall", () => {
+  it("refuses with exit 7 when SSH is not on port 22", () => {
+    const r = dry({ HP_SSHD_PORTS: "2222" });
+    expect(r.code).toBe(7);
+    expect(r.err).toContain("SSH listens on port 2222");
+    expect(r.err).toContain("--skip-firewall");
+  });
+
+  it("--skip-firewall lets a non-22 SSH host through and skips step 10", () => {
+    const r = dry({ HP_SSHD_PORTS: "2222" }, ["--skip-firewall"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/\[STEP 10\/12\][^\n]*\n\s*\S*\s*skip/i);
+  });
+
+  it("passes when SSH also listens on 22", () => {
+    expect(dry({ HP_SSHD_PORTS: "22 2222" }).code).toBe(0);
+  });
+});
+
+describe("docker0 bind address", () => {
+  it("dry-run passes without docker0", () => {
+    const r = dry({ HP_DOCKER0_IPV4: "" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("HP_WEB_BIND_ADDRESS=<docker0 IPv4>");
+  });
+
+  it("live lookup exits 6 (not 1) when docker0 has no IPv4", () => {
+    const bin = join(tmp(), "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "ip"), "#!/bin/sh\necho 'Device \"docker0\" does not exist.' >&2\nexit 1\n", { mode: 0o755 });
+    const r = spawnSync("bash", ["-c", `source "${SCRIPT}"; set -euo pipefail; bind="$(panel_bind_address)"; echo "got:$bind"`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }
+    });
+    expect(r.status).toBe(6);
+    expect(r.stderr).toContain("docker0 has no IPv4");
   });
 });
 

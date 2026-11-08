@@ -10,18 +10,20 @@ usage() {
 Usage: sudo bash install.sh --hostname <fqdn> --admin-email <email> --admin-name "<name>"
                             [--acme-email <email>] [--ipv4 <addr>]
                             [--version <v> | --archive <path>] [--acme-staging]
-                            [--dry-run] [--allow-other-linux]
+                            [--skip-firewall] [--dry-run] [--allow-other-linux]
 
   --acme-email   Let's Encrypt account email (default: --admin-email).
   --ipv4         Public IPv4 of this server (default: source address of the default route).
   --version      Release to install (default: latest GitHub release).
   --archive      Local hosting-panel-<v>-linux-x64.tar.gz (its .sha256 must sit next to it).
+  --skip-firewall  Do not install the panel nftables ruleset (you manage the firewall yourself).
   --dry-run      Print the plan; changes nothing, needs neither root nor network.
 
 The admin password is read from HP_ADMIN_PASSWORD or prompted (hidden, twice, >= 12 chars).
 
 Exit codes: 0 ok, 1 step failed, 2 bad arguments, 3 unsupported OS/architecture or no
-docker-ce for this release, 4 checksum failure, 5 health check timeout, 6 docker0 has no IPv4.
+docker-ce/postgresql-18 for this release, 4 checksum failure, 5 health check timeout,
+6 docker0 has no IPv4, 7 SSH is not on port 22 (use --skip-firewall).
 EOF
 }
 
@@ -93,7 +95,44 @@ env_value() { # env_value <file> <KEY>: prints the value (for internal use only,
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
-docker0_ipv4() { ip -4 -o addr show docker0 2>/dev/null | awk '{split($4, a, "/"); print a[1]; exit}'; }
+docker0_ipv4() { { ip -4 -o addr show docker0 2>/dev/null || true; } | awk '{split($4, a, "/"); print a[1]; exit}'; }
+
+# Prints the docker0 IPv4 the web console binds to; exit 6 rather than binding to all interfaces.
+panel_bind_address() {
+  local b
+  b="$(docker0_ipv4)"
+  [[ -n "${b}" ]] || die 6 "docker0 has no IPv4 address; is Docker running with its default bridge? (refusing to bind the web console to all interfaces)"
+  printf '%s\n' "${b}"
+}
+
+# Ports sshd listens on, one per line (empty if unknown).
+sshd_ports() {
+  { sshd -T 2>/dev/null || true; } | awk '$1 == "port" {print $2}' | sort -u | grep . && return 0
+  { ss -ltnpH 2>/dev/null || true; } | awk '/"sshd"/ {n = split($4, a, ":"); print a[n]}' | sort -u
+}
+
+# Adds an apt repo and checks the package has a candidate; on any failure removes what it added
+# (a broken .list would break every later apt run) and exits 3.
+add_apt_repo() { # <keyring name> <key url> <list name> <repo line> <package> <message>
+  local key="/etc/apt/keyrings/$1.asc" list="/etc/apt/sources.list.d/$3.list" new_key=0 candidate=""
+  [[ -e "${key}" ]] || new_key=1
+  if ! curl -fsSL --retry 3 --connect-timeout 15 "$2" -o "${key}"; then
+    ((new_key == 0)) || rm -f -- "${key}"
+    die 1 "Cannot download the $1 apt key from $2"
+  fi
+  chmod 0644 "${key}"
+  printf '%s\n' "$4" >"${list}"
+  chmod 0644 "${list}"
+  if apt-get update -q; then
+    candidate="$(apt-cache policy "$5" | awk '/Candidate:/ {print $2}')"
+  fi
+  if [[ -z "${candidate}" || "${candidate}" == "(none)" ]]; then
+    rm -f -- "${list}"
+    ((new_key == 0)) || rm -f -- "${key}"
+    apt-get update -q >/dev/null 2>&1 || true
+    die 3 "$6"
+  fi
+}
 
 on_exit() {
   local rc=$?
@@ -111,7 +150,7 @@ main() {
   ORIG_ARGS=("$@")
 
   local hostname="" admin_email="" admin_name="" acme_email="" ipv4="" version="" archive=""
-  local acme_staging=false dry_run=0 allow_other=0
+  local acme_staging=false dry_run=0 allow_other=0 skip_firewall=0 downloaded=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --hostname | --admin-email | --admin-name | --acme-email | --ipv4 | --version | --archive)
@@ -129,6 +168,7 @@ main() {
         ;;
       --acme-staging) acme_staging=true; shift ;;
       --dry-run) dry_run=1; shift ;;
+      --skip-firewall) skip_firewall=1; shift ;;
       --allow-other-linux) allow_other=1; shift ;;
       --help | -h) usage; exit 0 ;;
       *) usage >&2; die 2 "Unknown argument: $1" ;;
@@ -187,10 +227,28 @@ main() {
   read -r os_id codename <<<"${os}"
   ((dry_run)) || [[ "$(uname -m)" == x86_64 ]] || die 3 "Only x86_64 is supported (release archives are linux-x64)."
   info "Detected ${os_id} ${codename}"
+  # SSH preflight (R9), done here so a lockout risk stops the install before anything changes.
+  if ((skip_firewall)); then
+    info "--skip-firewall: the panel firewall will not be installed"
+  else
+    local ports
+    if ((dry_run)) && [[ -n "${HP_SSHD_PORTS+x}" ]]; then ports="$(tr ' ' '\n' <<<"${HP_SSHD_PORTS}" | grep . || true)"; else ports="$(sshd_ports)"; fi
+    if [[ -z "${ports}" ]]; then
+      if ((dry_run)); then
+        info "SSH ports unknown (sshd -T needs root); the live run checks them"
+      else
+        die 7 "Cannot detect which port SSH listens on; the panel firewall only allows 22/80/443. Rerun with --skip-firewall and manage the firewall yourself."
+      fi
+    elif ! grep -qx 22 <<<"${ports}"; then
+      die 7 "SSH listens on port $(paste -sd, <<<"${ports}"); the panel firewall only allows 22/80/443. Move SSH to 22 or rerun with --skip-firewall and manage the firewall yourself."
+    else
+      info "SSH listens on port 22"
+    fi
+  fi
 
   # ---------------------------------------------------------------- 2
   step 2 "apt prerequisites"
-  local prereqs=(curl ca-certificates gnupg nftables openssl tar iproute2)
+  local prereqs=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2)
   if ((dry_run)); then
     plan "apt-get install -y ${prereqs[*]}"
   else
@@ -209,31 +267,22 @@ main() {
   # ---------------------------------------------------------------- 3
   step 3 "Docker CE"
   local docker_repo="deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${os_id} ${codename} stable"
-  local docker_url="https://docs.docker.com/engine/install/${os_id}/"
   info "repo: ${docker_repo}"
   if ((dry_run)); then
-    if command -v docker >/dev/null 2>&1; then plan "skip: docker already installed"; else plan "would add the repo above and install docker-ce (removing docker.io/podman-docker/containerd/runc if present)"; fi
+    if pkg_installed docker-ce; then plan "skip: docker-ce already installed"; else plan "would add the repo above and install docker-ce (removing docker.io/podman-docker/containerd/runc if present)"; fi
     plan "systemctl enable --now docker"
   else
-    if ! command -v docker >/dev/null 2>&1; then
+    if ! pkg_installed docker-ce; then
       local p remove=()
       for p in docker.io docker-compose docker-doc podman-docker containerd runc; do
         pkg_installed "${p}" && remove+=("${p}")
       done
       ((${#remove[@]} == 0)) || apt-get remove -y -q "${remove[@]}"
-      curl -fsSL --retry 3 "https://download.docker.com/linux/${os_id}/gpg" -o /etc/apt/keyrings/docker.asc
-      chmod 0644 /etc/apt/keyrings/docker.asc
-      printf '%s\n' "${docker_repo}" >/etc/apt/sources.list.d/docker.list
-      chmod 0644 /etc/apt/sources.list.d/docker.list
-      apt-get update -q
-      local candidate
-      candidate="$(apt-cache policy docker-ce | awk '/Candidate:/ {print $2}')"
-      if [[ -z "${candidate}" || "${candidate}" == "(none)" ]]; then
-        die 3 "Docker's apt repository has no docker-ce package for ${os_id} ${codename} yet. See ${docker_url} — the installer never falls back to the distro docker.io package."
-      fi
+      add_apt_repo docker "https://download.docker.com/linux/${os_id}/gpg" docker "${docker_repo}" docker-ce \
+        "Docker's apt repository has no docker-ce package for ${os_id} ${codename} (yet). See https://docs.docker.com/engine/install/ — the installer never falls back to the distro docker.io package."
       apt-get install -y -q docker-ce docker-ce-cli containerd.io
     else
-      info "docker already installed"
+      info "docker-ce already installed"
     fi
     systemctl enable --now docker
   fi
@@ -249,11 +298,13 @@ main() {
     if [[ -z "${archive}" ]]; then
       if [[ "${version}" == latest ]]; then
         version="$(curl -fsSL --retry 3 --connect-timeout 15 "https://api.github.com/repos/${HP_RELEASE_REPO}/releases/latest" |
-          sed -n 's/.*"tag_name": *"v\([0-9.]*\)".*/\1/p' | head -n1)"
-        [[ "${version}" =~ ${_hp_semver_re} ]] || die 1 "Cannot resolve the latest release; pass --version."
+          sed -n 's/.*"tag_name": *"v\([0-9.]*\)".*/\1/p' | head -n1)" || version=""
+        [[ "${version}" =~ ${_hp_semver_re} ]] || die 1 "Could not determine the latest release; pass --version."
+        ORIG_ARGS+=(--version "${version}") # a rerun installs the same version
         info "Latest release: ${version}"
       fi
       archive="$(fetch_release "${version}" /var/tmp/hosting-panel-install)"
+      downloaded=1
     fi
     verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
     node_version="$(tar -xzOf "${archive}" "hosting-panel-${version}/RELEASE.json" |
@@ -292,11 +343,8 @@ main() {
     printf 'Package: *\nPin: release o=apt.postgresql.org\nPin-Priority: 600\n' >/etc/apt/preferences.d/pgdg.pref
     chmod 0644 /etc/apt/preferences.d/pgdg.pref
     if ! pkg_installed postgresql-18; then
-      curl -fsSL --retry 3 https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /etc/apt/keyrings/postgresql.asc
-      chmod 0644 /etc/apt/keyrings/postgresql.asc
-      printf '%s\n' "${pg_repo}" >/etc/apt/sources.list.d/pgdg.list
-      chmod 0644 /etc/apt/sources.list.d/pgdg.list
-      apt-get update -q
+      add_apt_repo postgresql https://www.postgresql.org/media/keys/ACCC4CF8.asc pgdg "${pg_repo}" postgresql-18 \
+        "The PGDG apt repository has no postgresql-18 package for ${os_id} ${codename}. See https://www.postgresql.org/download/linux/"
       apt-get install -y -q postgresql-18
     else
       info "postgresql-18 already installed"
@@ -349,6 +397,10 @@ main() {
       ((i < 30)) || die 1 "PostgreSQL is not accepting connections"
       sleep 1
     done
+    local pg_port
+    pg_port="$(pg_lsclusters -h 2>/dev/null | awk '$1 == "18" {print $3; exit}')" || pg_port=""
+    [[ "${pg_port}" == 5432 ]] ||
+      die 1 "The PostgreSQL 18 cluster listens on port '${pg_port:-none}', not 5432 (another PostgreSQL owns 5432?). Fix it (pg_lsclusters) and rerun."
     role_exists="$(cd / && runuser -u postgres -- psql -X -qtAc "select 1 from pg_roles where rolname = 'hosting_panel'")"
     if [[ -n "$(env_value "${api_env}" DATABASE_URL)" && "${role_exists}" == 1 ]]; then
       info "skip: role hosting_panel already provisioned"
@@ -374,12 +426,12 @@ SQL
   # ---------------------------------------------------------------- 9
   step 9 "Panel settings in web.env and executor.env"
   local bind
-  bind="$(docker0_ipv4)"
   if ((dry_run)); then
+    if [[ -n "${HP_DOCKER0_IPV4+x}" ]]; then bind="${HP_DOCKER0_IPV4}"; else bind="$(docker0_ipv4)"; fi
     plan "would set web.env HP_WEB_BIND_ADDRESS=${bind:-<docker0 IPv4>}"
     plan "would set executor.env HP_PANEL_HOSTNAME=${hostname} HP_PANEL_IPV4=${ipv4} HP_ACME_EMAIL=${acme_email} HP_ACME_STAGING=${acme_staging}"
   else
-    [[ -n "${bind}" ]] || die 6 "docker0 has no IPv4 address; is Docker running with its default bridge? (refusing to bind the web console to all interfaces)"
+    bind="$(panel_bind_address)"
     set_env_keys "${STATE_DIR}/web.env" "HP_WEB_BIND_ADDRESS=${bind}"
     set_env_keys "${STATE_DIR}/executor.env" "HP_PANEL_HOSTNAME=${hostname}" "HP_PANEL_IPV4=${ipv4}" \
       "HP_ACME_EMAIL=${acme_email}" "HP_ACME_STAGING=${acme_staging}"
@@ -390,7 +442,9 @@ SQL
   step 10 "Firewall (nftables)"
   local nft_src="${ROOT}/current/infra/linux/nftables-dedicated.conf" nft_dst=/etc/nftables.d/hosting-panel.nft
   local include_line="include \"${nft_dst}\""
-  if ((dry_run)); then
+  if ((skip_firewall)); then
+    info "skip: --skip-firewall given; manage the firewall yourself (allow 22/80/443, and 3000 from docker bridges only)"
+  elif ((dry_run)); then
     plan "would apply nft -f ${nft_src}, install it as ${nft_dst}, add '${include_line}' to /etc/nftables.conf if missing, enable nftables.service"
   else
     # Our file deletes/recreates only table inet hp_dedicated_filter; we never flush the ruleset
@@ -431,7 +485,18 @@ SQL
       totp_secret="$(sed -n 's/.*"totpSecretBase32":"\([^"]*\)".*/\1/p' <<<"${out}")"
       totp_uri="$(sed -n 's/.*"otpauthUri":"\([^"]*\)".*/\1/p' <<<"${out}")"
       unset out
+      [[ -n "${totp_secret}" ]] ||
+        die 1 "Administrator ${admin_email} was created but its TOTP secret could not be read. Issue a new one: sudo hp-accounts reset-totp --email ${admin_email}"
       info "Created administrator ${admin_email}"
+      # Printed now, not only in the summary: if a later step fails the secret would be lost.
+      cat <<EOF
+
+  ************************************************************************
+   Two-factor enrolment for ${admin_email} (shown ONCE, add it now):
+     secret: ${totp_secret}
+     URI:    ${totp_uri}
+  ************************************************************************
+EOF
     fi
     install -m 0400 -o root -g root /dev/null "${STATE_DIR}/admin-created"
   fi
@@ -456,6 +521,7 @@ SQL
     info "API and web console are healthy"
   fi
 
+  ((dry_run || !downloaded)) || rm -rf -- /var/tmp/hosting-panel-install
   STEP=0
   if ((dry_run)); then
     printf '\nDry run complete: nothing was changed.\n'
@@ -475,9 +541,17 @@ EOF
   if [[ -n "${totp_secret}" ]]; then
     cat <<EOF
 
- Two-factor enrolment for ${admin_email} (shown ONCE — add it to your authenticator now):
+ Reminder: two-factor enrolment for ${admin_email} (also printed in step 11):
    secret: ${totp_secret}
    URI:    ${totp_uri}
+EOF
+  fi
+  if ((skip_firewall)); then
+    cat <<'EOF'
+
+ !!! WARNING: --skip-firewall was given. The panel firewall is NOT installed.
+ !!! Allow only TCP 22 (or your SSH port), 80 and 443 inbound, and port 3000
+ !!! only from Docker bridges, or the web console's internal port may be exposed.
 EOF
   fi
   cat <<'EOF'

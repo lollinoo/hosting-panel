@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -84,6 +84,26 @@ describe("install_release", () => {
     expect(run(`install_release "${archive}" "${root}"`).code).not.toBe(0);
     expect(readdirSync(join(root, "releases"))).toEqual(["0.1.0"]);
     expect(readlinkSync(join(root, "current"))).toBe("releases/0.1.0");
+  });
+
+  it("extracts world-readable code even under umask 027", () => {
+    const d = tmp();
+    const top = join(d, "src/hosting-panel-0.4.0");
+    mkdirSync(join(top, "bin"), { recursive: true });
+    writeFileSync(join(top, "VERSION"), "0.4.0\n");
+    writeFileSync(join(top, "bin/run"), "#!/bin/sh\n");
+    const name = "hosting-panel-0.4.0-linux-x64.tar.gz";
+    sh(`cd "${d}" && chmod 0755 src/hosting-panel-0.4.0 src/hosting-panel-0.4.0/bin src/hosting-panel-0.4.0/bin/run && chmod 0644 src/hosting-panel-0.4.0/VERSION && tar -czf "${name}" -C src hosting-panel-0.4.0`);
+    const root = join(tmp(), "opt");
+    expect(run(`umask 027; install_release "${join(d, name)}" "${root}"`).code).toBe(0);
+    const mode = (p: string) => statSync(join(root, p)).mode & 0o777;
+    expect(mode(".")).toBe(0o755);
+    expect(mode("releases")).toBe(0o755);
+    expect(mode("releases/0.4.0")).toBe(0o755);
+    expect(mode("releases/0.4.0/VERSION")).toBe(0o644);
+    expect(mode("releases/0.4.0/bin/run")).toBe(0o755);
+    // The caller's umask is untouched (install_release runs in a subshell).
+    expect(run("umask 027; install_release /nonexistent x >/dev/null 2>&1 || true; umask").out).toBe("0027");
   });
 
   it("refuses a VERSION mismatch", () => {

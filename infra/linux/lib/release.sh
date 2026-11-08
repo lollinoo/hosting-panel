@@ -52,10 +52,13 @@ verify_release_archive() {
   }
 }
 
-# Prints the installed version.
-install_release() {
+# Prints the installed version. Code must be readable by the service users whatever the
+# caller's umask (installer uses 027): extract under umask 022 in a subshell.
+install_release() { (umask 022 && _hp_install_release "$@"); }
+
+_hp_install_release() {
   local archive="$1" root="${2:-${HP_DEFAULT_ROOT}}" tmp top version
-  mkdir -p "${root}/releases" || return 1
+  mkdir -p "${root}/releases" && chmod 0755 "${root}" "${root}/releases" || return 1
   tmp="$(mktemp -d "${root}/releases/.tmp-XXXXXX")" || return 1
   if ! tar -xzf "${archive}" --no-same-owner --no-same-permissions -C "${tmp}"; then
     printf '[ERROR] Failed to extract %s\n' "${archive}" >&2
