@@ -158,10 +158,13 @@
 - Behaviour, in this order:
   1. If `locked_until > now`, return `ACCOUNT_LOCKED`.
   2. If the user is unknown, has no `password_hash`, has a wrong password, or is not `active`, increment `failed_login_count` when the user exists. At 5 failures, set `locked_until = now + 15 min` and reset the count. Return `INVALID_CREDENTIALS` with the fixed message `"Email o password non corretti."`.
+     - When the user is unknown (or has no hash), still run `verifyPassword` against a fixed dummy scrypt hash, so response time doesn't reveal which emails exist.
+     - Increment with one atomic statement: `UPDATE users SET failed_login_count = failed_login_count + 1 WHERE id = $1 RETURNING failed_login_count`. Lock when the returned value is ≥ 5. Never read, add in JS, and write back.
+     - **Lockout bypass:** a request carrying the correct password **and** a valid TOTP code succeeds even while `locked_until > now`. Strangers can't lock out a 2FA-protected admin. Step 1's lock check applies only to requests that don't carry both.
   3. If the user is a server admin without `totp_enabled_at`, return `ACCOUNT_SETUP_INCOMPLETE`.
   4. If TOTP is enabled and there is no `totpCode`, return `{ status: "totp_required" }` (the failure counter is not touched).
   5. If the code is wrong or reused, count it as a failure and return `TOTP_INVALID`.
-  6. On success, reset the counter, store `totp_last_step`, issue a session token, and audit `auth.login.success`. Failures audit `auth.login.failure` with `{ reason }` and never include the password.
+  6. On success, reset the counter, store `totp_last_step`, issue a session token, and audit `auth.login.success`. Store `totp_last_step` with a conditional update: `UPDATE users SET totp_last_step = $step WHERE id = $1 AND (totp_last_step IS NULL OR totp_last_step < $step)`. If 0 rows are updated, the code was reused, so return `TOTP_INVALID`. Failures audit `auth.login.failure` with `{ reason }` and never include the password.
 
 - [ ] **Step 1: Write failing tests.** Seed users directly in PGlite with `hashPassword`. The TOTP secret is encrypted with a test master key passed as `secretsMasterKey`.
   - `logs in with correct password` → 200 `status: "ok"`, and the token works on `/v1/me`.
@@ -172,6 +175,10 @@
   - `rejects reused TOTP code`: the same code twice → the second gives 401 `TOTP_INVALID`.
   - `server admin without TOTP cannot log in` → 403 `ACCOUNT_SETUP_INCOMPLETE`.
   - `mustChangePassword is reported` when the flag is set.
+  - `unknown email still costs a password check`: spy on or time `verifyPassword`. An unknown-email login calls it exactly once.
+  - `parallel wrong passwords cannot exceed the lockout`: fire 10 wrong-password logins with `Promise.all`; afterwards `failed_login_count` + lock state reflect all 10 (account locked).
+  - `parallel reuse of one TOTP code succeeds at most once`: two concurrent logins with the same valid code → exactly one `ok`.
+  - `correct password and valid TOTP bypass lockout`: lock a TOTP-enabled user via 5 failures. Correct password + valid code → `ok`. Correct password without a code → `ACCOUNT_LOCKED`.
 - [ ] **Step 2: Run them and confirm they fail.** Run `corepack pnpm run build && corepack pnpm exec vitest run apps/api/test/login.integration.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement the contracts, `LoginService` and the route.**
 - [ ] **Step 4: Run them and confirm they pass**, plus `vitest run packages/contracts apps/api`.
@@ -252,14 +259,15 @@
   1. Create the org (slug derived from the name).
   2. Create the dedicated allocation of the single local host via the existing `allocateHostTransactional`.
   3. Create the user (`must_change_password = true`), the membership and the `customer_owner` membership role.
-  - Returns 409 `DEDICATED_HOST_OCCUPIED` if a customer organization already exists (one customer per server), and 404 `NOT_FOUND` if `setup` was never run (no host).
+  - One customer per server is enforced **only** by `allocateHostTransactional`'s dedicated admission: map its thrown `code` to the matching `ControlPlaneError`. Do **not** count organizations: `hosts.controller.ts` creates an internal `PLATFORM_OPS_ORG_ID` organization on host maintenance. Returns 404 `NOT_FOUND` if `setup` was never run (no host).
 - `POST /v1/admin/users/:userId/reset-password` → `{ data: { temporaryPassword } }` (reuses `resetUserPassword` from Task 6)
 - `POST /v1/admin/users/:userId/reset-totp` → customers only (admins use the CLI); 204
 - `PATCH /v1/admin/users/:userId { status: "active" | "disabled" }` → disabling revokes all sessions. An admin cannot disable themself (403).
 
 - [ ] **Step 1: Write failing tests:**
   - `server admin creates the customer account`: the response has a 16-char temp password. The customer logs in → `mustChangePassword: true`, and `/v1/me.memberships[0].role === "customer_owner"`.
-  - `second customer account is refused` → 409 `DEDICATED_HOST_OCCUPIED`.
+  - `second customer account is refused` → 409, with the code the admission policy returns.
+  - `customer can be created after host maintenance`: run a host maintenance action first (it creates the internal platform-ops org), then create the customer → 201.
   - `customer cannot call admin endpoints` → 403 `PERMISSION_DENIED`, with an audit row of the denied type.
   - `disabling a user revokes their sessions` → their token gets 401.
   - `admin cannot disable themself` → 403.
@@ -432,6 +440,7 @@
   - Print the next step: `sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup ... && ... create-admin ...`.
 - Modify: `infra/systemd/hp-api.service` (`Environment=HP_JWT_SIGNING_KEY_FILE=/etc/hosting-panel/jwt-signing.pem`)
 - Modify: `infra/linux/run-outage-ac-f1-08.mjs`: add `HP_SEED_DEMO: "true"` next to `ENABLE_DEV_OIDC: "true"` (line ~621) so the outage runner keeps working.
+- Modify: `infra/linux/run-dev-docker.mjs` (`pnpm run dev:docker`). It starts the API in `linux-systemd` mode. Pass `ENABLE_DEV_OIDC=true`, `HP_SEED_DEMO=true`, and `HP_JWT_SIGNING_KEY_FILE` pointing to a temporary RSA PKCS#8 key generated at launch with `node:crypto` (`generateKeyPairSync`). Also apply this to the outage runner if its API spawn uses `linux-systemd`.
 - Modify: `.env.example` (`ENABLE_DEV_OIDC=false`, `HP_SEED_DEMO=false`, `BFF_SESSION_SECRET` comment "required in production, ≥32 chars", `HP_JWT_SIGNING_KEY_FILE`)
 - Modify: `docs/api/openapi.yaml` (the new `/v1/auth/login`, `/v1/me/*`, `/v1/admin/*` endpoints and error codes)
 - Modify: `README.md` (quick start: dev scripts opt into demo; production first-run = `setup` + `create-admin`; two roles; 2FA mandatory for admins)
