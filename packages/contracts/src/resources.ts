@@ -1,5 +1,8 @@
 import { z } from "zod";
 import { PresetRoleNameSchema } from "./permissions.js";
+import { SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
+
+export const PLATFORM_OPS_ORG_ID = "org_platform_ops";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
 const EntityIdSchema = z.string().min(1).max(128);
@@ -594,10 +597,32 @@ export const SiteSummaryDtoSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
   status: SiteStatusSchema,
+  // null marks a pre-Step-2 row that is not a managed WordPress site
+  phpVersion: z.enum(SUPPORTED_PHP_VERSIONS).nullable(),
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });
 export type SiteSummaryDto = z.infer<typeof SiteSummaryDtoSchema>;
+
+export const ManagedSiteDtoSchema = SiteSummaryDtoSchema.extend({
+  primaryDomain: z.string().nullable(),
+});
+export type ManagedSiteDto = z.infer<typeof ManagedSiteDtoSchema>;
+
+export const AdminSiteDtoSchema = SiteSummaryDtoSchema.extend({
+  primaryDomain: z.string().nullable(),
+  // null when the site is held by PLATFORM_OPS_ORG_ID
+  owner: z.object({ organizationId: EntityIdSchema, name: z.string() }).nullable(),
+});
+export type AdminSiteDto = z.infer<typeof AdminSiteDtoSchema>;
+
+export const AdminSitesListDtoSchema = z.object({
+  sites: z.array(AdminSiteDtoSchema),
+  customers: z.array(
+    z.object({ organizationId: EntityIdSchema, name: z.string(), ownerEmail: z.string() }),
+  ),
+});
+export type AdminSitesListDto = z.infer<typeof AdminSitesListDtoSchema>;
 
 export const SiteDetailDtoSchema = SiteSummaryDtoSchema.extend({
   services: z.array(ServiceInstanceDtoSchema),

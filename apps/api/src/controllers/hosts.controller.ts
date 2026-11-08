@@ -15,6 +15,7 @@ import {
   CreateHostAllocationInputSchema,
   HostMaintenanceInputSchema,
   HostSecurityInputSchema,
+  PLATFORM_OPS_ORG_ID,
   UpdateHostModeInputSchema,
   type AsyncAcceptedEnvelope,
   type HostAllocationDto,
@@ -64,7 +65,6 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 
-const PLATFORM_OPS_ORG_ID = "org_platform_ops";
 const PLATFORM_OPS_ORG_SLUG = "platform-ops";
 
 const HOST_OPERATION_STEPS = [
