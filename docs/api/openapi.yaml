@@ -2073,7 +2073,6 @@ paths:
       tags: [Admin Sites]
       operationId: adminListSites
       summary: List every managed site with owner, plus the customers a site can be assigned to (server administrator only)
-      parameters:
       responses:
         "200":
           description: Sites and assignable customers
