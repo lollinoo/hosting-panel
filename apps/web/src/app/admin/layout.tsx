@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getServerSession } from "@/lib/server-session";
+import { fetchServerMe } from "@/lib/server-api";
 import { Header } from "@/components/layout/header";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 
@@ -10,6 +11,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
   if (!session) redirect("/login");
   if (!session.user.isServerAdmin) redirect("/");
   if (session.user.mustChangePassword) redirect("/account/change-password");
+  await fetchServerMe(); // a revoked/expired API session redirects to login instead of rendering empty tables
 
   return (
     <div className="min-h-screen flex flex-col bg-background">

@@ -1,4 +1,3 @@
-import { notFound } from "next/navigation";
 import type { OperationDto, OperationKind, OperationStatus } from "@hosting-panel/contracts";
 import { format, getMessages, type Messages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
@@ -21,13 +20,15 @@ const outcome = (s: OperationStatus) =>
 export default async function SiteOverviewPage({ params }: { params: Promise<{ siteId: string }> }) {
   const { siteId } = await params;
   const { orgId } = await getCustomerContext();
-  const site = await getSite(orgId, siteId);
-  if (!site || !orgId) notFound();
+  const result = await getSite(orgId, siteId);
+  if (!result.ok || !orgId) return null; // the layout shows the 404 or the load error
+  const site = result.data;
 
   const locale = await getRequestLocale();
   const m = getMessages(locale);
   const ids = new Set([site.id, ...site.services.map((s) => s.id), ...site.domains.map((d) => d.id)]);
-  const recent = (await fetchServerOrgOperations(orgId))
+  const operations = await fetchServerOrgOperations(orgId);
+  const recent = (operations ?? [])
     .filter((op: OperationDto) => ids.has(op.resourceId) && ACTIVITY[op.kind])
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
     .slice(0, 5);
@@ -71,7 +72,9 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
           <CardTitle className="text-base">{m.site.overview.activityTitle}</CardTitle>
         </CardHeader>
         <CardContent>
-          {recent.length === 0 ? (
+          {operations === null ? (
+            <CardDescription role="alert">{m.site.overview.activityLoadError}</CardDescription>
+          ) : recent.length === 0 ? (
             <CardDescription>{m.site.overview.noActivity}</CardDescription>
           ) : (
             <ul className="divide-y text-sm">

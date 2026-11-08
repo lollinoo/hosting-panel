@@ -8,6 +8,7 @@ import { LAST_SITE_COOKIE, pickLandingSite } from "./landing";
 export default async function SitesPage() {
   const { orgId } = await getCustomerContext();
   const sites = await getSites(orgId);
+  if (!sites) return null; // the layout already shows the load error
   const target = pickLandingSite(sites, (await cookies()).get(LAST_SITE_COOKIE)?.value);
   if (target) redirect(`/sites/${target}`);
 

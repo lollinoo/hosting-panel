@@ -20,7 +20,7 @@ export default async function AccountPage() {
   const isAdmin = session.user.isServerAdmin || session.activeConsole === "admin";
   const me = await fetchServerMe();
   const orgId = me?.memberships[0]?.organizationId;
-  const sites = !isAdmin && orgId ? await fetchServerOrgSites(orgId) : [];
+  const sites = (!isAdmin && orgId ? await fetchServerOrgSites(orgId) : []) ?? [];
   const m = getMessages(await getRequestLocale());
 
   return (
@@ -39,11 +39,25 @@ export default async function AccountPage() {
         </Link>
         <h1 className="text-2xl font-semibold tracking-tight">{m.account.title}</h1>
         <AccountPasswordCard csrfToken={session.csrfToken} />
-        <TotpCard
-          csrfToken={session.csrfToken}
-          enabled={me?.user.totpEnabled ?? false}
-          canDisable={!session.user.isServerAdmin}
-        />
+        {/* No 2FA controls without knowing its real state (a dead session already redirected to login). */}
+        {me ? (
+          <TotpCard
+            csrfToken={session.csrfToken}
+            enabled={me.user.totpEnabled}
+            canDisable={!session.user.isServerAdmin}
+          />
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle>{m.account.totpTitle}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p role="alert" className="text-sm text-muted-foreground">
+                {m.account.loadError}
+              </p>
+            </CardContent>
+          </Card>
+        )}
         <Card>
           <CardHeader>
             <CardTitle>{m.account.languageTitle}</CardTitle>

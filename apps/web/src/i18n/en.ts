@@ -48,11 +48,14 @@ export const en: Messages = {
     totpAdminRequired: "As an administrator you must always keep it on.",
     languageTitle: "Language",
     back: "Back",
+    loadError: "We couldn't load your security settings. Reload the page in a minute; if it keeps happening, contact your administrator.",
   },
   shell: {
     productName: "Hosting Panel",
     emptyTitle: "No sites yet",
     emptyBody: "Your administrator is preparing your first site.",
+    loadErrorTitle: "We couldn't load this page",
+    loadErrorBody: "Something went wrong on our side. Reload the page in a minute; if it keeps happening, contact your administrator.",
     switchSite: "Switch site",
     yourSites: "Your sites",
     accountMenu: "Account menu",
@@ -86,6 +89,7 @@ export const en: Messages = {
       noDomains: "Your site does not have a web address yet.",
       activityTitle: "Recent activity",
       noActivity: "Nothing has happened yet.",
+      activityLoadError: "We couldn't load the recent activity. Reload the page to try again.",
     },
     domainStatus: {
       pending: "Being connected",

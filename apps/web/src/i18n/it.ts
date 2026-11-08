@@ -46,11 +46,16 @@ export const it = {
     totpAdminRequired: "Come amministratore devi tenerla sempre attiva.",
     languageTitle: "Lingua",
     back: "Indietro",
+    loadError:
+      "Non siamo riusciti a caricare le impostazioni di sicurezza. Ricarica la pagina tra un minuto; se il problema continua contatta il tuo amministratore.",
   },
   shell: {
     productName: "Hosting Panel",
     emptyTitle: "Nessun sito per ora",
     emptyBody: "Il tuo amministratore sta preparando il tuo primo sito.",
+    loadErrorTitle: "Non siamo riusciti a caricare questa pagina",
+    loadErrorBody:
+      "Qualcosa è andato storto da parte nostra. Ricarica la pagina tra un minuto; se il problema continua contatta il tuo amministratore.",
     switchSite: "Cambia sito",
     yourSites: "I tuoi siti",
     accountMenu: "Menu account",
@@ -84,6 +89,7 @@ export const it = {
       noDomains: "Il tuo sito non ha ancora un indirizzo web.",
       activityTitle: "Attività recenti",
       noActivity: "Ancora nessuna attività.",
+      activityLoadError: "Non siamo riusciti a caricare le attività recenti. Ricarica la pagina per riprovare.",
     },
     domainStatus: {
       pending: "In collegamento",
