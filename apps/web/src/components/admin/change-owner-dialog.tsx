@@ -86,6 +86,8 @@ export function ChangeOwnerDialog({
               {owner && target
                 ? format(t.moveTo, { site: site?.name ?? "", owner: target.name })
                 : t.moveToNone}
+              {site?.owner && owner && target && ` ${format(t.moveFrom, { current: site.owner.name })}`}
+              {(site?.owner || (owner && target)) && ` ${t.wpLogins}`}
             </DialogDescription>
           </DialogHeader>
           <OwnerSelect id="change-owner" value={owner} onChange={setOwner} customers={customers} />

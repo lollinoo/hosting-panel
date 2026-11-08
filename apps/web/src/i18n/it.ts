@@ -378,6 +378,8 @@ export const it = {
       changeOwnerTitle: "Cambia il proprietario di {site}",
       moveTo: "{site} passerà a {owner}. Lo vedrà e lo gestirà dal suo pannello. Il sito si riavvia per qualche secondo.",
       moveToNone: "Il cliente non vedrà più questo sito.",
+      moveFrom: "{current} non lo vedrà e non lo gestirà più.",
+      wpLogins: "Gli accessi di amministrazione WordPress non cambiano e restano validi per il nuovo proprietario: reimpostali da WP Admin se serve.",
       confirmMove: "Cambia proprietario",
       retry: "Riprova",
       delete: "Elimina",

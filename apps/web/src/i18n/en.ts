@@ -378,6 +378,8 @@ export const en: Messages = {
       changeOwnerTitle: "Change owner of {site}",
       moveTo: "{site} will move to {owner}. They will see and manage it from their panel. The site restarts for a few seconds.",
       moveToNone: "The customer will no longer see this site.",
+      moveFrom: "{current} will no longer see it or manage it.",
+      wpLogins: "WordPress admin logins are not changed and keep working for the new owner: reset them in WP Admin if needed.",
       confirmMove: "Change owner",
       retry: "Try again",
       delete: "Delete",
