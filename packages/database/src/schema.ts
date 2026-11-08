@@ -98,6 +98,7 @@ export const users = pgTable("users", {
   totpEnabledAt: timestamp("totp_enabled_at", { withTimezone: true }),
   totpLastStep: bigint("totp_last_step", { mode: "number" }),
   failedLoginCount: integer("failed_login_count").notNull().default(0),
+  totpFailedCount: integer("totp_failed_count").notNull().default(0),
   lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

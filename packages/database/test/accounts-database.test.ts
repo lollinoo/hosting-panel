@@ -31,6 +31,12 @@ describe("@hosting-panel/database — 0003 production accounts", () => {
     expect(row?.platformRole).toBeNull();
   });
 
+  it("totp_failed_count defaults to 0", async () => {
+    await client.db.insert(users).values({ id: "u_t", email: "t@x.io", name: "T" });
+    const [row] = await client.db.select().from(users).where(eq(users.id, "u_t"));
+    expect(row?.totpFailedCount).toBe(0);
+  });
+
   it("rejects locale outside it/en", async () => {
     await expect(
       client.db.execute(sql`INSERT INTO users (id, email, name, locale) VALUES ('u_b','b@x.io','B','fr')`),

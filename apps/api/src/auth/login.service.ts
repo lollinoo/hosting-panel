@@ -60,7 +60,7 @@ export class LoginService {
     const passwordOk = await verifyPassword(input.password, user?.passwordHash ?? (await getDummyHash()));
     if (!user || !user.passwordHash || !passwordOk || user.userStatus !== "active") {
       const reason = !user ? "unknown_user" : !passwordOk || !user.passwordHash ? "bad_password" : "inactive";
-      return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "INVALID_CREDENTIALS", reason, !locked);
+      return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "INVALID_CREDENTIALS", reason, locked ? false : "password");
     }
 
     if (user.totpEnabledAt === null) {
@@ -70,21 +70,25 @@ export class LoginService {
       }
       await this.dbClient.db
         .update(users)
-        .set({ failedLoginCount: 0, lockedUntil: null })
+        .set({ failedLoginCount: 0, totpFailedCount: 0, lockedUntil: null })
         .where(eq(users.id, user.id));
       return this.succeed(user, ip);
     }
 
     if (input.totpCode === undefined) return { status: "totp_required" };
+    // A lock reached through TOTP failures refuses the bypass, bounding guesses per lock window.
+    if (locked && user.totpFailedCount >= MAX_FAILURES) {
+      return this.fail(user, ip, "ACCOUNT_LOCKED", "locked", false);
+    }
 
     const result = this.checkTotp(user, input.totpCode, now);
     if (!result.ok) {
-      return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "bad_totp", !locked);
+      return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "bad_totp", "totp");
     }
     // Conditional step save: of two concurrent logins with the same code, only one matches.
     const saved = await this.dbClient.db
       .update(users)
-      .set({ totpLastStep: result.step, failedLoginCount: 0, lockedUntil: null })
+      .set({ totpLastStep: result.step, failedLoginCount: 0, totpFailedCount: 0, lockedUntil: null })
       .where(
         and(
           eq(users.id, user.id),
@@ -93,7 +97,7 @@ export class LoginService {
       )
       .returning({ id: users.id });
     if (saved.length === 0) {
-      return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "totp_reused", !locked);
+      return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "totp_reused", "totp");
     }
     return this.succeed(user, ip);
   }
@@ -137,9 +141,10 @@ export class LoginService {
     ip: string | null,
     code: "INVALID_CREDENTIALS" | keyof typeof MESSAGES,
     reason: string,
-    countFailure: boolean,
+    countFailure: false | "password" | "totp",
   ): Promise<never> {
-    if (user && countFailure) await this.recordFailure(user.id);
+    if (user && countFailure === "password") await this.recordFailure(user.id);
+    if (user && countFailure === "totp") await this.recordTotpFailure(user.id);
     await this.audit(user?.id ?? null, ip, "auth.login.failure", { reason });
     throw new ControlPlaneError(
       code,
@@ -155,6 +160,25 @@ export class LoginService {
       .update(users)
       .set({
         failedLoginCount: sql`CASE WHEN ${next} >= ${MAX_FAILURES} THEN 0 ELSE ${next} END`,
+        lockedUntil: sql`CASE WHEN ${next} >= ${MAX_FAILURES} THEN ${lockedUntil.toISOString()}::timestamptz ELSE ${users.lockedUntil} END`,
+        // Only runs while unlocked, so a count >= 5 belongs to an expired TOTP lock: start fresh.
+        totpFailedCount: sql`CASE WHEN ${users.totpFailedCount} >= ${MAX_FAILURES} THEN 0 ELSE ${users.totpFailedCount} END`,
+      })
+      .where(eq(users.id, userId));
+  }
+
+  /**
+   * Separate TOTP counter, counted even while locked. Once the lock has passed it starts fresh;
+   * reaching 5 locks for 15 minutes, during which the password+TOTP bypass is refused.
+   */
+  private async recordTotpFailure(userId: string): Promise<void> {
+    const nowIso = new Date().toISOString();
+    const next = sql`CASE WHEN ${users.lockedUntil} IS NOT NULL AND ${users.lockedUntil} <= ${nowIso}::timestamptz AND ${users.totpFailedCount} >= ${MAX_FAILURES} THEN 1 ELSE ${users.totpFailedCount} + 1 END`;
+    const lockedUntil = new Date(Date.now() + LOCK_MS);
+    await this.dbClient.db
+      .update(users)
+      .set({
+        totpFailedCount: next,
         lockedUntil: sql`CASE WHEN ${next} >= ${MAX_FAILURES} THEN ${lockedUntil.toISOString()}::timestamptz ELSE ${users.lockedUntil} END`,
       })
       .where(eq(users.id, userId));

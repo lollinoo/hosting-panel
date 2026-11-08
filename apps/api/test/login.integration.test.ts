@@ -249,4 +249,39 @@ describe("POST /v1/auth/login", () => {
     expect(row.lockedUntil).toBeNull();
     expect(row.failedLoginCount).toBe(0);
   });
+
+  it("5 wrong TOTP codes lock the account and refuse the bypass", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    const code = currentCode(secret);
+    const wrong = code === "000000" ? "111111" : "000000";
+    for (let i = 0; i < 5; i++) {
+      await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong });
+    }
+    expect((await getUser()).totpFailedCount).toBe(5);
+    const refused = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: code });
+    expect(refused.status).toBe(423);
+    expect(((await refused.json()) as Err).error.code).toBe("ACCOUNT_LOCKED");
+    await dbClient.db.update(users).set({ lockedUntil: new Date(Date.now() - 1_000) }).where(eq(users.id, "usr_mario"));
+    const ok = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: code });
+    expect(ok.status).toBe(200);
+    const row = await getUser();
+    expect(row.totpFailedCount).toBe(0);
+    expect(row.lockedUntil).toBeNull();
+  });
+
+  it("wrong TOTP codes while locked still count", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    for (let i = 0; i < 5; i++) {
+      await login({ email: "mario@hotel.it", password: "nope nope" });
+    }
+    expect((await getUser()).lockedUntil!.getTime()).toBeGreaterThan(Date.now());
+    const wrong = currentCode(secret) === "000000" ? "111111" : "000000";
+    for (let i = 0; i < 2; i++) {
+      const res = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong });
+      expect(res.status).toBe(423);
+    }
+    expect((await getUser()).totpFailedCount).toBe(2);
+  });
 });
