@@ -10,8 +10,8 @@ Type=simple
 User=hp-executor
 Group=hp-executor
 SupplementaryGroups=docker hp-ipc
-WorkingDirectory=/opt/hosting-panel/apps/docker-executor
-EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+WorkingDirectory=/opt/hosting-panel/current/apps/docker-executor
+EnvironmentFile=/etc/hosting-panel/executor.env
 Environment=NODE_ENV=production
 Environment=HP_RUNTIME_BACKEND=linux-systemd
 Environment=HP_IPC_TRANSPORT=uds
@@ -20,12 +20,12 @@ Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_SECRETS_ROOT_DIR=/run/hosting-panel/secrets
 Environment=HP_INGRESS_ROOT_DIR=/var/lib/hosting-panel/ingress
 ExecStartPre=/usr/bin/install -d -m 0700 /run/hosting-panel/secrets
-ExecStart=/usr/bin/node /opt/hosting-panel/apps/docker-executor/dist/main.js
+ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/docker-executor/dist/main.js
 Restart=on-failure
 RestartSec=5s
 UMask=0007
 
-# Shared UDS IPC dir (/run/hosting-panel 2750 root:hp-ipc via tmpfiles.d) & secrets tmpfs (0700)
+# Shared UDS IPC dir (/run/hosting-panel 3770 root:hp-ipc via tmpfiles.d) & secrets tmpfs (0700)
 ReadWritePaths=/var/lib/hosting-panel /run/hosting-panel
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix (sole daemon permitted /var/run/docker.sock)

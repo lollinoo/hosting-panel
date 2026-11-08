@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # HCP-SPEC-003 §9.1 — Idempotent Dedicated Host Bootstrap Script
-# Target: Ubuntu 24.04 LTS / Debian 12 (kernel 6.x+, cgroups v2, Docker Engine)
+# Target: Ubuntu 24.04/26.04, Debian 12/13 (kernel 6.x+, cgroups v2, Docker Engine)
 # ==============================================================================
 set -euo pipefail
 umask 027
@@ -67,25 +67,11 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   fail "Dedicated bootstrap requires a Linux host (detected: $(uname -s))."
 fi
 
-if [[ ! -r /etc/os-release ]]; then
-  fail "Missing /etc/os-release; cannot verify Linux distribution."
-fi
-
-# shellcheck source=/dev/null
-. /etc/os-release
-
-DISTRO_ID="${ID:-unknown}"
-DISTRO_VERSION="${VERSION_ID:-unknown}"
-
-if [[ "${DISTRO_ID}" == "ubuntu" && "${DISTRO_VERSION}" == "24.04" ]]; then
-  log_info "Verified supported OS: Ubuntu ${DISTRO_VERSION} LTS"
-elif [[ "${DISTRO_ID}" == "debian" && "${DISTRO_VERSION}" == "12" ]]; then
-  log_info "Verified supported OS: Debian ${DISTRO_VERSION}"
-elif [[ "${ALLOW_OTHER_LINUX}" -eq 1 ]]; then
-  log_info "Non-target Linux distribution allowed via --allow-other-linux (${DISTRO_ID} ${DISTRO_VERSION})"
-else
-  fail "Unsupported distribution '${DISTRO_ID} ${DISTRO_VERSION}'. Expected Ubuntu 24.04 LTS or Debian 12 (use --allow-other-linux for lab hosts)."
-fi
+# shellcheck source=lib/os.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/os.sh"
+export HP_ALLOW_OTHER_LINUX="${ALLOW_OTHER_LINUX}"
+OS_DETECTED="$(detect_supported_os)" || fail "Unsupported distribution. Supported: ${HP_SUPPORTED_OS} (use --allow-other-linux for lab hosts)."
+log_info "Verified OS: ${OS_DETECTED}"
 
 # 2. Verify Linux kernel 6.x+
 KERNEL_RELEASE="$(uname -r)"
@@ -151,9 +137,10 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/secrets-master.key (0400 hp-api:root)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
   log_dry "Would idempotently generate RSA-3072 JWT signing key /etc/hosting-panel/jwt-signing.pem (0400 hp-api:root)"
-  log_dry "Would ensure /etc/hosting-panel/hosting-panel.env (0440 root:hp-web) has BFF_SESSION_SECRET=<64 hex> (only if absent), ENABLE_DEV_OIDC=false, HP_SEED_DEMO=false"
-  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750)"
-  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (2750 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
+  log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
+  log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass and /usr/local/sbin/hp-update (0750 root:root)"
+  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor)"
+  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
   done
@@ -271,29 +258,48 @@ else
   log_info "Preserved existing JWT signing key at ${JWT_KEY_PATH} (0400)"
 fi
 
-# Web session secret and production-safe flags; existing values are never overwritten.
-ENV_FILE="/etc/hosting-panel/hosting-panel.env"
-touch "${ENV_FILE}"
-if ! grep -q '^BFF_SESSION_SECRET=' "${ENV_FILE}"; then
-  printf 'BFF_SESSION_SECRET=%s\n' "$(generate_32_byte_hex_key)" >> "${ENV_FILE}"
-  log_info "Generated BFF_SESSION_SECRET in ${ENV_FILE}"
-fi
-for flag in ENABLE_DEV_OIDC HP_SEED_DEMO; do
-  grep -q "^${flag}=" "${ENV_FILE}" || printf '%s=false\n' "${flag}" >> "${ENV_FILE}"
-done
-chown root:hp-web "${ENV_FILE}"
-chmod 0440 "${ENV_FILE}"
+# Per-service env files (0400 root:root; systemd reads them as root). Created only if absent, from a temp file.
+write_env_file() {
+  local path="$1" content="$2" tmp
+  if [[ -e "${path}" ]]; then
+    log_info "Preserved existing ${path}"
+    return
+  fi
+  tmp="$(mktemp /etc/hosting-panel/.env.XXXXXX)"
+  printf '%s\n' "${content}" > "${tmp}"
+  install -m 0400 -o root -g root "${tmp}" "${path}"
+  rm -f "${tmp}"
+  log_info "Created ${path} (0400 root:root)"
+}
 
-# 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid 2750 root:hp-ipc)
+write_env_file /etc/hosting-panel/api.env "DATABASE_URL=
+ENABLE_DEV_OIDC=false
+HP_SEED_DEMO=false"
+# Loopback placeholder: an empty value would make next listen on all interfaces; install.sh sets docker0.
+write_env_file /etc/hosting-panel/web.env "BFF_SESSION_SECRET=$(generate_32_byte_hex_key)
+API_INTERNAL_URL=http://127.0.0.1:4000
+HP_WEB_BIND_ADDRESS=127.0.0.1"
+write_env_file /etc/hosting-panel/executor.env "HP_PANEL_HOSTNAME=
+HP_PANEL_IPV4=
+HP_ACME_EMAIL=
+HP_ACME_STAGING=false
+HP_PANEL_UPSTREAM_PORT=3000"
+
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-accounts" /usr/local/sbin/hp-accounts
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-break-glass" /usr/local/sbin/hp-break-glass
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-update" /usr/local/sbin/hp-update
+
+# 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid+sticky 3770 root:hp-ipc)
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/static
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/dynamic
+install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/acme
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/sites
 
 install -m 0644 -o root -g root "${SYSTEMD_SRC_DIR}/hosting-panel-tmpfiles.conf" /etc/tmpfiles.d/hosting-panel.conf
-install -d -m 2750 -o root -g hp-ipc /run/hosting-panel
-chmod 2750 /run/hosting-panel
+install -d -m 3770 -o root -g hp-ipc /run/hosting-panel
+chmod 3770 /run/hosting-panel
 install -d -m 0700 -o hp-executor -g hp-executor /run/hosting-panel/secrets
 
 # 9. Install and reload systemd units
@@ -304,15 +310,10 @@ done
 systemctl daemon-reload
 log_info "Installed systemd units and reloaded systemd daemon successfully."
 
+# The updater re-runs bootstrap on every update; the first-run hints are noise there.
+[[ "${HP_BOOTSTRAP_QUIET:-0}" == 1 ]] && exit 0
 cat <<'EOF'
 
-Next step (first run): create the installation and the first server administrator.
-The CLI applies database migrations itself, so it works before the services ever started.
-It reads the database from DATABASE_URL (it does not read hosting-panel.env); the full installer
-that provisions PostgreSQL and this variable comes with Plan 1b.
-  export DATABASE_URL='postgres://<user>:<password>@127.0.0.1:5432/<database>'
-  sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<server name>" --hostname <hostname> --ipv4 <ip> \
-    && sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<name>"
-Break-glass (dist/cli/break-glass.js) needs the same DATABASE_URL + sudo -E -u hp-api.
-create-admin prints the TOTP secret once: enrol it in an authenticator app (2FA is mandatory for administrators).
+Host prepared. To install the panel itself, run infra/linux/install.sh from a release
+archive (see "Installazione su un nuovo server" in the README).
 EOF

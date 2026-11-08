@@ -1,0 +1,65 @@
+# Tag-driven release: builds, verifies and publishes the installable archive.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release archive
+    runs-on: ubuntu-latest
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Enable Corepack package manager
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Check tag matches package.json version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version v$version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Lint codebase
+        run: corepack pnpm run lint
+
+      - name: Typecheck monorepo
+        run: corepack pnpm run typecheck
+
+      - name: Run automated test suite
+        run: corepack pnpm run test
+
+      - name: Build release archive
+        run: corepack pnpm run release:build
+
+      - name: Smoke-test release archive
+        run: corepack pnpm run release:smoke "dist-release/hosting-panel-${VERSION}-linux-x64.tar.gz"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          archive="dist-release/hosting-panel-${VERSION}-linux-x64.tar.gz"
+          printf 'Hosting Panel %s\n\nInstall: see "Installazione su un nuovo server" in the README.\nVerify the download with sha256sum -c.\n' "$VERSION" > release-notes.md
+          gh release create "$GITHUB_REF_NAME" "$archive" "$archive.sha256" --title "$GITHUB_REF_NAME" --notes-file release-notes.md

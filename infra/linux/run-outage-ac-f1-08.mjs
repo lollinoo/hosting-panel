@@ -22,6 +22,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+const TRAEFIK_IMAGE = "traefik:v3.7";
 const execFile = promisify(execFileCb);
 
 const __filename = fileURLToPath(import.meta.url);
@@ -587,7 +588,7 @@ async function main() {
           HP_SECRETS_ROOT_DIR: secretsRootDir,
           HP_INGRESS_ROOT_DIR: ingressRootDir,
           HP_INGRESS_HTTP_PORT: String(ingressPort),
-          HP_TRAEFIK_IMAGE: "traefik:v3.3",
+          HP_TRAEFIK_IMAGE: TRAEFIK_IMAGE,
         },
       },
     );
@@ -1280,7 +1281,7 @@ async function main() {
 | **Control Plane Database** | \`${postgresServerVersion}\` |
 | **Migrazioni SQL Applicate su PostgreSQL 18** | \`${appliedMigrations.join(", ")}\` |
 | **Filesystem Segreti (\`/tmp\`)** | \`${tmpFsType}\` (mode \`0700\` dir / \`0400\` secret files \`:ro\`) |
-| **Ingress Data Plane** | \`traefik:v3.3\` (\`hp_ingress_proxy\`, zero \`docker.sock\`, file provider dinamico \`:ro\`) |
+| **Ingress Data Plane** | \`${TRAEFIK_IMAGE}\` (\`hp_ingress_proxy\`, zero \`docker.sock\`, file provider dinamico \`:ro\`) |
 | **Workload Tenant Data Plane** | 2 siti HTTP (\`${domainAlpha}\`, \`${domainBravo}\` su \`nginxinc/nginx-unprivileged:alpine\`) + 1 datastore interno (\`redis:7.4-alpine\`) |
 
 ---

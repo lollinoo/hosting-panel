@@ -27,8 +27,8 @@ La **Fase 2 (`HCP-SPEC-003`)** attiva il runtime operativo per la modalità **`D
 
 1. **Split Agents a 3 domini di privilegio separati (`Q2`, chiusura `ADR-010`)**:
    - `hp-api` / `hp-web` (Control Plane): nessun accesso a `/var/run/docker.sock` (`InaccessiblePaths=/var/run/docker.sock`) e zero Linux Capabilities.
-   - `hp-docker-executor` (`apps/docker-executor`): demone standalone Node.js 24 + TypeScript (zero NestJS), utente non-root `hp-executor`, unico componente autorizzato a dialogare con `/var/run/docker.sock`.
-   - `hp-host-agent` (`apps/host-agent`): demone standalone Node.js 24 + TypeScript (zero NestJS), utente non-root `hp-agent` confinato con sole `CAP_NET_ADMIN` + `CAP_DAC_READ_SEARCH` per telemetria host, manutenzione allowlisted e verifica postura `nftables`.
+   - `hp-docker-executor` (`apps/docker-executor`): demone standalone Node.js 26 + TypeScript (zero NestJS), utente non-root `hp-executor`, unico componente autorizzato a dialogare con `/var/run/docker.sock`.
+   - `hp-host-agent` (`apps/host-agent`): demone standalone Node.js 26 + TypeScript (zero NestJS), utente non-root `hp-agent` confinato con sole `CAP_NET_ADMIN` + `CAP_DAC_READ_SEARCH` per telemetria host, manutenzione allowlisted e verifica postura `nftables`.
 2. **Canale IPC locale firmato senza porte TCP (`Q3`, `ADR-010` + `ADR-008`)**:
    - Trasporto su Unix Domain Sockets dedicati (`/run/hosting-panel/executor.sock` e `/run/hosting-panel/host-agent.sock`, directory `0750`, socket `0660` ristretti al gruppo `hp-ipc`).
    - Autenticazione crittografica applicativa per singola richiesta (`node:crypto` HMAC-SHA256 / Ed25519 con `timestamp`, `nonce` anti-replay e SHA-256 canonico del body), già predisposta per un futuro trasporto mTLS verso il Management Hub (`ADR-008`) e compatibile con Named Pipe / loopback effimero per test portatili.
@@ -43,7 +43,7 @@ La **Fase 2 (`HCP-SPEC-003`)** attiva il runtime operativo per la modalità **`D
    - Il Drift Reconciler rileva le discrepanze `StackRevision.specHash` vs label container marcando `in_sync` o `drifted` + evento di audit, **senza mai riavviare o ricreare autonomamente i container attivi** (`AC-F1-08` step `T5`).
 6. **Segreti cifrati `AES-256-GCM` e montaggio `tmpfs` `0400` (`Q8`, `F1-012`)**:
    - Migrazione additiva non distruttiva `0002_phase2_runtime_and_secrets.sql` con tabella `encrypted_secrets`; risoluzione JIT dei `secretRefs` su file read-only `0400` in `/run/hosting-panel/secrets/<serviceId>/<ref>` (pattern `*_FILE`), evitando qualsiasi segreto in chiaro in `Env`, `docker inspect`, `stack_revisions`, `outbox_events` o log.
-7. **Target Ubuntu 24.04 LTS / Debian 12 ed esecuzione reale `AC-F1-08` (`Q7`, `Q9`)**:
+7. **Target Ubuntu 24.04 / 26.04 / Debian 12 / 13 ed esecuzione reale `AC-F1-08` (`Q7`, `Q9`)**:
    - Kit completo in `infra/systemd/` e `infra/linux/` (`bootstrap-dedicated.sh`, CLI break-glass, runner automatico `run-outage-ac-f1-08.mjs`) da eseguire dal vivo sull'ambiente Linux dedicato, accompagnato dallo sblocco veritiero delle 3 console `shadcn@4.23.0` (`PlatformCapabilitiesDto` dinamico con `runtimeBackend`).
 
 ---
@@ -53,7 +53,7 @@ La **Fase 2 (`HCP-SPEC-003`)** attiva il runtime operativo per la modalità **`D
 ### 1.1 Incluso in `HCP-SPEC-003` (Fase 2)
 
 - Chiusura formale di `ADR-010` e redazione degli ADR operativi di Fase 2 (`ADR-013` IPC firmato e UDS, `ADR-014` Data Plane Traefik file-provider zero-sock, `ADR-015` Store segreti `AES-256-GCM` e mount `tmpfs`).
-- Nuovi pacchetti/applicazioni monorepo `apps/docker-executor` e `apps/host-agent` (Node.js 24 + TypeScript, zero dipendenze esterne oltre l'allowlist approvata).
+- Nuovi pacchetti/applicazioni monorepo `apps/docker-executor` e `apps/host-agent` (Node.js 26 + TypeScript, zero dipendenze esterne oltre l'allowlist approvata).
 - Estensione compatibile di `@hosting-panel/contracts`, `@hosting-panel/executor-contracts`, `@hosting-panel/host-agent-contracts` e `@hosting-panel/database` (`0002_phase2_runtime_and_secrets.sql`).
 - Worker Transactional Outbox, recovery `unknown`, Drift Reconciler *observe-only*, endpoint segreti cifrati e risposte `202 Accepted` in `apps/api` + aggiornamento `docs/api/openapi.yaml`.
 - Aggiornamento delle 3 console `shadcn@4.23.0` in `apps/web` (lifecycle asincrono con `OperationTimeline`, gestione `secretRefs`, badge `in_sync`/`drifted`, telemetria host, stato demoni IPC, manutenzione allowlisted e verifica postura `nftables`).
@@ -101,7 +101,7 @@ Restano tassativamente fuori perimetro e marcati `false` in `PlatformCapabilitie
                 ▼                                         ▼
 ┌───────────────────────────────────────┐ ┌──────────────────────────────────┐
 │ DATA PLANE — Docker Engine            │ │ LINUX KERNEL / OS                │
-│  - hp_ingress_proxy (Traefik v3,      │ │  - Ubuntu 24.04 LTS / Debian 12  │
+│  - hp_ingress_proxy (Traefik v3,      │ │  - Ubuntu 24.04/26.04, Deb 12/13 │
 │    file provider :ro, ZERO sock)      │ │  - systemd + cgroups v2          │
 │  - Reti isolate hp_site_<id>_net      │ │  - nftables (22, 80, 443)        │
 │  - Container tenant (CapDrop: ALL)    │ │  - tmpfs /run/hosting-panel      │
@@ -111,13 +111,13 @@ Restano tassativamente fuori perimetro e marcati `false` in `PlatformCapabilitie
 ### 2.2 Struttura dei nuovi workspace nel monorepo
 
 - `apps/docker-executor`:
-  - Demone leggero in Node.js 24 + TypeScript senza framework pesanti (`node:http`, `node:net`, `node:fs/promises`, `node:crypto`).
+  - Demone leggero in Node.js 26 + TypeScript senza framework pesanti (`node:http`, `node:net`, `node:fs/promises`, `node:crypto`).
   - Dipende esclusivamente da `@hosting-panel/config`, `@hosting-panel/contracts`, `@hosting-panel/hosting-domain`, `@hosting-panel/executor-contracts` e `zod`.
   - Supporta due adapter di esecuzione selezionabili via configurazione esplicita:
     1. `DockerEngineSocketAdapter`: parla realmente con `/var/run/docker.sock` (API `v1.45+`), governa reti `hp_site_<id>_net`, volumi `hp_vol_<svcId>_*`, segreti `tmpfs` e file di routing Traefik.
     2. `InMemoryDockerSimulatorAdapter`: simulatore deterministico fedele per test unitari/integrazione isolati e sviluppo locale su macchine prive di Docker.
 - `apps/host-agent`:
-  - Demone leggero in Node.js 24 + TypeScript (`node:http`, `node:fs/promises`, `node:child_process.execFile`, `node:os`, `node:crypto`).
+  - Demone leggero in Node.js 26 + TypeScript (`node:http`, `node:fs/promises`, `node:child_process.execFile`, `node:os`, `node:crypto`).
   - Dipende esclusivamente da `@hosting-panel/config`, `@hosting-panel/contracts`, `@hosting-panel/host-agent-contracts` e `zod`.
   - Supporta:
     1. `LinuxSystemHostAdapter`: legge `/proc/stat`, `/proc/meminfo`, `fs.statfs`, informazioni kernel/OS e invoca `execFile` su path assoluti verificati (`/usr/sbin/nft`, `/usr/bin/df`, `/usr/bin/uname`).
@@ -189,7 +189,7 @@ Prima di invocare `POST /v1.45/containers/create` su `/var/run/docker.sock`, `hp
 
 1. **Rete Ingress condivisa (`hp_ingress_net`) + Reti isolate per Sito (`hp_site_<siteId>_net`)**:
    - Ogni `Site` possiede una rete bridge privata `hp_site_<siteId>_net` (`Internal: true` per i servizi backend/DB non esposti; i soli servizi HTTP esposti sono raggiungibili dall'ingress sulla rete dedicata di frontiera per sito `hp_edge_<siteId>_net`, impedendo la visibilità diretta container-to-container tra `Site` diversi).
-2. **Container `hp_ingress_proxy` (`traefik:v3.3` o digest pinnato)**:
+2. **Container `hp_ingress_proxy` (`traefik:v3.7` o digest pinnato)**:
    - Pubblica le porte host `80:80` (ed eventuale `443:443`).
    - Monta **in sola lettura** `/var/lib/hosting-panel/ingress/static/traefik.yml:/etc/traefik/traefik.yml:ro` e `/var/lib/hosting-panel/ingress/dynamic:/etc/traefik/dynamic:ro`.
    - **NON monta `/var/run/docker.sock`**.
@@ -317,9 +317,9 @@ La migrazione `0002` **NON modifica né elimina** vincoli di `0001_phase1_docker
 
 ### 9.1 Kit operativo Linux (`infra/systemd/` & `infra/linux/`)
 
-1. `infra/systemd/hp-docker-executor.service`, `infra/systemd/hp-host-agent.service`, `infra/systemd/hp-api.service`, `infra/systemd/hp-web.service`: unit complete pronte per Ubuntu 24.04 LTS / Debian 12.
+1. `infra/systemd/hp-docker-executor.service`, `infra/systemd/hp-host-agent.service`, `infra/systemd/hp-api.service`, `infra/systemd/hp-web.service`: unit complete pronte per Ubuntu 24.04 / 26.04 / Debian 12 / 13.
 2. `infra/linux/bootstrap-dedicated.sh`: script POSIX/bash idempotente che:
-   - verifica Ubuntu 24.04 / Debian 12, kernel 6.x+, `cgroups v2` e Docker Engine;
+   - verifica Ubuntu 24.04 / 26.04 / Debian 12 / 13, kernel 6.x+, `cgroups v2` e Docker Engine;
    - crea il gruppo `hp-ipc` e gli utenti di sistema `hp-web`, `hp-api`, `hp-executor`, `hp-agent` (`/usr/sbin/nologin`);
    - predispone `/etc/hosting-panel` (`0750`), genera in modo idempotente `ipc.key` e `secrets-master.key` (`0440` / `0400`), crea `/var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites}` e installa/ricarica le unit `systemd`.
 3. CLI Break-Glass (`apps/api/src/cli/break-glass.ts`): comando amministrativo locale eseguibile da root/console SSH sull'host per:

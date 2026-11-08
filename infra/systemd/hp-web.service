@@ -1,19 +1,18 @@
 [Unit]
 Description=Hosting Panel Web Console & BFF (HCP-SPEC-003 Domain 1)
 Documentation=https://hosting-panel.internal/docs/hcp-spec-003
-After=network-online.target hp-api.service
+After=network-online.target docker.service hp-api.service
 Wants=network-online.target hp-api.service
 
 [Service]
 Type=simple
 User=hp-web
 Group=hp-web
-WorkingDirectory=/opt/hosting-panel/apps/web
-EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+WorkingDirectory=/opt/hosting-panel/current/apps/web
+EnvironmentFile=/etc/hosting-panel/web.env
 Environment=NODE_ENV=production
 Environment=PORT=3000
-Environment=HOSTNAME=127.0.0.1
-ExecStart=/usr/bin/node /opt/hosting-panel/apps/web/node_modules/next/dist/bin/next start --hostname 127.0.0.1 --port 3000
+ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/web/node_modules/next/dist/bin/next start --hostname ${HP_WEB_BIND_ADDRESS} --port 3000
 Restart=on-failure
 RestartSec=5s
 UMask=0027

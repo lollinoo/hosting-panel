@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./invoked-directly": {
+      "types": "./dist/invoked-directly.d.ts",
+      "default": "./dist/invoked-directly.js"
     }
   },
   "scripts": {

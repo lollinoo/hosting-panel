@@ -30,6 +30,7 @@ export default [
       "**/.next/**",
       "**/node_modules/**",
       "**/coverage/**",
+      "dist-release/**",
       "**/*.d.ts",
     ],
   },
