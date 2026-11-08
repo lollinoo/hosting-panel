@@ -6,6 +6,7 @@ import {
   type PresetRoleName,
   type ReadMeta,
 } from "@hosting-panel/contracts";
+import { eq, users, type DatabaseClient } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import type { FastifyRequest } from "fastify";
@@ -17,6 +18,7 @@ import {
 } from "../common/control-plane.error.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
+  DATABASE_CLIENT_TOKEN,
   DOCKER_EXECUTOR_TOKEN,
   HOST_AGENT_TOKEN,
   type ControlPlaneRuntimeConfig,
@@ -29,12 +31,14 @@ export class MeController {
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
     @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
+    @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
   ) {}
 
   @Get()
   public async getMe(@Req() req: FastifyRequest): Promise<{ data: MeDto }> {
     const auth = await this.authzService.authenticateRequest(req);
 
+    const [row] = await this.dbClient.db.select().from(users).where(eq(users.id, auth.user.id)).limit(1);
     const memberships = auth.activeMembershipSummaries.map((m) => ({
       id: m.membershipId,
       organizationId: m.organization.id,
@@ -50,6 +54,10 @@ export class MeController {
           id: auth.user.id,
           email: auth.user.email,
           name: auth.user.name,
+          locale: row?.locale ?? "it",
+          totpEnabled: row?.totpEnabledAt != null,
+          mustChangePassword: row?.mustChangePassword ?? false,
+          isServerAdmin: row?.platformRole === "infrastructure_admin",
         },
         globalRoles: (auth.principal.globalRoles ?? []) as PresetRoleName[],
         hostingAdminOrgIds: (auth.principal.hostingAdminOrgIds ?? []) as string[],

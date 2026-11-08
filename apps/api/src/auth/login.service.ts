@@ -4,11 +4,7 @@ import type { LoginInput, LoginResultDto } from "@hosting-panel/contracts";
 import {
   and,
   appendAuditEvent,
-  decryptSecretAesGcm,
   eq,
-  isNull,
-  lt,
-  or,
   sql,
   users,
   type DatabaseClient,
@@ -21,7 +17,7 @@ import {
 } from "../tokens.js";
 import { OidcService } from "./oidc.service.js";
 import { hashPassword, verifyPassword } from "./password.js";
-import { verifyTotp } from "./totp.js";
+import { checkUserTotp, saveTotpStep } from "./totp-secret.js";
 
 const MAX_FAILURES = 5;
 const LOCK_MS = 15 * 60_000;
@@ -96,43 +92,20 @@ export class LoginService {
       return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
     }
 
-    const result = this.checkTotp(user, input.totpCode, now);
+    const result = checkUserTotp(user, input.totpCode, now, this.config.secretsMasterKey);
     if (!result.ok) {
       return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "bad_totp");
     }
     // Conditional step save: of two concurrent logins with the same code, only one matches.
-    const saved = await this.dbClient.db
-      .update(users)
-      .set({ totpLastStep: result.step, failedLoginCount: 0, totpFailedCount: 0, lockedUntil: null })
-      .where(
-        and(
-          eq(users.id, user.id),
-          or(isNull(users.totpLastStep), lt(users.totpLastStep, result.step)),
-        ),
-      )
-      .returning({ id: users.id });
-    if (saved.length === 0) {
+    const saved = await saveTotpStep(this.dbClient.db, user.id, result.step, {
+      failedLoginCount: 0,
+      totpFailedCount: 0,
+      lockedUntil: null,
+    });
+    if (!saved) {
       return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "totp_reused");
     }
     return this.succeed(user, ip);
-  }
-
-  private checkTotp(user: UserRow, code: string, now: number): { ok: true; step: number } | { ok: false } {
-    try {
-      const secret = decryptSecretAesGcm({
-        ciphertextBase64: user.totpCiphertextBase64 ?? "",
-        ivBase64: user.totpIvBase64 ?? "",
-        authTagBase64: user.totpAuthTagBase64 ?? "",
-        masterKey: this.config.secretsMasterKey,
-        organizationId: "platform",
-        siteId: null,
-        secretKey: `totp:${user.id}`,
-      });
-      return verifyTotp(secret, code, now, user.totpLastStep);
-    } catch {
-      // A corrupt or undecryptable secret is a failed code, never a 500.
-      return { ok: false };
-    }
   }
 
   private async succeed(user: UserRow, ip: string | null): Promise<LoginResultDto> {

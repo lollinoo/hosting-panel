@@ -9,6 +9,7 @@ import { AuthzContextService } from "./auth/authz-context.service.js";
 import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import { ApiExceptionFilter } from "./common/api-exception.filter.js";
+import { AccountController } from "./controllers/account.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
@@ -45,6 +46,7 @@ export class AppModule {
         HealthController,
         AuthController,
         MeController,
+        AccountController,
         HostsController,
         ServiceTemplatesController,
         AdminAuditController,

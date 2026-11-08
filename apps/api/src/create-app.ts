@@ -388,8 +388,12 @@ export async function createControlPlaneApp(
   // Public DTO security boundary: block accidental leakage of internal/forbidden keys
   fastifyInstance.addHook("preSerialization", async (request, _reply, payload) => {
     const routeUrl = request.url.split("?")[0] ?? "";
-    // Token-issuing endpoints legitimately return an accessToken.
-    if (routeUrl === "/v1/dev/auth/token" || routeUrl === "/v1/auth/login") {
+    // Token-issuing endpoints legitimately return an accessToken; TOTP setup returns the one-time secret.
+    if (
+      routeUrl === "/v1/dev/auth/token" ||
+      routeUrl === "/v1/auth/login" ||
+      routeUrl === "/v1/me/totp/setup"
+    ) {
       return payload;
     }
     const forbidden = findForbiddenPublicDtoKeys(payload);
