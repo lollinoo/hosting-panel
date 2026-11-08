@@ -31,12 +31,23 @@ export default async function SiteLayout({
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">{site.name}</h1>
         <StatusPill status={site.status} driftSummary={site.driftSummary} labels={m.site.status} />
+        {site.phpVersion !== null && site.status === "ready" && primary && (
+          <a
+            href={`http://${primary.hostname}/wp-admin/`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            {m.site.wpAdmin} <span aria-hidden>&nbsp;↗</span>
+            <span className="sr-only"> {m.site.opensNewTab}</span>
+          </a>
+        )}
         {primary && (
           <a
             href={`https://${primary.hostname}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="ml-auto text-sm font-medium text-primary underline-offset-4 hover:underline"
+            className={`${site.phpVersion !== null && site.status === "ready" ? "" : "ml-auto "}text-sm font-medium text-primary underline-offset-4 hover:underline`}
           >
             {m.site.visit} <span aria-hidden>↗</span>
             <span className="sr-only"> {m.site.opensNewTab}</span>

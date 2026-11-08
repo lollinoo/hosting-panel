@@ -3,6 +3,7 @@ import { format, getMessages, type Messages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
 import { fetchServerOrgOperations } from "@/lib/server-api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { SiteProgress } from "@/components/customer/site-progress";
 import { StatusPill, toSiteStatusView } from "@/components/customer/status-pill";
 import { getCustomerContext, getSite } from "../data";
 
@@ -19,7 +20,7 @@ const outcome = (s: OperationStatus) =>
 
 export default async function SiteOverviewPage({ params }: { params: Promise<{ siteId: string }> }) {
   const { siteId } = await params;
-  const { orgId } = await getCustomerContext();
+  const { orgId, session } = await getCustomerContext();
   const result = await getSite(orgId, siteId);
   if (!result.ok || !orgId) return null; // the layout shows the 404 or the load error
   const site = result.data;
@@ -32,11 +33,28 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
     .filter((op: OperationDto) => ids.has(op.resourceId) && ACTIVITY[op.kind])
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))
     .slice(0, 5);
+  const provision = (operations ?? [])
+    .filter((op: OperationDto) => op.kind === "site.provision" && op.resourceId === site.id)
+    .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))[0];
+  // A degraded site only shows the setup when that is what failed.
+  const showProgress =
+    site.phpVersion !== null &&
+    (site.status === "deploying" || (site.status === "degraded" && provision?.status === "failed"));
   const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const { labelKey } = toSiteStatusView(site.status, site.driftSummary);
 
   return (
     <div className="grid gap-6 md:grid-cols-2">
+      {showProgress && (
+        <div className="md:col-span-2">
+          <SiteProgress
+            orgId={orgId}
+            siteId={site.id}
+            csrfToken={session.csrfToken}
+            initial={provision ? { id: provision.id, status: provision.status, steps: provision.steps } : null}
+          />
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{m.site.overview.statusTitle}</CardTitle>
