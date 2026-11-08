@@ -174,7 +174,7 @@ function mapSiteSummaryToDto(site: typeof sites.$inferSelect): SiteSummaryDto {
     name: site.name,
     slug: site.slug,
     status: site.status,
-    phpVersion: null,
+    phpVersion: site.phpVersion,
     createdAt: toIsoString(site.createdAt),
     updatedAt: toIsoString(site.updatedAt),
   };
@@ -991,7 +991,7 @@ export class OrganizationsController {
         name: result.site.name,
         slug: result.site.slug,
         status: result.site.status,
-        phpVersion: null,
+        phpVersion: result.site.phpVersion,
         services: [],
         domains: domainList,
         driftSummary: {
@@ -1094,7 +1094,7 @@ export class OrganizationsController {
         name: site.name,
         slug: site.slug,
         status: aggregateSummary.siteStatus,
-        phpVersion: null,
+        phpVersion: site.phpVersion,
         services: svcs.map(mapServiceInstanceToDto),
         domains: doms.map(mapDomainToDto),
         driftSummary: aggregateSummary.driftSummary,
