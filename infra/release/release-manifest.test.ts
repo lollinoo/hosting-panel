@@ -56,6 +56,10 @@ describe("listReleaseViolations", () => {
     ]);
   });
 
+  it("requires the shared release library", () => {
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/lib/release.sh");
+  });
+
   it("accepts a complete minimal tree", async () => {
     expect(await listReleaseViolations(completeTree())).toEqual([]);
   });

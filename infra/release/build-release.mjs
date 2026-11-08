@@ -24,6 +24,7 @@ export const REQUIRED_RELEASE_PATHS = [
   "infra/systemd/hp-host-agent.service",
   "infra/systemd/hp-web.service",
   "infra/linux/bootstrap-dedicated.sh",
+  "infra/linux/lib/release.sh",
   "infra/linux/nftables-dedicated.conf",
   "infra/linux/hp-accounts",
   "infra/linux/hp-break-glass"
@@ -119,7 +120,7 @@ async function main() {
   copy("apps/web/next.config.mjs");
   copy("apps/web/.next", (src) => !/[/\\]\.next[/\\](cache|dev)([/\\]|$)/.test(src));
   copy("infra/systemd");
-  copy("infra/linux", (src) => !src.endsWith(".mjs"));
+  copy("infra/linux", (src) => !src.endsWith(".mjs") && !src.endsWith(".test.ts"));
 
   run("corepack", ["pnpm", "install", "--prod", "--frozen-lockfile", "--offline", "--ignore-scripts"], stage);
   rmSync(path.join(stage, "node_modules/.cache"), { recursive: true, force: true });

@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# Release fetch/verify/install/swap/prune helpers. Source this file; functions return non-zero, never exit.
+# Layout: <root>/releases/<version>/, <root>/current -> releases/<version>.
+
+HP_RELEASE_REPO="${HP_RELEASE_REPO:-lollinoo/hosting-panel}"
+HP_DEFAULT_ROOT="/opt/hosting-panel"
+
+_hp_semver_re='^[0-9]+\.[0-9]+\.[0-9]+$'
+
+release_asset_url() {
+  printf 'https://github.com/%s/releases/download/v%s/hosting-panel-%s-linux-x64.tar.gz\n' \
+    "${HP_RELEASE_REPO}" "$1" "$1"
+}
+
+# Prints the archive path.
+fetch_release() {
+  local version="$1" dest="$2" url archive
+  [[ "${version}" =~ ${_hp_semver_re} ]] || { printf '[ERROR] Invalid version %s\n' "${version}" >&2; return 1; }
+  url="$(release_asset_url "${version}")"
+  archive="${dest}/hosting-panel-${version}-linux-x64.tar.gz"
+  mkdir -p "${dest}" || return 1
+  curl -fsSL --retry 3 -o "${archive}" "${url}" || { printf '[ERROR] Download failed: %s\n' "${url}" >&2; return 1; }
+  curl -fsSL --retry 3 -o "${archive}.sha256" "${url}.sha256" || { printf '[ERROR] Download failed: %s.sha256\n' "${url}" >&2; return 1; }
+  printf '%s\n' "${archive}"
+}
+
+# shortcut: checksum only, no signature — add minisign/cosign verification before third parties publish releases
+verify_release_archive() {
+  local archive="$1" dir base
+  dir="$(dirname -- "${archive}")"
+  base="$(basename -- "${archive}")"
+  if [[ ! -f "${archive}" || ! -f "${archive}.sha256" ]]; then
+    printf '[ERROR] Missing archive or checksum file for %s\n' "${archive}" >&2
+    return 1
+  fi
+  (cd "${dir}" && sha256sum -c "${base}.sha256" >/dev/null 2>&1) || {
+    printf '[ERROR] Checksum mismatch for %s\n' "${archive}" >&2
+    return 1
+  }
+}
+
+# Prints the installed version.
+install_release() {
+  local archive="$1" root="${2:-${HP_DEFAULT_ROOT}}" tmp top version
+  mkdir -p "${root}/releases" || return 1
+  tmp="$(mktemp -d "${root}/releases/.tmp-XXXXXX")" || return 1
+  if ! tar -xzf "${archive}" -C "${tmp}"; then
+    printf '[ERROR] Failed to extract %s\n' "${archive}" >&2
+    rm -rf -- "${tmp}"
+    return 1
+  fi
+  local entries=("${tmp}"/* "${tmp}"/.[!.]*)
+  local existing=() e
+  for e in "${entries[@]}"; do [[ -e "${e}" || -L "${e}" ]] && existing+=("${e}"); done
+  top="${existing[0]:-}"
+  if [[ ${#existing[@]} -ne 1 || ! -d "${top}" || -L "${top}" || ! -f "${top}/VERSION" ]]; then
+    printf '[ERROR] Archive must contain a single hosting-panel-<version>/ directory with VERSION\n' >&2
+    rm -rf -- "${tmp}"
+    return 1
+  fi
+  version="$(tr -d '[:space:]' <"${top}/VERSION")"
+  if [[ ! "${version}" =~ ${_hp_semver_re} || "$(basename -- "${top}")" != "hosting-panel-${version}" ]]; then
+    printf '[ERROR] Archive directory %s does not match VERSION %s\n' "$(basename -- "${top}")" "${version}" >&2
+    rm -rf -- "${tmp}"
+    return 1
+  fi
+  if [[ -e "${root}/releases/${version}" ]]; then
+    if [[ "${HP_FORCE_REINSTALL:-0}" != "1" ]]; then
+      printf '[ERROR] Release %s already installed (set HP_FORCE_REINSTALL=1 to replace)\n' "${version}" >&2
+      rm -rf -- "${tmp}"
+      return 1
+    fi
+    rm -rf -- "${root}/releases/${version}"
+  fi
+  if ! mv -T -- "${top}" "${root}/releases/${version}"; then
+    rm -rf -- "${tmp}"
+    return 1
+  fi
+  rm -rf -- "${tmp}"
+  printf '%s\n' "${version}"
+}
+
+current_version() {
+  local root="${1:-${HP_DEFAULT_ROOT}}" target
+  target="$(readlink -- "${root}/current" 2>/dev/null)" || target=""
+  [[ -n "${target}" ]] && basename -- "${target}"
+  return 0
+}
+
+swap_current() {
+  local root="${1:-${HP_DEFAULT_ROOT}}" version="$2"
+  if [[ ! -d "${root}/releases/${version}" ]]; then
+    printf '[ERROR] Release %s is not installed\n' "${version}" >&2
+    return 1
+  fi
+  ln -sfn "releases/${version}" "${root}/current.new" && mv -T -- "${root}/current.new" "${root}/current"
+}
+
+version_gt() {
+  local a b i
+  [[ "$1" =~ ${_hp_semver_re} && "$2" =~ ${_hp_semver_re} ]] || return 1
+  IFS=. read -r -a a <<<"$1"
+  IFS=. read -r -a b <<<"$2"
+  for i in 0 1 2; do
+    ((10#${a[i]} > 10#${b[i]})) && return 0
+    ((10#${a[i]} < 10#${b[i]})) && return 1
+  done
+  return 1
+}
+
+prune_releases() {
+  local root="${1:-${HP_DEFAULT_ROOT}}" keep="${2:-3}" cur v n=0
+  cur="$(current_version "${root}")"
+  [[ -d "${root}/releases" ]] || return 0
+  # Protected releases (current, HP_KEEP_EXTRA) use up part of the keep budget; the rest go newest first.
+  # Only strict semver dirs are candidates (.tmp-* and others are ignored).
+  local all=() p=0
+  while IFS= read -r v; do
+    all+=("${v}")
+    [[ "${v}" == "${cur}" || "${v}" == "${HP_KEEP_EXTRA:-}" ]] && p=$((p + 1))
+  done < <(_hp_list_releases "${root}")
+  for v in "${all[@]}"; do
+    [[ "${v}" == "${cur}" || "${v}" == "${HP_KEEP_EXTRA:-}" ]] && continue
+    n=$((n + 1))
+    ((n <= keep - p)) && continue
+    rm -rf -- "${root}/releases/${v}"
+  done
+}
+
+_hp_list_releases() {
+  local root="$1" d v
+  for d in "${root}"/releases/*/; do
+    v="$(basename -- "${d}")"
+    [[ -d "${root}/releases/${v}" && ! -L "${root}/releases/${v}" && "${v}" =~ ${_hp_semver_re} ]] && printf '%s\n' "${v}"
+  done | sort -t. -k1,1nr -k2,2nr -k3,3nr
+}
