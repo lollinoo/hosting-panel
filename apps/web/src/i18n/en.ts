@@ -15,9 +15,17 @@ export const en: Messages = {
     password: "Password",
     totp: "Verification code",
     submit: "Sign in",
+    totpHint: "Enter the 6-digit code from your authenticator app.",
+    verify: "Verify",
+    back: "Back",
   },
   account: {
     title: "My account",
+    changePasswordTitle: "Choose a new password",
+    changePasswordHint: "To continue you need to replace the temporary password with your own.",
+    currentPassword: "Current password",
+    newPassword: "New password",
+    changePasswordSubmit: "Save password",
   },
   shell: {
     productName: "Hosting Panel",

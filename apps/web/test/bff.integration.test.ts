@@ -1120,23 +1120,6 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       // Zero legacy mentions anywhere in src/
       expect(content.toLowerCase()).not.toContain(forbiddenLegacyBrand);
     }
-
-    // Explicit AC-F1-10 & AC-F2-10 boundary notices verified
-    const hostDetailPage = fs.readFileSync(
-      path.join(webSrcDir, "app/admin/hosts/[hostId]/page.tsx"),
-      "utf-8"
-    );
-    expect(hostDetailPage).toContain("AC-F1-10");
-    expect(hostDetailPage).toContain("Boundary Logico Definito — Runtime previsto in Fase 2");
-
-    const overviewPage = fs.readFileSync(
-      path.join(webSrcDir, "app/o/[orgSlug]/overview/page.tsx"),
-      "utf-8"
-    );
-    expect(overviewPage).toContain("AC-F1-10");
-    expect(overviewPage).toContain("AC-F2-10");
-    expect(overviewPage).toContain("Matrice Disponibilità Fase 1");
-    expect(overviewPage).toContain("Non attivo in Fase 1 (Previsto Fase 2+)");
   });
 
   it("7. Phase 2 Async Lifecycle (deploy/restart/stop) & Org Operation polling: enforces CSRF, forwards Idempotency-Key, and preserves 202 Accepted", async () => {

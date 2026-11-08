@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { getMessages, getRequestLocale } from "@/i18n";
+import { getMessages } from "@/i18n";
+import { getRequestLocale } from "@/i18n/server";
 import { I18nProvider } from "@/i18n/provider";
 
 export const metadata: Metadata = {

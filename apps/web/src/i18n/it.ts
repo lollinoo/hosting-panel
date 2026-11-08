@@ -13,9 +13,17 @@ export const it = {
     password: "Password",
     totp: "Codice di verifica",
     submit: "Accedi",
+    totpHint: "Inserisci il codice a 6 cifre generato dalla tua app di autenticazione.",
+    verify: "Verifica",
+    back: "Indietro",
   },
   account: {
     title: "Il mio account",
+    changePasswordTitle: "Scegli una nuova password",
+    changePasswordHint: "Per continuare devi sostituire la password provvisoria con una tua.",
+    currentPassword: "Password attuale",
+    newPassword: "Nuova password",
+    changePasswordSubmit: "Salva password",
   },
   shell: {
     productName: "Hosting Panel",

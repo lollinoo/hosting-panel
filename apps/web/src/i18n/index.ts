@@ -24,15 +24,6 @@ export function resolveLocale(session: SessionData | null, cookieValue: string |
   return isLocale(cookieValue) ? cookieValue : DEFAULT_LOCALE;
 }
 
-export async function getRequestLocale(): Promise<Locale> {
-  const [{ cookies }, { getServerSession }] = await Promise.all([
-    import("next/headers"),
-    import("@/lib/server-session"),
-  ]);
-  const session = await getServerSession();
-  return resolveLocale(session, (await cookies()).get(LOCALE_COOKIE)?.value);
-}
-
 export function errorMessage(messages: Messages, code: string): string {
   const errors = messages.errors as Record<string, string>;
   return Object.hasOwn(errors, code) ? errors[code]! : messages.errors.generic;

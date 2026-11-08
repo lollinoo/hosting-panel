@@ -12,7 +12,6 @@ import type {
   SiteDetailDto,
   OperationDto,
   MeDto,
-  DevPersonaDto,
   EncryptedSecretMetadataDto,
   HostTelemetryDto,
   HostDaemonHeartbeatDto,
@@ -24,61 +23,6 @@ export interface HostTelemetryOverviewDto {
   runtimeBackend: RuntimeBackend;
   telemetry: HostTelemetryDto | null;
   daemons: HostDaemonHeartbeatDto[];
-}
-
-export async function fetchServerPersonas(): Promise<DevPersonaDto[]> {
-  const res = await fetchUpstream<{ data: DevPersonaDto[] }>("v1/dev/auth/personas");
-  if (res.ok && res.data?.data) {
-    return res.data.data;
-  }
-  // Fallback dev personas if upstream is offline/mocking
-  return [
-    {
-      id: "persona-infra-admin",
-      email: "admin@platform.local",
-      name: "Alice Fontana (Infrastructure Admin)",
-      description: "Amministratore infrastruttura Linux/Docker Engine con permessi host",
-      role: "infrastructure_admin",
-      globalRoles: ["infrastructure_admin"],
-      organizationId: null,
-    },
-    {
-      id: "persona-hosting-admin",
-      email: "hosting@platform.local",
-      name: "Marco Riva (Hosting Admin)",
-      description: "Gestione allocazioni e catalogo template (segregato da daemon host)",
-      role: "hosting_admin",
-      globalRoles: ["hosting_admin"],
-      organizationId: null,
-    },
-    {
-      id: "persona-customer-owner",
-      email: "owner@acme.it",
-      name: "Giulia Rossi (Customer Owner)",
-      description: "Proprietario organizzazione Acme Corp con gestione siti e stack",
-      role: "customer_owner",
-      globalRoles: [],
-      organizationId: "org-acme",
-    },
-    {
-      id: "persona-customer-collab",
-      email: "dev@acme.it",
-      name: "Luca Bianchi (Customer Collaborator)",
-      description: "Collaboratore con permessi di sola lettura e deployment limitati",
-      role: "customer_collaborator",
-      globalRoles: [],
-      organizationId: "org-acme",
-    },
-    {
-      id: "persona-suspended-owner",
-      email: "suspended@demo.it",
-      name: "Paolo Neri (Organizzazione Sospesa)",
-      description: "Organizzazione sospesa per verifica policy o mancato pagamento",
-      role: "customer_owner",
-      globalRoles: [],
-      organizationId: "org-suspended",
-    },
-  ];
 }
 
 export async function fetchServerMe(): Promise<MeDto | null> {
