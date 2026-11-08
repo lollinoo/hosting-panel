@@ -1,90 +1,69 @@
-import { generateCsrfToken, type ConsoleContext, type SessionData } from "@/lib/session";
+import { generateCsrfToken, type SessionData } from "@/lib/session";
 import { setSessionCookie } from "@/lib/server-session";
 import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
+import { bffUpstreamResponse } from "@/lib/bff-proxy";
 import { fetchUpstream } from "@/lib/upstream";
-import type { MeDto } from "@hosting-panel/contracts";
+import type { LoginResultDto, MeDto } from "@hosting-panel/contracts";
 
 export async function POST(req: Request) {
-  let body: Record<string, unknown> = {};
+  let body: Record<string, unknown>;
   try {
     body = (await req.json()) as Record<string, unknown>;
   } catch {
-    // Body is optional or empty
+    return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400);
   }
 
-  const tokenRes = await fetchUpstream<{
-    data?: { accessToken: string; user?: unknown };
-    accessToken?: string;
-  }>("v1/dev/auth/token", {
+  // Forward only the credential fields; the API validates them.
+  const { email, password, totpCode } = body;
+  const loginRes = await fetchUpstream<{ data: LoginResultDto }>("v1/auth/login", {
     method: "POST",
-    body,
+    body: { email, password, totpCode },
   });
 
-  if (!tokenRes.ok || !tokenRes.data) {
-    const errorData = tokenRes.error as { error?: { message?: string; code?: string } } | undefined;
-    return bffErrorResponse(
-      "UNAUTHENTICATED",
-      errorData?.error?.message || "Autenticazione fallita",
-      tokenRes.status || 401
-    );
+  if (!loginRes.ok) {
+    return bffUpstreamResponse(loginRes);
   }
 
-  const accessToken =
-    tokenRes.data.data?.accessToken || tokenRes.data.accessToken;
-
-  if (!accessToken) {
-    return bffErrorResponse(
-      "INTERNAL_ERROR",
-      "Token di accesso non restituito dal servizio upstream",
-      500
-    );
+  const result = loginRes.data?.data;
+  if (result?.status === "totp_required") {
+    return bffJsonResponse({ status: "totp_required" });
+  }
+  if (result?.status !== "ok" || !result.accessToken) {
+    return bffErrorResponse("INTERNAL_ERROR", "Risposta di login upstream non valida", 502);
   }
 
-  const meRes = await fetchUpstream<{ data: MeDto }>("v1/me", {
-    accessToken,
-  });
-
+  const accessToken = result.accessToken;
+  const meRes = await fetchUpstream<{ data: MeDto }>("v1/me", { accessToken });
   if (!meRes.ok || !meRes.data?.data) {
-    return bffErrorResponse(
-      "UNAUTHENTICATED",
-      "Impossibile recuperare il profilo utente",
-      401
-    );
+    return bffErrorResponse("UNAUTHENTICATED", "Impossibile recuperare il profilo utente", 401);
   }
 
   const me = meRes.data.data;
-  const csrfToken = generateCsrfToken();
-
-  let activeConsole: ConsoleContext = "org";
-  let activeOrgSlug: string | null = null;
-
-  if (me.globalRoles.includes("infrastructure_admin")) {
-    activeConsole = "infra";
-  } else if (me.globalRoles.includes("hosting_admin")) {
-    activeConsole = "hosting";
-  } else if (me.memberships.length > 0) {
-    activeConsole = "org";
-    activeOrgSlug = me.memberships[0]?.organizationSlug ?? null;
-  }
+  const isServerAdmin = me.user.isServerAdmin;
 
   const sessionData: SessionData = {
     accessToken,
-    csrfToken,
-    activeConsole,
-    activeOrgSlug,
+    csrfToken: generateCsrfToken(),
+    activeConsole: isServerAdmin ? "admin" : "customer",
+    activeOrgSlug: isServerAdmin ? null : (me.memberships[0]?.organizationSlug ?? null),
     user: {
       id: me.user.id,
       email: me.user.email,
       name: me.user.name,
       globalRoles: me.globalRoles,
       hostingAdminOrgIds: me.hostingAdminOrgIds,
+      locale: me.user.locale,
+      isServerAdmin,
+      mustChangePassword: me.user.mustChangePassword,
     },
   };
 
   const response = bffJsonResponse({
     ok: true,
-    activeConsole,
-    activeOrgSlug,
+    status: "ok",
+    activeConsole: sessionData.activeConsole,
+    activeOrgSlug: sessionData.activeOrgSlug,
+    mustChangePassword: sessionData.user.mustChangePassword,
     user: sessionData.user,
   });
 

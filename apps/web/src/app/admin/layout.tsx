@@ -19,7 +19,7 @@ export default async function AdminLayout({
   const isInfra = session.user.globalRoles.includes("infrastructure_admin");
   const isHosting = session.user.globalRoles.includes("hosting_admin");
   if (!isInfra && !isHosting) {
-    redirect("/choose-context");
+    redirect("/");
   }
 
   const me = await fetchServerMe();
@@ -30,7 +30,7 @@ export default async function AdminLayout({
         session={{
           authenticated: true,
           csrfToken: session.csrfToken,
-          activeConsole: "infra",
+          activeConsole: "admin",
           activeOrgSlug: session.activeOrgSlug,
           user: session.user,
           memberships: me?.memberships || [],

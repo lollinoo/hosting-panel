@@ -641,7 +641,7 @@ async function main() {
           ...process.env,
           NODE_ENV: "production",
           API_INTERNAL_URL: apiBaseUrl,
-          SESSION_SECRET: webSessionSecret,
+          BFF_SESSION_SECRET: webSessionSecret,
         },
       },
     );

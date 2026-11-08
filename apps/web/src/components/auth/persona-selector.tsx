@@ -46,14 +46,12 @@ export function PersonaSelector({ personas }: PersonaSelectorProps) {
       }
 
       const data = await res.json();
-      if (data.activeConsole === "infra") {
+      if (data.activeConsole === "admin") {
         router.push("/admin/hosts");
-      } else if (data.activeConsole === "hosting") {
-        router.push("/hosting/allocations");
-      } else if (data.activeConsole === "org" && data.activeOrgSlug) {
+      } else if (data.activeOrgSlug) {
         router.push(`/o/${data.activeOrgSlug}/overview`);
       } else {
-        router.push("/choose-context");
+        router.push("/");
       }
       router.refresh();
     } catch {

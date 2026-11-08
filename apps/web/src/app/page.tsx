@@ -8,13 +8,12 @@ export default async function HomePage() {
     redirect("/login");
   }
 
-  if (session.activeConsole === "infra") {
+  if (session.activeConsole === "admin") {
     redirect("/admin/hosts");
-  } else if (session.activeConsole === "hosting") {
-    redirect("/hosting/allocations");
-  } else if (session.activeConsole === "org" && session.activeOrgSlug) {
+  } else if (session.activeOrgSlug) {
     redirect(`/o/${session.activeOrgSlug}/overview`);
   }
 
-  redirect("/choose-context");
+  // A customer without an organization has nowhere to go; redirecting to "/" would loop.
+  redirect("/login");
 }

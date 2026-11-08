@@ -8,7 +8,7 @@ import type {
 
 export const SESSION_COOKIE_NAME = "hp_session";
 
-export type ConsoleContext = "infra" | "hosting" | "org";
+export type ConsoleContext = "admin" | "customer";
 
 export interface SessionUser {
   id: string;
@@ -16,6 +16,9 @@ export interface SessionUser {
   name: string;
   globalRoles: PresetRoleName[];
   hostingAdminOrgIds: string[];
+  locale: "it" | "en";
+  isServerAdmin: boolean;
+  mustChangePassword: boolean;
 }
 
 export interface SessionData {
@@ -39,8 +42,11 @@ export interface PublicSessionDto {
 const DEFAULT_SECRET = "hosting-panel-secure-session-key-32-chars-minimum-prod-grade!";
 
 function getSessionSecretKey(): Uint8Array {
-  const rawSecret = process.env.SESSION_SECRET || DEFAULT_SECRET;
-  return createHash("sha256").update(rawSecret).digest();
+  const configured = process.env.BFF_SESSION_SECRET;
+  if (process.env.NODE_ENV === "production" && (!configured || configured.length < 32)) {
+    throw new Error("BFF_SESSION_SECRET must be set to at least 32 characters in production");
+  }
+  return createHash("sha256").update(configured || DEFAULT_SECRET).digest();
 }
 
 export async function encryptSession(data: SessionData): Promise<string> {
@@ -48,13 +54,14 @@ export async function encryptSession(data: SessionData): Promise<string> {
   return await new EncryptJWT(data as unknown as Record<string, unknown>)
     .setProtectedHeader({ alg: "dir", enc: "A256GCM" })
     .setIssuedAt()
-    .setExpirationTime("24h")
+    .setExpirationTime("12h")
     .encrypt(key);
 }
 
 export async function decryptSession(token: string): Promise<SessionData | null> {
+  // Outside the try: a misconfigured secret must fail loudly, not look like "logged out".
+  const key = getSessionSecretKey();
   try {
-    const key = getSessionSecretKey();
     const { payload } = await jwtDecrypt(token, key, {
       contentEncryptionAlgorithms: ["A256GCM"],
       keyManagementAlgorithms: ["dir"],

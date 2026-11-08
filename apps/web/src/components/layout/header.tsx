@@ -43,34 +43,17 @@ export function Header({ session }: HeaderProps) {
     }
   };
 
-  const handleSwitchContext = async (
-    activeConsole: "infra" | "hosting" | "org",
+  // The switch-context route is gone; the console is derived from the URL, so just navigate.
+  const handleSwitchContext = (
+    target: "infra" | "hosting" | "org",
     activeOrgSlug: string | null = null
   ) => {
-    if (!session.csrfToken) return;
-    setLoading(true);
-    try {
-      const res = await fetch("/api/session/switch-context", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": session.csrfToken,
-        },
-        body: JSON.stringify({ activeConsole, activeOrgSlug }),
-      });
-
-      if (res.ok) {
-        if (activeConsole === "infra") {
-          router.push("/admin/hosts");
-        } else if (activeConsole === "hosting") {
-          router.push("/hosting/allocations");
-        } else if (activeConsole === "org" && activeOrgSlug) {
-          router.push(`/o/${activeOrgSlug}/overview`);
-        }
-        router.refresh();
-      }
-    } finally {
-      setLoading(false);
+    if (target === "infra") {
+      router.push("/admin/hosts");
+    } else if (target === "hosting") {
+      router.push("/hosting/allocations");
+    } else if (activeOrgSlug) {
+      router.push(`/o/${activeOrgSlug}/overview`);
     }
   };
 
@@ -89,9 +72,8 @@ export function Header({ session }: HeaderProps) {
   };
 
   const currentConsoleLabel = () => {
-    if (session.activeConsole === "infra") return "Console Infrastructure Admin";
-    if (session.activeConsole === "hosting") return "Console Hosting Admin";
-    if (session.activeConsole === "org") {
+    if (session.activeConsole === "admin") return "Console Admin";
+    if (session.activeConsole === "customer") {
       const m = session.memberships?.find((item) => item.organizationSlug === session.activeOrgSlug);
       return m ? `Organizzazione: ${m.organizationName}` : "Pannello Organizzazione";
     }
@@ -130,9 +112,8 @@ export function Header({ session }: HeaderProps) {
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline" size="sm" className="gap-2 text-xs" disabled={loading}>
-                    {session.activeConsole === "infra" && <Server className="h-3.5 w-3.5 text-blue-500" />}
-                    {session.activeConsole === "hosting" && <Layers className="h-3.5 w-3.5 text-emerald-500" />}
-                    {session.activeConsole === "org" && <Building2 className="h-3.5 w-3.5 text-amber-500" />}
+                    {session.activeConsole === "admin" && <Server className="h-3.5 w-3.5 text-blue-500" />}
+                    {session.activeConsole === "customer" && <Building2 className="h-3.5 w-3.5 text-amber-500" />}
                     <span>{currentConsoleLabel()}</span>
                     <ChevronDown className="h-3.5 w-3.5 opacity-50" />
                   </Button>

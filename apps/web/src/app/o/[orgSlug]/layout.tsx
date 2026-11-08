@@ -28,7 +28,7 @@ export default async function OrgLayout({
     session.user.globalRoles.includes("hosting_admin");
 
   if (!membership && !isGlobalAdmin) {
-    redirect("/choose-context");
+    redirect("/");
   }
 
   const orgId = membership?.organizationId || orgSlug;
@@ -42,7 +42,7 @@ export default async function OrgLayout({
         session={{
           authenticated: true,
           csrfToken: session.csrfToken,
-          activeConsole: "org",
+          activeConsole: "customer",
           activeOrgSlug: orgSlug,
           user: session.user,
           memberships: me?.memberships || [],

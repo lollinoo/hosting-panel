@@ -21,7 +21,7 @@ export default async function HostingLayout({
     session.user.globalRoles.includes("infrastructure_admin");
 
   if (!isHostingAdmin) {
-    redirect("/choose-context");
+    redirect("/");
   }
 
   const me = await fetchServerMe();
@@ -32,7 +32,7 @@ export default async function HostingLayout({
         session={{
           authenticated: true,
           csrfToken: session.csrfToken,
-          activeConsole: "hosting",
+          activeConsole: "admin",
           activeOrgSlug: session.activeOrgSlug,
           user: session.user,
           memberships: me?.memberships || [],
