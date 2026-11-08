@@ -48,9 +48,9 @@ import {
 } from "../tokens.js";
 
 const SERVICE_STEPS = [
-  { key: "validate_spec", label: "Validate declarative specification" },
-  { key: "dispatch_ipc", label: "Dispatch signed request to docker-executor" },
-  { key: "reconcile_state", label: "Reconcile observed container state" },
+  { key: "validate_spec", label: "Check the request" },
+  { key: "dispatch_ipc", label: "Apply the change" },
+  { key: "reconcile_state", label: "Check the site" },
 ] as const;
 
 const isUniqueViolation = (err: unknown): boolean => {

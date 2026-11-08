@@ -606,6 +606,51 @@ describe("managed WordPress sites API", () => {
     expect(await dbClient.db.select().from(operations)).toHaveLength(opsBefore);
   });
 
+  it("a delete that fails after the database drop can be requested again and removes everything", async () => {
+    const { siteId } = await createAndRun();
+    vi.spyOn(sim, "purgeSite").mockRejectedValueOnce(new Error("boom"));
+    const first = await call("DELETE", siteUrl(siteId), { confirmName: SITE.name }, key());
+    await run();
+    expect((await getOp(first.body.data.operationId)).status).toBe("failed");
+    expect((await call("GET", siteUrl(siteId))).body.data.status).toBe("degraded");
+
+    const second = await call("DELETE", siteUrl(siteId), { confirmName: SITE.name }, key());
+    expect(second.status).toBe(202);
+    await run();
+    expect((await getOp(second.body.data.operationId)).status).toBe("succeeded");
+    expect(sim.jobs.filter((j) => j.kind === "db.drop")).toHaveLength(2);
+    expect((await call("GET", siteUrl(siteId))).status).toBe(404);
+    expect(await dbClient.db.select().from(serviceInstances).where(eq(serviceInstances.siteId, siteId))).toHaveLength(0);
+  });
+
+  it("customer-visible step and error texts never use internal words", async () => {
+    const { siteId } = await createAndRun();
+    const act = (action: string) => call("POST", siteUrl(siteId, "/actions"), { action }, key());
+    await act("stop");
+    await run();
+    await act("start");
+    await run();
+    await act("restart");
+    await run();
+    await call("PATCH", siteUrl(siteId, "/runtime"), { phpVersion: "8.5" }, key());
+    await run();
+    sim.failNextDeploy();
+    await call("PATCH", siteUrl(siteId, "/runtime"), { phpVersion: "8.3" }, key());
+    await run();
+    await call("DELETE", siteUrl(siteId), { confirmName: SITE.name }, key());
+    await run();
+
+    const ops = await dbClient.db.select().from(operations);
+    expect(ops.map((o) => o.kind).sort()).toEqual(
+      ["service.deploy", "service.deploy", "service.restart", "service.restart", "service.stop", "site.delete", "site.provision"],
+    );
+    expect(ops.filter((o) => o.status === "failed").length).toBe(1);
+    const steps = await dbClient.db.select().from(operationSteps);
+    const texts = [...steps.flatMap((x) => [x.label, x.message ?? ""]), ...ops.map((o) => o.errorMessage ?? "")];
+    const forbidden = /\b(containers?|images?|docker|volumes?|networks?|revisions?|services?|templates?|mariadb|jobs?|organi[sz]ations?)\b/i;
+    expect(texts.filter((t) => forbidden.test(t))).toEqual([]);
+  });
+
   it("deleting a revision directly is still refused", async () => {
     const { siteId } = await createAndRun();
     await expect(

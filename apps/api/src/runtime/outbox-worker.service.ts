@@ -53,6 +53,12 @@ import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
+const SITE_ACTION_FAILED = "This action did not finish. Try again in a few minutes.";
+const SITE_STEP_TEXT: Readonly<Record<string, string>> = {
+  validate_spec: "Request checked",
+  dispatch_ipc: "Change applied",
+  reconcile_state: "Site is up to date",
+};
 const SITE_OPERATION_KINDS: ReadonlySet<OperationKind> = new Set([
   "site.provision",
   "site.delete",
@@ -257,6 +263,9 @@ export class OutboxWorkerService {
       return "skipped";
     }
 
+    // Operations on a managed site are shown to customers: fixed friendly step texts only.
+    const siteOp = op.lockKey?.startsWith("site:") === true;
+    if (siteOp) this.#siteOperationIds.add(op.id);
     try {
       await transitionOperation(db, op.id, "processing");
       await this.#safeUpdateStep(
@@ -340,7 +349,8 @@ export class OutboxWorkerService {
         return "failed";
       }
 
-      await this.#failRemainingSteps(op.id, sanitizedMessage);
+      const stepMessage = siteOp ? SITE_ACTION_FAILED : sanitizedMessage;
+      await this.#failRemainingSteps(op.id, stepMessage);
 
       if (
         latestOp &&
@@ -349,12 +359,14 @@ export class OutboxWorkerService {
       ) {
         await transitionOperation(db, op.id, "failed", {
           errorCode,
-          errorMessage: sanitizedMessage,
+          errorMessage: stepMessage,
         });
       }
 
       await failOutboxEvent(db, event.id, sanitizedMessage);
       return "failed";
+    } finally {
+      this.#siteOperationIds.delete(op.id);
     }
   }
 
@@ -908,12 +920,22 @@ export class OutboxWorkerService {
     }
   }
 
+  readonly #siteOperationIds = new Set<string>();
+
   async #safeUpdateStep(
     operationId: string,
     stepKey: string,
     status: OperationStepStatus,
     message?: string,
   ): Promise<void> {
+    if (this.#siteOperationIds.has(operationId)) {
+      message =
+        status === "succeeded"
+          ? (SITE_STEP_TEXT[stepKey] ?? "Done")
+          : status === "running"
+            ? "In progress"
+            : "Could not finish this step";
+    }
     try {
       await updateOperationStepTransactional(
         this.dbClient.db,
