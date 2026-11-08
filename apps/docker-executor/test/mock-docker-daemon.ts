@@ -28,6 +28,9 @@ export interface MockDockerDaemon {
     IPAM?: { Config?: Array<{ Subnet?: string }> };
   }>;
   readonly createdVolumes: string[];
+  readonly volumeLabels: Map<string, Record<string, string>>;
+  readonly deletedVolumes: string[];
+  readonly deletedNetworks: string[];
   readonly networkConnectCalls: Array<{ network: string; container: string; aliases?: string[] }>;
   /** Connects to these networks answer 404 (removed between list and connect). */
   readonly vanishedNetworks: Set<string>;
@@ -54,6 +57,9 @@ export async function startMockDockerDaemon(options?: {
   }> = [];
   const networkNames = new Set<string>();
   const createdVolumes: string[] = [];
+  const volumeLabels = new Map<string, Record<string, string>>();
+  const deletedVolumes: string[] = [];
+  const deletedNetworks: string[] = [];
   const networkConnectCalls: Array<{ network: string; container: string; aliases?: string[] }> = [];
   const vanishedNetworks = new Set<string>();
   const containers = new Map<string, MockDockerContainerRecord>();
@@ -221,10 +227,47 @@ export async function startMockDockerDaemon(options?: {
       }
 
       if (method === "POST" && routePath === "/volumes/create") {
-        const body = JSON.parse(bodyStr) as { Name: string };
+        const body = JSON.parse(bodyStr) as { Name: string; Labels?: Record<string, string> };
         createdVolumes.push(body.Name);
+        volumeLabels.set(body.Name, body.Labels ?? {});
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ Name: body.Name }));
+        return;
+      }
+
+      if (method === "GET" && routePath === "/volumes") {
+        const rawFilters = parsedUrl.searchParams.get("filters");
+        const filterLabels: string[] = rawFilters
+          ? ((JSON.parse(rawFilters) as { label?: string[] }).label ?? [])
+          : [];
+        const Volumes = [...volumeLabels]
+          .filter(([, labels]) =>
+            filterLabels.every((expr) => {
+              const [k = "", v] = expr.split("=");
+              return v === undefined ? k in labels : labels[k] === v;
+            }),
+          )
+          .map(([Name, Labels]) => ({ Name, Labels }));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ Volumes, Warnings: null }));
+        return;
+      }
+
+      const resourceDeleteMatch = /^\/(volumes|networks)\/([^/]+)$/.exec(routePath);
+      if (method === "DELETE" && resourceDeleteMatch && resourceDeleteMatch[2]) {
+        const name = decodeURIComponent(resourceDeleteMatch[2]);
+        const isVolume = resourceDeleteMatch[1] === "volumes";
+        const exists = isVolume ? volumeLabels.has(name) : networkNames.has(name);
+        if (exists) {
+          (isVolume ? deletedVolumes : deletedNetworks).push(name);
+          if (isVolume) {
+            volumeLabels.delete(name);
+          } else {
+            networkNames.delete(name);
+          }
+        }
+        res.writeHead(exists ? 204 : 404, { "Content-Type": "application/json" });
+        res.end(exists ? undefined : JSON.stringify({ message: "not found" }));
         return;
       }
 
@@ -375,6 +418,9 @@ export async function startMockDockerDaemon(options?: {
     socketPath,
     createdNetworks,
     createdVolumes,
+    volumeLabels,
+    deletedVolumes,
+    deletedNetworks,
     networkConnectCalls,
     vanishedNetworks,
     containers,

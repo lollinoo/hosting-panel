@@ -1471,6 +1471,62 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
+  /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */
+  public async purgeSite(siteId: string): Promise<void> {
+    assertSafeIdentifier(siteId, "siteId");
+    const listJson = async <T>(endpoint: string, label: string): Promise<T> => {
+      const filters = encodeURIComponent(JSON.stringify({ label: [label] }));
+      const res = await this.dockerClient.request("GET", `${endpoint}filters=${filters}`);
+      if (res.statusCode !== 200) {
+        throw new ExecutorCodedError(
+          `Failed to list site resources (HTTP ${String(res.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      return JSON.parse(res.body.toString("utf8")) as T;
+    };
+    const siteLabel = `${MANAGED_DOCKER_LABELS.siteId}=${siteId}`;
+    const all = await listJson<DockerContainerListSummary[]>(
+      "/containers/json?all=true&",
+      siteLabel,
+    );
+    const isJob = (c: DockerContainerListSummary): boolean =>
+      c.Labels?.["io.hostingpanel.role"] === SITE_JOB_ROLE;
+    if (all.some((c) => !isJob(c))) {
+      throw new ExecutorCodedError("The site still has a running service", "RESOURCE_LOCKED");
+    }
+    for (const job of all) {
+      await this.stopAndRemoveContainer(job.Id);
+    }
+
+    const internalNet = getSiteInternalNetworkName(siteId);
+    const edgeNet = getSiteEdgeNetworkName(siteId);
+    await this.disconnectContainerFromNetwork(edgeNet, INGRESS_PROXY_CONTAINER_NAME);
+    await this.disconnectContainerFromNetwork(internalNet, SHARED_DB_CONTAINER_NAME);
+    for (const net of [edgeNet, internalNet]) {
+      await this.deleteIgnoringMissing(`/networks/${encodeURIComponent(net)}`);
+    }
+
+    const volumes = await listJson<{ Volumes: { Name: string }[] | null }>(
+      "/volumes?",
+      siteLabel,
+    );
+    for (const volume of volumes.Volumes ?? []) {
+      await this.deleteIgnoringMissing(`/volumes/${encodeURIComponent(volume.Name)}`);
+    }
+    await this.ingressManager.removeSiteRoutes(siteId);
+  }
+
+  private async deleteIgnoringMissing(endpoint: string): Promise<void> {
+    const res = await this.dockerClient.request("DELETE", endpoint);
+    if (res.statusCode !== 204 && res.statusCode !== 404) {
+      throw new ExecutorCodedError(
+        `Failed to remove site resource (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+  }
+
   /** Fire-and-forget at start, so the first site is created in seconds rather than minutes. */
   public async prewarmSiteImages(): Promise<void> {
     const images = [

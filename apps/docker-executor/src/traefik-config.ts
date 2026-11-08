@@ -577,6 +577,15 @@ export class TraefikIngressFileManager {
     return { siteId, remainingSiteRoutes: siteMap.size };
   }
 
+  public async removeSiteRoutes(siteId: string): Promise<void> {
+    const filePath = this.getSiteDynamicFilePath(siteId);
+    for (const serviceId of (await this.getOrHydrateSiteMap(siteId)).keys()) {
+      this.serviceToSite.delete(serviceId);
+    }
+    this.siteRoutes.delete(siteId);
+    await rm(filePath, { force: true });
+  }
+
   private async flushSiteDynamicFile(
     siteId: string,
     siteMap: Map<string, SiteIngressRouteEntry>,

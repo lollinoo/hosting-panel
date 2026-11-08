@@ -1064,3 +1064,96 @@ describe("service logs", () => {
     expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
   });
 });
+
+describe("purge site", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  async function setup() {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-purge-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const ingressRootDir = path.join(tmp, "ingress");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir,
+    });
+    const dynamic = path.join(ingressRootDir, "dynamic");
+    await mkdir(dynamic, { recursive: true });
+    for (const id of ["A", "B"]) {
+      await writeFile(path.join(dynamic, `site_${id}.yml`), "x");
+      mockDaemon.volumeLabels.set(`hp_vol_${id}`, { "io.hostingpanel.site_id": id });
+      for (const net of [`hp_site_${id}_net`, `hp_edge_${id}_net`]) {
+        await fetchNetwork(mockDaemon.socketPath, net);
+      }
+    }
+    return { adapter, mockDaemon, dynamic };
+  }
+
+  function fetchNetwork(socketPath: string, Name: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { socketPath, path: "/networks/create", method: "POST" },
+        (res) => {
+          res.resume();
+          res.on("end", resolve);
+        },
+      );
+      req.on("error", reject);
+      req.end(JSON.stringify({ Name }));
+    });
+  }
+
+  it("purgeSite removes only volumes and networks labelled with that site", async () => {
+    const { adapter, mockDaemon, dynamic } = await setup();
+    await adapter.purgeSite("A");
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+    expect([...mockDaemon.deletedNetworks].sort()).toEqual(["hp_edge_A_net", "hp_site_A_net"]);
+    await expect(stat(path.join(dynamic, "site_A.yml"))).rejects.toThrow();
+    await expect(stat(path.join(dynamic, "site_B.yml"))).resolves.toBeTruthy();
+  });
+
+  it("purgeSite refuses while a site container exists", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("c1", {
+      id: "c1",
+      name: "hp-site-a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    await expect(adapter.purgeSite("A")).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    expect(mockDaemon.deletedVolumes).toEqual([]);
+  });
+
+  it("purgeSite removes leftover job containers and is idempotent", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("j1", {
+      id: "j1",
+      name: "job",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_job" },
+      running: false,
+      status: "exited",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    await adapter.purgeSite("A");
+    await adapter.purgeSite("A");
+    expect(mockDaemon.containers.size).toBe(0);
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+  });
+});
