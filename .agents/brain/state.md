@@ -4,7 +4,7 @@
 Implement **`HCP-SPEC-003` Fase 2 — Runtime Operativo `Dedicated`, Split Agents (`hp-docker-executor` + `hp-host-agent`), IPC Firmato, Outbox/Reconciler, Segreti `AES-256-GCM` su `tmpfs`, Hardening `systemd` ed Esecuzione Reale `AC-F1-08`** (`docs/architecture/hcp-spec-003-phase-2.md`) on the dedicated Linux environment.
 
 - **Phase 1 Baseline Status**: `HCP-SPEC-002` Phase 1 completed, verified (`113/113` tests green), and merged on `main` (`31b3753`).
-- **Phase 2 Design Status**: `/grill-me` `Q1`–`Q9` settled and persisted in `docs/architecture/hcp-spec-003-phase-2.md` and `.agents/brain/decisions.md`. Ready for Swarm implementation waves on Linux.
+- **Phase 2 Status**: `HCP-SPEC-003` Phase 2 completed on dedicated Linux (`CachyOS 7.3.3` + Docker Engine `29.9.3` + PostgreSQL `18.1` + Traefik `v3.3`), verified across all 4 mechanical sensors (`15/15` suites, `167/167` tests green), live `AC-F1-08` outage execution (`PASS`: `1521/1521` `200 OK`, `0` restarts, `2.81s` `in_sync` convergence), and independent Pass 2 adversarial review (`PASS`), signed off (`"go"`) for `main`.
 
 ---
 
@@ -33,4 +33,4 @@ Implement **`HCP-SPEC-003` Fase 2 — Runtime Operativo `Dedicated`, Split Agent
 - [x] **Wave 4 (Live Linux Execution of `AC-F1-08` & Two-Pass Adversarial Verification)**:
   - Run `build`, `lint`, `typecheck`, `test` (`0` exit code — `15/15` suites, `167/167` tests).
   - Execute `infra/linux/run-outage-ac-f1-08.mjs` against real Docker Engine `29.9.3` + PostgreSQL `18.1` + Traefik `v3.3` + tenant site containers on the dedicated Linux host and record verified metrics (`1521/1521` `200 OK`, `0` restarts, `2.81s` `in_sync` convergence) in `docs/security/ac-f1-08-execution-report.md`.
-  - Independent `swarm-verifier` Pass 2 adversarial findings (`F-01`..`F-05`) remediated & regression-tested (`167/167` green); awaiting final verifier sign-off + user `"go"` to merge `feat/hcp-spec-003-phase-2` into `main`.
+  - Independent `swarm-verifier` Pass 2 adversarial findings (`F-01`..`F-05`) remediated, regression-tested (`167/167` green), and certified `PASS` (`Approved for Ship`); user sign-off (`"go"`) received and merged on `main`.
