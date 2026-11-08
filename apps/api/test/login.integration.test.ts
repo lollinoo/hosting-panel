@@ -8,12 +8,18 @@ import {
 } from "@hosting-panel/database";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as password from "../src/auth/password.js";
+import * as totp from "../src/auth/totp.js";
 import { generateTotpSecret, totpCodeAt } from "../src/auth/totp.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 
 vi.mock("../src/auth/password.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/auth/password.js")>();
   return { ...actual, verifyPassword: vi.fn(actual.verifyPassword) };
+});
+
+vi.mock("../src/auth/totp.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/auth/totp.js")>();
+  return { ...actual, verifyTotp: vi.fn(actual.verifyTotp) };
 });
 
 const MASTER_KEY = Buffer.alloc(32, 7);
@@ -283,5 +289,50 @@ describe("POST /v1/auth/login", () => {
       expect(res.status).toBe(423);
     }
     expect((await getUser()).totpFailedCount).toBe(2);
+  });
+
+  it("parallel wrong TOTP codes get at most 5 real checks", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    const wrong = currentCode(secret) === "000000" ? "111111" : "000000";
+    const spy = vi.mocked(totp.verifyTotp);
+    spy.mockClear();
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong })),
+    );
+    for (const r of results) expect([401, 423]).toContain(r.status);
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(5);
+    const row = await getUser();
+    expect(row.totpFailedCount).toBe(5);
+    expect(row.lockedUntil!.getTime()).toBeGreaterThan(Date.now());
+    const refused = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: currentCode(secret) });
+    expect(refused.status).toBe(423);
+  });
+
+  it("parallel wrong passwords get at most 5 real checks", async () => {
+    await seedUser();
+    const spy = vi.mocked(password.verifyPassword);
+    spy.mockClear();
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => login({ email: "mario@hotel.it", password: "nope nope" })),
+    );
+    for (const r of results) expect([401, 423]).toContain(r.status);
+    expect(spy.mock.calls.filter(([, stored]) => stored === passwordHash).length).toBeLessThanOrEqual(5);
+    expect((await getUser()).lockedUntil!.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it("a wrong password during a TOTP lock does not reopen the bypass", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    const code = currentCode(secret);
+    const wrong = code === "000000" ? "111111" : "000000";
+    for (let i = 0; i < 5; i++) {
+      await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong });
+    }
+    expect((await login({ email: "mario@hotel.it", password: "nope nope" })).status).toBe(423);
+    expect((await login({ email: "mario@hotel.it", password: "nope nope", totpCode: wrong })).status).toBe(423);
+    expect((await getUser()).totpFailedCount).toBe(5);
+    const refused = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: code });
+    expect(refused.status).toBe(423);
   });
 });
