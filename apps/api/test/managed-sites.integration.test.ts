@@ -212,6 +212,13 @@ describe("managed WordPress sites API", () => {
     expect(site!.status).toBe("degraded");
   });
 
+  it("the site page reports a failed setup as degraded, so the customer gets Try again", async () => {
+    sim.failNextJob("wordpress.install", 1);
+    const { siteId } = await createAndRun();
+    const site = await call("GET", org(`/sites/${siteId}`));
+    expect(site.body.data.status).toBe("degraded");
+  });
+
   it("a provisioned site has no secret refs and is deployed without secrets", async () => {
     const { siteId } = await createAndRun();
     const svc = await webService(siteId);

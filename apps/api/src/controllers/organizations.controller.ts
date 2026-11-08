@@ -1128,7 +1128,8 @@ export class OrganizationsController {
         hostAllocationId: site.hostAllocationId,
         name: site.name,
         slug: site.slug,
-        status: aggregateSummary.siteStatus,
+        // A managed site's setup/delete state lives on the row; the service aggregate cannot see a failed setup.
+        status: site.phpVersion !== null && site.status !== "ready" ? site.status : aggregateSummary.siteStatus,
         phpVersion: site.phpVersion,
         services: svcs.map(mapServiceInstanceToDto),
         domains: doms.map(mapDomainToDto),
