@@ -192,6 +192,9 @@ export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string
 
 export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
   const hostname = assertSafeDomain(panel.hostname);
+  if (hostname.startsWith("*.")) {
+    throw new ExecutorCodedError("Panel hostname cannot be a wildcard", "VALIDATION_ERROR");
+  }
   const ipv4 = assertSafeDomain(panel.ipv4);
   if (!isIPv4(ipv4)) {
     throw new ExecutorCodedError("Panel IPv4 address is invalid", "VALIDATION_ERROR");

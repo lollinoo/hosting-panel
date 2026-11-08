@@ -61,7 +61,12 @@ interface MockDockerContainerRecord {
 
 interface MockDockerDaemon {
   readonly socketPath: string;
-  readonly createdNetworks: Array<{ Name: string; Internal?: boolean; Driver?: string }>;
+  readonly createdNetworks: Array<{
+    Name: string;
+    Internal?: boolean;
+    Driver?: string;
+    Labels?: Record<string, string>;
+  }>;
   readonly createdVolumes: string[];
   readonly networkConnectCalls: Array<{ network: string; container: string }>;
   readonly containers: Map<string, MockDockerContainerRecord>;
@@ -73,7 +78,12 @@ async function startMockDockerDaemon(options?: {
   readonly rejectVersionedPrefix?: boolean;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
-  const createdNetworks: Array<{ Name: string; Internal?: boolean; Driver?: string }> = [];
+  const createdNetworks: Array<{
+    Name: string;
+    Internal?: boolean;
+    Driver?: string;
+    Labels?: Record<string, string>;
+  }> = [];
   const networkNames = new Set<string>();
   const createdVolumes: string[] = [];
   const networkConnectCalls: Array<{ network: string; container: string }> = [];
@@ -128,6 +138,22 @@ async function startMockDockerDaemon(options?: {
         return;
       }
 
+      if (method === "GET" && routePath === "/networks") {
+        const rawFilters = parsedUrl.searchParams.get("filters");
+        const filterLabels: string[] = rawFilters
+          ? ((JSON.parse(rawFilters) as { label?: string[] }).label ?? [])
+          : [];
+        const matches = createdNetworks.filter((n) =>
+          filterLabels.every((expr) => {
+            const [k = "", v] = expr.split("=");
+            return v === undefined ? k in (n.Labels ?? {}) : n.Labels?.[k] === v;
+          }),
+        );
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(matches.map((n) => ({ Name: n.Name, Labels: n.Labels ?? {} }))));
+        return;
+      }
+
       if (method === "GET" && routePath.startsWith("/networks/")) {
         const netName = decodeURIComponent(routePath.slice("/networks/".length));
         if (networkNames.has(netName)) {
@@ -141,7 +167,12 @@ async function startMockDockerDaemon(options?: {
       }
 
       if (method === "POST" && routePath === "/networks/create") {
-        const body = JSON.parse(bodyStr) as { Name: string; Internal?: boolean; Driver?: string };
+        const body = JSON.parse(bodyStr) as {
+          Name: string;
+          Internal?: boolean;
+          Driver?: string;
+          Labels?: Record<string, string>;
+        };
         networkNames.add(body.Name);
         createdNetworks.push(body);
         res.writeHead(201, { "Content-Type": "application/json" });
@@ -1074,6 +1105,9 @@ describe("panel ingress", () => {
 
   it("panel route rejects unsafe hostname or invalid ipv4", () => {
     expect(() => buildPanelDynamicYaml({ ...panel, hostname: "a`b" })).toThrow();
+    expect(() => buildPanelDynamicYaml({ ...panel, hostname: "*.example.it" })).toThrow(
+      expect.objectContaining({ code: "VALIDATION_ERROR" }),
+    );
     expect(() => buildPanelDynamicYaml({ ...panel, ipv4: "999.1.1.1" })).toThrow(
       expect.objectContaining({ code: "VALIDATION_ERROR" }),
     );
@@ -1194,6 +1228,57 @@ describe("panel ingress", () => {
     expect(recreateCalls(mark).length).toBe(2);
     expect(proxy()?.id).not.toBe(first?.id);
     expect(proxy()?.labels["io.hostingpanel.static_sha256"]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("reattaches site edge networks after a recreate, and only then", async () => {
+    const { adapter, mockDaemon, proxy } = await setupAdapter(panel);
+    for (const name of ["hp_edge_site_a_net", "hp_edge_site_b_net"]) {
+      mockDaemon.createdNetworks.push({
+        Name: name,
+        Labels: { "io.hostingpanel.network_role": "site_edge" },
+      });
+    }
+    mockDaemon.createdNetworks.push({
+      Name: "hp_site_site_a_net",
+      Labels: { "io.hostingpanel.network_role": "site_internal" },
+    });
+    const proxyConnects = () =>
+      mockDaemon.networkConnectCalls
+        .filter((c) => c.container === INGRESS_PROXY_CONTAINER_NAME)
+        .map((c) => c.network)
+        .sort();
+
+    await adapter.ensureIngressProxy();
+    expect(proxyConnects()).toEqual(["hp_edge_site_a_net", "hp_edge_site_b_net"]);
+
+    mockDaemon.networkConnectCalls.length = 0;
+    await adapter.ensureIngressProxy(); // up to date: no recreate, no reconnect
+    expect(proxyConnects()).toEqual([]);
+
+    const current = proxy();
+    if (current) {
+      current.hostConfig = { ...current.hostConfig, ExtraHosts: [] };
+    }
+    await adapter.ensureIngressProxy(); // drift: recreate + reconnect
+    expect(proxyConnects()).toEqual(["hp_edge_site_a_net", "hp_edge_site_b_net"]);
+  });
+
+  it("serialises concurrent ensureIngressProxy calls into a single create", async () => {
+    const { adapter, mockDaemon } = await setupAdapter(panel);
+    await Promise.all([adapter.ensureIngressProxy(), adapter.ensureIngressProxy()]);
+    expect(mockDaemon.requestedPaths.filter((p) => p.includes("/containers/create"))).toHaveLength(
+      1,
+    );
+  });
+
+  it("rejects an invalid HP_INGRESS_HTTPS_PORT at startup", async () => {
+    await expect(
+      bootstrapDockerExecutorDaemon({
+        HP_IPC_KEY: HMAC_SECRET,
+        HP_IPC_TRANSPORT: "loopback-test",
+        HP_INGRESS_HTTPS_PORT: "abc",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
   it("removes the panel dynamic file when the panel is disabled", async () => {

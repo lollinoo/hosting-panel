@@ -163,6 +163,16 @@ export async function bootstrapDockerExecutorDaemon(
     ? Number(rawIngressPort)
     : DEFAULT_INGRESS_HTTP_PORT;
   const rawIngressHttpsPort = env.HP_INGRESS_HTTPS_PORT?.trim();
+  const ingressHttpsPort = rawIngressHttpsPort ? Number(rawIngressHttpsPort) : undefined;
+  if (
+    ingressHttpsPort !== undefined &&
+    (!Number.isInteger(ingressHttpsPort) || ingressHttpsPort < 1 || ingressHttpsPort > 65535)
+  ) {
+    throw new ExecutorCodedError(
+      "HP_INGRESS_HTTPS_PORT must be an integer between 1 and 65535",
+      "VALIDATION_ERROR",
+    );
+  }
   const panel = parsePanelIngressConfigFromEnv(env);
 
   const dockerAdapter = useSimulator
@@ -173,7 +183,7 @@ export async function bootstrapDockerExecutorDaemon(
         ingressRootDir,
         traefikImage,
         ingressHttpPort,
-        ...(rawIngressHttpsPort ? { ingressHttpsPort: Number(rawIngressHttpsPort) } : {}),
+        ...(ingressHttpsPort !== undefined ? { ingressHttpsPort } : {}),
         panel,
       });
   const executor: IngressCapableDockerExecutor =

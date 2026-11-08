@@ -858,6 +858,12 @@ export interface DockerEngineSocketAdapterOptions {
   readonly pullMissingImages?: boolean;
 }
 
+type IngressEnsureResult = {
+  readonly component: "ingress_proxy";
+  readonly status: "running";
+  readonly ensuredAt: string;
+};
+
 interface DockerContainerListSummary {
   readonly Id: string;
   readonly Names?: readonly string[];
@@ -875,6 +881,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly panel: PanelIngressConfig | null;
   private readonly pullMissingImages: boolean;
   private readonly expectedMetadata = new Map<string, ExpectedManagedServiceMetadata>();
+  private ingressEnsureInFlight: Promise<IngressEnsureResult> | null = null;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -902,11 +909,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
-  public async ensureIngressProxy(): Promise<{
-    readonly component: "ingress_proxy";
-    readonly status: "running";
-    readonly ensuredAt: string;
-  }> {
+  /** Serialised: concurrent callers (startup, IPC, deployService) share one run, so drift never triggers two recreates. */
+  public ensureIngressProxy(): Promise<IngressEnsureResult> {
+    this.ingressEnsureInFlight ??= this.ensureIngressProxyOnce().finally(() => {
+      this.ingressEnsureInFlight = null;
+    });
+    return this.ingressEnsureInFlight;
+  }
+
+  private async ensureIngressProxyOnce(): Promise<IngressEnsureResult> {
     const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256 } =
       await this.ingressManager.ensureStaticConfig(this.panel);
 
@@ -1007,6 +1018,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
           "DOCKER_ENGINE_UNAVAILABLE",
         );
       }
+    }
+
+    if (proxyId !== existing?.Id) {
+      // A new proxy container starts on hp_ingress_net only: reattach every site edge network
+      // or all site routes stay down until each site is redeployed (CP-01).
+      await this.reconnectProxyToSiteEdgeNetworks();
     }
 
     return {
@@ -1371,6 +1388,24 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         `Failed to provision managed Docker volume (HTTP ${String(createRes.statusCode)})`,
         "DOCKER_ENGINE_UNAVAILABLE",
       );
+    }
+  }
+
+  private async reconnectProxyToSiteEdgeNetworks(): Promise<void> {
+    const filters = JSON.stringify({ label: ["io.hostingpanel.network_role=site_edge"] });
+    const res = await this.dockerClient.request(
+      "GET",
+      `/networks?filters=${encodeURIComponent(filters)}`,
+    );
+    if (res.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to list site edge networks (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    const networks = JSON.parse(res.body.toString("utf8")) as Array<{ readonly Name: string }>;
+    for (const network of networks) {
+      await this.connectContainerToNetwork(network.Name, INGRESS_PROXY_CONTAINER_NAME);
     }
   }
 
