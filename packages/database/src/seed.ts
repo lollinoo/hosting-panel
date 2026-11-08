@@ -146,6 +146,7 @@ export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void>
         email: "infra@hcp.local",
         name: "Admin Infrastruttura",
         userStatus: "active",
+        platformRole: "infrastructure_admin",
       },
       {
         id: DEMO_IDS.users.hosting,
