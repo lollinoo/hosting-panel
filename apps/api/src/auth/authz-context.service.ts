@@ -102,6 +102,10 @@ export class AuthzContextService {
       );
     }
 
+    if (user.userStatus !== "active") {
+      throw new ControlPlaneError("UNAUTHENTICATED", "User account is not active.");
+    }
+
     const loaded = await this.loadPrincipalContextForUser(user);
     return {
       user: {
@@ -121,6 +125,7 @@ export class AuthzContextService {
     readonly email: string;
     readonly name: string;
     readonly userStatus: string;
+    readonly platformRole: "infrastructure_admin" | null;
   }): Promise<{
     readonly principal: PrincipalContext;
     readonly activeMembershipSummaries: readonly AuthenticatedMembershipSummary[];
@@ -129,7 +134,7 @@ export class AuthzContextService {
 
     // Load global roles and hosting admin scopes
     const globalRoles: PresetRoleName[] = [];
-    if (user.id === "usr_infra" || user.email === "infra@hcp.local") {
+    if (user.platformRole === "infrastructure_admin") {
       globalRoles.push("infrastructure_admin");
     }
 

@@ -17,7 +17,8 @@
     "test": "vitest run",
     "dev": "tsc -p tsconfig.build.json && node --watch dist/main.js",
     "start": "node dist/main.js",
-    "break-glass": "node dist/cli/break-glass.js"
+    "break-glass": "node dist/cli/break-glass.js",
+    "accounts": "node dist/cli/accounts.js"
   },
   "dependencies": {
     "@hosting-panel/authz": "workspace:*",

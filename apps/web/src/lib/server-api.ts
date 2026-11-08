@@ -1,3 +1,4 @@
+import { redirect } from "next/navigation";
 import { getServerSession } from "./server-session";
 import { fetchUpstream } from "./upstream";
 import type {
@@ -12,7 +13,7 @@ import type {
   SiteDetailDto,
   OperationDto,
   MeDto,
-  DevPersonaDto,
+  AdminUserDto,
   EncryptedSecretMetadataDto,
   HostTelemetryDto,
   HostDaemonHeartbeatDto,
@@ -26,204 +27,101 @@ export interface HostTelemetryOverviewDto {
   daemons: HostDaemonHeartbeatDto[];
 }
 
-export async function fetchServerPersonas(): Promise<DevPersonaDto[]> {
-  const res = await fetchUpstream<{ data: DevPersonaDto[] }>("v1/dev/auth/personas");
-  if (res.ok && res.data?.data) {
-    return res.data.data;
-  }
-  // Fallback dev personas if upstream is offline/mocking
-  return [
-    {
-      id: "persona-infra-admin",
-      email: "admin@platform.local",
-      name: "Alice Fontana (Infrastructure Admin)",
-      description: "Amministratore infrastruttura Linux/Docker Engine con permessi host",
-      role: "infrastructure_admin",
-      globalRoles: ["infrastructure_admin"],
-      organizationId: null,
-    },
-    {
-      id: "persona-hosting-admin",
-      email: "hosting@platform.local",
-      name: "Marco Riva (Hosting Admin)",
-      description: "Gestione allocazioni e catalogo template (segregato da daemon host)",
-      role: "hosting_admin",
-      globalRoles: ["hosting_admin"],
-      organizationId: null,
-    },
-    {
-      id: "persona-customer-owner",
-      email: "owner@acme.it",
-      name: "Giulia Rossi (Customer Owner)",
-      description: "Proprietario organizzazione Acme Corp con gestione siti e stack",
-      role: "customer_owner",
-      globalRoles: [],
-      organizationId: "org-acme",
-    },
-    {
-      id: "persona-customer-collab",
-      email: "dev@acme.it",
-      name: "Luca Bianchi (Customer Collaborator)",
-      description: "Collaboratore con permessi di sola lettura e deployment limitati",
-      role: "customer_collaborator",
-      globalRoles: [],
-      organizationId: "org-acme",
-    },
-    {
-      id: "persona-suspended-owner",
-      email: "suspended@demo.it",
-      name: "Paolo Neri (Organizzazione Sospesa)",
-      description: "Organizzazione sospesa per verifica policy o mancato pagamento",
-      role: "customer_owner",
-      globalRoles: [],
-      organizationId: "org-suspended",
-    },
-  ];
+export type UpstreamOutcome = "ok" | "expired" | "notFound" | "error";
+
+/** 401 = the API session is dead (revoked/expired); 404 = really missing; anything else = a failure to report. */
+export function classifyUpstream(res: { ok: boolean; status: number }): UpstreamOutcome {
+  if (res.ok) return "ok";
+  if (res.status === 401) return "expired";
+  return res.status === 404 ? "notFound" : "error";
 }
 
-export async function fetchServerMe(): Promise<MeDto | null> {
+export type ServerResult<T> = { ok: true; data: T } | { ok: false; outcome: "notFound" | "error" };
+
+/**
+ * GET for server components. A dead API session never renders misleading empty UI:
+ * it goes through /api/session/expired, which clears the cookie and lands on /login.
+ */
+export async function serverGet<T>(path: string): Promise<ServerResult<T>> {
   const session = await getServerSession();
-  if (!session) return null;
-  const res = await fetchUpstream<{ data: MeDto }>("v1/me", {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : null;
+  if (!session) redirect("/login");
+  const res = await fetchUpstream<{ data: T }>(path, { accessToken: session.accessToken });
+  const outcome = classifyUpstream(res);
+  if (outcome === "expired") redirect("/api/session/expired");
+  if (outcome === "ok" && res.data?.data !== undefined) return { ok: true, data: res.data.data };
+  return { ok: false, outcome: outcome === "notFound" ? "notFound" : "error" };
+}
+
+const orNull = <T>(r: ServerResult<T>): T | null => (r.ok ? r.data : null);
+const orEmpty = <T>(r: ServerResult<T[]>): T[] => (r.ok ? r.data : []);
+
+/** null = /v1/me failed for a reason other than a dead session (that one redirects to login). */
+export async function fetchServerMe(): Promise<MeDto | null> {
+  return orNull(await serverGet<MeDto>("v1/me"));
 }
 
 export async function fetchServerHosts(): Promise<HostDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: HostDto[] }>("v1/hosts", {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<HostDto[]>("v1/hosts"));
 }
 
 export async function fetchServerHost(hostId: string): Promise<HostDto | null> {
-  const session = await getServerSession();
-  if (!session) return null;
-  const res = await fetchUpstream<{ data: HostDto }>(`v1/hosts/${hostId}`, {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : null;
+  return orNull(await serverGet<HostDto>(`v1/hosts/${hostId}`));
 }
 
 export async function fetchServerHostAllocations(hostId: string): Promise<HostAllocationDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: HostAllocationDto[] }>(`v1/hosts/${hostId}/allocations`, {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<HostAllocationDto[]>(`v1/hosts/${hostId}/allocations`));
 }
 
 export async function fetchServerAllocations(): Promise<HostAllocationDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: HostAllocationDto[] }>("v1/allocations", {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<HostAllocationDto[]>("v1/allocations"));
 }
 
 export async function fetchServerTemplates(): Promise<ServiceTemplateDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: ServiceTemplateDto[] }>("v1/service-templates", {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<ServiceTemplateDto[]>("v1/service-templates"));
 }
 
 export async function fetchServerAudit(): Promise<AuditEventDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: AuditEventDto[] }>("v1/admin/audit", {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<AuditEventDto[]>("v1/admin/audit"));
 }
 
 export async function fetchServerOrg(orgId: string): Promise<OrganizationDetailDto | null> {
-  const session = await getServerSession();
-  if (!session) return null;
-  const res = await fetchUpstream<{ data: OrganizationDetailDto }>(`v1/organizations/${orgId}`, {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : null;
+  return orNull(await serverGet<OrganizationDetailDto>(`v1/organizations/${orgId}`));
 }
 
-export async function fetchServerOrgSites(orgId: string): Promise<SiteSummaryDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: SiteSummaryDto[] }>(`v1/organizations/${orgId}/sites`, {
-    accessToken: session.accessToken,
-  });
-  return res.ok && res.data?.data ? res.data.data : [];
+/** null = the list could not be loaded (not "no sites"). */
+export async function fetchServerOrgSites(orgId: string): Promise<SiteSummaryDto[] | null> {
+  return orNull(await serverGet<SiteSummaryDto[]>(`v1/organizations/${orgId}/sites`));
 }
 
-export async function fetchServerOrgSite(orgId: string, siteId: string): Promise<SiteDetailDto | null> {
-  const session = await getServerSession();
-  if (!session) return null;
-  const res = await fetchUpstream<{ data: SiteDetailDto }>(
-    `v1/organizations/${orgId}/sites/${siteId}`,
-    { accessToken: session.accessToken }
-  );
-  return res.ok && res.data?.data ? res.data.data : null;
+export async function fetchServerOrgSite(orgId: string, siteId: string): Promise<ServerResult<SiteDetailDto>> {
+  return serverGet<SiteDetailDto>(`v1/organizations/${orgId}/sites/${siteId}`);
 }
 
 export async function fetchServerOrgQuotas(orgId: string): Promise<ResourceQuotaDto | null> {
-  const session = await getServerSession();
-  if (!session) return null;
-  const res = await fetchUpstream<{ data: ResourceQuotaDto }>(
-    `v1/organizations/${orgId}/quotas`,
-    { accessToken: session.accessToken }
-  );
-  return res.ok && res.data?.data ? res.data.data : null;
+  return orNull(await serverGet<ResourceQuotaDto>(`v1/organizations/${orgId}/quotas`));
 }
 
 export async function fetchServerOrgMembers(orgId: string): Promise<MemberDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: MemberDto[] }>(
-    `v1/organizations/${orgId}/members`,
-    { accessToken: session.accessToken }
-  );
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<MemberDto[]>(`v1/organizations/${orgId}/members`));
 }
 
-export async function fetchServerOrgOperations(orgId: string): Promise<OperationDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
-  const res = await fetchUpstream<{ data: OperationDto[] }>(
-    `v1/organizations/${orgId}/operations`,
-    { accessToken: session.accessToken }
-  );
-  return res.ok && res.data?.data ? res.data.data : [];
+/** null = the operations could not be loaded (not "nothing happened"). */
+export async function fetchServerOrgOperations(orgId: string): Promise<OperationDto[] | null> {
+  return orNull(await serverGet<OperationDto[]>(`v1/organizations/${orgId}/operations`));
 }
 
 export async function fetchServerOrgSecrets(
   orgId: string,
   siteId?: string
 ): Promise<EncryptedSecretMetadataDto[]> {
-  const session = await getServerSession();
-  if (!session) return [];
   const query = siteId ? `?siteId=${encodeURIComponent(siteId)}` : "";
-  const res = await fetchUpstream<{ data: EncryptedSecretMetadataDto[] }>(
-    `v1/organizations/${orgId}/secrets${query}`,
-    { accessToken: session.accessToken }
-  );
-  return res.ok && res.data?.data ? res.data.data : [];
+  return orEmpty(await serverGet<EncryptedSecretMetadataDto[]>(`v1/organizations/${orgId}/secrets${query}`));
 }
 
-export async function fetchServerHostTelemetry(
-  hostId: string
-): Promise<HostTelemetryOverviewDto | null> {
-  const session = await getServerSession();
-  if (!session) return null;
-  const res = await fetchUpstream<{ data: HostTelemetryOverviewDto }>(
-    `v1/hosts/${hostId}/telemetry`,
-    { accessToken: session.accessToken }
-  );
-  return res.ok && res.data?.data ? res.data.data : null;
+export async function fetchServerHostTelemetry(hostId: string): Promise<HostTelemetryOverviewDto | null> {
+  return orNull(await serverGet<HostTelemetryOverviewDto>(`v1/hosts/${hostId}/telemetry`));
+}
+
+export async function fetchServerAdminUsers(): Promise<AdminUserDto[]> {
+  return orEmpty(await serverGet<AdminUserDto[]>("v1/admin/users"));
 }

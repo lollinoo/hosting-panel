@@ -14,6 +14,7 @@ export * from "./controllers/me.controller.js";
 export * from "./controllers/hosts.controller.js";
 export * from "./controllers/service-templates.controller.js";
 export * from "./controllers/admin-audit.controller.js";
+export * from "./controllers/admin-users.controller.js";
 export * from "./controllers/organizations.controller.js";
 export * from "./app.module.js";
 export * from "./create-app.js";

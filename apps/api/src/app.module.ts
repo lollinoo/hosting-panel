@@ -6,8 +6,11 @@ import { Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts"
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import { AuthzContextService } from "./auth/authz-context.service.js";
+import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import { ApiExceptionFilter } from "./common/api-exception.filter.js";
+import { AccountController } from "./controllers/account.controller.js";
+import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
@@ -44,9 +47,11 @@ export class AppModule {
         HealthController,
         AuthController,
         MeController,
+        AccountController,
         HostsController,
         ServiceTemplatesController,
         AdminAuditController,
+        AdminUsersController,
         OrganizationsController,
       ],
       providers: [
@@ -68,6 +73,7 @@ export class AppModule {
         },
         OidcService,
         AuthzContextService,
+        LoginService,
         OutboxWorkerService,
         DriftReconcilerService,
         {

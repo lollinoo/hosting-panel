@@ -23,6 +23,10 @@ tags:
     description: Liveness and database readiness probes
   - name: Auth
     description: Authentication, Dev OIDC token issuance, and token revocation
+  - name: Account
+    description: Self-service password, two-factor authentication and language
+  - name: Admin Users
+    description: Account administration by the server administrator
   - name: Identity
     description: Principal identity, assigned roles, and tenant memberships
   - name: Hosts
@@ -231,6 +235,356 @@ paths:
                         type: string
                         format: date-time
         "401":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Email and password login (TOTP code required for accounts with 2FA)
+      description: >-
+        Returns `totp_required` when the account has 2FA enabled and no `totpCode` was sent.
+        5 failures in 15 minutes lock the account (`ACCOUNT_LOCKED`, 423); TOTP guesses have a separate counter.
+        Server administrators without enrolled 2FA get `ACCOUNT_SETUP_INCOMPLETE` (403).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                totpCode:
+                  type: string
+                  pattern: "^\\d{6}$"
+      responses:
+        "200":
+          description: Login result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    oneOf:
+                      - type: object
+                        required: [status, accessToken, expiresAt, mustChangePassword]
+                        properties:
+                          status:
+                            type: string
+                            const: ok
+                          accessToken:
+                            type: string
+                          expiresAt:
+                            type: string
+                            format: date-time
+                          mustChangePassword:
+                            type: boolean
+                      - type: object
+                        required: [status]
+                        properties:
+                          status:
+                            type: string
+                            const: totp_required
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "423":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/me/password:
+    post:
+      tags: [Account]
+      operationId: changeMyPassword
+      summary: Change own password (min 12 chars); revokes the other sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+                  minLength: 12
+      responses:
+        "204":
+          description: Password changed
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "423":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/me/totp/setup:
+    post:
+      tags: [Account]
+      operationId: setupMyTotp
+      summary: Generate a TOTP secret (not active until enabled)
+      responses:
+        "200":
+          description: Secret and otpauth URI
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [secretBase32, otpauthUri]
+                    properties:
+                      secretBase32:
+                        type: string
+                      otpauthUri:
+                        type: string
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/me/totp/enable:
+    post:
+      tags: [Account]
+      operationId: enableMyTotp
+      summary: Enable 2FA by confirming a code from the authenticator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+      responses:
+        "204":
+          description: 2FA enabled
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "423":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/me/totp/disable:
+    post:
+      tags: [Account]
+      operationId: disableMyTotp
+      summary: Disable 2FA (customers only; server administrators must keep it)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, code]
+              properties:
+                password:
+                  type: string
+                code:
+                  type: string
+      responses:
+        "204":
+          description: 2FA disabled
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "423":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/me/locale:
+    patch:
+      tags: [Account]
+      operationId: setMyLocale
+      summary: Set the UI language of the caller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [locale]
+              properties:
+                locale:
+                  type: string
+                  enum: [it, en]
+      responses:
+        "204":
+          description: Locale updated
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/users:
+    get:
+      tags: [Admin Users]
+      operationId: listAdminUsers
+      summary: List all accounts (platform.users.manage)
+      responses:
+        "200":
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminUserDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/customer-account:
+    post:
+      tags: [Admin Users]
+      operationId: createCustomerAccount
+      summary: Create the customer organization and its hosting admin (one customer per server)
+      description: The temporary password is returned once; the user must change it at first login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [organizationName, ownerName, ownerEmail]
+              properties:
+                organizationName:
+                  type: string
+                ownerName:
+                  type: string
+                ownerEmail:
+                  type: string
+                  format: email
+      responses:
+        "201":
+          description: Account created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [organizationId, userId, temporaryPassword]
+                    properties:
+                      organizationId:
+                        type: string
+                      userId:
+                        type: string
+                      temporaryPassword:
+                        type: string
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/users/{userId}:
+    patch:
+      tags: [Admin Users]
+      operationId: updateAdminUserStatus
+      summary: Enable or disable an account (disabling revokes its sessions)
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [active, disabled]
+      responses:
+        "200":
+          description: Updated account
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminUserDto"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/users/{userId}/reset-password:
+    post:
+      tags: [Admin Users]
+      operationId: resetAdminUserPassword
+      summary: Issue a new temporary password (returned once)
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Temporary password
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [temporaryPassword]
+                    properties:
+                      temporaryPassword:
+                        type: string
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/users/{userId}/reset-totp:
+    post:
+      tags: [Admin Users]
+      operationId: resetAdminUserTotp
+      summary: Remove a customer's 2FA (server administrators recover via the SSH CLI only)
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: 2FA reset
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/me:
@@ -1620,6 +1974,10 @@ components:
           type: string
           enum:
             - UNAUTHENTICATED
+            - INVALID_CREDENTIALS
+            - ACCOUNT_LOCKED
+            - TOTP_INVALID
+            - ACCOUNT_SETUP_INCOMPLETE
             - PERMISSION_DENIED
             - HOST_POLICY_DENIED
             - ORGANIZATION_SUSPENDED
@@ -1659,6 +2017,35 @@ components:
           type: string
         reason:
           type: string
+
+    AdminUserDto:
+      type: object
+      required: [id, email, name, role, status, totpEnabled, mustChangePassword, lockedUntil, createdAt]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        role:
+          type: string
+          enum: [server_admin, customer]
+        status:
+          type: string
+          enum: [active, disabled]
+        totpEnabled:
+          type: boolean
+        mustChangePassword:
+          type: boolean
+        lockedUntil:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
 
     ReadMeta:
       type: object

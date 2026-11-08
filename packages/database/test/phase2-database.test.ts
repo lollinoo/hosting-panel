@@ -42,6 +42,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
     expect(applied).toEqual([
       "0001_phase1_docker_native.sql",
       "0002_phase2_runtime_and_secrets.sql",
+      "0003_production_accounts.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -55,6 +56,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
     expect(firstRows.map((r) => r.filename)).toEqual([
       "0001_phase1_docker_native.sql",
       "0002_phase2_runtime_and_secrets.sql",
+      "0003_production_accounts.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -64,6 +66,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
     expect(appliedAgain).toEqual([
       "0001_phase1_docker_native.sql",
       "0002_phase2_runtime_and_secrets.sql",
+      "0003_production_accounts.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);

@@ -8,13 +8,14 @@ import {
   Post,
   Req,
 } from "@nestjs/common";
-import type { DevPersonaDto } from "@hosting-panel/contracts";
+import { LoginInputSchema, type DevPersonaDto, type LoginResultDto } from "@hosting-panel/contracts";
 import { eq, users, type DatabaseClient } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { AuthzContextService } from "../auth/authz-context.service.js";
+import { LoginService } from "../auth/login.service.js";
 import { OidcService } from "../auth/oidc.service.js";
-import { ControlPlaneError } from "../common/control-plane.error.js";
+import { ControlPlaneError, extractClientIp } from "../common/control-plane.error.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -86,7 +87,16 @@ export class AuthController {
     private readonly oidcService: OidcService,
     @Inject(AuthzContextService)
     private readonly authzService: AuthzContextService,
+    @Inject(LoginService)
+    private readonly loginService: LoginService,
   ) {}
+
+  @Post("v1/auth/login")
+  @HttpCode(HttpStatus.OK)
+  public async login(@Req() req: FastifyRequest, @Body() rawBody: unknown): Promise<{ data: LoginResultDto }> {
+    const input = LoginInputSchema.parse(rawBody ?? {});
+    return { data: await this.loginService.login(input, extractClientIp(req)) };
+  }
 
   @Get("v1/dev/auth/personas")
   public getPersonas(): { data: readonly DevPersonaDto[] } {
@@ -178,9 +188,8 @@ export class AuthController {
   ): Promise<{ data: { revoked: boolean; revokedAt: string } }> {
     const auth = await this.authzService.authenticateRequest(req);
     const jti = auth.claims.jti;
-    const exp = auth.claims.exp;
 
-    this.oidcService.revokeTokenJti(jti, exp);
+    await this.oidcService.revokeSession(jti);
 
     await this.authzService.recordAudit(auth, req, {
       action: "auth.token.revoke",

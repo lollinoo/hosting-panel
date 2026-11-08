@@ -12,7 +12,7 @@
  */
 
 import { execFile as execFileCb, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -22,6 +22,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+const TRAEFIK_IMAGE = "traefik:v3.7";
 const execFile = promisify(execFileCb);
 
 const __filename = fileURLToPath(import.meta.url);
@@ -544,6 +545,12 @@ async function main() {
   await chmod(ipcKeyFile, 0o400);
   await writeFile(secretsMasterKeyFile, `${masterKeyHex}\n`, { mode: 0o400 });
   await chmod(secretsMasterKeyFile, 0o400);
+  const jwtSigningKeyFile = path.join(runtimeDir, "jwt-signing.pem");
+  await writeFile(
+    jwtSigningKeyFile,
+    generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }),
+    { mode: 0o400 },
+  );
 
   const pgContainerName = `hp_cp_pg18_${runShortId}`;
   const databaseUrl = `postgresql://hcp:${pgPassword}@127.0.0.1:${String(pgPort)}/hosting_panel`;
@@ -581,7 +588,7 @@ async function main() {
           HP_SECRETS_ROOT_DIR: secretsRootDir,
           HP_INGRESS_ROOT_DIR: ingressRootDir,
           HP_INGRESS_HTTP_PORT: String(ingressPort),
-          HP_TRAEFIK_IMAGE: "traefik:v3.3",
+          HP_TRAEFIK_IMAGE: TRAEFIK_IMAGE,
         },
       },
     );
@@ -614,11 +621,15 @@ async function main() {
         cwd: REPO_ROOT,
         env: {
           ...commonDaemonEnv,
+          // The API refuses HP_SEED_DEMO/ENABLE_DEV_OIDC under NODE_ENV=production; this harness needs both.
+          NODE_ENV: "development",
           API_HOST: "127.0.0.1",
           API_PORT: String(apiPort),
           DATABASE_URL: databaseUrl,
           WEB_ORIGIN: webBaseUrl,
           ENABLE_DEV_OIDC: "true",
+          HP_SEED_DEMO: "true",
+          HP_JWT_SIGNING_KEY_FILE: jwtSigningKeyFile,
           HP_EXECUTOR_SOCKET_PATH: executorSocketPath,
           HP_HOST_AGENT_SOCKET_PATH: hostAgentSocketPath,
           HP_SECRETS_MASTER_KEY_FILE: secretsMasterKeyFile,
@@ -641,7 +652,7 @@ async function main() {
           ...process.env,
           NODE_ENV: "production",
           API_INTERNAL_URL: apiBaseUrl,
-          SESSION_SECRET: webSessionSecret,
+          BFF_SESSION_SECRET: webSessionSecret,
         },
       },
     );
@@ -1270,7 +1281,7 @@ async function main() {
 | **Control Plane Database** | \`${postgresServerVersion}\` |
 | **Migrazioni SQL Applicate su PostgreSQL 18** | \`${appliedMigrations.join(", ")}\` |
 | **Filesystem Segreti (\`/tmp\`)** | \`${tmpFsType}\` (mode \`0700\` dir / \`0400\` secret files \`:ro\`) |
-| **Ingress Data Plane** | \`traefik:v3.3\` (\`hp_ingress_proxy\`, zero \`docker.sock\`, file provider dinamico \`:ro\`) |
+| **Ingress Data Plane** | \`${TRAEFIK_IMAGE}\` (\`hp_ingress_proxy\`, zero \`docker.sock\`, file provider dinamico \`:ro\`) |
 | **Workload Tenant Data Plane** | 2 siti HTTP (\`${domainAlpha}\`, \`${domainBravo}\` su \`nginxinc/nginx-unprivileged:alpine\`) + 1 datastore interno (\`redis:7.4-alpine\`) |
 
 ---

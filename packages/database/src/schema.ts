@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   foreignKey,
   index,
@@ -87,9 +88,36 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   name: text("name").notNull(),
   userStatus: text("user_status").notNull().default("active"),
+  passwordHash: text("password_hash"),
+  platformRole: text("platform_role").$type<"infrastructure_admin">(),
+  locale: text("locale").$type<"it" | "en">().notNull().default("it"),
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
+  totpCiphertextBase64: text("totp_ciphertext_base64"),
+  totpIvBase64: text("totp_iv_base64"),
+  totpAuthTagBase64: text("totp_auth_tag_base64"),
+  totpEnabledAt: timestamp("totp_enabled_at", { withTimezone: true }),
+  totpLastStep: bigint("totp_last_step", { mode: "number" }),
+  failedLoginCount: integer("failed_login_count").notNull().default(0),
+  totpFailedCount: integer("totp_failed_count").notNull().default(0),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const userSessions = pgTable(
+  "user_sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    ip: text("ip"),
+  },
+  (t) => [index("idx_user_sessions_user_id").on(t.userId)],
+);
 
 export const roles = pgTable("roles", {
   id: text("id").primaryKey(),

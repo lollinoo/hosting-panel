@@ -314,6 +314,10 @@ export const MeDtoSchema = z.object({
     id: EntityIdSchema,
     email: z.string().email(),
     name: z.string().min(1),
+    locale: z.enum(["it", "en"]),
+    totpEnabled: z.boolean(),
+    mustChangePassword: z.boolean(),
+    isServerAdmin: z.boolean(),
   }),
   globalRoles: z.array(PresetRoleNameSchema),
   hostingAdminOrgIds: z.array(EntityIdSchema),
@@ -721,3 +725,42 @@ export const HostTelemetryDtoSchema = z.object({
 });
 export type HostTelemetryDto = z.infer<typeof HostTelemetryDtoSchema>;
 
+
+// Login
+export const LoginInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email(),
+  password: z.string().min(1).max(1024),
+  totpCode: z.string().regex(/^\d{6}$/).optional(),
+});
+export type LoginInput = z.infer<typeof LoginInputSchema>;
+
+export const LoginResultDtoSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    accessToken: z.string().min(1),
+    expiresAt: IsoDateTimeSchema,
+    mustChangePassword: z.boolean(),
+  }),
+  z.object({ status: z.literal("totp_required") }),
+]);
+export type LoginResultDto = z.infer<typeof LoginResultDtoSchema>;
+
+export const AdminUserDtoSchema = z.object({
+  id: EntityIdSchema,
+  email: z.string().email(),
+  name: z.string().min(1),
+  role: z.enum(["server_admin", "customer"]),
+  status: z.enum(["active", "disabled"]),
+  totpEnabled: z.boolean(),
+  mustChangePassword: z.boolean(),
+  lockedUntil: IsoDateTimeSchema.nullable(),
+  createdAt: IsoDateTimeSchema,
+});
+export type AdminUserDto = z.infer<typeof AdminUserDtoSchema>;
+
+export const CreateCustomerAccountInputSchema = z.object({
+  organizationName: z.string().trim().min(1).max(120),
+  ownerEmail: z.string().trim().toLowerCase().email(),
+  ownerName: z.string().trim().min(1).max(120),
+});
+export type CreateCustomerAccountInput = z.infer<typeof CreateCustomerAccountInputSchema>;

@@ -92,6 +92,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
 
   beforeAll(async () => {
     app = await createControlPlaneApp({
+      seedPhase1: true,
       host: "127.0.0.1",
       port: 0,
       listen: true,

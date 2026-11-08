@@ -6,39 +6,18 @@ import { SidebarNav } from "@/components/layout/sidebar-nav";
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const session = await getServerSession();
-  if (!session) {
-    redirect("/login");
-  }
-
-  const isInfra = session.user.globalRoles.includes("infrastructure_admin");
-  const isHosting = session.user.globalRoles.includes("hosting_admin");
-  if (!isInfra && !isHosting) {
-    redirect("/choose-context");
-  }
-
-  const me = await fetchServerMe();
+  if (!session) redirect("/login");
+  if (!session.user.isServerAdmin) redirect("/");
+  if (session.user.mustChangePassword) redirect("/account/change-password");
+  await fetchServerMe(); // a revoked/expired API session redirects to login instead of rendering empty tables
 
   return (
     <div className="min-h-screen flex flex-col bg-background">
-      <Header
-        session={{
-          authenticated: true,
-          csrfToken: session.csrfToken,
-          activeConsole: "infra",
-          activeOrgSlug: session.activeOrgSlug,
-          user: session.user,
-          memberships: me?.memberships || [],
-          platformCapabilities: me?.platformCapabilities,
-        }}
-      />
+      <Header userName={session.user.name} email={session.user.email} csrfToken={session.csrfToken} />
       <div className="flex flex-1">
-        <SidebarNav consoleContext="infra" />
+        <SidebarNav />
         <main className="flex-1 p-8 overflow-y-auto">{children}</main>
       </div>
     </div>

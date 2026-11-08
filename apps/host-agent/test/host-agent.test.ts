@@ -669,6 +669,16 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(BigInt(invJson.totalStorageBytes)).toBeGreaterThan(0n);
       expect(findForbiddenPublicDtoKeys(invJson)).toEqual([]);
 
+      // The deployed runtime dir is group-writable and sticky for the hp-ipc daemons (3770).
+      await chmod(runtimeDir, 0o3770);
+      const groupWritableRes = await adapter.executeMaintenance(
+        createApprovedHostMaintenanceCommand({
+          hostId: "host_linux_live",
+          action: "verify_storage_posture",
+        }),
+      );
+      expect(groupWritableRes.status).toBe("succeeded");
+
       // World-writable directory fails strict storage posture verification
       await chmod(runtimeDir, 0o777);
       const insecurePostureRes = await adapter.executeMaintenance(
@@ -709,6 +719,15 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(text).toContain("ip6 nexthdr ipv6-icmp accept");
       expect(text).toContain("tcp dport { 22, 80, 443 }");
       expect(text).toContain("policy drop;");
+    });
+
+    it("baseline allows 3000 only from docker bridges", async () => {
+      const text = await readFile(REPO_DEDICATED_NFTABLES_RULESET_PATH, "utf8");
+      const lines = text.split("\n").filter((l) => l.includes("3000")).map((l) => l.trim());
+      expect(lines).toEqual([
+        'iifname "docker0" tcp dport 3000 ct state new accept',
+        'iifname "br-*" tcp dport 3000 ct state new accept',
+      ]);
     });
 
     it("rejects tampered nftables rulesets BEFORE invoking nft (both direct adapter and UDS IPC)", async () => {
@@ -924,7 +943,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         join(SYSTEMD_DIR, "hosting-panel-tmpfiles.conf"),
         "utf8",
       );
-      expect(tmpfilesContent).toContain("d /run/hosting-panel 2750 root hp-ipc -");
+      expect(tmpfilesContent).toContain("d /run/hosting-panel 3770 root hp-ipc -");
       expect(tmpfilesContent).toContain(
         "d /run/hosting-panel/secrets 0700 hp-executor hp-executor -",
       );

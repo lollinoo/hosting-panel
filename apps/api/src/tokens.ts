@@ -12,6 +12,7 @@ export interface ControlPlaneRuntimeConfig {
   readonly runtimeBackend: RuntimeBackend;
   readonly secretsMasterKey: Buffer;
   readonly breakglassSigningKey?: Uint8Array;
+  readonly jwtSigningKeyPem: string | null;
   readonly autoProcessOutbox: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;

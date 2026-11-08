@@ -1,7 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import {
   findForbiddenPublicDtoKeys,
   ApiErrorEnvelopeSchema,
@@ -14,11 +14,19 @@ import {
   createErrorEnvelope,
   type RuntimeBackend,
 } from "@hosting-panel/contracts";
-import { decryptSession, SESSION_COOKIE_NAME } from "../src/lib/session";
+import { decryptSession, encryptSession, SESSION_COOKIE_NAME } from "../src/lib/session";
 import { GET as getSession } from "../src/app/api/session/route";
 import { POST as postLogin } from "../src/app/api/session/login/route";
 import { POST as postLogout } from "../src/app/api/session/logout/route";
-import { POST as postSwitchContext } from "../src/app/api/session/switch-context/route";
+import { POST as postAccountPassword } from "../src/app/api/account/password/route";
+import { POST as postTotpSetup } from "../src/app/api/account/totp/setup/route";
+import { POST as postTotpEnable } from "../src/app/api/account/totp/enable/route";
+import { POST as postTotpDisable } from "../src/app/api/account/totp/disable/route";
+import { PATCH as patchAccountLocale } from "../src/app/api/account/locale/route";
+import { POST as postCustomerAccount } from "../src/app/api/admin/customer-account/route";
+import { PATCH as patchAdminUser } from "../src/app/api/admin/users/[userId]/route";
+import { POST as postAdminResetPassword } from "../src/app/api/admin/users/[userId]/reset-password/route";
+import { POST as postAdminResetTotp } from "../src/app/api/admin/users/[userId]/reset-totp/route";
 import { PATCH as patchHostMode } from "../src/app/api/bff/hosts/[hostId]/mode/route";
 import { POST as postHostMaintenance } from "../src/app/api/bff/hosts/[hostId]/maintenance/route";
 import { POST as postHostSecurity } from "../src/app/api/bff/hosts/[hostId]/security/route";
@@ -65,6 +73,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
   let revokeCalled = false;
   let mockRuntimeBackend: RuntimeBackend = "disabled";
   let lastReceivedIdempotencyKey: string | undefined;
+  let lastLoginBody: Record<string, unknown> = {};
   const storedSecrets = new Map<
     string,
     {
@@ -110,26 +119,47 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         }
 
         // Mock Upstream Routes
-        if (method === "POST" && url.pathname === "/v1/dev/auth/token") {
-          const personaId = (body.personaId as string) || "";
-          const isCustomer = personaId.includes("customer");
-
-          const responseData = {
-            data: {
-              accessToken: isCustomer
-                ? "mock-customer-token-jwt-secret-val"
-                : "mock-admin-token-jwt-secret-val-12345",
-              user: {
-                id: isCustomer ? "usr_customer_1" : "usr_admin_1",
-                email: isCustomer ? "owner@acme.it" : "admin@platform.local",
-                name: isCustomer ? "Giulia Rossi" : "Alice Fontana",
-                globalRoles: isCustomer ? [] : ["infrastructure_admin"],
-                hostingAdminOrgIds: [],
-              },
-            },
-          };
+        if (method === "POST" && url.pathname === "/v1/auth/login") {
+          lastLoginBody = body;
+          const email = (body.email as string) || "";
+          if (email === "locked@acme.it") {
+            res.writeHead(423, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "ACCOUNT_LOCKED",
+                  message: "Account bloccato",
+                  requestId: "req-locked",
+                })
+              )
+            );
+            return;
+          }
+          if (email === "totp@acme.it" && !body.totpCode) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ data: { status: "totp_required" } }));
+            return;
+          }
+          const isCustomer = email !== "admin@platform.local";
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(responseData));
+          res.end(
+            JSON.stringify({
+              data: {
+                status: "ok",
+                accessToken: isCustomer
+                  ? "mock-customer-token-jwt-secret-val"
+                  : "mock-admin-token-jwt-secret-val-12345",
+                expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+                mustChangePassword: false,
+              },
+            })
+          );
+          return;
+        }
+
+        if (method === "PATCH" && url.pathname === "/v1/me/locale") {
+          res.writeHead(204);
+          res.end();
           return;
         }
 
@@ -158,6 +188,10 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
                 id: isCustomer ? "usr_customer_1" : "usr_admin_1",
                 email: isCustomer ? "owner@acme.it" : "admin@platform.local",
                 name: isCustomer ? "Giulia Rossi" : "Alice Fontana",
+                locale: "it",
+                totpEnabled: false,
+                mustChangePassword: false,
+                isServerAdmin: !isCustomer,
               },
               globalRoles: isCustomer ? [] : ["infrastructure_admin"],
               hostingAdminOrgIds: [],
@@ -722,7 +756,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
         Origin: "http://localhost:3000",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ personaId: "persona-infra-admin" }),
+      body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
     });
 
     const loginRes = await postLogin(loginReq);
@@ -742,10 +776,18 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     // Verify raw cookie is encrypted JWE and never exposes plaintext token
     expect(rawCookieValue).not.toContain("mock-admin-token");
 
+    const loginBody = (await loginRes.json()) as Record<string, unknown>;
+    expect(JSON.stringify(loginBody)).not.toContain("mock-admin-token");
+    expect(loginBody).not.toHaveProperty("accessToken");
+    expect(lastLoginBody).toEqual({ email: "admin@platform.local", password: "pw" });
+
     const decrypted = await decryptSession(rawCookieValue);
     expect(decrypted).not.toBeNull();
     expect(decrypted?.accessToken).toBe("mock-admin-token-jwt-secret-val-12345");
-    expect(decrypted?.user.globalRoles).toContain("infrastructure_admin");
+    expect(decrypted?.activeConsole).toBe("admin");
+    expect(decrypted?.user.isServerAdmin).toBe(true);
+    expect(decrypted?.user.locale).toBe("it");
+    expect(decrypted?.user.mustChangePassword).toBe(false);
 
     // Tampered JWE must fail decryption
     const tampered = rawCookieValue.slice(0, -6) + "XXXXXX";
@@ -792,7 +834,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           Host: "localhost:3000",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ personaId: "persona-infra-admin" }),
+        body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
       })
     );
     const cookiePair = extractCookiePair(loginRes);
@@ -805,8 +847,8 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     const sessionData = (await sessionRes.json()) as { csrfToken: string };
 
     // Case A: Missing X-CSRF-Token header
-    const noCsrfRes = await postSwitchContext(
-      new Request("http://localhost:3000/api/session/switch-context", {
+    const noCsrfRes = await postAccountPassword(
+      new Request("http://localhost:3000/api/account/password", {
         method: "POST",
         headers: {
           Host: "localhost:3000",
@@ -814,7 +856,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           Cookie: cookiePair,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ activeConsole: "infra" }),
+        body: JSON.stringify({ currentPassword: "a", newPassword: "b" }),
       })
     );
     expect(noCsrfRes.status).toBe(403);
@@ -823,8 +865,8 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     expect(noCsrfErr.error.code).toBe("PERMISSION_DENIED");
 
     // Case B: Cross-site Origin (https://evil.example)
-    const evilOriginRes = await postSwitchContext(
-      new Request("http://localhost:3000/api/session/switch-context", {
+    const evilOriginRes = await postAccountPassword(
+      new Request("http://localhost:3000/api/account/password", {
         method: "POST",
         headers: {
           Host: "localhost:3000",
@@ -833,79 +875,13 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           "X-CSRF-Token": sessionData.csrfToken,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ activeConsole: "infra" }),
+        body: JSON.stringify({ currentPassword: "a", newPassword: "b" }),
       })
     );
     expect(evilOriginRes.status).toBe(403);
     const evilOriginJson = await evilOriginRes.json();
     const evilOriginErr = ApiErrorEnvelopeSchema.parse(evilOriginJson);
     expect(evilOriginErr.error.code).toBe("PERMISSION_DENIED");
-  });
-
-  it("3. POST /api/session/switch-context enforces membership (404 NOT_FOUND on unauthorized org, 200 on valid org)", async () => {
-    // Login as customer without admin roles
-    const loginRes = await postLogin(
-      new Request("http://localhost:3000/api/session/login", {
-        method: "POST",
-        headers: {
-          Host: "localhost:3000",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ personaId: "persona-customer-owner" }),
-      })
-    );
-    const cookiePair = extractCookiePair(loginRes);
-
-    const sessionRes = await getSession(
-      new Request("http://localhost:3000/api/session", {
-        headers: { Host: "localhost:3000", Cookie: cookiePair },
-      })
-    );
-    const { csrfToken } = (await sessionRes.json()) as { csrfToken: string };
-
-    // Valid switch to own organization
-    const validSwitchRes = await postSwitchContext(
-      new Request("http://localhost:3000/api/session/switch-context", {
-        method: "POST",
-        headers: {
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-          Cookie: cookiePair,
-          "X-CSRF-Token": csrfToken,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          activeConsole: "org",
-          activeOrgSlug: "acme-corp",
-        }),
-      })
-    );
-    expect(validSwitchRes.status).toBe(200);
-    const validJson = (await validSwitchRes.json()) as { ok: boolean; activeOrgSlug: string };
-    expect(validJson.ok).toBe(true);
-    expect(validJson.activeOrgSlug).toBe("acme-corp");
-
-    // Switch to unauthorized organization
-    const unauthorizedSwitchRes = await postSwitchContext(
-      new Request("http://localhost:3000/api/session/switch-context", {
-        method: "POST",
-        headers: {
-          Host: "localhost:3000",
-          Origin: "http://localhost:3000",
-          Cookie: cookiePair,
-          "X-CSRF-Token": csrfToken,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          activeConsole: "org",
-          activeOrgSlug: "unauthorized-tenant-x",
-        }),
-      })
-    );
-    expect(unauthorizedSwitchRes.status).toBe(404);
-    const unauthJson = await unauthorizedSwitchRes.json();
-    const unauthErr = ApiErrorEnvelopeSchema.parse(unauthJson);
-    expect(unauthErr.error.code).toBe("NOT_FOUND");
   });
 
   it("4. Mutating BFF routes enforce Idempotency-Key, Shared Mode Gating (409), and Lifecycle Boundary (422 NOT_SUPPORTED)", async () => {
@@ -917,7 +893,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           Host: "localhost:3000",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ personaId: "persona-infra-admin" }),
+        body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
       })
     );
     const cookiePair = extractCookiePair(loginRes);
@@ -1096,7 +1072,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           Host: "localhost:3000",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ personaId: "persona-infra-admin" }),
+        body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
       })
     );
     const cookiePair = extractCookiePair(loginRes);
@@ -1144,23 +1120,6 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       // Zero legacy mentions anywhere in src/
       expect(content.toLowerCase()).not.toContain(forbiddenLegacyBrand);
     }
-
-    // Explicit AC-F1-10 & AC-F2-10 boundary notices verified
-    const hostDetailPage = fs.readFileSync(
-      path.join(webSrcDir, "app/admin/hosts/[hostId]/page.tsx"),
-      "utf-8"
-    );
-    expect(hostDetailPage).toContain("AC-F1-10");
-    expect(hostDetailPage).toContain("Boundary Logico Definito — Runtime previsto in Fase 2");
-
-    const overviewPage = fs.readFileSync(
-      path.join(webSrcDir, "app/o/[orgSlug]/overview/page.tsx"),
-      "utf-8"
-    );
-    expect(overviewPage).toContain("AC-F1-10");
-    expect(overviewPage).toContain("AC-F2-10");
-    expect(overviewPage).toContain("Matrice Disponibilità Fase 1");
-    expect(overviewPage).toContain("Non attivo in Fase 1 (Previsto Fase 2+)");
   });
 
   it("7. Phase 2 Async Lifecycle (deploy/restart/stop) & Org Operation polling: enforces CSRF, forwards Idempotency-Key, and preserves 202 Accepted", async () => {
@@ -1173,7 +1132,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
             Host: "localhost:3000",
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ personaId: "persona-customer-owner" }),
+          body: JSON.stringify({ email: "owner@acme.it", password: "pw" }),
         })
       );
       const cookiePair = extractCookiePair(loginRes);
@@ -1259,7 +1218,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           Host: "localhost:3000",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ personaId: "persona-customer-owner" }),
+        body: JSON.stringify({ email: "owner@acme.it", password: "pw" }),
       })
     );
     const cookiePair = extractCookiePair(loginRes);
@@ -1394,7 +1353,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
             Host: "localhost:3000",
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ personaId: "persona-infra-admin" }),
+          body: JSON.stringify({ email: "admin@platform.local", password: "pw" }),
         })
       );
       const cookiePair = extractCookiePair(loginRes);
@@ -1519,5 +1478,141 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     } finally {
       mockRuntimeBackend = "disabled";
     }
+  });
+  async function loginAs(email: string): Promise<Response> {
+    return await postLogin(
+      new Request("http://localhost:3000/api/session/login", {
+        method: "POST",
+        headers: { Host: "localhost:3000", "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password: "pw" }),
+      })
+    );
+  }
+
+  it("10. throws in production when BFF_SESSION_SECRET is missing", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("BFF_SESSION_SECRET", "");
+    try {
+      await expect(
+        encryptSession({
+          accessToken: "t",
+          csrfToken: "c",
+          activeConsole: "customer",
+          activeOrgSlug: null,
+          user: {
+            id: "u",
+            email: "a@b.it",
+            name: "A",
+            globalRoles: [],
+            hostingAdminOrgIds: [],
+            locale: "it",
+            isServerAdmin: false,
+            mustChangePassword: false,
+          },
+        })
+      ).rejects.toThrow(/BFF_SESSION_SECRET/);
+      vi.stubEnv("BFF_SESSION_SECRET", "too-short");
+      await expect(decryptSession("x")).rejects.toThrow(/BFF_SESSION_SECRET/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("11. login passes totp_required through without a cookie", async () => {
+    const res = await loginAs("totp@acme.it");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    expect(await res.json()).toEqual({ status: "totp_required" });
+  });
+
+  it("12. login maps ACCOUNT_LOCKED to 423", async () => {
+    const res = await loginAs("locked@acme.it");
+    expect(res.status).toBe(423);
+    expect(res.headers.get("set-cookie")).toBeNull();
+    const body = await res.json();
+    expect(JSON.stringify(body)).not.toContain("accessToken");
+    expect(ApiErrorEnvelopeSchema.parse(body).error.code).toBe("ACCOUNT_LOCKED");
+  });
+
+  it("13. successful login sets admin console for server admin and customer console otherwise", async () => {
+    const adminRes = await loginAs("admin@platform.local");
+    expect(adminRes.status).toBe(200);
+    expect((await adminRes.json()).activeConsole).toBe("admin");
+    expect((await decryptSession(extractRawCookieValue(adminRes)))?.activeConsole).toBe("admin");
+
+    const customerRes = await loginAs("owner@acme.it");
+    expect(customerRes.status).toBe(200);
+    const customerBody = (await customerRes.json()) as Record<string, unknown>;
+    expect(customerBody.activeConsole).toBe("customer");
+    expect(customerBody.activeOrgSlug).toBe("acme-corp");
+    expect(customerBody).not.toHaveProperty("accessToken");
+    const customerSession = await decryptSession(extractRawCookieValue(customerRes));
+    expect(customerSession?.activeConsole).toBe("customer");
+    expect(customerSession?.user.isServerAdmin).toBe(false);
+  });
+
+  it("14. account and admin mutating routes reject missing CSRF", async () => {
+    const cookiePair = extractCookiePair(await loginAs("admin@platform.local"));
+    const userCtx = { params: Promise.resolve({ userId: "usr_customer_1" }) };
+    const noCsrf = (method: string, url: string) =>
+      new Request(`http://localhost:3000${url}`, {
+        method,
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+
+    const results = [
+      await postAccountPassword(noCsrf("POST", "/api/account/password")),
+      await postTotpSetup(noCsrf("POST", "/api/account/totp/setup")),
+      await postTotpEnable(noCsrf("POST", "/api/account/totp/enable")),
+      await postTotpDisable(noCsrf("POST", "/api/account/totp/disable")),
+      await patchAccountLocale(noCsrf("PATCH", "/api/account/locale")),
+      await postCustomerAccount(noCsrf("POST", "/api/admin/customer-account")),
+      await patchAdminUser(noCsrf("PATCH", "/api/admin/users/usr_customer_1"), userCtx),
+      await postAdminResetPassword(noCsrf("POST", "/api/admin/users/usr_customer_1/reset-password"), userCtx),
+      await postAdminResetTotp(noCsrf("POST", "/api/admin/users/usr_customer_1/reset-totp"), userCtx),
+    ];
+    for (const res of results) {
+      expect(res.status).toBe(403);
+      expect(ApiErrorEnvelopeSchema.parse(await res.json()).error.code).toBe("PERMISSION_DENIED");
+    }
+
+    const badSegment = await patchAdminUser(noCsrf("PATCH", "/api/admin/users/x"), {
+      params: Promise.resolve({ userId: "../etc" }),
+    });
+    expect(badSegment.status).toBe(400);
+  });
+
+  it("15. locale PATCH re-issues cookie with new locale", async () => {
+    const cookiePair = extractCookiePair(await loginAs("owner@acme.it"));
+    const sessionRes = await getSession(
+      new Request("http://localhost:3000/api/session", {
+        headers: { Host: "localhost:3000", Cookie: cookiePair },
+      })
+    );
+    const { csrfToken } = (await sessionRes.json()) as { csrfToken: string };
+
+    const res = await patchAccountLocale(
+      new Request("http://localhost:3000/api/account/locale", {
+        method: "PATCH",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ locale: "en" }),
+      })
+    );
+    expect(res.status).toBe(204);
+    const updated = await decryptSession(extractRawCookieValue(res));
+    expect(updated?.user.locale).toBe("en");
+    expect(updated?.accessToken).toBe("mock-customer-token-jwt-secret-val");
   });
 });

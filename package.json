@@ -1,21 +1,23 @@
 {
   "name": "hosting-panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.18.0",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=26.0.0"
   },
   "scripts": {
     "lint": "eslint .",
     "typecheck": "node packages/config/scripts/run-workspaces.mjs typecheck",
     "test": "vitest run",
     "build": "node packages/config/scripts/run-workspaces.mjs build",
-    "dev:api": "corepack pnpm -C apps/api run dev",
-    "dev:api:sim": "HP_RUNTIME_BACKEND=local-simulator corepack pnpm -C apps/api run dev",
+    "dev:api": "ENABLE_DEV_OIDC=true HP_SEED_DEMO=true corepack pnpm -C apps/api run dev",
+    "dev:api:sim": "ENABLE_DEV_OIDC=true HP_SEED_DEMO=true HP_RUNTIME_BACKEND=local-simulator corepack pnpm -C apps/api run dev",
     "dev:web": "corepack pnpm -C apps/web run dev",
-    "dev:docker": "node infra/linux/run-dev-docker.mjs"
+    "dev:docker": "node infra/linux/run-dev-docker.mjs",
+    "release:build": "node infra/release/build-release.mjs",
+    "release:smoke": "node infra/release/smoke-release.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

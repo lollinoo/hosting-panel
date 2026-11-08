@@ -50,6 +50,7 @@ const DEFAULT_EXECUTOR_SOCKET = "/run/hosting-panel/executor.sock";
 const DEFAULT_HOST_AGENT_SOCKET = "/run/hosting-panel/host-agent.sock";
 const DEFAULT_IPC_KEY_FILE = "/etc/hosting-panel/ipc.key";
 const DEFAULT_SECRETS_MASTER_KEY_FILE = "/etc/hosting-panel/secrets-master.key";
+const DEFAULT_JWT_SIGNING_KEY_FILE = "/etc/hosting-panel/jwt-signing.pem";
 
 const DEV_FALLBACK_MASTER_KEY = createHash("sha256")
   .update("hosting-panel-dev-simulator-secrets-master-key-v1")
@@ -113,7 +114,7 @@ async function resolveLinuxIpcSigningKey(): Promise<IpcSigningKey> {
   };
 }
 
-async function resolveSecretsMasterKey(
+export async function resolveSecretsMasterKey(
   runtimeBackend: RuntimeBackend,
   explicitKey?: string | Buffer | Uint8Array,
 ): Promise<Buffer> {
@@ -175,6 +176,25 @@ async function resolveBreakglassSigningKey(
   return undefined;
 }
 
+async function resolveJwtSigningKeyPem(
+  runtimeBackend: RuntimeBackend,
+  explicitPem?: string,
+): Promise<string | null> {
+  if (explicitPem !== undefined) {
+    if (explicitPem.trim() === "") throw new Error("JWT signing key must not be empty.");
+    return explicitPem;
+  }
+  if (runtimeBackend !== "linux-systemd") {
+    return null;
+  }
+  const keyFile =
+    process.env["HP_JWT_SIGNING_KEY_FILE"]?.trim() || DEFAULT_JWT_SIGNING_KEY_FILE;
+  // Missing/unreadable file throws: production must not fall back to an ephemeral key.
+  const pem = await readFile(keyFile, "utf8");
+  if (pem.trim() === "") throw new Error(`JWT signing key file ${keyFile} is empty.`);
+  return pem;
+}
+
 export interface CreateControlPlaneAppOptions {
   readonly host?: string;
   readonly port?: number;
@@ -186,6 +206,7 @@ export interface CreateControlPlaneAppOptions {
   readonly hostAgent?: HostAgentPort;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
+  readonly jwtSigningKeyPem?: string;
   readonly autoProcessOutbox?: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
@@ -221,6 +242,16 @@ export async function createControlPlaneApp(
     options?.port ??
     (process.env["API_PORT"] ? Number.parseInt(process.env["API_PORT"], 10) : 0);
 
+  // Demo data uses a published password/TOTP seed and dev OIDC mints tokens for any user: never in production.
+  const seedDemo = options?.seedPhase1 ?? process.env["HP_SEED_DEMO"] === "true";
+  const enableDevOidc = options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] === "true";
+  if (process.env["NODE_ENV"] === "production" && (seedDemo || enableDevOidc)) {
+    throw new Error(
+      `Refusing to start with NODE_ENV=production and ${seedDemo ? "HP_SEED_DEMO" : "ENABLE_DEV_OIDC"} enabled: ` +
+        "these are development-only flags. Unset them (or run without NODE_ENV=production).",
+    );
+  }
+
   const runtimeBackend = resolveRuntimeBackend(options);
   const secretsMasterKey = await resolveSecretsMasterKey(
     runtimeBackend,
@@ -229,6 +260,10 @@ export async function createControlPlaneApp(
   const breakglassSigningKey = await resolveBreakglassSigningKey(
     runtimeBackend,
     options?.breakglassSigningKey,
+  );
+  const jwtSigningKeyPem = await resolveJwtSigningKeyPem(
+    runtimeBackend,
+    options?.jwtSigningKeyPem,
   );
 
   let dockerExecutor = options?.dockerExecutor;
@@ -287,12 +322,9 @@ export async function createControlPlaneApp(
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";
   const oidcAudience = options?.oidcAudience ?? "hosting-panel-api";
 
-  if (options?.seedPhase1 ?? ownsDatabaseClient) {
-    await seedPhase1Dataset(dbClient.db);
+  if (seedDemo) {
+    await seedPhase1Dataset(dbClient.db, secretsMasterKey);
   }
-
-  const enableDevOidc =
-    options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] !== "false";
 
   const autoProcessOutbox = options?.autoProcessOutbox ?? true;
   const defaultBackgroundInterval =
@@ -320,6 +352,7 @@ export async function createControlPlaneApp(
     runtimeBackend,
     secretsMasterKey,
     ...(breakglassSigningKey !== undefined ? { breakglassSigningKey } : {}),
+    jwtSigningKeyPem,
     autoProcessOutbox,
     outboxPollIntervalMs,
     driftReconcileIntervalMs,
@@ -365,7 +398,12 @@ export async function createControlPlaneApp(
   // Public DTO security boundary: block accidental leakage of internal/forbidden keys
   fastifyInstance.addHook("preSerialization", async (request, _reply, payload) => {
     const routeUrl = request.url.split("?")[0] ?? "";
-    if (routeUrl === "/v1/dev/auth/token") {
+    // Token-issuing endpoints legitimately return an accessToken; TOTP setup returns the one-time secret.
+    if (
+      routeUrl === "/v1/dev/auth/token" ||
+      routeUrl === "/v1/auth/login" ||
+      routeUrl === "/v1/me/totp/setup"
+    ) {
       return payload;
     }
     const forbidden = findForbiddenPublicDtoKeys(payload);

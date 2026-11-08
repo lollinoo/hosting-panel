@@ -1,6 +1,11 @@
-# Active Bounded Operating Contract (`hosting-panel` — `HCP-SPEC-003` Phase 2)
+# Active Bounded Operating Contract (`hosting-panel` — Production Hosting Panel)
 
-## Current Macro Goal
+## Current Macro Goal (supersedes the Phase 2 goal below)
+Build the **production hosting panel** per `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md` in six ordered steps. **Step 1a (accounts, real login, IT/EN, site-first shell) is in progress** on branch `feat/step-1a-accounts-login`; installer and release packaging (Plan 1b) are built on branch `feat/step-1b-installer-releases`: `install.sh`, `hp-update` (health check + automatic rollback), release build/smoke and the tag-driven `release.yml` workflow, version `0.2.0`. Live acceptance on the owner's VMs is still pending. Owner decisions: `.agents/brain/decisions.md`.
+
+---
+
+## Previous Macro Goal (completed)
 Implement **`HCP-SPEC-003` Fase 2 — Runtime Operativo `Dedicated`, Split Agents (`hp-docker-executor` + `hp-host-agent`), IPC Firmato, Outbox/Reconciler, Segreti `AES-256-GCM` su `tmpfs`, Hardening `systemd` ed Esecuzione Reale `AC-F1-08`** (`docs/architecture/hcp-spec-003-phase-2.md`) on the dedicated Linux environment.
 
 - **Phase 1 Baseline Status**: `HCP-SPEC-002` Phase 1 completed, verified (`113/113` tests green), and merged on `main` (`31b3753`).

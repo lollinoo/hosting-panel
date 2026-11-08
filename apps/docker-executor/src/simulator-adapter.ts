@@ -21,6 +21,7 @@ import {
 import {
   assertSafeIdentifier,
   buildIngressProxyContainerPayload,
+  buildPanelDynamicYaml,
   buildSiteDynamicTraefikYaml,
   buildTraefikStaticYaml,
   DEFAULT_INGRESS_HTTP_PORT,
@@ -31,6 +32,7 @@ import {
   INGRESS_BRIDGE_NETWORK_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
   TraefikIngressFileManager,
+  type PanelIngressConfig,
   type SiteIngressRouteEntry,
 } from "./traefik-config.js";
 
@@ -50,6 +52,7 @@ export interface InMemoryDockerSimulatorAdapterOptions {
   readonly ingressRootDir?: string;
   readonly traefikImage?: string;
   readonly ingressHttpPort?: number;
+  readonly panel?: PanelIngressConfig | null;
   readonly dockerEngineReachable?: boolean;
 }
 
@@ -92,6 +95,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly ingressFileManager: TraefikIngressFileManager | null;
   private readonly traefikImage: string;
   private readonly ingressHttpPort: number;
+  private readonly panel: PanelIngressConfig | null;
   private engineReachable: boolean;
 
   private readonly containersByServiceId = new Map<string, MutableSimulatedContainer>();
@@ -110,6 +114,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       : null;
     this.traefikImage = options?.traefikImage ?? DEFAULT_TRAEFIK_IMAGE;
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
+    this.panel = options?.panel ?? null;
     this.engineReachable = options?.dockerEngineReachable ?? true;
   }
 
@@ -130,18 +135,23 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
     let staticPath = `${VIRTUAL_INGRESS_ROOT}/static/traefik.yml`;
     let dynamicPath = `${VIRTUAL_INGRESS_ROOT}/dynamic`;
+    let acmePath = `${VIRTUAL_INGRESS_ROOT}/acme`;
     if (this.ingressFileManager) {
-      const paths = await this.ingressFileManager.ensureStaticConfig();
+      const paths = await this.ingressFileManager.ensureStaticConfig(this.panel);
       staticPath = paths.staticConfigPath;
       dynamicPath = paths.dynamicDirPath;
+      acmePath = paths.acmeDirPath;
+    } else if (this.panel) {
+      buildPanelDynamicYaml(this.panel); // same validation as the on-disk path
     }
-    this.staticTraefikYaml = buildTraefikStaticYaml();
+    this.staticTraefikYaml = buildTraefikStaticYaml(this.panel);
 
     const payload = buildIngressProxyContainerPayload({
       traefikImage: this.traefikImage,
       httpHostPort: this.ingressHttpPort,
       staticConfigHostPath: staticPath,
       dynamicDirHostPath: dynamicPath,
+      acmeDirHostPath: acmePath,
     });
 
     if (!this.ingressProxyContainer) {

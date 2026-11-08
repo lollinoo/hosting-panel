@@ -74,3 +74,20 @@ Durable log of settled architectural and product boundary decisions aligned via 
 - **ADR-010**: Concrete Process Topology & IPC (`Split Agents` + Signed UDS IPC) — **To transition from `OPEN` to `APPROVATO — Fase 2` during `HCP-SPEC-003` implementation**
 - **ADR-011**: Filesystem & Volume Disk Quota Enforcement for `Shared` Hosting — **Remains `OPEN — prima di Shared`**
 - **ADR-012**: Threat Model Constraint on Untrusted Workloads in Shared Hosting — **VINCOLO**
+
+---
+
+## Production Hosting Panel Owner Decisions (2026-11-08)
+
+Source: `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md`.
+
+1. **Two product roles**: server administrator (`users.platform_role='infrastructure_admin'`, TOTP 2FA mandatory) and customer hosting admin (`customer_owner` membership).
+2. **One customer per server**: the panel runs on a dedicated server for a single hosting customer.
+3. **No mail hosting**: no mailboxes. Outgoing mail of sites goes through an SMTP relay configured by the admin.
+4. **Languages**: UI in Italian (default) and English, per-user language.
+5. **Site-first UI**: customer shell centred on the site (top-bar switcher, tabs), Coolify-like look.
+6. **DNS stays at the registrar**: the panel checks DNS, never hosts zones.
+7. **Backups**: S3 target configured by the admin.
+8. **SFTP and web file manager are mandatory**; databases with phpMyAdmin.
+9. **Container terminal only**: no host terminal in the panel.
+10. **Delivery order** (steps 1–6): 1 foundation (auth, roles, i18n, shell, installer); 2 sites, domains, TLS, outgoing mail; 3 backups; 4 files, databases, site import (first go-live line is steps 1–4); 5 WordPress tools; 6 admin console completion. Each step has its own plan and passes the four sensors plus a real-server check.

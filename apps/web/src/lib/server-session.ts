@@ -47,7 +47,7 @@ export async function setSessionCookie(
     sameSite: "lax",
     secure: isProduction,
     path: "/",
-    maxAge: 60 * 60 * 24, // 24 hours
+    maxAge: 60 * 60 * 12, // 12 hours
   });
 }
 

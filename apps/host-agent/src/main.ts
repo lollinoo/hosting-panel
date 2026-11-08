@@ -1,8 +1,7 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { getWorkspaceMetadata } from "@hosting-panel/config";
 import type { IpcVerificationKeyring, RuntimeBackend } from "@hosting-panel/contracts";
+import { isInvokedDirectly } from "@hosting-panel/contracts/invoked-directly";
 import { HOST_AGENT_VERSION, LinuxSystemHostAdapter } from "./linux-adapter.js";
 import { HostPolicyDeniedError } from "./nftables-baseline.js";
 import {
@@ -168,9 +167,7 @@ async function runMain(): Promise<void> {
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
-const currentFilePath = fileURLToPath(import.meta.url);
-const entryArgPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (entryArgPath === currentFilePath) {
+if (isInvokedDirectly(import.meta.url)) {
   runMain().catch((err: unknown) => {
     console.error(
       JSON.stringify({

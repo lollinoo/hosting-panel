@@ -33,6 +33,7 @@ export const PERMISSION_KEYS = [
   "quota.manage",
   "operation.read",
   "audit.read",
+  "platform.users.manage",
 ] as const;
 
 export const PermissionKeySchema = z.enum(PERMISSION_KEYS);
@@ -90,6 +91,7 @@ export const PRESET_ROLE_PERMISSIONS: Readonly<Record<PresetRoleName, readonly P
       "quota.read",
       "operation.read",
       "audit.read",
+      "platform.users.manage",
     ]),
     hosting_admin: Object.freeze<readonly PermissionKey[]>([
       "host.read",
