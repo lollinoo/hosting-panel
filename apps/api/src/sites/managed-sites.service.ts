@@ -1,7 +1,9 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  PLATFORM_OPS_ORG_ID,
   resolveWordpressImage,
+  type AdminSitesListDto,
   resolveWordpressRuntime,
   type CreateManagedSiteInput,
   type ManagedSiteDto,
@@ -11,8 +13,10 @@ import {
 } from "@hosting-panel/contracts";
 import {
   WORDPRESS_TEMPLATE_ID,
+  allocateHostTransactional,
   and,
   appendStackRevisionTransactional,
+  asc,
   createServiceWithRevisionTransactional,
   createSiteTransactional,
   desc,
@@ -22,14 +26,22 @@ import {
   hostAllocations,
   hosts,
   insertSiteDatabase,
+  isNotNull,
   latestSiteOperation,
+  membershipRoles,
+  memberships,
+  not,
   operations,
   or,
+  organizations,
   outboxEvents,
   serviceInstances,
   sites,
+  sql,
   stackRevisions,
+  updateOperationStepTransactional,
   upsertEncryptedSecretTransactional,
+  users,
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
@@ -38,6 +50,7 @@ import { ControlPlaneError } from "../common/control-plane.error.js";
 import {
   SITE_DELETE_STEPS,
   SITE_PROVISION_STEPS,
+  SITE_REASSIGN_STEPS,
   siteDatabaseIdentifier,
 } from "../runtime/site-provisioner.js";
 import {
@@ -477,6 +490,167 @@ export class ManagedSitesService {
         throw unavailable;
       throw err;
     }
+  }
+
+  /** The platform-ops allocation that holds unassigned sites; org and allocation are created on first use. */
+  public async ensureAdminHoldingAllocation(): Promise<string> {
+    return this.dbClient.db.transaction(async (tx) => {
+      // The host row lock serializes concurrent first uses, so only one allocation is created.
+      const [host] = await tx.select().from(hosts).limit(1).for("update");
+      if (!host) throw new ControlPlaneError("NOT_FOUND", "Installation has not been set up.");
+      const [existing] = await tx
+        .select({ id: hostAllocations.id })
+        .from(hostAllocations)
+        .where(and(eq(hostAllocations.organizationId, PLATFORM_OPS_ORG_ID), eq(hostAllocations.status, "active")))
+        .limit(1);
+      if (existing) return existing.id;
+      await tx
+        .insert(organizations)
+        .values({
+          id: PLATFORM_OPS_ORG_ID,
+          platformInstallationId: host.platformInstallationId,
+          name: "Platform Infrastructure Operations",
+          slug: "platform-ops",
+          status: "active",
+        })
+        .onConflictDoNothing();
+      const { allocation } = await allocateHostTransactional(tx as unknown as HostingPanelDatabase, {
+        hostId: host.id,
+        organizationId: PLATFORM_OPS_ORG_ID,
+        hostingMode: "dedicated",
+      });
+      return allocation!.id;
+    });
+  }
+
+  /** Admin owner choice → target org: null is platform-ops ("unassigned"), else a customer with an active allocation. */
+  public async resolveOwner(ownerOrganizationId: string | null): Promise<string> {
+    if (ownerOrganizationId === null) {
+      await this.ensureAdminHoldingAllocation();
+      return PLATFORM_OPS_ORG_ID;
+    }
+    if (ownerOrganizationId === PLATFORM_OPS_ORG_ID) {
+      throw new ControlPlaneError("VALIDATION_ERROR", "Choose a customer, or leave the site unassigned.", {
+        details: [{ field: "ownerOrganizationId", message: "Choose a customer, or leave the site unassigned." }],
+      });
+    }
+    const [allocation] = await this.dbClient.db
+      .select({ id: hostAllocations.id })
+      .from(hostAllocations)
+      .where(and(eq(hostAllocations.organizationId, ownerOrganizationId), eq(hostAllocations.status, "active")))
+      .limit(1);
+    if (!allocation) throw new ControlPlaneError("NOT_FOUND", "This customer was not found. Pick one from the list.");
+    return ownerOrganizationId;
+  }
+
+  /** The organization that currently holds a managed site (admin routes are not org-scoped). */
+  public async ownerOf(siteId: string): Promise<string> {
+    const [site] = await this.dbClient.db
+      .select({ organizationId: sites.organizationId })
+      .from(sites)
+      .where(and(eq(sites.id, siteId), isNotNull(sites.phpVersion)))
+      .limit(1);
+    if (!site) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    return site.organizationId;
+  }
+
+  public async listAll(): Promise<AdminSitesListDto> {
+    const db = this.dbClient.db;
+    const rows = await db
+      .select({ site: sites, orgName: organizations.name, primaryDomain: domains.hostname })
+      .from(sites)
+      .innerJoin(organizations, eq(organizations.id, sites.organizationId))
+      .leftJoin(domains, and(eq(domains.siteId, sites.id), eq(domains.isPrimary, true)))
+      .where(isNotNull(sites.phpVersion))
+      .orderBy(asc(sites.name), asc(sites.id));
+    const customers = await db
+      .selectDistinct({ organizationId: organizations.id, name: organizations.name, ownerEmail: users.email })
+      .from(hostAllocations)
+      .innerJoin(organizations, eq(organizations.id, hostAllocations.organizationId))
+      .innerJoin(memberships, eq(memberships.organizationId, organizations.id))
+      .innerJoin(
+        membershipRoles,
+        and(eq(membershipRoles.membershipId, memberships.id), eq(membershipRoles.roleId, "role_customer_owner")),
+      )
+      .innerJoin(users, eq(users.id, memberships.userId))
+      .where(and(eq(hostAllocations.status, "active"), not(eq(organizations.id, PLATFORM_OPS_ORG_ID))))
+      .orderBy(asc(organizations.name), asc(organizations.id));
+    return {
+      sites: rows.map(({ site, orgName, primaryDomain }) => ({
+        id: site.id,
+        organizationId: site.organizationId,
+        hostAllocationId: site.hostAllocationId,
+        name: site.name,
+        slug: site.slug,
+        status: site.status,
+        phpVersion: site.phpVersion,
+        primaryDomain: primaryDomain ?? null,
+        owner: site.organizationId === PLATFORM_OPS_ORG_ID ? null : { organizationId: site.organizationId, name: orgName },
+        createdAt: site.createdAt.toISOString(),
+        updatedAt: site.updatedAt.toISOString(),
+      })),
+      customers,
+    };
+  }
+
+  /**
+   * Enqueues site.reassign to an already resolved target org. The same owner is refused unless the
+   * latest owner change failed: then only the redeploy runs, to finish a half-done move.
+   */
+  public async reassign(
+    siteId: string,
+    toOrganizationId: string,
+    actorId: string,
+    idempotencyKey?: string,
+  ): Promise<ManagedSiteAccepted> {
+    const from = await this.ownerOf(siteId);
+    let redeployOnly = false;
+    if (from === toOrganizationId) {
+      const latest = await latestSiteOperation(this.dbClient.db, { siteId, kind: "site.reassign" });
+      if (latest?.status !== "failed") {
+        throw new ControlPlaneError("VALIDATION_ERROR", "The site already belongs to this customer.");
+      }
+      redeployOnly = true;
+    }
+    return this.dbClient.db.transaction(async (tx) => {
+      const t = tx as unknown as HostingPanelDatabase;
+      const enqueued = await enqueueOperationTransactional(t, {
+        organizationId: from,
+        kind: "site.reassign",
+        resourceType: "site",
+        resourceId: siteId,
+        requestedByUserId: actorId,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        lockKey: `site:${siteId}`,
+        steps: SITE_REASSIGN_STEPS,
+        outboxPayload: { fromOrganizationId: from, toOrganizationId },
+      });
+      if (!enqueued.idempotentReplay && redeployOnly) {
+        await updateOperationStepTransactional(t, enqueued.operation.id, "move_ownership", "skipped", "Already done");
+      }
+      return { siteId, operationId: enqueued.operation.id };
+    });
+  }
+
+  /** Admin "Try again": a failed owner change newer than the setup is re-issued; otherwise the setup is retried. */
+  public async adminRetry(siteId: string, actorId: string, idempotencyKey?: string): Promise<ManagedSiteAccepted> {
+    const db = this.dbClient.db;
+    const owner = await this.ownerOf(siteId);
+    const reassign = await latestSiteOperation(db, { siteId, kind: "site.reassign" });
+    const provision = await latestSiteOperation(db, { siteId, kind: "site.provision" });
+    if (reassign?.status === "failed" && (!provision || reassign.submittedAt >= provision.submittedAt)) {
+      const [event] = await db
+        .select({ payload: outboxEvents.payload })
+        .from(outboxEvents)
+        .where(sql`${outboxEvents.payload}->>'operationId' = ${reassign.id}`)
+        .limit(1);
+      // toOrganizationId is the requested owner, not the stamped (pre-move) organizationId.
+      const target = (event?.payload as Record<string, unknown> | undefined)?.["toOrganizationId"];
+      if (typeof target !== "string") throw new ControlPlaneError("VALIDATION_ERROR", "There is nothing to retry.");
+      const to = await this.resolveOwner(target === PLATFORM_OPS_ORG_ID ? null : target);
+      return this.reassign(siteId, to, actorId, idempotencyKey);
+    }
+    return this.act(siteId, owner, "retry", actorId, idempotencyKey);
   }
 
   async #webService(site: typeof sites.$inferSelect) {

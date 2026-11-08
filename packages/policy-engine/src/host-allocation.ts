@@ -1,3 +1,4 @@
+import { PLATFORM_OPS_ORG_ID } from "@hosting-panel/contracts";
 import type {
   ErrorCode,
   HostAllocationStatus,
@@ -52,10 +53,13 @@ export function evaluateHostAllocationAdmission(
     }
   }
 
-  if (effectiveMode === "dedicated") {
+  // Platform-ops only holds unassigned sites: it neither occupies a dedicated host nor is refused one.
+  if (effectiveMode === "dedicated" && requestOrganizationId !== PLATFORM_OPS_ORG_ID) {
     // Dedicated single-customer-org rule across pending | active | suspended allocations (AC-F1-01)
     const occupyingAllocations = existingAllocations.filter(
-      (a) => a.status === "pending" || a.status === "active" || a.status === "suspended",
+      (a) =>
+        a.organizationId !== PLATFORM_OPS_ORG_ID &&
+        (a.status === "pending" || a.status === "active" || a.status === "suspended"),
     );
 
     const conflictingAllocation = occupyingAllocations.find(

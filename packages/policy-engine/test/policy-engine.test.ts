@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PLATFORM_OPS_ORG_ID } from "@hosting-panel/contracts";
 import {
   evaluateHostAllocationAdmission,
   evaluateHostModeTransition,
@@ -77,6 +78,38 @@ describe("@hosting-panel/policy-engine — Host Allocation Admission (AC-F1-01)"
     const result = evaluateHostAllocationAdmission(ungatedSharedHost, "org_acme", []);
     expect(result.admitted).toBe(false);
     expect(result.errorCode).toBe("SHARED_MODE_GATED");
+  });
+});
+
+describe("@hosting-panel/policy-engine — platform-ops holding allocation", () => {
+  const host: HostAdmissionTarget = {
+    id: "hst_ded_01",
+    status: "ready",
+    hostingMode: "dedicated",
+    securityReviewed: true,
+    sharedApproved: false,
+  };
+  const ops: ExistingAllocationSnapshot = {
+    id: "alloc_ops",
+    organizationId: PLATFORM_OPS_ORG_ID,
+    status: "active",
+    hostingMode: "dedicated",
+  };
+
+  it("platform-ops allocation does not occupy a dedicated host", () => {
+    expect(evaluateHostAllocationAdmission(host, "org_acme", [ops]).admitted).toBe(true);
+  });
+
+  it("still refuses a second customer when platform-ops also holds the host", () => {
+    const a: ExistingAllocationSnapshot = { ...ops, id: "alloc_a", organizationId: "org_a" };
+    const result = evaluateHostAllocationAdmission(host, "org_b", [ops, a]);
+    expect(result.admitted).toBe(false);
+    expect(result.errorCode).toBe("DEDICATED_HOST_OCCUPIED");
+  });
+
+  it("always admits platform-ops on a ready dedicated host", () => {
+    const a: ExistingAllocationSnapshot = { ...ops, id: "alloc_a", organizationId: "org_a" };
+    expect(evaluateHostAllocationAdmission(host, PLATFORM_OPS_ORG_ID, [a]).admitted).toBe(true);
   });
 });
 

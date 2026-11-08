@@ -10,6 +10,7 @@ import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import { ApiExceptionFilter } from "./common/api-exception.filter.js";
 import { AccountController } from "./controllers/account.controller.js";
+import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AuthController } from "./controllers/auth.controller.js";
@@ -55,6 +56,7 @@ export class AppModule {
         ServiceTemplatesController,
         AdminAuditController,
         AdminUsersController,
+        AdminSitesController,
         OrganizationsController,
         ManagedSitesController,
       ],

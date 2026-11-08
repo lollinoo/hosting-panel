@@ -12,7 +12,9 @@ import {
   domains,
   encryptedSecrets,
   eq,
+  hostAllocations,
   listSiteDatabases,
+  moveSiteToOrganizationTransactional,
   operationSteps,
   operations,
   renewOperationLease,
@@ -50,8 +52,20 @@ export const SITE_DELETE_STEPS = [
   { key: "finish", label: "Finish" },
 ] as const;
 
+export const SITE_REASSIGN_STEPS = [
+  { key: "move_ownership", label: "Change the owner" },
+  { key: "redeploy", label: "Restart the site" },
+] as const;
+
 type SiteProvisionStep = (typeof SITE_PROVISION_STEPS)[number]["key"];
 type SiteDeleteStep = (typeof SITE_DELETE_STEPS)[number]["key"];
+type SiteReassignStep = (typeof SITE_REASSIGN_STEPS)[number]["key"];
+
+const REASSIGN_STEP_DONE: Readonly<Record<SiteReassignStep, string>> = {
+  move_ownership: "Owner changed",
+  redeploy: "Site restarted",
+};
+export const SITE_REASSIGN_FAILED = "The owner change did not finish";
 
 const DELETE_STEP_DONE: Readonly<Record<SiteDeleteStep, string>> = {
   drop_database: "Database removed",
@@ -286,6 +300,92 @@ export class SiteProvisioner {
     }
   }
 
+  /**
+   * Runs site.reassign: moves the site, its secrets and its operations (this one included) to the
+   * target org, then redeploys so the running site carries the new owner. Every update after the
+   * move uses the target org; the payload's stamped organizationId is never read.
+   */
+  public async reassign(op: typeof operations.$inferSelect, payload: Record<string, unknown>): Promise<void> {
+    const db = this.dbClient.db;
+    const siteId = op.resourceId;
+    const to = stringField(payload, "toOrganizationId");
+    let owner = op.organizationId;
+    let current: SiteReassignStep = "move_ownership";
+
+    const step = async (key: SiteReassignStep, work: () => Promise<void>): Promise<void> => {
+      current = key;
+      await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+      await updateOperationStepTransactional(db, op.id, key, "running", STEP_RUNNING);
+      await work();
+      await updateOperationStepTransactional(db, op.id, key, "succeeded", REASSIGN_STEP_DONE[key]);
+    };
+
+    try {
+      const [site] = await db.select().from(sites).where(eq(sites.id, siteId)).limit(1);
+      if (!site) throw new ControlPlaneError("NOT_FOUND", `Site '${siteId}' not found`);
+      const from = site.organizationId;
+      owner = from;
+
+      const [moveStep] = await db
+        .select({ status: operationSteps.status })
+        .from(operationSteps)
+        .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "move_ownership")))
+        .limit(1);
+      // "skipped" at enqueue: the same owner change is re-issued to finish a half-done move.
+      if (moveStep?.status !== "skipped") {
+        await step("move_ownership", async () => {
+          if (from === to) return;
+          const [allocation] = await db
+            .select({ id: hostAllocations.id })
+            .from(hostAllocations)
+            .where(and(eq(hostAllocations.organizationId, to), eq(hostAllocations.status, "active")))
+            .limit(1);
+          if (!allocation) throw new ControlPlaneError("NOT_FOUND", `Organization '${to}' has no active allocation`);
+          await moveSiteToOrganizationTransactional(db, {
+            siteId,
+            fromOrganizationId: from,
+            toOrganizationId: to,
+            toHostAllocationId: allocation.id,
+            masterKey: this.config.secretsMasterKey.toString("hex"),
+          });
+          owner = to;
+        });
+      } else if (from !== to) {
+        throw new ControlPlaneError("VALIDATION_ERROR", `Site '${siteId}' is not owned by '${to}'`);
+      }
+
+      await step("redeploy", async () => {
+        const services = await db
+          .select({ id: serviceInstances.id })
+          .from(serviceInstances)
+          .where(and(eq(serviceInstances.siteId, siteId), eq(serviceInstances.organizationId, to)));
+        for (const svc of services) {
+          const spec = await buildApprovedServiceSpec(db, this.config, { organizationId: to, serviceInstanceId: svc.id });
+          await recordDeployedState(db, this.executor, spec, await this.executor.deployService(spec));
+        }
+      });
+
+      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
+      await db
+        .update(sites)
+        .set({ status: "ready", updatedAt: new Date() })
+        .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
+      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
+      await appendAuditEvent(db, {
+        actorId: null,
+        actorType: "system",
+        organizationId: to,
+        action: "admin.site.reassign.succeeded",
+        targetType: "site",
+        targetId: siteId,
+        details: { operationId: op.id, from, to },
+      });
+    } catch (err) {
+      await this.#settleFailure({ ...op, organizationId: owner }, current, err, SITE_REASSIGN_FAILED, "admin.site.reassign.failed");
+      throw err;
+    }
+  }
+
   async #runJob(req: SiteJobRequest): Promise<void> {
     const result = await this.executor.runSiteJob(req);
     if (result.exitCode !== 0) {
@@ -325,7 +425,7 @@ export class SiteProvisioner {
 
   async #settleFailure(
     op: typeof operations.$inferSelect,
-    failedStep: SiteProvisionStep | SiteDeleteStep,
+    failedStep: SiteProvisionStep | SiteDeleteStep | SiteReassignStep,
     err: unknown,
     publicMessage: string,
     auditAction: string,

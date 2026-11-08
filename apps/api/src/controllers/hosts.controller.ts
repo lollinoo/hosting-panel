@@ -36,6 +36,7 @@ import {
   hostAllocations,
   hosts,
   listHostAgentHeartbeats,
+  not,
   operationSteps,
   operations,
   organizations,
@@ -809,6 +810,8 @@ export class HostsController {
         and(
           eq(hostAllocations.hostId, host.id),
           eq(hostAllocations.status, "active"),
+          // The platform-ops allocation only holds unassigned sites; host ops belong to the customer.
+          not(eq(hostAllocations.organizationId, PLATFORM_OPS_ORG_ID)),
         ),
       )
       .limit(1);
