@@ -137,8 +137,61 @@ describe("prune_releases", () => {
     const root = tmp();
     for (const v of ["0.1.0", "0.2.0", "0.3.0", "0.4.0"]) mkdirSync(join(root, "releases", v), { recursive: true });
     symlinkSync("releases/0.4.0", join(root, "current"));
-    run(`prune_releases "${root}" 1`, { HP_KEEP_EXTRA: "0.1.0" });
+    expect(run(`prune_releases "${root}" 1`, { HP_KEEP_EXTRA: "0.1.0" }).code).toBe(0);
     expect(readdirSync(join(root, "releases")).sort()).toEqual(["0.1.0", "0.4.0"]);
+  });
+});
+
+describe("hardening", () => {
+  it("rejects a checksum file naming another file", () => {
+    const archive = makeArchive("0.1.0");
+    const other = makeArchive("0.2.0");
+    sh(`cp "${other}" "${join(archive, "..", "other.tgz")}"; cd "${join(archive, "..")}" && sha256sum other.tgz > "${archive}.sha256"`);
+    expect(run(`verify_release_archive "${archive}"`).code).not.toBe(0);
+  });
+
+  it("fetch_release leaves no archive or .part when curl fails", () => {
+    const shim = tmp();
+    writeFileSync(join(shim, "curl"), "#!/bin/sh\nexit 22\n", { mode: 0o755 });
+    const dest = join(tmp(), "dl");
+    const r = run(`fetch_release 0.1.0 "${dest}"`, { PATH: `${shim}:${process.env.PATH}` });
+    expect(r.code).not.toBe(0);
+    expect(readdirSync(dest)).toEqual([]);
+  });
+
+  it("force reinstall restores the old release when the rename fails", () => {
+    const root = tmp();
+    const archive = makeArchive("0.2.0");
+    expect(run(`install_release "${archive}" "${root}"; swap_current "${root}" 0.2.0`).code).toBe(0);
+    const shim = tmp();
+    const count = join(shim, "n");
+    writeFileSync(
+      join(shim, "mv"),
+      `#!/bin/sh\nn=$(cat "${count}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${count}"\n[ "$n" = 2 ] && exit 1\nexec /usr/bin/env -S PATH=/usr/bin:/bin mv "$@"\n`,
+      { mode: 0o755 }
+    );
+    const r = run(`install_release "${archive}" "${root}"`, {
+      HP_FORCE_REINSTALL: "1",
+      PATH: `${shim}:${process.env.PATH}`
+    });
+    expect(r.code).not.toBe(0);
+    expect(existsSync(join(root, "current/VERSION"))).toBe(true);
+    expect(readdirSync(join(root, "releases"))).toEqual(["0.2.0"]);
+  });
+
+  it("swap_current rejects empty and traversal versions", () => {
+    const root = tmp();
+    mkdirSync(join(root, "releases/x"), { recursive: true });
+    expect(run(`swap_current "${root}" ""`).code).not.toBe(0);
+    expect(run(`swap_current "${root}" "../x"`).code).not.toBe(0);
+    expect(existsSync(join(root, "current"))).toBe(false);
+  });
+
+  it("prune_releases rejects a non-numeric keep and deletes nothing", () => {
+    const root = tmp();
+    for (const v of ["0.1.0", "0.2.0"]) mkdirSync(join(root, "releases", v), { recursive: true });
+    expect(run(`prune_releases "${root}" abc`).code).not.toBe(0);
+    expect(readdirSync(join(root, "releases")).sort()).toEqual(["0.1.0", "0.2.0"]);
   });
 });
 

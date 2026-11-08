@@ -19,8 +19,15 @@ fetch_release() {
   url="$(release_asset_url "${version}")"
   archive="${dest}/hosting-panel-${version}-linux-x64.tar.gz"
   mkdir -p "${dest}" || return 1
-  curl -fsSL --retry 3 -o "${archive}" "${url}" || { printf '[ERROR] Download failed: %s\n' "${url}" >&2; return 1; }
-  curl -fsSL --retry 3 -o "${archive}.sha256" "${url}.sha256" || { printf '[ERROR] Download failed: %s.sha256\n' "${url}" >&2; return 1; }
+  local f
+  for f in "" ".sha256"; do
+    if ! curl -fsSL --retry 3 --connect-timeout 15 --speed-time 30 --speed-limit 1024 \
+      -o "${archive}${f}.part" "${url}${f}" || ! mv -f -- "${archive}${f}.part" "${archive}${f}"; then
+      printf '[ERROR] Download failed: %s%s\n' "${url}" "${f}" >&2
+      rm -f -- "${archive}.part" "${archive}.sha256.part" "${archive}.sha256" "${archive}"
+      return 1
+    fi
+  done
   printf '%s\n' "${archive}"
 }
 
@@ -31,6 +38,12 @@ verify_release_archive() {
   base="$(basename -- "${archive}")"
   if [[ ! -f "${archive}" || ! -f "${archive}.sha256" ]]; then
     printf '[ERROR] Missing archive or checksum file for %s\n' "${archive}" >&2
+    return 1
+  fi
+  local named
+  named="$(awk 'NR==1{n=$2; sub(/^\*/,"",n); print n}' "${archive}.sha256")"
+  if [[ "${named}" != "${base}" ]]; then
+    printf '[ERROR] Checksum file names %s, expected %s\n' "${named}" "${base}" >&2
     return 1
   fi
   (cd "${dir}" && sha256sum -c "${base}.sha256" >/dev/null 2>&1) || {
@@ -44,7 +57,7 @@ install_release() {
   local archive="$1" root="${2:-${HP_DEFAULT_ROOT}}" tmp top version
   mkdir -p "${root}/releases" || return 1
   tmp="$(mktemp -d "${root}/releases/.tmp-XXXXXX")" || return 1
-  if ! tar -xzf "${archive}" -C "${tmp}"; then
+  if ! tar -xzf "${archive}" --no-same-owner --no-same-permissions -C "${tmp}"; then
     printf '[ERROR] Failed to extract %s\n' "${archive}" >&2
     rm -rf -- "${tmp}"
     return 1
@@ -70,9 +83,10 @@ install_release() {
       rm -rf -- "${tmp}"
       return 1
     fi
-    rm -rf -- "${root}/releases/${version}"
+    mv -T -- "${root}/releases/${version}" "${tmp}/old" || { rm -rf -- "${tmp}"; return 1; }
   fi
   if ! mv -T -- "${top}" "${root}/releases/${version}"; then
+    [[ -e "${tmp}/old" ]] && mv -T -- "${tmp}/old" "${root}/releases/${version}"
     rm -rf -- "${tmp}"
     return 1
   fi
@@ -89,7 +103,7 @@ current_version() {
 
 swap_current() {
   local root="${1:-${HP_DEFAULT_ROOT}}" version="$2"
-  if [[ ! -d "${root}/releases/${version}" ]]; then
+  if [[ ! "${version}" =~ ${_hp_semver_re} || ! -d "${root}/releases/${version}" ]]; then
     printf '[ERROR] Release %s is not installed\n' "${version}" >&2
     return 1
   fi
@@ -110,6 +124,7 @@ version_gt() {
 
 prune_releases() {
   local root="${1:-${HP_DEFAULT_ROOT}}" keep="${2:-3}" cur v n=0
+  [[ "${keep}" =~ ^[0-9]+$ ]] || { printf '[ERROR] Invalid keep count %s\n' "${keep}" >&2; return 1; }
   cur="$(current_version "${root}")"
   [[ -d "${root}/releases" ]] || return 0
   # Protected releases (current, HP_KEEP_EXTRA) use up part of the keep budget; the rest go newest first.
