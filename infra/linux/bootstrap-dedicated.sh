@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # HCP-SPEC-003 §9.1 — Idempotent Dedicated Host Bootstrap Script
-# Target: Ubuntu 24.04 LTS / Debian 12 (kernel 6.x+, cgroups v2, Docker Engine)
+# Target: Ubuntu 24.04/26.04, Debian 12/13 (kernel 6.x+, cgroups v2, Docker Engine)
 # ==============================================================================
 set -euo pipefail
 umask 027
@@ -67,25 +67,11 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   fail "Dedicated bootstrap requires a Linux host (detected: $(uname -s))."
 fi
 
-if [[ ! -r /etc/os-release ]]; then
-  fail "Missing /etc/os-release; cannot verify Linux distribution."
-fi
-
-# shellcheck source=/dev/null
-. /etc/os-release
-
-DISTRO_ID="${ID:-unknown}"
-DISTRO_VERSION="${VERSION_ID:-unknown}"
-
-if [[ "${DISTRO_ID}" == "ubuntu" && "${DISTRO_VERSION}" == "24.04" ]]; then
-  log_info "Verified supported OS: Ubuntu ${DISTRO_VERSION} LTS"
-elif [[ "${DISTRO_ID}" == "debian" && "${DISTRO_VERSION}" == "12" ]]; then
-  log_info "Verified supported OS: Debian ${DISTRO_VERSION}"
-elif [[ "${ALLOW_OTHER_LINUX}" -eq 1 ]]; then
-  log_info "Non-target Linux distribution allowed via --allow-other-linux (${DISTRO_ID} ${DISTRO_VERSION})"
-else
-  fail "Unsupported distribution '${DISTRO_ID} ${DISTRO_VERSION}'. Expected Ubuntu 24.04 LTS or Debian 12 (use --allow-other-linux for lab hosts)."
-fi
+# shellcheck source=lib/os.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/os.sh"
+export HP_ALLOW_OTHER_LINUX="${ALLOW_OTHER_LINUX}"
+OS_DETECTED="$(detect_supported_os)" || fail "Unsupported distribution. Supported: ${HP_SUPPORTED_OS} (use --allow-other-linux for lab hosts)."
+log_info "Verified OS: ${OS_DETECTED}"
 
 # 2. Verify Linux kernel 6.x+
 KERNEL_RELEASE="$(uname -r)"

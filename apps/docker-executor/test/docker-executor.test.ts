@@ -748,7 +748,7 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
       (c) => c.name === INGRESS_PROXY_CONTAINER_NAME,
     );
     expect(proxyCtr).toBeDefined();
-    expect(proxyCtr?.image).toBe("traefik:v3.3");
+    expect(proxyCtr?.image).toBe("traefik:v3.7");
     expect(proxyCtr?.hostConfig.Privileged).toBe(false);
     expect(proxyCtr?.hostConfig.CapDrop).toEqual(["ALL"]);
     expect(proxyCtr?.hostConfig.CapAdd).toEqual(["NET_BIND_SERVICE"]);
@@ -961,7 +961,7 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     mockDaemon.containers.set("ctr_stale_proxy", {
       id: "ctr_stale_proxy",
       name: INGRESS_PROXY_CONTAINER_NAME,
-      image: "traefik:v3.3",
+      image: "traefik:v3.7",
       env: [],
       labels: { "io.hostingpanel.managed": "true", "io.hostingpanel.role": "ingress_proxy" },
       hostConfig: {

@@ -96,7 +96,7 @@ hosting-panel/
 ## 4. Avvio Rapido
 
 ### Prerequisiti di Sistema
-- **Node.js**: Versione `>= 24.0.0` (raccomandata `24.22.0+`, verificare con `.node-version`)
+- **Node.js**: Versione `>= 26.0.0` (verificare con `.node-version`)
 - **Package Manager**: `corepack pnpm`
 
 ---
@@ -123,7 +123,7 @@ Gli script `dev:*` attivano esplicitamente `ENABLE_DEV_OIDC=true` e `HP_SEED_DEM
 
 ---
 
-### Opzione B: Modalità VPS Linux Dedicated (`Ubuntu 24.04 LTS` / `Debian 12`)
+### Opzione B: Modalità VPS Linux Dedicated (`Ubuntu 24.04` / `Ubuntu 26.04` / `Debian 12` / `Debian 13`)
 Per predisporre un nodo Linux dedicato con utenti isolati (`hp-web`, `hp-api`, `hp-executor`, `hp-agent`), gruppo `hp-ipc`, chiavi `/etc/hosting-panel/{ipc.key,secrets-master.key}` e unit `systemd` blindate:
 
 ```bash
