@@ -711,6 +711,15 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(text).toContain("policy drop;");
     });
 
+    it("baseline allows 3000 only from docker bridges", async () => {
+      const text = await readFile(REPO_DEDICATED_NFTABLES_RULESET_PATH, "utf8");
+      const lines = text.split("\n").filter((l) => l.includes("3000")).map((l) => l.trim());
+      expect(lines).toEqual([
+        'iifname "docker0" tcp dport 3000 ct state new accept',
+        'iifname "br-*" tcp dport 3000 ct state new accept',
+      ]);
+    });
+
     it("rejects tampered nftables rulesets BEFORE invoking nft (both direct adapter and UDS IPC)", async () => {
       const dir = await createShortTempDir();
       const tamperedPath = join(dir, "nftables-tampered.conf");

@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEDICATED_NFTABLES_RULESET_SHA256 =
-  "e08127372d597f33bdd6c1af4530af79723c650fc2c8e253082fa3e9aa5421bc" as const;
+  "e02539a5ed5ef38253d5a4b824a593cfdefef288cf88696f6cb6a7898369a0fc" as const;
 
 export const PRODUCTION_DEDICATED_NFTABLES_RULESET_PATH =
   "/etc/hosting-panel/nftables-dedicated.conf" as const;
