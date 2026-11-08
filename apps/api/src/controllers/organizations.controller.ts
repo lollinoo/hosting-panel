@@ -26,6 +26,7 @@ import {
   UpsertEncryptedSecretInputSchema,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
+  isPlatformSecretKey,
   type AsyncAcceptedEnvelope,
   type DomainDto,
   type EncryptedSecretMetadataDto,
@@ -53,6 +54,7 @@ import {
   deleteEncryptedSecretTransactional,
   desc,
   domains,
+  encryptedSecrets,
   enqueueOperationTransactional,
   eq,
   hostAllocations,
@@ -110,6 +112,8 @@ const SERVICE_OPERATION_STEPS = [
   { key: "dispatch_ipc", label: "Dispatch signed request to docker-executor" },
   { key: "reconcile_state", label: "Reconcile observed container state" },
 ] as const;
+
+const MANAGED_SITE_MESSAGE = "Manage this site from its page";
 
 function toIsoString(date: Date | string | null | undefined): string {
   if (!date) return new Date().toISOString();
@@ -287,6 +291,25 @@ export class OrganizationsController {
     @Inject(AuthzContextService) private readonly authzService: AuthzContextService,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
   ) {}
+
+  /** Managed WordPress sites change only through managed-sites routes (image, PHP version, site lock). */
+  async #refuseManagedSite(siteId: string | null): Promise<void> {
+    if (siteId === null) return;
+    const [site] = await this.dbClient.db
+      .select({ phpVersion: sites.phpVersion })
+      .from(sites)
+      .where(eq(sites.id, siteId))
+      .limit(1);
+    if (site?.phpVersion) {
+      throw new ControlPlaneError("VALIDATION_ERROR", MANAGED_SITE_MESSAGE);
+    }
+  }
+
+  #refusePlatformSecretKey(secretKey: string): void {
+    if (isPlatformSecretKey(secretKey)) {
+      throw new ControlPlaneError("VALIDATION_ERROR", "This name is reserved by the panel. Choose another name.");
+    }
+  }
 
   #buildCapabilities(): OrganizationCapabilitiesDto {
     const runtimeEnabled = this.config.runtimeBackend !== "disabled";
@@ -495,6 +518,8 @@ export class OrganizationsController {
       typeof body.siteId === "string" && body.siteId.trim().length > 0
         ? body.siteId.trim()
         : null;
+    this.#refusePlatformSecretKey(body.secretKey);
+    await this.#refuseManagedSite(normalizedSiteId);
 
     const saved = await upsertEncryptedSecretTransactional(this.dbClient.db, {
       organizationId: orgId,
@@ -521,6 +546,16 @@ export class OrganizationsController {
       targetType: "encrypted_secret",
       targetId: secretId,
     });
+
+    const [secret] = await this.dbClient.db
+      .select({ secretKey: encryptedSecrets.secretKey, siteId: encryptedSecrets.siteId })
+      .from(encryptedSecrets)
+      .where(and(eq(encryptedSecrets.id, secretId), eq(encryptedSecrets.organizationId, orgId)))
+      .limit(1);
+    if (secret) {
+      this.#refusePlatformSecretKey(secret.secretKey);
+      await this.#refuseManagedSite(secret.siteId);
+    }
 
     await deleteEncryptedSecretTransactional(this.dbClient.db, {
       organizationId: orgId,
@@ -1185,6 +1220,7 @@ export class OrganizationsController {
       targetId: siteId,
       resource: { id: site.id, organizationId: site.organizationId },
     });
+    await this.#refuseManagedSite(site.id);
 
     const body = CreateServiceInstanceInputSchema.parse(rawBody ?? {});
 
@@ -1328,6 +1364,7 @@ export class OrganizationsController {
       targetId: serviceId,
       resource: { id: svc.id, organizationId: svc.organizationId },
     });
+    await this.#refuseManagedSite(svc.siteId);
 
     const body = CreateStackRevisionInputSchema.parse(rawBody ?? {});
 
@@ -1396,6 +1433,7 @@ export class OrganizationsController {
       targetId: serviceId,
       resource: { id: svc.id, organizationId: svc.organizationId },
     });
+    await this.#refuseManagedSite(svc.siteId);
 
     // Preserve Phase 1 disabled runtime behavior (AC-F1-10 -> 422 NOT_SUPPORTED)
     if (!this.dockerExecutor.isRuntimeAvailable) {

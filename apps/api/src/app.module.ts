@@ -15,11 +15,14 @@ import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
 import { HostsController } from "./controllers/hosts.controller.js";
+import { ManagedSitesController } from "./controllers/managed-sites.controller.js";
 import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
+import { SiteProvisioner } from "./runtime/site-provisioner.js";
+import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -53,6 +56,7 @@ export class AppModule {
         AdminAuditController,
         AdminUsersController,
         OrganizationsController,
+        ManagedSitesController,
       ],
       providers: [
         {
@@ -75,6 +79,8 @@ export class AppModule {
         AuthzContextService,
         LoginService,
         OutboxWorkerService,
+        SiteProvisioner,
+        ManagedSitesService,
         DriftReconcilerService,
         {
           provide: APP_FILTER,
