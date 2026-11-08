@@ -42,14 +42,26 @@ panel_dead_unit() {
   return 1
 }
 
-# Waits up to <timeout> seconds for the API readiness probe, the web login page and all four
-# panel units active; gives up early when a unit is dead. ${SYSTEMCTL} (default systemctl) is
-# stubbable in tests.
-panel_health_check() { # <web bind address> <timeout seconds>
-  local deadline=$((SECONDS + $2)) dead
+# Succeeds when the panel ingress is disabled (executor.env HP_PANEL_HOSTNAME empty, as the
+# executor reads it) or the hp_ingress_proxy container is running. ${HP_DOCKER_CMD} replaces
+# docker for non-root tests only.
+panel_proxy_ready() { # <executor.env>
+  local host docker=docker
+  host="$(env_value "$1" HP_PANEL_HOSTNAME)"
+  [[ -n "${host//[[:space:]]/}" ]] || return 0
+  ((EUID == 0)) || docker="${HP_DOCKER_CMD:-docker}"
+  [[ "$("${docker}" inspect -f '{{.State.Running}}' hp_ingress_proxy 2>/dev/null || true)" == true ]]
+}
+
+# Waits up to <timeout> seconds for the API readiness probe, the web login page, all four
+# panel units active and (panel ingress enabled) hp_ingress_proxy running; gives up early when a
+# unit is dead. ${SYSTEMCTL} (default systemctl) is stubbable in tests.
+panel_health_check() { # <web bind address> <timeout seconds> [executor.env]
+  local deadline=$((SECONDS + $2)) dead env_file="${3:-/etc/hosting-panel/executor.env}"
   printf '  waiting for health (up to %s s)...\n' "$2"
   until curl -fs -o /dev/null --max-time 5 http://127.0.0.1:4000/health/ready &&
-    curl -fs -o /dev/null --max-time 5 "http://$1:3000/login" && panel_units_active; do
+    curl -fs -o /dev/null --max-time 5 "http://$1:3000/login" && panel_units_active &&
+    panel_proxy_ready "${env_file}"; do
     ((SECONDS < deadline)) || return 1
     if dead="$(panel_dead_unit)"; then
       printf '  %s\n' "${dead}" >&2

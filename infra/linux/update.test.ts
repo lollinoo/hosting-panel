@@ -244,24 +244,44 @@ esac
     expect(r.stdout.match(/waiting for health/g)).toHaveLength(1);
   });
 
-  /** Runs panel_health_check with curl exiting <curlRc> and the given systemctl stub body. */
-  function healthCheck(curlRc: number, systemctl: string, timeout: number) {
+  /**
+   * Runs panel_health_check with curl exiting <curlRc> and the given systemctl stub body; with
+   * <executorEnv>, also an executor.env with that content and a docker stub printing <proxyRunning>.
+   */
+  function healthCheck(curlRc: number, systemctl: string, timeout: number, executorEnv?: string, proxyRunning = "true") {
     const d = tmp();
     const bin = join(d, "bin");
     mkdirSync(bin);
     writeFileSync(join(bin, "curl"), `#!/bin/sh\nexit ${curlRc}\n`, { mode: 0o755 });
     writeFileSync(join(d, "systemctl"), `#!/usr/bin/env bash\n${systemctl}\n`, { mode: 0o755 });
+    writeFileSync(join(d, "docker"), `#!/bin/sh\necho "$*" >> "${d}/docker.log"\necho ${proxyRunning}\n`, { mode: 0o755 });
+    const envFile = join(d, "executor.env");
+    if (executorEnv !== undefined) writeFileSync(envFile, executorEnv);
     const start = Date.now();
-    const r = spawnSync("bash", ["-c", `source "${resolve(__dirname, "lib/common.sh")}"; panel_health_check 127.0.0.1 ${timeout}`], {
+    const r = spawnSync("bash", ["-c", `source "${resolve(__dirname, "lib/common.sh")}"; panel_health_check 127.0.0.1 ${timeout} "${envFile}"`], {
       encoding: "utf8",
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYSTEMCTL: join(d, "systemctl") }
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYSTEMCTL: join(d, "systemctl"), HP_DOCKER_CMD: join(d, "docker") }
     });
-    return { code: r.status, ms: Date.now() - start, err: r.stderr };
+    const dockerLog = existsSync(join(d, "docker.log")) ? readFileSync(join(d, "docker.log"), "utf8") : "";
+    return { code: r.status, ms: Date.now() - start, err: r.stderr, dockerLog };
   }
   const ACTIVE = `case "$1" in is-active) exit 0;; is-failed) exit 1;; show) printf 'active\\nrunning\\n';; esac`;
 
   it("health check passes when probes answer and all four units are active", () => {
     expect(healthCheck(0, ACTIVE, 30).code).toBe(0);
+  });
+
+  it("health check waits for hp_ingress_proxy when the panel ingress is enabled", () => {
+    const r = healthCheck(0, ACTIVE, 1, "HP_PANEL_HOSTNAME=panel.example.com\n", "false");
+    expect(r.code).toBe(1);
+    expect(r.dockerLog).toContain("inspect -f {{.State.Running}} hp_ingress_proxy");
+    expect(healthCheck(0, ACTIVE, 30, "HP_PANEL_HOSTNAME=panel.example.com\n", "true").code).toBe(0);
+  }, 15_000);
+
+  it("health check skips the proxy when the panel ingress is disabled", () => {
+    const r = healthCheck(0, ACTIVE, 30, "HP_PANEL_HOSTNAME=\n", "false");
+    expect(r.code).toBe(0);
+    expect(r.dockerLog).toBe("");
   });
 
   it("health check is not satisfied by HTTP probes while a daemon unit is down", () => {

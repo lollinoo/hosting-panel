@@ -138,7 +138,7 @@ main() {
     step 7 "Restart services"
     plan "would systemctl restart ${UNITS[*]}"
     step 8 "Health check"
-    plan "would wait up to 90 s for http://127.0.0.1:4000/health/ready and http://<HP_WEB_BIND_ADDRESS>:3000/login; on failure roll back to ${prev:-<previous>}"
+    plan "would wait up to 90 s for http://127.0.0.1:4000/health/ready and http://<HP_WEB_BIND_ADDRESS>:3000/login and hp_ingress_proxy (if the panel ingress is on); on failure roll back to ${prev:-<previous>}"
     step 9 "Prune old releases"
     plan "would keep the 3 newest releases"
     STEP=0
@@ -207,7 +207,7 @@ main() {
 
   step 8 "Health check"
   if ((restarted)) && health; then
-    info "API and web console are healthy"
+    info "All panel services are healthy"
   else
     printf '[ERROR] %s is unhealthy; rolling back to %s\n' "${version}" "${prev}" >&2
     swap_current "${root}" "${prev}" || die 7 "Rollback failed: could not point current back at ${prev} (update to ${version} failed)."
