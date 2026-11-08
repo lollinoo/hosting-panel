@@ -824,6 +824,34 @@ describe("panel ingress", () => {
     expect(payload.HostConfig.Binds.some((b) => b.includes("docker.sock"))).toBe(false);
   });
 
+  it("proxy keeps its default route on hp_ingress_net (GwPriority, O2)", () => {
+    const payload = buildIngressProxyContainerPayload({
+      staticConfigHostPath: "/s/traefik.yml",
+      dynamicDirHostPath: "/s/dynamic",
+      acmeDirHostPath: "/s/acme",
+    });
+    expect(payload.NetworkingConfig.EndpointsConfig.hp_ingress_net).toEqual({ GwPriority: 1 });
+  });
+
+  it("creates the proxy at API 1.48 and recreates one without the gateway priority", async () => {
+    const { adapter, mockDaemon, proxy, recreateCalls } = await setupAdapter(panel);
+    await adapter.ensureIngressProxy();
+    expect(
+      mockDaemon.requestedPaths.some((p) =>
+        p.startsWith(`/v1.48/containers/create?name=${INGRESS_PROXY_CONTAINER_NAME}`),
+      ),
+    ).toBe(true);
+
+    const first = proxy();
+    if (first) {
+      first.networks = { hp_ingress_net: { GwPriority: 0 } }; // proxy made by an older release
+    }
+    const mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark).length).toBe(2);
+    expect(proxy()?.networks).toEqual({ hp_ingress_net: { GwPriority: 1 } });
+  });
+
   async function setupAdapter(panelConfig: PanelIngressConfig | null) {
     const tmpBaseDir = await mkdtemp(path.join(os.tmpdir(), "hp-panel-ingress-"));
     cleanupTasks.push(() => rm(tmpBaseDir, { recursive: true, force: true }));

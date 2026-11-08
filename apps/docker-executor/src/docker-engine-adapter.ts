@@ -63,6 +63,8 @@ import {
 
 export const DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock" as const;
 export const DEFAULT_DOCKER_API_PREFIX = "/v1.45" as const;
+/** GwPriority (Docker Engine 28+); the installer refuses older engines. */
+export const INGRESS_PROXY_DOCKER_API_PREFIX = "/v1.48" as const;
 export const DEFAULT_SECRETS_ROOT_DIR = "/run/hosting-panel/secrets" as const;
 export const DEFAULT_PIDS_LIMIT = 256 as const;
 export const DEFAULT_CPU_MILLI = 250 as const;
@@ -768,9 +770,13 @@ class DockerSocketHttpClient {
     method: string,
     endpointPath: string,
     jsonBody?: unknown,
-    options?: { readonly timeoutMs?: number },
+    options?: { readonly timeoutMs?: number; readonly apiPrefix?: string },
   ): Promise<DockerHttpResponse> {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    if (options?.apiPrefix !== undefined) {
+      // A pinned version must fail on an older engine, never fall back and drop the new fields.
+      return this.rawRequest(method, `${options.apiPrefix}${endpointPath}`, jsonBody, timeoutMs);
+    }
     const primaryPrefix = this.useUnversionedFallback ? "" : this.apiPrefix;
     const response = await this.rawRequest(
       method,
@@ -1013,10 +1019,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         "POST",
         `/containers/create?name=${encodeURIComponent(INGRESS_PROXY_CONTAINER_NAME)}`,
         payload,
+        { apiPrefix: INGRESS_PROXY_DOCKER_API_PREFIX },
       );
       if (createRes.statusCode !== 201) {
         throw new ExecutorCodedError(
-          `Failed to create managed ingress proxy container (HTTP ${String(createRes.statusCode)})`,
+          `Failed to create managed ingress proxy container (HTTP ${String(createRes.statusCode)}; needs Docker Engine 28+)`,
           "DOCKER_ENGINE_UNAVAILABLE",
         );
       }
@@ -1044,6 +1051,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         existing.Config?.Labels?.[STATIC_SHA256_LABEL] !== staticSha256 ||
         sortedJson(existingBinds) !== sortedJson(payload.HostConfig.Binds) ||
         sortedJson(existing.HostConfig?.ExtraHosts) !== sortedJson(payload.HostConfig.ExtraHosts) ||
+        (
+          existing.NetworkSettings?.Networks?.[INGRESS_BRIDGE_NETWORK_NAME] as
+            | { readonly GwPriority?: number }
+            | undefined
+        )?.GwPriority !== 1 ||
         portBindingsKey(existing.HostConfig?.PortBindings) !==
           portBindingsKey(payload.HostConfig.PortBindings));
 

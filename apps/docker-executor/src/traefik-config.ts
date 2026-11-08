@@ -373,6 +373,9 @@ export interface DockerIngressProxyCreatePayload {
     readonly Binds: readonly string[];
     readonly ExtraHosts: readonly string[];
   };
+  readonly NetworkingConfig: {
+    readonly EndpointsConfig: { readonly [INGRESS_BRIDGE_NETWORK_NAME]: { readonly GwPriority: 1 } };
+  };
 }
 
 export function buildIngressProxyContainerPayload(
@@ -428,6 +431,10 @@ export function buildIngressProxyContainerPayload(
       ],
       ExtraHosts: ["host.docker.internal:host-gateway"],
     },
+    // The panel upstream (host-gateway, docker0) is reached through the default route. Without a
+    // priority Docker gives the gateway to the first network by name, so a new hp_edge_* network
+    // would take it and stall the panel connections in flight (O2). Needs Engine API >= 1.48.
+    NetworkingConfig: { EndpointsConfig: { [INGRESS_BRIDGE_NETWORK_NAME]: { GwPriority: 1 } } },
   };
 }
 

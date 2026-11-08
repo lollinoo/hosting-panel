@@ -26,3 +26,4 @@ Lo Step 2a introduce l'unico tipo di sito creabile (WordPress, PHP `8.3`/`8.4`/`
 - Ogni azione admin è registrata come `admin.site.*`.
 - I flag di capability non cambiano: `acmeTlsRuntimeAvailable` diventa `true` nello Step 2b.
 - Solo installazioni nuove; minimo 2 GB di RAM (l'installer avvisa sotto 1.800.000 kB, senza bloccare).
+- Il proxy nasce con `GwPriority: 1` su `hp_ingress_net` (Docker Engine API ≥ 1.48, Docker 28+; l'installer rifiuta motori più vecchi): senza priorità Docker sposterebbe la rotta di default sulla prima rete `hp_edge_*` collegata e bloccherebbe le richieste al pannello in corso (O2).

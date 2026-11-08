@@ -24,7 +24,7 @@ is read instead; never put it on a command line (shell history, ps).
 
 Exit codes: 0 ok, 1 step failed, 2 bad arguments (or archive VERSION differs from its file
 name), 3 unsupported OS/architecture or no
-docker-ce/postgresql-18 for this release, 4 checksum failure, 5 health check timeout,
+docker-ce/postgresql-18 for this release or Docker older than 28, 4 checksum failure, 5 health check timeout,
 6 docker0 has no IPv4, 7 SSH is not on port 22 (use --skip-firewall).
 EOF
 }
@@ -98,6 +98,14 @@ panel_bind_address() {
   b="$(docker0_ipv4)"
   [[ -n "${b}" ]] || die 6 "docker0 has no IPv4 address; is Docker running with its default bridge? (refusing to bind the web console to all interfaces)"
   printf '%s\n' "${b}"
+}
+
+# The proxy keeps its default route through GwPriority (O2), which needs Docker Engine API >= 1.48.
+require_docker_api() {
+  local api
+  api="$(docker version --format '{{.Server.APIVersion}}' 2>/dev/null || true)"
+  [[ "$(printf '%s\n1.48\n' "${api:-0}" | sort -V | head -n1)" == "1.48" ]] ||
+    die 3 "Docker Engine API ${api:-unknown} is older than 1.48 (Docker 28); upgrade it: apt-get install --only-upgrade docker-ce docker-ce-cli"
 }
 
 ports_only() { { grep -E '^[0-9]+$' || true; } | sort -un; }
@@ -329,7 +337,7 @@ main() {
   info "repo: ${docker_repo}"
   if ((dry_run)); then
     if pkg_installed docker-ce; then plan "skip: docker-ce already installed"; else plan "would add the repo above and install docker-ce (removing docker.io/podman-docker/containerd/runc if present)"; fi
-    plan "systemctl enable --now docker"
+    plan "systemctl enable --now docker; require Docker Engine API >= 1.48"
   else
     if ! pkg_installed docker-ce; then
       local p remove=()
@@ -344,6 +352,7 @@ main() {
       info "docker-ce already installed"
     fi
     systemctl enable --now docker
+    require_docker_api
   fi
 
   # ---------------------------------------------------------------- 4

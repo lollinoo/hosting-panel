@@ -269,6 +269,27 @@ describe("docker0 bind address", () => {
   });
 });
 
+describe("docker engine API", () => {
+  const run = (api: string) => {
+    const bin = join(tmp(), "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "docker"), `#!/bin/sh\necho '${api}'\n`, { mode: 0o755 });
+    return spawnSync("bash", ["-c", `source "${SCRIPT}"; set -euo pipefail; require_docker_api; echo ok`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }
+    });
+  };
+  it("accepts API 1.48 and newer (GwPriority)", () => {
+    expect(run("1.48").status).toBe(0);
+    expect(run("1.56").status).toBe(0);
+  });
+  it("exits 3 on an engine older than API 1.48", () => {
+    const r = run("1.47");
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain("1.48");
+  });
+});
+
 describe("set_env_keys", () => {
   it("updates only the owned keys atomically, keeps other lines, 0400", () => {
     const d = tmp();
