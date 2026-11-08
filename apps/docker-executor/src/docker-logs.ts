@@ -1,8 +1,4 @@
-export interface ServiceLogLine {
-  at: string | null;
-  stream: "stdout" | "stderr";
-  text: string;
-}
+import type { ServiceLogLine } from "@hosting-panel/executor-contracts";
 
 const MAX_LINE_CHARS = 2000;
 const TIMESTAMP_PREFIX = /^(\d{4}-\d{2}-\d{2}T\S+) ?/;

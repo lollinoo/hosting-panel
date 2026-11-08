@@ -18,6 +18,16 @@ export interface DockerExecutorPort {
   stopService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   deleteService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   getObservedState(serviceInstanceId: string): Promise<ObservedServiceState | null>;
+  runSiteJob(req: SiteJobRequest): Promise<SiteJobResult>;
+  /** Removes a site's volumes, networks and routes; refuses while its containers exist. */
+  purgeSite(siteId: string): Promise<void>;
+  getServiceLogs(serviceInstanceId: string, tail: number): Promise<readonly ServiceLogLine[]>;
+}
+
+export interface ServiceLogLine {
+  at: string | null;
+  stream: "stdout" | "stderr";
+  text: string;
 }
 
 /** One-off, allowlisted setup jobs. The API picks only the kind; the executor owns image, script and mounts. */

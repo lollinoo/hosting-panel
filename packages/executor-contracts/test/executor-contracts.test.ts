@@ -264,3 +264,13 @@ describe("@hosting-panel/executor-contracts — Phase1DisabledDockerExecutor", (
     expect(observed).toBeNull();
   });
 });
+
+describe("Phase1DisabledDockerExecutor site capabilities", () => {
+  it("phase1 executor refuses site jobs, purge and logs with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const job = { jobId: "job_1", kind: "db.drop" as const, siteId: "s", organizationId: "o", params: {} };
+    await expect(executor.runSiteJob(job)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    await expect(executor.purgeSite("s")).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    await expect(executor.getServiceLogs("svc", 10)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+  });
+});

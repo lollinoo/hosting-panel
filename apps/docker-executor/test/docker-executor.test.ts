@@ -13,7 +13,7 @@ import {
   createApprovedServiceSpec,
   type ApprovedServiceSpec,
 } from "@hosting-panel/executor-contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DockerEngineSocketAdapter,
   DockerExecutorIpcServer,
@@ -1155,5 +1155,96 @@ describe("purge site", () => {
     await adapter.purgeSite("A");
     expect(mockDaemon.containers.size).toBe(0);
     expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+  });
+});
+
+describe("site IPC", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  async function setup() {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const server = new DockerExecutorIpcServer({
+      executor: simulator,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+    return { simulator, client };
+  }
+
+  // db.provision only accepts a 64-char hex password, so the canary must be one.
+  const CANARY = "ca7a".repeat(16);
+  const provisionJob = {
+    jobId: "job_site_ipc_1",
+    kind: "db.provision" as const,
+    siteId: "site_1",
+    organizationId: "org_1",
+    params: { dbName: "wp_site_1", dbUser: "wp_site_1" },
+    resolvedSecrets: { HP_DB_PASSWORD: CANARY },
+  };
+
+  it("round-trips a job and never logs the secret", async () => {
+    const { client } = await setup();
+    const captured: string[] = [];
+    const grab = (chunk: unknown): boolean => {
+      captured.push(String(chunk));
+      return true;
+    };
+    vi.spyOn(process.stdout, "write").mockImplementation(grab);
+    vi.spyOn(process.stderr, "write").mockImplementation(grab);
+
+    const result = await client.runSiteJob(provisionJob);
+    expect(result).toMatchObject({ jobId: "job_site_ipc_1", exitCode: 0 });
+    expect(captured.join("")).not.toContain(CANARY);
+    expect(JSON.stringify(result)).not.toContain(CANARY);
+  });
+
+  it("rejects an unknown job kind with VALIDATION_ERROR", async () => {
+    const { client } = await setup();
+    await expect(
+      client.runSiteJob({ ...provisionJob, kind: "rm.rf" as never }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("serves purge and logs", async () => {
+    const { client, simulator } = await setup();
+    simulator.setServiceLogs("svc_1", [{ at: null, stream: "stdout", text: "hi" }]);
+    expect(await client.getServiceLogs("svc_1", 10)).toEqual([
+      { at: null, stream: "stdout", text: "hi" },
+    ]);
+    await expect(client.purgeSite("site_1")).resolves.toBeUndefined();
+  });
+
+  it("client uses 300 s for deploy and 510 s for job requests", async () => {
+    const { client } = await setup();
+    const timeouts: Array<number | undefined> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    const spec = createApprovedServiceSpec({
+      serviceInstanceId: "svc_t",
+      siteId: "site_t",
+      organizationId: "org_t",
+      image: "nginx:1.27-alpine",
+      containerName: "hp-t",
+    });
+    await client.deployService(spec).catch(() => undefined);
+    await client.runSiteJob(provisionJob).catch(() => undefined);
+    await client.purgeSite("site_t").catch(() => undefined);
+    await client.getServiceLogs("svc_t", 5).catch(() => undefined);
+    expect(timeouts).toEqual([300_000, 510_000, 120_000, 35_000]);
   });
 });

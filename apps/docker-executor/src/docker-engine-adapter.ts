@@ -22,7 +22,7 @@ import {
   type SiteJobRequest,
   type SiteJobResult,
 } from "@hosting-panel/executor-contracts";
-import { demuxDockerLogStream, type ServiceLogLine } from "./docker-logs.js";
+import { demuxDockerLogStream } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
@@ -1549,7 +1549,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
-  public async getServiceLogs(serviceInstanceId: string, tail: number): Promise<ServiceLogLine[]> {
+  public async getServiceLogs(serviceInstanceId: string, tail: number): Promise<ReturnType<typeof demuxDockerLogStream>> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const summary = await this.findContainerSummaryByServiceId(serviceInstanceId);
     if (!summary) {

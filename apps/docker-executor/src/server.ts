@@ -11,6 +11,9 @@ import {
   IpcNonceReplayCache,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
+  ServiceLogsIpcRequestSchema,
+  SiteJobIpcRequestSchema,
+  SitePurgeIpcRequestSchema,
   createErrorEnvelope,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
@@ -28,6 +31,7 @@ import {
   type DockerExecutionResult,
   type DockerExecutorPort,
 } from "@hosting-panel/executor-contracts";
+import { z } from "zod";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
 export const DEFAULT_EXECUTOR_SOCKET_PATH = "/run/hosting-panel/executor.sock" as const;
@@ -438,6 +442,33 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/v1/jobs/run") {
+        const req = this.parseBody(SiteJobIpcRequestSchema, rawBody, "site job");
+        const result = await this.executor.runSiteJob(req);
+        writeJson(res, 200, { data: result });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sites/purge") {
+        const { siteId } = this.parseBody(SitePurgeIpcRequestSchema, rawBody, "site purge");
+        assertSafeIdentifier(siteId, "siteId");
+        await this.executor.purgeSite(siteId);
+        writeJson(res, 200, { data: { siteId } });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/services/logs") {
+        const { serviceInstanceId, tail } = this.parseBody(
+          ServiceLogsIpcRequestSchema,
+          rawBody,
+          "service logs",
+        );
+        assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
+        const lines = await this.executor.getServiceLogs(serviceInstanceId, tail);
+        writeJson(res, 200, { data: lines });
+        return;
+      }
+
       const observedMatch = /^\/v1\/services\/([^/]+)\/observed-state$/.exec(pathname);
       if (method === "GET" && observedMatch && observedMatch[1]) {
         const serviceInstanceId = decodeURIComponent(observedMatch[1]);
@@ -531,6 +562,18 @@ export class DockerExecutorIpcServer {
     } catch {
       throw new ExecutorCodedError("Malformed JSON request body", "VALIDATION_ERROR");
     }
+  }
+
+  private parseBody<S extends z.ZodType>(schema: S, rawBody: Buffer, what: string): z.infer<S> {
+    const parsed = schema.safeParse(this.parseJsonBody(rawBody));
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      throw new ExecutorCodedError(
+        firstIssue ? `Invalid ${what} payload: ${firstIssue.message}` : `Invalid ${what} payload`,
+        "VALIDATION_ERROR",
+      );
+    }
+    return parsed.data;
   }
 
   private async handleDeployService(rawBody: Buffer): Promise<DockerExecutionResult> {

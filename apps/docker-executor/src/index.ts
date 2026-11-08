@@ -1,4 +1,4 @@
-export { demuxDockerLogStream, type ServiceLogLine } from "./docker-logs.js";
+export { demuxDockerLogStream } from "./docker-logs.js";
 export {
   CERTIFIED_SAFE_CAPABILITIES,
   DEFAULT_CPU_MILLI,
