@@ -30,6 +30,20 @@ export {
 } from "./docker-engine-adapter.js";
 
 export {
+  DEFAULT_SHARED_DB_ADMIN_SUBNET,
+  DEFAULT_SHARED_DB_DATA_DIR,
+  DEFAULT_SHARED_DB_ROOT_KEY_FILE,
+  SHARED_DB_ALIAS,
+  SHARED_DB_CONFIG_SHA256_LABEL,
+  SHARED_DB_CONTAINER_NAME,
+  SHARED_DB_NETWORK_NAME,
+  buildSharedDatabaseContainerPayload,
+  subnetToMariadbHostPattern,
+  type SharedDatabaseContainerInput,
+  type SharedDatabaseCreatePayload,
+} from "./shared-database.js";
+
+export {
   InMemoryDockerSimulatorAdapter,
   type InMemoryDockerSimulatorAdapterOptions,
   type OutOfBandMutationInput,

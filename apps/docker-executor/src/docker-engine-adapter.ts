@@ -36,6 +36,16 @@ import {
   getSiteInternalNetworkName,
   writeFileAtomically,
 } from "./traefik-config.js";
+import {
+  DEFAULT_SHARED_DB_ADMIN_SUBNET,
+  DEFAULT_SHARED_DB_DATA_DIR,
+  DEFAULT_SHARED_DB_ROOT_KEY_FILE,
+  SHARED_DB_ALIAS,
+  SHARED_DB_CONFIG_SHA256_LABEL,
+  SHARED_DB_CONTAINER_NAME,
+  SHARED_DB_NETWORK_NAME,
+  buildSharedDatabaseContainerPayload,
+} from "./shared-database.js";
 
 export const DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock" as const;
 export const DEFAULT_DOCKER_API_PREFIX = "/v1.45" as const;
@@ -867,7 +877,17 @@ export interface DockerEngineSocketAdapterOptions {
   readonly panel?: PanelIngressConfig | null;
   readonly requestTimeoutMs?: number;
   readonly pullMissingImages?: boolean;
+  readonly sharedDbDataDir?: string;
+  readonly sharedDbRootKeyFile?: string;
+  readonly sharedDbAdminSubnet?: string;
+  /** The uid the data dir must NOT be owned by; defaults to process.getuid(). */
+  readonly executorUid?: number;
 }
+
+type SharedDatabaseEnsureResult = {
+  readonly component: "shared_database";
+  readonly status: "running";
+};
 
 type IngressEnsureResult = {
   readonly component: "ingress_proxy";
@@ -893,6 +913,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly pullMissingImages: boolean;
   private readonly expectedMetadata = new Map<string, ExpectedManagedServiceMetadata>();
   private ingressEnsureInFlight: Promise<IngressEnsureResult> | null = null;
+  private readonly sharedDbDataDir: string;
+  private readonly sharedDbRootKeyFile: string;
+  private readonly sharedDbAdminSubnet: string;
+  private readonly executorUid: number | undefined;
+  private sharedDbEnsureInFlight: Promise<SharedDatabaseEnsureResult> | null = null;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -909,6 +934,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.ingressHttpsPort = options?.ingressHttpsPort;
     this.panel = options?.panel ?? null;
     this.pullMissingImages = options?.pullMissingImages ?? true;
+    this.sharedDbDataDir = path.resolve(options?.sharedDbDataDir ?? DEFAULT_SHARED_DB_DATA_DIR);
+    this.sharedDbRootKeyFile = path.resolve(
+      options?.sharedDbRootKeyFile ?? DEFAULT_SHARED_DB_ROOT_KEY_FILE,
+    );
+    this.sharedDbAdminSubnet = options?.sharedDbAdminSubnet ?? DEFAULT_SHARED_DB_ADMIN_SUBNET;
+    this.executorUid = options?.executorUid ?? process.getuid?.();
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1042,6 +1073,95 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
+  /** Serialised like ensureIngressProxy. Called at executor start, never by jobs (they must not pull). */
+  public ensureSharedDatabase(): Promise<SharedDatabaseEnsureResult> {
+    this.sharedDbEnsureInFlight ??= this.ensureSharedDatabaseOnce().finally(() => {
+      this.sharedDbEnsureInFlight = null;
+    });
+    return this.sharedDbEnsureInFlight;
+  }
+
+  /** Cheap check for db.* jobs: fail fast instead of pulling or creating anything. */
+  public async isSharedDatabaseRunning(): Promise<boolean> {
+    const existing = await this.inspectContainerByNameOrId(SHARED_DB_CONTAINER_NAME);
+    return existing?.State?.Running === true;
+  }
+
+  private async ensureSharedDatabaseOnce(): Promise<SharedDatabaseEnsureResult> {
+    // Docker Binds would create a missing source as a root-owned directory: insist on bootstrap's.
+    const keyStat = await stat(this.sharedDbRootKeyFile).catch(() => null);
+    const dataStat = await stat(this.sharedDbDataDir).catch(() => null);
+    if (
+      !keyStat?.isFile() ||
+      !dataStat?.isDirectory() ||
+      dataStat.uid === 0 ||
+      dataStat.uid === this.executorUid
+    ) {
+      throw new ExecutorCodedError(
+        "Shared database key file or data directory is missing or unsafe. Run bootstrap first",
+        "HOST_POLICY_DENIED",
+      );
+    }
+
+    await this.ensureNetwork(SHARED_DB_NETWORK_NAME, {
+      internal: true,
+      subnet: this.sharedDbAdminSubnet,
+      labels: {
+        [MANAGED_DOCKER_LABELS.managed]: "true",
+        "io.hostingpanel.network_role": "shared_database",
+      },
+    });
+
+    const payload = buildSharedDatabaseContainerPayload({
+      user: `${String(dataStat.uid)}:${String(dataStat.gid)}`,
+      dataDirHostPath: this.sharedDbDataDir,
+      rootKeyHostPath: this.sharedDbRootKeyFile,
+      adminSubnet: this.sharedDbAdminSubnet,
+    });
+    await this.ensureImageAvailable(payload.Image);
+
+    const existing = await this.inspectContainerByNameOrId(SHARED_DB_CONTAINER_NAME);
+    // Only the label: Config.Env also holds the image's ENV, so comparing it would recreate on every start (CP-01).
+    const needsRecreate =
+      existing !== null &&
+      existing.Config?.Labels?.[SHARED_DB_CONFIG_SHA256_LABEL] !==
+        payload.Labels[SHARED_DB_CONFIG_SHA256_LABEL];
+    if (existing && needsRecreate) {
+      await this.stopAndRemoveContainer(existing.Id);
+    }
+
+    let containerId = existing?.Id ?? "";
+    if (!existing || needsRecreate) {
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(SHARED_DB_CONTAINER_NAME)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create shared database container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      containerId = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+    }
+
+    if (!existing || needsRecreate || existing.State?.Running !== true) {
+      const startRes = await this.dockerClient.request("POST", `/containers/${containerId}/start`);
+      if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+        throw new ExecutorCodedError(
+          `Failed to start shared database container (HTTP ${String(startRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+    }
+
+    // A new container starts on hp_mariadb_net only: reattach every site network (idempotent).
+    await this.reconnectToRoleNetworks("site_internal", SHARED_DB_CONTAINER_NAME, [SHARED_DB_ALIAS]);
+
+    return { component: "shared_database", status: "running" };
+  }
+
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
     const spec = validateExecutorServiceSpec(rawSpec);
     const httpExposed = isServiceHttpExposed(spec);
@@ -1058,6 +1178,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         "io.hostingpanel.network_role": "site_internal",
       },
     });
+    // 404 = hp_mariadb not created yet; ensureSharedDatabase attaches it later.
+    await this.connectContainerToNetwork(
+      siteNetworkName,
+      SHARED_DB_CONTAINER_NAME,
+      [SHARED_DB_ALIAS],
+      { skipMissingNetwork: true },
+    );
 
     if (spec.volumeMounts) {
       for (const mount of spec.volumeMounts) {
@@ -1386,7 +1513,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
   private async ensureNetwork(
     networkName: string,
-    options: { readonly internal: boolean; readonly labels: Readonly<Record<string, string>> },
+    options: {
+      readonly internal: boolean;
+      readonly labels: Readonly<Record<string, string>>;
+      readonly subnet?: string;
+    },
   ): Promise<void> {
     const inspectRes = await this.dockerClient.request(
       "GET",
@@ -1402,6 +1533,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       Internal: options.internal,
       CheckDuplicate: true,
       Labels: options.labels,
+      ...(options.subnet ? { IPAM: { Config: [{ Subnet: options.subnet }] } } : {}),
     });
 
     if (createRes.statusCode !== 201 && createRes.statusCode !== 409) {
@@ -1433,32 +1565,37 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
-  private async reconnectProxyToSiteEdgeNetworks(): Promise<void> {
-    const filters = JSON.stringify({ label: ["io.hostingpanel.network_role=site_edge"] });
+  private reconnectProxyToSiteEdgeNetworks(): Promise<void> {
+    return this.reconnectToRoleNetworks("site_edge", INGRESS_PROXY_CONTAINER_NAME);
+  }
+
+  private async reconnectToRoleNetworks(
+    role: "site_edge" | "site_internal",
+    containerRef: string,
+    aliases?: readonly string[],
+  ): Promise<void> {
+    const filters = JSON.stringify({ label: [`io.hostingpanel.network_role=${role}`] });
     const res = await this.dockerClient.request(
       "GET",
       `/networks?filters=${encodeURIComponent(filters)}`,
     );
     if (res.statusCode !== 200) {
       throw new ExecutorCodedError(
-        `Failed to list site edge networks (HTTP ${String(res.statusCode)})`,
+        `Failed to list ${role} networks (HTTP ${String(res.statusCode)})`,
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
     const networks = JSON.parse(res.body.toString("utf8")) as Array<{ readonly Name: string }>;
     for (const network of networks) {
-      const connected = await this.connectContainerToNetwork(
-        network.Name,
-        INGRESS_PROXY_CONTAINER_NAME,
-        undefined,
-        { skipMissingNetwork: true },
-      );
+      const connected = await this.connectContainerToNetwork(network.Name, containerRef, aliases, {
+        skipMissingNetwork: true,
+      });
       if (!connected) {
         // Removed between the list and the connect (site deleted): skip it, keep the rest.
         console.warn(
           JSON.stringify({
             component: "hp-docker-executor",
-            event: "site_edge_network_missing",
+            event: `${role}_network_missing`,
             network: network.Name,
             timestamp: new Date().toISOString(),
           }),

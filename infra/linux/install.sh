@@ -247,6 +247,12 @@ main() {
   read -r os_id codename <<<"${os}"
   ((dry_run)) || [[ "$(uname -m)" == x86_64 ]] || die 3 "Only x86_64 is supported (release archives are linux-x64)."
   info "Detected ${os_id} ${codename}"
+  # A "2 GB" VPS often reports 1.85-1.95 M kB, hence the 1,800,000 kB threshold; never blocks.
+  local mem_kb
+  mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' "${HP_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null || true)"
+  if [[ "${mem_kb}" =~ ^[0-9]+$ ]] && ((mem_kb < 1800000)); then
+    info "WARNING: this server has $((mem_kb / 1024)) MB of RAM; at least 2 GB is required for WordPress sites and the database. Continuing."
+  fi
   # SSH preflight (R9), done here so a lockout risk stops the install before anything changes.
   if ((skip_firewall)); then
     info "--skip-firewall: the panel firewall will not be installed"
@@ -553,12 +559,15 @@ EOF
   if ((dry_run)); then
     plan "would systemctl enable + restart ${units[*]}"
     plan "would wait up to 90 s for http://127.0.0.1:4000/health/ready, http://<docker0 IPv4>:3000/login and hp_ingress_proxy running"
+    plan "would wait up to 300 s for hp_mariadb running (first start downloads the database image)"
   else
     systemctl enable "${units[@]}"
     # restart (not just --now) so a rerun picks up the new release and env values.
     systemctl restart "${units[@]}"
     panel_health_check "${bind}" 90 "${STATE_DIR}/executor.env" || die 5 "Health check failed (timeout 90 s). Inspect: journalctl -u hp-host-agent -u hp-docker-executor -u hp-api -u hp-web -n 100"
     info "All panel services (API, web console, host agent, executor, ingress proxy) are healthy"
+    container_running_within hp_mariadb 300 || die 5 "The shared database (hp_mariadb) is not running after 300 s. Inspect: journalctl -u hp-docker-executor -n 100 and docker logs hp_mariadb"
+    info "Shared database (hp_mariadb) is running"
   fi
 
   STEP=0
@@ -601,6 +610,8 @@ EOF
 #      esse i dati cifrati e i backup non sono recuperabili.                 #
 #  !!! EN: Back up /etc/hosting-panel (keys) now — without them encrypted    #
 #      data and backups cannot be recovered.                                 #
+#      ipc.key, secrets-master.key, breakglass-jwt.key, jwt-signing.pem,     #
+#      mariadb-root.key                                                      #
 ##############################################################################
 EOF
 }

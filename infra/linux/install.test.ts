@@ -120,6 +120,34 @@ describe("install.sh --dry-run", () => {
   });
 });
 
+describe("install.sh shared database and memory", () => {
+  it("dry-run step 12 waits for hp_mariadb", () => {
+    const r = dry();
+    expect(r.code).toBe(0);
+    expect(r.out.slice(r.out.indexOf("[STEP 12/12]"))).toContain("hp_mariadb");
+  });
+
+  const meminfo = (kb: number) => {
+    const f = join(tmp(), "meminfo");
+    writeFileSync(f, `MemTotal:       ${String(kb)} kB\nMemFree:          100000 kB\n`);
+    return f;
+  };
+
+  it("warns but continues below 2 GB RAM", () => {
+    const r = dry({ HP_MEMINFO_FILE: meminfo(1015808) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("at least 2 GB");
+    expect(r.out).toContain("992 MB");
+    expect(r.out).toContain("[STEP 12/12]");
+  });
+
+  it("no memory warning at 4 GB", () => {
+    const r = dry({ HP_MEMINFO_FILE: meminfo(4026532) });
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("at least 2 GB");
+  });
+});
+
 describe("install.sh SSH-safe firewall", () => {
   it("refuses with exit 7 when SSH is not on port 22", () => {
     const r = dry({ HP_SSHD_PORTS: "2222" });

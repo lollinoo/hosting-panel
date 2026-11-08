@@ -100,6 +100,12 @@ describe("per-service env files and wrappers", () => {
     expect(r.stdout).not.toContain("hosting-panel.env");
   });
 
+  it.skipIf(!hasHost)("bootstrap dry-run provisions the mariadb user, key and data dir", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    for (const s of ["hp-mariadb", "mariadb-root.key", "0440", "/var/lib/hosting-panel/mariadb/data"]) expect(r.stdout).toContain(s);
+  });
+
   it("wrappers never put DATABASE_URL in argv", () => {
     for (const w of ["hp-accounts", "hp-break-glass"]) {
       const src = read(`infra/linux/${w}`);
