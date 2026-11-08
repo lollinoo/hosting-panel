@@ -1,18 +1,16 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { errorMessage, LOCALE_COOKIE, type Locale } from "@/i18n";
-import { useLocale, useMessages } from "@/i18n/provider";
+import { errorMessage } from "@/i18n";
+import { useMessages } from "@/i18n/provider";
+import { LanguageSwitch } from "@/components/shared/language-switch";
 
 export function LoginForm() {
   const m = useMessages();
-  const locale = useLocale();
-  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
@@ -36,18 +34,14 @@ export function LoginForm() {
       } else if (data.status === "totp_required") {
         setNeedsTotp(true);
       } else {
-        router.replace("/");
+        // Hard navigation: the root layout (and its locale) must re-render for the signed-in user.
+        window.location.assign("/");
       }
     } catch {
       setError(m.errors.generic);
     } finally {
       setBusy(false);
     }
-  }
-
-  function setLocale(next: Locale) {
-    document.cookie = `${LOCALE_COOKIE}=${next}; path=/; max-age=31536000; samesite=lax`;
-    router.refresh();
   }
 
   return (
@@ -124,19 +118,7 @@ export function LoginForm() {
             </Button>
           )}
         </form>
-        <div role="group" className="mt-6 flex justify-center gap-2 text-xs text-muted-foreground" aria-label={m.common.language}>
-          {(["it", "en"] as const).map((l) => (
-            <button
-              key={l}
-              type="button"
-              onClick={() => setLocale(l)}
-              aria-pressed={locale === l}
-              className={locale === l ? "font-semibold text-foreground" : "hover:underline"}
-            >
-              {l === "it" ? m.common.italian : m.common.english}
-            </button>
-          ))}
-        </div>
+        <LanguageSwitch className="mt-6 justify-center" />
       </CardContent>
     </Card>
   );

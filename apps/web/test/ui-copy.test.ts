@@ -5,9 +5,16 @@ import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 
 const src = path.resolve(__dirname, "../src");
-// Task 11 extends this to app/sites, components/customer and the shell/site keys.
-const dirs = ["app/login", "app/account", "components/auth"].map((d) => path.join(src, d));
-const sections = ["login", "account"] as const;
+const dirs = [
+  "app/login",
+  "app/account",
+  "app/sites",
+  "components/auth",
+  "components/account",
+  "components/customer",
+  "components/shared",
+].map((d) => path.join(src, d));
+const sections = ["login", "account", "shell", "site"] as const;
 
 function files(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];

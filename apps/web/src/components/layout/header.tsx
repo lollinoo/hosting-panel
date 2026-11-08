@@ -21,6 +21,7 @@ import {
   ChevronDown,
   Lock,
   Cpu,
+  UserCog,
 } from "lucide-react";
 import type { PublicSessionDto } from "@/lib/session";
 
@@ -178,6 +179,11 @@ export function Header({ session }: HeaderProps) {
                   <span className="text-xs font-medium leading-none">{session.user?.name}</span>
                   <span className="text-[10px] text-muted-foreground">{session.user?.email}</span>
                 </div>
+                <Button variant="ghost" size="icon" asChild title="Account">
+                  <Link href="/account" aria-label="Account">
+                    <UserCog className="h-4 w-4 text-muted-foreground" />
+                  </Link>
+                </Button>
                 <Button
                   variant="ghost"
                   size="icon"
