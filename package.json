@@ -13,7 +13,9 @@
     "test": "vitest run",
     "build": "node packages/config/scripts/run-workspaces.mjs build",
     "dev:api": "corepack pnpm -C apps/api run dev",
-    "dev:web": "corepack pnpm -C apps/web run dev"
+    "dev:api:sim": "HP_RUNTIME_BACKEND=local-simulator corepack pnpm -C apps/api run dev",
+    "dev:web": "corepack pnpm -C apps/web run dev",
+    "dev:docker": "node infra/linux/run-dev-docker.mjs"
   },
   "devDependencies": {
     "@eslint/js": "catalog:",

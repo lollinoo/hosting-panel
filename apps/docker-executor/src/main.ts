@@ -34,7 +34,11 @@ export async function loadExecutorVerificationKeyringFromEnv(
   let rawMaterial: string | null = null;
   const inlineEd25519Pem = env.HP_IPC_ED25519_PUBLIC_KEY_PEM?.trim();
   const ed25519File = env.HP_IPC_ED25519_PUBLIC_KEY_FILE?.trim();
-  const inlineSecret = (env.HP_IPC_HMAC_SECRET ?? env.HP_IPC_SECRET)?.trim();
+  const inlineSecret = (
+    env.HP_IPC_KEY ??
+    env.HP_IPC_HMAC_SECRET ??
+    env.HP_IPC_SECRET
+  )?.trim();
   const keyFile = env.HP_IPC_KEY_FILE?.trim();
 
   if (inlineEd25519Pem) {
@@ -116,8 +120,9 @@ export async function bootstrapDockerExecutorDaemon(
     resolvedLegacyIngressRoot ||
     DEFAULT_INGRESS_ROOT_DIR;
   const traefikImage = env.HP_TRAEFIK_IMAGE?.trim() || DEFAULT_TRAEFIK_IMAGE;
-  const ingressHttpPort = env.HP_INGRESS_HTTP_PORT
-    ? Number(env.HP_INGRESS_HTTP_PORT)
+  const rawIngressPort = env.HP_INGRESS_HTTP_PORT ?? env.HP_TRAEFIK_HTTP_PORT;
+  const ingressHttpPort = rawIngressPort
+    ? Number(rawIngressPort)
     : DEFAULT_INGRESS_HTTP_PORT;
 
   const executor: IngressCapableDockerExecutor = useSimulator

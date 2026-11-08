@@ -922,7 +922,7 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
 
     const socketPath = `/tmp/hp-exec-boot-${randomBytes(5).toString("hex")}.sock`;
     const daemon = await bootstrapDockerExecutorDaemon({
-      HP_IPC_HMAC_SECRET: HMAC_SECRET,
+      HP_IPC_KEY: HMAC_SECRET,
       HP_IPC_KEY_ID: "hmac-v1",
       HP_IPC_TRANSPORT: "uds",
       HP_EXECUTOR_SOCKET_PATH: socketPath,

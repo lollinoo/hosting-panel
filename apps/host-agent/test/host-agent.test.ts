@@ -995,6 +995,22 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       });
       const health = await client.checkHealth();
       expect(health.status).toBe("online");
+
+      const inlineSocketPath = join(dir, "daemon-inline.sock");
+      const inlineDaemon = await createHostAgentDaemonFromEnv({
+        HP_RUNTIME_BACKEND: "local-simulator",
+        HP_IPC_TRANSPORT: "uds",
+        HP_HOST_AGENT_SOCKET_PATH: inlineSocketPath,
+        HP_IPC_KEY_ID: "ipc-test-v1",
+        HP_IPC_KEY: TEST_HMAC_SECRET,
+      });
+      activeServers.push(inlineDaemon);
+      await inlineDaemon.start();
+      const inlineClient = new SignedHostAgentIpcClient({
+        signingKey: TEST_SIGNING_KEY,
+        socketPath: inlineSocketPath,
+      });
+      expect((await inlineClient.checkHealth()).status).toBe("online");
     });
   });
 });

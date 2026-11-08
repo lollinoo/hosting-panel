@@ -20,7 +20,9 @@ export interface BootstrapHostAgentEnv {
   readonly HP_HOST_AGENT_PIPE?: string;
   readonly HP_IPC_KEY_ID?: string;
   readonly HP_IPC_KEY_FILE?: string;
+  readonly HP_IPC_KEY?: string;
   readonly HP_IPC_HMAC_SECRET?: string;
+  readonly HP_IPC_SECRET?: string;
   readonly HP_NFTABLES_RULESET_PATH?: string;
   readonly HP_STORAGE_PATH?: string;
 }
@@ -31,12 +33,18 @@ async function loadIpcKeyringFromEnv(
   const keyId = (env.HP_IPC_KEY_ID ?? "ipc-v1").trim() || "ipc-v1";
   const keyFile = env.HP_IPC_KEY_FILE?.trim();
 
+  const inlineSecret = (
+    env.HP_IPC_KEY ??
+    env.HP_IPC_HMAC_SECRET ??
+    env.HP_IPC_SECRET
+  )?.trim();
+
   let secret: string;
   if (keyFile) {
     const raw = await readFile(keyFile, "utf8");
     secret = raw.trim();
-  } else if (env.HP_IPC_HMAC_SECRET) {
-    secret = env.HP_IPC_HMAC_SECRET.trim();
+  } else if (inlineSecret) {
+    secret = inlineSecret;
   } else {
     const raw = await readFile("/etc/hosting-panel/ipc.key", "utf8");
     secret = raw.trim();
