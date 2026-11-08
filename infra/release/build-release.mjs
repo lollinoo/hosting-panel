@@ -68,6 +68,17 @@ export async function listReleaseViolations(dir) {
   return out;
 }
 
+/** Exact running node version for RELEASE.json; its major must match .node-version (installer downloads x.y.z). */
+export function releaseNodeVersion(nodeVersionFile, runningVersion) {
+  const wanted = nodeVersionFile.trim().replace(/^v/, "").split(".")[0];
+  const running = runningVersion.replace(/^v/, "");
+  if (!/^\d+\.\d+\.\d+$/.test(running)) throw new Error(`node version ${running} is not x.y.z`);
+  if (running.split(".")[0] !== wanted) {
+    throw new Error(`building with node ${running} but .node-version requires major ${wanted}`);
+  }
+  return running;
+}
+
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 function run(cmd, args, cwd = repo) {
@@ -86,6 +97,7 @@ async function main() {
     console.error(`--version ${version} differs from package.json version ${pkgVersion}`);
     process.exit(1);
   }
+  const node = releaseNodeVersion(readFileSync(path.join(repo, ".node-version"), "utf8"), process.versions.node);
   const outDir = path.resolve(repo, arg("--out") ?? "dist-release");
   const name = `hosting-panel-${version}`;
   const stage = path.join(outDir, name);
@@ -112,8 +124,9 @@ async function main() {
   run("corepack", ["pnpm", "install", "--prod", "--frozen-lockfile", "--offline", "--ignore-scripts"], stage);
   rmSync(path.join(stage, "node_modules/.cache"), { recursive: true, force: true });
 
-  const gitCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
-  const node = readFileSync(path.join(repo, ".node-version"), "utf8").trim();
+  const git = (...a) => execFileSync("git", a, { cwd: repo, encoding: "utf8" }).trim();
+  const dirty = git("status", "--porcelain", "--", ".", ":(exclude)dist-release") !== "";
+  const gitCommit = `${git("rev-parse", "HEAD")}${dirty ? "-dirty" : ""}`;
   writeFileSync(path.join(stage, "VERSION"), `${version}\n`);
   writeFileSync(
     path.join(stage, "RELEASE.json"),

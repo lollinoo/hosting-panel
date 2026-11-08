@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error -- plain ESM script without type declarations
-import { listReleaseViolations, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
+import { listReleaseViolations, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
 
 const dirs: string[] = [];
 function tmp() {
@@ -58,5 +58,17 @@ describe("listReleaseViolations", () => {
 
   it("accepts a complete minimal tree", async () => {
     expect(await listReleaseViolations(completeTree())).toEqual([]);
+  });
+});
+
+describe("releaseNodeVersion", () => {
+  it("returns the exact x.y.z when the major matches .node-version", () => {
+    const v: string = releaseNodeVersion("26\n", "26.13.0");
+    expect(v).toBe("26.13.0");
+    expect(v).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it("rejects a running major that differs from .node-version", () => {
+    expect(() => releaseNodeVersion("26", "24.11.1")).toThrow(/major 26/);
   });
 });
