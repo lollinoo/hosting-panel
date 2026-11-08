@@ -226,8 +226,10 @@ export class ManagedSitesService {
         return { siteId: site.id, operationId };
       });
     } catch (err) {
-      // A concurrent create passed the check above and committed first.
+      // A concurrent create passed the check above and committed first: the same key replays it.
       if (isUniqueViolation(err)) {
+        const twin = await this.#replay(organizationId, idempotencyKey);
+        if (twin) return twin;
         throw new ControlPlaneError(
           "DOMAIN_CONFLICT",
           "This web address is already used by another site or by the panel.",

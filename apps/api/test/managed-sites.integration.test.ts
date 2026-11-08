@@ -239,6 +239,26 @@ describe("managed WordPress sites API", () => {
     expect(await dbClient.db.select().from(sites)).toHaveLength(1);
   });
 
+  it("a concurrent create with the same Idempotency-Key replays, not DOMAIN_CONFLICT", async () => {
+    const key = randomUUID();
+    const original = dbClient.db.transaction.bind(dbClient.db);
+    let winner: Promise<Awaited<ReturnType<typeof create>>> | undefined;
+    // The twin request commits between this one's replay check and its own transaction.
+    vi.spyOn(dbClient.db, "transaction").mockImplementation((async (...args: Parameters<typeof original>) => {
+      if (!winner) {
+        winner = create(SITE, key);
+        await winner;
+      }
+      return original(...args);
+    }) as typeof original);
+    const loser = await create(SITE, key);
+    const first = await winner!;
+    expect(first.status).toBe(202);
+    expect(loser.status).toBe(202);
+    expect(loser.body.data).toEqual(first.body.data);
+    expect(await dbClient.db.select().from(sites)).toHaveLength(1);
+  });
+
   it("a step running past 60 s keeps its lease", async () => {
     let statusDuringStep: string | undefined;
     sim.onJob = async (req) => {
