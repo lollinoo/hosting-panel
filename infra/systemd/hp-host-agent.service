@@ -21,7 +21,7 @@ Restart=on-failure
 RestartSec=5s
 UMask=0007
 
-# Shared UDS IPC dir (/run/hosting-panel 2770 root:hp-ipc managed via tmpfiles.d)
+# Shared UDS IPC dir (/run/hosting-panel 3770 root:hp-ipc managed via tmpfiles.d)
 ReadWritePaths=/run/hosting-panel
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix

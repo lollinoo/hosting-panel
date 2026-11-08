@@ -669,8 +669,8 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(BigInt(invJson.totalStorageBytes)).toBeGreaterThan(0n);
       expect(findForbiddenPublicDtoKeys(invJson)).toEqual([]);
 
-      // The deployed runtime dir is group-writable for the hp-ipc daemons (2770).
-      await chmod(runtimeDir, 0o2770);
+      // The deployed runtime dir is group-writable and sticky for the hp-ipc daemons (3770).
+      await chmod(runtimeDir, 0o3770);
       const groupWritableRes = await adapter.executeMaintenance(
         createApprovedHostMaintenanceCommand({
           hostId: "host_linux_live",
@@ -943,7 +943,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         join(SYSTEMD_DIR, "hosting-panel-tmpfiles.conf"),
         "utf8",
       );
-      expect(tmpfilesContent).toContain("d /run/hosting-panel 2770 root hp-ipc -");
+      expect(tmpfilesContent).toContain("d /run/hosting-panel 3770 root hp-ipc -");
       expect(tmpfilesContent).toContain(
         "d /run/hosting-panel/secrets 0700 hp-executor hp-executor -",
       );

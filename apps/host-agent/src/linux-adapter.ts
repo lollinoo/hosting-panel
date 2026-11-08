@@ -521,7 +521,7 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
             statfs(entry.targetPath),
           ]);
           const modeOctal = dirStat.mode & 0o777;
-          // The runtime dir is group-writable (2770 root:hp-ipc) so the daemons can create their sockets.
+          // The runtime dir is group-writable (3770 root:hp-ipc) so the daemons can create their sockets.
           const permissionsCompliant =
             dirStat.isDirectory() &&
             (modeOctal === 0o750 ||
