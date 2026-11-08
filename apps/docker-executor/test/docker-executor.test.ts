@@ -78,6 +78,9 @@ interface MockDockerDaemon {
 
 async function startMockDockerDaemon(options?: {
   readonly rejectVersionedPrefix?: boolean;
+  /** Image inspect answers 404 and /images/create answers 200 with this body. */
+  readonly pullBody?: string;
+  readonly logsBody?: Buffer;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -135,7 +138,25 @@ async function startMockDockerDaemon(options?: {
         return;
       }
 
+      if (method === "POST" && routePath === "/images/create" && options?.pullBody !== undefined) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(options.pullBody);
+        return;
+      }
+
+      const logsMatch = /^\/containers\/([^/]+)\/logs$/.exec(routePath);
+      if (method === "GET" && logsMatch && options?.logsBody) {
+        res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
+        res.end(options.logsBody);
+        return;
+      }
+
       if (method === "GET" && routePath.startsWith("/images/") && routePath.endsWith("/json")) {
+        if (options?.pullBody !== undefined) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "No such image" }));
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ Id: "sha256:mockimage" }));
         return;
@@ -1317,5 +1338,79 @@ describe("panel ingress", () => {
     await writeFile(panelFile, "stale");
     await adapter.ensureIngressProxy();
     await expect(stat(panelFile)).rejects.toThrow();
+  });
+});
+
+describe("service logs", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  async function setup(options?: Parameters<typeof startMockDockerDaemon>[0]) {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-logs-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon(options);
+    cleanupTasks.push(() => mockDaemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    return { adapter, mockDaemon };
+  }
+
+  const spec = () =>
+    createApprovedServiceSpec({
+      serviceInstanceId: "svc_logs",
+      siteId: "site_logs",
+      organizationId: "org_logs",
+      image: "ghcr.io/example/webapp:1.0.0",
+      containerName: "hp-site-logs",
+      env: {},
+      resourceLimits: { cpuMilli: 500, memoryBytes: "536870912" },
+      pidsLimit: 128,
+      revisionNumber: 1,
+      specHash: "hash_logs",
+      domains: [],
+      exposeHttp: false,
+      internalPort: 3000,
+      volumeMounts: [],
+      resolvedSecrets: {},
+    });
+
+  it("getServiceLogs clamps tail and returns demuxed lines", async () => {
+    const frame = Buffer.alloc(8);
+    const text = Buffer.from("2026-01-02T03:04:05.123456789Z hello\n");
+    frame[0] = 1;
+    frame.writeUInt32BE(text.length, 4);
+    const { adapter, mockDaemon } = await setup({
+      pullBody: "",
+      logsBody: Buffer.concat([frame, text]),
+    });
+    await adapter.deployService(spec());
+    const lines = await adapter.getServiceLogs("svc_logs", 9999);
+    expect(lines).toEqual([
+      { at: "2026-01-02T03:04:05.123456789Z", stream: "stdout", text: "hello" },
+    ]);
+    expect(mockDaemon.requestedPaths.some((p) => p.includes("/logs?") && p.includes("tail=500"))).toBe(
+      true,
+    );
+    await expect(adapter.getServiceLogs("svc_missing", 5)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
+
+  it("a pull that streams an error is reported as a failure", async () => {
+    const { adapter, mockDaemon } = await setup({
+      pullBody: '{"status":"Pulling"}\n{"error":"manifest unknown"}\n',
+    });
+    await expect(adapter.deployService(spec())).rejects.toMatchObject({
+      code: "DOCKER_ENGINE_UNAVAILABLE",
+      message: "Could not download the site software",
+    });
+    expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
   });
 });

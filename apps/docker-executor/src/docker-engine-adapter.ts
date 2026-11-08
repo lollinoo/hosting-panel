@@ -15,6 +15,7 @@ import {
   type DockerExecutionResult,
   type DockerExecutorPort,
 } from "@hosting-panel/executor-contracts";
+import { demuxDockerLogStream, type ServiceLogLine } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
@@ -721,6 +722,8 @@ interface DockerHttpResponse {
   readonly body: Buffer;
 }
 
+const PULL_TIMEOUT_MS = 240_000;
+
 class DockerSocketHttpClient {
   private readonly socketPath: string;
   private readonly apiPrefix: string;
@@ -741,9 +744,16 @@ class DockerSocketHttpClient {
     method: string,
     endpointPath: string,
     jsonBody?: unknown,
+    options?: { readonly timeoutMs?: number },
   ): Promise<DockerHttpResponse> {
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     const primaryPrefix = this.useUnversionedFallback ? "" : this.apiPrefix;
-    const response = await this.rawRequest(method, `${primaryPrefix}${endpointPath}`, jsonBody);
+    const response = await this.rawRequest(
+      method,
+      `${primaryPrefix}${endpointPath}`,
+      jsonBody,
+      timeoutMs,
+    );
 
     if (
       !this.useUnversionedFallback &&
@@ -758,7 +768,7 @@ class DockerSocketHttpClient {
         text.includes("too new") ||
         text.includes("too old")
       ) {
-        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody);
+        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody, timeoutMs);
         if (fallbackResponse.statusCode < 500 && fallbackResponse.statusCode !== 404) {
           this.useUnversionedFallback = true;
           return fallbackResponse;
@@ -772,7 +782,8 @@ class DockerSocketHttpClient {
   private rawRequest(
     method: string,
     fullPath: string,
-    jsonBody?: unknown,
+    jsonBody: unknown,
+    timeoutMs: number,
   ): Promise<DockerHttpResponse> {
     const serializedBody =
       jsonBody !== undefined ? Buffer.from(JSON.stringify(jsonBody), "utf8") : undefined;
@@ -793,7 +804,7 @@ class DockerSocketHttpClient {
           path: fullPath,
           method,
           headers,
-          timeout: this.timeoutMs,
+          timeout: timeoutMs,
         },
         (res) => {
           const chunks: Buffer[] = [];
@@ -1177,6 +1188,26 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
+  public async getServiceLogs(serviceInstanceId: string, tail: number): Promise<ServiceLogLine[]> {
+    assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
+    const summary = await this.findContainerSummaryByServiceId(serviceInstanceId);
+    if (!summary) {
+      throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
+    }
+    const n = Math.min(500, Math.max(1, Math.trunc(tail) || 1));
+    const res = await this.dockerClient.request(
+      "GET",
+      `/containers/${summary.Id}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
+    );
+    if (res.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to read service logs (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    return demuxDockerLogStream(res.body);
+  }
+
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const summary = await this.findContainerSummaryByServiceId(serviceInstanceId);
@@ -1331,10 +1362,23 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const pullRes = await this.dockerClient.request(
       "POST",
       `/images/create?fromImage=${encodeURIComponent(image)}`,
+      undefined,
+      { timeoutMs: PULL_TIMEOUT_MS },
     );
     if (pullRes.statusCode !== 200) {
       throw new ExecutorCodedError(
         `Failed to pull container image '${image.slice(0, 128)}' (HTTP ${String(pullRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    // The Engine answers 200 even when the pull fails; the error is a JSON line in the stream.
+    const failed = pullRes.body
+      .toString("utf8")
+      .split("\n")
+      .some((l) => l.startsWith("{") && /"error"\s*:/.test(l));
+    if (failed) {
+      throw new ExecutorCodedError(
+        "Could not download the site software",
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
