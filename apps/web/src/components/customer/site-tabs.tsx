@@ -8,8 +8,9 @@ import { LAST_SITE_COOKIE } from "@/app/sites/landing";
 import { cn } from "@/lib/utils";
 
 // Later steps append tabs here.
-export const SITE_TABS: { key: "overview"; href: (siteId: string) => string }[] = [
+export const SITE_TABS: { key: "overview" | "logs"; href: (siteId: string) => string }[] = [
   { key: "overview", href: (siteId) => `/sites/${siteId}` },
+  { key: "logs", href: (siteId) => `/sites/${siteId}/logs` },
 ];
 
 // Route tabs are page links, so they are a nav with aria-current rather than an ARIA tablist.

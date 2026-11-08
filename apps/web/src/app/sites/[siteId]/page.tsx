@@ -5,10 +5,13 @@ import { fetchServerOrgOperations } from "@/lib/server-api";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SiteProgress } from "@/components/customer/site-progress";
 import { StatusPill, toSiteStatusView } from "@/components/customer/status-pill";
+import { SiteActions } from "@/components/customer/site-actions";
+import { showSetupProgress } from "@/lib/site-setup";
 import { getCustomerContext, getSite } from "../data";
 
 // Only operations a site owner would recognise; anything else is not shown.
 const ACTIVITY: Partial<Record<OperationKind, keyof Messages["site"]["activity"]>> = {
+  "site.provision": "provision",
   "site.deploy": "deploy",
   "service.deploy": "deploy",
   "service.restart": "restart",
@@ -36,10 +39,8 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
   const provision = (operations ?? [])
     .filter((op: OperationDto) => op.kind === "site.provision" && op.resourceId === site.id)
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))[0];
-  // A degraded site only shows the setup when that is what failed.
-  const showProgress =
-    site.phpVersion !== null &&
-    (site.status === "deploying" || (site.status === "degraded" && provision?.status === "failed"));
+  // Only the setup shows here; restarts and PHP changes report through the Manage card.
+  const showProgress = site.phpVersion !== null && showSetupProgress(site.status, provision?.status);
   const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const { labelKey } = toSiteStatusView(site.status, site.driftSummary);
 
@@ -52,6 +53,18 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
             siteId={site.id}
             csrfToken={session.csrfToken}
             initial={provision ? { id: provision.id, status: provision.status, steps: provision.steps } : null}
+          />
+        </div>
+      )}
+      {site.phpVersion !== null && (
+        <div className="md:col-span-2">
+          <SiteActions
+            orgId={orgId}
+            siteId={site.id}
+            siteName={site.name}
+            status={site.status}
+            phpVersion={site.phpVersion}
+            csrfToken={session.csrfToken}
           />
         </div>
       )}

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { SiteForm, type SiteFormBody } from "@/components/customer/site-form";
 import { errorMessage } from "@/i18n";
+import { renewKeyAfter } from "@/lib/site-setup";
 import { useMessages } from "@/i18n/provider";
 
 export function NewSite({ orgId, csrfToken }: { orgId: string; csrfToken: string }) {
@@ -42,8 +43,8 @@ export function NewSite({ orgId, csrfToken }: { orgId: string; csrfToken: string
       } else {
         setError(errorMessage(m, code));
       }
-      // A rejected request is not stored under its key, but a fixed form is a new request anyway.
-      idempotencyKey.current = crypto.randomUUID();
+      // A 4xx is not stored under its key and a fixed form is a new request; after a 5xx the same key must replay.
+      if (renewKeyAfter(res.status)) idempotencyKey.current = crypto.randomUUID();
     } catch {
       setError(m.errors.generic);
     } finally {

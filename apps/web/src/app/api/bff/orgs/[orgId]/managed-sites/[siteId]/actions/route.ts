@@ -14,7 +14,7 @@ export async function POST(req: Request, context: { params: Promise<{ orgId: str
 
   const idempotencyKey = req.headers.get("idempotency-key");
   if (!idempotencyKey) {
-    return bffErrorResponse("VALIDATION_ERROR", "Intestazione Idempotency-Key obbligatoria per la l'azione sul sito", 400, [
+    return bffErrorResponse("VALIDATION_ERROR", "Intestazione Idempotency-Key obbligatoria per l'azione sul sito", 400, [
       { field: "idempotency-key", message: "Intestazione richiesta" },
     ]);
   }
