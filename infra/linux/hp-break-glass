@@ -15,4 +15,4 @@ export DATABASE_URL
 exec runuser -u hp-api -- env \
   HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key \
   HP_BREAKGLASS_KEY_FILE=/etc/hosting-panel/breakglass-jwt.key \
-  node /opt/hosting-panel/current/apps/api/dist/cli/break-glass.js "$@"
+  /usr/bin/node /opt/hosting-panel/current/apps/api/dist/cli/break-glass.js "$@"

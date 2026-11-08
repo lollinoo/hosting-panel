@@ -60,6 +60,11 @@ describe("listReleaseViolations", () => {
     expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/lib/release.sh");
   });
 
+  it("requires the installer and the OS library it sources", () => {
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/install.sh");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/lib/os.sh");
+  });
+
   it("accepts a complete minimal tree", async () => {
     expect(await listReleaseViolations(completeTree())).toEqual([]);
   });

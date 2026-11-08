@@ -87,6 +87,8 @@ describe("per-service env files and wrappers", () => {
   it("web binds to HP_WEB_BIND_ADDRESS", () => {
     const web = read("infra/systemd/hp-web.service");
     expect(web).toContain("--hostname ${HP_WEB_BIND_ADDRESS}");
+    // Never an empty placeholder: `next start --hostname ""` listens on all interfaces.
+    expect(read("infra/linux/bootstrap-dedicated.sh")).toContain("HP_WEB_BIND_ADDRESS=127.0.0.1");
     expect(web).toMatch(/^After=.*docker\.service/m);
   });
 
@@ -102,6 +104,7 @@ describe("per-service env files and wrappers", () => {
     for (const w of ["hp-accounts", "hp-break-glass"]) {
       const src = read(`infra/linux/${w}`);
       expect(src).toContain("runuser -u hp-api");
+      expect(src).toContain("/usr/bin/node /opt/hosting-panel/current/");
       expect(src).not.toMatch(/node\s[^\n]*"\$DATABASE_URL"/);
     }
   });

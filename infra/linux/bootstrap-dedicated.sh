@@ -275,9 +275,10 @@ write_env_file() {
 write_env_file /etc/hosting-panel/api.env "DATABASE_URL=
 ENABLE_DEV_OIDC=false
 HP_SEED_DEMO=false"
+# Loopback placeholder: an empty value would make next listen on all interfaces; install.sh sets docker0.
 write_env_file /etc/hosting-panel/web.env "BFF_SESSION_SECRET=$(generate_32_byte_hex_key)
 API_INTERNAL_URL=http://127.0.0.1:4000
-HP_WEB_BIND_ADDRESS="
+HP_WEB_BIND_ADDRESS=127.0.0.1"
 write_env_file /etc/hosting-panel/executor.env "HP_PANEL_HOSTNAME=
 HP_PANEL_IPV4=
 HP_ACME_EMAIL=

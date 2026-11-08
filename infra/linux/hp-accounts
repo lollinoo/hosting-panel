@@ -14,4 +14,4 @@ done < "$ENV_FILE"
 export DATABASE_URL
 exec runuser -u hp-api -- env \
   HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key \
-  node /opt/hosting-panel/current/apps/api/dist/cli/accounts.js "$@"
+  /usr/bin/node /opt/hosting-panel/current/apps/api/dist/cli/accounts.js "$@"

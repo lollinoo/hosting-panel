@@ -24,6 +24,8 @@ export const REQUIRED_RELEASE_PATHS = [
   "infra/systemd/hp-host-agent.service",
   "infra/systemd/hp-web.service",
   "infra/linux/bootstrap-dedicated.sh",
+  "infra/linux/install.sh",
+  "infra/linux/lib/os.sh",
   "infra/linux/lib/release.sh",
   "infra/linux/nftables-dedicated.conf",
   "infra/linux/hp-accounts",
