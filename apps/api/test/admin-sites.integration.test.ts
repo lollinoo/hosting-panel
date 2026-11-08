@@ -196,6 +196,24 @@ describe("server administrator site API", () => {
       expect((await call("GET", "/v1/admin/sites", token)).status).toBe(403);
       expect((await call("POST", "/v1/admin/sites", token, { ...SITE, domain: "b.it", ownerOrganizationId: null })).status).toBe(403);
       expect((await call("POST", `/v1/admin/sites/${siteId}/owner`, token, { ownerOrganizationId: null })).status).toBe(403);
+      expect((await call("POST", `/v1/admin/sites/${siteId}/actions`, token, { action: "stop" })).status).toBe(403);
+      expect((await call("POST", `/v1/admin/sites/${siteId}/actions`, token, { action: "retry" })).status).toBe(403);
+      expect((await call("DELETE", `/v1/admin/sites/${siteId}`, token, { confirmName: SITE.name })).status).toBe(403);
+      expect(await dbClient.db.select().from(sites).where(eq(sites.id, siteId))).toHaveLength(1);
+    });
+
+    it("an owner change keeps a failed setup visible and retryable", async () => {
+      sim.failNextJob("wordpress.install", 1);
+      const { siteId, operationId } = await createAndRun(null);
+      expect((await opRow(operationId)).status).toBe("failed");
+      const moved = await reassign(siteId, orgId);
+      await run();
+      expect((await opRow(moved.body.data.operationId as string)).status).toBe("succeeded");
+      expect((await dbClient.db.select().from(sites).where(eq(sites.id, siteId)))[0]!.status).toBe("degraded");
+
+      const retry = await call("POST", `/v1/admin/sites/${siteId}/actions`, adminToken, { action: "retry" });
+      expect(retry.status).toBe(202);
+      expect((await opRow(retry.body.data.operationId as string)).kind).toBe("site.provision");
     });
 
     it("admin cannot name platform-ops as an owner", async () => {

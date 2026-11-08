@@ -13,6 +13,7 @@ import {
   encryptedSecrets,
   eq,
   hostAllocations,
+  latestSiteOperation,
   listSiteDatabases,
   moveSiteToOrganizationTransactional,
   operationSteps,
@@ -366,10 +367,13 @@ export class SiteProvisioner {
       });
 
       await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      await db
-        .update(sites)
-        .set({ status: "ready", updatedAt: new Date() })
-        .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
+      // A failed setup stays degraded, so its Try again survives the owner change.
+      if ((await latestSiteOperation(db, { siteId, kind: "site.provision" }))?.status === "succeeded") {
+        await db
+          .update(sites)
+          .set({ status: "ready", updatedAt: new Date() })
+          .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
+      }
       await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
       await appendAuditEvent(db, {
         actorId: null,
