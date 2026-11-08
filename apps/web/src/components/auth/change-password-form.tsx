@@ -14,11 +14,14 @@ export function ChangePasswordForm({ csrfToken }: { csrfToken: string }) {
   const router = useRouter();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (newPassword.length < 12) return setError(m.account.passwordRule);
+    if (newPassword !== confirm) return setError(m.account.passwordMismatch);
     setBusy(true);
     setError(null);
     try {
@@ -29,11 +32,17 @@ export function ChangePasswordForm({ csrfToken }: { csrfToken: string }) {
       });
       if (res.ok) {
         router.replace("/");
-        router.refresh();
         return;
       }
       const data = await res.json().catch(() => null);
-      setError(errorMessage(m, data?.error?.code ?? ""));
+      const code: string = data?.error?.code ?? "";
+      setError(
+        code === "INVALID_CREDENTIALS"
+          ? m.account.currentPasswordWrong
+          : code === "VALIDATION_ERROR"
+            ? m.account.passwordRule
+            : errorMessage(m, code),
+      );
     } catch {
       setError(m.errors.generic);
     } finally {
@@ -69,6 +78,22 @@ export function ChangePasswordForm({ csrfToken }: { csrfToken: string }) {
               autoComplete="new-password"
               value={newPassword}
               onChange={(e) => setNewPassword(e.target.value)}
+              minLength={12}
+              aria-describedby="new-hint"
+              required
+            />
+            <p id="new-hint" className="text-xs text-muted-foreground">
+              {m.account.passwordRule}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="confirm">{m.account.confirmPassword}</Label>
+            <Input
+              id="confirm"
+              type="password"
+              autoComplete="new-password"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
               required
             />
           </div>

@@ -26,6 +26,10 @@ export const en: Messages = {
     currentPassword: "Current password",
     newPassword: "New password",
     changePasswordSubmit: "Save password",
+    confirmPassword: "Confirm new password",
+    passwordRule: "At least 12 characters.",
+    passwordMismatch: "The two passwords do not match.",
+    currentPasswordWrong: "Your current password is incorrect.",
   },
   shell: {
     productName: "Hosting Panel",

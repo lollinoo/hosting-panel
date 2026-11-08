@@ -24,6 +24,10 @@ export const it = {
     currentPassword: "Password attuale",
     newPassword: "Nuova password",
     changePasswordSubmit: "Salva password",
+    confirmPassword: "Conferma nuova password",
+    passwordRule: "Almeno 12 caratteri.",
+    passwordMismatch: "Le due password non coincidono.",
+    currentPasswordWrong: "La password attuale non è corretta.",
   },
   shell: {
     productName: "Hosting Panel",

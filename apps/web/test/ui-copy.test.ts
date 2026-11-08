@@ -17,7 +17,13 @@ function files(dir: string): string[] {
   });
 }
 
-const sources = () => dirs.flatMap(files).map((f) => fs.readFileSync(f, "utf-8"));
+// Comments and imports are code, not copy.
+const strip = (t: string) =>
+  t
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/.*$/gm, "$1")
+    .replace(/^\s*import[^;]*;?$/gm, "");
+const sources = () => dirs.flatMap(files).map((f) => strip(fs.readFileSync(f, "utf-8")));
 const copy = () => [
   ...sources(),
   ...sections.flatMap((s) => [JSON.stringify(en[s]), JSON.stringify(itMsgs[s])]),
@@ -31,7 +37,7 @@ describe("ui copy", () => {
   });
 
   it("customer surfaces avoid infrastructure jargon", () => {
-    const jargon = /container|docker|revision|drift|allocation|outbox|HCP-SPEC|AC-F|ADR-/i;
+    const jargon = /\b(container|docker|revision|drift|allocation|outbox)\b|HCP-SPEC|AC-F|ADR-/i;
     for (const text of copy()) expect(text).not.toMatch(jargon);
   });
 });

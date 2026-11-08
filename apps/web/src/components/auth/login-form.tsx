@@ -37,7 +37,6 @@ export function LoginForm() {
         setNeedsTotp(true);
       } else {
         router.replace("/");
-        router.refresh();
       }
     } catch {
       setError(m.errors.generic);
@@ -117,6 +116,7 @@ export function LoginForm() {
               onClick={() => {
                 setNeedsTotp(false);
                 setTotpCode("");
+                setPassword("");
                 setError(null);
               }}
             >
@@ -124,7 +124,7 @@ export function LoginForm() {
             </Button>
           )}
         </form>
-        <div className="mt-6 flex justify-center gap-2 text-xs text-muted-foreground" aria-label={m.common.language}>
+        <div role="group" className="mt-6 flex justify-center gap-2 text-xs text-muted-foreground" aria-label={m.common.language}>
           {(["it", "en"] as const).map((l) => (
             <button
               key={l}
