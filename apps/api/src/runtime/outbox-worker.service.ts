@@ -276,6 +276,8 @@ export class OutboxWorkerService {
         await this.#executeHostSecurity(op, payload);
       } else if (op.kind === "site.provision") {
         await this.siteProvisioner.provision(op, payload);
+      } else if (op.kind === "site.delete") {
+        await this.siteProvisioner.remove(op);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",

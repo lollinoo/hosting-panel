@@ -1,8 +1,12 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post, Query, Req } from "@nestjs/common";
 import {
+  ChangeSiteRuntimeInputSchema,
   CreateManagedSiteInputSchema,
+  DeleteSiteInputSchema,
   SiteActionInputSchema,
   type ManagedSiteDto,
+  type PermissionKey,
+  type SiteLogLineDto,
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
@@ -80,14 +84,12 @@ export class ManagedSitesController {
   ): Promise<ManagedSiteAcceptedEnvelope> {
     const auth = await this.authzService.authenticateRequest(req);
     const site = await this.sitesService.get(siteId, orgId);
+    // Permission first (a body that fails validation must not tell a collaborator more than a 403).
+    const requested = (rawBody as { action?: unknown } | null)?.action;
+    const permission: PermissionKey =
+      requested === "stop" ? "service.stop" : requested === "start" || requested === "restart" ? "service.restart" : "site.create";
+    await this.#require(auth, req, orgId, site, permission);
     const { action } = SiteActionInputSchema.parse(rawBody ?? {});
-    await this.authzService.requireOrgPermission(auth, req, {
-      organizationId: orgId,
-      permission: "site.create",
-      targetType: "site",
-      targetId: siteId,
-      resource: { id: site.id, organizationId: site.organizationId },
-    });
     const idempotencyKey = requireIdempotencyKey(headersOf(req));
 
     const accepted = await this.sitesService.act(siteId, orgId, action, auth.user.id, idempotencyKey);
@@ -100,6 +102,87 @@ export class ManagedSitesController {
     });
     this.outboxWorker.triggerAsync();
     return this.#accepted(orgId, accepted);
+  }
+
+  @Patch(":siteId/runtime")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public async changeRuntime(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("siteId") siteId: string,
+    @Body() rawBody: unknown,
+  ): Promise<ManagedSiteAcceptedEnvelope> {
+    const auth = await this.authzService.authenticateRequest(req);
+    const site = await this.sitesService.get(siteId, orgId);
+    await this.#require(auth, req, orgId, site, "service.deploy");
+    const body = ChangeSiteRuntimeInputSchema.parse(rawBody ?? {});
+    const idempotencyKey = requireIdempotencyKey(headersOf(req));
+
+    const accepted = await this.sitesService.changeRuntime(siteId, orgId, body.phpVersion, auth.user.id, idempotencyKey);
+    await this.authzService.recordAudit(auth, req, {
+      organizationId: orgId,
+      action: "site.runtime.change",
+      targetType: "site",
+      targetId: siteId,
+      details: { operationId: accepted.operationId, phpVersion: body.phpVersion },
+    });
+    this.outboxWorker.triggerAsync();
+    return this.#accepted(orgId, accepted);
+  }
+
+  @Delete(":siteId")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public async remove(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("siteId") siteId: string,
+    @Body() rawBody: unknown,
+  ): Promise<ManagedSiteAcceptedEnvelope> {
+    const auth = await this.authzService.authenticateRequest(req);
+    const site = await this.sitesService.get(siteId, orgId);
+    await this.#require(auth, req, orgId, site, "site.delete");
+    const body = DeleteSiteInputSchema.parse(rawBody ?? {});
+    const idempotencyKey = requireIdempotencyKey(headersOf(req));
+
+    const accepted = await this.sitesService.remove(siteId, orgId, body.confirmName, auth.user.id, idempotencyKey);
+    await this.authzService.recordAudit(auth, req, {
+      organizationId: orgId,
+      action: "site.delete",
+      targetType: "site",
+      targetId: siteId,
+      details: { operationId: accepted.operationId },
+    });
+    this.outboxWorker.triggerAsync();
+    return this.#accepted(orgId, accepted);
+  }
+
+  @Get(":siteId/logs")
+  public async logs(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("siteId") siteId: string,
+    @Query("tail") tail?: string,
+  ): Promise<{ data: SiteLogLineDto[] }> {
+    const auth = await this.authzService.authenticateRequest(req);
+    const site = await this.sitesService.get(siteId, orgId);
+    await this.#require(auth, req, orgId, site, "service.logs.read");
+    return { data: await this.sitesService.logs(siteId, orgId, tail === undefined ? 200 : Number(tail)) };
+  }
+
+  async #require(
+    auth: Awaited<ReturnType<AuthzContextService["authenticateRequest"]>>,
+    req: FastifyRequest,
+    orgId: string,
+    site: ManagedSiteDto,
+    permission: PermissionKey,
+  ): Promise<void> {
+    await this.authzService.requireOrgPermission(auth, req, {
+      organizationId: orgId,
+      permission,
+      targetType: "site",
+      targetId: site.id,
+      resource: { id: site.id, organizationId: site.organizationId },
+    });
   }
 
   #accepted(orgId: string, accepted: ManagedSiteAccepted): ManagedSiteAcceptedEnvelope {

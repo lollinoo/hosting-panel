@@ -44,7 +44,21 @@ export const SITE_PROVISION_STEPS = [
   { key: "finish", label: "Finish" },
 ] as const;
 
+export const SITE_DELETE_STEPS = [
+  { key: "drop_database", label: "Remove the database" },
+  { key: "remove_site", label: "Remove the site" },
+  { key: "finish", label: "Finish" },
+] as const;
+
 type SiteProvisionStep = (typeof SITE_PROVISION_STEPS)[number]["key"];
+type SiteDeleteStep = (typeof SITE_DELETE_STEPS)[number]["key"];
+
+const DELETE_STEP_DONE: Readonly<Record<SiteDeleteStep, string>> = {
+  drop_database: "Database removed",
+  remove_site: "Site removed",
+  finish: "Your site was deleted",
+};
+export const SITE_DELETE_FAILED = "Site could not be deleted";
 
 // Step and operation messages are shown to every org member: fixed texts only.
 const STEP_DONE: Readonly<Record<SiteProvisionStep, string>> = {
@@ -203,7 +217,71 @@ export class SiteProvisioner {
         details: { operationId: op.id },
       });
     } catch (err) {
-      await this.#settleFailure(op, current, err);
+      await this.#settleFailure(op, current, err, SITE_SETUP_FAILED, "site.provision.failed");
+      throw err;
+    }
+  }
+
+  /**
+   * Runs site.delete. Databases go first, so a drop failure leaves the site still serving;
+   * every row is kept on failure and the delete can be requested again.
+   */
+  public async remove(op: typeof operations.$inferSelect): Promise<void> {
+    const db = this.dbClient.db;
+    const organizationId = op.organizationId;
+    const siteId = op.resourceId;
+    let current: SiteDeleteStep = "drop_database";
+
+    const step = async (key: SiteDeleteStep, work: () => Promise<void>): Promise<void> => {
+      current = key;
+      await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+      await updateOperationStepTransactional(db, op.id, key, "running", STEP_RUNNING);
+      await work();
+      await updateOperationStepTransactional(db, op.id, key, "succeeded", DELETE_STEP_DONE[key]);
+    };
+
+    try {
+      const siteDbs = await listSiteDatabases(db, { organizationId, siteId });
+      const services = await db
+        .select()
+        .from(serviceInstances)
+        .where(and(eq(serviceInstances.siteId, siteId), eq(serviceInstances.organizationId, organizationId)));
+
+      await step("drop_database", async () => {
+        for (const [i, siteDb] of siteDbs.entries()) {
+          await this.#runJob({
+            jobId: `job_${op.id.replace(/^op_/, "")}_drop${String(i)}`,
+            kind: "db.drop",
+            siteId,
+            organizationId,
+            params: { dbName: siteDb.dbName, dbUser: siteDb.dbUser },
+          });
+        }
+      });
+
+      await step("remove_site", async () => {
+        for (const svc of services) await this.executor.deleteService(svc.id);
+        await this.executor.purgeSite(siteId);
+      });
+
+      // Every executor step is done; what is left is bookkeeping (processing cannot go straight to succeeded).
+      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
+      await step("finish", async () => {
+        await db.delete(sites).where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)));
+      });
+
+      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
+      await appendAuditEvent(db, {
+        actorId: null,
+        actorType: "system",
+        organizationId,
+        action: "site.delete.succeeded",
+        targetType: "site",
+        targetId: siteId,
+        details: { operationId: op.id },
+      });
+    } catch (err) {
+      await this.#settleFailure(op, current, err, SITE_DELETE_FAILED, "site.delete.failed");
       throw err;
     }
   }
@@ -247,8 +325,10 @@ export class SiteProvisioner {
 
   async #settleFailure(
     op: typeof operations.$inferSelect,
-    failedStep: SiteProvisionStep,
+    failedStep: SiteProvisionStep | SiteDeleteStep,
     err: unknown,
+    publicMessage: string,
+    auditAction: string,
   ): Promise<void> {
     const db = this.dbClient.db;
     const steps = await db.select().from(operationSteps).where(eq(operationSteps.operationId, op.id));
@@ -264,7 +344,7 @@ export class SiteProvisioner {
     if (latest && !isTerminalOperationStatus(latest.status) && canTransitionOperation(latest.status, "failed")) {
       await transitionOperation(db, op.id, "failed", {
         errorCode: err instanceof ControlPlaneError ? err.code : "INTERNAL_ERROR",
-        errorMessage: SITE_SETUP_FAILED,
+        errorMessage: publicMessage,
       });
     }
     await db.update(sites).set({ status: "degraded", updatedAt: new Date() }).where(eq(sites.id, op.resourceId));
@@ -275,7 +355,7 @@ export class SiteProvisioner {
       actorId: null,
       actorType: "system",
       organizationId: op.organizationId,
-      action: "site.provision.failed",
+      action: auditAction,
       targetType: "site",
       targetId: op.resourceId,
       details: {

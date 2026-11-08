@@ -113,6 +113,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
   /** Test hook awaited inside runSiteJob. */
   public onJob?: (req: SiteJobRequest) => Promise<void>;
+  /** Test hook awaited inside deployService. */
+  public onDeploy?: (spec: ApprovedServiceSpec) => Promise<void>;
   private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string }[] = [];
   private failDeployOnce = false;
   private readonly serviceLogs = new Map<string, ServiceLogLine[]>();
@@ -250,6 +252,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
     this.assertEngineAvailable();
+    await this.onDeploy?.(rawSpec);
     if (this.failDeployOnce) {
       this.failDeployOnce = false;
       throw new ExecutorCodedError("Simulated deploy failure", "DOCKER_ENGINE_UNAVAILABLE");

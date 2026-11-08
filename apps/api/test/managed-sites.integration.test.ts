@@ -5,11 +5,14 @@ import {
   domains,
   encryptedSecrets,
   eq,
+  hostAllocations,
+  moveSiteToOrganizationTransactional,
   markExpiredOperationsUnknownTransactional,
   membershipRoles,
   memberships,
   operationSteps,
   operations,
+  organizations,
   outboxEvents,
   serviceInstances,
   siteDatabases,
@@ -23,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { siteDatabaseIdentifier } from "../src/runtime/site-provisioner.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 
 const KEY = Buffer.alloc(32, 7);
@@ -45,6 +49,7 @@ describe("managed WordPress sites API", () => {
   let app: ControlPlaneAppHandle;
   let sim: InMemoryDockerSimulatorAdapter;
   let token: string;
+  let adminToken: string;
   let orgId: string;
 
   async function login(email: string, password: string, totpSecret?: string): Promise<string> {
@@ -92,6 +97,25 @@ describe("managed WordPress sites API", () => {
     return res.body.data as { siteId: string; operationId: string };
   }
 
+  const key = () => ({ "Idempotency-Key": randomUUID() });
+  const siteUrl = (siteId: string, tail = "") => org(`/managed-sites/${siteId}${tail}`);
+
+  async function addCollaborator(): Promise<string> {
+    const userId = `usr_${randomUUID()}`;
+    const membershipId = `mem_${randomUUID()}`;
+    await dbClient.db.insert(users).values({
+      id: userId,
+      email: "collab@hotel.it",
+      name: "Collab",
+      passwordHash: await hashPassword(PW),
+    });
+    await dbClient.db.insert(memberships).values({ id: membershipId, organizationId: orgId, userId });
+    await dbClient.db
+      .insert(membershipRoles)
+      .values({ id: `mrl_${randomUUID()}`, membershipId, roleId: "role_customer_collaborator" });
+    return login("collab@hotel.it", PW);
+  }
+
   beforeEach(async () => {
     dbClient = createDatabaseClient({ mode: "pglite" });
     await dbClient.migrate();
@@ -111,7 +135,7 @@ describe("managed WordPress sites API", () => {
       driftReconcileIntervalMs: null,
       recoverUnknownOnStart: false,
     });
-    const adminToken = await login("admin@x.it", PW, admin.totpSecretBase32);
+    adminToken = await login("admin@x.it", PW, admin.totpSecretBase32);
     const created = await call(
       "POST",
       "/v1/admin/customer-account",
@@ -375,5 +399,217 @@ describe("managed WordPress sites API", () => {
     const res = await call("POST", org("/managed-sites"), SITE, { "Idempotency-Key": randomUUID() }, collabToken);
     expect(res.status).toBe(403);
     expect(await dbClient.db.select().from(sites)).toHaveLength(0);
+  });
+  it("a collaborator without permission gets 403 before 400 on actions", async () => {
+    const { siteId } = await createAndRun();
+    const collabToken = await addCollaborator();
+    const res = await call("POST", siteUrl(siteId, "/actions"), { action: "nonsense" }, key(), collabToken);
+    expect(res.status).toBe(403);
+  });
+
+  it("a create that loses the domain race gets 409 DOMAIN_CONFLICT, not 500", async () => {
+    expect((await create({ ...SITE, name: "Other", domain: "other.it" })).status).toBe(202);
+    // The rival commits between the pre-check and the create transaction.
+    const original = dbClient.db.transaction.bind(dbClient.db);
+    vi.spyOn(dbClient.db, "transaction").mockImplementationOnce(((fn: never, cfg?: never) =>
+      dbClient.db
+        .update(domains)
+        .set({ hostname: SITE.domain })
+        .where(eq(domains.hostname, "other.it"))
+        .then(() => original(fn, cfg))) as never);
+    const res = await create(SITE);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("DOMAIN_CONFLICT");
+    expect(await dbClient.db.select().from(sites)).toHaveLength(1);
+  });
+
+  it("stop then start sets desired status and enqueues the matching operation", async () => {
+    const { siteId } = await createAndRun();
+    const svc = await webService(siteId);
+
+    const stop = await call("POST", siteUrl(siteId, "/actions"), { action: "stop" }, key());
+    expect(stop.status).toBe(202);
+    const stopOp = await getOp(stop.body.data.operationId);
+    expect(stopOp.kind).toBe("service.stop");
+    expect((await webService(siteId)).desiredStatus).toBe("stopped");
+    await run();
+    expect((await getOp(stop.body.data.operationId)).status).toBe("succeeded");
+    expect(sim.getSimulatedContainerInspect(svc.id)?.State?.Running).toBe(false);
+
+    const start = await call("POST", siteUrl(siteId, "/actions"), { action: "start" }, key());
+    expect(start.status).toBe(202);
+    expect((await getOp(start.body.data.operationId)).kind).toBe("service.restart");
+    expect((await webService(siteId)).desiredStatus).toBe("running");
+    await run();
+    expect((await getOp(start.body.data.operationId)).status).toBe("succeeded");
+
+    const [lock] = await dbClient.db.select().from(operations).where(eq(operations.id, start.body.data.operationId));
+    expect(lock!.lockKey).toBe(`site:${siteId}`);
+  });
+
+  it("changing PHP version creates a revision with the new image and redeploys", async () => {
+    const { siteId } = await createAndRun();
+    const svc = await webService(siteId);
+    const res = await call("PATCH", siteUrl(siteId, "/runtime"), { phpVersion: "8.5" }, key());
+    expect(res.status).toBe(202);
+    await run();
+    expect((await getOp(res.body.data.operationId)).status).toBe("succeeded");
+
+    const revs = await dbClient.db.select().from(stackRevisions).where(eq(stackRevisions.serviceInstanceId, svc.id));
+    expect(revs).toHaveLength(2);
+    const latest = revs.sort((a, b) => a.revisionNumber - b.revisionNumber)[1]!;
+    expect((latest.declarativeConfig as Json)["image"]).toBe("wordpress:7.1.4-php8.5-apache");
+    expect((latest.declarativeConfig as Json)["volumeMounts"]).toEqual(
+      (revs.find((r) => r.id !== latest.id)!.declarativeConfig as Json)["volumeMounts"],
+    );
+    expect(siteSpecs(siteId).at(-1)!.image).toBe("wordpress:7.1.4-php8.5-apache");
+    expect((await call("GET", siteUrl(siteId))).body.data.phpVersion).toBe("8.5");
+  });
+
+  it("a service.deploy keeps its lease past 60 s", async () => {
+    const { siteId } = await createAndRun();
+    let statusDuringDeploy: string | undefined;
+    sim.onDeploy = async () => {
+      await markExpiredOperationsUnknownTransactional(dbClient.db, new Date(Date.now() + 61_000));
+      const [op] = await dbClient.db.select().from(operations).where(eq(operations.kind, "service.deploy"));
+      statusDuringDeploy = op!.status;
+    };
+    const res = await call("PATCH", siteUrl(siteId, "/runtime"), { phpVersion: "8.3" }, key());
+    await run();
+    expect(statusDuringDeploy).toBe("processing");
+    expect((await getOp(res.body.data.operationId)).status).toBe("succeeded");
+  });
+
+  it("delete requires the exact site name", async () => {
+    const { siteId } = await createAndRun();
+    const res = await call("DELETE", siteUrl(siteId), { confirmName: "hotel" }, key());
+    expect(res.status).toBe(400);
+    expect(res.body.error.details[0].field).toBe("confirmName");
+    expect(await dbClient.db.select().from(sites)).toHaveLength(1);
+    expect((await call("DELETE", siteUrl(siteId), { confirmName: " Hotel Bella " }, key())).status).toBe(202);
+  });
+
+  it("delete while provisioning returns RESOURCE_LOCKED", async () => {
+    const created = await create();
+    const { siteId } = created.body.data as { siteId: string };
+    const res = await call("DELETE", siteUrl(siteId), { confirmName: SITE.name }, key());
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe("RESOURCE_LOCKED");
+  });
+
+  it("delete drops the site database and keeps the other site serving", async () => {
+    const a = await createAndRun();
+    const b = await createAndRun({ ...SITE, name: "Bar Sport", domain: "bar.it" });
+    const [dbA] = await dbClient.db.select().from(siteDatabases).where(eq(siteDatabases.siteId, a.siteId));
+    expect(dbA!.dbName).toBe(siteDatabaseIdentifier(a.siteId));
+    const purge = vi.spyOn(sim, "purgeSite");
+    sim.jobs.length = 0;
+
+    const res = await call("DELETE", siteUrl(a.siteId), { confirmName: SITE.name }, key());
+    expect(res.status).toBe(202);
+    expect((await call("GET", siteUrl(a.siteId))).body.data.status).toBe("maintenance");
+    await run();
+    expect((await getOp(res.body.data.operationId)).status).toBe("succeeded");
+
+    expect(sim.jobs.map((j) => [j.kind, j.siteId, j.params["dbName"], j.params["dbUser"]])).toEqual([
+      ["db.drop", a.siteId, dbA!.dbName, dbA!.dbUser],
+    ]);
+    expect(purge.mock.calls).toEqual([[a.siteId]]);
+    expect((await call("GET", siteUrl(a.siteId))).status).toBe(404);
+    expect(await dbClient.db.select().from(serviceInstances).where(eq(serviceInstances.siteId, a.siteId))).toHaveLength(0);
+    expect(await dbClient.db.select().from(domains).where(eq(domains.siteId, a.siteId))).toHaveLength(0);
+    expect(await dbClient.db.select().from(encryptedSecrets).where(eq(encryptedSecrets.siteId, a.siteId))).toHaveLength(0);
+    expect(await dbClient.db.select().from(siteDatabases).where(eq(siteDatabases.siteId, a.siteId))).toHaveLength(0);
+
+    expect((await call("GET", siteUrl(b.siteId))).body.data.status).toBe("ready");
+    expect(await dbClient.db.select().from(siteDatabases).where(eq(siteDatabases.siteId, b.siteId))).toHaveLength(1);
+    expect(await dbClient.db.select().from(stackRevisions).where(eq(stackRevisions.serviceInstanceId, (await webService(b.siteId)).id))).toHaveLength(1);
+    const audits = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "site.delete.succeeded"));
+    expect(audits).toHaveLength(1);
+  });
+
+  it("a failed database drop keeps the site serving and delete can be requested again", async () => {
+    const { siteId } = await createAndRun();
+    const svc = await webService(siteId);
+    sim.failNextJob("db.drop", 1);
+    const first = await call("DELETE", siteUrl(siteId), { confirmName: SITE.name }, key());
+    await run();
+    expect((await getOp(first.body.data.operationId)).status).toBe("failed");
+    expect(sim.getSimulatedContainerInspect(svc.id)?.State?.Running).toBe(true);
+    expect((await webService(siteId)).id).toBe(svc.id);
+    expect(await dbClient.db.select().from(siteDatabases).where(eq(siteDatabases.siteId, siteId))).toHaveLength(1);
+    expect((await call("GET", siteUrl(siteId))).body.data.status).toBe("degraded");
+
+    const second = await call("DELETE", siteUrl(siteId), { confirmName: SITE.name }, key());
+    expect(second.status).toBe(202);
+    await run();
+    expect((await getOp(second.body.data.operationId)).status).toBe("succeeded");
+    expect((await call("GET", siteUrl(siteId))).status).toBe(404);
+  });
+
+  it("logs return demuxed lines and clamp tail", async () => {
+    const { siteId } = await createAndRun();
+    const svc = await webService(siteId);
+    const lines = Array.from({ length: 600 }, (_, i) => ({
+      at: "2026-11-08T10:00:00.000Z",
+      stream: i % 2 ? ("stderr" as const) : ("stdout" as const),
+      text: `line ${String(i)}`,
+    }));
+    sim.setServiceLogs(svc.id, lines);
+    const spy = vi.spyOn(sim, "getServiceLogs");
+
+    const two = await call("GET", siteUrl(siteId, "/logs?tail=2"));
+    expect(two.status).toBe(200);
+    expect(two.body.data).toEqual(lines.slice(-2));
+    expect((await call("GET", siteUrl(siteId, "/logs?tail=99999"))).body.data).toHaveLength(500);
+    await call("GET", siteUrl(siteId, "/logs?tail=0"));
+    await call("GET", siteUrl(siteId, "/logs"));
+    expect(spy.mock.calls.map((c) => c[1])).toEqual([2, 500, 1, 200]);
+  });
+
+  it("logs answer 503 when the executor does not support them", async () => {
+    const { siteId } = await createAndRun();
+    vi.spyOn(sim, "getServiceLogs").mockRejectedValue(Object.assign(new Error("off"), { code: "NOT_SUPPORTED" }));
+    const res = await call("GET", siteUrl(siteId, "/logs"));
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("DOCKER_ENGINE_UNAVAILABLE");
+  });
+
+  it("customer cannot act on a site of another organization", async () => {
+    const foreign = (await createAndRun()).siteId;
+    const [mine] = await dbClient.db.select().from(organizations).where(eq(organizations.id, orgId));
+    const otherOrg = `org_${randomUUID()}`;
+    await dbClient.db
+      .insert(organizations)
+      .values({ id: otherOrg, platformInstallationId: mine!.platformInstallationId, name: "Bar Sport", slug: "bar-sport" });
+    const [alloc] = await dbClient.db.select().from(hostAllocations).where(eq(hostAllocations.organizationId, orgId));
+    const otherAlloc = `alloc_${randomUUID()}`;
+    await dbClient.db
+      .insert(hostAllocations)
+      .values({ id: otherAlloc, hostId: alloc!.hostId, organizationId: otherOrg, status: "active" });
+    await moveSiteToOrganizationTransactional(dbClient.db, {
+      siteId: foreign,
+      fromOrganizationId: orgId,
+      toOrganizationId: otherOrg,
+      toHostAllocationId: otherAlloc,
+      masterKey: KEY.toString("hex"),
+    });
+    const opsBefore = (await dbClient.db.select().from(operations)).length;
+
+    const attempts = [
+      call("POST", siteUrl(foreign, "/actions"), { action: "stop" }, key()),
+      call("PATCH", siteUrl(foreign, "/runtime"), { phpVersion: "8.5" }, key()),
+      call("DELETE", siteUrl(foreign), { confirmName: "Bar" }, key()),
+      call("GET", siteUrl(foreign, "/logs")),
+    ];
+    expect((await Promise.all(attempts)).map((r) => r.status)).toEqual([404, 404, 404, 404]);
+    expect(await dbClient.db.select().from(operations)).toHaveLength(opsBefore);
+  });
+
+  it("deleting a revision directly is still refused", async () => {
+    const { siteId } = await createAndRun();
+    await expect(
+      dbClient.db.delete(stackRevisions).where(eq(stackRevisions.serviceInstanceId, (await webService(siteId)).id)),
+    ).rejects.toThrow();
   });
 });
