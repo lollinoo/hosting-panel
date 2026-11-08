@@ -23,7 +23,7 @@ L'infrastruttura di sviluppo, compilazione ed esecuzione si basa su versioni mod
 
 | Componente | Versione Adottata | Ruolo Architetturale & Giustificazione |
 | :--- | :--- | :--- |
-| **Node.js** | `>= 24.0.0` (target `24.22.0+`) | Runtime server conforme a `.node-version`; supporto nativo a ES modules, modern crypto e performance V8 avanzate. |
+| **Node.js** | `>= 26.0.0` | Runtime server conforme a `.node-version`; supporto nativo a ES modules, modern crypto e performance V8 avanzate. |
 | **Package Manager** | `corepack pnpm` (v12) | Gestione del monorepo tramite workspaces `pnpm`; isolamento deterministico delle dipendenze e hoisting rigoroso. |
 | **TypeScript** | `6.0.3` | Compilatore statico unificato (`tsconfig.base.json`); compatibilità con i decoratori ECMAScript / stage-3 e i target di build. |
 | **Control Plane API** | NestJS `12.4.0` + Fastify `5.12.8` | Backend modulare ad alte prestazioni; adotta Fastify 5 come HTTP adapter per minimizzare l'overhead di latenza e massimizzare il throughput. |
