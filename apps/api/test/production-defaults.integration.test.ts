@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
 import {
   createDatabaseClient,
@@ -11,6 +12,7 @@ import {
   type ControlPlaneAppHandle,
   type CreateControlPlaneAppOptions,
 } from "../src/index.js";
+import { totpCodeAt } from "../src/auth/totp.js";
 
 const jwtSigningKeyPem = generateKeyPairSync("rsa", { modulusLength: 2048 })
   .privateKey.export({ type: "pkcs8", format: "pem" })
@@ -151,5 +153,38 @@ describe("Production defaults, persisted signing key and DB-backed sessions", ()
     expect(res.status).toBe(200);
     const json = (await res.json()) as { data: { globalRoles: string[] } };
     expect(json.data.globalRoles).not.toContain("infrastructure_admin");
+  });
+
+  it("openapi documents the login endpoint", () => {
+    const text = readFileSync(new URL("../../../docs/api/openapi.yaml", import.meta.url), "utf8");
+    for (const p of ["/v1/auth/login", "/v1/me/totp/setup", "/v1/admin/customer-account"]) {
+      expect(text).toContain(p);
+    }
+  });
+
+  it("rejects an empty or whitespace-only JWT signing key", async () => {
+    await expect(boot({ jwtSigningKeyPem: "" })).rejects.toThrow(/signing key/i);
+    await expect(boot({ jwtSigningKeyPem: "  \n" })).rejects.toThrow(/signing key/i);
+  });
+
+  it("demo seed gives users a dev password and usr_infra a fixed TOTP secret", async () => {
+    const app = await boot({ seedPhase1: true, secretsMasterKey: Buffer.alloc(32, 3) });
+    const login = (body: unknown) =>
+      fetch(`${app.baseUrl!}/v1/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    const elena = await login({ email: "elena@acme.it", password: "demo-password-123" });
+    expect(elena.status).toBe(200);
+    expect(((await elena.json()) as { data: { status: string } }).data.status).toBe("ok");
+    const creds = { email: "infra@hcp.local", password: "demo-password-123" };
+    expect(((await (await login(creds)).json()) as { data: { status: string } }).data.status).toBe(
+      "totp_required",
+    );
+    const code = totpCodeAt("JBSWY3DPEHPK3PXP", Math.floor(Date.now() / 30_000));
+    const ok = await login({ ...creds, totpCode: code });
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { data: { status: string } }).data.status).toBe("ok");
   });
 });

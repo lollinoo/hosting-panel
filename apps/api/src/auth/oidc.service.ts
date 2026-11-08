@@ -97,7 +97,7 @@ export class OidcService implements OnModuleInit {
   async #ensureKeys(): Promise<{ publicKey: CryptoKey; privateKey: CryptoKey }> {
     if (!this.#keyPairPromise) {
       const pem = this.config.jwtSigningKeyPem;
-      this.#keyPairPromise = pem
+      this.#keyPairPromise = pem != null
         ? Promise.all([
             importPKCS8(pem, "RS256"),
             importSPKI(

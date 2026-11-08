@@ -181,6 +181,7 @@ async function resolveJwtSigningKeyPem(
   explicitPem?: string,
 ): Promise<string | null> {
   if (explicitPem !== undefined) {
+    if (explicitPem.trim() === "") throw new Error("JWT signing key must not be empty.");
     return explicitPem;
   }
   if (runtimeBackend !== "linux-systemd") {
@@ -189,7 +190,9 @@ async function resolveJwtSigningKeyPem(
   const keyFile =
     process.env["HP_JWT_SIGNING_KEY_FILE"]?.trim() || DEFAULT_JWT_SIGNING_KEY_FILE;
   // Missing/unreadable file throws: production must not fall back to an ephemeral key.
-  return readFile(keyFile, "utf8");
+  const pem = await readFile(keyFile, "utf8");
+  if (pem.trim() === "") throw new Error(`JWT signing key file ${keyFile} is empty.`);
+  return pem;
 }
 
 export interface CreateControlPlaneAppOptions {
@@ -310,7 +313,7 @@ export async function createControlPlaneApp(
   const oidcAudience = options?.oidcAudience ?? "hosting-panel-api";
 
   if (options?.seedPhase1 ?? process.env["HP_SEED_DEMO"] === "true") {
-    await seedPhase1Dataset(dbClient.db);
+    await seedPhase1Dataset(dbClient.db, secretsMasterKey);
   }
 
   const enableDevOidc =

@@ -4,7 +4,10 @@ import {
   PRESET_ROLE_PERMISSIONS,
 } from "@hosting-panel/contracts";
 import { buildImmutableStackRevision } from "@hosting-panel/hosting-domain";
+import { randomBytes, scrypt } from "node:crypto";
+import { and, eq, isNull } from "drizzle-orm";
 import type { HostingPanelDatabase } from "./client.js";
+import { encryptSecretAesGcm } from "./secrets-crypto.js";
 import {
   auditEvents,
   dockerResources,
@@ -123,8 +126,26 @@ export async function ensurePresetRolesAndPermissions(db: HostingPanelDatabase):
   }
 }
 
-export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void> {
+/** DEV ONLY: password and TOTP secret of the demo users. Used solely when the demo dataset is seeded. */
+export const DEMO_PASSWORD = "demo-password-123";
+export const DEMO_INFRA_TOTP_SECRET = "JBSWY3DPEHPK3PXP";
+
+// Same format as apps/api/src/auth/password.ts (the database package cannot import from apps/api).
+function demoPasswordHash(): Promise<string> {
+  const salt = randomBytes(16);
+  return new Promise((resolve, reject) =>
+    scrypt(DEMO_PASSWORD, salt, 64, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }, (e, k) =>
+      e ? reject(e) : resolve(["scrypt", 32768, 8, 1, salt.toString("base64"), k.toString("base64")].join("$")),
+    ),
+  );
+}
+
+export async function seedPhase1Dataset(
+  db: HostingPanelDatabase,
+  secretsMasterKey?: string | Buffer | Uint8Array,
+): Promise<void> {
   const now = new Date();
+  const passwordHash = await demoPasswordHash();
 
   // 1. Platform Installation
   await db
@@ -151,6 +172,7 @@ export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void>
         email: "infra@hcp.local",
         name: "Admin Infrastruttura",
         userStatus: "active",
+        passwordHash,
         platformRole: "infrastructure_admin",
       },
       {
@@ -158,27 +180,50 @@ export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void>
         email: "hosting@hcp.local",
         name: "Admin Hosting",
         userStatus: "active",
+        passwordHash,
       },
       {
         id: DEMO_IDS.users.elena,
         email: "elena@acme.it",
         name: "Elena Rossi (Acme Owner)",
         userStatus: "active",
+        passwordHash,
       },
       {
         id: DEMO_IDS.users.marco,
         email: "marco@acme.it",
         name: "Marco Bianchi (Acme Dev)",
         userStatus: "active",
+        passwordHash,
       },
       {
         id: DEMO_IDS.users.giulia,
         email: "giulia@gamma.it",
         name: "Giulia Verdi (Gamma Suspended)",
         userStatus: "active",
+        passwordHash,
       },
     ])
     .onConflictDoNothing();
+
+  if (secretsMasterKey !== undefined) {
+    const env = encryptSecretAesGcm({
+      plaintext: DEMO_INFRA_TOTP_SECRET,
+      masterKey: secretsMasterKey,
+      organizationId: "platform",
+      siteId: null,
+      secretKey: `totp:${DEMO_IDS.users.infra}`,
+    });
+    await db
+      .update(users)
+      .set({
+        totpCiphertextBase64: env.ciphertextBase64,
+        totpIvBase64: env.ivBase64,
+        totpAuthTagBase64: env.authTagBase64,
+        totpEnabledAt: now,
+      })
+      .where(and(eq(users.id, DEMO_IDS.users.infra), isNull(users.totpEnabledAt)));
+  }
 
   // 4. Demo Organizations
   await db
