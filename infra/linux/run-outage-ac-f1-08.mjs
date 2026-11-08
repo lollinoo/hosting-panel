@@ -620,6 +620,8 @@ async function main() {
         cwd: REPO_ROOT,
         env: {
           ...commonDaemonEnv,
+          // The API refuses HP_SEED_DEMO/ENABLE_DEV_OIDC under NODE_ENV=production; this harness needs both.
+          NODE_ENV: "development",
           API_HOST: "127.0.0.1",
           API_PORT: String(apiPort),
           DATABASE_URL: databaseUrl,

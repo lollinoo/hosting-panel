@@ -146,6 +146,9 @@ export class AdminUsersController {
   ): Promise<{ data: { temporaryPassword: string } }> {
     const auth = await this.#guard(req, userId);
     const user = await this.#findUser(userId);
+    if (user.platformRole === "infrastructure_admin") {
+      throw new ControlPlaneError("PERMISSION_DENIED", "Server admin passwords can only be reset from the CLI.");
+    }
     const { temporaryPassword } = await resetUserPassword(this.dbClient.db, { email: user.email });
     await this.authz.recordAudit(auth, req, { action: "admin.user.reset_password", targetType: "user", targetId: userId });
     return { data: { temporaryPassword } };

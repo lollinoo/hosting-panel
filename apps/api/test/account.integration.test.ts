@@ -205,6 +205,28 @@ describe("self-service account API", () => {
     expect(((await ok.json()) as { error: { code: string } }).error.code).toBe("ACCOUNT_LOCKED");
   });
 
+  it("success on the 5th reserved attempt does not leave the account locked", async () => {
+    await seed("usr_a");
+    const a = await loginToken("usr_a");
+    for (let i = 0; i < 4; i++) {
+      await call(a, "POST", "/v1/me/password", { currentPassword: "wrong wrong wrong", newPassword: NEW_PASSWORD });
+    }
+    const ok = await call(a, "POST", "/v1/me/password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(ok.status).toBe(204);
+    expect((await dbClient.db.select().from(users).where(eq(users.id, "usr_a")))[0]!.lockedUntil).toBeNull();
+    await loginToken("usr_a", NEW_PASSWORD);
+
+    const secret = generateTotpSecret();
+    await seed("usr_b", { totpSecret: secret });
+    const b = await loginToken("usr_b", PASSWORD, codeNow(secret));
+    for (let i = 0; i < 4; i++) {
+      await call(b, "POST", "/v1/me/totp/disable", { password: "wrong wrong wrong", code: "000000" });
+    }
+    const off = await call(b, "POST", "/v1/me/totp/disable", { password: PASSWORD, code: codeNow(secret, 1) });
+    expect(off.status).toBe(204);
+    expect((await dbClient.db.select().from(users).where(eq(users.id, "usr_b")))[0]!.lockedUntil).toBeNull();
+  });
+
   it("wrong codes on disable are capped", async () => {
     const secret = generateTotpSecret();
     await seed("usr_a", { totpSecret: secret });

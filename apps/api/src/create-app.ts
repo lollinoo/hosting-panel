@@ -242,6 +242,16 @@ export async function createControlPlaneApp(
     options?.port ??
     (process.env["API_PORT"] ? Number.parseInt(process.env["API_PORT"], 10) : 0);
 
+  // Demo data uses a published password/TOTP seed and dev OIDC mints tokens for any user: never in production.
+  const seedDemo = options?.seedPhase1 ?? process.env["HP_SEED_DEMO"] === "true";
+  const enableDevOidc = options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] === "true";
+  if (process.env["NODE_ENV"] === "production" && (seedDemo || enableDevOidc)) {
+    throw new Error(
+      `Refusing to start with NODE_ENV=production and ${seedDemo ? "HP_SEED_DEMO" : "ENABLE_DEV_OIDC"} enabled: ` +
+        "these are development-only flags. Unset them (or run without NODE_ENV=production).",
+    );
+  }
+
   const runtimeBackend = resolveRuntimeBackend(options);
   const secretsMasterKey = await resolveSecretsMasterKey(
     runtimeBackend,
@@ -312,12 +322,9 @@ export async function createControlPlaneApp(
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";
   const oidcAudience = options?.oidcAudience ?? "hosting-panel-api";
 
-  if (options?.seedPhase1 ?? process.env["HP_SEED_DEMO"] === "true") {
+  if (seedDemo) {
     await seedPhase1Dataset(dbClient.db, secretsMasterKey);
   }
-
-  const enableDevOidc =
-    options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] === "true";
 
   const autoProcessOutbox = options?.autoProcessOutbox ?? true;
   const defaultBackgroundInterval =

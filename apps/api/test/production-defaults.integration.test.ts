@@ -100,6 +100,22 @@ describe("Production defaults, persisted signing key and DB-backed sessions", ()
     }
   });
 
+  it("refuses to start in production with the demo seed or the dev token endpoint enabled", async () => {
+    const saved = process.env["NODE_ENV"];
+    process.env["NODE_ENV"] = "production";
+    try {
+      await expect(boot({ seedPhase1: true })).rejects.toThrow(/HP_SEED_DEMO/);
+      await expect(boot({ enableDevOidc: true })).rejects.toThrow(/ENABLE_DEV_OIDC/);
+      process.env["HP_SEED_DEMO"] = "true";
+      await expect(boot()).rejects.toThrow(/HP_SEED_DEMO/);
+      delete process.env["HP_SEED_DEMO"];
+      process.env["ENABLE_DEV_OIDC"] = "true";
+      await expect(boot()).rejects.toThrow(/ENABLE_DEV_OIDC/);
+    } finally {
+      process.env["NODE_ENV"] = saved;
+    }
+  });
+
   it("no demo data is seeded by default", async () => {
     // Let the app own its database so the old "seed when owning the DB" default is exercised.
     const app = await boot({ databaseClient: undefined });

@@ -115,7 +115,7 @@ describe("admin user management API", () => {
     expect(self.status).toBe(403);
   });
 
-  it("reset-password returns a new temporary password; reset-totp is customers only", async () => {
+  it("reset-password returns a new temporary password; both resets are customers only", async () => {
     const { data } = (await (await createCustomer()).json()) as Created;
     const r = await call(adminToken, "POST", `/v1/admin/users/${data.userId}/reset-password`);
     expect(r.status).toBe(200);
@@ -123,6 +123,8 @@ describe("admin user management API", () => {
     expect((await login("mario@hotel.it", temporaryPassword)).data.mustChangePassword).toBe(true);
     expect((await call(adminToken, "POST", `/v1/admin/users/${data.userId}/reset-totp`)).status).toBe(204);
     expect((await call(adminToken, "POST", `/v1/admin/users/${adminId}/reset-totp`)).status).toBe(403);
+    // Server admins (the caller included) are recovered from the CLI only.
+    expect((await call(adminToken, "POST", `/v1/admin/users/${adminId}/reset-password`)).status).toBe(403);
     expect((await call(adminToken, "POST", `/v1/admin/users/usr_nope/reset-password`)).status).toBe(404);
     expect(JSON.stringify(await dbClient.db.select().from(auditEvents))).not.toContain(temporaryPassword);
   });

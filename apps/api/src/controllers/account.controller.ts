@@ -44,7 +44,7 @@ export class AccountController {
     assertPasswordPolicy(body.newPassword);
     await this.dbClient.db
       .update(users)
-      .set({ passwordHash: await hashPassword(body.newPassword), mustChangePassword: false, failedLoginCount: 0 })
+      .set({ passwordHash: await hashPassword(body.newPassword), mustChangePassword: false, failedLoginCount: 0, lockedUntil: null })
       .where(eq(users.id, user.id));
     await this.oidc.revokeAllSessionsForUser(user.id, auth.claims.jti);
     await this.authz.recordAudit(auth, req, { action: "account.password.change", targetType: "user", targetId: user.id });
@@ -128,7 +128,10 @@ export class AccountController {
       totpAuthTagBase64: null,
       totpEnabledAt: null,
       totpLastStep: null,
+      // Full success, as at login: also drop a lock set by this request's own 5th reservation.
+      failedLoginCount: 0,
       totpFailedCount: 0,
+      lockedUntil: null,
     };
     if (!result.ok || !(await saveTotpStep(this.dbClient.db, user.id, result.step, cleared))) {
       await this.fail(auth, req, "account.totp.disable", "TOTP_INVALID", BAD_CODE);
