@@ -2,13 +2,9 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { redactSensitiveString } from "@hosting-panel/contracts";
 import {
-  and,
   appendAuditEvent,
   createDatabaseClient,
   eq,
-  membershipRoles,
-  memberships,
-  roles,
   unlockOperationBreakGlassTransactional,
   users,
   type DatabaseClient,
@@ -17,7 +13,6 @@ import { OidcService, type IssuedJwtResult } from "../auth/oidc.service.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 
 export const MAX_BREAK_GLASS_TOKEN_TTL_SECONDS = 300;
-export const DEFAULT_BREAK_GLASS_USER_ID = "usr_infra";
 export const DEFAULT_BREAKGLASS_KEY_FILE = "/etc/hosting-panel/breakglass-jwt.key";
 
 export function parseBreakglassSigningKey(
@@ -73,6 +68,7 @@ export interface IssueBreakGlassEmergencyTokenInput {
   readonly reason: string;
   readonly ttlSeconds?: number;
   readonly userId?: string;
+  readonly email?: string;
 }
 
 export interface BreakGlassEmergencyTokenResult {
@@ -114,17 +110,24 @@ export async function issueBreakGlassEmergencyToken(
     Math.min(MAX_BREAK_GLASS_TOKEN_TTL_SECONDS, Math.floor(requestedTtl)),
   );
 
-  const targetUserId = input.userId?.trim() || DEFAULT_BREAK_GLASS_USER_ID;
+  const targetUserId = input.userId?.trim();
+  const targetEmail = input.email?.trim().toLowerCase();
+  if (!targetUserId && !targetEmail) {
+    throw new ControlPlaneError(
+      "VALIDATION_ERROR",
+      "Break-glass emergency token issuance requires an explicit --user-id or --email.",
+    );
+  }
   const [user] = await input.dbClient.db
     .select()
     .from(users)
-    .where(eq(users.id, targetUserId))
+    .where(targetUserId ? eq(users.id, targetUserId) : eq(users.email, targetEmail!))
     .limit(1);
 
   if (!user) {
     throw new ControlPlaneError(
       "NOT_FOUND",
-      `Break-glass principal '${targetUserId}' not found.`,
+      `Break-glass principal '${targetUserId ?? targetEmail}' not found.`,
     );
   }
 
@@ -151,27 +154,7 @@ export async function issueBreakGlassEmergencyToken(
     );
   }
 
-  const isSeededInfraAdmin =
-    user.id === "usr_infra" || user.email === "infra@hcp.local";
-  let hasInfraRoleInDb = false;
-  if (!isSeededInfraAdmin) {
-    const infraRows = await input.dbClient.db
-      .select({ roleName: roles.name })
-      .from(memberships)
-      .innerJoin(membershipRoles, eq(membershipRoles.membershipId, memberships.id))
-      .innerJoin(roles, eq(roles.id, membershipRoles.roleId))
-      .where(
-        and(
-          eq(memberships.userId, user.id),
-          eq(memberships.status, "active"),
-          eq(roles.name, "infrastructure_admin"),
-        ),
-      )
-      .limit(1);
-    hasInfraRoleInDb = infraRows.length > 0;
-  }
-
-  if (!isSeededInfraAdmin && !hasInfraRoleInDb) {
+  if (user.platformRole !== "infrastructure_admin") {
     await appendAuditEvent(input.dbClient.db, {
       actorId: null,
       actorType: "system",
@@ -266,6 +249,7 @@ async function runCli(argv: readonly string[]): Promise<void> {
       const reason = parseCliFlag(argv, "--reason") ?? "";
       const rawTtl = parseCliFlag(argv, "--ttl");
       const userId = parseCliFlag(argv, "--user-id");
+      const email = parseCliFlag(argv, "--email");
       const ttlSeconds = rawTtl !== undefined ? Number.parseInt(rawTtl, 10) : undefined;
 
       const breakglassSigningKey = await resolveRequiredBreakglassSigningKey();
@@ -287,6 +271,7 @@ async function runCli(argv: readonly string[]): Promise<void> {
         reason,
         ttlSeconds,
         userId,
+        email,
       });
 
       process.stdout.write(
@@ -302,7 +287,7 @@ async function runCli(argv: readonly string[]): Promise<void> {
     }
 
     throw new Error(
-      "Usage: break-glass <unlock --operation-id <id> --reason <text> | emergency-token --reason <text> [--ttl 300]>",
+      "Usage: break-glass <unlock --operation-id <id> --reason <text> | emergency-token --reason <text> (--user-id <id> | --email <email>) [--ttl 300]>",
     );
   } finally {
     await dbClient.close();

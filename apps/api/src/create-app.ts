@@ -114,7 +114,7 @@ async function resolveLinuxIpcSigningKey(): Promise<IpcSigningKey> {
   };
 }
 
-async function resolveSecretsMasterKey(
+export async function resolveSecretsMasterKey(
   runtimeBackend: RuntimeBackend,
   explicitKey?: string | Buffer | Uint8Array,
 ): Promise<Buffer> {

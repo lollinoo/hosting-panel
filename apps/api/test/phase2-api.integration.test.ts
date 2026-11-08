@@ -1012,6 +1012,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     const emergency = await issueBreakGlassEmergencyToken({
       dbClient: app.dbClient,
       oidcService: app.oidc,
+      userId: DEMO_IDS.users.infra,
       ttlSeconds: 7200,
       reason: "External OIDC provider outage during P1 incident",
     });
@@ -1137,6 +1138,24 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
           reason: "Attempted hosting_admin escalation",
         }),
       ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+
+      // No implicit default principal: an explicit --user-id or --email is required
+      await expect(
+        issueBreakGlassEmergencyToken({
+          dbClient: bgApp.dbClient,
+          oidcService: standaloneCliOidc,
+          reason: "No principal given",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      // Lookup by email is trimmed + lower-cased; platformRole (not a hard-coded id) decides
+      const byEmail = await issueBreakGlassEmergencyToken({
+        dbClient: bgApp.dbClient,
+        oidcService: standaloneCliOidc,
+        email: " INFRA@hcp.local ",
+        ttlSeconds: 60,
+        reason: "Lookup by email",
+      });
+      expect(byEmail.userId).toBe(DEMO_IDS.users.infra);
 
       // Active infrastructure_admin succeeds and works across distinct OidcService instances
       const issued = await issueBreakGlassEmergencyToken({
