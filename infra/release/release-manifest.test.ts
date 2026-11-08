@@ -56,6 +56,10 @@ describe("listReleaseViolations", () => {
     ]);
   });
 
+  it("requires the tmpfiles.d config bootstrap installs", () => {
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hosting-panel-tmpfiles.conf");
+  });
+
   it("requires the shared release library", () => {
     expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/lib/release.sh");
   });

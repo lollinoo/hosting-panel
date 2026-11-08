@@ -23,6 +23,7 @@ export const REQUIRED_RELEASE_PATHS = [
   "infra/systemd/hp-docker-executor.service",
   "infra/systemd/hp-host-agent.service",
   "infra/systemd/hp-web.service",
+  "infra/systemd/hosting-panel-tmpfiles.conf",
   "infra/linux/bootstrap-dedicated.sh",
   "infra/linux/install.sh",
   "infra/linux/update.sh",
