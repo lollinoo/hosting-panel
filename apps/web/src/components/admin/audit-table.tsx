@@ -12,6 +12,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Search, Filter } from "lucide-react";
+import { useMessages } from "@/i18n/provider";
 import type { AuditEventDto } from "@hosting-panel/contracts";
 
 export interface AuditTableProps {
@@ -19,6 +20,8 @@ export interface AuditTableProps {
 }
 
 export function AuditTable({ initialEvents }: AuditTableProps) {
+  const m = useMessages();
+  const t = m.admin.audit;
   const [orgFilter, setOrgFilter] = React.useState("");
   const [actionFilter, setActionFilter] = React.useState("");
 
@@ -37,18 +40,20 @@ export function AuditTable({ initialEvents }: AuditTableProps) {
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
-          <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Search aria-hidden className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Filtra per Organizzazione ID..."
+            aria-label={t.filterOrg}
+            placeholder={t.filterOrg}
             value={orgFilter}
             onChange={(e) => setOrgFilter(e.target.value)}
             className="pl-8 text-xs"
           />
         </div>
         <div className="relative flex-1">
-          <Filter className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Filter aria-hidden className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
-            placeholder="Filtra per Azione (es. host.mode.update)..."
+            aria-label={t.filterAction}
+            placeholder={t.filterAction}
             value={actionFilter}
             onChange={(e) => setActionFilter(e.target.value)}
             className="pl-8 text-xs"
@@ -60,29 +65,29 @@ export function AuditTable({ initialEvents }: AuditTableProps) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Timestamp</TableHead>
-              <TableHead>Attore / Tipo</TableHead>
-              <TableHead>Azione</TableHead>
-              <TableHead>Organizzazione</TableHead>
-              <TableHead>Target</TableHead>
-              <TableHead>Dettagli</TableHead>
+              <TableHead>{t.colTime}</TableHead>
+              <TableHead>{t.colActor}</TableHead>
+              <TableHead>{t.colAction}</TableHead>
+              <TableHead>{t.colOrg}</TableHead>
+              <TableHead>{t.colTarget}</TableHead>
+              <TableHead>{t.colDetails}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={6} className="text-center py-6 text-muted-foreground text-xs">
-                  Nessun evento audit corrispondente ai filtri specificati.
+                  {t.empty}
                 </TableCell>
               </TableRow>
             ) : (
               filtered.map((event) => (
                 <TableRow key={event.id}>
                   <TableCell className="font-mono text-[11px] text-muted-foreground whitespace-nowrap">
-                    {new Date(event.timestamp).toLocaleString("it-IT")}
+                    {new Date(event.timestamp).toLocaleString(m.common.dateLocale)}
                   </TableCell>
                   <TableCell className="text-xs">
-                    <div className="font-medium">{event.actorId || "sistema"}</div>
+                    <div className="font-medium">{event.actorId || t.system}</div>
                     <Badge variant="outline" className="text-[9px]">
                       {event.actorType}
                     </Badge>

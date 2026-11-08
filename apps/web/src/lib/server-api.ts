@@ -12,6 +12,7 @@ import type {
   SiteDetailDto,
   OperationDto,
   MeDto,
+  AdminUserDto,
   EncryptedSecretMetadataDto,
   HostTelemetryDto,
   HostDaemonHeartbeatDto,
@@ -170,4 +171,13 @@ export async function fetchServerHostTelemetry(
     { accessToken: session.accessToken }
   );
   return res.ok && res.data?.data ? res.data.data : null;
+}
+
+export async function fetchServerAdminUsers(): Promise<AdminUserDto[]> {
+  const session = await getServerSession();
+  if (!session) return [];
+  const res = await fetchUpstream<{ data: AdminUserDto[] }>("v1/admin/users", {
+    accessToken: session.accessToken,
+  });
+  return res.ok && res.data?.data ? res.data.data : [];
 }

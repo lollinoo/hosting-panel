@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import type { HostDaemonStatus } from "@hosting-panel/contracts";
+import { format, getMessages } from "@/i18n";
+import { getRequestLocale } from "@/i18n/server";
 import { getServerSession } from "@/lib/server-session";
 import {
   fetchServerMe,
@@ -59,7 +61,7 @@ function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const mins = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days}g ${hours}h ${mins}m`;
+  if (days > 0) return `${days}d ${hours}h ${mins}m`;
   if (hours > 0) return `${hours}h ${mins}m`;
   return `${mins}m`;
 }
@@ -83,6 +85,9 @@ export default async function AdminHostDetailPage({
 }) {
   const { hostId } = await params;
   const session = await getServerSession();
+  const m = getMessages(await getRequestLocale());
+  const t = m.admin.host;
+  const dateLocale = m.common.dateLocale;
   const host = await fetchServerHost(hostId);
 
   if (!host) {
@@ -95,7 +100,6 @@ export default async function AdminHostDetailPage({
     fetchServerHostTelemetry(hostId),
   ]);
 
-  const isInfraAdmin = !!session?.user.globalRoles.includes("infrastructure_admin");
   const runtimeBackend =
     telemetryOverview?.runtimeBackend ??
     me?.platformCapabilities.runtimeBackend ??
@@ -119,8 +123,8 @@ export default async function AdminHostDetailPage({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <Button asChild variant="outline" size="icon" className="h-8 w-8">
-            <Link href="/admin/hosts">
-              <ArrowLeft className="h-4 w-4" />
+            <Link href="/admin/hosts" aria-label={t.back} title={t.back}>
+              <ArrowLeft aria-hidden className="h-4 w-4" />
             </Link>
           </Button>
           <div>
@@ -142,11 +146,11 @@ export default async function AdminHostDetailPage({
                 }
                 className="font-mono text-xs"
               >
-                backend: {runtimeBackend}
+                {format(t.backend, { backend: runtimeBackend })}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground font-mono mt-0.5">
-              Hostname: {host.hostname} &bull; IPv4: {host.ipv4Address}
+              {format(t.hostLine, { hostname: host.hostname, ip: host.ipv4Address })}
             </p>
           </div>
         </div>
@@ -154,9 +158,9 @@ export default async function AdminHostDetailPage({
 
       <Tabs defaultValue="overview" className="w-full">
         <TabsList className="grid w-full grid-cols-3 max-w-lg">
-          <TabsTrigger value="overview">Panoramica &amp; Telemetria</TabsTrigger>
-          <TabsTrigger value="allocations">Allocazioni Tenant</TabsTrigger>
-          <TabsTrigger value="boundaries">Demoni IPC &amp; Sicurezza</TabsTrigger>
+          <TabsTrigger value="overview">{t.tabOverview}</TabsTrigger>
+          <TabsTrigger value="allocations">{t.tabAllocations}</TabsTrigger>
+          <TabsTrigger value="boundaries">{t.tabBoundaries}</TabsTrigger>
         </TabsList>
 
         {/* Tab 1: Panoramica, Telemetria Live & Capacità */}
@@ -165,9 +169,9 @@ export default async function AdminHostDetailPage({
             <Card>
               <CardHeader className="flex flex-row items-center justify-between pb-2">
                 <CardTitle className="text-xs font-medium text-muted-foreground">
-                  CPU Host ({host.totalCpuMilli / 1000} vCPU)
+                  {format(t.cpuTitle, { n: host.totalCpuMilli / 1000 })}
                 </CardTitle>
-                <Cpu className="h-4 w-4 text-blue-500" />
+                <Cpu aria-hidden className="h-4 w-4 text-blue-500" />
               </CardHeader>
               <CardContent className="space-y-2">
                 {telemetry ? (
@@ -177,14 +181,14 @@ export default async function AdminHostDetailPage({
                     </div>
                     <Progress value={Math.round(telemetry.cpuUsagePercent)} className="h-2" />
                     <p className="text-[11px] text-muted-foreground">
-                      Carico live • {host.totalCpuMilli} millicores totali
+                      {format(t.cpuLive, { n: host.totalCpuMilli })}
                     </p>
                   </>
                 ) : (
                   <>
-                    <div className="text-2xl font-bold">{host.totalCpuMilli / 1000} vCPU</div>
+                    <div className="text-2xl font-bold">{format(m.admin.hosts.vcpu, { n: host.totalCpuMilli / 1000 })}</div>
                     <p className="text-[11px] text-muted-foreground mt-1">
-                      {host.totalCpuMilli} millicores fisici (telemetria non attiva)
+                      {format(t.cpuStatic, { n: host.totalCpuMilli })}
                     </p>
                   </>
                 )}
@@ -194,9 +198,9 @@ export default async function AdminHostDetailPage({
             <Card>
               <CardHeader className="flex flex-row items-center justify-between pb-2">
                 <CardTitle className="text-xs font-medium text-muted-foreground">
-                  Memoria RAM
+                  {t.ramTitle}
                 </CardTitle>
-                <Activity className="h-4 w-4 text-emerald-500" />
+                <Activity aria-hidden className="h-4 w-4 text-emerald-500" />
               </CardHeader>
               <CardContent className="space-y-2">
                 {telemetry ? (
@@ -204,15 +208,17 @@ export default async function AdminHostDetailPage({
                     <div className="text-2xl font-bold">{ramPercent}%</div>
                     <Progress value={ramPercent} className="h-2" />
                     <p className="text-[11px] text-muted-foreground">
-                      {formatGib(telemetry.memoryUsedBytes)} usati su{" "}
-                      {formatGib(telemetry.memoryTotalBytes)}
+                      {format(t.usedOf, {
+                        used: formatGib(telemetry.memoryUsedBytes),
+                        total: formatGib(telemetry.memoryTotalBytes),
+                      })}
                     </p>
                   </>
                 ) : (
                   <>
                     <div className="text-2xl font-bold">{formatGib(host.totalMemoryBytes)}</div>
                     <p className="text-[11px] text-muted-foreground mt-1">
-                      {host.totalMemoryBytes} bytes totali
+                      {format(t.bytesTotal, { n: host.totalMemoryBytes })}
                     </p>
                   </>
                 )}
@@ -222,9 +228,9 @@ export default async function AdminHostDetailPage({
             <Card>
               <CardHeader className="flex flex-row items-center justify-between pb-2">
                 <CardTitle className="text-xs font-medium text-muted-foreground">
-                  Storage Primario
+                  {t.storageTitle}
                 </CardTitle>
-                <HardDrive className="h-4 w-4 text-purple-500" />
+                <HardDrive aria-hidden className="h-4 w-4 text-purple-500" />
               </CardHeader>
               <CardContent className="space-y-2">
                 {telemetry ? (
@@ -232,15 +238,17 @@ export default async function AdminHostDetailPage({
                     <div className="text-2xl font-bold">{storagePercent}%</div>
                     <Progress value={storagePercent} className="h-2" />
                     <p className="text-[11px] text-muted-foreground">
-                      {formatGib(telemetry.storageUsedBytes)} usati su{" "}
-                      {formatGib(telemetry.storageTotalBytes)}
+                      {format(t.usedOf, {
+                        used: formatGib(telemetry.storageUsedBytes),
+                        total: formatGib(telemetry.storageTotalBytes),
+                      })}
                     </p>
                   </>
                 ) : (
                   <>
                     <div className="text-2xl font-bold">{formatGib(host.totalStorageBytes)}</div>
                     <p className="text-[11px] text-muted-foreground mt-1">
-                      Storage NVMe locale isolato
+                      {t.storageNote}
                     </p>
                   </>
                 )}
@@ -253,52 +261,50 @@ export default async function AdminHostDetailPage({
             <CardHeader className="pb-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
-                  <Server className="h-4 w-4 text-primary" />
+                  <Server aria-hidden className="h-4 w-4 text-primary" />
                   <CardTitle className="text-sm">
-                    Telemetria Sistema Operativo &amp; Stato Demoni Split-Agent (ADR-010)
+                    {t.telemetryTitle}
                   </CardTitle>
                 </div>
                 {telemetry && (
                   <span className="text-[11px] font-mono text-muted-foreground flex items-center gap-1">
-                    <Clock className="h-3 w-3" />
-                    Aggiornato: {new Date(telemetry.collectedAt).toLocaleTimeString("it-IT")}
+                    <Clock aria-hidden className="h-3 w-3" />
+                    {format(t.updatedAt, { time: new Date(telemetry.collectedAt).toLocaleTimeString(dateLocale) })}
                   </span>
                 )}
               </div>
               <CardDescription className="text-xs">
-                Metriche raccolte da <code className="font-mono">hp-host-agent</code> e battiti cardiaci registrati dai
-                canali IPC firmati (ADR-013).
+                {t.telemetryHint}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4 text-xs">
               {telemetry ? (
                 <div className="grid gap-3 sm:grid-cols-3">
                   <div className="rounded-lg border p-3">
-                    <span className="text-muted-foreground">Versione Kernel Linux:</span>
+                    <span className="text-muted-foreground">{t.kernel}</span>
                     <div className="font-mono font-semibold mt-1">{telemetry.kernelVersion}</div>
                   </div>
                   <div className="rounded-lg border p-3">
-                    <span className="text-muted-foreground">Uptime Nodo:</span>
+                    <span className="text-muted-foreground">{t.uptime}</span>
                     <div className="font-mono font-semibold mt-1">
-                      {formatUptime(telemetry.uptimeSeconds)} ({Math.round(telemetry.uptimeSeconds)}s)
+                      {formatUptime(telemetry.uptimeSeconds)}
                     </div>
                   </div>
                   <div className="rounded-lg border p-3">
-                    <span className="text-muted-foreground">Docker Engine API (v1.45+):</span>
+                    <span className="text-muted-foreground">{t.docker}</span>
                     <div className="mt-1">
                       <Badge
                         variant={telemetry.dockerEngineReachable ? "success" : "destructive"}
                         className="text-[10px]"
                       >
-                        {telemetry.dockerEngineReachable ? "Raggiungibile" : "Non raggiungibile"}
+                        {telemetry.dockerEngineReachable ? t.reachable : t.unreachable}
                       </Badge>
                     </div>
                   </div>
                 </div>
               ) : (
                 <div className="rounded-lg border border-dashed p-3 text-muted-foreground">
-                  Telemetria host in tempo reale non disponibile con{" "}
-                  <code className="font-mono">runtimeBackend={runtimeBackend}</code>.
+                  {format(t.noTelemetry, { backend: runtimeBackend })}
                 </div>
               )}
 
@@ -306,35 +312,41 @@ export default async function AdminHostDetailPage({
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-lg border p-3 flex items-center justify-between">
                   <div>
-                    <div className="font-semibold font-mono">hp-docker-executor</div>
+                    <div className="font-semibold font-mono">{"hp-docker-executor"}</div>
                     <div className="text-[11px] text-muted-foreground">
                       {executorHeartbeat
-                        ? `v${executorHeartbeat.version} • visto ${new Date(executorHeartbeat.lastSeenAt).toLocaleTimeString("it-IT")}`
-                        : "Nessun heartbeat IPC registrato"}
+                        ? format(t.heartbeat, {
+                            version: executorHeartbeat.version,
+                            time: new Date(executorHeartbeat.lastSeenAt).toLocaleTimeString(dateLocale),
+                          })
+                        : t.noHeartbeat}
                     </div>
                   </div>
                   <Badge
                     variant={getDaemonBadgeVariant(executorHeartbeat?.status)}
                     className="text-[10px]"
                   >
-                    {executorHeartbeat?.status ?? (isRuntimeEnabled ? "attesa" : "disabled")}
+                    {executorHeartbeat?.status ?? (isRuntimeEnabled ? t.waiting : t.disabled)}
                   </Badge>
                 </div>
 
                 <div className="rounded-lg border p-3 flex items-center justify-between">
                   <div>
-                    <div className="font-semibold font-mono">hp-host-agent</div>
+                    <div className="font-semibold font-mono">{"hp-host-agent"}</div>
                     <div className="text-[11px] text-muted-foreground">
                       {hostAgentHeartbeat
-                        ? `v${hostAgentHeartbeat.version} • visto ${new Date(hostAgentHeartbeat.lastSeenAt).toLocaleTimeString("it-IT")}`
-                        : "Nessun heartbeat IPC registrato"}
+                        ? format(t.heartbeat, {
+                            version: hostAgentHeartbeat.version,
+                            time: new Date(hostAgentHeartbeat.lastSeenAt).toLocaleTimeString(dateLocale),
+                          })
+                        : t.noHeartbeat}
                     </div>
                   </div>
                   <Badge
                     variant={getDaemonBadgeVariant(hostAgentHeartbeat?.status)}
                     className="text-[10px]"
                   >
-                    {hostAgentHeartbeat?.status ?? (isRuntimeEnabled ? "attesa" : "disabled")}
+                    {hostAgentHeartbeat?.status ?? (isRuntimeEnabled ? t.waiting : t.disabled)}
                   </Badge>
                 </div>
               </div>
@@ -343,36 +355,36 @@ export default async function AdminHostDetailPage({
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm">Configurazione e Metadati Hardware</CardTitle>
+              <CardTitle className="text-sm">{t.configTitle}</CardTitle>
               <CardDescription className="text-xs">
-                Parametri identificativi registrati nel piano di controllo.
+                {t.configHint}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-2 text-xs">
               <div className="grid grid-cols-2 gap-4">
                 <div className="rounded-lg border p-3">
-                  <span className="text-muted-foreground">Identificativo Univoco:</span>
+                  <span className="text-muted-foreground">{t.uniqueId}</span>
                   <div className="font-mono mt-1">{host.id}</div>
                 </div>
                 <div className="rounded-lg border p-3">
-                  <span className="text-muted-foreground">Indirizzo IPv6:</span>
-                  <div className="font-mono mt-1">{host.ipv6Address || "Non configurato"}</div>
+                  <span className="text-muted-foreground">{t.ipv6}</span>
+                  <div className="font-mono mt-1">{host.ipv6Address || t.notConfigured}</div>
                 </div>
                 <div className="rounded-lg border p-3">
-                  <span className="text-muted-foreground">Revisione di Sicurezza:</span>
+                  <span className="text-muted-foreground">{t.securityReview}</span>
                   <div className="mt-1">
                     {host.securityReviewed ? (
-                      <Badge variant="success" className="text-[10px]">Approvato</Badge>
+                      <Badge variant="success" className="text-[10px]">{t.approved}</Badge>
                     ) : (
-                      <Badge variant="warning" className="text-[10px]">Non Verificato</Badge>
+                      <Badge variant="warning" className="text-[10px]">{t.notVerified}</Badge>
                     )}
                   </div>
                 </div>
                 <div className="rounded-lg border p-3">
-                  <span className="text-muted-foreground">Approvazione Modalità Shared:</span>
+                  <span className="text-muted-foreground">{t.sharedApproval}</span>
                   <div className="mt-1">
                     <Badge variant="outline" className="text-[10px] text-destructive border-destructive/30">
-                      Disabilitata (AC-F1-06 / AC-F2-10)
+                      {t.sharedDisabled}
                     </Badge>
                   </div>
                 </div>
@@ -385,27 +397,27 @@ export default async function AdminHostDetailPage({
         <TabsContent value="allocations" className="space-y-4 pt-3">
           <Card>
             <CardHeader>
-              <CardTitle className="text-sm">Tenant Allocati su questo Host</CardTitle>
+              <CardTitle className="text-sm">{t.allocTitle}</CardTitle>
               <CardDescription className="text-xs">
-                In modalità Dedicated, al più un tenant attivo può occupare questo nodo (AC-F1-01).
+                {t.allocHint}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Allocazione ID</TableHead>
-                    <TableHead>Organizzazione Tenant</TableHead>
-                    <TableHead>Stato</TableHead>
-                    <TableHead>Ambito Dedicated</TableHead>
-                    <TableHead>Data Creazione</TableHead>
+                    <TableHead>{t.allocId}</TableHead>
+                    <TableHead>{t.allocOrg}</TableHead>
+                    <TableHead>{t.allocStatus}</TableHead>
+                    <TableHead>{t.allocScope}</TableHead>
+                    <TableHead>{t.allocCreated}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {allocations.length === 0 ? (
                     <TableRow>
                       <TableCell colSpan={5} className="text-center py-6 text-muted-foreground text-xs">
-                        Nessuna allocazione attiva su questo host (nodo libero per assegnazione dedicata).
+                        {t.allocEmpty}
                       </TableCell>
                     </TableRow>
                   ) : (
@@ -420,11 +432,11 @@ export default async function AdminHostDetailPage({
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline" className="text-[10px]">
-                            {alloc.dedicatedScope ? "Esclusivo (AC-F1-01)" : "Shared"}
+                            {alloc.dedicatedScope ? t.exclusive : t.shared}
                           </Badge>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground font-mono">
-                          {new Date(alloc.createdAt).toLocaleDateString("it-IT")}
+                          {new Date(alloc.createdAt).toLocaleDateString(dateLocale)}
                         </TableCell>
                       </TableRow>
                     ))
@@ -442,27 +454,18 @@ export default async function AdminHostDetailPage({
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Boxes className={isRuntimeEnabled ? "h-4 w-4 text-emerald-600" : "h-4 w-4 text-amber-600"} />
+                    <Boxes aria-hidden className={isRuntimeEnabled ? "h-4 w-4 text-emerald-600" : "h-4 w-4 text-amber-600"} />
                     <CardTitle className="text-sm font-semibold">
-                      Docker Executor (`hp-docker-executor`)
+                      {t.executorTitle}
                     </CardTitle>
                   </div>
-                  <Badge variant={isRuntimeEnabled ? "success" : "warning"} className="text-[10px]">
-                    {isRuntimeEnabled ? "ADR-010 Split Agent" : "AC-F1-10"}
-                  </Badge>
                 </div>
                 <CardDescription className="text-xs font-medium">
-                  {isRuntimeEnabled
-                    ? `Runtime Attivo (${runtimeBackend}) — UDS Firmato & Traefik Zero-Sock`
-                    : "Boundary Logico Definito — Runtime previsto in Fase 2"}
+                  {isRuntimeEnabled ? format(t.runtimeActive, { backend: runtimeBackend }) : t.runtimePlanned}
                 </CardDescription>
               </CardHeader>
               <CardContent className="text-xs text-muted-foreground space-y-1.5">
-                <p>
-                  Demone isolato non-root con confinamento container (<code className="font-mono">CapDrop: ALL</code>,{" "}
-                  <code className="font-mono">no-new-privileges</code>, reti dedicate per sito) e ingress Traefik v3 via
-                  file provider <code className="font-mono">:ro</code> senza <code className="font-mono">docker.sock</code>.
-                </p>
+                <p>{t.executorBody}</p>
               </CardContent>
             </Card>
 
@@ -470,26 +473,18 @@ export default async function AdminHostDetailPage({
               <CardHeader className="pb-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Lock className="h-4 w-4 text-blue-600" />
+                    <Lock aria-hidden className="h-4 w-4 text-blue-600" />
                     <CardTitle className="text-sm font-semibold">
-                      Host Agent (`hp-host-agent`)
+                      {t.agentTitle}
                     </CardTitle>
                   </div>
-                  <Badge variant={isRuntimeEnabled ? "default" : "secondary"} className="text-[10px]">
-                    {isRuntimeEnabled ? "AC-F2-04 Zero-Shell" : "AC-F1-10"}
-                  </Badge>
                 </div>
                 <CardDescription className="text-xs font-medium">
-                  {isRuntimeEnabled
-                    ? `Runtime Attivo (${runtimeBackend}) — CAP_NET_ADMIN & execFile Allowlist`
-                    : "Boundary Logico Definito — Runtime previsto in Fase 2"}
+                  {isRuntimeEnabled ? format(t.runtimeActive, { backend: runtimeBackend }) : t.runtimePlanned}
                 </CardDescription>
               </CardHeader>
               <CardContent className="text-xs text-muted-foreground space-y-1.5">
-                <p>
-                  Nessuna shell arbitraria (<code className="font-mono">sh -c</code> vietato). Accetta esclusivamente le 3
-                  azioni di manutenzione pre-approvate e i profili statici <code className="font-mono">nftables</code>.
-                </p>
+                <p>{t.agentBody}</p>
               </CardContent>
             </Card>
           </div>
@@ -497,7 +492,6 @@ export default async function AdminHostDetailPage({
           <HostDetailActions
             hostId={host.id}
             csrfToken={session?.csrfToken}
-            isInfraAdmin={isInfraAdmin}
             runtimeBackend={runtimeBackend}
           />
         </TabsContent>

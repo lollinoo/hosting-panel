@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { getServerSession } from "@/lib/server-session";
+import { format, getMessages } from "@/i18n";
+import { getRequestLocale } from "@/i18n/server";
 import { fetchServerHosts } from "@/lib/server-api";
 import {
   Card,
@@ -18,108 +19,81 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
-import { Server, Cpu, ShieldAlert, ArrowRight, CheckCircle2 } from "lucide-react";
+import { Server, Cpu, ArrowRight, CheckCircle2 } from "lucide-react";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminHostsPage() {
-  const session = await getServerSession();
-  const hosts = await fetchServerHosts();
-
-  const isInfraAdmin = session?.user.globalRoles.includes("infrastructure_admin");
+  const [m, hosts] = await Promise.all([getRequestLocale().then(getMessages), fetchServerHosts()]);
+  const t = m.admin.hosts;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Inventario Nodi Host Fisici</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Supervisione della flotta server dedicati e garanzie di confinamento runtime (AC-F1-01, AC-F1-06).
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant={isInfraAdmin ? "default" : "secondary"}>
-            {isInfraAdmin ? "Controllo Completo InfrastructureAdmin" : "Lettura Sola (HostingAdmin)"}
-          </Badge>
-        </div>
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">{t.title}</h1>
+        <p className="text-sm text-muted-foreground mt-1">{t.subtitle}</p>
       </div>
 
-      {!isInfraAdmin && (
-        <Alert variant="warning">
-          <ShieldAlert className="h-4 w-4" />
-          <AlertTitle>Privilegi Segregati (AC-F1-03)</AlertTitle>
-          <AlertDescription>
-            Sei autenticato come Hosting Admin. L'accesso alle operazioni di manutenzione del daemon host,
-            sicurezza kernel Linux e gating di modalità è riservato esclusivamente al ruolo InfrastructureAdmin.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* KPI Cards */}
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Totale Nodi Host</CardTitle>
-            <Server className="h-4 w-4 text-blue-500" />
+            <CardTitle className="text-xs font-medium text-muted-foreground">{t.total}</CardTitle>
+            <Server aria-hidden className="h-4 w-4 text-blue-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{hosts.length}</div>
-            <p className="text-[11px] text-muted-foreground mt-1">Modalità Dedicated enforcement attiva</p>
+            <p className="text-[11px] text-muted-foreground mt-1">{t.totalNote}</p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Capacità CPU Allocabile</CardTitle>
-            <Cpu className="h-4 w-4 text-emerald-500" />
+            <CardTitle className="text-xs font-medium text-muted-foreground">{t.cpu}</CardTitle>
+            <Cpu aria-hidden className="h-4 w-4 text-emerald-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {hosts.reduce((acc, h) => acc + h.totalCpuMilli, 0) / 1000} vCPU
+              {format(t.vcpu, { n: hosts.reduce((acc, h) => acc + h.totalCpuMilli, 0) / 1000 })}
             </div>
-            <p className="text-[11px] text-muted-foreground mt-1">Risorse hardware verificate</p>
+            <p className="text-[11px] text-muted-foreground mt-1">{t.cpuNote}</p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-xs font-medium text-muted-foreground">Modalità Hosting Attiva</CardTitle>
-            <CheckCircle2 className="h-4 w-4 text-purple-500" />
+            <CardTitle className="text-xs font-medium text-muted-foreground">{t.mode}</CardTitle>
+            <CheckCircle2 aria-hidden className="h-4 w-4 text-purple-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">100% Dedicated</div>
-            <p className="text-[11px] text-muted-foreground mt-1">Shared Mode disabilitata in Fase 1</p>
+            <div className="text-2xl font-bold">{t.modeValue}</div>
+            <p className="text-[11px] text-muted-foreground mt-1">{t.modeNote}</p>
           </CardContent>
         </Card>
       </div>
 
-      {/* Host Table */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Elenco Nodi Registrati</CardTitle>
-          <CardDescription className="text-xs">
-            Ispezione dettagliata dello stato, indirizzo IPv4 e parametri di confinamento.
-          </CardDescription>
+          <CardTitle className="text-base">{t.listTitle}</CardTitle>
+          <CardDescription className="text-xs">{t.listHint}</CardDescription>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Host / Nome</TableHead>
-                <TableHead>Indirizzo IPv4</TableHead>
-                <TableHead>Stato</TableHead>
-                <TableHead>Modalità</TableHead>
-                <TableHead>Capacità Hardware</TableHead>
-                <TableHead>Revisione Sicurezza</TableHead>
-                <TableHead className="text-right">Azioni</TableHead>
+                <TableHead>{t.colHost}</TableHead>
+                <TableHead>{t.colIp}</TableHead>
+                <TableHead>{t.colStatus}</TableHead>
+                <TableHead>{t.colMode}</TableHead>
+                <TableHead>{t.colHardware}</TableHead>
+                <TableHead>{t.colSecurity}</TableHead>
+                <TableHead className="text-right">{t.colActions}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {hosts.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={7} className="text-center py-6 text-muted-foreground text-xs">
-                    Nessun host registrato nel piano di controllo.
+                    {t.empty}
                   </TableCell>
                 </TableRow>
               ) : (
@@ -141,24 +115,26 @@ export default async function AdminHostsPage() {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      <div>{host.totalCpuMilli / 1000} vCPU</div>
-                      <div>{(Number(host.totalMemoryBytes) / (1024 * 1024 * 1024)).toFixed(1)} GB RAM</div>
+                      <div>{format(t.vcpu, { n: host.totalCpuMilli / 1000 })}</div>
+                      <div>
+                        {format(t.ram, { n: (Number(host.totalMemoryBytes) / (1024 * 1024 * 1024)).toFixed(1) })}
+                      </div>
                     </TableCell>
                     <TableCell>
                       {host.securityReviewed ? (
                         <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          <span>Verificato</span>
+                          <CheckCircle2 aria-hidden className="h-3.5 w-3.5" />
+                          <span>{t.reviewed}</span>
                         </span>
                       ) : (
-                        <span className="text-[11px] text-amber-600">In attesa</span>
+                        <span className="text-[11px] text-amber-600">{t.pending}</span>
                       )}
                     </TableCell>
                     <TableCell className="text-right">
                       <Button asChild size="sm" variant="ghost" className="gap-1 text-xs">
                         <Link href={`/admin/hosts/${host.id}`}>
-                          <span>Dettaglio</span>
-                          <ArrowRight className="h-3.5 w-3.5" />
+                          <span>{t.detail}</span>
+                          <ArrowRight aria-hidden className="h-3.5 w-3.5" />
                         </Link>
                       </Button>
                     </TableCell>

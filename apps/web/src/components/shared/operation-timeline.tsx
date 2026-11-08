@@ -8,6 +8,8 @@ import {
   type OperationStatus,
   type OperationStepStatus,
 } from "@hosting-panel/contracts";
+import { format } from "@/i18n";
+import { useMessages } from "@/i18n/provider";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
@@ -29,27 +31,6 @@ export interface OperationTimelineProps {
   onDismiss?: () => void;
 }
 
-function getOperationStatusLabel(status: OperationStatus): string {
-  switch (status) {
-    case "queued":
-      return "In coda (Outbox)";
-    case "processing":
-      return "In esecuzione";
-    case "accepted":
-      return "Accettata dal demone IPC";
-    case "reconciling":
-      return "In riconciliazione";
-    case "succeeded":
-      return "Completata";
-    case "failed":
-      return "Fallita";
-    case "cancelled":
-      return "Annullata";
-    case "unknown":
-      return "Stato indeterminato (Recovery TH-08)";
-  }
-}
-
 function getOperationBadgeVariant(status: OperationStatus) {
   switch (status) {
     case "succeeded":
@@ -64,25 +45,6 @@ function getOperationBadgeVariant(status: OperationStatus) {
       return "default" as const;
     default:
       return "secondary" as const;
-  }
-}
-
-function getStepStatusLabel(status: OperationStepStatus): string {
-  switch (status) {
-    case "pending":
-      return "In attesa";
-    case "running":
-      return "In corso";
-    case "succeeded":
-      return "Completato";
-    case "failed":
-      return "Fallito";
-    case "cancelled":
-      return "Annullato";
-    case "skipped":
-      return "Saltato";
-    case "unknown":
-      return "Verifica Read-Only";
   }
 }
 
@@ -124,6 +86,9 @@ export function OperationTimeline({
   onDismiss,
 }: OperationTimelineProps) {
   const router = useRouter();
+  const m = useMessages();
+  const t = m.admin.operation;
+  const locale = m.common.dateLocale;
   const [operation, setOperation] = React.useState<OperationDto | null>(null);
   const [pollError, setPollError] = React.useState<string | null>(null);
   const refreshedForIdRef = React.useRef<string | null>(null);
@@ -148,10 +113,7 @@ export function OperationTimeline({
         if (!active) return;
 
         if (!res.ok || !payload.data) {
-          setPollError(
-            payload.error?.message ||
-              "Impossibile aggiornare lo stato dell'operazione asincrona."
-          );
+          setPollError(payload.error?.message || t.pollFailed);
           return;
         }
 
@@ -171,7 +133,7 @@ export function OperationTimeline({
         }
       } catch {
         if (!active) return;
-        setPollError("Connessione temporaneamente non disponibile durante il polling.");
+        setPollError(t.pollOffline);
       }
     };
 
@@ -186,7 +148,7 @@ export function OperationTimeline({
         clearInterval(intervalId);
       }
     };
-  }, [pollUrl, operationId, router]);
+  }, [pollUrl, operationId, router, t]);
 
   const currentStatus: OperationStatus = operation?.status ?? initialStatus;
   const isTerminal = isTerminalOperationStatus(currentStatus);
@@ -201,11 +163,11 @@ export function OperationTimeline({
           <div className="flex flex-wrap items-center gap-2">
             <Activity className="h-4 w-4 text-primary" />
             <span className="text-sm font-semibold">
-              {title || "Timeline Operazione Asincrona"}
+              {title || t.defaultTitle}
             </span>
             <Badge variant={getOperationBadgeVariant(currentStatus)} className="text-[10px]">
               {!isTerminal && <Loader2 className="h-3 w-3 animate-spin mr-1 inline" />}
-              {getOperationStatusLabel(currentStatus)}
+              {t.status[currentStatus]}
             </Badge>
             {operation?.kind && (
               <Badge variant="outline" className="font-mono text-[10px]">
@@ -214,8 +176,8 @@ export function OperationTimeline({
             )}
           </div>
           <p className="text-[11px] font-mono text-muted-foreground">
-            Operazione ID: {operation?.id ?? operationId}
-            {operation?.resourceId ? ` • Risorsa: ${operation.resourceId}` : ""}
+            {format(t.idLine, { id: operation?.id ?? operationId })}
+            {operation?.resourceId ? format(t.resource, { id: operation.resourceId }) : ""}
           </p>
         </div>
 
@@ -226,7 +188,8 @@ export function OperationTimeline({
             size="icon"
             className="h-7 w-7"
             onClick={onDismiss}
-            title="Chiudi pannello operazione"
+            aria-label={t.dismiss}
+            title={t.dismiss}
           >
             <X className="h-3.5 w-3.5" />
           </Button>
@@ -237,13 +200,10 @@ export function OperationTimeline({
         <Alert variant="warning" className="text-xs">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle className="font-semibold text-xs">
-            Crash-Recovery da Stato Indeterminato Attivo (TH-08 / AC-F2-07)
+            {t.unknownTitle}
           </AlertTitle>
           <AlertDescription className="text-xs">
-            L&apos;operazione ha rilevato un&apos;interruzione o timeout post-invio IPC ed è transitata nello stato{" "}
-            <code className="font-mono">unknown</code>. Il lock esclusivo resta acquisito: il riconciliatore interroga lo
-            stato osservato in sola lettura (<code className="font-mono">getObservedState</code>) senza alcun replay cieco{" "}
-            <code className="font-mono">POST</code>.
+            {t.unknownBody}
           </AlertDescription>
         </Alert>
       )}
@@ -252,10 +212,10 @@ export function OperationTimeline({
         <Alert variant="destructive" className="text-xs">
           <XCircle className="h-4 w-4" />
           <AlertTitle className="font-mono text-xs">
-            Errore Operazione: [{operation.errorCode || "INTERNAL_ERROR"}]
+            {format(t.errorTitle, { code: operation.errorCode || "INTERNAL_ERROR" })}
           </AlertTitle>
           <AlertDescription className="text-xs">
-            {operation.errorMessage || "L'esecuzione asincrona non è andata a buon fine."}
+            {operation.errorMessage || t.errorFallback}
           </AlertDescription>
         </Alert>
       )}
@@ -263,7 +223,7 @@ export function OperationTimeline({
       {pollError && (
         <Alert variant="warning" className="text-xs">
           <AlertTriangle className="h-4 w-4" />
-          <AlertTitle className="text-xs">Avviso Telemetria Operazione</AlertTitle>
+          <AlertTitle className="text-xs">{t.pollTitle}</AlertTitle>
           <AlertDescription className="text-xs">{pollError}</AlertDescription>
         </Alert>
       )}
@@ -272,11 +232,11 @@ export function OperationTimeline({
         {!operation ? (
           <div className="flex items-center gap-2 text-xs text-muted-foreground py-2">
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>Acquisizione stato iniziale dall&apos;Outbox transazionale...</span>
+            <span>{t.loading}</span>
           </div>
         ) : operation.steps.length === 0 ? (
           <div className="text-xs text-muted-foreground py-1">
-            Operazione registrata ({getOperationStatusLabel(operation.status)}). Nessuno step dettagliato emesso.
+            {format(t.noSteps, { status: t.status[operation.status] })}
           </div>
         ) : (
           <ol className="space-y-2">
@@ -296,11 +256,11 @@ export function OperationTimeline({
                 </div>
                 <div className="flex flex-col items-end gap-1 shrink-0">
                   <Badge variant={getStepBadgeVariant(step.status)} className="text-[10px]">
-                    {getStepStatusLabel(step.status)}
+                    {t.step[step.status]}
                   </Badge>
                   {step.completedAt && (
                     <span className="text-[10px] font-mono text-muted-foreground">
-                      {new Date(step.completedAt).toLocaleTimeString("it-IT")}
+                      {new Date(step.completedAt).toLocaleTimeString(locale)}
                     </span>
                   )}
                 </div>
