@@ -146,11 +146,37 @@ describe("install.sh SSH-safe firewall", () => {
     expect(dry({ HP_SSHD_T_OUTPUT: "port 22\n" }).code).toBe(0);
   });
 
-  it("counts socket-activated SSH (systemd listener in ss) as well", () => {
-    const ss = 'LISTEN 0 4096 *:2222 *:* users:(("systemd",pid=1,fd=50))';
-    const r = dry({ HP_SSHD_T_OUTPUT: "", HP_SS_OUTPUT: ss });
+  // Live order: sshd listeners in ss, else an active ssh.socket's Listen=, else sshd -T.
+  const SOCKET_2222 = "0.0.0.0:2222 (Stream)\n[::]:2222 (Stream)\n";
+  const sshdSs = (port: number) => `LISTEN 0 128 0.0.0.0:${port} 0.0.0.0:* users:(("sshd",pid=900,fd=3))`;
+
+  it("an active ssh.socket on 2222 wins over sshd -T port 22 (live lockout case)", () => {
+    const r = dry({ HP_SSHD_T_OUTPUT: "port 22\n", HP_SSH_SOCKET_LISTEN: SOCKET_2222, HP_SS_OUTPUT: "" });
     expect(r.code).toBe(7);
     expect(r.err).toContain("SSH listens on port 2222;");
+  });
+
+  it("a live sshd listener on 22 passes even if sshd -T says 2222 (config not yet applied)", () => {
+    const r = dry({ HP_SSHD_T_OUTPUT: "port 2222\n", HP_SSH_SOCKET_LISTEN: SOCKET_2222, HP_SS_OUTPUT: sshdSs(22) });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SSH listens on port 22");
+  });
+
+  it("a live sshd listener only on 2222 is refused even if sshd -T says 22", () => {
+    const r = dry({ HP_SSHD_T_OUTPUT: "port 22\n", HP_SS_OUTPUT: sshdSs(2222) });
+    expect(r.code).toBe(7);
+    expect(r.err).toContain("SSH listens on port 2222;");
+  });
+
+  it("ignores generic systemd listeners in ss (unrelated socket units)", () => {
+    const ss = 'LISTEN 0 4096 *:2222 *:* users:(("systemd",pid=1,fd=50))';
+    expect(dry({ HP_SSHD_T_OUTPUT: "port 22\n", HP_SS_OUTPUT: ss }).code).toBe(0);
+  });
+
+  it("exit 7 when no source yields a port", () => {
+    const r = dry({ HP_SSHD_T_OUTPUT: "", HP_SS_OUTPUT: "", HP_SSH_SOCKET_LISTEN: "" });
+    expect(r.code).toBe(7);
+    expect(r.err).toContain("Cannot detect which port SSH listens on");
   });
 });
 

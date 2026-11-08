@@ -100,20 +100,33 @@ panel_bind_address() {
   printf '%s\n' "${b}"
 }
 
-# Ports SSH listens on, one per line (empty if unknown), from `sshd -T` output ($1) and
-# `ss -ltnpH` output ($2). ListenAddress lines carry the port actually bound ([v6]:port too) and
-# override Port lines; ss adds live sshd listeners and systemd ones (socket-activated ssh.socket).
-sshd_ports_from() { # <sshd -T output> <ss -ltnpH output>
-  local cfg
-  cfg="$(awk '$1 == "listenaddress" {n = split($2, a, ":"); print a[n]}' <<<"$1")"
-  [[ -n "${cfg}" ]] || cfg="$(awk '$1 == "port" {print $2}' <<<"$1")"
-  {
-    printf '%s\n' "${cfg}"
-    awk '/"(sshd|systemd)"/ {n = split($4, a, ":"); print a[n]}' <<<"$2"
-  } | { grep -E '^[0-9]+$' || true; } | sort -un
+ports_only() { { grep -E '^[0-9]+$' || true; } | sort -un; }
+
+# Ports SSH listens on, one per line (empty if unknown), from the FIRST source that yields any:
+# live listeners owned by sshd (`ss -ltnpH`, $1); else an active ssh.socket's Listen= entries
+# (`addr:port (Stream)`, [v6]:port too, $2); else `sshd -T` ($3), where ListenAddress overrides
+# Port. Never merged, and generic "systemd" ss lines are ignored (unrelated socket units).
+sshd_ports_from() { # <ss -ltnpH output> <ssh.socket Listen output> <sshd -T output>
+  local p
+  p="$(awk '/"sshd"/ {n = split($4, a, ":"); print a[n]}' <<<"$1" | ports_only)"
+  [[ -n "${p}" ]] || p="$(awk '{for (i = 2; i <= NF; i++) if ($i == "(Stream)") {n = split($(i - 1), a, ":"); print a[n]}}' <<<"$2" | ports_only)"
+  if [[ -z "${p}" ]]; then
+    p="$(awk '$1 == "listenaddress" {n = split($2, a, ":"); print a[n]}' <<<"$3" | ports_only)"
+    [[ -n "${p}" ]] || p="$(awk '$1 == "port" {print $2}' <<<"$3" | ports_only)"
+  fi
+  [[ -z "${p}" ]] || printf '%s\n' "${p}"
 }
 
-sshd_ports() { sshd_ports_from "$(sshd -T 2>/dev/null || true)" "$(ss -ltnpH 2>/dev/null || true)"; }
+sshd_ports() {
+  local unit listen=""
+  for unit in ssh.socket sshd.socket; do # Debian/Ubuntu name it ssh, others sshd
+    if systemctl is-active --quiet "${unit}" 2>/dev/null; then
+      listen="$(systemctl show -p Listen --value "${unit}" 2>/dev/null || true)"
+      break
+    fi
+  done
+  sshd_ports_from "$(ss -ltnpH 2>/dev/null || true)" "${listen}" "$(sshd -T 2>/dev/null || true)"
+}
 
 # Adds an apt repo and checks the package has a candidate; on any failure removes what it added
 # (a broken .list would break every later apt run) and exits 3.
@@ -238,16 +251,17 @@ main() {
   if ((skip_firewall)); then
     info "--skip-firewall: the panel firewall will not be installed"
   else
-    local ports
-    if ((dry_run)) && [[ -n "${HP_SSHD_T_OUTPUT+x}" ]]; then
-      ports="$(sshd_ports_from "${HP_SSHD_T_OUTPUT}" "${HP_SS_OUTPUT:-}")" # raw outputs, test override
+    local ports stubbed=0
+    if ((dry_run)) && [[ -n "${HP_SS_OUTPUT+x}${HP_SSH_SOCKET_LISTEN+x}${HP_SSHD_T_OUTPUT+x}" ]]; then
+      stubbed=1 # raw per-source outputs, test override
+      ports="$(sshd_ports_from "${HP_SS_OUTPUT:-}" "${HP_SSH_SOCKET_LISTEN:-}" "${HP_SSHD_T_OUTPUT:-}")"
     elif ((dry_run)) && [[ -n "${HP_SSHD_PORTS+x}" ]]; then
       ports="$(tr ' ' '\n' <<<"${HP_SSHD_PORTS}" | grep . || true)"
     else
       ports="$(sshd_ports)"
     fi
     if [[ -z "${ports}" ]]; then
-      if ((dry_run)); then
+      if ((dry_run && !stubbed)); then
         info "SSH ports unknown (sshd -T needs root); the live run checks them"
       else
         die 7 "Cannot detect which port SSH listens on; the panel firewall only allows 22/80/443. Rerun with --skip-firewall and manage the firewall yourself."
@@ -538,13 +552,13 @@ EOF
   local units=(hp-host-agent hp-docker-executor hp-api hp-web)
   if ((dry_run)); then
     plan "would systemctl enable + restart ${units[*]}"
-    plan "would wait up to 90 s for http://127.0.0.1:4000/health/ready and http://<docker0 IPv4>:3000/login"
+    plan "would wait up to 90 s for http://127.0.0.1:4000/health/ready, http://<docker0 IPv4>:3000/login and hp_ingress_proxy running"
   else
     systemctl enable "${units[@]}"
     # restart (not just --now) so a rerun picks up the new release and env values.
     systemctl restart "${units[@]}"
-    panel_health_check "${bind}" 90 || die 5 "Health check failed (timeout 90 s). Inspect: journalctl -u hp-host-agent -u hp-docker-executor -u hp-api -u hp-web -n 100"
-    info "API, web console, host agent and executor are healthy"
+    panel_health_check "${bind}" 90 "${STATE_DIR}/executor.env" || die 5 "Health check failed (timeout 90 s). Inspect: journalctl -u hp-host-agent -u hp-docker-executor -u hp-api -u hp-web -n 100"
+    info "All panel services (API, web console, host agent, executor, ingress proxy) are healthy"
   fi
 
   STEP=0
