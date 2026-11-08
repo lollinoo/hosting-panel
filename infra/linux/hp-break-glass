@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run the API break-glass CLI as hp-api. Root only: api.env is 0400 root:root.
+set -euo pipefail
+ENV_FILE="${HP_API_ENV_FILE:-/etc/hosting-panel/api.env}"
+
+# api.env is data, not code: read only the DATABASE_URL line, never source it.
+DATABASE_URL=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" == DATABASE_URL=* ]]; then DATABASE_URL="${line#DATABASE_URL=}"; fi
+done < "$ENV_FILE"
+[[ -n "$DATABASE_URL" ]] || { echo "DATABASE_URL is empty in $ENV_FILE" >&2; exit 1; }
+
+# The secret is exported, not passed as an argument (argv is world-readable in ps); runuser keeps the environment.
+export DATABASE_URL
+exec runuser -u hp-api -- env \
+  HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key \
+  HP_BREAKGLASS_KEY_FILE=/etc/hosting-panel/breakglass-jwt.key \
+  node /opt/hosting-panel/current/apps/api/dist/cli/break-glass.js "$@"

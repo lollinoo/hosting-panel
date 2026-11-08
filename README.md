@@ -130,17 +130,16 @@ Per predisporre un nodo Linux dedicato con utenti isolati (`hp-web`, `hp-api`, `
 sudo bash infra/linux/bootstrap-dedicated.sh
 ```
 
-Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signing.pem`, RSA 3072, `0400`) e, in `/etc/hosting-panel/hosting-panel.env`, `BFF_SESSION_SECRET` (obbligatorio in produzione, almeno 32 caratteri), `ENABLE_DEV_OIDC=false` e `HP_SEED_DEMO=false`.
+Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signing.pem`, RSA 3072, `0400`) e un file env per servizio (`api.env`, `web.env`, `executor.env`, `0400 root:root`; `web.env` contiene `BFF_SESSION_SECRET`, `api.env` ha `ENABLE_DEV_OIDC=false` e `HP_SEED_DEMO=false`).
 
-**Primo avvio in produzione** (nessun utente demo): creare l'installazione e il primo amministratore server dalla CLI via SSH. La CLI legge il database da `DATABASE_URL` (non è letta da `hosting-panel.env`, che `hp-api` non può leggere) e applica da sola le migrazioni, quindi funziona anche prima del primo avvio dei servizi. L'installer completo che prepara PostgreSQL e questa variabile arriva con il Plan 1b.
+**Primo avvio in produzione** (nessun utente demo): creare l'installazione e il primo amministratore server con i wrapper `hp-accounts` e `hp-break-glass` (installati in `/usr/local/sbin`), che leggono `DATABASE_URL` da `api.env`, girano come `hp-api` e applicano da soli le migrazioni. L'installer completo che compila `DATABASE_URL` arriva con il Plan 1b.
 
 ```bash
-export DATABASE_URL='postgres://<utente>:<password>@127.0.0.1:5432/<database>'
-sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<nome server>" --hostname <hostname> --ipv4 <ip>
-sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<nome>"
+sudo hp-accounts setup --name "<nome server>" --hostname <hostname> --ipv4 <ip>
+sudo hp-accounts create-admin --email <email> --name "<nome>"
 ```
 
-`create-admin` legge la password da `HP_NEW_PASSWORD` o da un prompt nascosto e stampa il segreto TOTP e l'URI `otpauth` da registrare in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori). Recupero accessi: `accounts.js reset-password --email`, `reset-totp --email`, `unlock --email`. La CLI break-glass richiede `--user-id` oppure `--email`. Anche queste CLI (`accounts.js`, `break-glass.js`) vanno lanciate con `DATABASE_URL` esportata e `sudo -E -u hp-api`.
+`create-admin` legge la password da `HP_NEW_PASSWORD` o da un prompt nascosto e stampa il segreto TOTP e l'URI `otpauth` da registrare in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori). Recupero accessi: `accounts.js reset-password --email`, `reset-totp --email`, `unlock --email`. La CLI break-glass richiede `--user-id` oppure `--email`. Usare `sudo hp-accounts ...` e `sudo hp-break-glass ...`.
 
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 

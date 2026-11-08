@@ -137,7 +137,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/secrets-master.key (0400 hp-api:root)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
   log_dry "Would idempotently generate RSA-3072 JWT signing key /etc/hosting-panel/jwt-signing.pem (0400 hp-api:root)"
-  log_dry "Would ensure /etc/hosting-panel/hosting-panel.env (0440 root:hp-web) has BFF_SESSION_SECRET=<64 hex> (only if absent), ENABLE_DEV_OIDC=false, HP_SEED_DEMO=false"
+  log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
+  log_dry "Would install /usr/local/sbin/hp-accounts and /usr/local/sbin/hp-break-glass (0750 root:root)"
   log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750)"
   log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (2750 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
@@ -257,18 +258,34 @@ else
   log_info "Preserved existing JWT signing key at ${JWT_KEY_PATH} (0400)"
 fi
 
-# Web session secret and production-safe flags; existing values are never overwritten.
-ENV_FILE="/etc/hosting-panel/hosting-panel.env"
-touch "${ENV_FILE}"
-if ! grep -q '^BFF_SESSION_SECRET=' "${ENV_FILE}"; then
-  printf 'BFF_SESSION_SECRET=%s\n' "$(generate_32_byte_hex_key)" >> "${ENV_FILE}"
-  log_info "Generated BFF_SESSION_SECRET in ${ENV_FILE}"
-fi
-for flag in ENABLE_DEV_OIDC HP_SEED_DEMO; do
-  grep -q "^${flag}=" "${ENV_FILE}" || printf '%s=false\n' "${flag}" >> "${ENV_FILE}"
-done
-chown root:hp-web "${ENV_FILE}"
-chmod 0440 "${ENV_FILE}"
+# Per-service env files (0400 root:root; systemd reads them as root). Created only if absent, from a temp file.
+write_env_file() {
+  local path="$1" content="$2" tmp
+  if [[ -e "${path}" ]]; then
+    log_info "Preserved existing ${path}"
+    return
+  fi
+  tmp="$(mktemp /etc/hosting-panel/.env.XXXXXX)"
+  printf '%s\n' "${content}" > "${tmp}"
+  install -m 0400 -o root -g root "${tmp}" "${path}"
+  rm -f "${tmp}"
+  log_info "Created ${path} (0400 root:root)"
+}
+
+write_env_file /etc/hosting-panel/api.env "DATABASE_URL=
+ENABLE_DEV_OIDC=false
+HP_SEED_DEMO=false"
+write_env_file /etc/hosting-panel/web.env "BFF_SESSION_SECRET=$(generate_32_byte_hex_key)
+API_INTERNAL_URL=http://127.0.0.1:4000
+HP_WEB_BIND_ADDRESS="
+write_env_file /etc/hosting-panel/executor.env "HP_PANEL_HOSTNAME=
+HP_PANEL_IPV4=
+HP_ACME_EMAIL=
+HP_ACME_STAGING=false
+HP_PANEL_UPSTREAM_PORT=3000"
+
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-accounts" /usr/local/sbin/hp-accounts
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-break-glass" /usr/local/sbin/hp-break-glass
 
 # 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid 2750 root:hp-ipc)
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
@@ -293,12 +310,10 @@ log_info "Installed systemd units and reloaded systemd daemon successfully."
 cat <<'EOF'
 
 Next step (first run): create the installation and the first server administrator.
-The CLI applies database migrations itself, so it works before the services ever started.
-It reads the database from DATABASE_URL (it does not read hosting-panel.env); the full installer
-that provisions PostgreSQL and this variable comes with Plan 1b.
-  export DATABASE_URL='postgres://<user>:<password>@127.0.0.1:5432/<database>'
-  sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<server name>" --hostname <hostname> --ipv4 <ip> \
-    && sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<name>"
-Break-glass (dist/cli/break-glass.js) needs the same DATABASE_URL + sudo -E -u hp-api.
+The wrapper reads DATABASE_URL from /etc/hosting-panel/api.env (filled in by the full installer),
+applies database migrations itself and runs as hp-api:
+  sudo hp-accounts setup --name "<server name>" --hostname <hostname> --ipv4 <ip>
+  sudo hp-accounts create-admin --email <email> --name "<name>"
+Break-glass: sudo hp-break-glass <args>.
 create-admin prints the TOTP secret once: enrol it in an authenticator app (2FA is mandatory for administrators).
 EOF

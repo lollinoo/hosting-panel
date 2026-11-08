@@ -9,15 +9,14 @@ Type=simple
 User=hp-agent
 Group=hp-agent
 SupplementaryGroups=hp-ipc
-WorkingDirectory=/opt/hosting-panel/apps/host-agent
-EnvironmentFile=-/etc/hosting-panel/hosting-panel.env
+WorkingDirectory=/opt/hosting-panel/current/apps/host-agent
 Environment=NODE_ENV=production
 Environment=HP_RUNTIME_BACKEND=linux-systemd
 Environment=HP_IPC_TRANSPORT=uds
 Environment=HP_HOST_AGENT_SOCKET_PATH=/run/hosting-panel/host-agent.sock
 Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_NFTABLES_RULESET_PATH=/etc/hosting-panel/nftables-dedicated.conf
-ExecStart=/usr/bin/node /opt/hosting-panel/apps/host-agent/dist/main.js
+ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/host-agent/dist/main.js
 Restart=on-failure
 RestartSec=5s
 UMask=0007
