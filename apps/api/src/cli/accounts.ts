@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { statfs } from "node:fs/promises";
 import os from "node:os";
-import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import { redactSensitiveString } from "@hosting-panel/contracts";
+import { isInvokedDirectly } from "@hosting-panel/contracts/invoked-directly";
 import {
   appendAuditEvent,
   createDatabaseClient,
@@ -235,8 +235,7 @@ export async function runCli(argv: readonly string[], dbClient = databaseClientF
   }
 }
 
-const invokedPath = process.argv[1];
-if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+if (isInvokedDirectly(import.meta.url)) {
   runCli(process.argv.slice(2)).catch((err: unknown) => {
     process.stderr.write(`${redactSensitiveString(err instanceof Error ? err.message : String(err))}\n`);
     process.exitCode = 1;

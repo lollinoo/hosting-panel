@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 import { redactSensitiveString } from "@hosting-panel/contracts";
+import { isInvokedDirectly } from "@hosting-panel/contracts/invoked-directly";
 import {
   appendAuditEvent,
   createDatabaseClient,
@@ -294,8 +294,7 @@ async function runCli(argv: readonly string[]): Promise<void> {
   }
 }
 
-const invokedPath = process.argv[1];
-if (invokedPath && import.meta.url === pathToFileURL(invokedPath).href) {
+if (isInvokedDirectly(import.meta.url)) {
   runCli(process.argv.slice(2)).catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
     process.stderr.write(`${redactSensitiveString(msg)}\n`);

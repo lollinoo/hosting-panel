@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { getWorkspaceMetadata } from "@hosting-panel/config";
 import type { IpcVerificationKey, RuntimeBackend } from "@hosting-panel/contracts";
+import { isInvokedDirectly } from "@hosting-panel/contracts/invoked-directly";
 import {
   DEFAULT_DOCKER_SOCKET_PATH,
   DEFAULT_SECRETS_ROOT_DIR,
@@ -285,11 +285,7 @@ async function runMain(): Promise<void> {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-const isDirectExecution =
-  process.argv[1] !== undefined &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
-
-if (isDirectExecution) {
+if (isInvokedDirectly(import.meta.url)) {
   runMain().catch((err: unknown) => {
     const code = (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR";
     console.error(
