@@ -30,7 +30,7 @@ SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"
 . "${SCRIPT_DIR}/lib/common.sh"
 
 UNITS=(hp-host-agent hp-docker-executor hp-api hp-web)
-DOWNLOAD_DIR=/var/tmp/hosting-panel-update
+DOWNLOAD_DIR="" # private mktemp -d dir (0700), removed on every exit
 STEP=0
 STEP_NAME=""
 TOTAL=9
@@ -49,6 +49,7 @@ info() { printf '  %s\n' "$*"; }
 
 on_exit() {
   local rc=$?
+  [[ -z "${DOWNLOAD_DIR}" ]] || rm -rf -- "${DOWNLOAD_DIR}"
   if ((rc != 0 && STEP > 0)); then
     printf '\n[ERROR] Step %s/%s (%s) ended with exit code %s.\n' "${STEP}" "${TOTAL}" "${STEP_NAME}" "${rc}" >&2
   fi
@@ -59,7 +60,7 @@ run_bootstrap() { # <release dir>
   if [[ -n "${HP_BOOTSTRAP_CMD:-}" ]]; then
     "${HP_BOOTSTRAP_CMD}" "$1"
   else
-    bash "$1/infra/linux/bootstrap-dedicated.sh" "${BOOTSTRAP_ARGS[@]}"
+    HP_BOOTSTRAP_QUIET=1 bash "$1/infra/linux/bootstrap-dedicated.sh" "${BOOTSTRAP_ARGS[@]}"
   fi
 }
 health() {
@@ -72,6 +73,10 @@ health() {
   fi
 }
 restart_units() { "${SYSTEMCTL}" restart "${UNITS[@]}"; }
+restore_prev_units() { # <prev release dir>: put the previous release's units and wrappers back (best effort)
+  run_bootstrap "$1" || printf '[WARN] bootstrap of %s failed while restoring it\n' "$1" >&2
+  "${SYSTEMCTL}" daemon-reload || true
+}
 
 main() {
   set -euo pipefail
@@ -115,10 +120,9 @@ main() {
   local root="${HP_ROOT:-${HP_DEFAULT_ROOT}}"
   SYSTEMCTL="${HP_SYSTEMCTL:-systemctl}"
   local prev
-  prev="$(current_version "${root}")"
-  ((dry_run)) || [[ -n "${prev}" ]] || die 1 "No current release under ${root}; run install.sh first."
 
   if ((dry_run)); then
+    prev="$(current_version "${root}")"
     step 1 "Resolve and fetch the release"
     if [[ -n "${archive}" ]]; then plan "use ${archive}"; else plan "would download release ${version} from github.com/${HP_RELEASE_REPO}"; fi
     step 2 "Verify checksum"
@@ -146,16 +150,19 @@ main() {
   exec 9>"${root}/.update.lock"
   flock -n 9 || die 1 "Another update is running (lock ${root}/.update.lock is held)."
   trap on_exit EXIT
+  # Read under the lock: a concurrent update could otherwise change it under us.
+  prev="$(current_version "${root}")"
+  [[ -n "${prev}" ]] || die 1 "No current release under ${root}; run install.sh first."
 
   step 1 "Resolve and fetch the release"
-  local downloaded=0
   if [[ -z "${archive}" ]]; then
     if [[ "${version}" == latest ]]; then
       version="$(latest_release_version)" || die 1 "Could not determine the latest release; pass --version."
       info "Latest release: ${version}"
     fi
+    # Fresh 0700 dir: a predictable shared path would let a local user plant an archive root installs.
+    DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
     archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")" || die 1 "Download of release ${version} failed."
-    downloaded=1
   fi
   info "archive: ${archive}"
 
@@ -180,13 +187,15 @@ main() {
   local new_dir="${root}/releases/${version}" prev_dir="${root}/releases/${prev}"
   step 5 "Bootstrap (units, wrappers, tmpfiles) and daemon-reload"
   if ! run_bootstrap "${new_dir}" || ! "${SYSTEMCTL}" daemon-reload; then
-    run_bootstrap "${prev_dir}" || true # restore the previous release's units and wrappers
-    "${SYSTEMCTL}" daemon-reload || true
+    restore_prev_units "${prev_dir}"
     die 1 "Bootstrap of ${version} failed; services still run ${prev} (not restarted)."
   fi
 
   step 6 "Switch current"
-  swap_current "${root}" "${version}" || die 1 "Could not point current at ${version}."
+  if ! swap_current "${root}" "${version}"; then
+    restore_prev_units "${prev_dir}"
+    die 1 "Could not point current at ${version}; services still run ${prev} (not restarted)."
+  fi
 
   step 7 "Restart services"
   local restarted=1
@@ -198,8 +207,7 @@ main() {
   else
     printf '[ERROR] %s is unhealthy; rolling back to %s\n' "${version}" "${prev}" >&2
     swap_current "${root}" "${prev}" || die 7 "Rollback failed: could not point current back at ${prev} (update to ${version} failed)."
-    run_bootstrap "${prev_dir}" || printf '[WARN] bootstrap of %s failed during rollback\n' "${prev}" >&2
-    "${SYSTEMCTL}" daemon-reload || true
+    restore_prev_units "${prev_dir}"
     if restart_units && health; then
       STEP=0
       printf 'rolled back to %s (update to %s failed its health check; %s is kept for inspection)\n' \
@@ -211,7 +219,6 @@ main() {
 
   step 9 "Prune old releases"
   prune_releases "${root}" 3 || printf '[WARN] pruning old releases failed\n' >&2
-  ((downloaded == 0)) || rm -rf -- "${DOWNLOAD_DIR}"
   STEP=0
   printf '\nupdated %s → %s\n' "${prev}" "${version}"
 }

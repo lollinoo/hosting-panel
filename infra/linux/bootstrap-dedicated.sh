@@ -310,6 +310,8 @@ done
 systemctl daemon-reload
 log_info "Installed systemd units and reloaded systemd daemon successfully."
 
+# The updater re-runs bootstrap on every update; the first-run hints are noise there.
+[[ "${HP_BOOTSTRAP_QUIET:-0}" == 1 ]] && exit 0
 cat <<'EOF'
 
 Next step (first run): create the installation and the first server administrator.

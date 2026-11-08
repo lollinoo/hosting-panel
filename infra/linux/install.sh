@@ -127,8 +127,11 @@ add_apt_repo() { # <keyring name> <key url> <list name> <repo line> <package> <m
   fi
 }
 
+DOWNLOAD_DIR=""
+
 on_exit() {
   local rc=$?
+  [[ -z "${DOWNLOAD_DIR}" ]] || rm -rf -- "${DOWNLOAD_DIR}"
   if ((rc != 0 && STEP > 0)); then
     printf '\n[ERROR] Step %s/%s (%s) failed with exit code %s.\n' "${STEP}" "${TOTAL}" "${STEP_NAME}" "${rc}" >&2
     printf '[ERROR] Fix the cause above, then rerun (it is safe to rerun):\n  sudo bash %q' "${SCRIPT_DIR}/install.sh" >&2
@@ -143,7 +146,7 @@ main() {
   ORIG_ARGS=("$@")
 
   local hostname="" admin_email="" admin_name="" acme_email="" ipv4="" version="" archive=""
-  local acme_staging=false dry_run=0 allow_other=0 skip_firewall=0 downloaded=0
+  local acme_staging=false dry_run=0 allow_other=0 skip_firewall=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --hostname | --admin-email | --admin-name | --acme-email | --ipv4 | --version | --archive)
@@ -294,8 +297,9 @@ main() {
         ORIG_ARGS+=(--version "${version}") # a rerun installs the same version
         info "Latest release: ${version}"
       fi
-      archive="$(fetch_release "${version}" /var/tmp/hosting-panel-install)"
-      downloaded=1
+      # Fresh 0700 dir: a predictable shared path would let a local user plant an archive root installs.
+      DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
+      archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")"
     fi
     verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
     node_version="$(tar -xzOf "${archive}" "hosting-panel-${version}/RELEASE.json" |
@@ -507,7 +511,6 @@ EOF
     info "API and web console are healthy"
   fi
 
-  ((dry_run || !downloaded)) || rm -rf -- /var/tmp/hosting-panel-install
   STEP=0
   if ((dry_run)); then
     printf '\nDry run complete: nothing was changed.\n'

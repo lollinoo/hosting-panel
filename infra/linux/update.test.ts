@@ -159,6 +159,62 @@ describe("update.sh", () => {
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
+  it("downloads into a fresh private dir, ignores a planted one, removes it afterwards", () => {
+    const f = fixture("0.1.0");
+    const archive = makeArchive("0.2.0");
+    const tmpDir = join(f.d, "tmp");
+    const planted = join(tmpDir, "hosting-panel-update");
+    mkdirSync(planted, { recursive: true });
+    writeFileSync(join(planted, "hosting-panel-0.2.0-linux-x64.tar.gz"), "evil");
+    const bin = join(f.d, "bin");
+    mkdirSync(bin);
+    const curlLog = join(f.d, "curl.log");
+    // Fake curl: answers the GitHub API and serves the fixture archive/.sha256 to -o <file>.
+    writeFileSync(
+      join(bin, "curl"),
+      `#!/usr/bin/env bash
+out=""; url=""; while (($#)); do case "$1" in -o) out="$2"; shift 2;; -*) shift;; *) url="$1"; shift;; esac; done
+case "$url" in
+  *api.github.com*) echo '{"tag_name": "v0.2.0"}' ;;
+  *.sha256) cp "${archive}.sha256" "$out"; echo "$(dirname "$out") $(stat -c %a "$(dirname "$out")")" >> "${curlLog}" ;;
+  *) cp "${archive}" "$out" ;;
+esac
+`,
+      { mode: 0o755 }
+    );
+    const r = update([], { ...f.env, TMPDIR: tmpDir, PATH: `${bin}:${process.env.PATH}` });
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    const [dir, mode] = readFileSync(curlLog, "utf8").trim().split(" ");
+    expect(dir.startsWith(`${tmpDir}/`)).toBe(true);
+    expect(dir).not.toBe(planted);
+    expect(mode).toBe("700");
+    expect(existsSync(dir)).toBe(false);
+    expect(readFileSync(join(planted, "hosting-panel-0.2.0-linux-x64.tar.gz"), "utf8")).toBe("evil");
+  });
+
+  it("installer and updater never download into a fixed shared path", () => {
+    for (const s of ["install.sh", "update.sh"]) {
+      expect(readFileSync(resolve(__dirname, s), "utf8")).not.toMatch(/\/var\/tmp\/hosting-panel/);
+    }
+  });
+
+  it("health check gives up early when a unit has failed", () => {
+    const d = tmp();
+    const bin = join(d, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "curl"), "#!/bin/sh\nexit 7\n", { mode: 0o755 });
+    writeFileSync(join(d, "systemctl"), "#!/bin/sh\n[ \"$1\" = is-failed ]\n", { mode: 0o755 });
+    const start = Date.now();
+    const r = spawnSync("bash", ["-c", `source "${resolve(__dirname, "lib/common.sh")}"; panel_health_check 127.0.0.1 90`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYSTEMCTL: join(d, "systemctl") }
+    });
+    expect(r.status).toBe(1);
+    expect(Date.now() - start).toBeLessThan(10_000);
+    expect(r.stdout.match(/waiting for health/g)).toHaveLength(1);
+  });
+
   it("rejects bad arguments with exit 2", () => {
     const f = fixture("0.1.0");
     expect(update(["--version", "x"], f.env).code).toBe(2);

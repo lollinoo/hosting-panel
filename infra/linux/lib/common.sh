@@ -20,12 +20,15 @@ latest_release_version() {
   printf '%s\n' "${v}"
 }
 
-# Waits up to <timeout> seconds for the API readiness probe and the web login page.
+# Waits up to <timeout> seconds for the API readiness probe and the web login page; gives up
+# early if hp-api or hp-web has failed. ${SYSTEMCTL} (default systemctl) is stubbable in tests.
 panel_health_check() { # <web bind address> <timeout seconds>
   local deadline=$((SECONDS + $2))
-  until curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:4000/health/ready &&
-    curl -fsS -o /dev/null --max-time 5 "http://$1:3000/login"; do
+  printf '  waiting for health (up to %s s)...\n' "$2"
+  until curl -fs -o /dev/null --max-time 5 http://127.0.0.1:4000/health/ready &&
+    curl -fs -o /dev/null --max-time 5 "http://$1:3000/login"; do
     ((SECONDS < deadline)) || return 1
+    ! "${SYSTEMCTL:-systemctl}" is-failed --quiet hp-api hp-web || { printf '  hp-api or hp-web has failed\n' >&2; return 1; }
     sleep 3
   done
 }
