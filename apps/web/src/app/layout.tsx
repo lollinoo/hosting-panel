@@ -1,21 +1,26 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { getMessages, getRequestLocale } from "@/i18n";
+import { I18nProvider } from "@/i18n/provider";
 
 export const metadata: Metadata = {
-  title: "Hosting Control Panel — Docker-Native Fase 1",
+  title: "Hosting Panel",
   description:
-    "Piattaforma di controllo hosting Docker-native isolata con garanzie di multi-tenancy e sicurezza Fase 1 (HCP-SPEC-002)",
+    "Gestisci i tuoi siti e il tuo hosting in un unico posto.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const locale = await getRequestLocale();
   return (
-    <html lang="it" className="h-full">
+    <html lang={locale} className="h-full">
       <body className="min-h-full flex flex-col antialiased bg-background text-foreground">
-        {children}
+        <I18nProvider locale={locale} messages={getMessages(locale)}>
+          {children}
+        </I18nProvider>
       </body>
     </html>
   );
