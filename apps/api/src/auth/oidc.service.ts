@@ -1,18 +1,30 @@
-import { randomUUID } from "node:crypto";
+import { createPublicKey, randomUUID } from "node:crypto";
 import { Inject, Injectable, type OnModuleInit } from "@nestjs/common";
 import {
   decodeProtectedHeader,
   exportJWK,
   generateKeyPair,
+  importPKCS8,
+  importSPKI,
   jwtVerify,
   SignJWT,
   type CryptoKey,
   type JSONWebKeySet,
   type JWTPayload,
 } from "jose";
+import {
+  and,
+  eq,
+  gt,
+  isNull,
+  not,
+  userSessions,
+  type DatabaseClient,
+} from "@hosting-panel/database";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
+  DATABASE_CLIENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 
@@ -22,6 +34,14 @@ export interface IssueJwtInput {
   readonly displayName: string;
   readonly expiresInSeconds?: number;
   readonly jti?: string;
+  readonly ip?: string | null;
+}
+
+export interface IssueSessionTokenInput {
+  readonly userId: string;
+  readonly email: string;
+  readonly displayName: string;
+  readonly ip: string | null;
 }
 
 export interface IssuedJwtResult {
@@ -47,14 +67,15 @@ export interface VerifiedJwtClaims {
 const KEY_ID = "dev-oidc-rs256-1";
 export const BREAKGLASS_KEY_ID = "breakglass-hs256-v1";
 const MAX_BREAKGLASS_TTL_SECONDS = 300;
+const SESSION_TTL_SECONDS = 43_200;
 
 @Injectable()
 export class OidcService implements OnModuleInit {
   #keyPairPromise: Promise<{ publicKey: CryptoKey; privateKey: CryptoKey }> | null = null;
-  readonly #revokedJtis = new Map<string, number | null>();
 
   public constructor(
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
+    @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
   ) {}
 
   public async onModuleInit(): Promise<void> {
@@ -75,7 +96,17 @@ export class OidcService implements OnModuleInit {
 
   async #ensureKeys(): Promise<{ publicKey: CryptoKey; privateKey: CryptoKey }> {
     if (!this.#keyPairPromise) {
-      this.#keyPairPromise = generateKeyPair("RS256");
+      const pem = this.config.jwtSigningKeyPem;
+      this.#keyPairPromise = pem
+        ? Promise.all([
+            importPKCS8(pem, "RS256"),
+            importSPKI(
+              createPublicKey(pem).export({ type: "spki", format: "pem" }).toString(),
+              "RS256",
+              { extractable: true },
+            ),
+          ]).then(([privateKey, publicKey]) => ({ privateKey, publicKey }))
+        : generateKeyPair("RS256");
     }
     return this.#keyPairPromise;
   }
@@ -97,7 +128,10 @@ export class OidcService implements OnModuleInit {
 
   public async issueToken(input: IssueJwtInput): Promise<IssuedJwtResult> {
     const { privateKey } = await this.#ensureKeys();
-    const expiresIn = Math.max(1, Math.min(86_400, input.expiresInSeconds ?? 3_600));
+    const expiresIn = Math.max(
+      1,
+      Math.min(SESSION_TTL_SECONDS, input.expiresInSeconds ?? SESSION_TTL_SECONDS),
+    );
     const nowEpoch = Math.floor(Date.now() / 1_000);
     const expEpoch = nowEpoch + expiresIn;
     const jti = input.jti ?? `jti_${randomUUID().replace(/-/g, "")}`;
@@ -114,6 +148,13 @@ export class OidcService implements OnModuleInit {
       .setIssuedAt(nowEpoch)
       .setExpirationTime(expEpoch)
       .sign(privateKey);
+
+    await this.dbClient.db.insert(userSessions).values({
+      id: jti,
+      userId: input.subject,
+      expiresAt: new Date(expEpoch * 1_000),
+      ip: input.ip ?? null,
+    });
 
     return {
       accessToken,
@@ -172,15 +213,48 @@ export class OidcService implements OnModuleInit {
     });
   }
 
-  public revokeTokenJti(jti: string, expiresAtEpochSeconds?: number): void {
-    const trimmed = jti.trim();
-    if (trimmed.length > 0) {
-      this.#revokedJtis.set(trimmed, expiresAtEpochSeconds ?? null);
-    }
+  public issueSessionToken(input: IssueSessionTokenInput): Promise<IssuedJwtResult> {
+    return this.issueToken({
+      subject: input.userId,
+      email: input.email,
+      displayName: input.displayName,
+      ip: input.ip,
+    });
   }
 
-  public isJtiRevoked(jti: string): boolean {
-    return this.#revokedJtis.has(jti.trim());
+  public async revokeSession(jti: string): Promise<void> {
+    await this.dbClient.db
+      .update(userSessions)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(userSessions.id, jti), isNull(userSessions.revokedAt)));
+  }
+
+  public async revokeAllSessionsForUser(userId: string, exceptJti?: string): Promise<void> {
+    await this.dbClient.db
+      .update(userSessions)
+      .set({ revokedAt: new Date() })
+      .where(
+        and(
+          eq(userSessions.userId, userId),
+          isNull(userSessions.revokedAt),
+          exceptJti === undefined ? undefined : not(eq(userSessions.id, exceptJti)),
+        ),
+      );
+  }
+
+  async #isSessionActive(jti: string): Promise<boolean> {
+    const [row] = await this.dbClient.db
+      .select({ id: userSessions.id })
+      .from(userSessions)
+      .where(
+        and(
+          eq(userSessions.id, jti),
+          isNull(userSessions.revokedAt),
+          gt(userSessions.expiresAt, new Date()),
+        ),
+      )
+      .limit(1);
+    return row !== undefined;
   }
 
   public async verifyAuthorizationHeader(
@@ -216,8 +290,9 @@ export class OidcService implements OnModuleInit {
     }
 
     let payload: JWTPayload;
+    const isBreakGlass = headerKid === BREAKGLASS_KEY_ID || headerAlg === "HS256";
     try {
-      if (headerKid === BREAKGLASS_KEY_ID || headerAlg === "HS256") {
+      if (isBreakGlass) {
         if (
           headerKid !== BREAKGLASS_KEY_ID ||
           headerAlg !== "HS256" ||
@@ -260,7 +335,8 @@ export class OidcService implements OnModuleInit {
       );
     }
 
-    if (this.isJtiRevoked(jti)) {
+    // RS256 tokens are only valid while their user_sessions row is live; break-glass is stateless.
+    if (!isBreakGlass && !(await this.#isSessionActive(jti))) {
       throw new ControlPlaneError(
         "UNAUTHENTICATED",
         "Authentication token has been revoked.",

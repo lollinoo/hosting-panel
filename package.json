@@ -12,8 +12,8 @@
     "typecheck": "node packages/config/scripts/run-workspaces.mjs typecheck",
     "test": "vitest run",
     "build": "node packages/config/scripts/run-workspaces.mjs build",
-    "dev:api": "corepack pnpm -C apps/api run dev",
-    "dev:api:sim": "HP_RUNTIME_BACKEND=local-simulator corepack pnpm -C apps/api run dev",
+    "dev:api": "ENABLE_DEV_OIDC=true HP_SEED_DEMO=true corepack pnpm -C apps/api run dev",
+    "dev:api:sim": "ENABLE_DEV_OIDC=true HP_SEED_DEMO=true HP_RUNTIME_BACKEND=local-simulator corepack pnpm -C apps/api run dev",
     "dev:web": "corepack pnpm -C apps/web run dev",
     "dev:docker": "node infra/linux/run-dev-docker.mjs"
   },

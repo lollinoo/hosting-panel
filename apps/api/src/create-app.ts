@@ -50,6 +50,7 @@ const DEFAULT_EXECUTOR_SOCKET = "/run/hosting-panel/executor.sock";
 const DEFAULT_HOST_AGENT_SOCKET = "/run/hosting-panel/host-agent.sock";
 const DEFAULT_IPC_KEY_FILE = "/etc/hosting-panel/ipc.key";
 const DEFAULT_SECRETS_MASTER_KEY_FILE = "/etc/hosting-panel/secrets-master.key";
+const DEFAULT_JWT_SIGNING_KEY_FILE = "/etc/hosting-panel/jwt-signing.pem";
 
 const DEV_FALLBACK_MASTER_KEY = createHash("sha256")
   .update("hosting-panel-dev-simulator-secrets-master-key-v1")
@@ -175,6 +176,22 @@ async function resolveBreakglassSigningKey(
   return undefined;
 }
 
+async function resolveJwtSigningKeyPem(
+  runtimeBackend: RuntimeBackend,
+  explicitPem?: string,
+): Promise<string | null> {
+  if (explicitPem !== undefined) {
+    return explicitPem;
+  }
+  if (runtimeBackend !== "linux-systemd") {
+    return null;
+  }
+  const keyFile =
+    process.env["HP_JWT_SIGNING_KEY_FILE"]?.trim() || DEFAULT_JWT_SIGNING_KEY_FILE;
+  // Missing/unreadable file throws: production must not fall back to an ephemeral key.
+  return readFile(keyFile, "utf8");
+}
+
 export interface CreateControlPlaneAppOptions {
   readonly host?: string;
   readonly port?: number;
@@ -186,6 +203,7 @@ export interface CreateControlPlaneAppOptions {
   readonly hostAgent?: HostAgentPort;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
+  readonly jwtSigningKeyPem?: string;
   readonly autoProcessOutbox?: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
@@ -229,6 +247,10 @@ export async function createControlPlaneApp(
   const breakglassSigningKey = await resolveBreakglassSigningKey(
     runtimeBackend,
     options?.breakglassSigningKey,
+  );
+  const jwtSigningKeyPem = await resolveJwtSigningKeyPem(
+    runtimeBackend,
+    options?.jwtSigningKeyPem,
   );
 
   let dockerExecutor = options?.dockerExecutor;
@@ -287,12 +309,12 @@ export async function createControlPlaneApp(
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";
   const oidcAudience = options?.oidcAudience ?? "hosting-panel-api";
 
-  if (options?.seedPhase1 ?? ownsDatabaseClient) {
+  if (options?.seedPhase1 ?? process.env["HP_SEED_DEMO"] === "true") {
     await seedPhase1Dataset(dbClient.db);
   }
 
   const enableDevOidc =
-    options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] !== "false";
+    options?.enableDevOidc ?? process.env["ENABLE_DEV_OIDC"] === "true";
 
   const autoProcessOutbox = options?.autoProcessOutbox ?? true;
   const defaultBackgroundInterval =
@@ -320,6 +342,7 @@ export async function createControlPlaneApp(
     runtimeBackend,
     secretsMasterKey,
     ...(breakglassSigningKey !== undefined ? { breakglassSigningKey } : {}),
+    jwtSigningKeyPem,
     autoProcessOutbox,
     outboxPollIntervalMs,
     driftReconcileIntervalMs,

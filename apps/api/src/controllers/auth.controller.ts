@@ -178,9 +178,8 @@ export class AuthController {
   ): Promise<{ data: { revoked: boolean; revokedAt: string } }> {
     const auth = await this.authzService.authenticateRequest(req);
     const jti = auth.claims.jti;
-    const exp = auth.claims.exp;
 
-    this.oidcService.revokeTokenJti(jti, exp);
+    await this.oidcService.revokeSession(jti);
 
     await this.authzService.recordAudit(auth, req, {
       action: "auth.token.revoke",

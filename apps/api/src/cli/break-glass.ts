@@ -276,8 +276,9 @@ async function runCli(argv: readonly string[]): Promise<void> {
         runtimeBackend: "disabled",
         secretsMasterKey: Buffer.alloc(32, 0),
         breakglassSigningKey,
+        jwtSigningKeyPem: null,
         autoProcessOutbox: false,
-      });
+      }, dbClient);
       await oidcService.onModuleInit();
 
       const issued = await issueBreakGlassEmergencyToken({

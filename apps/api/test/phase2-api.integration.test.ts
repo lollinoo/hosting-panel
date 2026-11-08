@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -207,11 +207,15 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     process.env["HP_IPC_KEY_ID"] = "ipc-v1";
 
     app = await createControlPlaneApp({
+      seedPhase1: true,
       host: "127.0.0.1",
       port: 0,
       listen: true,
       enableDevOidc: true,
       runtimeBackend: "linux-systemd",
+      jwtSigningKeyPem: generateKeyPairSync("rsa", { modulusLength: 2048 })
+        .privateKey.export({ type: "pkcs8", format: "pem" })
+        .toString(),
       secretsMasterKey: masterKeyHex,
       autoProcessOutbox: false,
       outboxPollIntervalMs: null,
@@ -1035,6 +1039,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
 
   it("8. Local-simulator runtimeBackend default wiring and auto-triggered background outbox dispatch work cleanly", async () => {
     const simApp = await createControlPlaneApp({
+      seedPhase1: true,
       listen: true,
       host: "127.0.0.1",
       port: 0,
@@ -1088,6 +1093,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
   it("9. Cross-process break-glass token (F-01): standalone OidcService with shared breakglassSigningKey verifies on API and denies non-infrastructure_admin principals", async () => {
     const sharedBreakglassHex = randomBytes(32).toString("hex");
     const bgApp = await createControlPlaneApp({
+      seedPhase1: true,
       listen: true,
       host: "127.0.0.1",
       port: 0,
@@ -1108,8 +1114,9 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
         runtimeBackend: "disabled",
         secretsMasterKey: Buffer.alloc(32, 0),
         breakglassSigningKey: parseBreakglassSigningKey(sharedBreakglassHex),
+        jwtSigningKeyPem: null,
         autoProcessOutbox: false,
-      });
+      }, bgApp.dbClient);
       await standaloneCliOidc.onModuleInit();
 
       // Non-infrastructure_admin principals MUST be denied
@@ -1236,6 +1243,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     });
 
     const f03App = await createControlPlaneApp({
+      seedPhase1: true,
       listen: true,
       host: "127.0.0.1",
       port: 0,
@@ -1370,6 +1378,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     });
 
     const f05App = await createControlPlaneApp({
+      seedPhase1: true,
       listen: true,
       host: "127.0.0.1",
       port: 0,
