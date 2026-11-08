@@ -669,6 +669,16 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(BigInt(invJson.totalStorageBytes)).toBeGreaterThan(0n);
       expect(findForbiddenPublicDtoKeys(invJson)).toEqual([]);
 
+      // The deployed runtime dir is group-writable for the hp-ipc daemons (2770).
+      await chmod(runtimeDir, 0o2770);
+      const groupWritableRes = await adapter.executeMaintenance(
+        createApprovedHostMaintenanceCommand({
+          hostId: "host_linux_live",
+          action: "verify_storage_posture",
+        }),
+      );
+      expect(groupWritableRes.status).toBe("succeeded");
+
       // World-writable directory fails strict storage posture verification
       await chmod(runtimeDir, 0o777);
       const insecurePostureRes = await adapter.executeMaintenance(
@@ -933,7 +943,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         join(SYSTEMD_DIR, "hosting-panel-tmpfiles.conf"),
         "utf8",
       );
-      expect(tmpfilesContent).toContain("d /run/hosting-panel 2750 root hp-ipc -");
+      expect(tmpfilesContent).toContain("d /run/hosting-panel 2770 root hp-ipc -");
       expect(tmpfilesContent).toContain(
         "d /run/hosting-panel/secrets 0700 hp-executor hp-executor -",
       );

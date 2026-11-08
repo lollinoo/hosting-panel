@@ -25,7 +25,7 @@ Restart=on-failure
 RestartSec=5s
 UMask=0007
 
-# Shared UDS IPC dir (/run/hosting-panel 2750 root:hp-ipc via tmpfiles.d) & secrets tmpfs (0700)
+# Shared UDS IPC dir (/run/hosting-panel 2770 root:hp-ipc via tmpfiles.d) & secrets tmpfs (0700)
 ReadWritePaths=/var/lib/hosting-panel /run/hosting-panel
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix (sole daemon permitted /var/run/docker.sock)
