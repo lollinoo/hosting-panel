@@ -151,6 +151,10 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "DOCKER_ENGINE_UNAVAILABLE",
       "HOST_AGENT_UNAVAILABLE",
       "INTERNAL_ERROR",
+      "INVALID_CREDENTIALS",
+      "ACCOUNT_LOCKED",
+      "TOTP_INVALID",
+      "ACCOUNT_SETUP_INCOMPLETE",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -159,6 +163,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       expect(ERROR_CODE_HTTP_STATUS[code]).toBeLessThan(600);
     }
     expect(ERROR_CODE_HTTP_STATUS.OPERATION_INTERRUPTED).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.ACCOUNT_LOCKED).toBe(423);
   });
 
   it("maps status codes accurately", () => {

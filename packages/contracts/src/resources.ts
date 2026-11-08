@@ -721,3 +721,22 @@ export const HostTelemetryDtoSchema = z.object({
 });
 export type HostTelemetryDto = z.infer<typeof HostTelemetryDtoSchema>;
 
+
+// Login
+export const LoginInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email(),
+  password: z.string().min(1).max(1024),
+  totpCode: z.string().regex(/^\d{6}$/).optional(),
+});
+export type LoginInput = z.infer<typeof LoginInputSchema>;
+
+export const LoginResultDtoSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("ok"),
+    accessToken: z.string().min(1),
+    expiresAt: IsoDateTimeSchema,
+    mustChangePassword: z.boolean(),
+  }),
+  z.object({ status: z.literal("totp_required") }),
+]);
+export type LoginResultDto = z.infer<typeof LoginResultDtoSchema>;
