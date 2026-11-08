@@ -1,6 +1,7 @@
 import { auditEvents, createDatabaseClient, eq, hosts, userSessions, users, type DatabaseClient } from "@hosting-panel/database";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  runCli,
   createServerAdmin,
   resetUserPassword,
   resetUserTotp,
@@ -111,5 +112,18 @@ describe("accounts CLI", () => {
     expect([u.lockedUntil, u.failedLoginCount, u.totpFailedCount]).toEqual([null, 0, 0]);
     expect(await db().select().from(auditEvents).where(eq(auditEvents.action, "accounts.unlock"))).toHaveLength(1);
     await expect(unlockUser(db(), { email: "no@x.it" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("runCli migrates a fresh, unmigrated database before running the command", async () => {
+    const fresh = createDatabaseClient({ mode: "pglite" });
+    const lines: string[] = [];
+    const write = process.stdout.write.bind(process.stdout);
+    process.stdout.write = ((chunk: string) => (lines.push(chunk), true)) as typeof process.stdout.write;
+    try {
+      await runCli(["setup", "--name", "Test", "--hostname", "host.test", "--ipv4", "10.0.0.1"], fresh);
+    } finally {
+      process.stdout.write = write;
+    }
+    expect(JSON.parse(lines[0]!)).toMatchObject({ hostId: expect.any(String) });
   });
 });

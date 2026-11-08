@@ -306,8 +306,13 @@ log_info "Installed systemd units and reloaded systemd daemon successfully."
 
 cat <<'EOF'
 
-Next step (first run): create the installation and the first server administrator:
-  sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<server name>" --hostname <hostname> --ipv4 <ip> \
-    && sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<name>"
+Next step (first run): create the installation and the first server administrator.
+The CLI applies database migrations itself, so it works before the services ever started.
+It reads the database from DATABASE_URL (it does not read hosting-panel.env); the full installer
+that provisions PostgreSQL and this variable comes with Plan 1b.
+  export DATABASE_URL='postgres://<user>:<password>@127.0.0.1:5432/<database>'
+  sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<server name>" --hostname <hostname> --ipv4 <ip> \
+    && sudo -E -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<name>"
+Break-glass (dist/cli/break-glass.js) needs the same DATABASE_URL + sudo -E -u hp-api.
 create-admin prints the TOTP secret once: enrol it in an authenticator app (2FA is mandatory for administrators).
 EOF

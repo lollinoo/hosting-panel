@@ -16,6 +16,7 @@ import {
   platformInstallations,
   userSessions,
   users,
+  type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import { assertPasswordPolicy, generateTemporaryPassword, hashPassword } from "../auth/password.js";
@@ -185,13 +186,19 @@ async function promptHidden(question: string): Promise<string> {
   );
 }
 
-async function runCli(argv: readonly string[]): Promise<void> {
-  const command = argv[0];
+function databaseClientFromEnv(): DatabaseClient {
   const databaseUrl = process.env["DATABASE_URL"]?.trim();
   if (!databaseUrl) throw new Error("DATABASE_URL environment variable is required for accounts CLI.");
-  const dbClient = createDatabaseClient({ mode: "postgres", connectionString: databaseUrl });
+  return createDatabaseClient({ mode: "postgres", connectionString: databaseUrl });
+}
+
+/** Closes `dbClient` when done. */
+export async function runCli(argv: readonly string[], dbClient = databaseClientFromEnv()): Promise<void> {
+  const command = argv[0];
   const out = (v: unknown) => process.stdout.write(`${JSON.stringify(v)}\n`);
   try {
+    // Idempotent: `accounts setup` is the first thing run on a new server, before the API ever migrated.
+    await dbClient.migrate();
     const db = dbClient.db;
     const key = () => resolveSecretsMasterKey("linux-systemd");
     if (command === "setup") {
