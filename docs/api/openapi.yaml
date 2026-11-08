@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Hosting Control Panel API
-  version: 0.2.0
+  version: 0.3.0
   summary: Docker-Native Control Plane API (HCP-SPEC-003 Phase 2)
   description: >-
     Versioned `/v1` Docker-native control-plane REST API enforcing strict tenant
@@ -41,6 +41,10 @@ tags:
     description: Write-only AES-256-GCM encrypted secrets metadata
   - name: Sites
     description: Composite application sites, domains, and aggregate drift status
+  - name: Managed Sites
+    description: WordPress sites created, controlled and deleted by customers (async, 202 + operation)
+  - name: Admin Sites
+    description: Server administrator view over all WordPress sites, creation for a customer and ownership moves
   - name: Services
     description: Declarative service instances, immutable revisions, and async lifecycle
   - name: Operations
@@ -1876,6 +1880,342 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites:
+    post:
+      tags: [Managed Sites]
+      operationId: createManagedSite
+      summary: Create a WordPress site (site.create); the admin password is stored as an encrypted site secret and deleted once the install succeeds
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateManagedSiteInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}:
+    get:
+      tags: [Managed Sites]
+      operationId: getManagedSite
+      summary: Retrieve a managed site (site.read)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Managed site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ManagedSiteDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Managed Sites]
+      operationId: deleteManagedSite
+      summary: Delete a site and its database; confirmName must equal the site name (site.delete)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteSiteInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/actions:
+    post:
+      tags: [Managed Sites]
+      operationId: actManagedSite
+      summary: Start, stop or restart a site, or retry a failed provision (service.stop / service.restart / site.create)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteActionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/runtime:
+    patch:
+      tags: [Managed Sites]
+      operationId: changeManagedSiteRuntime
+      summary: Change the PHP version of a site (service.deploy)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeSiteRuntimeInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/logs:
+    get:
+      tags: [Managed Sites]
+      operationId: getManagedSiteLogs
+      summary: Read recent site log lines (service.logs.read)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: query
+          name: tail
+          schema:
+            type: integer
+            default: 200
+      responses:
+        "200":
+          description: Log lines, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SiteLogLineDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites:
+    get:
+      tags: [Admin Sites]
+      operationId: adminListSites
+      summary: List every managed site with owner, plus the customers a site can be assigned to (server administrator only)
+      parameters:
+      responses:
+        "200":
+          description: Sites and assignable customers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSitesListDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Admin Sites]
+      operationId: adminCreateSite
+      summary: Create a site for a customer, or held by the platform-ops organization when ownerOrganizationId is null (audited as admin.site.create)
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminCreateSiteInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}:
+    delete:
+      tags: [Admin Sites]
+      operationId: adminDeleteSite
+      summary: Delete any managed site (audited as admin.site.delete)
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteSiteInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/owner:
+    post:
+      tags: [Admin Sites]
+      operationId: adminChangeSiteOwner
+      summary: Move a site to another customer or to platform-ops (null); site secrets are re-encrypted for the new owner (audited as admin.site.reassign)
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeSiteOwnerInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/actions:
+    post:
+      tags: [Admin Sites]
+      operationId: adminSiteAction
+      summary: Retry a failed site operation; other actions are refused here (audited as admin.site.retry)
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteActionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2706,6 +3046,159 @@ components:
         overallDriftStatus:
           type: string
           enum: [in_sync, drifted, unknown]
+
+    ManagedSiteAccepted:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [siteId, operationId]
+          properties:
+            siteId:
+              type: string
+            operationId:
+              type: string
+        links:
+          type: object
+          description: Present on customer routes only
+          properties:
+            operation:
+              type: string
+
+    ManagedSiteDto:
+      allOf:
+        - $ref: "#/components/schemas/SiteSummaryDto"
+        - type: object
+          required: [primaryDomain]
+          properties:
+            phpVersion:
+              type: string
+              nullable: true
+              enum: ["8.3", "8.4", "8.5"]
+            primaryDomain:
+              type: string
+              nullable: true
+
+    AdminSiteDto:
+      allOf:
+        - $ref: "#/components/schemas/ManagedSiteDto"
+        - type: object
+          required: [owner]
+          properties:
+            owner:
+              type: object
+              nullable: true
+              description: null when the site is held by platform-ops
+              required: [organizationId, name]
+              properties:
+                organizationId:
+                  type: string
+                name:
+                  type: string
+
+    AdminSitesListDto:
+      type: object
+      required: [sites, customers]
+      properties:
+        sites:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminSiteDto"
+        customers:
+          type: array
+          items:
+            type: object
+            required: [organizationId, name, ownerEmail]
+            properties:
+              organizationId:
+                type: string
+              name:
+                type: string
+              ownerEmail:
+                type: string
+
+    CreateManagedSiteInput:
+      type: object
+      required: [name, domain, title, adminUser, adminEmail, adminPassword]
+      properties:
+        name:
+          type: string
+          maxLength: 80
+        domain:
+          type: string
+        phpVersion:
+          type: string
+          enum: ["8.3", "8.4", "8.5"]
+          default: "8.4"
+        title:
+          type: string
+          maxLength: 120
+        adminUser:
+          type: string
+        adminEmail:
+          type: string
+          format: email
+        adminPassword:
+          type: string
+          minLength: 12
+          maxLength: 128
+          writeOnly: true
+
+    AdminCreateSiteInput:
+      allOf:
+        - $ref: "#/components/schemas/CreateManagedSiteInput"
+        - type: object
+          required: [ownerOrganizationId]
+          properties:
+            ownerOrganizationId:
+              type: string
+              nullable: true
+
+    ChangeSiteOwnerInput:
+      type: object
+      required: [ownerOrganizationId]
+      properties:
+        ownerOrganizationId:
+          type: string
+          nullable: true
+
+    SiteActionInput:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [start, stop, restart, retry]
+
+    ChangeSiteRuntimeInput:
+      type: object
+      required: [phpVersion]
+      properties:
+        phpVersion:
+          type: string
+          enum: ["8.3", "8.4", "8.5"]
+
+    DeleteSiteInput:
+      type: object
+      required: [confirmName]
+      properties:
+        confirmName:
+          type: string
+
+    SiteLogLineDto:
+      type: object
+      required: [at, stream, text]
+      properties:
+        at:
+          type: string
+          format: date-time
+          nullable: true
+        stream:
+          type: string
+          enum: [stdout, stderr]
+        text:
+          type: string
 
     SiteSummaryDto:
       type: object
