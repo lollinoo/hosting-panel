@@ -113,6 +113,12 @@ describe("buildSiteJobContainerPayload", () => {
     expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
   });
 
+  it("db.provision password never reaches the job Env or Cmd", () => {
+    const payload = buildSiteJobContainerPayload(dbJob("db.provision"), ctx);
+    expect(JSON.stringify(payload.Env)).not.toContain(DB_PW);
+    expect(JSON.stringify(payload.Cmd)).not.toContain(DB_PW);
+  });
+
   it("db.provision script re-checks the password is 64 hex", () => {
     const payload = buildSiteJobContainerPayload(dbJob("db.provision"), ctx);
     expect(payload.Cmd[2]).toContain("*[!0-9a-f]*) exit 64");
@@ -272,6 +278,10 @@ describe("DockerEngineSocketAdapter.runSiteJob", () => {
     expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create?name=job_wp_1"))).toBe(
       true,
     );
+    // Anonymous volumes (mariadb's VOLUME /var/lib/mysql) go with the job container (O3).
+    const removals = mockDaemon.requestedPaths.filter((p) => p.includes("?force=true"));
+    expect(removals.length).toBeGreaterThan(0);
+    expect(removals.every((p) => p.includes("v=true"))).toBe(true);
     expect(mockDaemon.createdVolumes).toContain("hp_vol_svc_a_html");
   });
 

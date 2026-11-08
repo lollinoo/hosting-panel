@@ -1417,7 +1417,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         if (containerId) {
           // Best effort: cleanupOrphanJobs removes leftovers at the next start.
           await this.dockerClient
-            .request("DELETE", `/containers/${containerId}?force=true`)
+            .request("DELETE", `/containers/${containerId}?force=true&v=true`)
             .catch(() => undefined);
         }
         await purgeServiceSecrets(this.secretsRootDir, req.jobId);
@@ -1947,7 +1947,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
     const rmRes = await this.dockerClient.request(
       "DELETE",
-      `/containers/${encodeURIComponent(containerId)}?force=true`,
+      // v=true drops only anonymous volumes (an image VOLUME); named volumes are never removed.
+      `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
     );
     if (rmRes.statusCode !== 204 && rmRes.statusCode !== 404) {
       throw new ExecutorCodedError(
