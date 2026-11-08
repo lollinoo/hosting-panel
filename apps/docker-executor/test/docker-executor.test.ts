@@ -69,6 +69,8 @@ interface MockDockerDaemon {
   }>;
   readonly createdVolumes: string[];
   readonly networkConnectCalls: Array<{ network: string; container: string }>;
+  /** Connects to these networks answer 404 (removed between list and connect). */
+  readonly vanishedNetworks: Set<string>;
   readonly containers: Map<string, MockDockerContainerRecord>;
   readonly requestedPaths: string[];
   close(): Promise<void>;
@@ -87,6 +89,7 @@ async function startMockDockerDaemon(options?: {
   const networkNames = new Set<string>();
   const createdVolumes: string[] = [];
   const networkConnectCalls: Array<{ network: string; container: string }> = [];
+  const vanishedNetworks = new Set<string>();
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
   let seq = 1;
@@ -188,6 +191,11 @@ async function startMockDockerDaemon(options?: {
         const target = findByRef(body.Container);
         if (action === "connect") {
           networkConnectCalls.push({ network: netName, container: body.Container });
+          if (vanishedNetworks.has(netName)) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: `network ${netName} not found` }));
+            return;
+          }
           if (target) {
             target.networks[netName] = body.EndpointConfig ?? {};
           }
@@ -355,6 +363,7 @@ async function startMockDockerDaemon(options?: {
     createdNetworks,
     createdVolumes,
     networkConnectCalls,
+    vanishedNetworks,
     containers,
     requestedPaths,
     async close() {
@@ -1230,7 +1239,7 @@ describe("panel ingress", () => {
     expect(proxy()?.labels["io.hostingpanel.static_sha256"]).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("reattaches site edge networks after a recreate, and only then", async () => {
+  it("reattaches site edge networks on every ensure (idempotent)", async () => {
     const { adapter, mockDaemon, proxy } = await setupAdapter(panel);
     for (const name of ["hp_edge_site_a_net", "hp_edge_site_b_net"]) {
       mockDaemon.createdNetworks.push({
@@ -1252,8 +1261,10 @@ describe("panel ingress", () => {
     expect(proxyConnects()).toEqual(["hp_edge_site_a_net", "hp_edge_site_b_net"]);
 
     mockDaemon.networkConnectCalls.length = 0;
-    await adapter.ensureIngressProxy(); // up to date: no recreate, no reconnect
-    expect(proxyConnects()).toEqual([]);
+    await adapter.ensureIngressProxy(); // up to date: no recreate, still reconnect (CP-01)
+    expect(proxyConnects()).toEqual(["hp_edge_site_a_net", "hp_edge_site_b_net"]);
+
+    mockDaemon.networkConnectCalls.length = 0;
 
     const current = proxy();
     if (current) {
@@ -1261,6 +1272,24 @@ describe("panel ingress", () => {
     }
     await adapter.ensureIngressProxy(); // drift: recreate + reconnect
     expect(proxyConnects()).toEqual(["hp_edge_site_a_net", "hp_edge_site_b_net"]);
+  });
+
+  it("skips a site edge network that vanished (404) and still attaches the others", async () => {
+    const { adapter, mockDaemon } = await setupAdapter(panel);
+    for (const name of ["hp_edge_site_a_net", "hp_edge_site_b_net", "hp_edge_site_c_net"]) {
+      mockDaemon.createdNetworks.push({
+        Name: name,
+        Labels: { "io.hostingpanel.network_role": "site_edge" },
+      });
+    }
+    mockDaemon.vanishedNetworks.add("hp_edge_site_b_net");
+    await expect(adapter.ensureIngressProxy()).resolves.toMatchObject({ status: "running" });
+    expect(
+      mockDaemon.networkConnectCalls
+        .filter((c) => c.container === INGRESS_PROXY_CONTAINER_NAME)
+        .map((c) => c.network)
+        .sort(),
+    ).toEqual(["hp_edge_site_a_net", "hp_edge_site_b_net", "hp_edge_site_c_net"]);
   });
 
   it("serialises concurrent ensureIngressProxy calls into a single create", async () => {

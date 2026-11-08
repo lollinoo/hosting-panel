@@ -1020,11 +1020,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       }
     }
 
-    if (proxyId !== existing?.Id) {
-      // A new proxy container starts on hp_ingress_net only: reattach every site edge network
-      // or all site routes stay down until each site is redeployed (CP-01).
-      await this.reconnectProxyToSiteEdgeNetworks();
-    }
+    // A new proxy starts on hp_ingress_net only, and a site edge network may have been detached
+    // while the proxy kept running: reattach every one on each ensure (idempotent, CP-01).
+    await this.reconnectProxyToSiteEdgeNetworks();
 
     return {
       component: "ingress_proxy",
@@ -1405,7 +1403,23 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
     const networks = JSON.parse(res.body.toString("utf8")) as Array<{ readonly Name: string }>;
     for (const network of networks) {
-      await this.connectContainerToNetwork(network.Name, INGRESS_PROXY_CONTAINER_NAME);
+      const connected = await this.connectContainerToNetwork(
+        network.Name,
+        INGRESS_PROXY_CONTAINER_NAME,
+        undefined,
+        { skipMissingNetwork: true },
+      );
+      if (!connected) {
+        // Removed between the list and the connect (site deleted): skip it, keep the rest.
+        console.warn(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "site_edge_network_missing",
+            network: network.Name,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      }
     }
   }
 
@@ -1413,7 +1427,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     networkName: string,
     containerRef: string,
     aliases?: readonly string[],
-  ): Promise<void> {
+    options?: { readonly skipMissingNetwork?: boolean },
+  ): Promise<boolean> {
     const res = await this.dockerClient.request(
       "POST",
       `/networks/${encodeURIComponent(networkName)}/connect`,
@@ -1424,14 +1439,18 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     );
 
     if (res.statusCode === 200 || res.statusCode === 204) {
-      return;
+      return true;
     }
 
     if (res.statusCode === 403 || res.statusCode === 409) {
       const msg = res.body.toString("utf8").toLowerCase();
       if (msg.includes("already exists")) {
-        return;
+        return true;
       }
+    }
+
+    if (res.statusCode === 404 && options?.skipMissingNetwork) {
+      return false;
     }
 
     throw new ExecutorCodedError(
