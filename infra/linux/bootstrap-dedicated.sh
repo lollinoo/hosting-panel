@@ -314,11 +314,6 @@ log_info "Installed systemd units and reloaded systemd daemon successfully."
 [[ "${HP_BOOTSTRAP_QUIET:-0}" == 1 ]] && exit 0
 cat <<'EOF'
 
-Next step (first run): create the installation and the first server administrator.
-The wrapper reads DATABASE_URL from /etc/hosting-panel/api.env (filled in by the full installer),
-applies database migrations itself and runs as hp-api:
-  sudo hp-accounts setup --name "<server name>" --hostname <hostname> --ipv4 <ip>
-  sudo hp-accounts create-admin --email <email> --name "<name>"
-Break-glass: sudo hp-break-glass <args>.
-create-admin prints the TOTP secret once: enrol it in an authenticator app (2FA is mandatory for administrators).
+Host prepared. To install the panel itself, run infra/linux/install.sh from a release
+archive (see "Installazione su un nuovo server" in the README).
 EOF

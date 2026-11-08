@@ -126,3 +126,16 @@ describe("per-service env files and wrappers", () => {
     expect(r.stdout.split("\n")[0]).toContain("dist/cli/accounts.js setup");
   });
 });
+
+describe("release workflow and docs", () => {
+  const read = (p: string) => readFileSync(join(root, p), "utf8");
+  it("release workflow and docs are consistent", () => {
+    const wf = read(".github/workflows/release.yml");
+    for (const s of ["tags:", "v*", "release:build", "release:smoke", "gh release create"]) expect(wf).toContain(s);
+    const readme = read("README.md");
+    for (const s of ["install.sh", "hp-update", "sha256sum -c", "hp-accounts"]) expect(readme).toContain(s);
+    expect(readme).not.toContain("export DATABASE_URL=");
+    expect(JSON.parse(read("package.json")).version).toBe("0.2.0");
+  });
+});
+

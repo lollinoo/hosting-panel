@@ -132,14 +132,47 @@ sudo bash infra/linux/bootstrap-dedicated.sh
 
 Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signing.pem`, RSA 3072, `0400`) e un file env per servizio (`api.env`, `web.env`, `executor.env`, `0400 root:root`; `web.env` contiene `BFF_SESSION_SECRET`, `api.env` ha `ENABLE_DEV_OIDC=false` e `HP_SEED_DEMO=false`).
 
-**Primo avvio in produzione** (nessun utente demo): creare l'installazione e il primo amministratore server con i wrapper `hp-accounts` e `hp-break-glass` (installati in `/usr/local/sbin`), che leggono `DATABASE_URL` da `api.env`, girano come `hp-api` e applicano da soli le migrazioni. L'installer completo che compila `DATABASE_URL` arriva con il Plan 1b.
+### Installazione su un nuovo server
+
+Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-sudo hp-accounts setup --name "<nome server>" --hostname <hostname> --ipv4 <ip>
-sudo hp-accounts create-admin --email <email> --name "<nome>"
+V=0.2.0
+curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
+curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
+sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
+tar xzf hosting-panel-$V-linux-x64.tar.gz
+sudo bash hosting-panel-$V/infra/linux/install.sh --archive hosting-panel-$V-linux-x64.tar.gz \
+  --hostname pannello.example.com --admin-email admin@example.com --admin-name "Nome Cognome"
 ```
 
-`create-admin` legge la password da `HP_NEW_PASSWORD` o da un prompt nascosto e stampa il segreto TOTP e l'URI `otpauth` da registrare in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori). Recupero accessi: `accounts.js reset-password --email`, `reset-totp --email`, `unlock --email`. La CLI break-glass richiede `--user-id` oppure `--email`. Usare `sudo hp-accounts ...` e `sudo hp-break-glass ...`.
+**Sicurezza di `--archive`**: tenere archivio e `.sha256` in una directory scrivibile solo da root (ad esempio `/root`), non in un download condiviso o in `/tmp` accessibile ad altri utenti.
+
+Flag di `install.sh`: `--hostname`, `--admin-email`, `--admin-name`, `--acme-email` (predefinito: email admin), `--ipv4`, `--version` oppure `--archive` (senza, usa l'ultima release GitHub), `--acme-staging`, `--skip-firewall`, `--dry-run`, `--allow-other-linux`. La password dell'amministratore viene letta da `HP_ADMIN_PASSWORD` o da un prompt nascosto. Codici di uscita: `0` ok, `2` argomenti errati, `3` OS non supportato o pacchetto assente per il codename, `4` checksum errato, `5` timeout health check, `6` `docker0` senza IPv4, `7` SSH non sulla porta 22 (usare `--skip-firewall` e gestire il firewall a mano).
+
+1. **DNS**: creare un record A `<hostname>` verso l'IP del server. Finché il DNS non punta al server il pannello è raggiungibile su `https://<ip-server>` con certificato autofirmato; su `https://<hostname>` arriva il certificato Let's Encrypt appena il DNS è propagato. Per server di prova usare `--acme-staging` (certificati di staging, non attendibili dai browser).
+2. **Enrolment TOTP**: al passo 11 l'installer stampa **una sola volta** il segreto TOTP e l'URI `otpauth` dell'amministratore: registrarli subito in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori).
+3. **Backup**: salvare `/etc/hosting-panel` (chiavi e segreti, file `api.env`, `web.env`, `executor.env` con permessi `0400` root). Senza queste chiavi i segreti cifrati non sono recuperabili.
+4. **Salute**: `/health/live` e `/health/ready`.
+
+#### Aggiornamento
+
+```bash
+sudo hp-update                    # ultima release
+sudo hp-update --version 0.2.1    # oppure --archive <file>
+```
+
+`hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall. Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `2` downgrade rifiutato o argomenti errati, `4` checksum, `6` rollback eseguito, `7` rollback fallito.
+
+#### Recupero accessi
+
+```bash
+sudo hp-accounts unlock --email <email>
+sudo hp-accounts reset-password --email <email>
+sudo hp-accounts reset-totp --email <email>
+```
+
+`hp-accounts` supporta anche `setup` e `create-admin`; `sudo hp-break-glass ...` è la CLI break-glass (richiede `--user-id` oppure `--email`). Entrambi i wrapper sono in `/usr/local/sbin`, girano come `hp-api` e leggono `DATABASE_URL` da `/etc/hosting-panel/api.env`.
 
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 

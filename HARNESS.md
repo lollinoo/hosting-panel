@@ -30,6 +30,8 @@
 - `/infra/local`: Local Docker Compose topology for PostgreSQL 18, Redis 7, and Keycloak 26 (loopback-bound)
 - `/infra/systemd`: Hardened Linux `systemd` service units (`hp-web.service`, `hp-api.service`, `hp-docker-executor.service`, `hp-host-agent.service`)
 - `/infra/linux`: Idempotent Ubuntu 24.04/26.04 / Debian 12/13 bootstrap script (`bootstrap-dedicated.sh`), static `nftables` profile, and live `AC-F1-08` Control Plane outage runner (`run-outage-ac-f1-08.mjs`)
+- `/infra/release`: Release packaging (`build-release.mjs`, `smoke-release.mjs`); archive `dist-release/hosting-panel-<v>-linux-x64.tar.gz` + `.sha256`, published by `.github/workflows/release.yml` on `v*` tags
+- `/infra/linux/{install.sh,update.sh,lib/release.sh}`: Fresh-server installer, safe updater (`hp-update`: health check + automatic rollback) and shared release library; wrappers `hp-accounts`/`hp-break-glass`
 - `/docs`: Phase 1 Repository Audit, `HCP-SPEC-003` Phase 2 Normative Spec, ADRs (`0001..0015`, with `ADR-010` approved and `ADR-011` explicitly `OPEN — prima di Shared`), ER & boundary diagrams, Security/Outage Test Plan (`AC-F1-08`), and OpenAPI 3.1 contract (`docs/api/openapi.yaml`)
 - `/.agents/brain/decisions.md`: Durable log of settled `/grill-me` choices and ADRs
 - `/.agents/brain/state.md`: Active Bounded Contract, swarm execution waves, and verification status
