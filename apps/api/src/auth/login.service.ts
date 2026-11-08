@@ -56,13 +56,18 @@ export class LoginService {
     }
     const now = Date.now();
     let locked = user.lockedUntil !== null && user.lockedUntil.getTime() > now;
-    // Only password + TOTP may bypass a lock, so lock-only requests stop before any check.
-    if (locked && input.totpCode === undefined) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
+    // Only password + TOTP may bypass a lock, so other requests to a locked account stop before any check.
+    const canBypass = input.totpCode !== undefined && user.totpEnabledAt !== null;
+    if (locked && !canBypass) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
     // Reserve (count) the password attempt before scrypt, so parallel bursts get at most 5 checks.
-    // A locked account skips the reservation: that request is a bypass attempt, bounded by the TOTP reservation.
     if (!locked && !(await this.reservePasswordAttempt(user.id))) {
-      if (input.totpCode === undefined) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
+      if (!canBypass) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
       locked = true;
+    }
+    // A bypass attempt is counted before any verification, whatever the password, so the
+    // DB side effects (and the lock) never reveal whether the password was right.
+    if (locked && !(await this.reserveTotpAttempt(user.id))) {
+      return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
     }
 
     const passwordOk = await verifyPassword(input.password, user.passwordHash ?? (await getDummyHash()));
@@ -74,7 +79,6 @@ export class LoginService {
     if (!locked) await this.dbClient.db.update(users).set({ failedLoginCount: 0 }).where(eq(users.id, user.id));
 
     if (user.totpEnabledAt === null) {
-      if (locked) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
       if (user.platformRole === "infrastructure_admin") {
         return this.fail(user, ip, "ACCOUNT_SETUP_INCOMPLETE", "totp_not_enrolled");
       }
@@ -86,8 +90,11 @@ export class LoginService {
     }
 
     if (input.totpCode === undefined) return { status: "totp_required" };
-    // Reserve (count) the TOTP guess before verifying; refused while a TOTP-caused lock is active.
-    if (!(await this.reserveTotpAttempt(user.id))) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
+    // Reserve (count) the TOTP guess before verifying (the locked path already did); refused while a
+    // TOTP-caused lock is active.
+    if (!locked && !(await this.reserveTotpAttempt(user.id))) {
+      return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
+    }
 
     const result = this.checkTotp(user, input.totpCode, now);
     if (!result.ok) {
@@ -170,6 +177,9 @@ export class LoginService {
       .set({
         failedLoginCount: sql`CASE WHEN ${next} >= ${MAX_FAILURES} THEN 0 ELSE ${next} END`,
         lockedUntil: sql`CASE WHEN ${next} >= ${MAX_FAILURES} THEN ${lockIso}::timestamptz ELSE ${users.lockedUntil} END`,
+        // Runs only while unlocked, so a TOTP count >= 5 is left over from an expired TOTP lock;
+        // clear it when locking, or it would refuse the bypass of this password-caused lock.
+        totpFailedCount: sql`CASE WHEN ${next} >= ${MAX_FAILURES} AND ${users.totpFailedCount} >= ${MAX_FAILURES} THEN 0 ELSE ${users.totpFailedCount} END`,
       })
       .where(
         and(

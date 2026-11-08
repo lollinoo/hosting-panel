@@ -335,4 +335,62 @@ describe("POST /v1/auth/login", () => {
     const refused = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: code });
     expect(refused.status).toBe(423);
   });
+
+  async function passwordLock(email = "mario@hotel.it") {
+    for (let i = 0; i < 5; i++) await login({ email, password: "nope nope" });
+  }
+
+  it("parallel wrong passwords with a code during a password lock get at most 5 real checks", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    await passwordLock();
+    const spy = vi.mocked(password.verifyPassword);
+    spy.mockClear();
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () => login({ email: "mario@hotel.it", password: "still wrong", totpCode: "123456" })),
+    );
+    for (const r of results) expect(r.status).toBe(423);
+    expect(spy.mock.calls.filter(([, stored]) => stored === passwordHash).length).toBeLessThanOrEqual(5);
+    expect((await getUser()).totpFailedCount).toBe(5);
+  });
+
+  it("bypass attempts leave the same state whether or not the password is right", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    await seedUser({ id: "usr_luigi", email: "luigi@hotel.it", totpSecret: secret });
+    await passwordLock("mario@hotel.it");
+    await passwordLock("luigi@hotel.it");
+    const wrong = currentCode(secret) === "000000" ? "111111" : "000000";
+    for (let i = 0; i < 5; i++) {
+      const a = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong });
+      const b = await login({ email: "luigi@hotel.it", password: "nope nope", totpCode: wrong });
+      expect(a.status).toBe(423);
+      expect(b.status).toBe(423);
+    }
+    const mario = await getUser("usr_mario");
+    const luigi = await getUser("usr_luigi");
+    expect(mario.failedLoginCount).toBe(luigi.failedLoginCount);
+    expect(mario.totpFailedCount).toBe(luigi.totpFailedCount);
+    expect(Math.abs(mario.lockedUntil!.getTime() - luigi.lockedUntil!.getTime())).toBeLessThan(5_000);
+    // Afterwards both answer a wrong password without code identically.
+    expect((await login({ email: "mario@hotel.it", password: "nope nope" })).status).toBe(423);
+    expect((await login({ email: "luigi@hotel.it", password: "nope nope" })).status).toBe(423);
+  });
+
+  it("a stale TOTP count does not block the bypass of a later password lock", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    const code = currentCode(secret);
+    const wrong = code === "000000" ? "111111" : "000000";
+    for (let i = 0; i < 5; i++) {
+      await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong });
+    }
+    expect((await getUser()).totpFailedCount).toBe(5);
+    await dbClient.db.update(users).set({ lockedUntil: new Date(Date.now() - 1_000) }).where(eq(users.id, "usr_mario"));
+    await passwordLock();
+    expect((await getUser()).lockedUntil!.getTime()).toBeGreaterThan(Date.now());
+    const ok = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: code });
+    expect(ok.status).toBe(200);
+  });
 });
+
