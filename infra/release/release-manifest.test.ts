@@ -65,6 +65,12 @@ describe("listReleaseViolations", () => {
     expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/lib/os.sh");
   });
 
+  it("requires the updater, its wrapper and the shared helpers", () => {
+    for (const p of ["infra/linux/update.sh", "infra/linux/hp-update", "infra/linux/lib/common.sh"]) {
+      expect(REQUIRED_RELEASE_PATHS).toContain(p);
+    }
+  });
+
   it("accepts a complete minimal tree", async () => {
     expect(await listReleaseViolations(completeTree())).toEqual([]);
   });

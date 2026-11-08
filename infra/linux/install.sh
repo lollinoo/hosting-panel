@@ -32,6 +32,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib/os.sh"
 # shellcheck source=lib/release.sh
 . "${SCRIPT_DIR}/lib/release.sh"
+# shellcheck source=lib/common.sh
+. "${SCRIPT_DIR}/lib/common.sh"
 
 STATE_DIR="${HP_INSTALL_STATE_DIR:-/etc/hosting-panel}"
 ROOT="/opt/hosting-panel"
@@ -82,15 +84,6 @@ set_env_keys() {
     return 1
   fi
   rm -f -- "${tmp}"
-}
-
-env_value() { # env_value <file> <KEY>: prints the value (for internal use only, never echoed)
-  local line
-  [[ -r "$1" ]] || return 0
-  while IFS= read -r line || [[ -n "${line}" ]]; do
-    [[ "${line}" == "$2="* ]] && printf '%s' "${line#"$2="}"
-  done <"$1"
-  return 0
 }
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
@@ -297,9 +290,7 @@ main() {
   else
     if [[ -z "${archive}" ]]; then
       if [[ "${version}" == latest ]]; then
-        version="$(curl -fsSL --retry 3 --connect-timeout 15 "https://api.github.com/repos/${HP_RELEASE_REPO}/releases/latest" |
-          sed -n 's/.*"tag_name": *"v\([0-9.]*\)".*/\1/p' | head -n1)" || version=""
-        [[ "${version}" =~ ${_hp_semver_re} ]] || die 1 "Could not determine the latest release; pass --version."
+        version="$(latest_release_version)" || die 1 "Could not determine the latest release; pass --version."
         ORIG_ARGS+=(--version "${version}") # a rerun installs the same version
         info "Latest release: ${version}"
       fi
@@ -512,12 +503,7 @@ EOF
     systemctl enable "${units[@]}"
     # restart (not just --now) so a rerun picks up the new release and env values.
     systemctl restart "${units[@]}"
-    local deadline=$((SECONDS + 90))
-    until curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:4000/health/ready &&
-      curl -fsS -o /dev/null --max-time 5 "http://${bind}:3000/login"; do
-      ((SECONDS < deadline)) || die 5 "Health check timed out after 90 s. Inspect: journalctl -u hp-api -u hp-web -n 100"
-      sleep 3
-    done
+    panel_health_check "${bind}" 90 || die 5 "Health check timed out after 90 s. Inspect: journalctl -u hp-api -u hp-web -n 100"
     info "API and web console are healthy"
   fi
 

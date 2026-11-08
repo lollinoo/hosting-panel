@@ -96,7 +96,7 @@ describe("per-service env files and wrappers", () => {
   it.skipIf(!hasHost)("bootstrap dry-run lists the three env files with 0400", () => {
     const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
     expect(r.status).toBe(0);
-    for (const s of ["api.env", "web.env", "executor.env", "0400", "/usr/local/sbin/hp-accounts"]) expect(r.stdout).toContain(s);
+    for (const s of ["api.env", "web.env", "executor.env", "0400", "/usr/local/sbin/hp-accounts", "/usr/local/sbin/hp-update"]) expect(r.stdout).toContain(s);
     expect(r.stdout).not.toContain("hosting-panel.env");
   });
 

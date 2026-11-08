@@ -25,11 +25,14 @@ export const REQUIRED_RELEASE_PATHS = [
   "infra/systemd/hp-web.service",
   "infra/linux/bootstrap-dedicated.sh",
   "infra/linux/install.sh",
+  "infra/linux/update.sh",
+  "infra/linux/lib/common.sh",
   "infra/linux/lib/os.sh",
   "infra/linux/lib/release.sh",
   "infra/linux/nftables-dedicated.conf",
   "infra/linux/hp-accounts",
-  "infra/linux/hp-break-glass"
+  "infra/linux/hp-break-glass",
+  "infra/linux/hp-update"
 ];
 
 function forbidden(rel) {

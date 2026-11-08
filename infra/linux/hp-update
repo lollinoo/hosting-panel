@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Run the updater shipped with the current release. A wrapper, not a symlink: it keeps its own
+# 0750 root:root mode and always follows whichever release `current` points at.
+exec bash /opt/hosting-panel/current/infra/linux/update.sh "$@"

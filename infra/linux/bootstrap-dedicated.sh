@@ -138,7 +138,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
   log_dry "Would idempotently generate RSA-3072 JWT signing key /etc/hosting-panel/jwt-signing.pem (0400 hp-api:root)"
   log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
-  log_dry "Would install /usr/local/sbin/hp-accounts and /usr/local/sbin/hp-break-glass (0750 root:root)"
+  log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass and /usr/local/sbin/hp-update (0750 root:root)"
   log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor)"
   log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (2750 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
@@ -287,6 +287,7 @@ HP_PANEL_UPSTREAM_PORT=3000"
 
 install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-accounts" /usr/local/sbin/hp-accounts
 install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-break-glass" /usr/local/sbin/hp-break-glass
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-update" /usr/local/sbin/hp-update
 
 # 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid 2750 root:hp-ipc)
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
