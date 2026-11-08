@@ -5,6 +5,10 @@ import {
   domains,
   encryptSecretAesGcm,
   encryptedSecrets,
+  ensurePresetRolesAndPermissions,
+  permissions,
+  resourceGrants,
+  users,
   ensureWordpressTemplate,
   eq,
   hostAllocations,
@@ -111,6 +115,14 @@ describe("@hosting-panel/database — 0004 sites and databases", () => {
         ciphertextBase64: env.ciphertextBase64, ivBase64: env.ivBase64, authTagBase64: env.authTagBase64,
       });
       await insertSiteDatabase(db(), { id: "sdb_mv", organizationId: "org_A", siteId, dbName: "wp_mv", dbUser: "wp_mv", passwordSecretId: "sec_mv" });
+      await ensurePresetRolesAndPermissions(db());
+      const [perm] = await db().select().from(permissions).limit(1);
+      await db().insert(users).values({ id: "u_grant", email: "g@x.io", name: "G" });
+      await db().insert(resourceGrants).values(
+        [siteId, "svc_mv", "other_resource"].map((resourceId) => ({
+          id: `grant_${resourceId}`, organizationId: "org_A", principalUserId: "u_grant", resourceId, permission: perm!.key,
+        })),
+      );
       await db().insert(operations).values([
         { id: "op_prov", organizationId: "org_A", kind: "site.provision", status: "succeeded", resourceType: "site", resourceId: siteId },
         { id: "op_run", organizationId: "org_A", kind: "site.reassign", status: "processing", resourceType: "site", resourceId: siteId },
@@ -149,6 +161,7 @@ describe("@hosting-panel/database — 0004 sites and databases", () => {
         const [op] = await db().select().from(operations).where(eq(operations.id, id));
         expect(op?.organizationId).toBe("org_B");
       }
+      expect((await db().select().from(resourceGrants)).map((g) => g.resourceId)).toEqual(["other_resource"]);
       const [running] = await db().select().from(operations).where(eq(operations.id, "op_run"));
       expect(running?.status).toBe("processing");
       expect((await latestSiteOperation(db(), { siteId, kind: "site.reassign" }))?.id).toBe("op_run");

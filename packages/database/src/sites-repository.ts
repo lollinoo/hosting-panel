@@ -6,7 +6,7 @@ import {
 } from "@hosting-panel/contracts";
 import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
-import { encryptedSecrets, operations, serviceInstances, serviceTemplates, siteDatabases, sites } from "./schema.js";
+import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
 
 export const WORDPRESS_TEMPLATE_ID = "tpl_site_wordpress";
@@ -130,6 +130,8 @@ export async function moveSiteToOrganizationTransactional(
     const serviceIds = (
       await tx.select({ id: serviceInstances.id }).from(serviceInstances).where(eq(serviceInstances.siteId, siteId))
     ).map((s) => s.id);
+    // Grants belong to the old organization's users: drop them, do not move them.
+    await tx.delete(resourceGrants).where(inArray(resourceGrants.resourceId, [siteId, ...serviceIds]));
     await tx
       .update(operations)
       .set({ organizationId: to })
