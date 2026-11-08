@@ -1,6 +1,7 @@
 import {
   auditEvents,
   createDatabaseClient,
+  decryptSecretAesGcm,
   encryptSecretAesGcm,
   eq,
   users,
@@ -236,18 +237,47 @@ describe("self-service account API", () => {
     expect((await me(a)).totpEnabled).toBe(false);
   });
 
-  it("setup after enable is refused, also when concurrent with enable", async () => {
+  async function startSetup(token: string): Promise<string> {
+    const res = await call(token, "POST", "/v1/me/totp/setup");
+    return ((await res.json()) as { data: { secretBase32: string } }).data.secretBase32;
+  }
+
+  it("setup after enable is refused", async () => {
     await seed("usr_a");
     const a = await loginToken("usr_a");
-    const { secretBase32 } = ((await (await call(a, "POST", "/v1/me/totp/setup")).json()) as { data: { secretBase32: string } }).data;
+    const secret = await startSetup(a);
+    expect((await call(a, "POST", "/v1/me/totp/enable", { code: codeNow(secret) })).status).toBe(204);
+    expect((await call(a, "POST", "/v1/me/totp/setup")).status).toBe(400);
+  });
+
+  it("concurrent setup and enable never leave 2FA enabled with an unconfirmed secret", async () => {
+    await seed("usr_a");
+    const a = await loginToken("usr_a");
+    const secret = await startSetup(a);
     const [en, setup] = await Promise.all([
-      call(a, "POST", "/v1/me/totp/enable", { code: codeNow(secretBase32) }),
+      call(a, "POST", "/v1/me/totp/enable", { code: codeNow(secret) }),
       call(a, "POST", "/v1/me/totp/setup"),
     ]);
-    expect(en.status).toBe(204);
-    // Whatever the interleaving, 2FA must end up enabled with the verified secret.
-    expect([200, 400]).toContain(setup.status);
-    expect((await me(a)).totpEnabled).toBe(true);
-    expect((await call(a, "POST", "/v1/me/totp/setup")).status).toBe(400);
+    const [row] = await dbClient.db.select().from(users).where(eq(users.id, "usr_a"));
+    if (en.status === 204) {
+      expect(setup.status).toBe(400);
+      expect(row!.totpEnabledAt).not.toBeNull();
+      // The enabled secret is the one the user confirmed.
+      const stored = decryptSecretAesGcm({
+        ciphertextBase64: row!.totpCiphertextBase64!,
+        ivBase64: row!.totpIvBase64!,
+        authTagBase64: row!.totpAuthTagBase64!,
+        masterKey: MASTER_KEY,
+        organizationId: "platform",
+        siteId: null,
+        secretKey: "totp:usr_a",
+      });
+      expect(stored).toBe(secret);
+    } else {
+      // Setup rotated the pending secret first, so the old code is legitimately refused.
+      expect(en.status).toBe(401);
+      expect(setup.status).toBe(200);
+      expect(row!.totpEnabledAt).toBeNull();
+    }
   });
 });
