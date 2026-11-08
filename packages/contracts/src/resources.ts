@@ -744,3 +744,23 @@ export const LoginResultDtoSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("totp_required") }),
 ]);
 export type LoginResultDto = z.infer<typeof LoginResultDtoSchema>;
+
+export const AdminUserDtoSchema = z.object({
+  id: EntityIdSchema,
+  email: z.string().email(),
+  name: z.string().min(1),
+  role: z.enum(["server_admin", "customer"]),
+  status: z.enum(["active", "disabled"]),
+  totpEnabled: z.boolean(),
+  mustChangePassword: z.boolean(),
+  lockedUntil: IsoDateTimeSchema.nullable(),
+  createdAt: IsoDateTimeSchema,
+});
+export type AdminUserDto = z.infer<typeof AdminUserDtoSchema>;
+
+export const CreateCustomerAccountInputSchema = z.object({
+  organizationName: z.string().trim().min(1).max(120),
+  ownerEmail: z.string().trim().toLowerCase().email(),
+  ownerName: z.string().trim().min(1).max(120),
+});
+export type CreateCustomerAccountInput = z.infer<typeof CreateCustomerAccountInputSchema>;

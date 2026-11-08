@@ -8,6 +8,7 @@ import {
   appendAuditEvent,
   createDatabaseClient,
   encryptSecretAesGcm,
+  ensurePresetRolesAndPermissions,
   eq,
   hosts,
   and,
@@ -55,6 +56,7 @@ export async function setupInstallation(
   db: HostingPanelDatabase,
   input: { installationName: string; hostHostname: string; hostIpv4: string },
 ): Promise<{ installationId: string; hostId: string }> {
+  await ensurePresetRolesAndPermissions(db);
   const [inst] = await db.select().from(platformInstallations).limit(1);
   const [host] = await db.select().from(hosts).limit(1);
   if (inst && host) return { installationId: inst.id, hostId: host.id };

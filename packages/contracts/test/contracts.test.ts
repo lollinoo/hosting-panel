@@ -38,9 +38,9 @@ import {
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 32 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(32);
-    expect(new Set(PERMISSION_KEYS).size).toBe(32);
+  it("defines exactly 33 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(33);
+    expect(new Set(PERMISSION_KEYS).size).toBe(33);
 
     for (const key of PERMISSION_KEYS) {
       expect(PermissionKeySchema.parse(key)).toBe(key);

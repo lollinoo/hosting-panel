@@ -84,23 +84,8 @@ export const DEMO_IDS = Object.freeze({
   }),
 });
 
-export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void> {
-  const now = new Date();
-
-  // 1. Platform Installation
-  await db
-    .insert(platformInstallations)
-    .values({
-      id: DEMO_IDS.installation,
-      name: "Hosting Control Panel Local Appliance",
-      specVersion: "HCP-SPEC-002",
-      phase: "phase-1",
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoNothing();
-
-  // 2. Roles & Permissions
+/** Idempotently inserts preset roles, permission keys and role grants (needed in production, not only demo). */
+export async function ensurePresetRolesAndPermissions(db: HostingPanelDatabase): Promise<void> {
   for (const roleName of PRESET_ROLE_NAMES) {
     await db
       .insert(roles)
@@ -136,6 +121,26 @@ export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void>
         .onConflictDoNothing();
     }
   }
+}
+
+export async function seedPhase1Dataset(db: HostingPanelDatabase): Promise<void> {
+  const now = new Date();
+
+  // 1. Platform Installation
+  await db
+    .insert(platformInstallations)
+    .values({
+      id: DEMO_IDS.installation,
+      name: "Hosting Control Panel Local Appliance",
+      specVersion: "HCP-SPEC-002",
+      phase: "phase-1",
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoNothing();
+
+  // 2. Roles & Permissions
+  await ensurePresetRolesAndPermissions(db);
 
   // 3. Demo Users
   await db
