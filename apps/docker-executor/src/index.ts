@@ -38,14 +38,17 @@ export {
   DEFAULT_INGRESS_HTTP_PORT,
   DEFAULT_INGRESS_ROOT_DIR,
   DEFAULT_TRAEFIK_IMAGE,
+  DEFAULT_INGRESS_HTTPS_PORT,
   ExecutorCodedError,
   INGRESS_BRIDGE_NETWORK_NAME,
+  PANEL_DYNAMIC_FILE_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
   TraefikIngressFileManager,
   assertContainedPath,
   assertSafeDomain,
   assertSafeIdentifier,
   buildIngressProxyContainerPayload,
+  buildPanelDynamicYaml,
   buildSiteDynamicTraefikYaml,
   buildTraefikStaticYaml,
   getManagedVolumeName,
@@ -55,6 +58,7 @@ export {
   writeFileAtomically,
   type DockerIngressProxyCreatePayload,
   type IngressProxyContainerConfigInput,
+  type PanelIngressConfig,
   type SiteIngressRouteEntry,
 } from "./traefik-config.js";
 
@@ -79,4 +83,5 @@ export {
 export {
   bootstrapDockerExecutorDaemon,
   loadExecutorVerificationKeyringFromEnv,
+  parsePanelIngressConfigFromEnv,
 } from "./main.js";

@@ -23,7 +23,9 @@ import {
   ExecutorCodedError,
   INGRESS_BRIDGE_NETWORK_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
+  STATIC_SHA256_LABEL,
   TraefikIngressFileManager,
+  type PanelIngressConfig,
   assertContainedPath,
   assertSafeDomain,
   assertSafeIdentifier,
@@ -86,6 +88,8 @@ export interface DockerContainerInspectPayload {
   };
   readonly Config?: {
     readonly Image?: string;
+    readonly Cmd?: readonly string[] | null;
+    readonly User?: string;
     readonly Env?: readonly string[];
     readonly Labels?: Readonly<Record<string, string>>;
   };
@@ -101,6 +105,7 @@ export interface DockerContainerInspectPayload {
     readonly RestartPolicy?: { readonly Name?: string };
     readonly NetworkMode?: string;
     readonly Binds?: readonly string[] | null;
+    readonly ExtraHosts?: readonly string[] | null;
     readonly PortBindings?: Readonly<
       Record<string, readonly { readonly HostIp?: string; readonly HostPort?: string }[] | null>
     > | null;
@@ -846,6 +851,9 @@ export interface DockerEngineSocketAdapterOptions {
   readonly ingressRootDir?: string;
   readonly traefikImage?: string;
   readonly ingressHttpPort?: number;
+  readonly ingressHttpsPort?: number;
+  /** null/undefined ⇒ panel ingress disabled. */
+  readonly panel?: PanelIngressConfig | null;
   readonly requestTimeoutMs?: number;
   readonly pullMissingImages?: boolean;
 }
@@ -863,6 +871,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly ingressManager: TraefikIngressFileManager;
   private readonly traefikImage: string;
   private readonly ingressHttpPort: number;
+  private readonly ingressHttpsPort: number | undefined;
+  private readonly panel: PanelIngressConfig | null;
   private readonly pullMissingImages: boolean;
   private readonly expectedMetadata = new Map<string, ExpectedManagedServiceMetadata>();
 
@@ -878,6 +888,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     );
     this.traefikImage = options?.traefikImage ?? DEFAULT_TRAEFIK_IMAGE;
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
+    this.ingressHttpsPort = options?.ingressHttpsPort;
+    this.panel = options?.panel ?? null;
     this.pullMissingImages = options?.pullMissingImages ?? true;
   }
 
@@ -895,7 +907,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     readonly status: "running";
     readonly ensuredAt: string;
   }> {
-    const { staticConfigPath, dynamicDirPath } = await this.ingressManager.ensureStaticConfig();
+    const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256 } =
+      await this.ingressManager.ensureStaticConfig(this.panel);
 
     await this.ensureNetwork(INGRESS_BRIDGE_NETWORK_NAME, {
       internal: false,
@@ -911,8 +924,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const payload = buildIngressProxyContainerPayload({
       traefikImage: this.traefikImage,
       httpHostPort: this.ingressHttpPort,
+      ...(this.ingressHttpsPort !== undefined ? { httpsHostPort: this.ingressHttpsPort } : {}),
       staticConfigHostPath: staticConfigPath,
       dynamicDirHostPath: dynamicDirPath,
+      acmeDirHostPath: acmeDirPath,
+      staticSha256,
+      // Same uid:gid as the executor, so the proxy can read hp-executor-owned dirs without DAC caps.
+      ...(process.getuid && process.getgid
+        ? { user: `${String(process.getuid())}:${String(process.getgid())}` }
+        : {}),
     });
 
     const createIngressProxy = async (): Promise<string> => {
@@ -932,17 +952,27 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
 
     const existingBinds = existing?.HostConfig?.Binds ?? [];
-    const expectedBinds = payload.HostConfig.Binds;
-    const bindsMismatch =
-      existingBinds.length !== expectedBinds.length ||
-      expectedBinds.some((expectedBind) => !existingBinds.includes(expectedBind));
-
-    const existingPortBindings = existing?.HostConfig?.PortBindings;
-    const boundHostPort = existingPortBindings?.["80/tcp"]?.[0]?.HostPort;
-    const portMismatch =
-      existingPortBindings !== undefined &&
-      existingPortBindings !== null &&
-      boundHostPort !== String(this.ingressHttpPort);
+    // Order-insensitive so an unchanged proxy is never recreated (CP-01: keep sites serving).
+    const sortedJson = (list: readonly string[] | null | undefined): string =>
+      JSON.stringify([...(list ?? [])].sort());
+    const portBindingsKey = (
+      bindings: NonNullable<DockerContainerInspectPayload["HostConfig"]>["PortBindings"],
+    ): string =>
+      sortedJson(
+        Object.entries(bindings ?? {}).flatMap(([port, list]) =>
+          (list ?? []).map((b) => `${port}|${b.HostIp ?? ""}|${b.HostPort ?? ""}`),
+        ),
+      );
+    const configDrift =
+      existing !== null &&
+      (existing.Config?.Image !== payload.Image ||
+        JSON.stringify(existing.Config?.Cmd ?? []) !== JSON.stringify(payload.Cmd) ||
+        (existing.Config?.User ?? "") !== (payload.User ?? "") ||
+        existing.Config?.Labels?.[STATIC_SHA256_LABEL] !== staticSha256 ||
+        sortedJson(existingBinds) !== sortedJson(payload.HostConfig.Binds) ||
+        sortedJson(existing.HostConfig?.ExtraHosts) !== sortedJson(payload.HostConfig.ExtraHosts) ||
+        portBindingsKey(existing.HostConfig?.PortBindings) !==
+          portBindingsKey(payload.HostConfig.PortBindings));
 
     const brokenMountState =
       existing?.State?.Dead === true ||
@@ -953,8 +983,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       existing !== null &&
       (existing.HostConfig?.Privileged !== false ||
         existingBinds.some((b) => b.includes("/var/run/docker.sock")) ||
-        bindsMismatch ||
-        portMismatch ||
+        configDrift ||
         brokenMountState);
 
     if (existing && needsRecreate) {
@@ -968,7 +997,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       if (startRes.statusCode !== 204 && startRes.statusCode !== 304 && existing && !needsRecreate) {
         // Self-heal stale stopped ingress container whose mount inode was invalidated
         await this.stopAndRemoveContainer(proxyId);
-        await this.ingressManager.ensureStaticConfig();
+        await this.ingressManager.ensureStaticConfig(this.panel);
         proxyId = await createIngressProxy();
         startRes = await this.dockerClient.request("POST", `/containers/${proxyId}/start`);
       }

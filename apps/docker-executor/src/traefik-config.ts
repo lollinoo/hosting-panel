@@ -1,5 +1,6 @@
-import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { isIPv4 } from "node:net";
 import path from "node:path";
 import { VOLUME_SUFFIX_PATTERN, type ErrorCode } from "@hosting-panel/contracts";
 
@@ -8,6 +9,10 @@ export const INGRESS_BRIDGE_NETWORK_NAME = "hp_ingress_net" as const;
 export const DEFAULT_TRAEFIK_IMAGE = "traefik:v3.7" as const;
 export const DEFAULT_INGRESS_ROOT_DIR = "/var/lib/hosting-panel/ingress" as const;
 export const DEFAULT_INGRESS_HTTP_PORT = 80 as const;
+export const DEFAULT_INGRESS_HTTPS_PORT = 443 as const;
+export const PANEL_DYNAMIC_FILE_NAME = "hp-panel.yml" as const;
+export const STATIC_SHA256_LABEL = "io.hostingpanel.static_sha256" as const;
+const ACME_EMAIL_PATTERN = /^[^\s@"'`\\]+@[^\s@"'`\\]+$/;
 
 const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const SAFE_DOMAIN_PATTERN =
@@ -124,8 +129,32 @@ export interface SiteIngressRouteEntry {
   readonly domains: readonly string[];
 }
 
-export function buildTraefikStaticYaml(): string {
-  return [
+export interface PanelIngressConfig {
+  readonly hostname: string;
+  readonly ipv4: string;
+  readonly acmeEmail: string | null;
+  readonly acmeStaging: boolean;
+  readonly upstreamPort: number;
+}
+
+function assertValidPort(port: number, what: string): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ExecutorCodedError(
+      `${what} must be an integer between 1 and 65535`,
+      "VALIDATION_ERROR",
+    );
+  }
+}
+
+function assertAcmeEmail(email: string): string {
+  if (email.length > 254 || !ACME_EMAIL_PATTERN.test(email)) {
+    throw new ExecutorCodedError("Invalid ACME account email", "VALIDATION_ERROR");
+  }
+  return email;
+}
+
+export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string {
+  const lines = [
     "# Managed by hp-docker-executor — Zero-Sock Static Configuration (HCP-SPEC-003 §4.2)",
     "api:",
     "  dashboard: false",
@@ -134,11 +163,77 @@ export function buildTraefikStaticYaml(): string {
     "entryPoints:",
     "  web:",
     '    address: ":80"',
+    "  websecure:",
+    '    address: ":443"',
     "",
     "providers:",
     "  file:",
     '    directory: "/etc/traefik/dynamic"',
     "    watch: true",
+    "",
+  ];
+  if (panel?.acmeEmail) {
+    lines.push(
+      "certificatesResolvers:",
+      "  le:",
+      "    acme:",
+      `      email: ${JSON.stringify(assertAcmeEmail(panel.acmeEmail))}`,
+      "      storage: /etc/traefik/acme/acme.json",
+      ...(panel.acmeStaging
+        ? ["      caServer: https://acme-staging-v02.api.letsencrypt.org/directory"]
+        : []),
+      "      httpChallenge:",
+      "        entryPoint: web",
+      "",
+    );
+  }
+  return lines.join("\n");
+}
+
+export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
+  const hostname = assertSafeDomain(panel.hostname);
+  const ipv4 = assertSafeDomain(panel.ipv4);
+  if (!isIPv4(ipv4)) {
+    throw new ExecutorCodedError("Panel IPv4 address is invalid", "VALIDATION_ERROR");
+  }
+  assertValidPort(panel.upstreamPort, "Panel upstream port");
+  const tls = panel.acmeEmail
+    ? ["      tls:", "        certResolver: le"]
+    : ["      tls: {}"];
+  return [
+    "# Managed by hp-docker-executor — panel ingress — DO NOT EDIT",
+    "http:",
+    "  routers:",
+    "    hp-panel:",
+    "      entryPoints:",
+    '        - "websecure"',
+    `      rule: "Host(\`${hostname}\`)"`,
+    '      service: "hp-panel"',
+    ...tls,
+    "    hp-panel-ip:",
+    "      entryPoints:",
+    '        - "websecure"',
+    `      rule: "Host(\`${ipv4}\`)"`,
+    '      service: "hp-panel"',
+    "      tls: {}",
+    "    hp-panel-http:",
+    "      entryPoints:",
+    '        - "web"',
+    `      rule: "Host(\`${hostname}\`) || Host(\`${ipv4}\`)"`,
+    '      service: "hp-panel"',
+    "      middlewares:",
+    '        - "hp-panel-https-redirect"',
+    "  middlewares:",
+    "    hp-panel-https-redirect:",
+    "      redirectScheme:",
+    "        scheme: https",
+    "        permanent: true",
+    "  services:",
+    "    hp-panel:",
+    "      loadBalancer:",
+    "        passHostHeader: true",
+    "        servers:",
+    `          - url: "http://host.docker.internal:${String(panel.upstreamPort)}"`,
     "",
   ].join("\n");
 }
@@ -246,13 +341,19 @@ function parsePersistedRoutesFromYaml(yamlContent: string): SiteIngressRouteEntr
 export interface IngressProxyContainerConfigInput {
   readonly traefikImage?: string;
   readonly httpHostPort?: number;
+  readonly httpsHostPort?: number;
   readonly staticConfigHostPath: string;
   readonly dynamicDirHostPath: string;
+  readonly acmeDirHostPath: string;
+  readonly staticSha256?: string;
+  /** "uid:gid" the proxy runs as; with CapDrop ALL, container root cannot read hp-executor-owned dirs. */
+  readonly user?: string;
 }
 
 export interface DockerIngressProxyCreatePayload {
   readonly Image: string;
   readonly Cmd: readonly string[];
+  readonly User?: string;
   readonly Labels: Readonly<Record<string, string>>;
   readonly ExposedPorts: Readonly<Record<string, Record<string, never>>>;
   readonly HostConfig: {
@@ -267,6 +368,7 @@ export interface DockerIngressProxyCreatePayload {
       Record<string, readonly { readonly HostIp: string; readonly HostPort: string }[]>
     >;
     readonly Binds: readonly string[];
+    readonly ExtraHosts: readonly string[];
   };
 }
 
@@ -275,16 +377,14 @@ export function buildIngressProxyContainerPayload(
 ): DockerIngressProxyCreatePayload {
   const image = input.traefikImage ?? DEFAULT_TRAEFIK_IMAGE;
   const httpPort = input.httpHostPort ?? DEFAULT_INGRESS_HTTP_PORT;
-  if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
-    throw new ExecutorCodedError(
-      "Ingress HTTP host port must be an integer between 1 and 65535",
-      "VALIDATION_ERROR",
-    );
-  }
+  const httpsPort = input.httpsHostPort ?? DEFAULT_INGRESS_HTTPS_PORT;
+  assertValidPort(httpPort, "Ingress HTTP host port");
+  assertValidPort(httpsPort, "Ingress HTTPS host port");
 
   if (
-    input.staticConfigHostPath.includes("/var/run/docker.sock") ||
-    input.dynamicDirHostPath.includes("/var/run/docker.sock")
+    [input.staticConfigHostPath, input.dynamicDirHostPath, input.acmeDirHostPath].some((p) =>
+      p.includes("docker.sock"),
+    )
   ) {
     throw new ExecutorCodedError(
       "Mounting docker.sock into ingress proxy is strictly forbidden (TH-02)",
@@ -295,12 +395,15 @@ export function buildIngressProxyContainerPayload(
   return {
     Image: image,
     Cmd: ["--configFile=/etc/traefik/traefik.yml"],
+    ...(input.user ? { User: input.user } : {}),
     Labels: {
       "io.hostingpanel.managed": "true",
       "io.hostingpanel.role": "ingress_proxy",
+      ...(input.staticSha256 ? { [STATIC_SHA256_LABEL]: input.staticSha256 } : {}),
     },
     ExposedPorts: {
       "80/tcp": {},
+      "443/tcp": {},
     },
     HostConfig: {
       Privileged: false,
@@ -312,11 +415,15 @@ export function buildIngressProxyContainerPayload(
       NetworkMode: INGRESS_BRIDGE_NETWORK_NAME,
       PortBindings: {
         "80/tcp": [{ HostIp: "0.0.0.0", HostPort: String(httpPort) }],
+        "443/tcp": [{ HostIp: "0.0.0.0", HostPort: String(httpsPort) }],
       },
       Binds: [
         `${input.staticConfigHostPath}:/etc/traefik/traefik.yml:ro`,
         `${input.dynamicDirHostPath}:/etc/traefik/dynamic:ro`,
+        // The only read-write mount: Traefik persists ACME account + certificates here.
+        `${input.acmeDirHostPath}:/etc/traefik/acme`,
       ],
+      ExtraHosts: ["host.docker.internal:host-gateway"],
     },
   };
 }
@@ -325,6 +432,7 @@ export class TraefikIngressFileManager {
   public readonly ingressRootDir: string;
   public readonly staticConfigPath: string;
   public readonly dynamicDirPath: string;
+  public readonly acmeDirPath: string;
   private readonly siteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
 
@@ -332,6 +440,7 @@ export class TraefikIngressFileManager {
     this.ingressRootDir = path.resolve(ingressRootDir);
     this.staticConfigPath = path.join(this.ingressRootDir, "static", "traefik.yml");
     this.dynamicDirPath = path.join(this.ingressRootDir, "dynamic");
+    this.acmeDirPath = path.join(this.ingressRootDir, "acme");
   }
 
   public getSiteDynamicFilePath(siteId: string): string {
@@ -340,13 +449,29 @@ export class TraefikIngressFileManager {
     return assertContainedPath(this.dynamicDirPath, candidate);
   }
 
-  public async ensureStaticConfig(): Promise<{
+  public async ensureStaticConfig(panel: PanelIngressConfig | null = null): Promise<{
     readonly staticConfigPath: string;
     readonly dynamicDirPath: string;
+    readonly acmeDirPath: string;
+    readonly staticSha256: string;
   }> {
     await mkdir(path.dirname(this.staticConfigPath), { recursive: true, mode: 0o755 });
     await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
-    const staticYaml = buildTraefikStaticYaml();
+    await mkdir(this.acmeDirPath, { recursive: true, mode: 0o700 });
+    await chmod(this.acmeDirPath, 0o700);
+    // Traefik refuses an acme.json looser than 0600; "a" never truncates existing certificates.
+    const acmeJsonPath = path.join(this.acmeDirPath, "acme.json");
+    await (await open(acmeJsonPath, "a", 0o600)).close();
+    await chmod(acmeJsonPath, 0o600);
+
+    const panelFilePath = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
+    if (panel) {
+      await writeFileAtomically(panelFilePath, buildPanelDynamicYaml(panel), 0o644, 0o755);
+    } else {
+      await rm(panelFilePath, { force: true });
+    }
+
+    const staticYaml = buildTraefikStaticYaml(panel);
 
     let needsWrite = true;
     try {
@@ -372,6 +497,8 @@ export class TraefikIngressFileManager {
     return {
       staticConfigPath: this.staticConfigPath,
       dynamicDirPath: this.dynamicDirPath,
+      acmeDirPath: this.acmeDirPath,
+      staticSha256: createHash("sha256").update(staticYaml).digest("hex"),
     };
   }
 

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -23,8 +23,13 @@ import {
   MANAGED_DOCKER_LABELS,
   SignedDockerExecutorIpcClient,
   bootstrapDockerExecutorDaemon,
+  parsePanelIngressConfigFromEnv,
+  buildIngressProxyContainerPayload,
+  buildPanelDynamicYaml,
+  buildTraefikStaticYaml,
   validateCertifiedCapabilities,
   type DockerContainerInspectPayload,
+  type PanelIngressConfig,
 } from "../src/index.js";
 
 const HMAC_SECRET = "0123456789abcdef0123456789abcdef-phase2-ipc-key";
@@ -43,6 +48,8 @@ interface MockDockerContainerRecord {
   id: string;
   name: string;
   image: string;
+  cmd?: string[];
+  user?: string;
   env: string[];
   labels: Record<string, string>;
   running: boolean;
@@ -202,6 +209,8 @@ async function startMockDockerDaemon(options?: {
         const name = parsedUrl.searchParams.get("name") ?? `ctr_${String(seq)}`;
         const payload = JSON.parse(bodyStr) as {
           Image: string;
+          Cmd?: string[];
+          User?: string;
           Env?: string[];
           Labels?: Record<string, string>;
           HostConfig: NonNullable<DockerContainerInspectPayload["HostConfig"]>;
@@ -214,6 +223,8 @@ async function startMockDockerDaemon(options?: {
           id,
           name,
           image: payload.Image,
+          ...(payload.Cmd ? { cmd: payload.Cmd } : {}),
+          ...(payload.User ? { user: payload.User } : {}),
           env: [...(payload.Env ?? [])],
           labels: { ...(payload.Labels ?? {}) },
           running: false,
@@ -249,6 +260,8 @@ async function startMockDockerDaemon(options?: {
           },
           Config: {
             Image: target.image,
+            ...(target.cmd ? { Cmd: target.cmd } : {}),
+            ...(target.user ? { User: target.user } : {}),
             Env: target.env,
             Labels: target.labels,
           },
@@ -758,6 +771,7 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     expect(proxyCtr?.hostConfig.Binds).toEqual([
       `${path.join(ingressRootDir, "static", "traefik.yml")}:/etc/traefik/traefik.yml:ro`,
       `${path.join(ingressRootDir, "dynamic")}:/etc/traefik/dynamic:ro`,
+      `${path.join(ingressRootDir, "acme")}:/etc/traefik/acme`,
     ]);
 
     // Verify hp_ingress_proxy connected to hp_edge_site_alpha_net
@@ -1007,6 +1021,187 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     expect(recreated?.hostConfig.Binds).toEqual([
       `${path.join(ingressRootDir, "static", "traefik.yml")}:/etc/traefik/traefik.yml:ro`,
       `${path.join(ingressRootDir, "dynamic")}:/etc/traefik/dynamic:ro`,
+      `${path.join(ingressRootDir, "acme")}:/etc/traefik/acme`,
     ]);
+  });
+});
+
+describe("panel ingress", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const panel: PanelIngressConfig = {
+    hostname: "srv12.example.it",
+    ipv4: "203.0.113.10",
+    acmeEmail: "ops@example.it",
+    acmeStaging: false,
+    upstreamPort: 3000,
+  };
+
+  it("static yaml has websecure and acme resolver only with email", () => {
+    const withEmail = buildTraefikStaticYaml(panel);
+    expect(withEmail).toContain("websecure:");
+    expect(withEmail).toContain('address: ":443"');
+    expect(withEmail).toContain("certificatesResolvers:");
+    expect(withEmail).toContain("storage: /etc/traefik/acme/acme.json");
+    expect(withEmail).toContain("entryPoint: web");
+    expect(withEmail).not.toContain("acme-staging-v02");
+
+    const noEmail = buildTraefikStaticYaml({ ...panel, acmeEmail: null });
+    expect(noEmail).toContain("websecure:");
+    expect(noEmail).not.toContain("certificatesResolvers");
+
+    const disabled = buildTraefikStaticYaml(null);
+    expect(disabled).toContain("websecure:");
+    expect(disabled).not.toContain("certificatesResolvers");
+
+    expect(buildTraefikStaticYaml({ ...panel, acmeStaging: true })).toContain("acme-staging-v02");
+  });
+
+  it("panel route matches hostname and server IP", () => {
+    const yaml = buildPanelDynamicYaml(panel);
+    expect(yaml).toContain("Host(`srv12.example.it`)");
+    expect(yaml).toContain("Host(`203.0.113.10`)");
+    expect(yaml).toContain("certResolver: le");
+    expect(yaml).toContain("http://host.docker.internal:3000");
+    expect(yaml).toContain("scheme: https");
+    expect(buildPanelDynamicYaml({ ...panel, acmeEmail: null })).not.toContain("certResolver");
+  });
+
+  it("panel route rejects unsafe hostname or invalid ipv4", () => {
+    expect(() => buildPanelDynamicYaml({ ...panel, hostname: "a`b" })).toThrow();
+    expect(() => buildPanelDynamicYaml({ ...panel, ipv4: "999.1.1.1" })).toThrow(
+      expect.objectContaining({ code: "VALIDATION_ERROR" }),
+    );
+  });
+
+  it("parses panel env: empty hostname disables, invalid values disable, valid values parse", () => {
+    expect(parsePanelIngressConfigFromEnv({ HP_PANEL_HOSTNAME: "" })).toBeNull();
+    expect(
+      parsePanelIngressConfigFromEnv({ HP_PANEL_HOSTNAME: "srv12.example.it", HP_PANEL_IPV4: "" }),
+    ).toBeNull();
+    expect(
+      parsePanelIngressConfigFromEnv({
+        HP_PANEL_HOSTNAME: "srv12.example.it",
+        HP_PANEL_IPV4: "203.0.113.10",
+        HP_ACME_EMAIL: "ops@example.it",
+        HP_ACME_STAGING: "false",
+        HP_PANEL_UPSTREAM_PORT: "3000",
+      }),
+    ).toEqual(panel);
+  });
+
+  it("proxy payload binds 443, acme dir rw, host-gateway", () => {
+    const payload = buildIngressProxyContainerPayload({
+      staticConfigHostPath: "/var/lib/hosting-panel/ingress/static/traefik.yml",
+      dynamicDirHostPath: "/var/lib/hosting-panel/ingress/dynamic",
+      acmeDirHostPath: "/var/lib/hosting-panel/ingress/acme",
+    });
+    expect(payload.HostConfig.PortBindings["443/tcp"]?.[0]?.HostPort).toBe("443");
+    expect(payload.ExposedPorts["443/tcp"]).toEqual({});
+    expect(payload.HostConfig.Binds).toContain(
+      "/var/lib/hosting-panel/ingress/acme:/etc/traefik/acme",
+    );
+    expect(payload.HostConfig.ExtraHosts).toEqual(["host.docker.internal:host-gateway"]);
+    expect(payload.HostConfig.Binds.some((b) => b.includes("docker.sock"))).toBe(false);
+  });
+
+  async function setupAdapter(panelConfig: PanelIngressConfig | null) {
+    const tmpBaseDir = await mkdtemp(path.join(os.tmpdir(), "hp-panel-ingress-"));
+    cleanupTasks.push(() => rm(tmpBaseDir, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const ingressRootDir = path.join(tmpBaseDir, "ingress");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmpBaseDir, "secrets"),
+      ingressRootDir,
+      pullMissingImages: false,
+      panel: panelConfig,
+    });
+    const proxy = () =>
+      [...mockDaemon.containers.values()].find((c) => c.name === INGRESS_PROXY_CONTAINER_NAME);
+    const recreateCalls = (from: number) =>
+      mockDaemon.requestedPaths
+        .slice(from)
+        .filter((p) => p.includes("/containers/create") || /\/containers\/[^/]+\?force/.test(p));
+    return { adapter, mockDaemon, ingressRootDir, proxy, recreateCalls };
+  }
+
+  it("ensureIngressProxy writes panel files and does not recreate an up-to-date proxy", async () => {
+    const { adapter, mockDaemon, ingressRootDir, proxy, recreateCalls } =
+      await setupAdapter(panel);
+    await adapter.ensureIngressProxy();
+    const first = proxy();
+    expect(first).toBeDefined();
+
+    expect(await readFile(path.join(ingressRootDir, "dynamic", "hp-panel.yml"), "utf8")).toContain(
+      "Host(`srv12.example.it`)",
+    );
+    const acmeStat = await stat(path.join(ingressRootDir, "acme"));
+    expect(acmeStat.mode & 0o777).toBe(0o700);
+    const acmeJsonStat = await stat(path.join(ingressRootDir, "acme", "acme.json"));
+    expect(acmeJsonStat.mode & 0o777).toBe(0o600);
+
+    // Docker may report arrays in a different order: must not count as a change
+    if (first) {
+      first.hostConfig = {
+        ...first.hostConfig,
+        Binds: [...(first.hostConfig.Binds ?? [])].reverse(),
+      };
+    }
+    const mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark)).toEqual([]);
+    expect(proxy()?.id).toBe(first?.id);
+  });
+
+  it("ensureIngressProxy recreates when only PortBindings differ", async () => {
+    const { adapter, mockDaemon, proxy, recreateCalls } = await setupAdapter(panel);
+    await adapter.ensureIngressProxy();
+    const first = proxy();
+    if (first) {
+      first.hostConfig = {
+        ...first.hostConfig,
+        PortBindings: { "80/tcp": [{ HostIp: "0.0.0.0", HostPort: "80" }] },
+      };
+    }
+    const mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark).length).toBe(2);
+    expect(proxy()?.id).not.toBe(first?.id);
+  });
+
+  it("ensureIngressProxy recreates when the static config changes", async () => {
+    const { adapter, mockDaemon, ingressRootDir, proxy, recreateCalls } =
+      await setupAdapter(null);
+    await adapter.ensureIngressProxy();
+    const first = proxy();
+
+    const panelAdapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(ingressRootDir, "..", "secrets"),
+      ingressRootDir,
+      pullMissingImages: false,
+      panel,
+    });
+    const mark = mockDaemon.requestedPaths.length;
+    await panelAdapter.ensureIngressProxy();
+    expect(recreateCalls(mark).length).toBe(2);
+    expect(proxy()?.id).not.toBe(first?.id);
+    expect(proxy()?.labels["io.hostingpanel.static_sha256"]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("removes the panel dynamic file when the panel is disabled", async () => {
+    const { adapter, ingressRootDir } = await setupAdapter(null);
+    const panelFile = path.join(ingressRootDir, "dynamic", "hp-panel.yml");
+    await mkdir(path.dirname(panelFile), { recursive: true });
+    await writeFile(panelFile, "stale");
+    await adapter.ensureIngressProxy();
+    await expect(stat(panelFile)).rejects.toThrow();
   });
 });

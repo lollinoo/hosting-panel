@@ -21,7 +21,45 @@ import {
   DEFAULT_INGRESS_ROOT_DIR,
   DEFAULT_TRAEFIK_IMAGE,
   ExecutorCodedError,
+  buildPanelDynamicYaml,
+  buildTraefikStaticYaml,
+  type PanelIngressConfig,
 } from "./traefik-config.js";
+
+const PANEL_INGRESS_RETRY_MS = 60_000;
+
+/** Empty HP_PANEL_HOSTNAME ⇒ null (panel ingress disabled). Invalid values are logged and disable it too. */
+export function parsePanelIngressConfigFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): PanelIngressConfig | null {
+  const hostname = env.HP_PANEL_HOSTNAME?.trim() ?? "";
+  if (hostname.length === 0) {
+    return null;
+  }
+  const panel: PanelIngressConfig = {
+    hostname,
+    ipv4: env.HP_PANEL_IPV4?.trim() ?? "",
+    acmeEmail: env.HP_ACME_EMAIL?.trim() || null,
+    acmeStaging: env.HP_ACME_STAGING?.trim().toLowerCase() === "true",
+    upstreamPort: Number(env.HP_PANEL_UPSTREAM_PORT?.trim() || 3000),
+  };
+  try {
+    // Fail here rather than inside ensureIngressProxy, which would also block site ingress.
+    buildPanelDynamicYaml(panel);
+    buildTraefikStaticYaml(panel);
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        component: "hp-docker-executor",
+        status: "panel_ingress_config_invalid",
+        code: (err as { code?: string } | null)?.code ?? "VALIDATION_ERROR",
+        timestamp: new Date().toISOString(),
+      }),
+    );
+    return null;
+  }
+  return panel;
+}
 
 const DEFAULT_IPC_KEY_FILE = "/etc/hosting-panel/ipc.key";
 
@@ -124,21 +162,29 @@ export async function bootstrapDockerExecutorDaemon(
   const ingressHttpPort = rawIngressPort
     ? Number(rawIngressPort)
     : DEFAULT_INGRESS_HTTP_PORT;
+  const rawIngressHttpsPort = env.HP_INGRESS_HTTPS_PORT?.trim();
+  const panel = parsePanelIngressConfigFromEnv(env);
 
-  const executor: IngressCapableDockerExecutor = useSimulator
-    ? new InMemoryDockerSimulatorAdapter({
-        secretsRootDir,
-        ingressRootDir,
-        traefikImage,
-        ingressHttpPort,
-      })
+  const dockerAdapter = useSimulator
+    ? null
     : new DockerEngineSocketAdapter({
         dockerSocketPath: env.HP_DOCKER_SOCKET_PATH?.trim() || DEFAULT_DOCKER_SOCKET_PATH,
         secretsRootDir,
         ingressRootDir,
         traefikImage,
         ingressHttpPort,
+        ...(rawIngressHttpsPort ? { ingressHttpsPort: Number(rawIngressHttpsPort) } : {}),
+        panel,
       });
+  const executor: IngressCapableDockerExecutor =
+    dockerAdapter ??
+    new InMemoryDockerSimulatorAdapter({
+      secretsRootDir,
+      ingressRootDir,
+      traefikImage,
+      ingressHttpPort,
+      panel,
+    });
 
   const transport = ((env.HP_IPC_TRANSPORT ?? "uds").trim() as IpcTransportMode);
   const socketPath =
@@ -170,6 +216,30 @@ export async function bootstrapDockerExecutorDaemon(
       startedAt: new Date().toISOString(),
     }),
   );
+
+  if (panel && dockerAdapter) {
+    // Never crashes the executor: failures are logged and retried until the proxy is up.
+    const ensurePanelIngress = async (): Promise<void> => {
+      try {
+        await dockerAdapter.ensureIngressProxy();
+        console.info(
+          JSON.stringify({ component: "hp-docker-executor", status: "panel_ingress_ready" }),
+        );
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            status: "panel_ingress_failed",
+            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+            retryInMs: PANEL_INGRESS_RETRY_MS,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        setTimeout(() => void ensurePanelIngress(), PANEL_INGRESS_RETRY_MS).unref();
+      }
+    };
+    await ensurePanelIngress();
+  }
 
   return server;
 }
