@@ -469,12 +469,14 @@ export class OutboxWorkerService {
 
       const refsToResolve: Record<string, string> = {};
       for (const [envVarName, refValue] of Object.entries(rawSecretRefs)) {
-        if (
-          refValue.startsWith("vault://") &&
-          !knownRefs.has(refValue) &&
-          !knownRefs.has(envVarName)
-        ) {
-          // Legacy Phase 1 demo seed placeholder with no backing encrypted_secrets row
+        if (refValue.startsWith("vault://")) {
+          if (knownRefs.has(refValue)) {
+            refsToResolve[envVarName] = refValue;
+          } else if (knownRefs.has(envVarName)) {
+            // Map Phase 1 demo vault:// placeholder to the encrypted secret matching envVarName
+            refsToResolve[envVarName] = envVarName;
+          }
+          // Otherwise skip legacy Phase 1 demo placeholder with no backing encrypted_secrets row
           continue;
         }
         refsToResolve[envVarName] = refValue;

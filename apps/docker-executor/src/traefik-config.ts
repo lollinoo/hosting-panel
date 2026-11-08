@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { VOLUME_SUFFIX_PATTERN, type ErrorCode } from "@hosting-panel/contracts";
 
@@ -347,7 +347,28 @@ export class TraefikIngressFileManager {
     await mkdir(path.dirname(this.staticConfigPath), { recursive: true, mode: 0o755 });
     await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
     const staticYaml = buildTraefikStaticYaml();
-    await writeFileAtomically(this.staticConfigPath, staticYaml, 0o644, 0o755);
+
+    let needsWrite = true;
+    try {
+      const existingStat = await stat(this.staticConfigPath);
+      if (existingStat.isDirectory()) {
+        // Heal auto-created directory left behind if Docker tried to restart a stale bind mount
+        await rm(this.staticConfigPath, { recursive: true, force: true });
+      } else if (existingStat.isFile()) {
+        const currentContent = await readFile(this.staticConfigPath, "utf8");
+        if (currentContent === staticYaml) {
+          await chmod(this.staticConfigPath, 0o644);
+          needsWrite = false;
+        }
+      }
+    } catch {
+      // File does not exist yet
+    }
+
+    if (needsWrite) {
+      await writeFileAtomically(this.staticConfigPath, staticYaml, 0o644, 0o755);
+    }
+
     return {
       staticConfigPath: this.staticConfigPath,
       dynamicDirPath: this.dynamicDirPath,

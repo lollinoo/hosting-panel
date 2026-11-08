@@ -103,7 +103,41 @@ async function main() {
 
   await mkdir(SOCKETS_DIR, { recursive: true, mode: 0o700 });
   await mkdir(SECRETS_DIR, { recursive: true, mode: 0o700 });
-  await mkdir(INGRESS_DIR, { recursive: true, mode: 0o755 });
+  await chmod(SECRETS_DIR, 0o700);
+
+  const ingressStaticDir = path.join(INGRESS_DIR, "static");
+  const ingressDynamicDir = path.join(INGRESS_DIR, "dynamic");
+  const ingressStaticFile = path.join(ingressStaticDir, "traefik.yml");
+  await mkdir(ingressStaticDir, { recursive: true, mode: 0o755 });
+  await mkdir(ingressDynamicDir, { recursive: true, mode: 0o755 });
+  try {
+    const st = await stat(ingressStaticFile);
+    if (st.isDirectory()) {
+      await rm(ingressStaticFile, { recursive: true, force: true });
+    }
+  } catch {
+    // Will write traefik.yml below
+  }
+  await writeFile(
+    ingressStaticFile,
+    [
+      "# Managed by hp-docker-executor — Zero-Sock Static Configuration (HCP-SPEC-003 §4.2)",
+      "api:",
+      "  dashboard: false",
+      "  insecure: false",
+      "",
+      "entryPoints:",
+      "  web:",
+      '    address: ":80"',
+      "",
+      "providers:",
+      "  file:",
+      '    directory: "/etc/traefik/dynamic"',
+      "    watch: true",
+      "",
+    ].join("\n"),
+    { mode: 0o644 },
+  );
 
   await rm(EXECUTOR_SOCK, { force: true });
   await rm(HOST_AGENT_SOCK, { force: true });

@@ -81,6 +81,8 @@ export interface DockerContainerInspectPayload {
     readonly Restarting?: boolean;
     readonly OOMKilled?: boolean;
     readonly Dead?: boolean;
+    readonly ExitCode?: number;
+    readonly Error?: string;
   };
   readonly Config?: {
     readonly Image?: string;
@@ -99,6 +101,9 @@ export interface DockerContainerInspectPayload {
     readonly RestartPolicy?: { readonly Name?: string };
     readonly NetworkMode?: string;
     readonly Binds?: readonly string[] | null;
+    readonly PortBindings?: Readonly<
+      Record<string, readonly { readonly HostIp?: string; readonly HostPort?: string }[] | null>
+    > | null;
   };
   readonly NetworkSettings?: {
     readonly Networks?: Readonly<Record<string, unknown>>;
@@ -373,7 +378,8 @@ export async function writeServiceSecrets(
     return { secretBinds: [], secretFileEnv: [] };
   }
 
-  await mkdir(secretsRootDir, { recursive: true, mode: 0o750 });
+  await mkdir(secretsRootDir, { recursive: true, mode: 0o700 });
+  await chmod(secretsRootDir, 0o700);
   const serviceDir = assertContainedPath(
     secretsRootDir,
     path.join(secretsRootDir, serviceInstanceId),
@@ -403,10 +409,13 @@ export async function writeServiceSecrets(
     }
 
     const secretHostFilePath = assertContainedPath(serviceDir, path.join(serviceDir, envName));
+    // Host traversal is strictly blocked by 0700 parent directories (secretsRootDir & serviceDir).
+    // Leaf file uses 0444 so CapDrop=["ALL"] containers (no CAP_DAC_READ_SEARCH) running as
+    // dedicated service UIDs (mysql/www-data/postgres/root) can read the :ro bind mount.
     await writeFileAtomically(
       secretHostFilePath,
       Buffer.from(secretValue, "utf8"),
-      0o400,
+      0o444,
       0o700,
     );
 
@@ -899,25 +908,14 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     await this.ensureImageAvailable(this.traefikImage);
 
     const existing = await this.inspectContainerByNameOrId(INGRESS_PROXY_CONTAINER_NAME);
-    let proxyId: string;
+    const payload = buildIngressProxyContainerPayload({
+      traefikImage: this.traefikImage,
+      httpHostPort: this.ingressHttpPort,
+      staticConfigHostPath: staticConfigPath,
+      dynamicDirHostPath: dynamicDirPath,
+    });
 
-    const needsRecreate =
-      existing !== null &&
-      (existing.HostConfig?.Privileged !== false ||
-        (existing.HostConfig?.Binds ?? []).some((b) => b.includes("/var/run/docker.sock")));
-
-    if (existing && needsRecreate) {
-      await this.stopAndRemoveContainer(existing.Id);
-    }
-
-    if (!existing || needsRecreate) {
-      const payload = buildIngressProxyContainerPayload({
-        traefikImage: this.traefikImage,
-        httpHostPort: this.ingressHttpPort,
-        staticConfigHostPath: staticConfigPath,
-        dynamicDirHostPath: dynamicDirPath,
-      });
-
+    const createIngressProxy = async (): Promise<string> => {
       const createRes = await this.dockerClient.request(
         "POST",
         `/containers/create?name=${encodeURIComponent(INGRESS_PROXY_CONTAINER_NAME)}`,
@@ -930,13 +928,50 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         );
       }
       const parsed = JSON.parse(createRes.body.toString("utf8")) as { Id: string };
-      proxyId = parsed.Id;
-    } else {
-      proxyId = existing.Id;
+      return parsed.Id;
+    };
+
+    const existingBinds = existing?.HostConfig?.Binds ?? [];
+    const expectedBinds = payload.HostConfig.Binds;
+    const bindsMismatch =
+      existingBinds.length !== expectedBinds.length ||
+      expectedBinds.some((expectedBind) => !existingBinds.includes(expectedBind));
+
+    const existingPortBindings = existing?.HostConfig?.PortBindings;
+    const boundHostPort = existingPortBindings?.["80/tcp"]?.[0]?.HostPort;
+    const portMismatch =
+      existingPortBindings !== undefined &&
+      existingPortBindings !== null &&
+      boundHostPort !== String(this.ingressHttpPort);
+
+    const brokenMountState =
+      existing?.State?.Dead === true ||
+      existing?.State?.ExitCode === 127 ||
+      (typeof existing?.State?.Error === "string" && existing.State.Error.trim().length > 0);
+
+    const needsRecreate =
+      existing !== null &&
+      (existing.HostConfig?.Privileged !== false ||
+        existingBinds.some((b) => b.includes("/var/run/docker.sock")) ||
+        bindsMismatch ||
+        portMismatch ||
+        brokenMountState);
+
+    if (existing && needsRecreate) {
+      await this.stopAndRemoveContainer(existing.Id);
     }
 
+    let proxyId = !existing || needsRecreate ? await createIngressProxy() : existing.Id;
+
     if (!existing || needsRecreate || existing.State?.Running !== true) {
-      const startRes = await this.dockerClient.request("POST", `/containers/${proxyId}/start`);
+      let startRes = await this.dockerClient.request("POST", `/containers/${proxyId}/start`);
+      if (startRes.statusCode !== 204 && startRes.statusCode !== 304 && existing && !needsRecreate) {
+        // Self-heal stale stopped ingress container whose mount inode was invalidated
+        await this.stopAndRemoveContainer(proxyId);
+        await this.ingressManager.ensureStaticConfig();
+        proxyId = await createIngressProxy();
+        startRes = await this.dockerClient.request("POST", `/containers/${proxyId}/start`);
+      }
       if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
         throw new ExecutorCodedError(
           `Failed to start managed ingress proxy container (HTTP ${String(startRes.statusCode)})`,

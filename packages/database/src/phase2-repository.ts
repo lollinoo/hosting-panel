@@ -667,7 +667,13 @@ export async function resolveDecryptedSecretRefs(
 
   const resolved: Record<string, string> = {};
   for (const [envVarName, ref] of entries) {
-    const matched = byId.get(ref) ?? bySiteKey.get(ref) ?? byOrgKey.get(ref);
+    const matched =
+      byId.get(ref) ??
+      bySiteKey.get(ref) ??
+      byOrgKey.get(ref) ??
+      (ref.startsWith("vault://")
+        ? (bySiteKey.get(envVarName) ?? byOrgKey.get(envVarName))
+        : undefined);
     if (!matched) {
       throw createRepoError(
         `Referenced secret '${ref}' for '${envVarName}' not found in tenant/site scope`,

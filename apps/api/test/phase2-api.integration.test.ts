@@ -671,10 +671,12 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     ]);
     expect(opDetailRes.body.data.steps.every((s) => s.status === "succeeded")).toBe(true);
 
-    // Verify 0400 secret file written on disk & *_FILE env convention (never raw plaintext env!)
+    // Verify 0700 secret dir & 0444 :ro secret file written on disk & *_FILE env convention (never raw plaintext env!)
+    const secretServiceDirStat = await stat(path.join(secretsRootDir, serviceId));
+    expect(secretServiceDirStat.mode & 0o777).toBe(0o700);
     const secretFilePath = path.join(secretsRootDir, serviceId, "DB_PASSWORD");
     const secretFileStat = await stat(secretFilePath);
-    expect(secretFileStat.mode & 0o777).toBe(0o400);
+    expect(secretFileStat.mode & 0o777).toBe(0o444);
     const secretFileContent = await readFile(secretFilePath, "utf8");
     expect(secretFileContent).toBe(plaintextV2);
 
@@ -1407,5 +1409,45 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     } finally {
       await f05App.close();
     }
+  });
+
+  it("12. Resolves seeded vault:// placeholder secretRefs via matching envVarName encrypted secret on direct deploy", async () => {
+    const dbServiceId = DEMO_IDS.services.acmeShopDb;
+    const mariaRootPass = "MariaDbRootS3cr3t!2026";
+
+    const createSecretRes = await requestJson<{ data: EncryptedSecretMetadataDto }>(
+      `/v1/organizations/${DEMO_IDS.organizations.acme}/secrets`,
+      {
+        method: "POST",
+        token: tokens["usr_elena"],
+        headers: { "Idempotency-Key": "idem-create-mariadb-secret" },
+        body: {
+          siteId: DEMO_IDS.sites.acmeShop,
+          secretKey: "MYSQL_ROOT_PASSWORD",
+          value: mariaRootPass,
+        },
+      },
+    );
+    expect(createSecretRes.status).toBe(201);
+
+    const deployRes = await requestJson<AsyncAcceptedEnvelope>(
+      `/v1/organizations/${DEMO_IDS.organizations.acme}/services/${dbServiceId}/lifecycle`,
+      {
+        method: "POST",
+        token: tokens["usr_elena"],
+        headers: { "Idempotency-Key": "idem-deploy-mariadb-vault-fallback" },
+        body: { action: "deploy", reason: "Provide MariaDB root password via AES-256-GCM secret" },
+      },
+    );
+    expect(deployRes.status).toBe(202);
+
+    const processed = await app.outboxWorker.processPendingOnce();
+    expect(processed.succeeded).toBe(1);
+
+    const inspect = dockerSim.getSimulatedContainerInspect(dbServiceId);
+    expect(inspect?.Config?.Env).toContain(
+      "MYSQL_ROOT_PASSWORD_FILE=/run/secrets/MYSQL_ROOT_PASSWORD",
+    );
+    expect((inspect?.Config?.Env ?? []).join("\n")).not.toContain(mariaRootPass);
   });
 });

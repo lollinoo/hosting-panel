@@ -17,7 +17,7 @@ I workload ospitati necessitano di credenziali sensibili (password di database, 
 
 ## 2. Decisione Architetturale
 
-Si adotta un ciclo di vita **Write-Only cifrato `AES-256-GCM` a riposo con risoluzione Just-In-Time (JIT) su `tmpfs` `0400` in sola lettura**:
+Si adotta un ciclo di vita **Write-Only cifrato `AES-256-GCM` a riposo con risoluzione Just-In-Time (JIT) su `tmpfs` confinato `0700` e mount `:ro`**:
 
 1. **Cifratura Autenticata `AES-256-GCM` con AAD Vincolato al Tenant (`0002_phase2_runtime_and_secrets.sql`)**:
    - I segreti sono archiviati nella tabella `encrypted_secrets` (`ciphertext_base64`, `iv_base64` a 12 byte casuali univoci per ogni scrittura/rotazione, `auth_tag_base64` a 16 byte, `key_version`, `version` incrementale) protetta da vincolo composto `(id, organization_id)` e FK composta `(site_id, organization_id)`.
@@ -29,9 +29,9 @@ Si adotta un ciclo di vita **Write-Only cifrato `AES-256-GCM` a riposo con risol
 2. **Semantica Rigorosamente Write-Only e Zero Persistenza nei Job**:
    - Gli endpoint `POST /v1/organizations/:orgId/secrets` e `GET /v1/organizations/:orgId/secrets` restituiscono esclusivamente `EncryptedSecretMetadataDto` (`id`, `secretKey`, `version`, `keyVersion`, `updatedAt`), **mai** il valore decifrato né i campi crittografici grezzi (bloccati anche da `FORBIDDEN_PUBLIC_DTO_KEYS`).
    - `StackRevision` registra unicamente la mappa di riferimenti `secretRefs: { "<ENV_NAME>": "sec_..." }` e `outbox_events` trasporta soltanto identificativi di operazione e revisione.
-3. **Decifratura JIT e Montaggio `tmpfs` `0400 :ro` (Pattern `*_FILE`)**:
+3. **Decifratura JIT e Montaggio `tmpfs` `0700` dir / `0444 :ro` leaf (Pattern `*_FILE`)**:
    - Solo nell'istante in cui l'Outbox Worker invoca `deployService` sul canale IPC firmato (`ADR-013`), i `secretRefs` della revisione vengono decifrati in RAM e trasmessi nel campo effimero `resolvedSecrets`.
-   - `hp-docker-executor` scrive ciascun segreto sul filesystem volatile in RAM `/run/hosting-panel/secrets/<serviceInstanceId>/<envName>` con permessi `0400`, lo monta in sola lettura nel container su `/run/secrets/<envName>:ro` ed espone unicamente la variabile puntatore `<ENV_NAME>_FILE=/run/secrets/<envName>`.
+   - `hp-docker-executor` isola la directory padre `/run/hosting-panel/secrets/<serviceInstanceId>` con permessi `0700` (bloccando a livello VFS qualsiasi attraversamento da parte di altri processi o utenti sull'host) e scrive il file foglia `<envName>` con mode `0444`, montandolo in sola lettura (`:ro`) nel singolo container su `/run/secrets/<envName>` con variabile puntatore `<ENV_NAME>_FILE=/run/secrets/<envName>`. Questo garantisce leggibilità ai workload multi-utente (`mysql`, `www-data`, `postgres`) eseguiti con `CapDrop: ["ALL"]` (privi di `CAP_DAC_READ_SEARCH`) senza mai concedere privilegi aggiuntivi né esporre il file sull'host.
    - All'arresto o rimozione del servizio, i file in `/run/hosting-panel/secrets/<serviceInstanceId>` vengono sovrascritti con zeri e cancellati.
 
 ---

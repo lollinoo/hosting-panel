@@ -61,7 +61,7 @@ Durable log of settled architectural and product boundary decisions aligned via 
 
 8. **Additive Phase 2 DB Migration & `AES-256-GCM` `tmpfs` Secrets (`Q8` — `F1-012`)**:
    - Add non-destructive migration `0002_phase2_runtime_and_secrets.sql` (`encrypted_secrets` encrypted at rest with `AES-256-GCM`, agent heartbeats, and partial unique index on active operation `lock_key`).
-   - Mount resolved secrets JIT as read-only `0400` files on `tmpfs` (`/run/hosting-panel/secrets/<serviceId>/<ref>`, Docker `*_FILE` pattern) so plaintext secrets never appear in `stack_revisions`, `outbox_events`, `Config.Env` (`docker inspect`), DTOs, or logs.
+   - Mount resolved secrets JIT as read-only files (`0444 :ro` inside `0700`-confined per-service directories for `CapDrop: ["ALL"]` non-root UID compatibility) on `tmpfs` (`/run/hosting-panel/secrets/<serviceId>/<ref>`, Docker `*_FILE` pattern) so plaintext secrets never appear in `stack_revisions`, `outbox_events`, `Config.Env` (`docker inspect`), DTOs, or logs.
 
 9. **Dynamic `PlatformCapabilitiesDto` & Truthful 3-Console `shadcn@4.23.0` Unlock (`Q9` — `AC-F1-10`)**:
    - Evolve `PlatformCapabilitiesDto` to expose `phase: "phase-1" | "phase-2"` and `runtimeBackend: "linux-systemd" | "local-simulator" | "disabled"`, keeping `sharedHostingEnabled`, `acmeTlsRuntimeAvailable`, `sftpAvailable`, and `productionBackupRuntimeAvailable` strictly `false`.

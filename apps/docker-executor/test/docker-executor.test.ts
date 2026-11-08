@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -726,14 +726,16 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     expect(tenantCtr?.env.join("\n")).not.toContain("ultra-secret-postgres-pw!");
     expect(tenantCtr?.env.join("\n")).not.toContain("ultra-secret-jwt-key!");
 
-    // Verify 0700 service secret directory and 0400 secret files on disk
+    // Verify 0700 root & service secret directories and 0444 :ro secret files for CapDrop=ALL UID readability
+    const rootSecretStat = await stat(secretsRootDir);
+    expect(rootSecretStat.mode & 0o777).toBe(0o700);
     const serviceSecretDir = path.join(secretsRootDir, "svc_prod_web");
     const dirStat = await stat(serviceSecretDir);
     expect(dirStat.mode & 0o777).toBe(0o700);
 
     const dbSecretFile = path.join(serviceSecretDir, "DATABASE_PASSWORD");
     const dbSecretStat = await stat(dbSecretFile);
-    expect(dbSecretStat.mode & 0o777).toBe(0o400);
+    expect(dbSecretStat.mode & 0o777).toBe(0o444);
     expect(await readFile(dbSecretFile, "utf8")).toBe("ultra-secret-postgres-pw!");
 
     expect(tenantCtr?.hostConfig.Binds).toContain("hp_vol_svc_prod_web_uploads:/app/uploads");
@@ -941,5 +943,70 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     const health = await client.checkHealth();
     expect(health.status).toBe("online");
     expect(health.runtimeBackend).toBe("local-simulator");
+  });
+
+  it("self-heals ensureStaticConfig directory collision and recreates stale hp_ingress_proxy on bind/port mismatch", async () => {
+    const tmpBaseDir = await mkdtemp(path.join(os.tmpdir(), "hp-ingress-heal-"));
+    cleanupTasks.push(() => rm(tmpBaseDir, { recursive: true, force: true }));
+
+    const ingressRootDir = path.join(tmpBaseDir, "ingress");
+    // Simulate Docker daemon auto-creating traefik.yml as a directory after /tmp reset
+    const collidedDir = path.join(ingressRootDir, "static", "traefik.yml");
+    await mkdir(collidedDir, { recursive: true });
+
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+
+    // Pre-seed a stale hp_ingress_proxy pointing to an old ingress path and port 80
+    mockDaemon.containers.set("ctr_stale_proxy", {
+      id: "ctr_stale_proxy",
+      name: INGRESS_PROXY_CONTAINER_NAME,
+      image: "traefik:v3.3",
+      env: [],
+      labels: { "io.hostingpanel.managed": "true", "io.hostingpanel.role": "ingress_proxy" },
+      hostConfig: {
+        Privileged: false,
+        CapDrop: ["ALL"],
+        CapAdd: ["NET_BIND_SERVICE"],
+        SecurityOpt: ["no-new-privileges:true"],
+        PidsLimit: 256,
+        RestartPolicy: { Name: "unless-stopped" },
+        NetworkMode: "hp_ingress_net",
+        Binds: [
+          "/tmp/old-stale-dir/static/traefik.yml:/etc/traefik/traefik.yml:ro",
+          "/tmp/old-stale-dir/dynamic:/etc/traefik/dynamic:ro",
+        ],
+        PortBindings: { "80/tcp": [{ HostIp: "0.0.0.0", HostPort: "80" }] },
+      },
+      networks: { hp_ingress_net: {} },
+      running: false,
+      status: "exited",
+      restartCount: 0,
+    });
+
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmpBaseDir, "secrets"),
+      ingressRootDir,
+      ingressHttpPort: 18080,
+      pullMissingImages: false,
+    });
+
+    const ensured = await adapter.ensureIngressProxy();
+    expect(ensured.status).toBe("running");
+
+    const healedStat = await stat(collidedDir);
+    expect(healedStat.isFile()).toBe(true);
+
+    expect(mockDaemon.containers.has("ctr_stale_proxy")).toBe(false);
+    const recreated = [...mockDaemon.containers.values()].find(
+      (c) => c.name === INGRESS_PROXY_CONTAINER_NAME,
+    );
+    expect(recreated).toBeDefined();
+    expect(recreated?.running).toBe(true);
+    expect(recreated?.hostConfig.Binds).toEqual([
+      `${path.join(ingressRootDir, "static", "traefik.yml")}:/etc/traefik/traefik.yml:ro`,
+      `${path.join(ingressRootDir, "dynamic")}:/etc/traefik/dynamic:ro`,
+    ]);
   });
 });
