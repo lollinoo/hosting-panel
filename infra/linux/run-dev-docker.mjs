@@ -10,7 +10,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { access, chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +27,7 @@ const INGRESS_DIR = path.join(RUNTIME_DIR, "ingress");
 const IPC_KEY_FILE = path.join(RUNTIME_DIR, "ipc.key");
 const MASTER_KEY_FILE = path.join(RUNTIME_DIR, "secrets-master.key");
 const BREAKGLASS_KEY_FILE = path.join(RUNTIME_DIR, "breakglass-jwt.key");
+const JWT_KEY_FILE = path.join(RUNTIME_DIR, "jwt-signing.pem");
 const ENV_SH_FILE = path.join(RUNTIME_DIR, "env.sh");
 
 const EXECUTOR_SOCK = path.join(SOCKETS_DIR, "executor.sock");
@@ -35,6 +36,20 @@ const HOST_AGENT_SOCK = path.join(SOCKETS_DIR, "host-agent.sock");
 const API_PORT = process.env["API_PORT"]?.trim() || "4000";
 const WEB_PORT = process.env["WEB_PORT"]?.trim() || "3000";
 const INGRESS_HTTP_PORT = process.env["HP_INGRESS_HTTP_PORT"]?.trim() || "18080";
+
+/** Dev-only temporary RSA key (PKCS#8) for the API JWT signing key; reused while the file exists. */
+async function ensureJwtKeyFile(filePath) {
+  try {
+    if ((await readFile(filePath, "utf8")).trim().length > 0) return;
+  } catch {
+    // Generate fresh key below
+  }
+  const pem = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+  await writeFile(filePath, pem, { mode: 0o600 });
+  await chmod(filePath, 0o600);
+}
 
 async function ensureSecretKeyFile(filePath) {
   try {
@@ -145,6 +160,7 @@ async function main() {
   const ipcKey = await ensureSecretKeyFile(IPC_KEY_FILE);
   const masterKey = await ensureSecretKeyFile(MASTER_KEY_FILE);
   const breakglassKey = await ensureSecretKeyFile(BREAKGLASS_KEY_FILE);
+  await ensureJwtKeyFile(JWT_KEY_FILE);
 
   const nftablesRulesetPath = path.join(REPO_ROOT, "infra/linux/nftables-dedicated.conf");
 
@@ -158,6 +174,9 @@ async function main() {
     `export HP_SECRETS_MASTER_KEY="${masterKey}"`,
     `export HP_BREAKGLASS_KEY_FILE="${BREAKGLASS_KEY_FILE}"`,
     `export HP_BREAKGLASS_KEY="${breakglassKey}"`,
+    `export HP_JWT_SIGNING_KEY_FILE="${JWT_KEY_FILE}"`,
+    `export ENABLE_DEV_OIDC="true"`,
+    `export HP_SEED_DEMO="true"`,
     `export HP_EXECUTOR_SOCKET_PATH="${EXECUTOR_SOCK}"`,
     `export HP_HOST_AGENT_SOCKET_PATH="${HOST_AGENT_SOCK}"`,
     `export HP_SECRETS_ROOT_DIR="${SECRETS_DIR}"`,
@@ -177,6 +196,10 @@ async function main() {
     HP_SECRETS_MASTER_KEY: masterKey,
     HP_BREAKGLASS_KEY_FILE: BREAKGLASS_KEY_FILE,
     HP_BREAKGLASS_KEY: breakglassKey,
+    HP_JWT_SIGNING_KEY_FILE: JWT_KEY_FILE,
+    // Dev launcher only: explicit opt-in to dev OIDC and the demo dataset.
+    ENABLE_DEV_OIDC: "true",
+    HP_SEED_DEMO: "true",
     HP_EXECUTOR_SOCKET_PATH: EXECUTOR_SOCK,
     HP_HOST_AGENT_SOCKET_PATH: HOST_AGENT_SOCK,
     HP_SECRETS_ROOT_DIR: SECRETS_DIR,

@@ -18,6 +18,7 @@ Environment=HP_HOST_AGENT_SOCKET_PATH=/run/hosting-panel/host-agent.sock
 Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key
 Environment=HP_BREAKGLASS_KEY_FILE=/etc/hosting-panel/breakglass-jwt.key
+Environment=HP_JWT_SIGNING_KEY_FILE=/etc/hosting-panel/jwt-signing.pem
 ExecStart=/usr/bin/node /opt/hosting-panel/apps/api/dist/main.js
 Restart=on-failure
 RestartSec=5s

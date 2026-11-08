@@ -12,7 +12,7 @@
  */
 
 import { execFile as execFileCb, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -544,6 +544,12 @@ async function main() {
   await chmod(ipcKeyFile, 0o400);
   await writeFile(secretsMasterKeyFile, `${masterKeyHex}\n`, { mode: 0o400 });
   await chmod(secretsMasterKeyFile, 0o400);
+  const jwtSigningKeyFile = path.join(runtimeDir, "jwt-signing.pem");
+  await writeFile(
+    jwtSigningKeyFile,
+    generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }),
+    { mode: 0o400 },
+  );
 
   const pgContainerName = `hp_cp_pg18_${runShortId}`;
   const databaseUrl = `postgresql://hcp:${pgPassword}@127.0.0.1:${String(pgPort)}/hosting_panel`;
@@ -619,6 +625,8 @@ async function main() {
           DATABASE_URL: databaseUrl,
           WEB_ORIGIN: webBaseUrl,
           ENABLE_DEV_OIDC: "true",
+          HP_SEED_DEMO: "true",
+          HP_JWT_SIGNING_KEY_FILE: jwtSigningKeyFile,
           HP_EXECUTOR_SOCKET_PATH: executorSocketPath,
           HP_HOST_AGENT_SOCKET_PATH: hostAgentSocketPath,
           HP_SECRETS_MASTER_KEY_FILE: secretsMasterKeyFile,

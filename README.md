@@ -117,7 +117,9 @@ corepack pnpm run dev:api
 corepack pnpm run dev:web
 ```
 
-Aprire il browser su **`http://127.0.0.1:3000`** e selezionare una demo persona per accedere alle 3 console.
+Gli script `dev:*` attivano esplicitamente `ENABLE_DEV_OIDC=true` e `HP_SEED_DEMO=true` (dati demo). Aprire il browser su **`http://127.0.0.1:3000`** e accedere con il login reale usando gli utenti demo (vedi sotto).
+
+> **Solo sviluppo, mai usato se `HP_SEED_DEMO` non è `true`.** Quando il dataset demo viene seminato, ogni utente demo ha la password `demo-password-123` (es. `elena@acme.it`, amministratore hosting del cliente demo). L'amministratore server demo `infra@hcp.local` richiede anche il 2FA, con segreto TOTP fisso `JBSWY3DPEHPK3PXP` (aggiungilo a un'app di autenticazione o calcola il codice a 6 cifre da quel segreto). In produzione entrambi i valori non esistono: nessun utente demo viene creato.
 
 ---
 
@@ -127,6 +129,17 @@ Per predisporre un nodo Linux dedicato con utenti isolati (`hp-web`, `hp-api`, `
 ```bash
 sudo bash infra/linux/bootstrap-dedicated.sh
 ```
+
+Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signing.pem`, RSA 3072, `0400`) e, in `/etc/hosting-panel/hosting-panel.env`, `BFF_SESSION_SECRET` (obbligatorio in produzione, almeno 32 caratteri), `ENABLE_DEV_OIDC=false` e `HP_SEED_DEMO=false`.
+
+**Primo avvio in produzione** (nessun utente demo): creare l'installazione e il primo amministratore server dalla CLI via SSH.
+
+```bash
+sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<nome server>" --hostname <hostname> --ipv4 <ip>
+sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<nome>"
+```
+
+`create-admin` legge la password da `HP_NEW_PASSWORD` o da un prompt nascosto e stampa il segreto TOTP e l'URI `otpauth` da registrare in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori). Recupero accessi: `accounts.js reset-password --email`, `reset-totp --email`, `unlock --email`. La CLI break-glass richiede `--user-id` oppure `--email`.
 
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 
@@ -139,6 +152,8 @@ corepack pnpm run build
 ---
 
 ## 5. Modello dei Ruoli di Autorizzazione & Demo Persona
+
+Il prodotto ha **due ruoli**: l'**amministratore server** (`users.platform_role = 'infrastructure_admin'`, 2FA TOTP obbligatorio) e l'**amministratore hosting del cliente** (membership `customer_owner`, un solo cliente per server). Il login (`POST /v1/auth/login`) blocca l'account dopo 5 tentativi falliti in 15 minuti (contatore separato per il codice TOTP). L'interfaccia è in italiano (predefinito) e inglese, per utente. La tabella seguente descrive il modello di autorizzazione sottostante.
 
 | Ruolo di Piattaforma | Console Assegnata | Privilegi e Confini di Sicurezza |
 | :--- | :--- | :--- |

@@ -150,6 +150,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/ipc.key (0440 root:hp-ipc)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/secrets-master.key (0400 hp-api:root)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
+  log_dry "Would idempotently generate RSA-3072 JWT signing key /etc/hosting-panel/jwt-signing.pem (0400 hp-api:root)"
+  log_dry "Would ensure /etc/hosting-panel/hosting-panel.env (0440 root:hp-web) has BFF_SESSION_SECRET=<64 hex> (only if absent), ENABLE_DEV_OIDC=false, HP_SEED_DEMO=false"
   log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750)"
   log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (2750 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
@@ -255,6 +257,33 @@ else
   log_info "Preserved existing break-glass JWT signing key at ${BREAKGLASS_KEY_PATH} (0400)"
 fi
 
+JWT_KEY_PATH="/etc/hosting-panel/jwt-signing.pem"
+if [[ ! -s "${JWT_KEY_PATH}" ]]; then
+  tmp_jwt_key="$(mktemp /etc/hosting-panel/.jwt-signing.pem.XXXXXX)"
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "${tmp_jwt_key}" 2>/dev/null
+  chown hp-api:root "${tmp_jwt_key}"
+  chmod 0400 "${tmp_jwt_key}"
+  mv -f "${tmp_jwt_key}" "${JWT_KEY_PATH}"
+  log_info "Generated new RSA-3072 JWT signing key at ${JWT_KEY_PATH}"
+else
+  chown hp-api:root "${JWT_KEY_PATH}"
+  chmod 0400 "${JWT_KEY_PATH}"
+  log_info "Preserved existing JWT signing key at ${JWT_KEY_PATH} (0400)"
+fi
+
+# Web session secret and production-safe flags; existing values are never overwritten.
+ENV_FILE="/etc/hosting-panel/hosting-panel.env"
+touch "${ENV_FILE}"
+if ! grep -q '^BFF_SESSION_SECRET=' "${ENV_FILE}"; then
+  printf 'BFF_SESSION_SECRET=%s\n' "$(generate_32_byte_hex_key)" >> "${ENV_FILE}"
+  log_info "Generated BFF_SESSION_SECRET in ${ENV_FILE}"
+fi
+for flag in ENABLE_DEV_OIDC HP_SEED_DEMO; do
+  grep -q "^${flag}=" "${ENV_FILE}" || printf '%s=false\n' "${flag}" >> "${ENV_FILE}"
+done
+chown root:hp-web "${ENV_FILE}"
+chmod 0440 "${ENV_FILE}"
+
 # 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid 2750 root:hp-ipc)
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress
@@ -274,3 +303,11 @@ done
 
 systemctl daemon-reload
 log_info "Installed systemd units and reloaded systemd daemon successfully."
+
+cat <<'EOF'
+
+Next step (first run): create the installation and the first server administrator:
+  sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js setup --name "<server name>" --hostname <hostname> --ipv4 <ip> \
+    && sudo -u hp-api node /opt/hosting-panel/apps/api/dist/cli/accounts.js create-admin --email <email> --name "<name>"
+create-admin prints the TOTP secret once: enrol it in an authenticator app (2FA is mandatory for administrators).
+EOF

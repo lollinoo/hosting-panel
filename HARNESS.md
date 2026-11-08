@@ -10,7 +10,9 @@
   - Never invoke `sh -c`, shell command interpolation, or unapproved OS binaries in `hp-host-agent` (`execFile` on static absolute paths and closed enums only — `AC-F2-04`).
   - Never expose raw Docker container/network/volume IDs, socket paths, host filesystem paths, ciphertexts, or plaintext secrets in public DTOs, `StackRevision` specs, `outbox_events`, `Config.Env`, or logs (`F1-008`, `F1-012`, `ADR-015`, `AC-F2-05`).
   - Never blindly replay mutating `POST` IPC calls for operations in `unknown` state (`TH-08`, `AC-F2-07`), and never let the Drift Reconciler restart or recreate running tenant containers autonomously (`TH-10`, `AC-F2-08`).
-  - Never enable `Shared Hosting` (`409 SHARED_MODE_GATED`), close `ADR-011` (`OPEN — prima di Shared`), or claim that `ACME/TLS`, `SFTP`, or production `Backups` are active runtime features in Phase 2 (`AC-F1-06`, `AC-F2-10`).
+  - Never enable `Shared Hosting` (`409 SHARED_MODE_GATED`) or close `ADR-011` (`OPEN — prima di Shared`) (`AC-F1-06`, `AC-F2-10`).
+  - Never claim a capability whose flag is still `false`; flags turn `true` only when the feature ships per `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md`.
+  - Never enable dev OIDC or demo seeding by default (`ENABLE_DEV_OIDC` and `HP_SEED_DEMO` stay `false` outside dev launchers).
 
 ## Project Map
 - `/apps/api`: NestJS 12 + Fastify 5 `/v1` Docker-Native Control Plane API, Dev OIDC `jose` issuer/verifier, signed UDS IPC clients, PostgreSQL Transactional Outbox Worker (`202 Accepted`), `unknown` read-only recovery, observe-only Drift Reconciler, write-only `AES-256-GCM` secrets endpoints, and local break-glass CLI
