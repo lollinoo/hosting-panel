@@ -44,11 +44,12 @@ export async function saveTotpStep(
   userId: string,
   step: number,
   extra: Partial<typeof users.$inferInsert> = {},
+  guard?: ReturnType<typeof and>,
 ): Promise<boolean> {
   const saved = await db
     .update(users)
     .set({ totpLastStep: step, ...extra })
-    .where(and(eq(users.id, userId), or(isNull(users.totpLastStep), lt(users.totpLastStep, step))))
+    .where(and(eq(users.id, userId), or(isNull(users.totpLastStep), lt(users.totpLastStep, step)), guard))
     .returning({ id: users.id });
   return saved.length > 0;
 }

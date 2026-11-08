@@ -189,4 +189,65 @@ describe("self-service account API", () => {
     expect(text).not.toContain("passwordHash");
     expect(((JSON.parse(text) as { data: { user: Record<string, unknown> } }).data.user).isServerAdmin).toBe(false);
   });
+
+  it("password guessing is throttled and locks the account", async () => {
+    await seed("usr_a");
+    const a = await loginToken("usr_a");
+    const codes: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const res = await call(a, "POST", "/v1/me/password", { currentPassword: "wrong wrong wrong", newPassword: NEW_PASSWORD });
+      codes.push(res.status);
+    }
+    expect(codes).toEqual([401, 401, 401, 401, 401, 423]);
+    const ok = await call(a, "POST", "/v1/me/password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(ok.status).toBe(423);
+    expect(((await ok.json()) as { error: { code: string } }).error.code).toBe("ACCOUNT_LOCKED");
+  });
+
+  it("wrong codes on disable are capped", async () => {
+    const secret = generateTotpSecret();
+    await seed("usr_a", { totpSecret: secret });
+    const t = await loginToken("usr_a", PASSWORD, codeNow(secret));
+    const codes: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      codes.push((await call(t, "POST", "/v1/me/totp/disable", { password: PASSWORD, code: "000000" })).status);
+    }
+    expect(codes).toEqual([401, 401, 401, 401, 401, 423]);
+    const good = await call(t, "POST", "/v1/me/totp/disable", { password: PASSWORD, code: codeNow(secret, 1) });
+    expect(good.status).toBe(423);
+  });
+
+  it("wrong codes on enable are capped", async () => {
+    await seed("usr_a");
+    const a = await loginToken("usr_a");
+    await call(a, "POST", "/v1/me/totp/setup");
+    const codes: number[] = [];
+    for (let i = 0; i < 6; i++) codes.push((await call(a, "POST", "/v1/me/totp/enable", { code: "000000" })).status);
+    expect(codes).toEqual([401, 401, 401, 401, 401, 423]);
+  });
+
+  it("a reused code on enable is rejected", async () => {
+    await seed("usr_a");
+    const a = await loginToken("usr_a");
+    const { secretBase32 } = ((await (await call(a, "POST", "/v1/me/totp/setup")).json()) as { data: { secretBase32: string } }).data;
+    await dbClient.db.update(users).set({ totpLastStep: Math.floor(Date.now() / 30_000) }).where(eq(users.id, "usr_a"));
+    const res = await call(a, "POST", "/v1/me/totp/enable", { code: codeNow(secretBase32) });
+    expect(res.status).toBe(401);
+    expect((await me(a)).totpEnabled).toBe(false);
+  });
+
+  it("setup after enable is refused, also when concurrent with enable", async () => {
+    await seed("usr_a");
+    const a = await loginToken("usr_a");
+    const { secretBase32 } = ((await (await call(a, "POST", "/v1/me/totp/setup")).json()) as { data: { secretBase32: string } }).data;
+    const [en, setup] = await Promise.all([
+      call(a, "POST", "/v1/me/totp/enable", { code: codeNow(secretBase32) }),
+      call(a, "POST", "/v1/me/totp/setup"),
+    ]);
+    expect(en.status).toBe(204);
+    // Whatever the interleaving, 2FA must end up enabled with the verified secret.
+    expect([200, 400]).toContain(setup.status);
+    expect((await me(a)).totpEnabled).toBe(true);
+    expect((await call(a, "POST", "/v1/me/totp/setup")).status).toBe(400);
+  });
 });
