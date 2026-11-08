@@ -137,6 +137,62 @@ describe("install.sh SSH-safe firewall", () => {
   it("passes when SSH also listens on 22", () => {
     expect(dry({ HP_SSHD_PORTS: "22 2222" }).code).toBe(0);
   });
+
+  it("reads the bound port from sshd -T listenaddress lines (they override port)", () => {
+    const r = dry({ HP_SSHD_T_OUTPUT: "port 22\nlistenaddress 0.0.0.0:2222\nlistenaddress [::]:2222\n" });
+    expect(r.code).toBe(7);
+    expect(r.err).toContain("SSH listens on port 2222;");
+    expect(dry({ HP_SSHD_T_OUTPUT: "port 22\nlistenaddress [::]:22\nlistenaddress 0.0.0.0:22\n" }).code).toBe(0);
+    expect(dry({ HP_SSHD_T_OUTPUT: "port 22\n" }).code).toBe(0);
+  });
+
+  it("counts socket-activated SSH (systemd listener in ss) as well", () => {
+    const ss = 'LISTEN 0 4096 *:2222 *:* users:(("systemd",pid=1,fd=50))';
+    const r = dry({ HP_SSHD_T_OUTPUT: "", HP_SS_OUTPUT: ss });
+    expect(r.code).toBe(7);
+    expect(r.err).toContain("SSH listens on port 2222;");
+  });
+});
+
+describe("install.sh --archive", () => {
+  function archive(version: string, content = version) {
+    const d = tmp();
+    mkdirSync(join(d, "src", `hosting-panel-${content}`), { recursive: true });
+    writeFileSync(join(d, "src", `hosting-panel-${content}`, "VERSION"), `${content}\n`);
+    const name = `hosting-panel-${version}-linux-x64.tar.gz`;
+    const r = spawnSync("bash", ["-c", `cd "${d}" && tar -czf "${name}" -C src "hosting-panel-${content}" && sha256sum "${name}" > "${name}.sha256"`]);
+    expect(r.status).toBe(0);
+    return join(d, name);
+  }
+
+  it("verifies a private copy in step 1, before any package step", () => {
+    const a = archive("0.3.0");
+    const tmpDir = tmp();
+    const r = dry({ TMPDIR: tmpDir }, ["--archive", a]);
+    expect(r.code, r.err).toBe(0);
+    const verified = /Release 0\.3\.0 verified \((.*)\)/.exec(r.out);
+    expect(verified?.[1]?.startsWith(`${tmpDir}/`)).toBe(true);
+    expect(verified?.[1]).not.toBe(a);
+    expect(r.out.indexOf("Release 0.3.0 verified")).toBeLessThan(r.out.indexOf("[STEP 2/12]"));
+  });
+
+  it("exits 4 in step 1 on a checksum mismatch", () => {
+    const a = archive("0.3.0");
+    spawnSync("bash", ["-c", `printf x >> "${a}"`]);
+    const r = dry({}, ["--archive", a]);
+    expect(r.code).toBe(4);
+    expect(r.out).not.toContain("[STEP 2/12]");
+  });
+
+  it("refuses a mislabelled archive (name 0.3.0, content 0.2.0) with exit 2", () => {
+    const r = dry({}, ["--archive", archive("0.3.0", "0.2.0")]);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("mislabelled");
+  });
+
+  it("lists libatomic1 among the apt prerequisites (Node 26 needs it)", () => {
+    expect(dry().out).toMatch(/apt-get install -y .*\blibatomic1\b/);
+  });
 });
 
 describe("docker0 bind address", () => {

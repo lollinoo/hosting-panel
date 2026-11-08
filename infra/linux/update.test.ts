@@ -19,13 +19,14 @@ function sh(cmd: string) {
   const r = spawnSync("bash", ["-c", cmd], { encoding: "utf8" });
   if (r.status !== 0) throw new Error(r.stderr);
 }
-/** hosting-panel-<v>-linux-x64.tar.gz (+ .sha256) in a fresh dir. */
-function makeArchive(version: string) {
+/** hosting-panel-<v>-linux-x64.tar.gz (+ .sha256) in a fresh dir; `content` is the version inside. */
+function makeArchive(version: string, content = version, marker = "") {
   const d = tmp();
-  mkdirSync(join(d, "src", `hosting-panel-${version}`), { recursive: true });
-  writeFileSync(join(d, "src", `hosting-panel-${version}`, "VERSION"), `${version}\n`);
+  mkdirSync(join(d, "src", `hosting-panel-${content}`), { recursive: true });
+  writeFileSync(join(d, "src", `hosting-panel-${content}`, "VERSION"), `${content}\n`);
+  if (marker) writeFileSync(join(d, "src", `hosting-panel-${content}`, marker), "");
   const name = `hosting-panel-${version}-linux-x64.tar.gz`;
-  sh(`cd "${d}" && tar -czf "${name}" -C src "hosting-panel-${version}" && sha256sum "${name}" > "${name}.sha256"`);
+  sh(`cd "${d}" && tar -czf "${name}" -C src "hosting-panel-${content}" && sha256sum "${name}" > "${name}.sha256"`);
   return join(d, name);
 }
 
@@ -133,6 +134,34 @@ describe("update.sh", () => {
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
+  it("refuses a mislabelled archive (name 0.3.0, content 0.2.0) with exit 2, current untouched", () => {
+    const f = fixture("0.2.0");
+    writeFileSync(join(f.root, "releases/0.2.0/ORIGINAL"), "");
+    const r = update(["--archive", makeArchive("0.3.0", "0.2.0")], f.env);
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("mislabelled");
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(existsSync(join(f.root, "releases/0.2.0/ORIGINAL"))).toBe(true);
+    expect(existsSync(join(f.root, "releases/0.3.0"))).toBe(false);
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("installs the private copy of --archive, not the original path (no swap after verify)", () => {
+    const f = fixture("0.1.0");
+    const archive = makeArchive("0.2.0");
+    const evil = makeArchive("0.2.0", "0.2.0", "EVIL");
+    const bin = join(f.d, "bin");
+    mkdirSync(bin);
+    // Every tar run first swaps the operator's original for another archive, as an attacker
+    // racing the verify/extract window would.
+    writeFileSync(join(bin, "tar"), `#!/usr/bin/env bash\ncp "${evil}" "${archive}"\nexec /usr/bin/tar "$@"\n`, { mode: 0o755 });
+    const r = update(["--archive", archive], { ...f.env, PATH: `${bin}:${process.env.PATH}` });
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(existsSync(join(f.root, "releases/0.2.0/VERSION"))).toBe(true);
+    expect(existsSync(join(f.root, "releases/0.2.0/EVIL"))).toBe(false);
+  });
+
   it("refuses to run while another update holds the lock", () => {
     const f = fixture("0.1.0");
     const r = spawnSync("flock", [join(f.root, ".update.lock"), "bash", SCRIPT, "--archive", makeArchive("0.2.0")], {
@@ -213,6 +242,43 @@ esac
     expect(r.status).toBe(1);
     expect(Date.now() - start).toBeLessThan(10_000);
     expect(r.stdout.match(/waiting for health/g)).toHaveLength(1);
+  });
+
+  /** Runs panel_health_check with curl exiting <curlRc> and the given systemctl stub body. */
+  function healthCheck(curlRc: number, systemctl: string, timeout: number) {
+    const d = tmp();
+    const bin = join(d, "bin");
+    mkdirSync(bin);
+    writeFileSync(join(bin, "curl"), `#!/bin/sh\nexit ${curlRc}\n`, { mode: 0o755 });
+    writeFileSync(join(d, "systemctl"), `#!/usr/bin/env bash\n${systemctl}\n`, { mode: 0o755 });
+    const start = Date.now();
+    const r = spawnSync("bash", ["-c", `source "${resolve(__dirname, "lib/common.sh")}"; panel_health_check 127.0.0.1 ${timeout}`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, SYSTEMCTL: join(d, "systemctl") }
+    });
+    return { code: r.status, ms: Date.now() - start, err: r.stderr };
+  }
+  const ACTIVE = `case "$1" in is-active) exit 0;; is-failed) exit 1;; show) printf 'active\\nrunning\\n';; esac`;
+
+  it("health check passes when probes answer and all four units are active", () => {
+    expect(healthCheck(0, ACTIVE, 30).code).toBe(0);
+  });
+
+  it("health check is not satisfied by HTTP probes while a daemon unit is down", () => {
+    // hp-host-agent inactive (dead): not failed, not crash-looping, so only the timeout ends it.
+    const r = healthCheck(0, `[[ "$1 $3" == "is-active hp-host-agent" ]] && exit 3\n${ACTIVE}`, 1);
+    expect(r.code).toBe(1);
+  }, 15_000);
+
+  it("health check gives up early when a unit is crash-looping (activating/auto-restart)", () => {
+    const r = healthCheck(
+      7,
+      `case "$1" in is-active) exit 3;; is-failed) exit 1;; show) [[ "$5" == hp-api ]] && printf 'activating\\nauto-restart\\n' || printf 'active\\nrunning\\n';; esac`,
+      90
+    );
+    expect(r.code).toBe(1);
+    expect(r.ms).toBeLessThan(10_000);
+    expect(r.err).toContain("hp-api is crash-looping");
   });
 
   it("rejects bad arguments with exit 2", () => {

@@ -128,6 +128,31 @@ describe("install_release", () => {
     expect(r.out).toBe("0.2.0");
     expect(readdirSync(join(root, "releases"))).toEqual(["0.2.0"]);
   });
+
+  it("never replaces the current release, even with HP_FORCE_REINSTALL=1", () => {
+    const root = tmp();
+    const archive = makeArchive("0.2.0");
+    expect(run(`install_release "${archive}" "${root}" && swap_current "${root}" 0.2.0`).code).toBe(0);
+    writeFileSync(join(root, "releases/0.2.0/ORIGINAL"), "");
+    expect(run(`install_release "${archive}" "${root}"`, { HP_FORCE_REINSTALL: "1" }).code).not.toBe(0);
+    expect(existsSync(join(root, "releases/0.2.0/ORIGINAL"))).toBe(true);
+  });
+});
+
+describe("archive_has_version / stage_release_archive", () => {
+  it("accepts a matching VERSION and rejects a mislabelled archive", () => {
+    expect(run(`archive_has_version "${makeArchive("0.2.0")}" 0.2.0`).code).toBe(0);
+    expect(run(`archive_has_version "${makeArchive("0.3.0", { topDir: "hosting-panel-0.2.0", fileVersion: "0.2.0" })}" 0.3.0`).code).not.toBe(0);
+    expect(run(`archive_has_version "${makeArchive("0.3.0", { fileVersion: "0.2.0" })}" 0.3.0`).code).not.toBe(0);
+  });
+
+  it("copies the archive and its .sha256 into the target dir and prints the copy", () => {
+    const archive = makeArchive("0.2.0");
+    const dest = tmp();
+    const r = run(`stage_release_archive "${archive}" "${dest}"`);
+    expect(r.out).toBe(join(dest, "hosting-panel-0.2.0-linux-x64.tar.gz"));
+    expect(run(`verify_release_archive "${r.out}"`).code).toBe(0);
+  });
 });
 
 describe("swap_current / current_version", () => {

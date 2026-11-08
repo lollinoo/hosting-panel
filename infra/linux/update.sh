@@ -17,7 +17,7 @@ Usage: sudo hp-update [--version <v> | --archive <path>] [--allow-downgrade] [--
   --dry-run          Print the plan; changes nothing, needs neither root nor network.
 
 Exit codes: 0 ok (or already up to date), 1 step failed or another update is running,
-2 bad arguments or downgrade refused, 4 checksum failure,
+2 bad arguments, downgrade refused or archive VERSION differs from its file name, 4 checksum failure,
 6 new release unhealthy: rolled back, 7 rollback unhealthy too.
 EOF
 }
@@ -126,7 +126,7 @@ main() {
     step 1 "Resolve and fetch the release"
     if [[ -n "${archive}" ]]; then plan "use ${archive}"; else plan "would download release ${version} from github.com/${HP_RELEASE_REPO}"; fi
     step 2 "Verify checksum"
-    plan "would verify the archive against its .sha256 (exit 4 on mismatch)"
+    plan "would verify the archive against its .sha256 (exit 4 on mismatch) and that its VERSION is ${version} (exit 2)"
     step 3 "Version check"
     plan "current: ${prev:-<none>}; same version exits 0, older needs --allow-downgrade"
     step 4 "Install the release"
@@ -155,19 +155,23 @@ main() {
   [[ -n "${prev}" ]] || die 1 "No current release under ${root}; run install.sh first."
 
   step 1 "Resolve and fetch the release"
+  # Fresh 0700 dir: a predictable shared path would let a local user plant an archive root installs.
+  DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
   if [[ -z "${archive}" ]]; then
     if [[ "${version}" == latest ]]; then
       version="$(latest_release_version)" || die 1 "Could not determine the latest release; pass --version."
       info "Latest release: ${version}"
     fi
-    # Fresh 0700 dir: a predictable shared path would let a local user plant an archive root installs.
-    DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
     archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")" || die 1 "Download of release ${version} failed."
+  else
+    info "archive: ${archive}"
+    archive="$(stage_release_archive "${archive}" "${DOWNLOAD_DIR}")" || die 1 "Cannot copy the archive into ${DOWNLOAD_DIR}."
   fi
-  info "archive: ${archive}"
 
   step 2 "Verify checksum"
   verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
+  archive_has_version "${archive}" "${version}" ||
+    die 2 "The archive does not contain hosting-panel-${version}/VERSION = ${version}; refusing a mislabelled archive."
 
   step 3 "Version check"
   if [[ "${version}" == "${prev}" ]]; then
@@ -181,7 +185,7 @@ main() {
   info "${prev} -> ${version}"
 
   step 4 "Install the release"
-  # A leftover dir (e.g. from a failed update) is replaced; it is never current here.
+  # A leftover dir (e.g. from a failed update) is replaced; install_release refuses the current one.
   HP_FORCE_REINSTALL=1 install_release "${archive}" "${root}" >/dev/null || die 1 "Could not install release ${version}."
 
   local new_dir="${root}/releases/${version}" prev_dir="${root}/releases/${prev}"
@@ -214,7 +218,7 @@ main() {
         "${prev}" "${version}" "${new_dir}" >&2
       exit 6
     fi
-    die 7 "Rollback to ${prev} is unhealthy too (update to ${version} failed). Inspect: journalctl -u hp-api -u hp-web -n 100"
+    die 7 "Rollback to ${prev} is unhealthy too (update to ${version} failed). Inspect: journalctl -u hp-host-agent -u hp-docker-executor -u hp-api -u hp-web -n 100"
   fi
 
   step 9 "Prune old releases"

@@ -20,15 +20,41 @@ latest_release_version() {
   printf '%s\n' "${v}"
 }
 
-# Waits up to <timeout> seconds for the API readiness probe and the web login page; gives up
-# early if hp-api or hp-web has failed. ${SYSTEMCTL} (default systemctl) is stubbable in tests.
+HP_PANEL_UNITS=(hp-host-agent hp-docker-executor hp-api hp-web)
+
+# systemctl is-active with several units succeeds if ANY is active, so check one by one.
+panel_units_active() {
+  local u
+  for u in "${HP_PANEL_UNITS[@]}"; do
+    "${SYSTEMCTL:-systemctl}" is-active --quiet "${u}" || return 1
+  done
+}
+
+# Prints the first dead panel unit and succeeds; fails if none is dead. Dead = failed, or
+# crash-looping: a unit with Restart= sits in activating/auto-restart and never reaches "failed".
+panel_dead_unit() {
+  local u state
+  for u in "${HP_PANEL_UNITS[@]}"; do
+    "${SYSTEMCTL:-systemctl}" is-failed --quiet "${u}" && { printf '%s failed\n' "${u}"; return 0; }
+    state="$("${SYSTEMCTL:-systemctl}" show -p ActiveState,SubState --value "${u}" 2>/dev/null | paste -sd' ')" || state=""
+    [[ "${state}" == "activating auto-restart" ]] && { printf '%s is crash-looping\n' "${u}"; return 0; }
+  done
+  return 1
+}
+
+# Waits up to <timeout> seconds for the API readiness probe, the web login page and all four
+# panel units active; gives up early when a unit is dead. ${SYSTEMCTL} (default systemctl) is
+# stubbable in tests.
 panel_health_check() { # <web bind address> <timeout seconds>
-  local deadline=$((SECONDS + $2))
+  local deadline=$((SECONDS + $2)) dead
   printf '  waiting for health (up to %s s)...\n' "$2"
   until curl -fs -o /dev/null --max-time 5 http://127.0.0.1:4000/health/ready &&
-    curl -fs -o /dev/null --max-time 5 "http://$1:3000/login"; do
+    curl -fs -o /dev/null --max-time 5 "http://$1:3000/login" && panel_units_active; do
     ((SECONDS < deadline)) || return 1
-    ! "${SYSTEMCTL:-systemctl}" is-failed --quiet hp-api hp-web || { printf '  hp-api or hp-web has failed\n' >&2; return 1; }
+    if dead="$(panel_dead_unit)"; then
+      printf '  %s\n' "${dead}" >&2
+      return 1
+    fi
     sleep 3
   done
 }

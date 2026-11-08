@@ -19,9 +19,11 @@ Usage: sudo bash install.sh --hostname <fqdn> --admin-email <email> --admin-name
   --skip-firewall  Do not install the panel nftables ruleset (you manage the firewall yourself).
   --dry-run      Print the plan; changes nothing, needs neither root nor network.
 
-The admin password is read from HP_ADMIN_PASSWORD or prompted (hidden, twice, >= 12 chars).
+The admin password is prompted (hidden, twice, >= 12 chars). For automation only, HP_ADMIN_PASSWORD
+is read instead; never put it on a command line (shell history, ps).
 
-Exit codes: 0 ok, 1 step failed, 2 bad arguments, 3 unsupported OS/architecture or no
+Exit codes: 0 ok, 1 step failed, 2 bad arguments (or archive VERSION differs from its file
+name), 3 unsupported OS/architecture or no
 docker-ce/postgresql-18 for this release, 4 checksum failure, 5 health check timeout,
 6 docker0 has no IPv4, 7 SSH is not on port 22 (use --skip-firewall).
 EOF
@@ -98,11 +100,20 @@ panel_bind_address() {
   printf '%s\n' "${b}"
 }
 
-# Ports sshd listens on, one per line (empty if unknown).
-sshd_ports() {
-  { sshd -T 2>/dev/null || true; } | awk '$1 == "port" {print $2}' | sort -u | grep . && return 0
-  { ss -ltnpH 2>/dev/null || true; } | awk '/"sshd"/ {n = split($4, a, ":"); print a[n]}' | sort -u
+# Ports SSH listens on, one per line (empty if unknown), from `sshd -T` output ($1) and
+# `ss -ltnpH` output ($2). ListenAddress lines carry the port actually bound ([v6]:port too) and
+# override Port lines; ss adds live sshd listeners and systemd ones (socket-activated ssh.socket).
+sshd_ports_from() { # <sshd -T output> <ss -ltnpH output>
+  local cfg
+  cfg="$(awk '$1 == "listenaddress" {n = split($2, a, ":"); print a[n]}' <<<"$1")"
+  [[ -n "${cfg}" ]] || cfg="$(awk '$1 == "port" {print $2}' <<<"$1")"
+  {
+    printf '%s\n' "${cfg}"
+    awk '/"(sshd|systemd)"/ {n = split($4, a, ":"); print a[n]}' <<<"$2"
+  } | { grep -E '^[0-9]+$' || true; } | sort -un
 }
+
+sshd_ports() { sshd_ports_from "$(sshd -T 2>/dev/null || true)" "$(ss -ltnpH 2>/dev/null || true)"; }
 
 # Adds an apt repo and checks the package has a candidate; on any failure removes what it added
 # (a broken .list would break every later apt run) and exits 3.
@@ -228,7 +239,13 @@ main() {
     info "--skip-firewall: the panel firewall will not be installed"
   else
     local ports
-    if ((dry_run)) && [[ -n "${HP_SSHD_PORTS+x}" ]]; then ports="$(tr ' ' '\n' <<<"${HP_SSHD_PORTS}" | grep . || true)"; else ports="$(sshd_ports)"; fi
+    if ((dry_run)) && [[ -n "${HP_SSHD_T_OUTPUT+x}" ]]; then
+      ports="$(sshd_ports_from "${HP_SSHD_T_OUTPUT}" "${HP_SS_OUTPUT:-}")" # raw outputs, test override
+    elif ((dry_run)) && [[ -n "${HP_SSHD_PORTS+x}" ]]; then
+      ports="$(tr ' ' '\n' <<<"${HP_SSHD_PORTS}" | grep . || true)"
+    else
+      ports="$(sshd_ports)"
+    fi
     if [[ -z "${ports}" ]]; then
       if ((dry_run)); then
         info "SSH ports unknown (sshd -T needs root); the live run checks them"
@@ -241,10 +258,36 @@ main() {
       info "SSH listens on port 22"
     fi
   fi
+  # The release is obtained and verified here, before any package is installed or changed.
+  # Fresh 0700 dir: a predictable shared path would let a local user plant an archive root installs.
+  if [[ -n "${archive}" ]] || ((dry_run == 0)); then
+    DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
+  fi
+  if [[ -n "${archive}" ]]; then
+    # Only the private copy is read from now on: the original could be swapped after the check.
+    archive="$(stage_release_archive "${archive}" "${DOWNLOAD_DIR}")" || die 1 "Cannot copy --archive into ${DOWNLOAD_DIR}."
+  elif ((dry_run)); then
+    plan "would download release ${version} from github.com/${HP_RELEASE_REPO} and verify its .sha256"
+  else
+    command -v curl >/dev/null || die 1 "curl is required to download the release; install it or pass --archive."
+    if [[ "${version}" == latest ]]; then
+      version="$(latest_release_version)" || die 1 "Could not determine the latest release; pass --version."
+      ORIG_ARGS+=(--version "${version}") # a rerun installs the same version
+      info "Latest release: ${version}"
+    fi
+    archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")" || die 1 "Download of release ${version} failed."
+  fi
+  if [[ -n "${archive}" ]]; then
+    verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
+    archive_has_version "${archive}" "${version}" ||
+      die 2 "The archive does not contain hosting-panel-${version}/VERSION = ${version}; refusing a mislabelled archive."
+    info "Release ${version} verified (${archive})"
+  fi
 
   # ---------------------------------------------------------------- 2
   step 2 "apt prerequisites"
-  local prereqs=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2)
+  # libatomic1: the official Node 26 linux-x64 binary links against it; minimal images lack it.
+  local prereqs=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2 libatomic1)
   if ((dry_run)); then
     plan "apt-get install -y ${prereqs[*]}"
   else
@@ -285,25 +328,13 @@ main() {
 
   # ---------------------------------------------------------------- 4
   step 4 "Node.js (exact version from the release)"
-  # The archive is obtained here (not in step 6) because RELEASE.json names the Node version.
+  # RELEASE.json (in the archive verified in step 1) names the Node version.
   local node_version="<RELEASE.json node>"
   if ((dry_run)); then
-    if [[ -n "${archive}" ]]; then plan "would verify ${archive} against its .sha256"; else plan "would download release ${version} from github.com/${HP_RELEASE_REPO} and verify its .sha256"; fi
     plan "would install Node ${node_version} from https://nodejs.org/dist/v<v>/node-v<v>-linux-x64.tar.xz (verified against SHASUMS256.txt) into /opt/node-v<v>, symlink /usr/bin/node (skip if node --version matches)"
   else
-    if [[ -z "${archive}" ]]; then
-      if [[ "${version}" == latest ]]; then
-        version="$(latest_release_version)" || die 1 "Could not determine the latest release; pass --version."
-        ORIG_ARGS+=(--version "${version}") # a rerun installs the same version
-        info "Latest release: ${version}"
-      fi
-      # Fresh 0700 dir: a predictable shared path would let a local user plant an archive root installs.
-      DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
-      archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")"
-    fi
-    verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
     node_version="$(tar -xzOf "${archive}" "hosting-panel-${version}/RELEASE.json" |
-      sed -n 's/.*"node": *"\([0-9.]*\)".*/\1/p' | head -n1)"
+      sed -n 's/.*"node": *"\([0-9.]*\)".*/\1/p' | head -n1)" || node_version=""
     [[ "${node_version}" =~ ${_hp_semver_re} ]] || die 1 "RELEASE.json has no valid node version"
     if [[ "$(/usr/bin/node --version 2>/dev/null || true)" == "v${node_version}" ]]; then
       info "Node v${node_version} already installed"
@@ -325,6 +356,11 @@ main() {
       ln -sfn "/opt/node-v${node_version}/bin/node" /usr/bin/node
       info "Installed Node v${node_version}"
     fi
+    # Fail here, not at step 11, if the binary cannot run (e.g. a missing shared library).
+    local node_ran
+    node_ran="$(/usr/bin/node --version 2>&1)" || node_ran="${node_ran:-exit $?}"
+    [[ "${node_ran}" == "v${node_version}" ]] ||
+      die 1 "/usr/bin/node does not run as v${node_version}: ${node_ran}"
   fi
 
   # ---------------------------------------------------------------- 5
@@ -481,7 +517,7 @@ SQL
       totp_uri="$(sed -n 's/.*"otpauthUri":"\([^"]*\)".*/\1/p' <<<"${out}")"
       unset out
       [[ -n "${totp_secret}" ]] ||
-        die 1 "Administrator ${admin_email} was created but its TOTP secret could not be read. Issue a new one: sudo hp-accounts reset-totp --email ${admin_email}"
+        die 1 "hp-accounts create-admin returned no TOTP secret for ${admin_email}; the administrator may not exist. Check with: sudo hp-accounts reset-totp --email ${admin_email} (it fails if there is no such user), then rerun."
       info "Created administrator ${admin_email}"
       # Printed now, not only in the summary: if a later step fails the secret would be lost.
       cat <<EOF
@@ -507,8 +543,8 @@ EOF
     systemctl enable "${units[@]}"
     # restart (not just --now) so a rerun picks up the new release and env values.
     systemctl restart "${units[@]}"
-    panel_health_check "${bind}" 90 || die 5 "Health check timed out after 90 s. Inspect: journalctl -u hp-api -u hp-web -n 100"
-    info "API and web console are healthy"
+    panel_health_check "${bind}" 90 || die 5 "Health check failed (timeout 90 s). Inspect: journalctl -u hp-host-agent -u hp-docker-executor -u hp-api -u hp-web -n 100"
+    info "API, web console, host agent and executor are healthy"
   fi
 
   STEP=0

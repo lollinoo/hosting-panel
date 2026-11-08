@@ -52,6 +52,27 @@ verify_release_archive() {
   }
 }
 
+# Copies an operator-supplied archive and its .sha256 into <dir> (a private mktemp -d) and prints
+# the copy's path: verify and install then read only the copy, so the original cannot be swapped
+# between the checksum check and the extraction.
+stage_release_archive() { # <archive> <dir>
+  local dest
+  dest="$2/$(basename -- "$1")"
+  if ! cp -- "$1" "${dest}" || ! cp -- "$1.sha256" "${dest}.sha256"; then
+    printf '[ERROR] Cannot copy %s and its .sha256\n' "$1" >&2
+    return 1
+  fi
+  printf '%s\n' "${dest}"
+}
+
+# Succeeds when the archive's hosting-panel-<version>/VERSION equals <version> (the one its file
+# name claims): a mislabelled archive must never be installed under, or over, another version.
+archive_has_version() { # <archive> <version>
+  local v
+  v="$(tar -xzOf "$1" "hosting-panel-$2/VERSION" 2>/dev/null | tr -d '[:space:]')" || v=""
+  [[ -n "${v}" && "${v}" == "$2" ]]
+}
+
 # Prints the installed version. Code must be readable by the service users whatever the
 # caller's umask (installer uses 027): extract under umask 022 in a subshell.
 install_release() { (umask 022 && _hp_install_release "$@"); }
@@ -81,6 +102,11 @@ _hp_install_release() {
     return 1
   fi
   if [[ -e "${root}/releases/${version}" ]]; then
+    if [[ "${version}" == "$(current_version "${root}")" ]]; then
+      printf '[ERROR] Release %s is the current release; refusing to replace it\n' "${version}" >&2
+      rm -rf -- "${tmp}"
+      return 1
+    fi
     if [[ "${HP_FORCE_REINSTALL:-0}" != "1" ]]; then
       printf '[ERROR] Release %s already installed (set HP_FORCE_REINSTALL=1 to replace)\n' "${version}" >&2
       rm -rf -- "${tmp}"
