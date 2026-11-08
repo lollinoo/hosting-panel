@@ -19,3 +19,23 @@ export interface DockerExecutorPort {
   deleteService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   getObservedState(serviceInstanceId: string): Promise<ObservedServiceState | null>;
 }
+
+/** One-off, allowlisted setup jobs. The API picks only the kind; the executor owns image, script and mounts. */
+export type SiteJobKind = "db.provision" | "db.drop" | "wordpress.install";
+
+export interface SiteJobRequest {
+  readonly jobId: string;
+  readonly kind: SiteJobKind;
+  readonly siteId: string;
+  readonly organizationId: string;
+  readonly serviceInstanceId?: string;
+  readonly params: Readonly<Record<string, string>>;
+  readonly resolvedSecrets?: Readonly<Record<string, string>>;
+}
+
+export interface SiteJobResult {
+  readonly jobId: string;
+  readonly exitCode: number;
+  /** Last 50 lines, at most 4 KiB, redacted. */
+  readonly outputTail: string;
+}

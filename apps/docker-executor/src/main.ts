@@ -218,6 +218,20 @@ export async function bootstrapDockerExecutorDaemon(
     version: DEFAULT_EXECUTOR_VERSION,
   });
 
+  if (dockerAdapter) {
+    // No job survives a restart; clear leftovers before accepting new ones.
+    await dockerAdapter.cleanupOrphanJobs().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "orphan_job_cleanup_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+  }
+
   const endpoint = await server.start();
   console.info(
     JSON.stringify({
@@ -253,6 +267,7 @@ export async function bootstrapDockerExecutorDaemon(
       }
     };
     void ensureSharedDatabase();
+    void dockerAdapter.prewarmSiteImages();
   }
 
   if (panel && dockerAdapter) {

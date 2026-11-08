@@ -44,6 +44,21 @@ export {
 } from "./shared-database.js";
 
 export {
+  DB_DROP_SCRIPT,
+  DB_PROVISION_SCRIPT,
+  DEFAULT_SITE_JOB_TIMEOUT_MS,
+  HTACCESS_PANEL,
+  HTACCESS_WORDPRESS,
+  SITE_JOB_ROLE,
+  WORDPRESS_INSTALL_SCRIPT,
+  assertValidSiteJobRequest,
+  buildSiteJobContainerPayload,
+  formatSiteJobOutputTail,
+  type SiteJobContext,
+  type SiteJobCreatePayload,
+} from "./site-jobs.js";
+
+export {
   InMemoryDockerSimulatorAdapter,
   type InMemoryDockerSimulatorAdapterOptions,
   type OutOfBandMutationInput,

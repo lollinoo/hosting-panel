@@ -3,8 +3,13 @@ import { chmod, mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises"
 import http from "node:http";
 import path from "node:path";
 import {
+  DEFAULT_PHP_VERSION,
   SECRET_KEY_PATTERN,
+  SHARED_MARIADB_IMAGE,
   findPlaintextSecretKeys,
+  resolveWordpressCliImage,
+  resolveWordpressImage,
+  type PhpVersion,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
   type ObservedServiceStateWire,
@@ -14,6 +19,8 @@ import {
   type ApprovedServiceSpec,
   type DockerExecutionResult,
   type DockerExecutorPort,
+  type SiteJobRequest,
+  type SiteJobResult,
 } from "@hosting-panel/executor-contracts";
 import { demuxDockerLogStream, type ServiceLogLine } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
@@ -46,6 +53,13 @@ import {
   SHARED_DB_NETWORK_NAME,
   buildSharedDatabaseContainerPayload,
 } from "./shared-database.js";
+import {
+  DEFAULT_SITE_JOB_TIMEOUT_MS,
+  SITE_JOB_ROLE,
+  assertValidSiteJobRequest,
+  buildSiteJobContainerPayload,
+  formatSiteJobOutputTail,
+} from "./site-jobs.js";
 
 export const DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock" as const;
 export const DEFAULT_DOCKER_API_PREFIX = "/v1.45" as const;
@@ -882,6 +896,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly sharedDbAdminSubnet?: string;
   /** The uid the data dir must NOT be owned by; defaults to process.getuid(). */
   readonly executorUid?: number;
+  /** Site job wait budget; on expiry the job is killed and reports exit 124. */
+  readonly jobTimeoutMs?: number;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -918,6 +934,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly sharedDbAdminSubnet: string;
   private readonly executorUid: number | undefined;
   private sharedDbEnsureInFlight: Promise<SharedDatabaseEnsureResult> | null = null;
+  private readonly jobTimeoutMs: number;
+  /** `siteId:kind` of the site jobs running now. */
+  private readonly runningSiteJobs = new Set<string>();
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -940,6 +959,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     );
     this.sharedDbAdminSubnet = options?.sharedDbAdminSubnet ?? DEFAULT_SHARED_DB_ADMIN_SUBNET;
     this.executorUid = options?.executorUid ?? process.getuid?.();
+    this.jobTimeoutMs = options?.jobTimeoutMs ?? DEFAULT_SITE_JOB_TIMEOUT_MS;
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1313,6 +1333,164 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       containerStatus: "running",
       ingressConfigured,
     };
+  }
+
+  /** Worst case: pull 240 s + wait 240 s + ~20 s of create, logs and remove, inside the client's 510 s. */
+  public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
+    assertValidSiteJobRequest(req); // jobId, ids, params and secrets, before anything touches Docker
+    const lockKey = `${req.siteId}:${req.kind}`;
+    if (this.runningSiteJobs.has(lockKey)) {
+      throw new ExecutorCodedError("This setup step is already running for the site", "RESOURCE_LOCKED");
+    }
+    this.runningSiteJobs.add(lockKey);
+    let containerId: string | null = null;
+    try {
+      if (req.kind === "wordpress.install") {
+        await this.ensureImageAvailable(resolveWordpressCliImage(req.params.phpVersion as PhpVersion));
+        await this.ensureVolume(
+          getManagedVolumeName(req.serviceInstanceId!, "html"),
+          req.siteId,
+          req.serviceInstanceId!,
+        );
+      } else if (!(await this.isSharedDatabaseRunning())) {
+        // Never pull or create hp_mariadb from a job: ensureSharedDatabase owns that.
+        throw new ExecutorCodedError(
+          "The shared database is not running yet. Retry in a few minutes",
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+
+      const { secretBinds, secretFileEnv } = await writeServiceSecrets(
+        this.secretsRootDir,
+        req.jobId,
+        req.resolvedSecrets,
+      );
+      const payload = buildSiteJobContainerPayload(req, {
+        executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
+        secretBinds,
+        secretFileEnv,
+        rootKeyHostPath: this.sharedDbRootKeyFile,
+      });
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(req.jobId)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create site job container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      const id = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+      containerId = id;
+      const startRes = await this.dockerClient.request("POST", `/containers/${id}/start`);
+      if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+        throw new ExecutorCodedError(
+          `Failed to start site job container (HTTP ${String(startRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+
+      const exitCode = await this.waitForSiteJob(id);
+      const logsRes = await this.dockerClient.request(
+        "GET",
+        `/containers/${id}/logs?stdout=1&stderr=1&tail=50`,
+      );
+      const outputTail =
+        logsRes.statusCode === 200 ? formatSiteJobOutputTail(logsRes.body, req.resolvedSecrets) : "";
+      return { jobId: req.jobId, exitCode, outputTail };
+    } finally {
+      try {
+        if (containerId) {
+          // Best effort: cleanupOrphanJobs removes leftovers at the next start.
+          await this.dockerClient
+            .request("DELETE", `/containers/${containerId}?force=true`)
+            .catch(() => undefined);
+        }
+        await purgeServiceSecrets(this.secretsRootDir, req.jobId);
+      } finally {
+        this.runningSiteJobs.delete(lockKey);
+      }
+    }
+  }
+
+  private async waitForSiteJob(containerId: string): Promise<number> {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), this.jobTimeoutMs);
+    });
+    try {
+      // Our own timer decides the timeout: a socket timeout would read as DOCKER_ENGINE_UNAVAILABLE.
+      const res = await Promise.race([
+        this.dockerClient.request("POST", `/containers/${containerId}/wait`, undefined, {
+          timeoutMs: this.jobTimeoutMs + 15_000,
+        }),
+        expired,
+      ]);
+      if (res === null) {
+        await this.dockerClient
+          .request("POST", `/containers/${containerId}/kill`)
+          .catch(() => undefined);
+        return 124;
+      }
+      const body = res.statusCode === 200 ? (JSON.parse(res.body.toString("utf8")) as { StatusCode?: unknown }) : {};
+      if (typeof body.StatusCode !== "number") {
+        throw new ExecutorCodedError(
+          `Failed to wait for site job container (HTTP ${String(res.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      return body.StatusCode;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** At executor start: no job survives a restart, so every site_job container and job_* secret dir is stale. */
+  public async cleanupOrphanJobs(): Promise<void> {
+    const filters = JSON.stringify({ label: [`io.hostingpanel.role=${SITE_JOB_ROLE}`] });
+    const res = await this.dockerClient.request(
+      "GET",
+      `/containers/json?all=true&filters=${encodeURIComponent(filters)}`,
+    );
+    if (res.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to list site job containers (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    for (const job of JSON.parse(res.body.toString("utf8")) as DockerContainerListSummary[]) {
+      await this.stopAndRemoveContainer(job.Id);
+    }
+    const entries = await readdir(this.secretsRootDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith("job_")) {
+        await purgeServiceSecrets(this.secretsRootDir, entry.name);
+      }
+    }
+  }
+
+  /** Fire-and-forget at start, so the first site is created in seconds rather than minutes. */
+  public async prewarmSiteImages(): Promise<void> {
+    const images = [
+      resolveWordpressImage(DEFAULT_PHP_VERSION),
+      resolveWordpressCliImage(DEFAULT_PHP_VERSION),
+      SHARED_MARIADB_IMAGE,
+    ];
+    for (const image of images) {
+      await this.ensureImageAvailable(image).catch((err: unknown) => {
+        console.warn(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "site_image_prewarm_failed",
+            image,
+            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      });
+    }
   }
 
   public async getServiceLogs(serviceInstanceId: string, tail: number): Promise<ServiceLogLine[]> {

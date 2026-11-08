@@ -41,6 +41,8 @@ export async function startMockDockerDaemon(options?: {
   /** Image inspect answers 404 and /images/create answers 200 with this body. */
   readonly pullBody?: string;
   readonly logsBody?: Buffer;
+  /** POST /containers/<id>/wait answers this StatusCode (default 0); "hang" never answers. */
+  readonly waitStatusCode?: number | "hang";
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -109,6 +111,27 @@ export async function startMockDockerDaemon(options?: {
       if (method === "GET" && logsMatch && options?.logsBody) {
         res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
         res.end(options.logsBody);
+        return;
+      }
+
+      if (method === "GET" && logsMatch) {
+        res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
+        res.end();
+        return;
+      }
+
+      const waitMatch = /^\/containers\/([^/]+)\/(wait|kill)$/.exec(routePath);
+      if (method === "POST" && waitMatch) {
+        if (waitMatch[2] === "kill") {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+        if (options?.waitStatusCode === "hang") {
+          return; // left open; close() drops it
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ StatusCode: options?.waitStatusCode ?? 0 }));
         return;
       }
 
@@ -357,6 +380,7 @@ export async function startMockDockerDaemon(options?: {
     containers,
     requestedPaths,
     async close() {
+      server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(socketPath, { force: true });
     },
