@@ -133,6 +133,10 @@ export interface DockerContainerInspectPayload {
     readonly NetworkMode?: string;
     readonly Binds?: readonly string[] | null;
     readonly ExtraHosts?: readonly string[] | null;
+    readonly LogConfig?: {
+      readonly Type?: string;
+      readonly Config?: Readonly<Record<string, string>> | null;
+    } | null;
     readonly PortBindings?: Readonly<
       Record<string, readonly { readonly HostIp?: string; readonly HostPort?: string }[] | null>
     > | null;
@@ -953,6 +957,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.secretsRootDir = path.resolve(options?.secretsRootDir ?? DEFAULT_SECRETS_ROOT_DIR);
     this.ingressManager = new TraefikIngressFileManager(
       options?.ingressRootDir ?? DEFAULT_INGRESS_ROOT_DIR,
+      options?.panel ?? null,
     );
     this.traefikImage = options?.traefikImage ?? DEFAULT_TRAEFIK_IMAGE;
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
@@ -1051,6 +1056,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         existing.Config?.Labels?.[STATIC_SHA256_LABEL] !== staticSha256 ||
         sortedJson(existingBinds) !== sortedJson(payload.HostConfig.Binds) ||
         sortedJson(existing.HostConfig?.ExtraHosts) !== sortedJson(payload.HostConfig.ExtraHosts) ||
+        existing.HostConfig?.LogConfig?.Type !== payload.HostConfig.LogConfig.Type ||
+        sortedJson(Object.entries(existing.HostConfig?.LogConfig?.Config ?? {}).map(String)) !==
+          sortedJson(Object.entries(payload.HostConfig.LogConfig.Config).map(String)) ||
         (
           existing.NetworkSettings?.Networks?.[INGRESS_BRIDGE_NETWORK_NAME] as
             | { readonly GwPriority?: number }
@@ -1309,7 +1317,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         serviceInstanceId: spec.serviceInstanceId,
         containerName: spec.containerName,
         internalPort: effectiveInternalPort,
-        domains,
+        // shortcut: plain HTTP hosts until the port carries SiteHostRoute (Task 5).
+        hosts: domains.map((hostname) => ({
+          hostname,
+          tls: false,
+          httpsRedirect: false,
+          redirectTo: null,
+        })),
       });
       ingressConfigured = routeResult.configured;
     } else {

@@ -42,6 +42,8 @@ export function parsePanelIngressConfigFromEnv(
     ipv4: env.HP_PANEL_IPV4?.trim() ?? "",
     acmeEmail: env.HP_ACME_EMAIL?.trim() || null,
     acmeStaging: env.HP_ACME_STAGING?.trim().toLowerCase() === "true",
+    acmeCaServer: env.HP_ACME_CA_SERVER?.trim() || null,
+    acmeCaCertFile: env.HP_ACME_CA_CERT_FILE?.trim() || null,
     upstreamPort: Number(env.HP_PANEL_UPSTREAM_PORT?.trim() || 3000),
   };
   try {

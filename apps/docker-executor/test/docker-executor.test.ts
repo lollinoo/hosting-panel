@@ -507,9 +507,8 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
       path.join(ingressRootDir, "dynamic", "site_site_alpha.yml"),
       "utf8",
     );
-    expect(siteDynamicYaml).toContain(
-      "Host(`alpha.hosting.example`) || Host(`www.alpha.hosting.example`)",
-    );
+    expect(siteDynamicYaml).toContain('rule: "Host(`alpha.hosting.example`)"');
+    expect(siteDynamicYaml).toContain('rule: "Host(`www.alpha.hosting.example`)"');
     expect(siteDynamicYaml).toContain('url: "http://hp-site-alpha-web:3000"');
 
     // Verify getObservedState reports clean in_sync-ready state, then detects out-of-band drift
@@ -750,6 +749,8 @@ describe("panel ingress", () => {
     ipv4: "203.0.113.10",
     acmeEmail: "ops@example.it",
     acmeStaging: false,
+    acmeCaServer: null,
+    acmeCaCertFile: null,
     upstreamPort: 3000,
   };
 
@@ -850,6 +851,27 @@ describe("panel ingress", () => {
     await adapter.ensureIngressProxy();
     expect(recreateCalls(mark).length).toBe(2);
     expect(proxy()?.networks).toEqual({ hp_ingress_net: { GwPriority: 1 } });
+  });
+
+  it("recreates a proxy without log rotation once, then keeps it", async () => {
+    const { adapter, mockDaemon, proxy, recreateCalls } = await setupAdapter(panel);
+    await adapter.ensureIngressProxy();
+    const first = proxy();
+    expect(first?.hostConfig.LogConfig).toEqual({
+      Type: "json-file",
+      Config: { "max-size": "10m", "max-file": "3" },
+    });
+    if (first) {
+      first.hostConfig = { ...first.hostConfig, LogConfig: { Type: "json-file", Config: {} } };
+    }
+    let mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark).length).toBe(2);
+    expect(proxy()?.networks).toEqual({ hp_ingress_net: { GwPriority: 1 } });
+
+    mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark)).toEqual([]);
   });
 
   async function setupAdapter(panelConfig: PanelIngressConfig | null) {

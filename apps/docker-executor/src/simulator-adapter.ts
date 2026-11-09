@@ -28,6 +28,7 @@ import {
   buildIngressProxyContainerPayload,
   buildPanelDynamicYaml,
   buildSiteDynamicTraefikYaml,
+  siteRouteOptions,
   buildTraefikStaticYaml,
   DEFAULT_INGRESS_HTTP_PORT,
   DEFAULT_TRAEFIK_IMAGE,
@@ -124,7 +125,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     this.secretsRootDir = options?.secretsRootDir ? path.resolve(options.secretsRootDir) : null;
     this.virtualSecretsRoot = this.secretsRootDir ?? VIRTUAL_SECRETS_ROOT;
     this.ingressFileManager = options?.ingressRootDir
-      ? new TraefikIngressFileManager(options.ingressRootDir)
+      ? new TraefikIngressFileManager(options.ingressRootDir, options.panel ?? null)
       : null;
     this.traefikImage = options?.traefikImage ?? DEFAULT_TRAEFIK_IMAGE;
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
@@ -364,7 +365,13 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
         serviceInstanceId: spec.serviceInstanceId,
         containerName: spec.containerName,
         internalPort: effectiveInternalPort,
-        domains,
+        // shortcut: plain HTTP hosts until the port carries SiteHostRoute (Task 5).
+        hosts: domains.map((hostname) => ({
+          hostname,
+          tls: false,
+          httpsRedirect: false,
+          redirectTo: null,
+        })),
       };
 
       this.upsertVirtualRoute(spec.siteId, routeEntry);
@@ -576,7 +583,11 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     if (!siteMap || siteMap.size === 0) {
       return null;
     }
-    return buildSiteDynamicTraefikYaml(siteId, [...siteMap.values()]);
+    return buildSiteDynamicTraefikYaml(
+      siteId,
+      [...siteMap.values()],
+      siteRouteOptions(this.panel),
+    );
   }
 
   public hasActiveVirtualSecret(serviceInstanceId: string, envName?: string): boolean {

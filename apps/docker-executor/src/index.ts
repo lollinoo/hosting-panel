@@ -74,6 +74,7 @@ export {
   PANEL_DYNAMIC_FILE_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
   TraefikIngressFileManager,
+  acmeStorageFileName,
   assertContainedPath,
   assertSafeDomain,
   assertSafeIdentifier,
@@ -85,11 +86,14 @@ export {
   getSiteEdgeNetworkName,
   getSiteInternalNetworkName,
   sanitizeTraefikKey,
+  siteRouteOptions,
   writeFileAtomically,
+  writeFileIfChanged,
   type DockerIngressProxyCreatePayload,
   type IngressProxyContainerConfigInput,
   type PanelIngressConfig,
   type SiteIngressRouteEntry,
+  type SiteRouteOptions,
 } from "./traefik-config.js";
 
 export {
