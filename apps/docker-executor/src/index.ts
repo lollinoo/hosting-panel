@@ -44,6 +44,16 @@ export {
 } from "./shared-database.js";
 
 export {
+  DEFAULT_MAIL_RELAY_SECRET_DIR,
+  MAIL_RELAY_NETWORK_NAME,
+  MAIL_RELAY_SASL_FILE,
+  MAIL_RELAY_SPOOL_VOLUME,
+  buildMailRelayContainerPayload,
+  buildMailRelaySaslLine,
+  type MailRelayContainerInput,
+} from "./mail-relay.js";
+
+export {
   DB_DROP_SCRIPT,
   DB_PROVISION_SCRIPT,
   DEFAULT_SITE_JOB_TIMEOUT_MS,

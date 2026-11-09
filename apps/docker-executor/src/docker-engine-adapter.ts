@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import {
@@ -11,6 +11,8 @@ import {
   resolveWordpressImage,
   MAIL_RELAY_ALIAS,
   MAIL_RELAY_CONTAINER_NAME,
+  MAIL_RELAY_IMAGE,
+  type MailRelayApplyRequest,
   type PhpVersion,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
@@ -28,6 +30,14 @@ import {
   type SiteRoutesRequest,
 } from "@hosting-panel/executor-contracts";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
+import {
+  DEFAULT_MAIL_RELAY_SECRET_DIR,
+  MAIL_RELAY_NETWORK_NAME,
+  MAIL_RELAY_SASL_FILE,
+  MAIL_RELAY_SPOOL_VOLUME,
+  buildMailRelayContainerPayload,
+  buildMailRelaySaslLine,
+} from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
 import { demuxDockerLogStream } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
@@ -952,6 +962,10 @@ export interface DockerEngineSocketAdapterOptions {
   readonly executorUid?: number;
   /** Site job wait budget; on expiry the job is killed and reports exit 124. */
   readonly jobTimeoutMs?: number;
+  /** tmpfs dir holding sasl_passwd; must exist and be owned by the executor (bootstrap/tmpfiles). */
+  readonly mailRelaySecretDir?: string;
+  /** How long to keep retrying the post-apply queue flush (default 30 000). */
+  readonly mailRelayFlushWaitMs?: number;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -992,6 +1006,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly jobTimeoutMs: number;
   /** `siteId:kind` of the site jobs running now. */
   private readonly runningSiteJobs = new Set<string>();
+  private readonly mailRelaySecretDir: string;
+  private readonly mailRelayFlushWaitMs: number;
+  /** Applies run strictly one after the other; two different configs are never merged. */
+  private mailRelayQueue: Promise<unknown> = Promise.resolve();
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -1017,6 +1035,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.sharedDbAdminSubnet = options?.sharedDbAdminSubnet ?? DEFAULT_SHARED_DB_ADMIN_SUBNET;
     this.executorUid = options?.executorUid ?? process.getuid?.();
     this.jobTimeoutMs = options?.jobTimeoutMs ?? DEFAULT_SITE_JOB_TIMEOUT_MS;
+    this.mailRelaySecretDir = path.resolve(
+      options?.mailRelaySecretDir ?? DEFAULT_MAIL_RELAY_SECRET_DIR,
+    );
+    this.mailRelayFlushWaitMs = options?.mailRelayFlushWaitMs ?? 30_000;
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1160,6 +1182,179 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   /** Serialised like ensureIngressProxy. Called at executor start, never by jobs (they must not pull). */
+  public applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
+    const run = this.mailRelayQueue.then(() => this.applyMailRelayNow(req));
+    this.mailRelayQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyMailRelayNow(req: MailRelayApplyRequest | null): Promise<void> {
+    const secretFile = path.join(this.mailRelaySecretDir, MAIL_RELAY_SASL_FILE);
+    if (req === null) {
+      const existing = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
+      if (existing) {
+        await this.stopAndRemoveContainer(existing.Id);
+      }
+      // The spool volume is kept: queued mail survives a disable/enable.
+      await overwriteAndUnlinkSecretFile(secretFile);
+      return;
+    }
+
+    const dirStat = await lstat(this.mailRelaySecretDir).catch(() => null);
+    if (!dirStat?.isDirectory() || dirStat.uid !== this.executorUid) {
+      throw new ExecutorCodedError(
+        "Mail relay secret directory is missing or not owned by the executor. Run bootstrap first",
+        "HOST_POLICY_DENIED",
+      );
+    }
+    const payload = buildMailRelayContainerPayload({
+      req,
+      myHostname: this.panel?.hostname ?? "hp-mail.localdomain",
+      secretDirHostPath: this.mailRelaySecretDir,
+    });
+    const saslLine = buildMailRelaySaslLine(req);
+    const secretChanged = (await readFile(secretFile, "utf8").catch(() => null)) !== saslLine;
+    await writeFileAtomically(secretFile, saslLine, 0o444, 0o755);
+
+    await this.ensureNetwork(MAIL_RELAY_NETWORK_NAME, {
+      internal: false,
+      labels: {
+        [MANAGED_DOCKER_LABELS.managed]: "true",
+        "io.hostingpanel.network_role": "mail_relay",
+      },
+    });
+    await this.ensureVolume(MAIL_RELAY_SPOOL_VOLUME);
+    await this.ensureImageAvailable(MAIL_RELAY_IMAGE);
+
+    const existing = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
+    const needsRecreate =
+      existing !== null &&
+      existing.Config?.Labels?.[SHARED_DB_CONFIG_SHA256_LABEL] !==
+        payload.Labels[SHARED_DB_CONFIG_SHA256_LABEL];
+    if (existing && needsRecreate) {
+      await this.stopAndRemoveContainer(existing.Id);
+    }
+    let containerId = existing?.Id ?? "";
+    if (!existing || needsRecreate) {
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(MAIL_RELAY_CONTAINER_NAME)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create mail relay container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      containerId = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+    }
+
+    // A (re)start reads the new sasl_passwd anyway; only a running, kept container needs a restart.
+    const mustStart = !existing || needsRecreate || existing.State?.Running !== true;
+    if (mustStart) {
+      const startRes = await this.dockerClient.request("POST", `/containers/${containerId}/start`);
+      if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+        throw new ExecutorCodedError(
+          `Failed to start mail relay container (HTTP ${String(startRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+    } else if (secretChanged) {
+      const restartRes = await this.dockerClient.request(
+        "POST",
+        `/containers/${encodeURIComponent(MAIL_RELAY_CONTAINER_NAME)}/restart?t=10`,
+      );
+      if (restartRes.statusCode !== 204) {
+        throw new ExecutorCodedError(
+          `Failed to restart mail relay container (HTTP ${String(restartRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+    }
+    if (mustStart || secretChanged) {
+      await this.flushMailRelayQueue();
+    }
+
+    await this.reconnectToRoleNetworks("site_internal", MAIL_RELAY_CONTAINER_NAME, [
+      MAIL_RELAY_ALIAS,
+    ]);
+  }
+
+  /** Best effort: Postfix may still be starting. The queue's own backoff delivers later anyway. */
+  private async flushMailRelayQueue(): Promise<void> {
+    const deadline = Date.now() + this.mailRelayFlushWaitMs;
+    for (;;) {
+      const exitCode = await this.execInContainer(MAIL_RELAY_CONTAINER_NAME, [
+        "postqueue",
+        "-f",
+      ]).catch(() => null);
+      if (exitCode === 0) {
+        return;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2_000, remaining)));
+    }
+    console.warn(
+      JSON.stringify({
+        component: "hp-docker-executor",
+        event: "mail_relay_flush_failed",
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  }
+
+  /** Runs a fixed command detached and returns its exit code, or null if it is still running after 10 s. */
+  private async execInContainer(
+    containerRef: string,
+    cmd: readonly string[],
+  ): Promise<number | null> {
+    const createRes = await this.dockerClient.request(
+      "POST",
+      `/containers/${encodeURIComponent(containerRef)}/exec`,
+      { Cmd: cmd, AttachStdout: false, AttachStderr: false },
+    );
+    if (createRes.statusCode !== 201) {
+      throw new ExecutorCodedError(
+        `Failed to create exec (HTTP ${String(createRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    const execId = encodeURIComponent(
+      (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id,
+    );
+    const startRes = await this.dockerClient.request("POST", `/exec/${execId}/start`, {
+      Detach: true,
+    });
+    if (startRes.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to start exec (HTTP ${String(startRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    for (let i = 0; i < 50; i += 1) {
+      const res = await this.dockerClient.request("GET", `/exec/${execId}/json`);
+      if (res.statusCode !== 200) {
+        throw new ExecutorCodedError(
+          `Failed to inspect exec (HTTP ${String(res.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      const state = JSON.parse(res.body.toString("utf8")) as {
+        Running?: boolean;
+        ExitCode?: number | null;
+      };
+      if (state.Running !== true) {
+        return state.ExitCode ?? null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return null;
+  }
+
   public ensureSharedDatabase(): Promise<SharedDatabaseEnsureResult> {
     this.sharedDbEnsureInFlight ??= this.ensureSharedDatabaseOnce().finally(() => {
       this.sharedDbEnsureInFlight = null;
@@ -1927,17 +2122,20 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
+  /** Without a site the volume is a platform one: deleteSite (by site label) never removes it. */
   private async ensureVolume(
     volumeName: string,
-    siteId: string,
-    serviceInstanceId: string,
+    siteId?: string,
+    serviceInstanceId?: string,
   ): Promise<void> {
     const createRes = await this.dockerClient.request("POST", "/volumes/create", {
       Name: volumeName,
       Labels: {
         [MANAGED_DOCKER_LABELS.managed]: "true",
-        [MANAGED_DOCKER_LABELS.siteId]: siteId,
-        [MANAGED_DOCKER_LABELS.serviceInstanceId]: serviceInstanceId,
+        ...(siteId !== undefined ? { [MANAGED_DOCKER_LABELS.siteId]: siteId } : {}),
+        ...(serviceInstanceId !== undefined
+          ? { [MANAGED_DOCKER_LABELS.serviceInstanceId]: serviceInstanceId }
+          : {}),
       },
     });
     if (createRes.statusCode !== 201 && createRes.statusCode !== 200) {

@@ -106,6 +106,22 @@ describe("per-service env files and wrappers", () => {
     for (const s of ["hp-mariadb", "mariadb-root.key", "0440", "/var/lib/hosting-panel/mariadb/data"]) expect(r.stdout).toContain(s);
   });
 
+  it("tmpfiles creates the mail relay secret directory", () => {
+    const lines = read("infra/systemd/hosting-panel-tmpfiles.conf").split("\n");
+    expect(lines).toContain("d /run/hosting-panel/mail-relay 0755 hp-executor hp-executor -");
+    expect(lines).toContain("d /run/hosting-panel 3770 root hp-ipc -");
+    const boot = read("infra/linux/bootstrap-dedicated.sh");
+    for (const d of ["/run/hosting-panel/mail-relay", "/var/lib/hosting-panel/site-mail"]) {
+      expect(boot).toContain(`install -d -m 0755 -o hp-executor -g hp-executor ${d}\n`);
+    }
+  });
+
+  it.skipIf(!hasHost)("bootstrap dry-run creates the mail directories", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    for (const s of ["/run/hosting-panel/mail-relay", "/var/lib/hosting-panel/site-mail"]) expect(r.stdout).toContain(s);
+  });
+
   it("wrappers never put DATABASE_URL in argv", () => {
     for (const w of ["hp-accounts", "hp-break-glass"]) {
       const src = read(`infra/linux/${w}`);
