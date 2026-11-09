@@ -9,6 +9,7 @@ import {
   type ErrorCode,
   type SiteHostRoute,
 } from "@hosting-panel/contracts";
+import { readAcmeCertificates } from "./acme-status.js";
 
 export const INGRESS_PROXY_CONTAINER_NAME = "hp_ingress_proxy" as const;
 export const INGRESS_BRIDGE_NETWORK_NAME = "hp_ingress_net" as const;
@@ -253,7 +254,9 @@ export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string
   return lines.join("\n");
 }
 
-export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
+export type PanelDnsLookup = (hostname: string) => Promise<{ a: string[]; aaaa: string[] }>;
+
+export function buildPanelDynamicYaml(panel: PanelIngressConfig, requestCertificate = true): string {
   const hostname = assertSafeDomain(panel.hostname);
   if (hostname.startsWith("*.")) {
     throw new ExecutorCodedError("Panel hostname cannot be a wildcard", "VALIDATION_ERROR");
@@ -263,7 +266,7 @@ export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
     throw new ExecutorCodedError("Panel IPv4 address is invalid", "VALIDATION_ERROR");
   }
   assertValidPort(panel.upstreamPort, "Panel upstream port");
-  const tls = panel.acmeEmail
+  const tls = panel.acmeEmail && requestCertificate
     ? ["      tls:", "        certResolver: le"]
     : ["      tls: {}"];
   return [
@@ -624,6 +627,9 @@ export class TraefikIngressFileManager {
   private readonly siteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
   private readonly routeOptions: SiteRouteOptions;
+  // Until gatePanelCertificate runs (the executor runs it before the first ensure), keep the resolver.
+  private panelRequestCertificate = true;
+  private panelGateDecided = false;
 
   public constructor(
     ingressRootDir: string = DEFAULT_INGRESS_ROOT_DIR,
@@ -634,6 +640,42 @@ export class TraefikIngressFileManager {
     this.staticConfigPath = path.join(this.ingressRootDir, "static", "traefik.yml");
     this.dynamicDirPath = path.join(this.ingressRootDir, "dynamic");
     this.acmeDirPath = path.join(this.ingressRootDir, "acme");
+  }
+
+  /**
+   * Owner decision (2b): like the sites, the panel asks Let's Encrypt only when its A record points
+   * here with no AAAA, so a wrong record never spends orders (Traefik re-orders on every reload).
+   * A valid stored certificate keeps the resolver (renewal).
+   * Rewrites the panel route file when it exists. Returns whether the certificate is requested.
+   */
+  public async gatePanelCertificate(
+    panel: PanelIngressConfig,
+    lookup: PanelDnsLookup,
+    now: number = Date.now(),
+  ): Promise<boolean> {
+    const hostname = panel.hostname.trim().toLowerCase();
+    let wanted = false;
+    if (panel.acmeEmail) {
+      const store = await readAcmeCertificates(path.join(this.acmeDirPath, acmeStorageFileName(panel)));
+      // A failed lookup keeps the last decision; before any decision it fails closed.
+      const previous = this.panelGateDecided && this.panelRequestCertificate;
+      wanted = store.certificates.some((c) => c.hostname === hostname && Date.parse(c.notAfter) > now);
+      if (!wanted) {
+        try {
+          const { a, aaaa } = await lookup(hostname);
+          wanted = a.length > 0 && a.every((ip) => ip === panel.ipv4.trim()) && aaaa.length === 0;
+        } catch {
+          wanted = previous;
+        }
+      }
+    }
+    this.panelRequestCertificate = wanted;
+    this.panelGateDecided = true;
+    const panelFilePath = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
+    if (await stat(panelFilePath).catch(() => null)) {
+      await writeFileIfChanged(panelFilePath, buildPanelDynamicYaml(panel, wanted), 0o644);
+    }
+    return wanted;
   }
 
   public getSiteDynamicFilePath(siteId: string): string {
@@ -668,7 +710,7 @@ export class TraefikIngressFileManager {
 
     const panelFilePath = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
     if (panel) {
-      await writeFileIfChanged(panelFilePath, buildPanelDynamicYaml(panel), 0o644);
+      await writeFileIfChanged(panelFilePath, buildPanelDynamicYaml(panel, this.panelRequestCertificate), 0o644);
     } else {
       await rm(panelFilePath, { force: true });
     }

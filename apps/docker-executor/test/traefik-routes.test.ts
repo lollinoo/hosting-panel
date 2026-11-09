@@ -297,3 +297,53 @@ describe("proxy and static config", () => {
     ).toMatchObject({ acmeCaServer: "https://pebble/dir", acmeCaCertFile: "/etc/ca.pem" });
   });
 });
+
+describe("panel certificate gate (owner decision: wait for DNS like the sites)", () => {
+  const here = async () => ({ a: [PANEL.ipv4], aaaa: [] });
+  const panelYaml = (root: string) => readFile(path.join(root, "dynamic", "hp-panel.yml"), "utf8");
+
+  it("asks Let's Encrypt only once the A record points here and there is no AAAA", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    expect(await manager.gatePanelCertificate(PANEL, async () => ({ a: ["198.51.100.7"], aaaa: [] }))).toBe(false);
+    await manager.ensureStaticConfig(PANEL);
+    expect(await panelYaml(root)).not.toContain("certResolver");
+    expect(await manager.gatePanelCertificate(PANEL, async () => ({ a: [PANEL.ipv4], aaaa: ["2001:db8::1"] }))).toBe(false);
+    expect(await manager.gatePanelCertificate(PANEL, here)).toBe(true);
+    expect(await panelYaml(root)).toContain("certResolver: le");
+  });
+
+  it("keeps the resolver while a valid certificate is stored, whatever DNS says", async () => {
+    const root = await tmp();
+    const panel = { ...PANEL, hostname: "hotel.it" };
+    const manager = new TraefikIngressFileManager(root, panel);
+    await manager.ensureStaticConfig(panel);
+    await writeFile(
+      path.join(root, "acme", "acme.json"),
+      await readFile(path.join(import.meta.dirname, "fixtures", "acme.json")),
+    );
+    expect(await manager.gatePanelCertificate(panel, async () => ({ a: [], aaaa: [] }))).toBe(true);
+    expect(await panelYaml(root)).toContain("certResolver: le");
+  });
+
+  it("a failed lookup keeps the previous decision, and fails closed before any decision", async () => {
+    const fail = async (): Promise<never> => {
+      throw new Error("SERVFAIL");
+    };
+    const fresh = new TraefikIngressFileManager(await tmp(), PANEL);
+    expect(await fresh.gatePanelCertificate(PANEL, fail)).toBe(false);
+    const manager = new TraefikIngressFileManager(await tmp(), PANEL);
+    await manager.gatePanelCertificate(PANEL, here);
+    expect(await manager.gatePanelCertificate(PANEL, fail)).toBe(true);
+  });
+
+  it("no ACME email: never a resolver, no lookup", async () => {
+    const root = await tmp();
+    const panel = { ...PANEL, acmeEmail: null };
+    const manager = new TraefikIngressFileManager(root, panel);
+    const never = async (): Promise<never> => {
+      throw new Error("must not look up");
+    };
+    expect(await manager.gatePanelCertificate(panel, never)).toBe(false);
+  });
+});

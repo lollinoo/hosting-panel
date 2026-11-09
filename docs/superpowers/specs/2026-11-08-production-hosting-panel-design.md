@@ -97,7 +97,7 @@ Site type in this version (**owner decision, 2026-11-08: WordPress only**):
 - A site can have more than one domain (aliases) only if it comes nearly free. Otherwise it is out of this version. **(builder's call)**
 - Out of this version: wildcard certificates (need DNS control), uploading custom certificates. **(builder's call)**
 - **Owner decisions, 2026-11-09 (Step 2b):**
-  - The panel's own certificate is not gated by the DNS check; create the panel's A record before installing.
+  - The panel's own certificate waits for DNS like the sites (owner, after the live run showed Traefik re-orders a failing name on every reload): the executor asks Let's Encrypt only when the panel's A record points to the server with no AAAA, or a valid certificate is already stored; it rechecks every 5 minutes. Create the panel's A record before installing.
   - "Also www" is ticked by default for two-label and `www.` names, and not for subdomains.
   - Up to 10 web addresses per site, each redirecting to the main address.
   - When port 80 is blocked, the customer is told the server administrator has been alerted.

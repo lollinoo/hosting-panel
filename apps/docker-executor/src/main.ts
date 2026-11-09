@@ -1,3 +1,4 @@
+import dns from "node:dns";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getWorkspaceMetadata } from "@hosting-panel/config";
@@ -27,6 +28,7 @@ import {
 } from "./traefik-config.js";
 
 const PANEL_INGRESS_RETRY_MS = 60_000;
+const PANEL_CERTIFICATE_GATE_MS = 5 * 60_000;
 const SHARED_DATABASE_RETRY_MS = 60_000;
 
 /** Empty HP_PANEL_HOSTNAME ⇒ null (panel ingress disabled). Invalid values are logged and disable it too. */
@@ -293,7 +295,37 @@ export async function bootstrapDockerExecutorDaemon(
         setTimeout(() => void ensurePanelIngress(), PANEL_INGRESS_RETRY_MS).unref();
       }
     };
+    // Public resolvers, as the API's DNS check (HP_DNS_RESOLVERS overrides for the test harness).
+    const servers = (env.HP_DNS_RESOLVERS ?? "").split(",").map((v) => v.trim()).filter(Boolean);
+    const lookup = async (hostname: string): Promise<{ a: string[]; aaaa: string[] }> => {
+      const resolver = new dns.promises.Resolver({ timeout: 2000, tries: 1 });
+      resolver.setServers(servers.length > 0 ? servers : ["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
+      const none = (e: { code?: string }): string[] => {
+        if (e.code === dns.NODATA || e.code === dns.NOTFOUND) return [];
+        throw e;
+      };
+      const [a, aaaa] = await Promise.all([
+        resolver.resolve4(hostname).catch(none),
+        resolver.resolve6(hostname).catch(none),
+      ]);
+      return { a, aaaa };
+    };
+    let lastGate: boolean | null = null;
+    const gatePanelCertificate = async (): Promise<void> => {
+      const requested = await dockerAdapter.gatePanelCertificate(lookup).catch(() => lastGate);
+      if (requested === null || requested === lastGate) return;
+      lastGate = requested;
+      console.info(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          status: requested ? "panel_certificate_requested" : "panel_certificate_waiting_for_dns",
+          hostname: panel.hostname,
+        }),
+      );
+    };
+    await gatePanelCertificate();
     await ensurePanelIngress();
+    setInterval(() => void gatePanelCertificate(), PANEL_CERTIFICATE_GATE_MS).unref();
   }
 
   return server;

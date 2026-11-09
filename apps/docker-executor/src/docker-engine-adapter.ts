@@ -38,6 +38,7 @@ import {
   STATIC_SHA256_LABEL,
   acmeStorageFileName,
   TraefikIngressFileManager,
+  type PanelDnsLookup,
   type PanelIngressConfig,
   assertContainedPath,
   assertSafeDomain,
@@ -1631,6 +1632,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         INGRESS_PROXY_CONTAINER_NAME,
       ).catch(() => undefined);
     }
+  }
+
+  /** See TraefikIngressFileManager.gatePanelCertificate. */
+  public async gatePanelCertificate(lookup: PanelDnsLookup): Promise<boolean> {
+    return this.panel ? this.ingressManager.gatePanelCertificate(this.panel, lookup) : false;
   }
 
   public async getCertificateStatus(req: { failuresSince: string }): Promise<CertificateStatusReport> {

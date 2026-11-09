@@ -92,6 +92,7 @@ export {
   writeFileIfChanged,
   type DockerIngressProxyCreatePayload,
   type IngressProxyContainerConfigInput,
+  type PanelDnsLookup,
   type PanelIngressConfig,
   type SiteIngressRouteEntry,
   type SiteRouteOptions,
