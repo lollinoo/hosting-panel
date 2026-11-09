@@ -61,6 +61,18 @@ export function routePlanHash(hosts: readonly SiteHostRoute[], wordpressUrl: str
   return createHash("sha256").update(JSON.stringify({ hosts: canonical, wordpressUrl })).digest("hex");
 }
 
+/** True when the site's current plan differs from the one last published. */
+export function routesPending(
+  rows: readonly DomainRow[],
+  now: Date,
+  site: { readonly appliedRoutesHash: string | null; readonly wordpressUrl: string | null },
+  acmeEnabled = true,
+): boolean {
+  const hosts = buildSiteHostRoutes(rows, now, { acmeEnabled });
+  if (site.appliedRoutesHash === null) return hosts.length > 0;
+  return routePlanHash(hosts, desiredWordpressUrl(rows, now, site.wordpressUrl, acmeEnabled)) !== site.appliedRoutesHash;
+}
+
 export type DnsEvaluation = Exclude<DnsStatus, "unchecked" | "lookup_failed">;
 
 export function evaluateDns(
@@ -98,11 +110,9 @@ export function manualCertRetryAt(
   now: Date,
   row: Pick<DomainRow, "certStatus" | "certProblem" | "certRequestedAt" | "certRetryAt">,
 ): Date | null {
-  if (row.certStatus !== "failed" || row.certProblem === "rate_limited") return null;
-  const earliest = Math.max(
-    now.getTime(),
-    (row.certRequestedAt?.getTime() ?? 0) + MANUAL_CERT_RETRY_GAP_MS,
-  );
+  // No request time means the 15-min gap cannot be enforced: fail closed.
+  if (row.certStatus !== "failed" || row.certProblem === "rate_limited" || !row.certRequestedAt) return null;
+  const earliest = Math.max(now.getTime(), row.certRequestedAt.getTime() + MANUAL_CERT_RETRY_GAP_MS);
   const t = row.certRetryAt ? Math.min(earliest, row.certRetryAt.getTime()) : earliest;
   return new Date(t);
 }

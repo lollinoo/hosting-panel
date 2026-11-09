@@ -33,7 +33,8 @@ import {
   HOST_AGENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "./tokens.js";
-import { createNodeDnsLookup, DEFAULT_DNS_RESOLVERS, type DnsLookup } from "./sites/dns-check.js";
+import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
+import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
@@ -83,7 +84,7 @@ export class AppModule {
         },
         {
           provide: DNS_LOOKUP_TOKEN,
-          useValue: options.dnsLookup ?? createNodeDnsLookup(DEFAULT_DNS_RESOLVERS),
+          useValue: options.dnsLookup ?? createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
         },
         OidcService,
         AuthzContextService,
@@ -93,6 +94,7 @@ export class AppModule {
         SiteDomainsApplier,
         ManagedSitesService,
         DriftReconcilerService,
+        DomainReconcilerService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,
@@ -107,6 +109,7 @@ export class AppModule {
         AuthzContextService,
         OutboxWorkerService,
         DriftReconcilerService,
+        DomainReconcilerService,
       ],
     };
   }

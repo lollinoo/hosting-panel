@@ -29,7 +29,8 @@ import {
   InMemoryHostSimulatorAdapter,
   SignedHostAgentIpcClient,
 } from "@hosting-panel/host-agent";
-import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
+import type { DnsLookup } from "./sites/dns-check.js";
+import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -213,6 +214,7 @@ export interface CreateControlPlaneAppOptions {
   readonly autoProcessOutbox?: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
+  readonly domainReconcileIntervalMs?: number | null;
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
@@ -233,6 +235,7 @@ export interface ControlPlaneAppHandle {
   readonly authz: AuthzContextService;
   readonly outboxWorker: OutboxWorkerService;
   readonly driftReconciler: DriftReconcilerService;
+  readonly domainReconciler: DomainReconcilerService;
   close(): Promise<void>;
 }
 
@@ -349,6 +352,16 @@ export async function createControlPlaneApp(
         ? (parsedEnvDriftInterval ?? 15_000)
         : null;
 
+  const envDomainIntervalRaw = process.env["HP_DOMAIN_RECONCILE_INTERVAL_MS"]?.trim();
+  const domainReconcileIntervalMs =
+    options?.domainReconcileIntervalMs !== undefined
+      ? options.domainReconcileIntervalMs
+      : shouldListen && runtimeBackend !== "disabled"
+        ? (envDomainIntervalRaw && /^\d+$/.test(envDomainIntervalRaw)
+            ? Number.parseInt(envDomainIntervalRaw, 10)
+            : 60_000)
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
@@ -360,6 +373,7 @@ export async function createControlPlaneApp(
     autoProcessOutbox,
     outboxPollIntervalMs,
     driftReconcileIntervalMs,
+    domainReconcileIntervalMs,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -426,9 +440,7 @@ export async function createControlPlaneApp(
       dbClient,
       dockerExecutor,
       hostAgent,
-      dnsLookup:
-        options?.dnsLookup ??
-        createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
+      ...(options?.dnsLookup ? { dnsLookup: options.dnsLookup } : {}),
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },
@@ -460,6 +472,7 @@ export async function createControlPlaneApp(
   const authz = nestApp.get(AuthzContextService);
   const outboxWorker = nestApp.get(OutboxWorkerService);
   const driftReconciler = nestApp.get(DriftReconcilerService);
+  const domainReconciler = nestApp.get(DomainReconcilerService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
@@ -470,6 +483,7 @@ export async function createControlPlaneApp(
     void driftReconciler.reconcileAllOnce().catch(() => undefined);
   }
   driftReconciler.startBackgroundLoop();
+  domainReconciler.startBackgroundLoop();
 
   let isClosed = false;
 
@@ -486,6 +500,7 @@ export async function createControlPlaneApp(
     authz,
     outboxWorker,
     driftReconciler,
+    domainReconciler,
     async close(): Promise<void> {
       if (isClosed) {
         return;
@@ -494,6 +509,7 @@ export async function createControlPlaneApp(
 
       await outboxWorker.stop();
       await driftReconciler.stop();
+      await domainReconciler.stop();
       await nestApp.close();
       if (ownsDatabaseClient) {
         await dbClient.close();

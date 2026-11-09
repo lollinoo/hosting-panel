@@ -1,5 +1,9 @@
 import dns from "node:dns";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { DatabaseClient } from "@hosting-panel/database";
+import { AppModule } from "../src/app.module.js";
+import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
+import { DNS_LOOKUP_TOKEN } from "../src/tokens.js";
 import {
   certRetryAt,
   evaluateDns,
@@ -46,6 +50,8 @@ describe("domain policy", () => {
     expect(manualCertRetryAt(new Date(T.getTime() + 30 * 60_000), row)).toEqual(new Date(T.getTime() + 30 * 60_000));
     expect(manualCertRetryAt(click, { ...row, certProblem: "rate_limited" })).toBeNull();
     expect(manualCertRetryAt(click, { ...row, certStatus: "requested" })).toBeNull();
+    // Fail closed: without a request time the 15-min gap cannot be enforced.
+    expect(manualCertRetryAt(click, { ...row, certRequestedAt: null })).toBeNull();
   });
   it("createNodeDnsLookup maps NODATA to an empty list and rethrows other errors", async () => {
     const err = (code: string) => Object.assign(new Error(code), { code });
@@ -58,5 +64,24 @@ describe("domain policy", () => {
     expect(await ok.lookup("a.test")).toEqual({ a: [IP], aaaa: [] });
     const bad = createNodeDnsLookup(["1.1.1.1"], () => make(() => Promise.reject(err(dns.TIMEOUT))));
     await expect(bad.lookup("a.test")).rejects.toThrow();
+  });
+});
+
+describe("app module DNS lookup", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env["HP_DNS_RESOLVERS"];
+  });
+
+  it("the default lookup uses HP_DNS_RESOLVERS", async () => {
+    process.env["HP_DNS_RESOLVERS"] = "127.0.0.1:5353";
+    const servers = vi.spyOn(dns.promises.Resolver.prototype, "setServers").mockImplementation(() => undefined);
+    vi.spyOn(dns.promises.Resolver.prototype, "resolve4").mockResolvedValue([]);
+    vi.spyOn(dns.promises.Resolver.prototype, "resolve6").mockResolvedValue([]);
+    const mod = AppModule.register({ config: {} as ControlPlaneRuntimeConfig, dbClient: {} as DatabaseClient });
+    const provider = mod.providers!.find((p) => typeof p === "object" && "provide" in p && p.provide === DNS_LOOKUP_TOKEN);
+    const lookup = (provider as { useValue: { lookup(h: string): Promise<unknown> } }).useValue;
+    await lookup.lookup("hotel.it");
+    expect(servers).toHaveBeenCalledWith(["127.0.0.1:5353"]);
   });
 });

@@ -287,8 +287,17 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     this.certificates.set(hostname, { hostname, notAfter, serialNumber: `sim-${hostname}` });
   }
 
-  public failCertificate(hostname: string, problem: CertProblem, at = new Date().toISOString()): void {
-    this.certFailures.push({ hostname, at, kind: "obtain", problem, detail: `simulated ${problem}` });
+  public removeCertificate(hostname: string): void {
+    this.certificates.delete(hostname);
+  }
+
+  public failCertificate(
+    hostname: string,
+    problem: CertProblem,
+    at = new Date().toISOString(),
+    kind: AcmeFailure["kind"] = "obtain",
+  ): void {
+    this.certFailures.push({ hostname, at, kind, problem, detail: `simulated ${problem}` });
   }
 
   public setCertificateStoreReadable(readable: boolean): void {

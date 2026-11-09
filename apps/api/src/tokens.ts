@@ -17,4 +17,5 @@ export interface ControlPlaneRuntimeConfig {
   readonly autoProcessOutbox: boolean;
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
+  readonly domainReconcileIntervalMs?: number | null;
 }

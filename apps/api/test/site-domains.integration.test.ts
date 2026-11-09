@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  and,
   auditEvents,
   createDatabaseClient,
   domains,
@@ -20,6 +21,7 @@ import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.
 import {
   buildSiteHostRoutes,
   desiredWordpressUrl,
+  manualCertRetryAt,
   routePlanHash,
 } from "../src/sites/domain-policy.js";
 import { enqueueSiteDomainsOperation } from "../src/sites/site-domains-applier.js";
@@ -143,6 +145,7 @@ describe("site.domains operation", () => {
   let sim: InMemoryDockerSimulatorAdapter;
   let token: string;
   let orgId: string;
+  const dnsAnswers = new Map<string, { a: string[]; aaaa: string[] } | Error>();
 
   async function login(email: string, password: string, totpSecret?: string): Promise<string> {
     const res = await fetch(`${app.baseUrl!}/v1/auth/login`, {
@@ -199,7 +202,16 @@ describe("site.domains operation", () => {
     await setupInstallation(dbClient.db, SETUP);
     const admin = await createServerAdmin(dbClient.db, KEY, { email: "admin@x.it", name: "Admin", password: PW });
     sim = new InMemoryDockerSimulatorAdapter();
+    dnsAnswers.clear();
     app = await createControlPlaneApp({
+      dnsLookup: {
+        lookup: async (h) => {
+          const v = dnsAnswers.get(h) ?? { a: [], aaaa: [] };
+          if (v instanceof Error) throw v;
+          return v;
+        },
+      },
+      domainReconcileIntervalMs: null,
       listen: true,
       host: "127.0.0.1",
       port: 0,
@@ -458,5 +470,257 @@ describe("site.domains operation", () => {
     expect(op.errorMessage).toBe("This change was interrupted. We'll try again shortly.");
     expect((await site(siteId)).status).toBe("ready");
     expect(sim.routeHistory).toHaveLength(routes);
+  });
+
+  describe("reconciler", () => {
+    const MIN = 60_000;
+    let t0: Date;
+    const at = (min: number) => new Date(t0.getTime() + min * MIN);
+    const reconcile = async (min: number) => {
+      await app.domainReconciler.reconcileOnce(at(min));
+      await run();
+    };
+    const dom = async (h: string) => (await dbClient.db.select().from(domains).where(eq(domains.hostname, h)))[0]!;
+    const pointHere = (h: string) => dnsAnswers.set(h, { a: ["10.0.0.1"], aaaa: [] });
+    const plan = (siteId: string) => sim.appliedRoutes.get(siteId)!.hosts.map((h) => ({ ...h }));
+    const domainOps = (siteId: string) =>
+      dbClient.db
+        .select()
+        .from(operations)
+        .where(and(eq(operations.resourceId, siteId), eq(operations.kind, "site.domains")));
+    const audits = (action: string) => dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, action));
+    const tlsRequests = () => sim.routeHistory.filter((r) => r.hosts.some((h) => h.tls)).length;
+    // What "Check now" does (Task 9): bring a retry forward within the policy, then reconcile the site.
+    const checkNow = async (siteId: string, h: string, min: number) => {
+      const retry = manualCertRetryAt(at(min), await dom(h));
+      if (retry) await setCert(h, { certRetryAt: retry });
+      await app.domainReconciler.reconcileSite(siteId, at(min), { forceDnsCheck: true });
+      await run();
+    };
+    const plain = { hostname: "hotel.it", tls: false, httpsRedirect: false, redirectTo: null };
+
+    beforeEach(() => {
+      // A minute ahead of the clock: rows the test creates are already due for a DNS check.
+      t0 = new Date(Date.now() + MIN);
+    });
+
+    async function requested(): Promise<string> {
+      const siteId = await createAndRun();
+      pointHere("hotel.it");
+      await reconcile(0);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      return siteId;
+    }
+
+    async function activated(): Promise<string> {
+      const siteId = await requested();
+      sim.issueCertificate("hotel.it", new Date(t0.getTime() + 90 * DAY).toISOString());
+      await reconcile(1);
+      expect((await dom("hotel.it")).certStatus).toBe("active");
+      return siteId;
+    }
+
+    it("waiting for DNS until the A record points here, then a certificate is requested and the site goes https", async () => {
+      const siteId = await createAndRun();
+      await reconcile(0);
+      let d = await dom("hotel.it");
+      expect(d).toMatchObject({ dnsStatus: "not_found", certStatus: "none", dnsAttempts: 1 });
+      expect(d.dnsNextCheckAt).toEqual(at(1));
+      expect(await domainOps(siteId)).toHaveLength(0);
+
+      pointHere("hotel.it");
+      await reconcile(1);
+      d = await dom("hotel.it");
+      expect(d).toMatchObject({ dnsStatus: "ok", certStatus: "requested", dnsAttempts: 0 });
+      expect(d.dnsObserved).toEqual({ a: ["10.0.0.1"], aaaa: [] });
+      expect(d.certRequestedAt).toEqual(at(1));
+      const ops = await domainOps(siteId);
+      expect(ops.map((o) => o.status)).toEqual(["succeeded"]);
+      expect(plan(siteId)).toEqual([{ ...plain, tls: true }]);
+
+      sim.issueCertificate("hotel.it", new Date(t0.getTime() + 90 * DAY).toISOString());
+      const jobs = sim.jobs.length;
+      await reconcile(2);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "active", certProblem: null, certAttempts: 0 });
+      expect(sim.jobs.slice(jobs).map((j) => j.kind)).toEqual(["wordpress.set-url"]);
+      expect(plan(siteId)).toEqual([{ ...plain, tls: true, httpsRedirect: true }]);
+      expect((await site(siteId)).wordpressUrl).toBe("https://hotel.it");
+      expect(await audits("site.certificate.issued")).toHaveLength(1);
+
+      await reconcile(3);
+      expect(await domainOps(siteId)).toHaveLength(2);
+      expect(await audits("site.certificate.issued")).toHaveLength(1);
+    });
+
+    it("a failure removes the resolver and schedules a retry", async () => {
+      const siteId = await requested();
+      sim.failCertificate("hotel.it", "port_80_blocked", at(1).toISOString());
+      await reconcile(1);
+      const d = await dom("hotel.it");
+      expect(d).toMatchObject({ certStatus: "failed", certProblem: "port_80_blocked", certAttempts: 1 });
+      expect(d.certRetryAt).toEqual(at(16));
+      expect(plan(siteId)).toEqual([plain]);
+      const [audit] = await audits("site.certificate.failed");
+      expect(audit!.details).toEqual({ hostname: "hotel.it", problem: "port_80_blocked", detail: "simulated port_80_blocked" });
+
+      await reconcile(15);
+      expect((await dom("hotel.it")).certStatus).toBe("failed");
+      await reconcile(16);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "requested", certRequestedAt: at(16) });
+      expect(plan(siteId)).toEqual([{ ...plain, tls: true }]);
+    });
+
+    it("a request with no certificate and no failure after 10 minutes counts as failed", async () => {
+      await requested();
+      await reconcile(9);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      await reconcile(10);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "failed", certProblem: "other", certRetryAt: at(25) });
+    });
+
+    it("check now does not shorten a rate-limit wait", async () => {
+      const siteId = await requested();
+      sim.failCertificate("hotel.it", "rate_limited", at(0).toISOString());
+      await reconcile(0);
+      expect((await dom("hotel.it")).certRetryAt).toEqual(new Date(at(0).getTime() + DAY));
+      await checkNow(siteId, "hotel.it", 1);
+      const d = await dom("hotel.it");
+      expect(d).toMatchObject({ certStatus: "failed", certProblem: "rate_limited" });
+      expect(d.certRetryAt).toEqual(new Date(at(0).getTime() + DAY));
+    });
+
+    it("check now cannot bring a certificate retry forward twice within 15 min", async () => {
+      const siteId = await requested();
+      expect(tlsRequests()).toBe(1);
+      sim.failCertificate("hotel.it", "port_80_blocked", at(0).toISOString());
+      await reconcile(0);
+      for (const min of [1, 2, 3]) {
+        await checkNow(siteId, "hotel.it", min);
+        await reconcile(min);
+        expect(await dom("hotel.it")).toMatchObject({ certStatus: "failed", certRetryAt: at(15) });
+      }
+      await reconcile(14);
+      expect(tlsRequests()).toBe(1);
+
+      await reconcile(16);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      expect(tlsRequests()).toBe(2);
+      sim.failCertificate("hotel.it", "port_80_blocked", at(16).toISOString());
+      await reconcile(16);
+      expect((await dom("hotel.it")).certRetryAt).toEqual(at(76));
+      await checkNow(siteId, "hotel.it", 17);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "failed", certRetryAt: at(31) });
+      await reconcile(30);
+      expect(tlsRequests()).toBe(2);
+      await reconcile(31);
+      expect(tlsRequests()).toBe(3);
+    });
+
+    it("concurrent reconciles never request twice", async () => {
+      const siteId = await createAndRun();
+      pointHere("hotel.it");
+      await Promise.all([app.domainReconciler.reconcileOnce(at(0)), app.domainReconciler.reconcileSite(siteId, at(0))]);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      expect(await audits("site.certificate.requested")).toHaveLength(1);
+      expect(await domainOps(siteId)).toHaveLength(1);
+    });
+
+    it("a renewal failure keeps the certificate active and raises the problem", async () => {
+      const siteId = await activated();
+      sim.failCertificate("hotel.it", "port_80_blocked", at(5).toISOString(), "renew");
+      await reconcile(5);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "active", certProblem: "port_80_blocked" });
+      expect(plan(siteId)).toEqual([{ ...plain, tls: true, httpsRedirect: true }]);
+
+      // The renewal goes through: a new certificate clears the problem, and the old failure does not bring it back.
+      sim.issueCertificate("hotel.it", new Date(t0.getTime() + 120 * DAY).toISOString());
+      await reconcile(6);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "active", certProblem: null });
+      await reconcile(7);
+      expect((await dom("hotel.it")).certProblem).toBeNull();
+      expect(await audits("site.certificate.issued")).toHaveLength(2);
+    });
+
+    it("an unreadable store keeps every certificate state", async () => {
+      const siteId = await activated();
+      const ops = (await domainOps(siteId)).length;
+      const before = await dom("hotel.it");
+      sim.setCertificateStoreReadable(false);
+      await reconcile(5);
+      await reconcile(20);
+      const after = await dom("hotel.it");
+      expect(after.certStatus).toBe("active");
+      expect({ ...after, updatedAt: null, dnsCheckedAt: null }).toEqual({ ...before, updatedAt: null, dnsCheckedAt: null });
+      expect(await domainOps(siteId)).toHaveLength(ops);
+    });
+
+    it("a store that lost a certificate requests it again whatever DNS says", async () => {
+      const siteId = await activated();
+      dnsAnswers.set("hotel.it", { a: ["198.51.100.9"], aaaa: [] });
+      sim.removeCertificate("hotel.it");
+      await app.domainReconciler.reconcileSite(siteId, at(5), { forceDnsCheck: true });
+      await run();
+      expect(await dom("hotel.it")).toMatchObject({ dnsStatus: "points_elsewhere", certStatus: "requested", certRequestedAt: at(5) });
+      await reconcile(6);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      expect(plan(siteId)[0]!.tls).toBe(true);
+    });
+
+    it("DNS pointing away later never drops an issued certificate", async () => {
+      const siteId = await activated();
+      dnsAnswers.set("hotel.it", { a: ["198.51.100.9"], aaaa: [] });
+      await app.domainReconciler.reconcileSite(siteId, at(5), { forceDnsCheck: true });
+      await run();
+      expect(await dom("hotel.it")).toMatchObject({ dnsStatus: "points_elsewhere", certStatus: "active" });
+      expect(plan(siteId)[0]!.tls).toBe(true);
+    });
+
+    it("a fresh request whose DNS breaks goes back to none", async () => {
+      const siteId = await requested();
+      dnsAnswers.set("hotel.it", new Error("SERVFAIL"));
+      await app.domainReconciler.reconcileSite(siteId, at(1), { forceDnsCheck: true });
+      await run();
+      expect(await dom("hotel.it")).toMatchObject({ dnsStatus: "lookup_failed", certStatus: "none" });
+      expect(plan(siteId)).toEqual([plain]);
+    });
+
+    it("a AAAA record blocks the request", async () => {
+      await createAndRun();
+      dnsAnswers.set("hotel.it", { a: ["10.0.0.1"], aaaa: ["2001:db8::1"] });
+      await reconcile(0);
+      expect(await dom("hotel.it")).toMatchObject({ dnsStatus: "ipv6_conflict", certStatus: "none" });
+    });
+
+    it("a locked site is retried on the next pass", async () => {
+      const siteId = await createAndRun();
+      const lockId = `op_lock_${randomUUID().replace(/-/g, "")}`;
+      await dbClient.db.insert(operations).values({
+        id: lockId,
+        organizationId: orgId,
+        kind: "site.provision",
+        status: "processing",
+        resourceType: "site",
+        resourceId: siteId,
+        lockKey: `site:${siteId}`,
+      });
+      pointHere("hotel.it");
+      await reconcile(0);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      expect(await domainOps(siteId)).toHaveLength(0);
+
+      await dbClient.db.update(operations).set({ status: "succeeded" }).where(eq(operations.id, lockId));
+      await reconcile(1);
+      expect((await domainOps(siteId)).map((o) => o.status)).toEqual(["succeeded"]);
+      expect(plan(siteId)).toEqual([{ ...plain, tls: true }]);
+    });
+
+    it("the reconciler never requests with acme disabled", async () => {
+      const siteId = await createAndRun();
+      sim.acmeEnabled = false;
+      pointHere("hotel.it");
+      await reconcile(0);
+      expect(await dom("hotel.it")).toMatchObject({ dnsStatus: "ok", certStatus: "none" });
+      expect(await domainOps(siteId)).toHaveLength(0);
+    });
   });
 });
