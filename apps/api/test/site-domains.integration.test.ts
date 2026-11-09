@@ -964,6 +964,32 @@ describe("site.domains operation", () => {
       expect((await dom("bellavista.it")).certStatus).toBe("requested");
     });
 
+    for (const by of ["customer", "admin"] as const) {
+      it(`a rate-limited name removed from one site and used by a new site (${by} create) waits 24 h`, async () => {
+        const siteA = await createAndRun();
+        await failedThenReAdded(siteA, "rate_limited");
+        expect((await call("DELETE", `${base(siteA)}/${(await dom("bellavista.it")).id}`)).status).toBe(200);
+
+        const body = { ...SITE, name: "Bella", domain: "bellavista.it", includeWww: true };
+        const res =
+          by === "customer"
+            ? await call("POST", org("/managed-sites"), body)
+            : await call("POST", "/v1/admin/sites", { ...body, ownerOrganizationId: null }, adminToken);
+        expect(res.status).toBe(202);
+        await run();
+        const siteB = res.body.data.siteId as string;
+        const d = await dom("bellavista.it");
+        expect(d).toMatchObject({ siteId: siteB, certStatus: "failed", certProblem: "rate_limited" });
+        expect(d.certRetryAt!.getTime()).toBeGreaterThan(Date.now() + 23 * 3600_000);
+        dnsAnswers.set("www.bellavista.it", { a: ["10.0.0.1"], aaaa: [] });
+        await app.domainReconciler.reconcileSite(siteB, new Date(Date.now() + 3600_000), { forceDnsCheck: true });
+        expect((await dom("bellavista.it")).certStatus).toBe("failed");
+        expect(await requestedFor("bellavista.it")).toHaveLength(1);
+        // The partner has no history of its own and is ordered normally.
+        expect((await dom("www.bellavista.it")).certStatus).toBe("requested");
+      });
+    }
+
     it("adding names already on the site looks nothing up", async () => {
       const siteId = await createAndRun();
       expect((await call("POST", base(siteId), { hostname: "hotel.it" })).status).toBe(201);

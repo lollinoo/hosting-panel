@@ -33,6 +33,7 @@ import {
   insertSiteDomains,
   isNotNull,
   latestSiteOperation,
+  listSiteDomains,
   membershipRoles,
   memberships,
   not,
@@ -64,6 +65,7 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { restoreCertificateThrottle } from "./site-domains.service.js";
 
 const SERVICE_STEPS = [
   { key: "validate_spec", label: "Check the request" },
@@ -177,6 +179,7 @@ export class ManagedSitesService {
         if (partner) {
           await insertSiteDomains(t, { siteId: site.id, organizationId, hostnames: [partner], routed: false });
         }
+        await restoreCertificateThrottle(t, await listSiteDomains(t, site.id));
 
         await createServiceWithRevisionTransactional(t, {
           siteId: site.id,

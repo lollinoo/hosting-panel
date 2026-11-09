@@ -55,6 +55,48 @@ export function requestedHostnames(input: AddSiteDomainInput): string[] {
   return partner ? [input.hostname, partner] : [input.hostname];
 }
 
+/**
+ * Let's Encrypt limits are per name and per account (shared by the whole server), so a name removed and
+ * added again keeps the request and failure history of its last 24 h, read back from the audit trail.
+ * Every insert into `domains` for a managed site calls this, in the inserting transaction.
+ */
+export async function restoreCertificateThrottle(tx: HostingPanelDatabase, rows: readonly DomainRow[]): Promise<void> {
+  if (rows.length === 0) return;
+  const hostname = sql<string>`${auditEvents.details}->>'hostname'`;
+  const events = await tx
+    .select({ action: auditEvents.action, hostname, problem: sql<CertProblem>`${auditEvents.details}->>'problem'`, at: auditEvents.timestamp })
+    .from(auditEvents)
+    .where(
+      and(
+        inArray(auditEvents.action, ["site.certificate.requested", "site.certificate.failed"]),
+        gte(auditEvents.timestamp, new Date(Date.now() - THROTTLE_MEMORY_MS)),
+        inArray(hostname, rows.map((r) => r.hostname)),
+      ),
+    )
+    .orderBy(desc(auditEvents.timestamp));
+  for (const row of rows) {
+    const own = events.filter((e) => e.hostname === row.hostname);
+    const requested = own.find((e) => e.action === "site.certificate.requested");
+    const failures = own.filter((e) => e.action === "site.certificate.failed");
+    const last = failures[0];
+    if (!requested && !last) continue;
+    await tx
+      .update(domains)
+      .set({
+        certRequestedAt: requested?.at ?? last?.at ?? null,
+        ...(last
+          ? {
+              certStatus: "failed" as const,
+              certProblem: last.problem,
+              certAttempts: failures.length,
+              certRetryAt: certRetryAt(last.at, last.problem, failures.length - 1),
+            }
+          : {}),
+      })
+      .where(eq(domains.id, row.id));
+  }
+}
+
 /** Every method takes a site id already authorized for `organizationId`. */
 @Injectable()
 export class SiteDomainsService {
@@ -133,7 +175,7 @@ export class SiteDomainsService {
         }
         const routed = rows.some((r) => r.isPrimary && r.status === "active");
         const created = await insertSiteDomains(tx, { siteId, organizationId, hostnames: fresh, routed });
-        await this.#restoreCertificateThrottle(tx, created);
+        await restoreCertificateThrottle(tx, created);
         return created;
       });
     } catch (err) {
@@ -143,47 +185,6 @@ export class SiteDomainsService {
     }
     if (inserted.length > 0) await this.#reconcile(siteId, inserted.map((r) => r.id));
     return this.list(siteId, organizationId);
-  }
-
-  /**
-   * Let's Encrypt limits are per name and per account (shared by the whole server), so a name removed and
-   * added again keeps the request and failure history of the last 24 h, read back from the audit trail.
-   */
-  async #restoreCertificateThrottle(tx: HostingPanelDatabase, rows: readonly DomainRow[]): Promise<void> {
-    if (rows.length === 0) return;
-    const hostname = sql<string>`${auditEvents.details}->>'hostname'`;
-    const events = await tx
-      .select({ action: auditEvents.action, hostname, problem: sql<CertProblem>`${auditEvents.details}->>'problem'`, at: auditEvents.timestamp })
-      .from(auditEvents)
-      .where(
-        and(
-          inArray(auditEvents.action, ["site.certificate.requested", "site.certificate.failed"]),
-          gte(auditEvents.timestamp, new Date(Date.now() - THROTTLE_MEMORY_MS)),
-          inArray(hostname, rows.map((r) => r.hostname)),
-        ),
-      )
-      .orderBy(desc(auditEvents.timestamp));
-    for (const row of rows) {
-      const own = events.filter((e) => e.hostname === row.hostname);
-      const requested = own.find((e) => e.action === "site.certificate.requested");
-      const failures = own.filter((e) => e.action === "site.certificate.failed");
-      const last = failures[0];
-      if (!requested && !last) continue;
-      await tx
-        .update(domains)
-        .set({
-          certRequestedAt: requested?.at ?? last?.at ?? null,
-          ...(last
-            ? {
-                certStatus: "failed" as const,
-                certProblem: last.problem,
-                certAttempts: failures.length,
-                certRetryAt: certRetryAt(last.at, last.problem, failures.length - 1),
-              }
-            : {}),
-        })
-        .where(eq(domains.id, row.id));
-    }
   }
 
   public async remove(siteId: string, organizationId: string, domainId: string): Promise<SiteDomainsDto> {
