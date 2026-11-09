@@ -150,6 +150,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "OPERATION_AMBIGUOUS",
       "DOCKER_ENGINE_UNAVAILABLE",
       "HOST_AGENT_UNAVAILABLE",
+      "MAIL_RELAY_UNAVAILABLE",
       "INTERNAL_ERROR",
       "INVALID_CREDENTIALS",
       "ACCOUNT_LOCKED",
