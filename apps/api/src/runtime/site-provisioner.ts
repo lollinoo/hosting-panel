@@ -34,6 +34,7 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { routePlanHash } from "../sites/domain-policy.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 
 /** The claim sets a 60 s lease; one site job may take up to 510 s, so each step renews it first. */
@@ -93,7 +94,7 @@ export function siteDatabaseIdentifier(siteId: string): string {
   return `wp_${createHash("sha256").update(siteId).digest("hex").slice(0, 12)}`;
 }
 
-class SiteJobFailedError extends Error {
+export class SiteJobFailedError extends Error {
   public constructor(
     public readonly exitCode: number,
     public readonly outputTail: string,
@@ -157,6 +158,7 @@ export class SiteProvisioner {
           serviceInstanceId: svc.id,
         });
         await recordDeployedState(db, this.executor, spec, await this.executor.deployService(spec));
+        return spec;
       };
 
       await step("create_database", async () => {
@@ -170,7 +172,9 @@ export class SiteProvisioner {
         });
       });
 
-      await step("deploy_site", deploy);
+      await step("deploy_site", async () => {
+        await deploy();
+      });
 
       await step("install_wordpress", async () => {
         if (await this.#installedByEarlierAttempt(siteId)) return;
@@ -204,8 +208,19 @@ export class SiteProvisioner {
         await db
           .update(domains)
           .set({ status: "active", updatedAt: new Date() })
-          .where(eq(domains.id, primary.id));
-        await deploy();
+          .where(eq(domains.siteId, siteId));
+        const hosts = (await deploy()).hostRoutes ?? [];
+        // A retry never moves an address already switched to https back to http.
+        const wordpressUrl = site.wordpressUrl ?? `http://${primary.hostname}`;
+        await db
+          .update(sites)
+          .set({
+            appliedRoutes: [...hosts],
+            appliedRoutesHash: routePlanHash(hosts, wordpressUrl),
+            wordpressUrl,
+            updatedAt: new Date(),
+          })
+          .where(eq(sites.id, siteId));
       });
 
       // Every executor step is done; what is left is bookkeeping (processing cannot go straight to succeeded).

@@ -24,6 +24,7 @@ import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
+import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -82,6 +83,7 @@ export class AppModule {
         LoginService,
         OutboxWorkerService,
         SiteProvisioner,
+        SiteDomainsApplier,
         ManagedSitesService,
         DriftReconcilerService,
         {

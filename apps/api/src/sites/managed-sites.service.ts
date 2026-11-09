@@ -10,6 +10,7 @@ import {
   type PhpVersion,
   type SiteActionInput,
   type SiteLogLineDto,
+  wwwPartner,
 } from "@hosting-panel/contracts";
 import {
   WORDPRESS_TEMPLATE_ID,
@@ -25,7 +26,9 @@ import {
   eq,
   hostAllocations,
   hosts,
+  inArray,
   insertSiteDatabase,
+  insertSiteDomains,
   isNotNull,
   latestSiteOperation,
   membershipRoles,
@@ -109,16 +112,18 @@ export class ManagedSitesService {
     const replay = await this.#replay(organizationId, idempotencyKey);
     if (replay) return replay;
 
+    const partner = body.includeWww ? wwwPartner(body.domain) : null;
+    const names = partner ? [body.domain, partner] : [body.domain];
     const [usedDomain] = await db
       .select({ id: domains.id })
       .from(domains)
-      .where(eq(domains.hostname, body.domain))
+      .where(inArray(domains.hostname, names))
       .limit(1);
     const [panelHost] = await db
       .select({ id: hosts.id })
       .from(hosts)
       .where(
-        or(eq(hosts.hostname, body.domain), eq(hosts.ipv4Address, body.domain)),
+        or(inArray(hosts.hostname, names), inArray(hosts.ipv4Address, names)),
       )
       .limit(1);
     if (usedDomain || panelHost) {
@@ -163,6 +168,10 @@ export class ManagedSitesService {
           phpVersion: body.phpVersion,
           actorId,
         });
+
+        if (partner) {
+          await insertSiteDomains(t, { siteId: site.id, organizationId, hostnames: [partner], routed: false });
+        }
 
         await createServiceWithRevisionTransactional(t, {
           siteId: site.id,

@@ -1,6 +1,7 @@
 import {
   SECRET_KEY_PATTERN,
   type ServiceVolumeMountSpec,
+  type SiteHostRoute,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -26,6 +27,7 @@ import {
   type PortBinding,
 } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import { buildSiteHostRoutes } from "../sites/domain-policy.js";
 import type { ControlPlaneRuntimeConfig } from "../tokens.js";
 
 const STRUCTURED_CONFIG_KEYS: ReadonlySet<string> = new Set([
@@ -54,7 +56,7 @@ function extractRestartCount(obs: unknown): number {
   return 0;
 }
 
-/** Builds the deploy spec of a service from its current revision, its site's active domains and its secrets. */
+/** Builds the deploy spec of a service from its current revision, its site's routes and its secrets. */
 export async function buildApprovedServiceSpec(
   db: HostingPanelDatabase,
   config: Pick<ControlPlaneRuntimeConfig, "secretsMasterKey">,
@@ -222,6 +224,20 @@ export async function buildApprovedServiceSpec(
       : !isInternalBackingCategory &&
         Boolean(domainHostnames.length > 0 || (tpl.defaultPort ?? 0) > 0);
 
+  // A restart or redeploy republishes the last applied plan; only site.domains moves to a new one.
+  const activeNames = new Set(domainHostnames);
+  const hostRoutes: SiteHostRoute[] = !exposeHttp
+    ? []
+    : site.appliedRoutes
+      ? site.appliedRoutes
+          .filter((h) => activeNames.has(h.hostname))
+          .map((h) => {
+            // The executor refuses a redirect to a name it does not route; serve it instead.
+            const target = h.redirectTo?.replace(/^https?:\/\//, "");
+            return target === undefined || activeNames.has(target) ? h : { ...h, redirectTo: null };
+          })
+      : buildSiteHostRoutes(activeDomains, new Date());
+
   const pidsLimit =
     typeof cfg["pidsLimit"] === "number" ? cfg["pidsLimit"] : undefined;
 
@@ -252,7 +268,8 @@ export async function buildApprovedServiceSpec(
     resourceLimits,
     revisionNumber: rev.revisionNumber,
     specHash: rev.specHash,
-    domains: exposeHttp ? domainHostnames : [],
+    domains: hostRoutes.map((h) => h.hostname),
+    hostRoutes,
     exposeHttp,
     internalPort: parsedPort,
     ...(pidsLimit !== undefined ? { pidsLimit } : {}),
