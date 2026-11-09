@@ -194,6 +194,12 @@ export const it = {
         caa_blocked: "Un'impostazione presso il fornitore del tuo dominio (un record CAA) non consente Let's Encrypt. Chiedi di consentire letsencrypt.org, oppure elimina il record CAA.",
         other: "Non è stato possibile creare il certificato. Riproveremo il {time}. Se continua, contatta il tuo amministratore del server.",
       },
+      hintNoTime: {
+        rate_limited: "Let's Encrypt ci ha chiesto di attendere prima di creare un altro certificato per questo indirizzo. Riproveremo automaticamente; non devi fare nulla.",
+        port_80_blocked: "Let's Encrypt non è riuscito a raggiungere il tuo sito da internet. Il tuo amministratore del server è stato avvisato. Riproveremo automaticamente.",
+        not_pointing: "Let's Encrypt ha raggiunto un altro server per {host}. Controlla che il suo record A sia {ip} e che non ci sia un record AAAA. Riproveremo automaticamente.",
+        other: "Non è stato possibile creare il certificato. Riproveremo automaticamente. Se continua, contatta il tuo amministratore del server.",
+      },
       pill: { validUntil: "HTTPS attivo fino al {date}" },
     },
     manage: {

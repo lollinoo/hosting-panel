@@ -109,8 +109,8 @@ export function DomainsPanel({
     const key = views.get(d.id)!.hint;
     if (!key) return null;
     const time = when(d.certificate.retryAt ?? d.dns.nextCheckAt);
-    // Without a time, drop the "We'll try again on {time}" sentence rather than print a gap.
-    const text = time ? t.hint[key] : t.hint[key].split(/(?<=\.)\s+/).filter((s) => !s.includes("{time}")).join(" ");
+    const noTime = t.hintNoTime as Partial<Record<typeof key, string>>;
+    const text = (!time && noTime[key]) || t.hint[key];
     return format(text, { host: d.hostname, ip: data.serverIpv4, seen: d.dns.observedA.join(", "), time });
   };
   const suggested = suggestWwwPair(hostname.trim().toLowerCase());

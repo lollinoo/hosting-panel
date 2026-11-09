@@ -194,6 +194,12 @@ export const en: Messages = {
         caa_blocked: "A setting at your domain provider (a CAA record) doesn't allow Let's Encrypt. Ask them to allow letsencrypt.org, or delete the CAA record.",
         other: "The certificate couldn't be created. We'll try again on {time}. If this keeps happening, contact your server administrator.",
       },
+      hintNoTime: {
+        rate_limited: "Let's Encrypt asked us to wait before creating another certificate for this address. We'll try again automatically; you don't need to do anything.",
+        port_80_blocked: "Let's Encrypt couldn't reach your site from the internet. Your server administrator has been alerted. We'll try again automatically.",
+        not_pointing: "Let's Encrypt reached a different server for {host}. Check that its A record is {ip} and that there is no AAAA record. We'll try again automatically.",
+        other: "The certificate couldn't be created. We'll try again automatically. If this keeps happening, contact your server administrator.",
+      },
       pill: { validUntil: "HTTPS valid until {date}" },
     },
     manage: {

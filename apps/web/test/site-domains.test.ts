@@ -186,13 +186,34 @@ describe("domains UI", () => {
     expect([checked("hotel.it"), checked("www.hotel.it"), checked("blog.hotel.it")]).toEqual([true, true, false]);
   });
 
-  it("hint drops the time sentence when there is no time, and Copy buttons name the host", () => {
-    for (const m of [en, itMsgs]) {
-      const failed = dom({ certificate: { status: "failed", problem: "other", retryAt: null }, dns: { nextCheckAt: null as unknown as string } });
-      const html = renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial: { ...initial, domains: [failed, dom({ hostname: "www.hotel.it", isPrimary: false })] } })));
-      expect(html).not.toMatch(/(on|il) \./);
-      expect(html).not.toContain("{time}");
-      for (const h of ["hotel.it", "www.hotel.it"]) expect(html).toContain(`aria-label="${m.site.domains.copyFor.replace("{host}", h).replace("'", "&#x27;")}"`);
+  it("hints without a time use their own no-time copy, and Copy buttons name the host", () => {
+    const exact = {
+      en: {
+        rate_limited: "Let's Encrypt asked us to wait before creating another certificate for this address. We'll try again automatically; you don't need to do anything.",
+        port_80_blocked: "Let's Encrypt couldn't reach your site from the internet. Your server administrator has been alerted. We'll try again automatically.",
+        not_pointing: "Let's Encrypt reached a different server for hotel.it. Check that its A record is 203.0.113.10 and that there is no AAAA record. We'll try again automatically.",
+        other: "The certificate couldn't be created. We'll try again automatically. If this keeps happening, contact your server administrator.",
+      },
+      it: {
+        rate_limited: "Let's Encrypt ci ha chiesto di attendere prima di creare un altro certificato per questo indirizzo. Riproveremo automaticamente; non devi fare nulla.",
+        port_80_blocked: "Let's Encrypt non è riuscito a raggiungere il tuo sito da internet. Il tuo amministratore del server è stato avvisato. Riproveremo automaticamente.",
+        not_pointing: "Let's Encrypt ha raggiunto un altro server per hotel.it. Controlla che il suo record A sia 203.0.113.10 e che non ci sia un record AAAA. Riproveremo automaticamente.",
+        other: "Non è stato possibile creare il certificato. Riproveremo automaticamente. Se continua, contatta il tuo amministratore del server.",
+      },
+    };
+    const esc = (x: string) => x.replace(/'/g, "&#x27;");
+    for (const [lang, m] of [["en", en], ["it", itMsgs]] as const) {
+      // every hint that carries {time} has a no-time twin
+      const withTime = Object.entries(m.site.domains.hint).filter(([, v]) => v.includes("{time}")).map(([k]) => k).sort();
+      expect(Object.keys(m.site.domains.hintNoTime).sort()).toEqual(withTime);
+      for (const problem of ["rate_limited", "port_80_blocked", "not_pointing", "other"] as const) {
+        const failed = dom({ certificate: { status: "failed", problem, retryAt: null }, dns: { nextCheckAt: null as unknown as string } });
+        const html = renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial: { ...initial, domains: [failed, dom({ hostname: "www.hotel.it", isPrimary: false })] } })));
+        expect(html).toContain(esc(exact[lang][problem]));
+        expect(html).not.toContain("{time}");
+      }
+      const html = renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial })));
+      for (const h of ["hotel.it", "www.hotel.it"]) expect(html).toContain(`aria-label="${esc(m.site.domains.copyFor.replace("{host}", h))}"`);
     }
   });
 });
