@@ -13,6 +13,8 @@ import {
   eq,
   hostAllocations,
   hosts,
+  insertSiteDomains,
+  listSiteDomains,
   insertSiteDatabase,
   latestSiteOperation,
   listSiteDatabases,
@@ -166,5 +168,52 @@ describe("@hosting-panel/database — 0004 sites and databases", () => {
       expect(running?.status).toBe("processing");
       expect((await latestSiteOperation(db(), { siteId, kind: "site.reassign" }))?.id).toBe("op_run");
     });
+  });
+});
+
+describe("@hosting-panel/database — domains dns and tls", () => {
+  let client: DatabaseClient;
+  const db = () => client.db;
+  let siteId: string;
+
+  beforeAll(async () => {
+    client = createDatabaseClient({ mode: "pglite" });
+    await client.migrate();
+    await db().insert(platformInstallations).values({ id: "pin", name: "P" });
+    await db().insert(hosts).values({
+      id: "h1", platformInstallationId: "pin", name: "h", hostname: "h.local", ipv4Address: "10.0.0.1",
+      totalCpuMilli: 4000, totalMemoryBytes: "4000000000", totalStorageBytes: "100000000000",
+    });
+    await db().insert(organizations).values({ id: "org_A", platformInstallationId: "pin", name: "A", slug: "a" });
+    await db().insert(hostAllocations).values({ id: "al_A", hostId: "h1", organizationId: "org_A" });
+    ({ site: { id: siteId } } = await createSiteTransactional(db(), { organizationId: "org_A", hostAllocationId: "al_A", name: "d", slug: "d" }));
+  });
+
+  afterAll(async () => {
+    await client.close();
+  });
+
+  it("0006 adds dns and cert columns with safe defaults", async () => {
+    const [row] = await insertSiteDomains(db(), { siteId, organizationId: "org_A", hostnames: ["a.example.it"], routed: true });
+    expect(row).toMatchObject({ dnsStatus: "unchecked", certStatus: "none", certTrusted: true, dnsAttempts: 0, certAttempts: 0, dnsObserved: { a: [], aaaa: [] } });
+    expect(row!.id).toMatch(/^dom_[0-9a-f]{32}$/);
+  });
+
+  it("rejects a second primary domain for one site", async () => {
+    await db().update(domains).set({ isPrimary: true }).where(eq(domains.hostname, "a.example.it"));
+    const [b] = await insertSiteDomains(db(), { siteId, organizationId: "org_A", hostnames: ["b.example.it"], routed: true });
+    await expect(db().update(domains).set({ isPrimary: true }).where(eq(domains.id, b!.id))).rejects.toThrow();
+  });
+
+  it("rejects an unknown cert_problem", async () => {
+    await expect(
+      db().update(domains).set({ certProblem: "bogus" as never }).where(eq(domains.hostname, "a.example.it")),
+    ).rejects.toThrow();
+  });
+
+  it("insertSiteDomains marks rows pending until routed", async () => {
+    const rows = await insertSiteDomains(db(), { siteId, organizationId: "org_A", hostnames: ["c.example.it"], routed: false });
+    expect(rows.map((r) => r.status)).toEqual(["pending"]);
+    expect((await listSiteDomains(db(), siteId)).map((r) => r.hostname)).toEqual(["a.example.it", "b.example.it", "c.example.it"]);
   });
 });

@@ -10,9 +10,14 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type {
   AuditActorType,
+  CertProblem,
+  CertStatus,
+  DnsStatus,
   DomainStatus,
   ErrorCode,
   GrantEffect,
@@ -31,6 +36,7 @@ import type {
   PresetRoleName,
   QuotaReservationStatus,
   ServiceDesiredStatus,
+  SiteHostRoute,
   SiteStatus,
 } from "@hosting-panel/contracts";
 
@@ -276,6 +282,9 @@ export const sites = pgTable(
     slug: text("slug").notNull(),
     status: text("status").$type<SiteStatus>().notNull().default("ready"),
     phpVersion: text("php_version").$type<PhpVersion>(),
+    appliedRoutesHash: text("applied_routes_hash"),
+    appliedRoutes: jsonb("applied_routes").$type<SiteHostRoute[] | null>(),
+    wordpressUrl: text("wordpress_url"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -410,6 +419,18 @@ export const domains = pgTable(
     hostname: text("hostname").notNull().unique(),
     isPrimary: boolean("is_primary").notNull().default(false),
     status: text("status").$type<DomainStatus>().notNull().default("pending"),
+    dnsStatus: text("dns_status").$type<DnsStatus>().notNull().default("unchecked"),
+    dnsObserved: jsonb("dns_observed").$type<{ a: string[]; aaaa: string[] }>().notNull().default({ a: [], aaaa: [] }),
+    dnsCheckedAt: timestamp("dns_checked_at", { withTimezone: true }),
+    dnsNextCheckAt: timestamp("dns_next_check_at", { withTimezone: true }).notNull().defaultNow(),
+    dnsAttempts: integer("dns_attempts").notNull().default(0),
+    certStatus: text("cert_status").$type<CertStatus>().notNull().default("none"),
+    certProblem: text("cert_problem").$type<CertProblem>(),
+    certRequestedAt: timestamp("cert_requested_at", { withTimezone: true }),
+    certRetryAt: timestamp("cert_retry_at", { withTimezone: true }),
+    certAttempts: integer("cert_attempts").notNull().default(0),
+    certExpiresAt: timestamp("cert_expires_at", { withTimezone: true }),
+    certTrusted: boolean("cert_trusted").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -419,6 +440,8 @@ export const domains = pgTable(
       foreignColumns: [sites.id, sites.organizationId],
       name: "fk_domains_site_org",
     }).onUpdate("cascade").onDelete("cascade"),
+    uniqueIndex("uq_domains_one_primary_per_site").on(t.siteId).where(sql`${t.isPrimary}`),
+    index("idx_domains_dns_due").on(t.dnsNextCheckAt),
   ],
 );
 

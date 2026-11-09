@@ -89,3 +89,10 @@ export const CertificateAlertDtoSchema = z.object({
   problem: z.enum(CERT_PROBLEMS).nullable(),
 });
 export type CertificateAlertDto = z.infer<typeof CertificateAlertDtoSchema>;
+
+export interface SiteHostRoute {
+  readonly hostname: string;
+  readonly tls: boolean;
+  readonly httpsRedirect: boolean;
+  readonly redirectTo: string | null;
+}
