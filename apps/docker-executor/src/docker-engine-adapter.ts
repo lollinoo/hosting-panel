@@ -1371,13 +1371,16 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.runningSiteJobs.add(lockKey);
     let containerId: string | null = null;
     try {
-      if (req.kind === "wordpress.install") {
+      if (req.kind === "wordpress.install" || req.kind === "wordpress.set-url") {
         await this.ensureImageAvailable(resolveWordpressCliImage(req.params.phpVersion as PhpVersion));
-        await this.ensureVolume(
-          getManagedVolumeName(req.serviceInstanceId!, "html"),
-          req.siteId,
-          req.serviceInstanceId!,
-        );
+        // set-url works on the existing html volume and must never create an empty one.
+        if (req.kind === "wordpress.install") {
+          await this.ensureVolume(
+            getManagedVolumeName(req.serviceInstanceId!, "html"),
+            req.siteId,
+            req.serviceInstanceId!,
+          );
+        }
       } else if (!(await this.isSharedDatabaseRunning())) {
         // Never pull or create hp_mariadb from a job: ensureSharedDatabase owns that.
         throw new ExecutorCodedError(

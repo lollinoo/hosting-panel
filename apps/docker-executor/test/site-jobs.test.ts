@@ -144,6 +144,9 @@ describe("wordpress.set-url", () => {
     const moved = await run("https://hotel.it", "http://hotel.it");
     expect(moved.code).toBe(0);
     const pairs = moved.calls.filter((c) => c.startsWith("search-replace")).map((c) => c.split(" ").slice(1, 3));
+    expect(moved.calls.filter((c) => c.startsWith("search-replace")).every((c) => c.includes(" --precise"))).toBe(
+      true,
+    );
     expect(pairs).toEqual([
       ["http://hotel.it/", "https://hotel.it/"],
       ['http://hotel.it"', 'https://hotel.it"'],
@@ -375,6 +378,13 @@ describe("DockerEngineSocketAdapter.runSiteJob", () => {
     expect(removals.length).toBeGreaterThan(0);
     expect(removals.every((p) => p.includes("v=true"))).toBe(true);
     expect(mockDaemon.createdVolumes).toContain("hp_vol_svc_a_html");
+  });
+
+  it("set-url pulls the wp-cli image and never creates the html volume", async () => {
+    const { adapter, mockDaemon } = await setup({ waitStatusCode: 0 });
+    await expect(adapter.runSiteJob(setUrl())).resolves.toMatchObject({ exitCode: 0 });
+    expect(mockDaemon.requestedPaths.some((p) => p.includes(encodeURIComponent(resolveWordpressCliImage("8.4"))) || p.includes(resolveWordpressCliImage("8.4")))).toBe(true);
+    expect(mockDaemon.createdVolumes).toEqual([]);
   });
 
   it("runSiteJob times out and reports exit 124", async () => {

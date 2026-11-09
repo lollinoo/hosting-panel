@@ -76,7 +76,7 @@ wp option update siteurl "$HP_SITE_URL" --skip-plugins --skip-themes
 p=$HP_PREVIOUS_URL; n=$HP_SITE_URL
 pe=$(printf '%s' "$p" | sed 's#/#\\\\/#g'); ne=$(printf '%s' "$n" | sed 's#/#\\\\/#g')
 for pair in "$p/|$n/" "$p\\"|$n\\"" "$p'|$n'" "$pe\\\\/|$ne\\\\/" "$pe\\"|$ne\\""; do
-  wp search-replace "\${pair%%|*}" "\${pair#*|}" --all-tables-with-prefix --skip-columns=guid \\
+  wp search-replace "\${pair%%|*}" "\${pair#*|}" --all-tables-with-prefix --skip-columns=guid --precise \\
     --skip-plugins --skip-themes --report-changed-only
 done
 `;
@@ -152,6 +152,13 @@ const SITE_JOB_SPECS: Readonly<
     requiredSecrets: [],
     optionalSecrets: [],
   },
+};
+
+const SITE_JOB_SCRIPTS: Readonly<Record<SiteJobKind, string>> = {
+  "db.provision": DB_PROVISION_SCRIPT,
+  "db.drop": DB_DROP_SCRIPT,
+  "wordpress.install": WORDPRESS_INSTALL_SCRIPT,
+  "wordpress.set-url": WORDPRESS_SET_URL_SCRIPT,
 };
 
 const invalid = (message: string): never => {
@@ -242,18 +249,13 @@ export function buildSiteJobContainerPayload(req: SiteJobRequest, ctx: SiteJobCo
   const env = Object.entries(req.params)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${paramEnvName(key)}=${value}`);
-  const isWordpress = req.kind !== "db.provision" && req.kind !== "db.drop";
+  const isWordpress = req.kind === "wordpress.install" || req.kind === "wordpress.set-url";
   if (req.kind === "wordpress.install") {
     env.push(`HP_HTACCESS_WORDPRESS=${HTACCESS_WORDPRESS}`, `HP_HTACCESS_PANEL=${HTACCESS_PANEL}`);
   }
   env.push(...ctx.secretFileEnv);
 
-  const script =
-    req.kind === "db.provision" ? DB_PROVISION_SCRIPT : req.kind === "db.drop"
-        ? DB_DROP_SCRIPT
-        : req.kind === "wordpress.set-url"
-          ? WORDPRESS_SET_URL_SCRIPT
-          : WORDPRESS_INSTALL_SCRIPT;
+  const script = SITE_JOB_SCRIPTS[req.kind];
   const binds = isWordpress
     ? [`${getManagedVolumeName(req.serviceInstanceId!, "html")}:/var/www/html`]
     : [`${ctx.rootKeyHostPath}:/run/secrets/mariadb-root:ro`];
