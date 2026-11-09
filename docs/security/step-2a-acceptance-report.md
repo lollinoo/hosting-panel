@@ -248,3 +248,28 @@ Three sites were running on each VM. Every check below fetched both `/` and `/he
 - O2: whether attaching the proxy to a network drops connections already open on a normal host. Check with a real browser holding HTTP/2 to the panel during a site creation.
 - The low-RAM warning on a real 1 GB VM.
 - Step 2b (domains, Let's Encrypt) needs a public IPv4 and the owner's test domain.
+
+## Final fix wave
+
+**Run:** 2026-11-09, release `hosting-panel-0.3.0-linux-x64.tar.gz` rebuilt at `388f6ea`, installed fresh (exit 0, 86 s) in one disposable VM `hp-live-fix-u2604` (Ubuntu 26.04, Docker CE 29.9.3, API 1.56) on `hp-live-fix-net` 10.231.0.0/24. The VM, its two volumes and the network were removed afterwards.
+
+**I1 / O2 fixed (`be67ae3`).** The proxy is created with `GwPriority: 1` on `hp_ingress_net` (Engine API 1.48), and the installer refuses Docker Engine API < 1.48.
+
+- **Before publish:** `default via 172.18.0.1 dev eth0` (the `hp_ingress_net` gateway); `hp_ingress_net gwprio=1`.
+- **After publish:** still `default via 172.18.0.1 dev eth0`, plus `172.20.0.0/16 dev eth1` for `hp_edge_site_<id>_net` (`gwprio=0`). The proxy connected to the edge network at 1794195006 (docker events).
+- **Route watcher** (every 0.5 s across the whole create): 47/47 samples were `default via 172.18.0.1 dev eth0`.
+- **Panel during the create** (customer created `hotel.test` through the BFF; `site.provision` succeeded with all five steps in about 5 s):
+  - new connection per request, `https://<vm>/api/session` every 0.25 s with a 60 s timeout: 96/96 answered 200, slowest 0.044 s;
+  - one keep-alive connection reused for every request: 109/109 answered 200, slowest 0.009 s.
+- `hotel.test` answered 200 right after.
+
+No panel request stalled. The 207 s hang and the `000` from the first run did not recur.
+
+**The other fixes** were checked by tests (build, lint, typecheck and test green: 42 files, 508 tests):
+
+- I2 (`7b13113`): an owner change keeps a failed setup `degraded` with Try again.
+- I3 (`4ba4fe1`): the owner-change confirmation says that the current owner loses the site and that WordPress logins keep working for the new owner.
+- I4 / O3 (`3b1b94c`): containers are removed with `v=true`, so jobs leave no anonymous volumes.
+- M3 (`8ea5b9b`): a concurrent create with the same Idempotency-Key replays.
+- O6 (`388f6ea`): `RESOURCE_LOCKED` shows "This site is finishing another change. Try again in a moment."
+- OpenAPI (`e27d15b`): `adminListSites` has no empty `parameters:`.
