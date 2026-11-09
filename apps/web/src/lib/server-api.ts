@@ -11,6 +11,7 @@ import type {
   MemberDto,
   SiteSummaryDto,
   SiteDetailDto,
+  SiteDomainsDto,
   OperationDto,
   MeDto,
   AdminUserDto,
@@ -129,4 +130,12 @@ export async function fetchServerAdminUsers(): Promise<AdminUserDto[]> {
 
 export async function fetchServerAdminSites(): Promise<AdminSitesListDto | null> {
   return orNull(await serverGet<AdminSitesListDto>("v1/admin/sites"));
+}
+
+export async function fetchServerAdminSiteDomains(siteId: string): Promise<SiteDomainsDto | null> {
+  return orNull(await serverGet<SiteDomainsDto>(`v1/admin/sites/${siteId}/domains`));
+}
+
+export async function fetchServerSiteDomains(orgId: string, siteId: string): Promise<SiteDomainsDto | null> {
+  return orNull(await serverGet<SiteDomainsDto>(`v1/organizations/${orgId}/managed-sites/${siteId}/domains`));
 }

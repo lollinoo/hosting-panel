@@ -285,7 +285,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     expect(openApiRaw).toContain("host.security");
   });
 
-  it("2. AC-F2-10: GET /health/live, GET /v1/me, and org capabilities enable Phase 2 runtimes while keeping shared/TLS/SFTP/backups strictly false", async () => {
+  it("2. AC-F2-10: GET /health/live, GET /v1/me, and org capabilities enable Phase 2 runtimes while keeping shared/SFTP/backups strictly false", async () => {
     const liveRes = await requestJson<{
       status: string;
       spec: string;
@@ -308,7 +308,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       sharedHostingEnabled: false,
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
-      acmeTlsRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: true,
       sftpAvailable: false,
       productionBackupRuntimeAvailable: false,
     });
@@ -323,7 +323,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       sharedHostingEnabled: false,
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
-      acmeTlsRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: true,
       sftpAvailable: false,
       productionBackupRuntimeAvailable: false,
     });

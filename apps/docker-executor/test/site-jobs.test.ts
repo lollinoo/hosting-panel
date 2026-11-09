@@ -1,4 +1,5 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SHARED_MARIADB_IMAGE, resolveWordpressCliImage } from "@hosting-panel/contracts";
@@ -8,6 +9,7 @@ import {
   DockerEngineSocketAdapter,
   SHARED_DB_CONTAINER_NAME,
   SHARED_DB_NETWORK_NAME,
+  WORDPRESS_SET_URL_SCRIPT,
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
 } from "../src/index.js";
@@ -50,6 +52,18 @@ function wpInstall(overrides?: Partial<SiteJobRequest>): SiteJobRequest {
   };
 }
 
+function setUrl(overrides?: Partial<SiteJobRequest>): SiteJobRequest {
+  return {
+    jobId: "job_seturl_1",
+    kind: "wordpress.set-url",
+    siteId: "site_a",
+    organizationId: "org_a",
+    serviceInstanceId: "svc_a",
+    params: { phpVersion: "8.4", siteUrl: "https://hotel.it", previousUrl: "http://hotel.it" },
+    ...overrides,
+  };
+}
+
 function dbJob(kind: "db.provision" | "db.drop", overrides?: Partial<SiteJobRequest>): SiteJobRequest {
   return {
     jobId: `job_${kind.replace(".", "_")}_1`,
@@ -61,6 +75,87 @@ function dbJob(kind: "db.provision" | "db.drop", overrides?: Partial<SiteJobRequ
     ...overrides,
   };
 }
+
+describe("wordpress.set-url", () => {
+  it("set-url passes URLs only as env", () => {
+    const payload = buildSiteJobContainerPayload(setUrl(), ctx);
+    expect(payload.Cmd[2]).toBe(WORDPRESS_SET_URL_SCRIPT);
+    expect(payload.Env).toContain("HP_SITE_URL=https://hotel.it");
+    expect(payload.Env).toContain("HP_PREVIOUS_URL=http://hotel.it");
+  });
+
+  it("set-url rejects a URL with a path, a quote or a $()", () => {
+    for (const bad of ["https://hotel.it/$(id)", "https://hotel.it/x", "https://hotel.it'", 'https://hotel.it"']) {
+      expect(() =>
+        buildSiteJobContainerPayload(setUrl({ params: { ...setUrl().params, siteUrl: bad } }), ctx),
+      ).toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
+    }
+  });
+
+  it("set-url runs as 33:33 on the site network with the html volume and no secrets", () => {
+    const payload = buildSiteJobContainerPayload(setUrl(), ctx);
+    expect(payload.User).toBe("33:33");
+    expect(payload.Image).toBe(resolveWordpressCliImage("8.4"));
+    expect(payload.WorkingDir).toBe("/var/www/html");
+    expect(payload.HostConfig.NetworkMode).toBe("hp_site_site_a_net");
+    expect(payload.HostConfig.Binds).toEqual(["hp_vol_svc_a_html:/var/www/html"]);
+    expect(payload.Env.some((e) => e.startsWith("HP_HTACCESS"))).toBe(false);
+    expect(() =>
+      buildSiteJobContainerPayload(setUrl({ resolvedSecrets: { HP_DB_PASSWORD: DB_PW } }), ctx),
+    ).toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
+    expect(() => buildSiteJobContainerPayload(setUrl({ serviceInstanceId: undefined }), ctx)).toThrow(
+      expect.objectContaining({ code: "VALIDATION_ERROR" }),
+    );
+  });
+
+  it("set-url script, run with a recording wp shim", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hp-wp-shim-"));
+    cleanupTasks.push(() => rm(dir, { recursive: true, force: true }));
+    const log = path.join(dir, "calls.log");
+    await writeFile(
+      path.join(dir, "wp"),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\n[ "$1 $2" = "config has" ] && exit "${"$"}{WP_SHIM_EXIT:-0}"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const run = async (site: string, prev: string, shimExit = "0") => {
+      await writeFile(log, "");
+      let code = 0;
+      try {
+        execFileSync("sh", ["-c", WORDPRESS_SET_URL_SCRIPT], {
+          env: { PATH: `${dir}:/usr/bin:/bin`, HP_SITE_URL: site, HP_PREVIOUS_URL: prev, WP_SHIM_EXIT: shimExit },
+          stdio: "pipe",
+        });
+      } catch (e) {
+        code = (e as { status: number }).status;
+      }
+      const calls = (await readFile(log, "utf8")).split("\n").filter(Boolean);
+      return { code, calls };
+    };
+
+    const refused = await run("https://hotel.it", "http://hotel.it", "1");
+    expect(refused.code).toBe(20);
+    expect(refused.calls).toHaveLength(1);
+
+    const same = await run("https://hotel.it", "https://hotel.it");
+    expect(same.code).toBe(0);
+    expect(same.calls.filter((c) => c.startsWith("option update"))).toHaveLength(2);
+    expect(same.calls.some((c) => c.startsWith("search-replace"))).toBe(false);
+
+    const moved = await run("https://hotel.it", "http://hotel.it");
+    expect(moved.code).toBe(0);
+    const pairs = moved.calls.filter((c) => c.startsWith("search-replace")).map((c) => c.split(" ").slice(1, 3));
+    expect(moved.calls.filter((c) => c.startsWith("search-replace")).every((c) => c.includes(" --precise"))).toBe(
+      true,
+    );
+    expect(pairs).toEqual([
+      ["http://hotel.it/", "https://hotel.it/"],
+      ['http://hotel.it"', 'https://hotel.it"'],
+      ["http://hotel.it'", "https://hotel.it'"],
+      ["http:\\/\\/hotel.it\\/", "https:\\/\\/hotel.it\\/"],
+      ['http:\\/\\/hotel.it"', 'https:\\/\\/hotel.it"'],
+    ]);
+  });
+});
 
 describe("buildSiteJobContainerPayload", () => {
   it("wordpress.install passes customer values only as env and never inside Cmd", () => {
@@ -283,6 +378,13 @@ describe("DockerEngineSocketAdapter.runSiteJob", () => {
     expect(removals.length).toBeGreaterThan(0);
     expect(removals.every((p) => p.includes("v=true"))).toBe(true);
     expect(mockDaemon.createdVolumes).toContain("hp_vol_svc_a_html");
+  });
+
+  it("set-url pulls the wp-cli image and never creates the html volume", async () => {
+    const { adapter, mockDaemon } = await setup({ waitStatusCode: 0 });
+    await expect(adapter.runSiteJob(setUrl())).resolves.toMatchObject({ exitCode: 0 });
+    expect(mockDaemon.requestedPaths.some((p) => p.includes(encodeURIComponent(resolveWordpressCliImage("8.4"))) || p.includes(resolveWordpressCliImage("8.4")))).toBe(true);
+    expect(mockDaemon.createdVolumes).toEqual([]);
   });
 
   it("runSiteJob times out and reports exit 124", async () => {

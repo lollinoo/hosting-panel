@@ -1,10 +1,12 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
 import {
+  AddSiteDomainInputSchema,
   AdminCreateSiteInputSchema,
   ChangeSiteOwnerInputSchema,
   DeleteSiteInputSchema,
   SiteActionInputSchema,
   type AdminSitesListDto,
+  type SiteDomainsDto,
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
@@ -12,6 +14,7 @@ import { requireServerAdmin } from "../auth/server-admin.guard.js";
 import { ControlPlaneError, requireIdempotencyKey } from "../common/control-plane.error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { ManagedSitesService, type ManagedSiteAccepted } from "../sites/managed-sites.service.js";
+import { SiteDomainsService, requestedHostnames } from "../sites/site-domains.service.js";
 
 const headersOf = (req: FastifyRequest) => req.headers as Record<string, string | string[] | undefined>;
 
@@ -21,6 +24,7 @@ export class AdminSitesController {
     @Inject(ManagedSitesService) private readonly sitesService: ManagedSitesService,
     @Inject(AuthzContextService) private readonly authz: AuthzContextService,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
+    @Inject(SiteDomainsService) private readonly domainsService: SiteDomainsService,
   ) {}
 
   @Get()
@@ -86,6 +90,77 @@ export class AdminSitesController {
     const owner = await this.sitesService.ownerOf(siteId);
     const accepted = await this.sitesService.remove(siteId, owner, confirmName, auth.user.id, idempotencyKey);
     return this.#done(auth, req, "admin.site.delete", accepted);
+  }
+
+  @Get(":siteId/domains")
+  public async listDomains(@Req() req: FastifyRequest, @Param("siteId") siteId: string): Promise<{ data: SiteDomainsDto }> {
+    await requireServerAdmin(this.authz, req, siteId, "site");
+    return { data: await this.domainsService.list(siteId, await this.sitesService.ownerOf(siteId)) };
+  }
+
+  @Post(":siteId/domains")
+  @HttpCode(HttpStatus.CREATED)
+  public async addDomain(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: SiteDomainsDto }> {
+    const auth = await requireServerAdmin(this.authz, req, siteId, "site");
+    const owner = await this.sitesService.ownerOf(siteId);
+    const input = AddSiteDomainInputSchema.parse(raw ?? {});
+    const data = await this.domainsService.add(siteId, owner, input);
+    await this.#domainAudit(auth, req, siteId, "admin.site.domain.add", requestedHostnames(input));
+    return { data };
+  }
+
+  @Delete(":siteId/domains/:domainId")
+  public async removeDomain(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Param("domainId") domainId: string,
+  ): Promise<{ data: SiteDomainsDto }> {
+    const auth = await requireServerAdmin(this.authz, req, siteId, "site");
+    const owner = await this.sitesService.ownerOf(siteId);
+    const { hostname } = await this.domainsService.findDomain(siteId, owner, domainId);
+    const data = await this.domainsService.remove(siteId, owner, domainId);
+    await this.#domainAudit(auth, req, siteId, "admin.site.domain.remove", [hostname]);
+    return { data };
+  }
+
+  @Post(":siteId/domains/:domainId/primary")
+  @HttpCode(HttpStatus.OK)
+  public async setPrimaryDomain(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Param("domainId") domainId: string,
+  ): Promise<{ data: SiteDomainsDto }> {
+    const auth = await requireServerAdmin(this.authz, req, siteId, "site");
+    const owner = await this.sitesService.ownerOf(siteId);
+    const { hostname } = await this.domainsService.findDomain(siteId, owner, domainId);
+    const data = await this.domainsService.setPrimary(siteId, owner, domainId);
+    await this.#domainAudit(auth, req, siteId, "admin.site.domain.primary", [hostname]);
+    return { data };
+  }
+
+  @Post(":siteId/domains/:domainId/check")
+  @HttpCode(HttpStatus.OK)
+  public async checkDomain(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Param("domainId") domainId: string,
+  ): Promise<{ data: SiteDomainsDto }> {
+    await requireServerAdmin(this.authz, req, siteId, "site");
+    return { data: await this.domainsService.check(siteId, await this.sitesService.ownerOf(siteId), domainId) };
+  }
+
+  #domainAudit(
+    auth: Awaited<ReturnType<typeof requireServerAdmin>>,
+    req: FastifyRequest,
+    siteId: string,
+    action: string,
+    hostnames: string[],
+  ) {
+    return this.authz.recordAudit(auth, req, { action, targetType: "site", targetId: siteId, details: { hostnames } });
   }
 
   async #done(

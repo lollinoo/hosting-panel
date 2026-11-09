@@ -3,6 +3,9 @@ import { getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
 import { StatusPill } from "@/components/customer/status-pill";
 import { SiteTabs } from "@/components/customer/site-tabs";
+import { CertificatePill } from "@/components/customer/certificate-pill";
+import { fetchServerSiteDomains } from "@/lib/server-api";
+import { domainView } from "@/lib/domain-view";
 import { LoadError } from "@/components/shared/load-error";
 import { getCustomerContext, getSite } from "../data";
 
@@ -25,15 +28,24 @@ export default async function SiteLayout({
   }
   const site = result.data;
   const primary = site.domains.find((d) => d.isPrimary) ?? site.domains[0];
+  const locale = await getRequestLocale();
+  const domains = await fetchServerSiteDomains(orgId!, siteId); // null: the pills are left out, the page still works
+  const hosts = domains?.domains ?? [];
+  const mainDomain = hosts.find((d) => d.isPrimary) ?? hosts[0];
+  const now = new Date();
+  const secure = mainDomain ? domainView(mainDomain, mainDomain, now).label === "secure" : false;
+  const dnsWaiting = hosts.find((d) => !d.isPrimary && domainView(d, mainDomain!, now).label === "waitingForDns");
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">{site.name}</h1>
         <StatusPill status={site.status} driftSummary={site.driftSummary} labels={m.site.status} />
+        {mainDomain && <CertificatePill domain={mainDomain} primary={mainDomain} m={m} locale={locale} now={now} />}
+        {mainDomain && dnsWaiting && <CertificatePill domain={dnsWaiting} primary={mainDomain} m={m} locale={locale} now={now} />}
         {site.phpVersion !== null && site.status === "ready" && primary && (
           <a
-            href={`http://${primary.hostname}/wp-admin/`}
+            href={`${secure ? "https" : "http"}://${primary.hostname}/wp-admin/`}
             target="_blank"
             rel="noopener noreferrer"
             className="ml-auto inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
@@ -44,7 +56,7 @@ export default async function SiteLayout({
         )}
         {primary && (
           <a
-            href={`https://${primary.hostname}`}
+            href={`${secure ? "https" : "http"}://${primary.hostname}`}
             target="_blank"
             rel="noopener noreferrer"
             className={`${site.phpVersion !== null && site.status === "ready" ? "" : "ml-auto "}text-sm font-medium text-primary underline-offset-4 hover:underline`}

@@ -12,7 +12,8 @@ Usage: sudo bash install.sh --hostname <fqdn> --admin-email <email> --admin-name
                             [--version <v> | --archive <path>] [--acme-staging]
                             [--skip-firewall] [--dry-run] [--allow-other-linux]
 
-  --acme-email   Let's Encrypt account email (default: --admin-email).
+  --acme-email   Let's Encrypt contact email (default: --admin-email). Must be a real address:
+                 Let's Encrypt rejects example.com, *.test and similar reserved domains.
   --ipv4         Public IPv4 of this server (default: source address of the default route).
   --version      Release to install (default: latest GitHub release).
   --archive      Local hosting-panel-<v>-linux-x64.tar.gz (its .sha256 must sit next to it).
@@ -56,6 +57,15 @@ step() {
 
 plan() { printf '  [DRY-RUN] %s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
+is_private_ipv4() { # is_private_ipv4 <addr>: RFC1918, CGNAT, loopback, link-local
+  local a b
+  IFS=. read -r a b _ <<<"$1"
+  case "${a}.${b}" in
+    10.* | 127.* | 192.168 | 169.254 | 100.6[4-9] | 100.[7-9][0-9] | 100.1[01][0-9] | 100.12[0-7]) return 0 ;;
+    172.1[6-9] | 172.2[0-9] | 172.3[01]) return 0 ;;
+  esac
+  return 1
+}
 
 # Rewrites KEY=VALUE lines in an env file atomically (0400 root:root); other lines are kept
 # byte for byte, missing keys are appended. Values are never printed.
@@ -90,6 +100,7 @@ set_env_keys() {
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
+ufw_active() { command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; }
 docker0_ipv4() { { ip -4 -o addr show docker0 2>/dev/null || true; } | awk '{split($4, a, "/"); print a[1]; exit}'; }
 
 # Prints the docker0 IPv4 the web console binds to; exit 6 rather than binding to all interfaces.
@@ -149,7 +160,7 @@ add_apt_repo() { # <keyring name> <key url> <list name> <repo line> <package> <m
   printf '%s\n' "$4" >"${list}"
   chmod 0644 "${list}"
   if apt-get update -q; then
-    candidate="$(apt-cache policy "$5" | awk '/Candidate:/ {print $2}')"
+    candidate="$(LC_ALL=C apt-cache policy "$5" | awk '/Candidate:/ {print $2}')"
   fi
   if [[ -z "${candidate}" || "${candidate}" == "(none)" ]]; then
     rm -f -- "${list}"
@@ -213,6 +224,11 @@ main() {
   [[ -n "${admin_name}" && "${admin_name}" != *$'\n'* ]] || die 2 "Missing or invalid --admin-name"
   acme_email="${acme_email:-${admin_email}}"
   [[ "${acme_email}" =~ ${email_re} ]] || die 2 "Invalid --acme-email"
+  local acme_domain="${acme_email##*@}"
+  case "${acme_domain}" in
+    example.com | example.net | example.org | *.example | *.test | *.invalid | *.localhost)
+      die 2 "Use a real --acme-email: Let's Encrypt rejects ${acme_domain}" ;;
+  esac
   [[ -z "${ipv4}" || "${ipv4}" =~ ${ipv4_re} ]] || die 2 "Invalid --ipv4: ${ipv4}"
   [[ -z "${version}" || -z "${archive}" ]] || die 2 "--version and --archive are mutually exclusive"
   [[ -z "${version}" || "${version}" == latest || "${version}" =~ ${_hp_semver_re} ]] || die 2 "Invalid --version: ${version}"
@@ -330,6 +346,12 @@ main() {
     fi
   fi
   info "Panel IPv4: ${ipv4}"
+  if is_private_ipv4 "${ipv4}"; then
+    info "WARNING: ${ipv4} is a private address. Customers' A records must point to this server's public IPv4; if the server is behind NAT, rerun with --ipv4 <public address>."
+  fi
+  if ((dry_run == 0)) && ! { getent ahostsv4 "${hostname}" 2>/dev/null || true; } | awk '{print $1}' | grep -qxF "${ipv4}"; then
+    info "WARNING: ${hostname} does not resolve to ${ipv4} yet. Create its A record now: until it resolves, the panel uses a temporary certificate and Let's Encrypt attempts for it fail."
+  fi
 
   # ---------------------------------------------------------------- 3
   step 3 "Docker CE"
@@ -506,6 +528,9 @@ SQL
     info "skip: --skip-firewall given; manage the firewall yourself (allow 22/80/443, and 3000 from docker bridges only)"
   elif ((dry_run)); then
     plan "would apply nft -f ${nft_src}, install it as ${nft_dst}, add '${include_line}' to /etc/nftables.conf if missing, enable nftables.service"
+    local ufw_on="${HP_UFW_ACTIVE-}"
+    [[ -n "${ufw_on}" ]] || { ufw_active && ufw_on=1 || ufw_on=0; }
+    if ((ufw_on)); then plan "would run ufw allow from 172.16.0.0/12 to ${bind:-<docker0 IPv4>} port 3000 proto tcp (ufw is active)"; fi
   else
     # Our file deletes/recreates only table inet hp_dedicated_filter; we never flush the ruleset
     # (that would drop Docker's iptables-nft NAT/filter tables, which Docker recreates only on restart).
@@ -517,6 +542,11 @@ SQL
     # Enable for boot only, never start/restart now: the distro nftables.conf starts with
     # "flush ruleset", which at boot runs before Docker, but now would wipe Docker's live tables.
     systemctl enable nftables
+    # ufw's own INPUT chain (policy drop) also sees proxy -> panel traffic; our table alone is not enough.
+    if ufw_active; then
+      ufw allow from 172.16.0.0/12 to "${bind}" port 3000 proto tcp comment 'hosting-panel: proxy -> panel' >/dev/null
+      info "ufw is active: allowed TCP 3000 from the Docker bridges (172.16.0.0/12) to ${bind}"
+    fi
   fi
 
   # ---------------------------------------------------------------- 11

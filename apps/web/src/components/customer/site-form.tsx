@@ -1,14 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { DEFAULT_PHP_VERSION, SUPPORTED_PHP_VERSIONS, type CreateManagedSiteInput } from "@hosting-panel/contracts";
+import { DEFAULT_PHP_VERSION, SUPPORTED_PHP_VERSIONS, suggestWwwPair, type CreateManagedSiteInput } from "@hosting-panel/contracts";
 import { Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMessages } from "@/i18n/provider";
 
-export type SiteFormBody = Omit<CreateManagedSiteInput, "phpVersion"> & { phpVersion: string };
+export type SiteFormBody = Omit<CreateManagedSiteInput, "phpVersion" | "includeWww"> & { phpVersion: string; includeWww: boolean };
 
 /** Shared by the customer page and the administrator dialog; the caller owns submission and errors. */
 export function SiteForm({
@@ -16,16 +16,21 @@ export function SiteForm({
   submitting,
   fieldErrors = {},
   extraFields,
+  initialDomain = "",
 }: {
   onSubmit: (body: SiteFormBody) => void;
   submitting: boolean;
   fieldErrors?: Partial<Record<string, string>>;
   extraFields?: React.ReactNode;
+  initialDomain?: string;
 }) {
   const t = useMessages().site.create;
-  const [v, setV] = useState({ name: "", domain: "", title: "", adminUser: "", adminEmail: "", adminPassword: "" });
+  const [v, setV] = useState({ name: "", domain: initialDomain, title: "", adminUser: "", adminEmail: "", adminPassword: "" });
   const [php, setPhp] = useState<string>(DEFAULT_PHP_VERSION);
   const [show, setShow] = useState(false);
+  const [wwwChoice, setWwwChoice] = useState<boolean | null>(null); // null = follow the suggestion
+  const domainName = v.domain.trim().toLowerCase();
+  const includeWww = wwwChoice ?? suggestWwwPair(domainName);
 
   const field = (key: keyof typeof v, label: string, extra: { type?: string; hint?: string; autoComplete?: string } = {}) => (
     <div className="space-y-2">
@@ -50,12 +55,16 @@ export function SiteForm({
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        onSubmit({ ...v, phpVersion: php });
+        onSubmit({ ...v, phpVersion: php, includeWww });
       }}
       className="space-y-4"
     >
       {field("name", t.name)}
       {field("domain", t.domain, { hint: t.domainHint })}
+      <label className="flex items-center gap-2 text-sm">
+        <input id="site-includeWww" type="checkbox" checked={includeWww} onChange={(e) => setWwwChoice(e.target.checked)} />
+        {t.alsoWww.replace("{domain}", domainName.replace(/^www\./, "") || "…")}
+      </label>
       {field("title", t.siteTitle)}
       {field("adminUser", t.adminUser, { autoComplete: "off" })}
       {field("adminEmail", t.adminEmail, { type: "email" })}

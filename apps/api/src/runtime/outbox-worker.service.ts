@@ -49,6 +49,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
+import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
 import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
@@ -117,6 +118,7 @@ export class OutboxWorkerService {
     @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(SiteProvisioner) private readonly siteProvisioner: SiteProvisioner,
+    @Inject(SiteDomainsApplier) private readonly siteDomainsApplier: SiteDomainsApplier,
   ) {}
 
   public startBackgroundLoop(): void {
@@ -289,6 +291,8 @@ export class OutboxWorkerService {
         await this.siteProvisioner.remove(op);
       } else if (op.kind === "site.reassign") {
         await this.siteProvisioner.reassign(op, payload);
+      } else if (op.kind === "site.domains") {
+        await this.siteDomainsApplier.apply(op);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -732,7 +736,11 @@ export class OutboxWorkerService {
     let convergedFailed = 0;
 
     for (const op of unknownOps) {
-      if (SITE_OPERATION_KINDS.has(op.kind)) {
+      if (op.kind === "site.domains") {
+        // Only routes changed: the site keeps its status and the reconciler re-enqueues.
+        await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
+        convergedFailed += 1;
+      } else if (SITE_OPERATION_KINDS.has(op.kind)) {
         // Site steps are not safely replayable mid-way: fail and let the customer retry.
         await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");
         await db

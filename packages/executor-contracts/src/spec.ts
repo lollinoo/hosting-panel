@@ -5,6 +5,7 @@ import {
   validateServiceVolumeMount,
   type ErrorCode,
   type ServiceVolumeMountSpec,
+  type SiteHostRoute,
 } from "@hosting-panel/contracts";
 
 export type { ServiceVolumeMountSpec };
@@ -32,6 +33,7 @@ export interface ApprovedServiceSpec {
   readonly revisionNumber?: number;
   readonly specHash?: string;
   readonly domains?: readonly string[];
+  readonly hostRoutes?: readonly SiteHostRoute[];
   readonly exposeHttp?: boolean;
   readonly internalPort?: number;
   readonly pidsLimit?: number;
@@ -52,6 +54,7 @@ export interface CreateApprovedServiceSpecInput {
   readonly revisionNumber?: number;
   readonly specHash?: string;
   readonly domains?: readonly string[];
+  readonly hostRoutes?: readonly SiteHostRoute[];
   readonly exposeHttp?: boolean;
   readonly internalPort?: number;
   readonly pidsLimit?: number;
@@ -200,6 +203,9 @@ export function createApprovedServiceSpec(
     ...(input.revisionNumber !== undefined ? { revisionNumber: input.revisionNumber } : {}),
     ...(input.specHash !== undefined ? { specHash: input.specHash } : {}),
     ...(input.domains !== undefined ? { domains: Object.freeze([...input.domains]) } : {}),
+    ...(input.hostRoutes !== undefined
+      ? { hostRoutes: Object.freeze(input.hostRoutes.map((r) => Object.freeze({ ...r }))) }
+      : {}),
     ...(input.exposeHttp !== undefined ? { exposeHttp: input.exposeHttp } : {}),
     ...(input.internalPort !== undefined ? { internalPort: input.internalPort } : {}),
     ...(input.pidsLimit !== undefined ? { pidsLimit: input.pidsLimit } : {}),

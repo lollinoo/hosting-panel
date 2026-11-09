@@ -3,9 +3,11 @@ import type {
   DockerExecutionResult,
   DockerExecutorPort,
   ServiceLogLine,
+  SiteRoutesRequest,
   SiteJobRequest,
   SiteJobResult,
 } from "./port.js";
+import type { CertificateStatusReport } from "./acme-status.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
@@ -44,6 +46,14 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async getServiceLogs(_serviceInstanceId: string, _tail: number): Promise<readonly ServiceLogLine[]> {
+    return this.refuse();
+  }
+
+  async applySiteRoutes(_req: SiteRoutesRequest): Promise<void> {
+    return this.refuse();
+  }
+
+  async getCertificateStatus(_req: { failuresSince: string }): Promise<CertificateStatusReport> {
     return this.refuse();
   }
 

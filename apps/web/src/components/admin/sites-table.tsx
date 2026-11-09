@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { AdminSiteDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -76,6 +77,9 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
                 <div className="flex flex-wrap gap-2">
                   <Button type="button" size="sm" variant="outline" onClick={() => setMoving(s)}>
                     {t.changeOwner}
+                  </Button>
+                  <Button asChild size="sm" variant="outline">
+                    <Link href={`/admin/sites/${s.id}/domains`}>{t.domains}</Link>
                   </Button>
                   {s.status === "degraded" && (
                     <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => retry(s)}>

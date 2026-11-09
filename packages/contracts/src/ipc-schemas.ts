@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CERT_PROBLEMS } from "./site-domains.js";
 import {
   HostDaemonStatusSchema,
   RuntimeBackendSchema,
@@ -102,6 +103,13 @@ export const ServiceVolumeMountWireSchema = z
   });
 export type ServiceVolumeMountWire = z.infer<typeof ServiceVolumeMountWireSchema>;
 
+export const SiteHostRouteSchema = z.object({
+  hostname: z.string().min(1).max(253),
+  tls: z.boolean(),
+  httpsRedirect: z.boolean(),
+  redirectTo: z.string().max(260).nullable(),
+});
+
 export const ApprovedServiceSpecWireSchema = z
   .object({
     serviceInstanceId: z.string().min(1).max(128),
@@ -121,6 +129,7 @@ export const ApprovedServiceSpecWireSchema = z
     revisionNumber: z.number().int().positive().optional(),
     specHash: z.string().min(1).optional(),
     domains: z.array(z.string().min(1)).optional(),
+    hostRoutes: z.array(SiteHostRouteSchema).max(20).optional(),
     exposeHttp: z.boolean().optional(),
     internalPort: z.number().int().min(1).max(65535).optional(),
     pidsLimit: z.number().int().min(16).max(4096).optional(),
@@ -182,7 +191,7 @@ export type ServiceInstanceActionIpcRequest = z.infer<
 
 export const SiteJobIpcRequestSchema = z.object({
   jobId: z.string().min(1).max(128),
-  kind: z.enum(["db.provision", "db.drop", "wordpress.install"]),
+  kind: z.enum(["db.provision", "db.drop", "wordpress.install", "wordpress.set-url"]),
   siteId: z.string().min(1).max(128),
   organizationId: z.string().min(1).max(128),
   serviceInstanceId: z.string().min(1).max(128).optional(),
@@ -199,6 +208,42 @@ export const ServiceLogsIpcRequestSchema = z.object({
   tail: z.number().int().min(1).max(500),
 });
 export type ServiceLogsIpcRequest = z.infer<typeof ServiceLogsIpcRequestSchema>;
+
+export const SiteRoutesIpcRequestSchema = z.object({
+  siteId: z.string().min(1).max(128),
+  serviceInstanceId: z.string().min(1).max(128),
+  containerName: z.string().min(1).max(128),
+  internalPort: z.number().int().min(1).max(65535),
+  hosts: z.array(SiteHostRouteSchema).max(20),
+});
+export type SiteRoutesIpcRequest = z.infer<typeof SiteRoutesIpcRequestSchema>;
+
+export const CertificateStatusIpcRequestSchema = z.object({
+  failuresSince: z.string().datetime({ offset: true }),
+});
+export type CertificateStatusIpcRequest = z.infer<typeof CertificateStatusIpcRequestSchema>;
+
+export const CertificateStatusReportWireSchema = z.object({
+  acmeEnabled: z.boolean(),
+  trusted: z.boolean(),
+  readable: z.boolean(),
+  certificates: z.array(
+    z.object({
+      hostname: z.string().min(1).max(253),
+      notAfter: z.string().datetime({ offset: true }),
+      serialNumber: z.string().max(128),
+    }),
+  ),
+  failures: z.array(
+    z.object({
+      hostname: z.string().min(1).max(253),
+      at: z.string().datetime({ offset: true }),
+      kind: z.enum(["obtain", "renew"]),
+      problem: z.enum(CERT_PROBLEMS),
+      detail: z.string().max(1024),
+    }),
+  ),
+});
 
 export const ObservedServiceStateWireSchema = z.object({
   serviceInstanceId: z.string().min(1).max(128).optional(),

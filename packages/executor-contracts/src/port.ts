@@ -1,5 +1,6 @@
-import type { OperationStatus } from "@hosting-panel/contracts";
+import type { OperationStatus, SiteHostRoute } from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
+import type { CertificateStatusReport } from "./acme-status.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export interface DockerExecutionResult {
@@ -22,6 +23,18 @@ export interface DockerExecutorPort {
   /** Removes a site's volumes, networks and routes; refuses while its containers exist. */
   purgeSite(siteId: string): Promise<void>;
   getServiceLogs(serviceInstanceId: string, tail: number): Promise<readonly ServiceLogLine[]>;
+  /** Rewrites only the routing file; the service container is never touched. */
+  applySiteRoutes(req: SiteRoutesRequest): Promise<void>;
+  /** Read-only: hostnames, expiry and recent ACME failures. Never private keys. */
+  getCertificateStatus(req: { failuresSince: string }): Promise<CertificateStatusReport>;
+}
+
+export interface SiteRoutesRequest {
+  readonly siteId: string;
+  readonly serviceInstanceId: string;
+  readonly containerName: string;
+  readonly internalPort: number;
+  readonly hosts: readonly SiteHostRoute[];
 }
 
 export interface ServiceLogLine {
@@ -31,7 +44,7 @@ export interface ServiceLogLine {
 }
 
 /** One-off, allowlisted setup jobs. The API picks only the kind; the executor owns image, script and mounts. */
-export type SiteJobKind = "db.provision" | "db.drop" | "wordpress.install";
+export type SiteJobKind = "db.provision" | "db.drop" | "wordpress.install" | "wordpress.set-url";
 
 export interface SiteJobRequest {
   readonly jobId: string;

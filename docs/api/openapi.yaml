@@ -2035,6 +2035,313 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/domains:
+    get:
+      tags: [Managed Sites]
+      operationId: customerListDomains
+      summary: List the domains of a site with DNS and HTTPS status
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Managed Sites]
+      operationId: customerAddDomain
+      summary: Add a domain (optionally with its www pair)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddSiteDomainInput"
+      responses:
+        "201":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}:
+    delete:
+      tags: [Managed Sites]
+      operationId: customerRemoveDomain
+      summary: Remove a domain (not the primary one, not the last one)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}/primary:
+    post:
+      tags: [Managed Sites]
+      operationId: customerSetPrimaryDomain
+      summary: Make a domain the main address
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}/check:
+    post:
+      tags: [Managed Sites]
+      operationId: customerCheckDomain
+      summary: Check DNS now and retry the certificate when allowed
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/domains:
+    get:
+      tags: [Admin Sites]
+      operationId: adminListDomains
+      summary: List the domains of a site with DNS and HTTPS status
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Admin Sites]
+      operationId: adminAddDomain
+      summary: Add a domain (optionally with its www pair)
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddSiteDomainInput"
+      responses:
+        "201":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/domains/{domainId}:
+    delete:
+      tags: [Admin Sites]
+      operationId: adminRemoveDomain
+      summary: Remove a domain (not the primary one, not the last one)
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/domains/{domainId}/primary:
+    post:
+      tags: [Admin Sites]
+      operationId: adminSetPrimaryDomain
+      summary: Make a domain the main address
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/domains/{domainId}/check:
+    post:
+      tags: [Admin Sites]
+      operationId: adminCheckDomain
+      summary: Check DNS now and retry the certificate when allowed
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/organizations/{orgId}/managed-sites/{siteId}/logs:
     get:
       tags: [Managed Sites]
@@ -2247,6 +2554,12 @@ components:
       required: true
       schema:
         type: string
+    DomainIdParam:
+      in: path
+      name: domainId
+      required: true
+      schema:
+        type: string
     ServiceIdParam:
       in: path
       name: serviceId
@@ -2445,7 +2758,6 @@ components:
           type: boolean
         acmeTlsRuntimeAvailable:
           type: boolean
-          const: false
         sftpAvailable:
           type: boolean
           const: false
@@ -2476,7 +2788,6 @@ components:
           type: boolean
         acmeTlsRuntimeAvailable:
           type: boolean
-          const: false
         sftpAvailable:
           type: boolean
           const: false
@@ -3098,8 +3409,12 @@ components:
 
     AdminSitesListDto:
       type: object
-      required: [sites, customers]
+      required: [sites, customers, certificateAlerts]
       properties:
+        certificateAlerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/CertificateAlertDto"
         sites:
           type: array
           items:
@@ -3116,6 +3431,109 @@ components:
                 type: string
               ownerEmail:
                 type: string
+
+    AddSiteDomainInput:
+      type: object
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+        includeWww:
+          type: boolean
+          default: false
+
+    CertificateAlertDto:
+      type: object
+      required: [kind, siteId, siteName, hostname, expiresAt, problem]
+      properties:
+        kind:
+          type: string
+          enum: [expiring, not_issued, panel_expiring]
+        siteId:
+          type: string
+          nullable: true
+        siteName:
+          type: string
+          nullable: true
+        hostname:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        problem:
+          type: string
+          enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other]
+          nullable: true
+
+    SiteDomainDto:
+      type: object
+      required: [id, hostname, isPrimary, routed, dns, certificate]
+      properties:
+        id:
+          type: string
+        hostname:
+          type: string
+        isPrimary:
+          type: boolean
+        routed:
+          type: boolean
+        dns:
+          type: object
+          required: [status, checkedAt, nextCheckAt, observedA, observedAaaa]
+          properties:
+            status:
+              type: string
+              enum: [unchecked, ok, not_found, points_elsewhere, ipv6_conflict, lookup_failed]
+            checkedAt:
+              type: string
+              format: date-time
+              nullable: true
+            nextCheckAt:
+              type: string
+              format: date-time
+            observedA:
+              type: array
+              items:
+                type: string
+            observedAaaa:
+              type: array
+              items:
+                type: string
+        certificate:
+          type: object
+          required: [status, problem, expiresAt, retryAt, trusted]
+          properties:
+            status:
+              type: string
+              enum: [none, requested, active, failed]
+            problem:
+              type: string
+              enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other]
+              nullable: true
+            expiresAt:
+              type: string
+              format: date-time
+              nullable: true
+            retryAt:
+              type: string
+              format: date-time
+              nullable: true
+            trusted:
+              type: boolean
+
+    SiteDomainsDto:
+      type: object
+      required: [serverIpv4, routesPending, domains]
+      properties:
+        serverIpv4:
+          type: string
+        routesPending:
+          type: boolean
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/SiteDomainDto"
 
     CreateManagedSiteInput:
       type: object

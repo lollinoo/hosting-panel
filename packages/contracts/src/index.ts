@@ -5,3 +5,4 @@ export * from "./resources.js";
 export * from "./ipc-auth.js";
 export * from "./ipc-schemas.js";
 export * from "./site-runtime.js";
+export * from "./site-domains.js";

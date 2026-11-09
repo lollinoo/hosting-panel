@@ -2,7 +2,14 @@ import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
 import path from "node:path";
-import { VOLUME_SUFFIX_PATTERN, type ErrorCode } from "@hosting-panel/contracts";
+import {
+  VOLUME_SUFFIX_PATTERN,
+  isSiteOrigin,
+  normalizeSiteDomain,
+  type ErrorCode,
+  type SiteHostRoute,
+} from "@hosting-panel/contracts";
+import { readAcmeCertificates } from "./acme-status.js";
 
 export const INGRESS_PROXY_CONTAINER_NAME = "hp_ingress_proxy" as const;
 export const INGRESS_BRIDGE_NETWORK_NAME = "hp_ingress_net" as const;
@@ -13,6 +20,10 @@ export const DEFAULT_INGRESS_HTTPS_PORT = 443 as const;
 export const PANEL_DYNAMIC_FILE_NAME = "hp-panel.yml" as const;
 export const STATIC_SHA256_LABEL = "io.hostingpanel.static_sha256" as const;
 const ACME_EMAIL_PATTERN = /^[^\s@"'`\\]+@[^\s@"'`\\]+$/;
+const ACME_CA_SERVER_PATTERN = /^https:\/\/[^\s"'`\\]+$/;
+const ACME_STAGING_URL = "https://acme-staging-v02.api.letsencrypt.org/directory";
+const CUSTOM_CA_FILE_NAME = "custom-ca.pem";
+const MAX_SITE_ROUTE_HOSTS = 20;
 
 const SAFE_IDENTIFIER_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const SAFE_DOMAIN_PATTERN =
@@ -122,11 +133,37 @@ export async function writeFileAtomically(
   }
 }
 
+/** Skips identical content: every rename makes Traefik reload, and each reload retries pending ACME hosts. */
+export async function writeFileIfChanged(
+  targetPath: string,
+  content: string | Buffer,
+  fileMode: number,
+): Promise<void> {
+  const current = await readFile(targetPath).catch(() => null);
+  if (current?.equals(Buffer.from(content))) {
+    return;
+  }
+  await writeFileAtomically(targetPath, content, fileMode);
+}
+
 export interface SiteIngressRouteEntry {
   readonly serviceInstanceId: string;
   readonly containerName: string;
   readonly internalPort: number;
-  readonly domains: readonly string[];
+  readonly hosts: readonly SiteHostRoute[];
+}
+
+export interface SiteRouteOptions {
+  readonly acmeEnabled: boolean;
+  /** Panel hostname and IPv4: never routable to a site. */
+  readonly reservedHosts: readonly string[];
+}
+
+export function siteRouteOptions(panel: PanelIngressConfig | null): SiteRouteOptions {
+  return {
+    acmeEnabled: Boolean(panel?.acmeEmail),
+    reservedHosts: panel ? [panel.hostname.trim().toLowerCase(), panel.ipv4.trim()] : [],
+  };
 }
 
 export interface PanelIngressConfig {
@@ -134,6 +171,9 @@ export interface PanelIngressConfig {
   readonly ipv4: string;
   readonly acmeEmail: string | null;
   readonly acmeStaging: boolean;
+  /** Local test CA only; the installer never sets it. */
+  readonly acmeCaServer: string | null;
+  readonly acmeCaCertFile: string | null;
   readonly upstreamPort: number;
 }
 
@@ -151,6 +191,21 @@ function assertAcmeEmail(email: string): string {
     throw new ExecutorCodedError("Invalid ACME account email", "VALIDATION_ERROR");
   }
   return email;
+}
+
+/** One store per CA, so switching staging/production never mixes accounts or certificates. */
+export function acmeStorageFileName(
+  panel: PanelIngressConfig | null,
+): "acme.json" | "acme-staging.json" | "acme-custom.json" {
+  if (panel?.acmeCaServer) return "acme-custom.json";
+  return panel?.acmeStaging ? "acme-staging.json" : "acme.json";
+}
+
+function assertAcmeCaServer(url: string): string {
+  if (url.length > 2048 || !ACME_CA_SERVER_PATTERN.test(url)) {
+    throw new ExecutorCodedError("ACME CA server must be an https:// URL", "VALIDATION_ERROR");
+  }
+  return url;
 }
 
 export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string {
@@ -171,16 +226,25 @@ export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string
     '    directory: "/etc/traefik/dynamic"',
     "    watch: true",
     "",
+    "log:",
+    "  format: json",
+    "",
   ];
+  const caServer = panel?.acmeCaServer
+    ? JSON.stringify(assertAcmeCaServer(panel.acmeCaServer))
+    : panel?.acmeStaging
+      ? ACME_STAGING_URL
+      : null;
   if (panel?.acmeEmail) {
     lines.push(
       "certificatesResolvers:",
       "  le:",
       "    acme:",
       `      email: ${JSON.stringify(assertAcmeEmail(panel.acmeEmail))}`,
-      "      storage: /etc/traefik/acme/acme.json",
-      ...(panel.acmeStaging
-        ? ["      caServer: https://acme-staging-v02.api.letsencrypt.org/directory"]
+      `      storage: /etc/traefik/acme/${acmeStorageFileName(panel)}`,
+      ...(caServer ? [`      caServer: ${caServer}`] : []),
+      ...(panel.acmeCaServer && panel.acmeCaCertFile
+        ? ["      caCertificates:", `        - /etc/traefik/acme/${CUSTOM_CA_FILE_NAME}`]
         : []),
       "      httpChallenge:",
       "        entryPoint: web",
@@ -190,7 +254,9 @@ export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string
   return lines.join("\n");
 }
 
-export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
+export type PanelDnsLookup = (hostname: string) => Promise<{ a: string[]; aaaa: string[] }>;
+
+export function buildPanelDynamicYaml(panel: PanelIngressConfig, requestCertificate = true): string {
   const hostname = assertSafeDomain(panel.hostname);
   if (hostname.startsWith("*.")) {
     throw new ExecutorCodedError("Panel hostname cannot be a wildcard", "VALIDATION_ERROR");
@@ -200,7 +266,7 @@ export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
     throw new ExecutorCodedError("Panel IPv4 address is invalid", "VALIDATION_ERROR");
   }
   assertValidPort(panel.upstreamPort, "Panel upstream port");
-  const tls = panel.acmeEmail
+  const tls = panel.acmeEmail && requestCertificate
     ? ["      tls:", "        certResolver: le"]
     : ["      tls: {}"];
   return [
@@ -241,14 +307,56 @@ export function buildPanelDynamicYaml(panel: PanelIngressConfig): string {
   ].join("\n");
 }
 
+function hostPolicyDenied(what: string): never {
+  throw new ExecutorCodedError(`Unsafe or reserved ingress ${what}`, "HOST_POLICY_DENIED");
+}
+
+function assertSiteHostRoute(host: SiteHostRoute, reserved: ReadonlySet<string>): SiteHostRoute {
+  if (normalizeSiteDomain(host.hostname) !== host.hostname || reserved.has(host.hostname)) {
+    hostPolicyDenied("hostname");
+  }
+  if (host.redirectTo !== null) {
+    if (!isSiteOrigin(host.redirectTo)) hostPolicyDenied("redirect origin");
+    if (reserved.has(host.redirectTo.replace(/^https?:\/\//, ""))) hostPolicyDenied("redirect origin");
+  }
+  return {
+    hostname: host.hostname,
+    tls: host.tls === true,
+    httpsRedirect: host.httpsRedirect === true,
+    redirectTo: host.redirectTo,
+  };
+}
+
+/** Every host and redirect passes policy; a redirect lands on another non-redirecting host of the set. */
+export function assertSiteHostRoutes(
+  routes: readonly SiteHostRoute[],
+  reserved: ReadonlySet<string>,
+): SiteHostRoute[] {
+  const hosts = routes.map((host) => assertSiteHostRoute(host, reserved));
+  const byName = new Map(hosts.map((h) => [h.hostname, h]));
+  for (const h of hosts) {
+    if (h.redirectTo === null) continue;
+    const target = byName.get(h.redirectTo.replace(/^https?:\/\//, ""));
+    if (!target || target === h || target.redirectTo !== null) hostPolicyDenied("redirect target");
+  }
+  return hosts;
+}
+
+/** Stable per hostname, so adding a name never renames the routers of the others. */
+function hostSuffix(hostname: string): string {
+  return createHash("sha256").update(hostname).digest("hex").slice(0, 8);
+}
+
 export function buildSiteDynamicTraefikYaml(
   siteId: string,
   routes: readonly SiteIngressRouteEntry[],
+  opts: SiteRouteOptions,
 ): string {
   assertSafeIdentifier(siteId, "siteId");
+  const reserved = new Set(opts.reservedHosts);
 
   const activeRoutes = routes
-    .filter((route) => route.domains.length > 0)
+    .filter((route) => route.hosts.length > 0)
     .map((route) => {
       assertSafeIdentifier(route.serviceInstanceId, "serviceInstanceId");
       assertSafeIdentifier(route.containerName, "containerName");
@@ -262,15 +370,23 @@ export function buildSiteDynamicTraefikYaml(
           "VALIDATION_ERROR",
         );
       }
-      const normalizedDomains = route.domains.map((d) => assertSafeDomain(d));
+      const hosts = assertSiteHostRoutes(route.hosts, reserved);
       return {
         serviceInstanceId: route.serviceInstanceId,
         containerName: route.containerName,
         internalPort: route.internalPort,
-        domains: normalizedDomains,
+        hosts: hosts.sort((a, b) => a.hostname.localeCompare(b.hostname)),
       };
     })
     .sort((a, b) => a.serviceInstanceId.localeCompare(b.serviceInstanceId));
+
+  const allHostnames = activeRoutes.flatMap((route) => route.hosts.map((h) => h.hostname));
+  if (allHostnames.length > MAX_SITE_ROUTE_HOSTS) {
+    throw new ExecutorCodedError("Too many hostnames for one site", "VALIDATION_ERROR");
+  }
+  if (new Set(allHostnames).size !== allHostnames.length) {
+    throw new ExecutorCodedError("Duplicate hostname in site routes", "VALIDATION_ERROR");
+  }
 
   if (activeRoutes.length === 0) {
     return "";
@@ -279,21 +395,60 @@ export function buildSiteDynamicTraefikYaml(
   const lines: string[] = [
     `# Managed by hp-docker-executor for site ${siteId} — DO NOT EDIT`,
   ];
-
   for (const route of activeRoutes) {
     lines.push(`# @hp-route ${JSON.stringify(route)}`);
   }
 
-  lines.push("http:");
-  lines.push("  routers:");
+  const routers: string[] = [];
+  const middlewares: string[] = [];
   for (const route of activeRoutes) {
     const key = sanitizeTraefikKey(route.serviceInstanceId);
-    const hostRule = route.domains.map((domain) => `Host(\`${domain}\`)`).join(" || ");
-    lines.push(`    router_${key}:`);
-    lines.push("      entryPoints:");
-    lines.push('        - "web"');
-    lines.push(`      rule: "${hostRule}"`);
-    lines.push(`      service: "svc_${key}"`);
+    let needsHttpsRedirect = false;
+    for (const host of route.hosts) {
+      const i = hostSuffix(host.hostname);
+      const canon = host.redirectTo !== null ? `canon_${key}_${i}` : null;
+      const httpsRedirect = opts.acmeEnabled && host.httpsRedirect && canon === null;
+      needsHttpsRedirect ||= httpsRedirect;
+      const httpMiddleware = canon ?? (httpsRedirect ? `https_${key}` : null);
+      const router = (name: string, entryPoint: string, middleware: string | null) => [
+        `    ${name}:`,
+        "      entryPoints:",
+        `        - "${entryPoint}"`,
+        `      rule: "Host(\`${host.hostname}\`)"`,
+        `      service: "svc_${key}"`,
+        ...(middleware ? ["      middlewares:", `        - "${middleware}"`] : []),
+      ];
+      routers.push(...router(`router_${key}_${i}`, "web", httpMiddleware));
+      if (host.tls && opts.acmeEnabled) {
+        routers.push(
+          ...router(`router_${key}_${i}_tls`, "websecure", canon),
+          "      tls:",
+          "        certResolver: le",
+        );
+      }
+      if (canon !== null) {
+        middlewares.push(
+          `    ${canon}:`,
+          "      redirectRegex:",
+          '        regex: "^https?://[^/]+(.*)$"',
+          `        replacement: "${host.redirectTo}\${1}"`,
+          "        permanent: true",
+        );
+      }
+    }
+    if (needsHttpsRedirect) {
+      middlewares.push(
+        `    https_${key}:`,
+        "      redirectScheme:",
+        "        scheme: https",
+        "        permanent: true",
+      );
+    }
+  }
+
+  lines.push("http:", "  routers:", ...routers);
+  if (middlewares.length > 0) {
+    lines.push("  middlewares:", ...middlewares);
   }
 
   lines.push("  services:");
@@ -310,6 +465,16 @@ export function buildSiteDynamicTraefikYaml(
   return lines.join("\n");
 }
 
+function isSiteHostRouteShape(value: unknown): value is SiteHostRoute {
+  const h = value as Partial<SiteHostRoute> | null;
+  return (
+    typeof h?.hostname === "string" &&
+    typeof h.tls === "boolean" &&
+    typeof h.httpsRedirect === "boolean" &&
+    (h.redirectTo === null || typeof h.redirectTo === "string")
+  );
+}
+
 function parsePersistedRoutesFromYaml(yamlContent: string): SiteIngressRouteEntry[] {
   const routes: SiteIngressRouteEntry[] = [];
   for (const line of yamlContent.split("\n")) {
@@ -319,19 +484,29 @@ function parsePersistedRoutesFromYaml(yamlContent: string): SiteIngressRouteEntr
     }
     const jsonPart = trimmed.slice("# @hp-route ".length);
     try {
-      const parsed = JSON.parse(jsonPart) as Partial<SiteIngressRouteEntry>;
+      const parsed = JSON.parse(jsonPart) as Partial<SiteIngressRouteEntry> & {
+        readonly domains?: unknown;
+      };
+      // A 2a file stores plain `domains`: they become hosts without TLS.
+      const hosts: unknown = Array.isArray(parsed.domains)
+        ? parsed.domains.map((d: unknown) =>
+            typeof d === "string"
+              ? { hostname: d, tls: false, httpsRedirect: false, redirectTo: null }
+              : null,
+          )
+        : parsed.hosts;
       if (
         typeof parsed.serviceInstanceId === "string" &&
         typeof parsed.containerName === "string" &&
         typeof parsed.internalPort === "number" &&
-        Array.isArray(parsed.domains) &&
-        parsed.domains.every((d): d is string => typeof d === "string")
+        Array.isArray(hosts) &&
+        hosts.every(isSiteHostRouteShape)
       ) {
         routes.push({
           serviceInstanceId: parsed.serviceInstanceId,
           containerName: parsed.containerName,
           internalPort: parsed.internalPort,
-          domains: parsed.domains,
+          hosts,
         });
       }
     } catch {
@@ -372,6 +547,10 @@ export interface DockerIngressProxyCreatePayload {
     >;
     readonly Binds: readonly string[];
     readonly ExtraHosts: readonly string[];
+    readonly LogConfig: {
+      readonly Type: "json-file";
+      readonly Config: { readonly "max-size": "10m"; readonly "max-file": "3" };
+    };
   };
   readonly NetworkingConfig: {
     readonly EndpointsConfig: { readonly [INGRESS_BRIDGE_NETWORK_NAME]: { readonly GwPriority: 1 } };
@@ -430,6 +609,8 @@ export function buildIngressProxyContainerPayload(
         `${input.acmeDirHostPath}:/etc/traefik/acme`,
       ],
       ExtraHosts: ["host.docker.internal:host-gateway"],
+      // The executor reads ACME failures from this log, so it must stay bounded.
+      LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
     },
     // The panel upstream (host-gateway, docker0) is reached through the default route. Without a
     // priority Docker gives the gateway to the first network by name, so a new hp_edge_* network
@@ -445,12 +626,60 @@ export class TraefikIngressFileManager {
   public readonly acmeDirPath: string;
   private readonly siteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
+  private readonly routeOptions: SiteRouteOptions;
+  // Until gatePanelCertificate runs (the executor runs it before the first ensure), keep the resolver.
+  private panelRequestCertificate = true;
+  private panelGateDecided = false;
 
-  public constructor(ingressRootDir: string = DEFAULT_INGRESS_ROOT_DIR) {
+  public constructor(
+    ingressRootDir: string = DEFAULT_INGRESS_ROOT_DIR,
+    panel: PanelIngressConfig | null = null,
+  ) {
+    this.routeOptions = siteRouteOptions(panel);
     this.ingressRootDir = path.resolve(ingressRootDir);
     this.staticConfigPath = path.join(this.ingressRootDir, "static", "traefik.yml");
     this.dynamicDirPath = path.join(this.ingressRootDir, "dynamic");
     this.acmeDirPath = path.join(this.ingressRootDir, "acme");
+  }
+
+  /**
+   * Owner decision (2b): like the sites, the panel asks Let's Encrypt only when its A record points
+   * here with no AAAA, so a wrong record never spends orders (Traefik re-orders on every reload).
+   * A valid stored certificate keeps the resolver (renewal).
+   * Rewrites the panel route file when it exists. Returns whether the certificate is requested.
+   */
+  public async gatePanelCertificate(
+    panel: PanelIngressConfig,
+    lookup: PanelDnsLookup,
+    now: number = Date.now(),
+  ): Promise<boolean> {
+    const hostname = panel.hostname.trim().toLowerCase();
+    const panelFile = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
+    let wanted = false;
+    if (panel.acmeEmail) {
+      const store = await readAcmeCertificates(path.join(this.acmeDirPath, acmeStorageFileName(panel)));
+      // The last decision: in memory, or after a restart the file already on disk (fresh install: no).
+      const previous = this.panelGateDecided
+        ? this.panelRequestCertificate
+        : (await readFile(panelFile, "utf8").catch(() => "")).includes("certResolver: le");
+      wanted = store.certificates.some((c) => c.hostname === hostname && Date.parse(c.notAfter) > now);
+      if (!wanted) {
+        try {
+          const { a, aaaa } = await lookup(hostname);
+          wanted = a.length > 0 && a.every((ip) => ip === panel.ipv4.trim()) && aaaa.length === 0;
+          // An unreadable store may hide a valid certificate: never drop the resolver on its word.
+          if (!wanted && !store.readable) wanted = previous;
+        } catch {
+          wanted = previous;
+        }
+      }
+    }
+    this.panelRequestCertificate = wanted;
+    this.panelGateDecided = true;
+    if (await stat(panelFile).catch(() => null)) {
+      await writeFileIfChanged(panelFile, buildPanelDynamicYaml(panel, wanted), 0o644);
+    }
+    return wanted;
   }
 
   public getSiteDynamicFilePath(siteId: string): string {
@@ -470,13 +699,22 @@ export class TraefikIngressFileManager {
     await mkdir(this.acmeDirPath, { recursive: true, mode: 0o700 });
     await chmod(this.acmeDirPath, 0o700);
     // Traefik refuses an acme.json looser than 0600; "a" never truncates existing certificates.
-    const acmeJsonPath = path.join(this.acmeDirPath, "acme.json");
+    const acmeJsonPath = path.join(this.acmeDirPath, acmeStorageFileName(panel));
     await (await open(acmeJsonPath, "a", 0o600)).close();
     await chmod(acmeJsonPath, 0o600);
+    if (panel?.acmeCaCertFile) {
+      const caPem = await readFile(panel.acmeCaCertFile).catch(() => {
+        throw new ExecutorCodedError(
+          "The custom CA certificate file (HP_ACME_CA_CERT_FILE) cannot be read",
+          "VALIDATION_ERROR",
+        );
+      });
+      await writeFileIfChanged(path.join(this.acmeDirPath, CUSTOM_CA_FILE_NAME), caPem, 0o644);
+    }
 
     const panelFilePath = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
     if (panel) {
-      await writeFileAtomically(panelFilePath, buildPanelDynamicYaml(panel), 0o644, 0o755);
+      await writeFileIfChanged(panelFilePath, buildPanelDynamicYaml(panel, this.panelRequestCertificate), 0o644);
     } else {
       await rm(panelFilePath, { force: true });
     }
@@ -547,24 +785,26 @@ export class TraefikIngressFileManager {
     }
 
     const siteMap = await this.getOrHydrateSiteMap(siteId);
-    if (route.domains.length === 0) {
+    if (route.hosts.length === 0) {
       siteMap.delete(route.serviceInstanceId);
       this.serviceToSite.delete(route.serviceInstanceId);
       await this.flushSiteDynamicFile(siteId, siteMap);
       return { configured: false, remainingSiteRoutes: siteMap.size };
     }
 
-    const normalizedDomains = route.domains.map((d) => assertSafeDomain(d));
-    siteMap.set(route.serviceInstanceId, {
+    const next = new Map(siteMap).set(route.serviceInstanceId, {
       serviceInstanceId: route.serviceInstanceId,
       containerName: assertSafeIdentifier(route.containerName, "containerName"),
       internalPort: route.internalPort,
-      domains: normalizedDomains,
+      hosts: route.hosts,
     });
+    // Validates every host before the cached routes change or any file is written.
+    buildSiteDynamicTraefikYaml(siteId, [...next.values()], this.routeOptions);
+    this.siteRoutes.set(siteId, next);
     this.serviceToSite.set(route.serviceInstanceId, siteId);
 
-    await this.flushSiteDynamicFile(siteId, siteMap);
-    return { configured: true, remainingSiteRoutes: siteMap.size };
+    await this.flushSiteDynamicFile(siteId, next);
+    return { configured: true, remainingSiteRoutes: next.size };
   }
 
   public async removeServiceRoute(
@@ -605,7 +845,7 @@ export class TraefikIngressFileManager {
     }
 
     await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
-    const yaml = buildSiteDynamicTraefikYaml(siteId, [...siteMap.values()]);
-    await writeFileAtomically(filePath, yaml, 0o644, 0o755);
+    const yaml = buildSiteDynamicTraefikYaml(siteId, [...siteMap.values()], this.routeOptions);
+    await writeFileIfChanged(filePath, yaml, 0o644);
   }
 }

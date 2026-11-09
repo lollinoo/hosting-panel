@@ -5,6 +5,7 @@ import { getServerSession } from "@/lib/server-session";
 import { fetchServerAdminSites } from "@/lib/server-api";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent } from "@/components/ui/card";
+import { CertificateAlerts } from "@/components/admin/certificate-alerts";
 import { SitesTable } from "@/components/admin/sites-table";
 import { CreateSiteForCustomerDialog } from "@/components/admin/create-site-for-customer-dialog";
 
@@ -25,6 +26,7 @@ export default async function AdminSitesPage() {
         </div>
         {list && <CreateSiteForCustomerDialog customers={list.customers} csrfToken={session.csrfToken} />}
       </div>
+      {list && <CertificateAlerts alerts={list.certificateAlerts} />}
       {list ? (
         <Card>
           <CardContent className="pt-6">

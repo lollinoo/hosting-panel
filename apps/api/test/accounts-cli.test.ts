@@ -36,6 +36,19 @@ describe("accounts CLI", () => {
     expect((await db().select().from(hosts))[0]!.hostingMode).toBe("dedicated");
   });
 
+  it("a second setup with a new --ipv4 updates the host row", async () => {
+    const count = async () =>
+      (await db().select().from(auditEvents).where(eq(auditEvents.action, "host.address.change"))).length;
+    await setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.10" });
+    await setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.20" });
+    const rows = await db().select().from(hosts);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.ipv4Address).toBe("203.0.113.20");
+    expect(await count()).toBe(1);
+    await setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.20" });
+    expect(await count()).toBe(1);
+  });
+
   it("createServerAdmin enrols TOTP and can log in", async () => {
     const out = await createServerAdmin(db(), KEY, { email: " Admin@Example.COM ", name: "Admin", password: PW });
     expect((await getUser("admin@example.com")).platformRole).toBe("infrastructure_admin");

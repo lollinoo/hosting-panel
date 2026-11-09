@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import {
   signIpcRequest,
   type IpcSigningKey,
   type IpcVerificationKey,
+  type SiteHostRoute,
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
@@ -507,9 +508,8 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
       path.join(ingressRootDir, "dynamic", "site_site_alpha.yml"),
       "utf8",
     );
-    expect(siteDynamicYaml).toContain(
-      "Host(`alpha.hosting.example`) || Host(`www.alpha.hosting.example`)",
-    );
+    expect(siteDynamicYaml).toContain('rule: "Host(`alpha.hosting.example`)"');
+    expect(siteDynamicYaml).toContain('rule: "Host(`www.alpha.hosting.example`)"');
     expect(siteDynamicYaml).toContain('url: "http://hp-site-alpha-web:3000"');
 
     // Verify getObservedState reports clean in_sync-ready state, then detects out-of-band drift
@@ -750,6 +750,8 @@ describe("panel ingress", () => {
     ipv4: "203.0.113.10",
     acmeEmail: "ops@example.it",
     acmeStaging: false,
+    acmeCaServer: null,
+    acmeCaCertFile: null,
     upstreamPort: 3000,
   };
 
@@ -850,6 +852,27 @@ describe("panel ingress", () => {
     await adapter.ensureIngressProxy();
     expect(recreateCalls(mark).length).toBe(2);
     expect(proxy()?.networks).toEqual({ hp_ingress_net: { GwPriority: 1 } });
+  });
+
+  it("recreates a proxy without log rotation once, then keeps it", async () => {
+    const { adapter, mockDaemon, proxy, recreateCalls } = await setupAdapter(panel);
+    await adapter.ensureIngressProxy();
+    const first = proxy();
+    expect(first?.hostConfig.LogConfig).toEqual({
+      Type: "json-file",
+      Config: { "max-size": "10m", "max-file": "3" },
+    });
+    if (first) {
+      first.hostConfig = { ...first.hostConfig, LogConfig: { Type: "json-file", Config: {} } };
+    }
+    let mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark).length).toBe(2);
+    expect(proxy()?.networks).toEqual({ hp_ingress_net: { GwPriority: 1 } });
+
+    mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark)).toEqual([]);
   });
 
   async function setupAdapter(panelConfig: PanelIngressConfig | null) {
@@ -1274,5 +1297,285 @@ describe("site IPC", () => {
     await client.purgeSite("site_t").catch(() => undefined);
     await client.getServiceLogs("svc_t", 5).catch(() => undefined);
     expect(timeouts).toEqual([300_000, 510_000, 120_000, 35_000]);
+  });
+});
+
+describe("site routes and certificates", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const PANEL: PanelIngressConfig = {
+    hostname: "srv12.example.it",
+    ipv4: "203.0.113.10",
+    acmeEmail: "ops@example.it",
+    acmeStaging: false,
+    acmeCaServer: null,
+    acmeCaCertFile: null,
+    upstreamPort: 3000,
+  };
+  const hostsOf = (...names: string[]): SiteHostRoute[] =>
+    names.map((hostname) => ({ hostname, tls: true, httpsRedirect: true, redirectTo: null }));
+  const failureLine = JSON.stringify({
+    level: "error",
+    domains: ["hotel.it"],
+    error: "urn:ietf:params:acme:error:rateLimited :: too many",
+    time: "2026-11-09T10:00:00Z",
+    message: "Unable to obtain ACME certificate for domains",
+  });
+
+  async function setup(logsBody?: Buffer) {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-routes-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon({
+      pullBody: "",
+      ...(logsBody ? { logsBody } : {}),
+    });
+    cleanupTasks.push(() => mockDaemon.close());
+    const ingressRootDir = path.join(tmp, "ingress");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir,
+      panel: PANEL,
+    });
+    return { adapter, mockDaemon, ingressRootDir };
+  }
+
+  const input = (hostRoutes?: SiteHostRoute[]) => ({
+    serviceInstanceId: "svc_r",
+    siteId: "site_r",
+    organizationId: "org_r",
+    image: "ghcr.io/example/webapp:1.0.0",
+    containerName: "hp-site-r",
+    env: {},
+    resourceLimits: { cpuMilli: 500, memoryBytes: "536870912" },
+    pidsLimit: 128,
+    revisionNumber: 1,
+    specHash: "hash_r",
+    exposeHttp: false,
+    internalPort: 3000,
+    volumeMounts: [],
+    resolvedSecrets: {},
+    ...(hostRoutes ? { hostRoutes } : {}),
+  });
+  const routeReq = (hosts: SiteHostRoute[]) => ({
+    siteId: "site_r",
+    serviceInstanceId: "svc_r",
+    containerName: "hp-site-r",
+    internalPort: 3000,
+    hosts,
+  });
+  const routeFile = (root: string) => path.join(root, "dynamic", "site_site_r.yml");
+
+  it("applySiteRoutes writes the plan without touching the container", async () => {
+    const { adapter, mockDaemon, ingressRootDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(input()));
+    const before = mockDaemon.requestedPaths.length;
+    await adapter.applySiteRoutes(routeReq(hostsOf("hotel.it")));
+    const after = mockDaemon.requestedPaths.slice(before);
+    const serviceId = [...mockDaemon.containers.values()].find((c) => c.name === "hp-site-r")!.id;
+    expect(after.some((p) => p.includes(serviceId) && !p.endsWith("/json"))).toBe(false);
+    expect(after.some((p) => p.includes("name=hp-site-r"))).toBe(false);
+    const hash = createHash("sha256").update("hotel.it").digest("hex").slice(0, 8);
+    const yaml = await readFile(routeFile(ingressRootDir), "utf8");
+    expect(yaml).toContain(`router_svc_r_${hash}:`);
+    expect(yaml).toContain(`router_svc_r_${hash}_tls:`);
+  });
+
+  it("applySiteRoutes refuses a service of another site", async () => {
+    const { adapter, ingressRootDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(input()));
+    await expect(
+      adapter.applySiteRoutes({ ...routeReq(hostsOf("hotel.it")), siteId: "site_other" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      adapter.applySiteRoutes({ ...routeReq(hostsOf("hotel.it")), containerName: "hp-other" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
+  });
+
+  it("applySiteRoutes refuses the panel hostname", async () => {
+    const { adapter, ingressRootDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(input()));
+    await expect(
+      adapter.applySiteRoutes(routeReq(hostsOf(PANEL.hostname))),
+    ).rejects.toMatchObject({ code: "HOST_POLICY_DENIED" });
+    await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
+  });
+
+  it("refuses redirects to itself, to an unknown host or through another redirect", async () => {
+    const { adapter, ingressRootDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(input()));
+    const plain = hostsOf("hotel.it", "www.hotel.it");
+    const withRedirect = (a: string | null, b: string | null) => [
+      { ...plain[0]!, redirectTo: a },
+      { ...plain[1]!, redirectTo: b },
+    ];
+    for (const hosts of [
+      withRedirect("https://hotel.it", null), // itself
+      withRedirect("https://other.it", null), // not in the set
+      withRedirect("https://www.hotel.it", "https://hotel.it"), // loop and chain
+    ]) {
+      await expect(adapter.applySiteRoutes(routeReq(hosts))).rejects.toMatchObject({
+        code: "HOST_POLICY_DENIED",
+      });
+    }
+    await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
+    await expect(
+      adapter.applySiteRoutes(routeReq(withRedirect(null, "https://hotel.it"))),
+    ).resolves.toBeUndefined();
+  });
+
+  it("a deploy with a bad hostRoute is refused before any container is created", async () => {
+    const { adapter, mockDaemon, ingressRootDir } = await setup();
+    for (const bad of [
+      hostsOf(PANEL.hostname),
+      hostsOf("Hotel.IT"),
+      [{ ...hostsOf("hotel.it")[0]!, redirectTo: "https://hotel.it" }],
+    ]) {
+      await expect(
+        adapter.deployService(createApprovedServiceSpec(input(bad))),
+      ).rejects.toMatchObject({ code: "HOST_POLICY_DENIED" });
+    }
+    expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
+    await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
+  });
+
+  it("certificate status without panel ingress is disabled, trusted and a missing acme.json is unreadable", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-nopanel-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    expect(await adapter.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" })).toEqual({
+      acmeEnabled: false,
+      trusted: true,
+      readable: false,
+      certificates: [],
+      failures: [],
+    });
+  });
+
+  it("a missing custom CA file is a coded error, not a raw ENOENT", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-ca-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      ingressRootDir: path.join(tmp, "ingress"),
+      panel: {
+        ...PANEL,
+        acmeCaServer: "https://ca.test/dir",
+        acmeCaCertFile: path.join(tmp, "missing.pem"),
+      },
+    });
+    await expect(adapter.ensureIngressProxy()).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+      message: expect.stringContaining("HP_ACME_CA_CERT_FILE"),
+    });
+  });
+
+  it("deploy with hostRoutes writes the same plan as applySiteRoutes", async () => {
+    const hosts = hostsOf("hotel.it", "www.hotel.it");
+    const a = await setup();
+    await a.adapter.deployService(createApprovedServiceSpec(input(hosts)));
+    const b = await setup();
+    await b.adapter.deployService(createApprovedServiceSpec(input()));
+    await b.adapter.applySiteRoutes(routeReq(hosts));
+    expect(await readFile(routeFile(a.ingressRootDir))).toEqual(
+      await readFile(routeFile(b.ingressRootDir)),
+    );
+  });
+
+  it("applySiteRoutes with no hosts removes the route file", async () => {
+    const { adapter, ingressRootDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(input()));
+    await adapter.applySiteRoutes(routeReq(hostsOf("hotel.it")));
+    await adapter.applySiteRoutes(routeReq([]));
+    await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
+  });
+
+  async function certClient(adapter: DockerEngineSocketAdapter) {
+    const server = new DockerExecutorIpcServer({
+      executor: adapter,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    return new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+  }
+
+  it("certificate IPC returns hostnames and expiry but never a private key", async () => {
+    const { adapter, ingressRootDir } = await setup();
+    await mkdir(path.join(ingressRootDir, "acme"), { recursive: true });
+    const store = path.join(ingressRootDir, "acme", "acme.json");
+    await copyFile(path.join(import.meta.dirname, "fixtures", "acme.json"), store);
+    const key = (
+      JSON.parse(await readFile(store, "utf8")) as { le: { Certificates: { key: string }[] } }
+    ).le.Certificates[0]!.key;
+    const client = await certClient(adapter);
+    const report = await client.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" });
+    expect(report).toMatchObject({
+      acmeEnabled: true,
+      trusted: true,
+      readable: true,
+      failures: [],
+      certificates: [{ hostname: "hotel.it", notAfter: "2036-11-06T04:46:29.000Z" }],
+    });
+    const body = JSON.stringify(report);
+    expect(body).not.toContain('"key"');
+    expect(body).not.toContain(key);
+  });
+
+  it("certificate IPC reports ACME failures from the proxy log", async () => {
+    const text = Buffer.from(`${failureLine}\n`);
+    const frame = Buffer.alloc(8);
+    frame[0] = 1;
+    frame.writeUInt32BE(text.length, 4);
+    const { adapter, mockDaemon } = await setup(Buffer.concat([frame, text]));
+    const client = await certClient(adapter);
+    const report = await client.getCertificateStatus({ failuresSince: "2026-11-09T09:00:00Z" });
+    expect(report.failures).toMatchObject([
+      { hostname: "hotel.it", kind: "obtain", problem: "rate_limited" },
+    ]);
+    expect(
+      mockDaemon.requestedPaths.some(
+        (p) => p.includes("hp_ingress_proxy/logs?") && p.includes(`since=${String(Date.parse("2026-11-09T09:00:00Z") / 1000)}`),
+      ),
+    ).toBe(true);
+  });
+
+  it("the simulator records route plans and certificates", async () => {
+    const sim = new InMemoryDockerSimulatorAdapter();
+    await sim.deployService(createApprovedServiceSpec(input(hostsOf("hotel.it"))));
+    await sim.applySiteRoutes(routeReq(hostsOf("hotel.it", "www.hotel.it")));
+    expect(sim.routeHistory).toHaveLength(2);
+    expect(sim.appliedRoutes.get("site_r")?.hosts).toHaveLength(2);
+    await expect(
+      sim.applySiteRoutes({ ...routeReq([]), siteId: "site_x" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    sim.issueCertificate("hotel.it", "2030-01-01T00:00:00.000Z");
+    sim.failCertificate("www.hotel.it", "port_80_blocked", "2026-11-09T10:00:00.000Z");
+    const report = await sim.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" });
+    expect(report.certificates.map((c) => c.hostname)).toEqual(["hotel.it"]);
+    expect(report.failures).toMatchObject([{ hostname: "www.hotel.it", problem: "port_80_blocked" }]);
+    sim.setCertificateStoreReadable(false);
+    expect(await sim.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" })).toMatchObject({
+      readable: false,
+      certificates: [],
+    });
   });
 });

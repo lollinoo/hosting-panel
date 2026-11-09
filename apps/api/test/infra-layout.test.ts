@@ -141,7 +141,7 @@ describe("release workflow and docs", () => {
     const readme = read("README.md");
     for (const s of ["install.sh", "hp-update", "sha256sum -c", "hp-accounts"]) expect(readme).toContain(s);
     expect(readme).not.toContain("export DATABASE_URL=");
-    expect(JSON.parse(read("package.json")).version).toBe("0.3.0");
+    expect(JSON.parse(read("package.json")).version).toBe("0.4.0");
   });
 
   it("step 2a docs are consistent", () => {
@@ -150,7 +150,19 @@ describe("release workflow and docs", () => {
     const api = read("docs/api/openapi.yaml");
     for (const s of ["/v1/organizations/{orgId}/managed-sites", "/v1/admin/sites"]) expect(api).toContain(s);
     expect(existsSync(join(root, "docs/architecture/adr/0016-shared-mariadb-and-site-jobs.md"))).toBe(true);
-    expect(JSON.parse(read("package.json")).version).toBe("0.3.0");
+    expect(JSON.parse(read("package.json")).version).toBe("0.4.0");
+  });
+
+  it("step 2b docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["Domini e HTTPS", "acme-staging", "HSTS"]) expect(readme).toContain(s);
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/domains",
+      "/v1/admin/sites/{siteId}/domains"
+    ])
+      expect(api).toContain(s);
+    expect(existsSync(join(root, "docs/architecture/adr/0017-domains-dns-and-acme-tls.md"))).toBe(true);
+    expect(JSON.parse(read("package.json")).version).toBe("0.4.0");
   });
 });
-

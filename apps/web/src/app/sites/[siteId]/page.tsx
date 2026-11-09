@@ -2,6 +2,7 @@ import type { OperationDto, OperationKind, OperationStatus } from "@hosting-pane
 import { format, getMessages, type Messages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
 import { fetchServerOrgOperations } from "@/lib/server-api";
+import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SiteProgress } from "@/components/customer/site-progress";
 import { StatusPill, toSiteStatusView } from "@/components/customer/status-pill";
@@ -16,6 +17,7 @@ const ACTIVITY: Partial<Record<OperationKind, keyof Messages["site"]["activity"]
   "service.deploy": "deploy",
   "service.restart": "restart",
   "service.stop": "stop",
+  "site.domains": "domains",
 };
 
 const outcome = (s: OperationStatus) =>
@@ -95,6 +97,9 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
               ))}
             </ul>
           )}
+          <Link href={`/sites/${site.id}/domains`} className="mt-3 inline-block text-sm font-medium text-primary underline-offset-4 hover:underline">
+            {m.site.overview.manageDomains}
+          </Link>
         </CardContent>
       </Card>
 

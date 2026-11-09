@@ -14,6 +14,8 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), refresh: 
 import { POST as createSite } from "@/app/api/admin/sites/route";
 import { POST as changeOwner } from "@/app/api/admin/sites/[siteId]/owner/route";
 import { DELETE as deleteSite } from "@/app/api/admin/sites/[siteId]/route";
+import { GET as listDomains, POST as addDomain } from "@/app/api/admin/sites/[siteId]/domains/route";
+import { CertificateAlerts } from "@/components/admin/certificate-alerts";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 import { I18nProvider } from "@/i18n/provider";
 
@@ -21,7 +23,7 @@ const req = (method: string, headers: Record<string, string> = {}, body: unknown
   new Request("http://localhost:3000/x", {
     method,
     headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", ...headers },
-    body: JSON.stringify(body),
+    body: method === "GET" ? undefined : JSON.stringify(body),
   });
 const site = { params: Promise.resolve({ siteId: "s1" }) };
 
@@ -69,5 +71,31 @@ describe("admin sites UI", () => {
       expect(m.admin.sites.moveTo).toContain("{owner}");
       expect(m.admin.sites.moveToNone.length).toBeGreaterThan(10);
     }
+  });
+});
+
+describe("admin domains", () => {
+  beforeEach(() => fetchUpstream.mockReset());
+
+  it("admin domains BFF requires CSRF and forwards to v1/admin/sites/s1/domains", async () => {
+    fetchUpstream.mockResolvedValue({ ok: true, status: 200, data: { data: {} } });
+    const noCsrf = new Request("http://localhost:3000/x", { method: "POST", headers: { Host: "localhost:3000", Origin: "http://localhost:3000" }, body: "{}" });
+    expect((await addDomain(noCsrf, site)).status).toBe(403);
+    expect(fetchUpstream).not.toHaveBeenCalled();
+    await addDomain(req("POST", {}, { hostname: "a.it" }), site);
+    expect(fetchUpstream).toHaveBeenCalledWith("v1/admin/sites/s1/domains", expect.objectContaining({ method: "POST", body: { hostname: "a.it" } }));
+    await listDomains(req("GET"), site);
+    expect(fetchUpstream).toHaveBeenLastCalledWith("v1/admin/sites/s1/domains", expect.objectContaining({ method: "GET" }));
+  });
+
+  it("admin sites page shows certificate alerts", () => {
+    const alerts = [
+      { kind: "expiring" as const, siteId: "s1", siteName: "Hotel", hostname: "hotel.it", expiresAt: "2026-12-01T12:00:00Z", problem: null },
+      { kind: "not_issued" as const, siteId: "s2", siteName: "Bar", hostname: "bar.it", expiresAt: null, problem: "caa_blocked" as const },
+      { kind: "panel_expiring" as const, siteId: null, siteName: null, hostname: "panel.example.com", expiresAt: "2026-12-02T12:00:00Z", problem: null },
+    ];
+    const html = renderToStaticMarkup(createElement(I18nProvider, { locale: "en", messages: en, children: createElement(CertificateAlerts, { alerts }) }));
+    for (const s of ["hotel.it (Hotel)", "Dec 1, 2026", "bar.it (Bar)", "no certificate", "CAA", "Panel address panel.example.com"]) expect(html).toContain(s);
+    expect(renderToStaticMarkup(createElement(I18nProvider, { locale: "en", messages: en, children: createElement(CertificateAlerts, { alerts: [] }) }))).toBe("");
   });
 });

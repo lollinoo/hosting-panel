@@ -3,6 +3,7 @@ import {
   SHARED_MARIADB_IMAGE,
   SITE_DB_IDENTIFIER_PATTERN,
   SUPPORTED_PHP_VERSIONS,
+  isSiteOrigin,
   normalizeSiteDomain,
   redactSensitiveString,
   resolveWordpressCliImage,
@@ -64,6 +65,20 @@ wp core is-installed || wp core install --url="$HP_SITE_URL" --title="$HP_TITLE"
 wp rewrite structure '/%postname%/'
 grep -q '^# BEGIN WordPress' .htaccess 2>/dev/null || printf '%s\\n' "$HP_HTACCESS_WORDPRESS" >> .htaccess
 grep -q '^# BEGIN hosting-panel' .htaccess || { printf '%s\\n' "$HP_HTACCESS_PANEL" | cat - .htaccess > .htaccess.new && mv .htaccess.new .htaccess; }
+`;
+
+// Rewrites only origin+delimiter, so http://hotel.it never matches inside http://hotel.italia-tours.com.
+export const WORDPRESS_SET_URL_SCRIPT = `set -eu
+wp config has HP_MANAGED --type=constant || exit 20
+wp option update home "$HP_SITE_URL" --skip-plugins --skip-themes
+wp option update siteurl "$HP_SITE_URL" --skip-plugins --skip-themes
+[ "$HP_PREVIOUS_URL" = "$HP_SITE_URL" ] && exit 0
+p=$HP_PREVIOUS_URL; n=$HP_SITE_URL
+pe=$(printf '%s' "$p" | sed 's#/#\\\\/#g'); ne=$(printf '%s' "$n" | sed 's#/#\\\\/#g')
+for pair in "$p/|$n/" "$p\\"|$n\\"" "$p'|$n'" "$pe\\\\/|$ne\\\\/" "$pe\\"|$ne\\""; do
+  wp search-replace "\${pair%%|*}" "\${pair#*|}" --all-tables-with-prefix --skip-columns=guid --precise \\
+    --skip-plugins --skip-themes --report-changed-only
+done
 `;
 
 // `wp rewrite --hard` writes no .htaccess under the CLI without an apache_modules config.
@@ -132,6 +147,18 @@ const SITE_JOB_SPECS: Readonly<
     // Deleted by the API once install succeeds; a retry finds WordPress installed and never reads it.
     optionalSecrets: ["HP_ADMIN_PASSWORD"],
   },
+  "wordpress.set-url": {
+    params: { phpVersion: isPhpVersion, siteUrl: isSiteOrigin, previousUrl: isSiteOrigin },
+    requiredSecrets: [],
+    optionalSecrets: [],
+  },
+};
+
+const SITE_JOB_SCRIPTS: Readonly<Record<SiteJobKind, string>> = {
+  "db.provision": DB_PROVISION_SCRIPT,
+  "db.drop": DB_DROP_SCRIPT,
+  "wordpress.install": WORDPRESS_INSTALL_SCRIPT,
+  "wordpress.set-url": WORDPRESS_SET_URL_SCRIPT,
 };
 
 const invalid = (message: string): never => {
@@ -177,7 +204,7 @@ export function assertValidSiteJobRequest(req: SiteJobRequest): void {
     }
   }
 
-  if (req.kind === "wordpress.install") {
+  if (req.kind === "wordpress.install" || req.kind === "wordpress.set-url") {
     assertSafeIdentifier(req.serviceInstanceId ?? invalid("serviceInstanceId is required"), "serviceInstanceId");
   }
 }
@@ -222,14 +249,13 @@ export function buildSiteJobContainerPayload(req: SiteJobRequest, ctx: SiteJobCo
   const env = Object.entries(req.params)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${paramEnvName(key)}=${value}`);
-  const isWordpress = req.kind === "wordpress.install";
-  if (isWordpress) {
+  const isWordpress = req.kind === "wordpress.install" || req.kind === "wordpress.set-url";
+  if (req.kind === "wordpress.install") {
     env.push(`HP_HTACCESS_WORDPRESS=${HTACCESS_WORDPRESS}`, `HP_HTACCESS_PANEL=${HTACCESS_PANEL}`);
   }
   env.push(...ctx.secretFileEnv);
 
-  const script =
-    req.kind === "db.provision" ? DB_PROVISION_SCRIPT : req.kind === "db.drop" ? DB_DROP_SCRIPT : WORDPRESS_INSTALL_SCRIPT;
+  const script = SITE_JOB_SCRIPTS[req.kind];
   const binds = isWordpress
     ? [`${getManagedVolumeName(req.serviceInstanceId!, "html")}:/var/www/html`]
     : [`${ctx.rootKeyHostPath}:/run/secrets/mariadb-root:ro`];

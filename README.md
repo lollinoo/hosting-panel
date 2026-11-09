@@ -47,7 +47,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **3 Console Web `shadcn@4.23.0` con `OperationTimeline` Live** | ✅ **Operativo** | `apps/web` BFF JWE + `runtimeBackend` dinamico |
 | **Modalità Shared Hosting (`sharedHostingEnabled`)** | ❌ **Chiuso (`false`)** | Restituisce `409 SHARED_MODE_GATED` (`AC-F1-06`, `AC-F2-10`) |
 | **Quote Disco per Volumi Condivisi (`ADR-011`)** | ❌ **`OPEN — prima di Shared`** | Differito a `HCP-SPEC-007` (`AC-F2-10`) |
-| **Emissione / Rinnovo Certificati ACME/TLS Automatici** | ❌ **Chiuso (`false`)** | `acmeTlsRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
+| **Emissione / Rinnovo Certificati ACME/TLS Automatici** | ✅ **Operativo** | `acmeTlsRuntimeAvailable: true` su `linux-systemd` (`ADR-0017`, `AC-F2-10`) |
 | **Server SFTP Chroot & Web File Manager** | ❌ **Chiuso (`false`)** | `sftpAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
 | **Backup Incrementali S3 di Produzione & DB Gestiti** | ❌ **Chiuso (`false`)** | `productionBackupRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
@@ -161,6 +161,19 @@ L'unico tipo di sito creabile è **WordPress**, con PHP `8.3`, `8.4` (predefinit
 
 I siti usano un unico MariaDB di piattaforma (`hp_mariadb`, utente di sistema `hp-mariadb`, riavvio automatico anche senza control plane). Dati: `/var/lib/hosting-panel/mariadb/data` (`0700`). Chiave root: `/etc/hosting-panel/mariadb-root.key` (32 byte, `0440 hp-mariadb:hp-executor`), generata dal bootstrap e **mai rigenerata**: va inclusa nei backup insieme ai dati. L'accesso root è limitato alla subnet `172.30.250.0/24` (modificabile con `HP_MARIADB_ADMIN_SUBNET` in `executor.env`). Dettagli: [ADR 0016](docs/architecture/adr/0016-shared-mariadb-and-site-jobs.md).
 
+### Domini e HTTPS
+
+Ogni sito può avere fino a **10 indirizzi**; uno è il principale e gli altri vi reindirizzano. Dalla scheda Domini del sito il cliente vede cosa impostare presso il proprio registrar: un record **A** verso l'IPv4 del server (l'opzione «Anche www» aggiunge anche `www`). **Non devono esistere record AAAA**: il server serve solo IPv4 e un AAAA blocca il certificato. Il DNS è ricontrollato periodicamente e con «Controlla ora».
+
+Quando il DNS punta al server, Traefik ottiene da Let's Encrypt un certificato per ogni nome (HTTP-01, porta 80 raggiungibile da Internet) e lo rinnova da solo, anche con il control plane fermo. Dopo un errore il tentativo è ripetuto con attese crescenti (15 min, 1 h, 3 h, 6 h, 24 h; 24 h se Let's Encrypt limita le richieste). Non è attivo **HSTS**.
+
+- **Pannello**: creare il record A del pannello **prima** di installare; l'installer avvisa se il nome non risolve all'IPv4 e, finché non risolve, il pannello usa un certificato temporaneo. Avvisa anche se l'IPv4 è privato (server dietro NAT: rilanciare con `--ipv4 <IPv4 pubblico>`). L'email `--acme-email` è il contatto Let's Encrypt e deve essere reale (no `example.com`, `.test` ecc.).
+- **Prove**: `--acme-staging` usa la CA di staging (certificati non attendibili dai browser, limiti larghi).
+- **Dove sono i certificati**: `/var/lib/hosting-panel/ingress/acme/acme.json` (`acme-staging.json` per lo staging); da includere nei backup.
+- **Avvisi**: l'amministratore vede un avviso quando un certificato scade entro 14 giorni o non è stato emesso.
+
+Dettagli e limiti: [ADR 0017](docs/architecture/adr/0017-domains-dns-and-acme-tls.md).
+
 #### Aggiornamento
 
 ```bash
@@ -221,6 +234,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0016`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` e `ADR-0016` MariaDB condiviso e job dei siti).
+- [Registro delle ADR (`ADR 0001..0017`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

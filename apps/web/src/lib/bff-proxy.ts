@@ -23,7 +23,7 @@ export function bffUpstreamResponse(upstreamRes: UpstreamResponse): NextResponse
 export async function forwardToUpstream(
   req: Request,
   upstreamPath: string,
-  method: "GET" | "POST" | "PATCH",
+  method: "GET" | "POST" | "PATCH" | "DELETE",
   onSuccess?: (session: SessionData, body: unknown, response: NextResponse) => Promise<void>
 ): Promise<NextResponse> {
   const session = await getSessionFromRequest(req);

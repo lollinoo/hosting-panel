@@ -20,23 +20,30 @@ import { ManagedSitesController } from "./controllers/managed-sites.controller.j
 import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
+import { SiteDomainsController } from "./controllers/site-domains.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
+import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
   DOCKER_EXECUTOR_TOKEN,
+  DNS_LOOKUP_TOKEN,
   HOST_AGENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "./tokens.js";
+import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
+import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
+import { SiteDomainsService } from "./sites/site-domains.service.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
   readonly dbClient: DatabaseClient;
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
+  readonly dnsLookup?: DnsLookup;
 }
 
 @Module({})
@@ -59,6 +66,7 @@ export class AppModule {
         AdminSitesController,
         OrganizationsController,
         ManagedSitesController,
+        SiteDomainsController,
       ],
       providers: [
         {
@@ -77,13 +85,20 @@ export class AppModule {
           provide: HOST_AGENT_TOKEN,
           useValue: hostAgent,
         },
+        {
+          provide: DNS_LOOKUP_TOKEN,
+          useValue: options.dnsLookup ?? createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
+        },
         OidcService,
         AuthzContextService,
         LoginService,
         OutboxWorkerService,
         SiteProvisioner,
+        SiteDomainsApplier,
         ManagedSitesService,
+        SiteDomainsService,
         DriftReconcilerService,
+        DomainReconcilerService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,
@@ -98,6 +113,7 @@ export class AppModule {
         AuthzContextService,
         OutboxWorkerService,
         DriftReconcilerService,
+        DomainReconcilerService,
       ],
     };
   }

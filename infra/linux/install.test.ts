@@ -21,7 +21,7 @@ function osRelease(id: string, codename: string) {
   writeFileSync(f, `ID=${id}\nVERSION_CODENAME=${codename}\n`);
   return f;
 }
-const ARGS = ["--hostname", "panel.example.com", "--admin-email", "admin@example.com", "--admin-name", "Ada Admin"];
+const ARGS = ["--hostname", "panel.example.com", "--admin-email", "admin@acme-hosting.it", "--admin-name", "Ada Admin"];
 
 function install(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync("bash", [SCRIPT, ...args], {
@@ -141,6 +141,21 @@ describe("install.sh shared database and memory", () => {
     expect(r.out).toContain("[STEP 12/12]");
   });
 
+  it("installer warns when the IPv4 is private and continues", () => {
+    const r = dry({}, ["--ipv4", "10.0.0.5"]);
+    expect(r.code).toBe(0);
+    expect(r.out + r.err).toContain("WARNING: 10.0.0.5 is a private address.");
+    expect(r.out).toContain("Dry run complete");
+    expect(dry({}, ["--ipv4", "203.0.113.7"]).out).not.toContain("private address");
+  });
+
+  it("installer refuses a reserved ACME email", () => {
+    for (const e of ["ops@example.com", "ops@example.org", "ops@host.test", "ops@x.invalid"]) {
+      expect(dry({}, ["--acme-email", e]).code).toBe(2);
+    }
+    expect(dry({}, ["--acme-email", "ops@acme-hosting.it"]).code).toBe(0);
+  });
+
   it("no memory warning at 4 GB", () => {
     const r = dry({ HP_MEMINFO_FILE: meminfo(4026532) });
     expect(r.code).toBe(0);
@@ -160,6 +175,16 @@ describe("install.sh SSH-safe firewall", () => {
     const r = dry({ HP_SSHD_PORTS: "2222" }, ["--skip-firewall"]);
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/\[STEP 10\/12\][^\n]*\n\s*\S*\s*skip/i);
+  });
+
+  it("an active ufw gets a rule letting the docker bridges reach the panel on 3000 (live 504 case)", () => {
+    const r = dry({ HP_UFW_ACTIVE: "1" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("would run ufw allow from 172.16.0.0/12 to 172.17.0.1 port 3000 proto tcp");
+  });
+
+  it("no ufw rule when ufw is not active", () => {
+    expect(dry({ HP_UFW_ACTIVE: "0" }).out).not.toContain("ufw allow");
   });
 
   it("passes when SSH also listens on 22", () => {
@@ -315,4 +340,8 @@ describe("set_env_keys", () => {
     expect(statSync(f).mode & 0o777).toBe(0o400);
     expect(r.stdout + r.stderr).not.toContain("new.example.com");
   });
+});
+
+it("reads the apt candidate in the C locale (a localized apt prints 'Candidato:')", () => {
+  expect(readFileSync(SCRIPT, "utf8")).toMatch(/LC_ALL=C apt-cache policy "\$5" \| awk '\/Candidate:\//);
 });

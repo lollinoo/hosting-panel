@@ -4,12 +4,15 @@ import {
   PLATFORM_OPS_ORG_ID,
   resolveWordpressImage,
   type AdminSitesListDto,
+  type CertificateAlertDto,
+  type CertProblem,
   resolveWordpressRuntime,
   type CreateManagedSiteInput,
   type ManagedSiteDto,
   type PhpVersion,
   type SiteActionInput,
   type SiteLogLineDto,
+  wwwPartner,
 } from "@hosting-panel/contracts";
 import {
   WORDPRESS_TEMPLATE_ID,
@@ -25,9 +28,12 @@ import {
   eq,
   hostAllocations,
   hosts,
+  inArray,
   insertSiteDatabase,
+  insertSiteDomains,
   isNotNull,
   latestSiteOperation,
+  listSiteDomains,
   membershipRoles,
   memberships,
   not,
@@ -59,12 +65,16 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { restoreCertificateThrottle } from "./site-domains.service.js";
 
 const SERVICE_STEPS = [
   { key: "validate_spec", label: "Check the request" },
   { key: "dispatch_ipc", label: "Apply the change" },
   { key: "reconcile_state", label: "Check the site" },
 ] as const;
+
+const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
+const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "other"]);
 
 const isUniqueViolation = (err: unknown): boolean => {
   const e = err as { code?: string; cause?: { code?: string } } | null;
@@ -109,22 +119,24 @@ export class ManagedSitesService {
     const replay = await this.#replay(organizationId, idempotencyKey);
     if (replay) return replay;
 
+    const partner = body.includeWww ? wwwPartner(body.domain) : null;
+    const names = partner ? [body.domain, partner] : [body.domain];
     const [usedDomain] = await db
       .select({ id: domains.id })
       .from(domains)
-      .where(eq(domains.hostname, body.domain))
+      .where(inArray(domains.hostname, names))
       .limit(1);
     const [panelHost] = await db
       .select({ id: hosts.id })
       .from(hosts)
       .where(
-        or(eq(hosts.hostname, body.domain), eq(hosts.ipv4Address, body.domain)),
+        or(inArray(hosts.hostname, names), inArray(hosts.ipv4Address, names)),
       )
       .limit(1);
     if (usedDomain || panelHost) {
       throw new ControlPlaneError(
         "DOMAIN_CONFLICT",
-        "This web address is already used by another site or by the panel.",
+        "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
       );
     }
 
@@ -163,6 +175,11 @@ export class ManagedSitesService {
           phpVersion: body.phpVersion,
           actorId,
         });
+
+        if (partner) {
+          await insertSiteDomains(t, { siteId: site.id, organizationId, hostnames: [partner], routed: false });
+        }
+        await restoreCertificateThrottle(t, await listSiteDomains(t, site.id));
 
         await createServiceWithRevisionTransactional(t, {
           siteId: site.id,
@@ -232,7 +249,7 @@ export class ManagedSitesService {
         if (twin) return twin;
         throw new ControlPlaneError(
           "DOMAIN_CONFLICT",
-          "This web address is already used by another site or by the panel.",
+          "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
         );
       }
       throw err;
@@ -592,7 +609,54 @@ export class ManagedSitesService {
         updatedAt: site.updatedAt.toISOString(),
       })),
       customers,
+      certificateAlerts: await this.#certificateAlerts(),
     };
+  }
+
+  async #certificateAlerts(): Promise<CertificateAlertDto[]> {
+    const db = this.dbClient.db;
+    const now = Date.now();
+    const soon = (at: Date | null) => at !== null && at.getTime() < now + ALERT_WINDOW_MS;
+    const rows = await db
+      .select({ d: domains, siteName: sites.name })
+      .from(domains)
+      .innerJoin(sites, eq(sites.id, domains.siteId))
+      .where(or(eq(domains.certStatus, "active"), eq(domains.certStatus, "failed"), isNotNull(domains.certProblem)))
+      .orderBy(asc(sites.name), asc(domains.hostname));
+    const alerts: CertificateAlertDto[] = [];
+    for (const { d, siteName } of rows) {
+      const kind =
+        d.certStatus === "active"
+          ? soon(d.certExpiresAt) || d.certProblem !== null
+            ? "expiring" // a problem on an active certificate means its renewal is failing
+            : null
+          : (d.certStatus === "failed" && d.certAttempts >= 2) || NOT_ISSUED_PROBLEMS.has(d.certProblem)
+            ? "not_issued"
+            : null;
+      if (kind) {
+        alerts.push({
+          kind,
+          siteId: d.siteId,
+          siteName,
+          hostname: d.hostname,
+          expiresAt: d.certExpiresAt?.toISOString() ?? null,
+          problem: d.certProblem,
+        });
+      }
+    }
+    const [host] = await db.select({ hostname: hosts.hostname }).from(hosts).limit(1);
+    if (host && this.executor.isRuntimeAvailable) {
+      try {
+        const report = await this.executor.getCertificateStatus({ failuresSince: new Date(now).toISOString() });
+        const panel = report.certificates.find((c) => c.hostname === host.hostname);
+        if (panel && soon(new Date(panel.notAfter))) {
+          alerts.push({ kind: "panel_expiring", siteId: null, siteName: null, hostname: host.hostname, expiresAt: new Date(panel.notAfter).toISOString(), problem: null });
+        }
+      } catch {
+        // The executor is unavailable: the site alerts above still show.
+      }
+    }
+    return alerts;
   }
 
   /**

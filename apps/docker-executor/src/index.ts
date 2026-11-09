@@ -51,6 +51,7 @@ export {
   HTACCESS_WORDPRESS,
   SITE_JOB_ROLE,
   WORDPRESS_INSTALL_SCRIPT,
+  WORDPRESS_SET_URL_SCRIPT,
   assertValidSiteJobRequest,
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
@@ -74,6 +75,7 @@ export {
   PANEL_DYNAMIC_FILE_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
   TraefikIngressFileManager,
+  acmeStorageFileName,
   assertContainedPath,
   assertSafeDomain,
   assertSafeIdentifier,
@@ -85,11 +87,15 @@ export {
   getSiteEdgeNetworkName,
   getSiteInternalNetworkName,
   sanitizeTraefikKey,
+  siteRouteOptions,
   writeFileAtomically,
+  writeFileIfChanged,
   type DockerIngressProxyCreatePayload,
   type IngressProxyContainerConfigInput,
+  type PanelDnsLookup,
   type PanelIngressConfig,
   type SiteIngressRouteEntry,
+  type SiteRouteOptions,
 } from "./traefik-config.js";
 
 export {
