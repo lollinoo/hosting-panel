@@ -19,9 +19,13 @@ import {
   type ApprovedServiceSpec,
   type DockerExecutionResult,
   type DockerExecutorPort,
+  type CertificateStatusReport,
+  type SiteHostRoute,
   type SiteJobRequest,
   type SiteJobResult,
+  type SiteRoutesRequest,
 } from "@hosting-panel/executor-contracts";
+import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
 import { demuxDockerLogStream } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
@@ -32,6 +36,7 @@ import {
   INGRESS_BRIDGE_NETWORK_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
   STATIC_SHA256_LABEL,
+  acmeStorageFileName,
   TraefikIngressFileManager,
   type PanelIngressConfig,
   assertContainedPath,
@@ -60,6 +65,10 @@ import {
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
 } from "./site-jobs.js";
+
+export function plainHostRoute(hostname: string): SiteHostRoute {
+  return { hostname, tls: false, httpsRedirect: false, redirectTo: null };
+}
 
 export const DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock" as const;
 export const DEFAULT_DOCKER_API_PREFIX = "/v1.45" as const;
@@ -224,7 +233,11 @@ export function resolveDefaultSafeCapabilities(
 }
 
 export function isServiceHttpExposed(spec: ApprovedServiceSpec): boolean {
-  return Boolean(spec.exposeHttp) || (spec.domains !== undefined && spec.domains.length > 0);
+  return (
+    Boolean(spec.exposeHttp) ||
+    (spec.domains !== undefined && spec.domains.length > 0) ||
+    (spec.hostRoutes !== undefined && spec.hostRoutes.length > 0)
+  );
 }
 
 export function validateExecutorServiceSpec(input: ApprovedServiceSpec): ApprovedServiceSpec {
@@ -326,6 +339,7 @@ export function validateExecutorServiceSpec(input: ApprovedServiceSpec): Approve
       revisionNumber: input.revisionNumber,
       specHash: input.specHash,
       domains: input.domains ? [...input.domains] : undefined,
+      hostRoutes: input.hostRoutes ? [...input.hostRoutes] : undefined,
       exposeHttp: input.exposeHttp,
       internalPort: input.internalPort,
       pidsLimit: input.pidsLimit,
@@ -1304,8 +1318,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
 
     let ingressConfigured = false;
-    const domains = spec.domains ?? [];
-    if (domains.length > 0) {
+    const hosts: readonly SiteHostRoute[] =
+      spec.hostRoutes ?? (spec.domains ?? []).map(plainHostRoute);
+    if (hosts.length > 0) {
       await this.ensureIngressProxy();
       const edgeNetworkName = getSiteEdgeNetworkName(spec.siteId);
       await this.connectContainerToNetwork(edgeNetworkName, INGRESS_PROXY_CONTAINER_NAME);
@@ -1317,13 +1332,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         serviceInstanceId: spec.serviceInstanceId,
         containerName: spec.containerName,
         internalPort: effectiveInternalPort,
-        // shortcut: plain HTTP hosts until the port carries SiteHostRoute (Task 5).
-        hosts: domains.map((hostname) => ({
-          hostname,
-          tls: false,
-          httpsRedirect: false,
-          redirectTo: null,
-        })),
+        hosts,
       });
       ingressConfigured = routeResult.configured;
     } else {
@@ -1576,6 +1585,67 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         );
       });
     }
+  }
+
+  /** Rewrites only the route file: the service container is looked up, never touched. */
+  public async applySiteRoutes(req: SiteRoutesRequest): Promise<void> {
+    assertSafeIdentifier(req.siteId, "siteId");
+    assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    const summary = await this.findContainerSummaryByServiceId(req.serviceInstanceId);
+    const name = summary?.Names?.[0]?.replace(/^\//, "");
+    if (
+      !summary ||
+      summary.Labels?.[MANAGED_DOCKER_LABELS.siteId] !== req.siteId ||
+      name !== req.containerName
+    ) {
+      throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
+    }
+    if (req.hosts.length > 0) {
+      await this.ensureIngressProxy();
+      await this.connectContainerToNetwork(
+        getSiteEdgeNetworkName(req.siteId),
+        INGRESS_PROXY_CONTAINER_NAME,
+      );
+      await this.ingressManager.upsertServiceRoute(req.siteId, {
+        serviceInstanceId: req.serviceInstanceId,
+        containerName: req.containerName,
+        internalPort: req.internalPort,
+        hosts: req.hosts,
+      });
+      return;
+    }
+    const removal = await this.ingressManager.removeServiceRoute(req.serviceInstanceId, req.siteId);
+    if (removal.siteId && removal.remainingSiteRoutes === 0) {
+      await this.disconnectContainerFromNetwork(
+        getSiteEdgeNetworkName(removal.siteId),
+        INGRESS_PROXY_CONTAINER_NAME,
+      ).catch(() => undefined);
+    }
+  }
+
+  public async getCertificateStatus(req: { failuresSince: string }): Promise<CertificateStatusReport> {
+    const store = await readAcmeCertificates(
+      path.join(this.ingressManager.acmeDirPath, acmeStorageFileName(this.panel)),
+    );
+    const sinceMs = Date.parse(req.failuresSince);
+    const res = await this.dockerClient.request(
+      "GET",
+      `/containers/${INGRESS_PROXY_CONTAINER_NAME}/logs?stdout=1&stderr=1&since=${String(Math.floor(sinceMs / 1000))}&tail=2000`,
+    );
+    if (res.statusCode !== 200 && res.statusCode !== 404) {
+      throw new ExecutorCodedError(
+        `Failed to read ingress proxy logs (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    const lines = res.statusCode === 200 ? demuxDockerLogStream(res.body).map((l) => l.text) : [];
+    return {
+      acmeEnabled: Boolean(this.panel?.acmeEmail),
+      trusted: !this.panel?.acmeStaging && !this.panel?.acmeCaServer,
+      readable: store.readable,
+      certificates: store.certificates,
+      failures: parseAcmeFailures(lines, sinceMs),
+    };
   }
 
   public async getServiceLogs(serviceInstanceId: string, tail: number): Promise<ReturnType<typeof demuxDockerLogStream>> {

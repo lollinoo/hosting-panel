@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { redactSensitiveString, type CertProblem } from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
-  CertificateStatusReport,
+  AcmeStoreRead,
   StoredCertificate,
 } from "@hosting-panel/executor-contracts";
 
@@ -19,7 +19,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function readAcmeCertificates(
   storePath: string,
   resolver = "le",
-): Promise<CertificateStatusReport> {
+): Promise<AcmeStoreRead> {
   let parsed: unknown;
   for (let attempt = 0; ; attempt += 1) {
     try {

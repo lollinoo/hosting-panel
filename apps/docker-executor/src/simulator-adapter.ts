@@ -1,13 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
+import type { CertProblem } from "@hosting-panel/contracts";
 import type {
+  AcmeFailure,
   ApprovedServiceSpec,
+  CertificateStatusReport,
   DockerExecutionResult,
   DockerExecutorPort,
   ServiceLogLine,
+  SiteHostRoute,
   SiteJobKind,
   SiteJobRequest,
   SiteJobResult,
+  SiteRoutesRequest,
+  StoredCertificate,
 } from "@hosting-panel/executor-contracts";
 import { assertValidSiteJobRequest } from "./site-jobs.js";
 import {
@@ -16,6 +22,7 @@ import {
   isServiceHttpExposed,
   MANAGED_DOCKER_LABELS,
   mapContainerStateToObservedStatus,
+  plainHostRoute,
   purgeServiceSecrets,
   validateExecutorServiceSpec,
   writeServiceSecrets,
@@ -112,6 +119,14 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
+  /** Latest route plan per site, from applySiteRoutes or a deploy carrying hostRoutes. */
+  public readonly appliedRoutes = new Map<string, SiteRoutesRequest>();
+  /** Every route plan in order. */
+  public readonly routeHistory: SiteRoutesRequest[] = [];
+  private readonly certificates = new Map<string, StoredCertificate>();
+  private readonly certFailures: AcmeFailure[] = [];
+  private certStoreReadable = true;
+  public acmeEnabled = true;
   /** Test hook awaited inside runSiteJob. */
   public onJob?: (req: SiteJobRequest) => Promise<void>;
   /** Test hook awaited inside deployService. */
@@ -243,6 +258,73 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     }
   }
 
+  public async applySiteRoutes(req: SiteRoutesRequest): Promise<void> {
+    this.assertEngineAvailable();
+    assertSafeIdentifier(req.siteId, "siteId");
+    const expected = this.expectedByServiceId.get(req.serviceInstanceId);
+    if (
+      !expected ||
+      expected.siteId !== req.siteId ||
+      expected.containerName !== req.containerName
+    ) {
+      throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
+    }
+    await this.applyRoutes(req);
+  }
+
+  public async getCertificateStatus(req: { failuresSince: string }): Promise<CertificateStatusReport> {
+    const since = Date.parse(req.failuresSince);
+    return {
+      acmeEnabled: this.acmeEnabled,
+      trusted: true,
+      readable: this.certStoreReadable,
+      certificates: this.certStoreReadable ? [...this.certificates.values()] : [],
+      failures: this.certFailures.filter((f) => Date.parse(f.at) >= since),
+    };
+  }
+
+  public issueCertificate(hostname: string, notAfter: string): void {
+    this.certificates.set(hostname, { hostname, notAfter, serialNumber: `sim-${hostname}` });
+  }
+
+  public failCertificate(hostname: string, problem: CertProblem, at = new Date().toISOString()): void {
+    this.certFailures.push({ hostname, at, kind: "obtain", problem, detail: `simulated ${problem}` });
+  }
+
+  public setCertificateStoreReadable(readable: boolean): void {
+    this.certStoreReadable = readable;
+  }
+
+  private async applyRoutes(req: SiteRoutesRequest): Promise<boolean> {
+    if (req.hosts.length > 0) {
+      await this.ensureIngressProxy();
+      if (this.ingressProxyContainer) {
+        this.ingressProxyContainer.networks[getSiteEdgeNetworkName(req.siteId)] = {};
+      }
+      const routeEntry: SiteIngressRouteEntry = {
+        serviceInstanceId: req.serviceInstanceId,
+        containerName: req.containerName,
+        internalPort: req.internalPort,
+        hosts: req.hosts,
+      };
+      // The real manager validates the hosts first, so a refused plan leaves no trace here.
+      if (this.ingressFileManager) {
+        await this.ingressFileManager.upsertServiceRoute(req.siteId, routeEntry);
+      }
+      this.upsertVirtualRoute(req.siteId, routeEntry);
+      this.appliedRoutes.set(req.siteId, req);
+      this.routeHistory.push(req);
+      return true;
+    }
+    this.removeVirtualRoute(req.serviceInstanceId);
+    if (this.ingressFileManager) {
+      await this.ingressFileManager.removeServiceRoute(req.serviceInstanceId, req.siteId);
+    }
+    this.appliedRoutes.set(req.siteId, req);
+    this.routeHistory.push(req);
+    return false;
+  }
+
   public async getServiceLogs(
     serviceInstanceId: string,
     tail: number,
@@ -349,37 +431,32 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       expectedEnv: createPayload.Env,
     });
 
-    let ingressConfigured = false;
-    const domains = spec.domains ?? [];
-    if (domains.length > 0) {
+    const hosts: readonly SiteHostRoute[] =
+      spec.hostRoutes ?? (spec.domains ?? []).map(plainHostRoute);
+    const planned: SiteRoutesRequest = {
+      siteId: spec.siteId,
+      serviceInstanceId: spec.serviceInstanceId,
+      containerName: spec.containerName,
+      internalPort: spec.internalPort ?? spec.portBindings[0]?.containerPort ?? 80,
+      hosts,
+    };
+    let ingressConfigured: boolean;
+    if (spec.hostRoutes !== undefined) {
+      ingressConfigured = await this.applyRoutes(planned);
+    } else if (hosts.length > 0) {
+      // Plain domains: configured as before, but not recorded as a route plan.
       await this.ensureIngressProxy();
-      const edgeNetworkName = getSiteEdgeNetworkName(spec.siteId);
       if (this.ingressProxyContainer) {
-        this.ingressProxyContainer.networks[edgeNetworkName] = {};
+        this.ingressProxyContainer.networks[getSiteEdgeNetworkName(spec.siteId)] = {};
       }
-
-      const effectiveInternalPort =
-        spec.internalPort ?? spec.portBindings[0]?.containerPort ?? 80;
-
-      const routeEntry: SiteIngressRouteEntry = {
-        serviceInstanceId: spec.serviceInstanceId,
-        containerName: spec.containerName,
-        internalPort: effectiveInternalPort,
-        // shortcut: plain HTTP hosts until the port carries SiteHostRoute (Task 5).
-        hosts: domains.map((hostname) => ({
-          hostname,
-          tls: false,
-          httpsRedirect: false,
-          redirectTo: null,
-        })),
-      };
-
+      const routeEntry: SiteIngressRouteEntry = { ...planned };
       this.upsertVirtualRoute(spec.siteId, routeEntry);
       if (this.ingressFileManager) {
         await this.ingressFileManager.upsertServiceRoute(spec.siteId, routeEntry);
       }
       ingressConfigured = true;
     } else {
+      ingressConfigured = false;
       this.removeVirtualRoute(spec.serviceInstanceId);
       if (this.ingressFileManager) {
         await this.ingressFileManager.removeServiceRoute(spec.serviceInstanceId, spec.siteId);

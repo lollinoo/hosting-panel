@@ -273,4 +273,20 @@ describe("Phase1DisabledDockerExecutor site capabilities", () => {
     await expect(executor.purgeSite("s")).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
     await expect(executor.getServiceLogs("svc", 10)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });
+
+  it("phase1 executor refuses routes and certificates with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    await expect(
+      executor.applySiteRoutes({
+        siteId: "s",
+        serviceInstanceId: "svc",
+        containerName: "c",
+        internalPort: 80,
+        hosts: [],
+      }),
+    ).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    await expect(
+      executor.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" }),
+    ).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+  });
 });

@@ -2,9 +2,11 @@ import http from "node:http";
 import {
   ApiErrorEnvelopeSchema,
   ErrorCodeSchema,
+  CertificateStatusReportWireSchema,
   ExecutorHealthResponseSchema,
   ObservedServiceStateWireSchema,
   signIpcRequest,
+  type CertificateStatusIpcRequest,
   type DeployServiceIpcRequest,
   type ErrorCode,
   type ExecutorHealthResponse,
@@ -14,14 +16,17 @@ import {
   type ServiceLogsIpcRequest,
   type SiteJobIpcRequest,
   type SitePurgeIpcRequest,
+  type SiteRoutesIpcRequest,
 } from "@hosting-panel/contracts";
 import type {
   ApprovedServiceSpec,
   DockerExecutionResult,
   DockerExecutorPort,
+  CertificateStatusReport,
   ServiceLogLine,
   SiteJobRequest,
   SiteJobResult,
+  SiteRoutesRequest,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
 import {
@@ -222,6 +227,9 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
         ...(spec.revisionNumber !== undefined ? { revisionNumber: spec.revisionNumber } : {}),
         ...(spec.specHash !== undefined ? { specHash: spec.specHash } : {}),
         ...(spec.domains !== undefined ? { domains: [...spec.domains] } : {}),
+        ...(spec.hostRoutes !== undefined
+          ? { hostRoutes: spec.hostRoutes.map((r) => ({ ...r })) }
+          : {}),
         ...(spec.exposeHttp !== undefined ? { exposeHttp: spec.exposeHttp } : {}),
         ...(spec.internalPort !== undefined ? { internalPort: spec.internalPort } : {}),
         ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
@@ -267,6 +275,25 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     assertSafeIdentifier(siteId, "siteId");
     const payload: SitePurgeIpcRequest = { siteId };
     await this.sendSignedJsonRequest("POST", "/v1/sites/purge", payload, SITE_PURGE_TIMEOUT_MS);
+  }
+
+  public async applySiteRoutes(req: SiteRoutesRequest): Promise<void> {
+    assertSafeIdentifier(req.siteId, "siteId");
+    assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    const payload: SiteRoutesIpcRequest = {
+      siteId: req.siteId,
+      serviceInstanceId: req.serviceInstanceId,
+      containerName: req.containerName,
+      internalPort: req.internalPort,
+      hosts: req.hosts.map((h) => ({ ...h })),
+    };
+    await this.sendSignedJsonRequest("POST", "/v1/sites/routes", payload);
+  }
+
+  public async getCertificateStatus(req: { failuresSince: string }): Promise<CertificateStatusReport> {
+    const payload: CertificateStatusIpcRequest = { failuresSince: req.failuresSince };
+    const json = await this.sendSignedJsonRequest("POST", "/v1/ingress/certificates", payload);
+    return z.object({ data: CertificateStatusReportWireSchema }).parse(json).data;
   }
 
   public async getServiceLogs(

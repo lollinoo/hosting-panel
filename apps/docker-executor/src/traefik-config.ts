@@ -352,13 +352,20 @@ export function buildSiteDynamicTraefikYaml(
           "VALIDATION_ERROR",
         );
       }
+      const hosts = route.hosts.map((host) => assertSiteHostRoute(host, reserved));
+      // A redirect must land on another host of this site that does not redirect itself:
+      // no loops, no chains.
+      const byName = new Map(hosts.map((h) => [h.hostname, h]));
+      for (const h of hosts) {
+        if (h.redirectTo === null) continue;
+        const target = byName.get(h.redirectTo.replace(/^https?:\/\//, ""));
+        if (!target || target === h || target.redirectTo !== null) hostPolicyDenied("redirect target");
+      }
       return {
         serviceInstanceId: route.serviceInstanceId,
         containerName: route.containerName,
         internalPort: route.internalPort,
-        hosts: route.hosts
-          .map((host) => assertSiteHostRoute(host, reserved))
-          .sort((a, b) => a.hostname.localeCompare(b.hostname)),
+        hosts: hosts.sort((a, b) => a.hostname.localeCompare(b.hostname)),
       };
     })
     .sort((a, b) => a.serviceInstanceId.localeCompare(b.serviceInstanceId));
@@ -643,11 +650,13 @@ export class TraefikIngressFileManager {
     await (await open(acmeJsonPath, "a", 0o600)).close();
     await chmod(acmeJsonPath, 0o600);
     if (panel?.acmeCaCertFile) {
-      await writeFileIfChanged(
-        path.join(this.acmeDirPath, CUSTOM_CA_FILE_NAME),
-        await readFile(panel.acmeCaCertFile),
-        0o644,
-      );
+      const caPem = await readFile(panel.acmeCaCertFile).catch(() => {
+        throw new ExecutorCodedError(
+          "The custom CA certificate file (HP_ACME_CA_CERT_FILE) cannot be read",
+          "VALIDATION_ERROR",
+        );
+      });
+      await writeFileIfChanged(path.join(this.acmeDirPath, CUSTOM_CA_FILE_NAME), caPem, 0o644);
     }
 
     const panelFilePath = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);

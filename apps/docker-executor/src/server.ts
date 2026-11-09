@@ -4,6 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
+  CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
   ERROR_CODE_HTTP_STATUS,
   ErrorCodeSchema,
@@ -14,6 +15,7 @@ import {
   ServiceLogsIpcRequestSchema,
   SiteJobIpcRequestSchema,
   SitePurgeIpcRequestSchema,
+  SiteRoutesIpcRequestSchema,
   createErrorEnvelope,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
@@ -457,6 +459,21 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/v1/sites/routes") {
+        const req = this.parseBody(SiteRoutesIpcRequestSchema, rawBody, "site routes");
+        assertSafeIdentifier(req.siteId, "siteId");
+        assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+        await this.executor.applySiteRoutes(req);
+        writeJson(res, 200, { data: { siteId: req.siteId } });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/ingress/certificates") {
+        const req = this.parseBody(CertificateStatusIpcRequestSchema, rawBody, "certificate status");
+        writeJson(res, 200, { data: await this.executor.getCertificateStatus(req) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/services/logs") {
         const { serviceInstanceId, tail } = this.parseBody(
           ServiceLogsIpcRequestSchema,
@@ -654,6 +671,7 @@ export class DockerExecutorIpcServer {
       revisionNumber: wireSpec.revisionNumber,
       specHash: wireSpec.specHash,
       domains: wireSpec.domains,
+      hostRoutes: wireSpec.hostRoutes,
       exposeHttp: wireSpec.exposeHttp,
       internalPort: wireSpec.internalPort,
       pidsLimit: wireSpec.pidsLimit,

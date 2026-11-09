@@ -14,7 +14,17 @@ export interface AcmeFailure {
   readonly detail: string;
 }
 
-export interface CertificateStatusReport {
+/** What reading one ACME store file yields. */
+export interface AcmeStoreRead {
   readable: boolean;
   certificates: StoredCertificate[];
+}
+
+export interface CertificateStatusReport {
+  readonly acmeEnabled: boolean;
+  /** False for the staging or a custom CA: its certificates are not trusted by browsers. */
+  readonly trusted: boolean;
+  readonly readable: boolean;
+  readonly certificates: readonly StoredCertificate[];
+  readonly failures: readonly AcmeFailure[];
 }
