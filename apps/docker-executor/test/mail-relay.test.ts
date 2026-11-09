@@ -38,8 +38,14 @@ describe("buildMailRelayContainerPayload", () => {
   it("relay env enforces the header rewrite for site clients", () => {
     const env = build().Env;
     expect(env).toContain("POSTFIX_local_header_rewrite_clients=permit_mynetworks");
-    expect(env).toContain("POSTFIX_sender_canonical_classes=envelope_sender,header_sender");
+    // Envelope only: header_sender would also rewrite Reply-To (acceptance O1).
+    expect(env).toContain("POSTFIX_sender_canonical_classes=envelope_sender");
     expect(env).toContain("POSTFIX_sender_canonical_maps=static:noreply@mail.hostingco.it");
+    // `$$` is main.cf's literal `$`; verified live against boky/postfix:5.2.1-alpine.
+    expect(env).toContain(
+      String.raw`POSTFIX_header_checks=regexp:{ {/^From:[[:space:]]*(("([^"\\]|\\.)*"|[^"<>@,;:])*)<[^<>]*>[[:space:]]*$$/ REPLACE From: $$1<noreply@mail.hostingco.it>}, {/^From:/ REPLACE From: noreply@mail.hostingco.it}, {/^Sender:/ REPLACE Sender: noreply@mail.hostingco.it} }`,
+    );
+    expect(env.join("\n")).not.toMatch(/Reply-To/i);
     expect(env[0]).toBe("RELAYHOST=[smtp.provider.example]:587");
     expect(env).toContain("POSTFIX_myhostname=panel.hostingco.it");
   });
@@ -62,6 +68,11 @@ describe("buildMailRelayContainerPayload", () => {
     const tls = build({ port: 465 }).Env;
     expect(tls).toContain("POSTFIX_smtp_tls_wrappermode=yes");
     expect(tls).toContain("RELAYHOST=[smtp.provider.example]:465");
+  });
+
+  it("a dropped provider port is reported within the 20 s test wait", () => {
+    // Below mailTestWaitMs (20 s), so a silent drop answers unreachable, not pending (acceptance O2).
+    expect(build().Env).toContain("POSTFIX_smtp_connect_timeout=15s");
   });
 
   it("relay binds only a tmpfs directory and a named volume, never a tmpfs file", () => {

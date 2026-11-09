@@ -414,7 +414,9 @@ It builds on the 2a and 2b plans, ADRs 0015–0017, and `docs/security/step-2b-a
     - `POSTFIX_smtp_tls_security_level=secure`
     - `POSTFIX_smtp_tls_wrappermode=<yes on 465, else no>`
     - `POSTFIX_local_header_rewrite_clients=permit_mynetworks`
-    - `POSTFIX_sender_canonical_classes=envelope_sender,header_sender`
+    - `POSTFIX_smtp_connect_timeout=15s` (added after the acceptance run, O2)
+    - `POSTFIX_sender_canonical_classes=envelope_sender` (was `envelope_sender,header_sender` until the acceptance run, O1: `header_sender` also rewrote `Reply-To`)
+    - `POSTFIX_header_checks=regexp:{ … }`: `REPLACE` for `From:` (display name kept) and `Sender:` with `noreply@<senderDomain>`; never `Reply-To`
     - `POSTFIX_sender_canonical_maps=static:noreply@<senderDomain>`
     - `POSTFIX_smtpd_client_message_rate_limit=200`
     - `POSTFIX_smtpd_client_event_limit_exceptions=127.0.0.0/8`
@@ -451,7 +453,7 @@ It builds on the 2a and 2b plans, ADRs 0015–0017, and `docs/security/step-2b-a
 - **Bootstrap:** `install -d -m 0755 -o hp-executor -g hp-executor` for both `/run/hosting-panel/mail-relay` and `/var/lib/hosting-panel/site-mail`. The dry-run text lists both.
 
 - [ ] **Step 1: Write the failing tests** in `mail-relay.test.ts`:
-  - `relay env enforces the header rewrite for site clients`: the env contains `POSTFIX_local_header_rewrite_clients=permit_mynetworks`, `POSTFIX_sender_canonical_classes=envelope_sender,header_sender` and `POSTFIX_sender_canonical_maps=static:noreply@mail.hostingco.it`.
+  - `relay env enforces the header rewrite for site clients`: the env contains `POSTFIX_local_header_rewrite_clients=permit_mynetworks`, `POSTFIX_sender_canonical_classes=envelope_sender` (after O1), the `POSTFIX_header_checks` value and `POSTFIX_sender_canonical_maps=static:noreply@mail.hostingco.it`.
   - `site clients are not exempt from the rate limit`: it contains `POSTFIX_smtpd_client_event_limit_exceptions=127.0.0.0/8` and `…message_rate_limit=200`, and no `POSTFIX_*=` line has an empty value.
   - `relay requires verified TLS`: `POSTFIX_smtp_tls_security_level=secure`; port 465 gives `wrappermode=yes`.
   - `relay binds only a tmpfs directory and a named volume, never a tmpfs file`.

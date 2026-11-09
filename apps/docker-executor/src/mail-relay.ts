@@ -49,6 +49,10 @@ export function buildMailRelayContainerPayload(input: MailRelayContainerInput) {
     );
   }
   const Image = MAIL_RELAY_IMAGE;
+  const noreply = mailSenderAddress(req.senderDomain);
+  // Only From and Sender, never Reply-To. A From keeps its display name only when the name has no unquoted
+  // `@ , ; :` (so a second address cannot hide in it); anything else becomes the bare address. `$$` is main.cf's `$`.
+  const headerChecks = String.raw`regexp:{ {/^From:[[:space:]]*(("([^"\\]|\\.)*"|[^"<>@,;:])*)<[^<>]*>[[:space:]]*$$/ REPLACE From: $$1<${noreply}>}, {/^From:/ REPLACE From: ${noreply}}, {/^Sender:/ REPLACE Sender: ${noreply}} }`;
   const Env = [
     `RELAYHOST=[${req.host}]:${String(req.port)}`,
     "ALLOW_EMPTY_SENDER_DOMAINS=1",
@@ -62,8 +66,10 @@ export function buildMailRelayContainerPayload(input: MailRelayContainerInput) {
     "POSTFIX_smtp_tls_security_level=secure",
     `POSTFIX_smtp_tls_wrappermode=${req.port === 465 ? "yes" : "no"}`,
     "POSTFIX_local_header_rewrite_clients=permit_mynetworks",
-    "POSTFIX_sender_canonical_classes=envelope_sender,header_sender",
-    `POSTFIX_sender_canonical_maps=static:${mailSenderAddress(req.senderDomain)}`,
+    "POSTFIX_smtp_connect_timeout=15s",
+    "POSTFIX_sender_canonical_classes=envelope_sender",
+    `POSTFIX_sender_canonical_maps=static:${noreply}`,
+    `POSTFIX_header_checks=${headerChecks}`,
     "POSTFIX_smtpd_client_message_rate_limit=200",
     "POSTFIX_smtpd_client_event_limit_exceptions=127.0.0.0/8",
     "POSTFIX_anvil_rate_time_unit=3600s",
