@@ -41,8 +41,8 @@ export interface MockDockerDaemon {
   readonly requestedPaths: string[];
   /** POST /containers/<ref>/exec calls, by the ref used in the path. */
   readonly execCalls: Array<{ container: string; Cmd: string[] }>;
-  /** The next `remaining` container restarts answer 500. */
-  readonly failRestarts: { remaining: number };
+  /** The next `remaining` container restarts answer 500 (or drop the socket with `drop`). */
+  readonly failRestarts: { remaining: number; drop?: boolean };
   close(): Promise<void>;
 }
 
@@ -55,6 +55,8 @@ export async function startMockDockerDaemon(options?: {
   readonly waitStatusCode?: number | "hang";
   /** GET /exec/<id>/json answers this ExitCode (default 0). */
   readonly execExitCode?: number;
+  /** GET /exec/<id>/json always answers Running: true. */
+  readonly execStaysRunning?: boolean;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -76,7 +78,7 @@ export async function startMockDockerDaemon(options?: {
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
-  const failRestarts = { remaining: 0 };
+  const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
   let seq = 1;
 
   const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
@@ -159,7 +161,11 @@ export async function startMockDockerDaemon(options?: {
         res.end(
           execMatch[2] === "start"
             ? undefined
-            : JSON.stringify({ Running: false, ExitCode: options?.execExitCode ?? 0 }),
+            : JSON.stringify(
+                options?.execStaysRunning
+                  ? { Running: true, ExitCode: null }
+                  : { Running: false, ExitCode: options?.execExitCode ?? 0 },
+              ),
         );
         return;
       }
@@ -428,6 +434,10 @@ export async function startMockDockerDaemon(options?: {
         }
         if (action === "restart" && failRestarts.remaining > 0) {
           failRestarts.remaining -= 1;
+          if (failRestarts.drop) {
+            req.socket.destroy();
+            return;
+          }
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message: "restart failed" }));
           return;

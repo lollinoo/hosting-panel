@@ -133,14 +133,16 @@ describe("buildMailRelayContainerPayload", () => {
 describe("DockerEngineSocketAdapter.applyMailRelay", () => {
   async function setup(options?: {
     readonly execExitCode?: number;
+    readonly execStaysRunning?: boolean;
     readonly executorUid?: number;
     readonly createDir?: boolean;
   }) {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-mail-relay-"));
     cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
-    const mockDaemon = await startMockDockerDaemon(
-      options?.execExitCode !== undefined ? { execExitCode: options.execExitCode } : undefined,
-    );
+    const mockDaemon = await startMockDockerDaemon({
+      ...(options?.execExitCode !== undefined ? { execExitCode: options.execExitCode } : {}),
+      ...(options?.execStaysRunning ? { execStaysRunning: true } : {}),
+    });
     cleanupTasks.push(() => mockDaemon.close());
     const secretDir = path.join(tmp, "mail-relay");
     if (options?.createDir !== false) {
@@ -252,6 +254,34 @@ describe("DockerEngineSocketAdapter.applyMailRelay", () => {
     expect(calls(from)).toEqual({ create: 0, restart: 1, exec: 1 });
   });
 
+  it("a restart request that never answers is retried by the next identical apply", async () => {
+    const { adapter, mockDaemon, calls } = await setup();
+    await adapter.applyMailRelay(req);
+    const changed = { ...req, password: "new-secret" };
+
+    mockDaemon.failRestarts.remaining = 1;
+    mockDaemon.failRestarts.drop = true;
+    await expect(adapter.applyMailRelay(changed)).rejects.toMatchObject({
+      code: "DOCKER_ENGINE_UNAVAILABLE",
+    });
+
+    const from = mockDaemon.requestedPaths.length;
+    await adapter.applyMailRelay(changed);
+    expect(calls(from)).toEqual({ create: 0, restart: 1, exec: 1 });
+  });
+
+  it("a flush still running at the deadline is not started twice", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { adapter, mockDaemon } = await setup({ execStaysRunning: true });
+    const started = Date.now();
+    await expect(adapter.applyMailRelay(req)).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(mockDaemon.execCalls).toHaveLength(1);
+    expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toContain(
+      '"event":"mail_relay_flush_failed"',
+    );
+  });
+
   it("a flush that keeps failing does not fail the apply", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { adapter, mockDaemon, relay } = await setup({ execExitCode: 1 });
@@ -270,6 +300,16 @@ describe("DockerEngineSocketAdapter.applyMailRelay", () => {
     expect(await readFile(path.join(secretDir, MAIL_RELAY_SASL_FILE), "utf8")).toBe(
       buildMailRelaySaslLine(second),
     );
+  });
+
+  it("apply null wipes the secret even when the container removal fails", async () => {
+    const { adapter, mockDaemon, secretDir } = await setup();
+    await adapter.applyMailRelay(req);
+    await mockDaemon.close(); // the daemon is gone: removal fails
+    await expect(adapter.applyMailRelay(null)).rejects.toBeDefined();
+    await expect(stat(path.join(secretDir, MAIL_RELAY_SASL_FILE))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("apply null removes the container and wipes the secret but keeps the volume", async () => {

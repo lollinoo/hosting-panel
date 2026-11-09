@@ -1181,7 +1181,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
-  /** Serialised like ensureIngressProxy. Called at executor start, never by jobs (they must not pull). */
+  /** Applies run one after the other (a queue, not de-dup: two configs are never merged). */
   public applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
     const run = this.mailRelayQueue.then(() => this.applyMailRelayNow(req));
     this.mailRelayQueue = run.catch(() => undefined);
@@ -1191,12 +1191,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private async applyMailRelayNow(req: MailRelayApplyRequest | null): Promise<void> {
     const secretFile = path.join(this.mailRelaySecretDir, MAIL_RELAY_SASL_FILE);
     if (req === null) {
+      // Wipe first: a failed removal must not leave the credentials on tmpfs.
+      await overwriteAndUnlinkSecretFile(secretFile);
       const existing = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
       if (existing) {
         await this.stopAndRemoveContainer(existing.Id);
       }
       // The spool volume is kept: queued mail survives a disable/enable.
-      await overwriteAndUnlinkSecretFile(secretFile);
       return;
     }
 
@@ -1215,7 +1216,30 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const saslLine = buildMailRelaySaslLine(req);
     const secretChanged = (await readFile(secretFile, "utf8").catch(() => null)) !== saslLine;
     await writeFileAtomically(secretFile, saslLine, 0o444, 0o755);
+    let mustStart: boolean;
+    try {
+      mustStart = await this.ensureMailRelayContainer(payload, secretChanged);
+    } catch (err) {
+      // Otherwise the next identical apply sees "unchanged" and the relay keeps the old credentials.
+      if (secretChanged) {
+        await overwriteAndUnlinkSecretFile(secretFile);
+      }
+      throw err;
+    }
+    if (mustStart || secretChanged) {
+      await this.flushMailRelayQueue();
+    }
 
+    await this.reconnectToRoleNetworks("site_internal", MAIL_RELAY_CONTAINER_NAME, [
+      MAIL_RELAY_ALIAS,
+    ]);
+  }
+
+  /** Creates, starts or restarts the relay as needed; true when it was (re)created or started. */
+  private async ensureMailRelayContainer(
+    payload: ReturnType<typeof buildMailRelayContainerPayload>,
+    secretChanged: boolean,
+  ): Promise<boolean> {
     await this.ensureNetwork(MAIL_RELAY_NETWORK_NAME, {
       internal: false,
       labels: {
@@ -1266,33 +1290,29 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         `/containers/${encodeURIComponent(MAIL_RELAY_CONTAINER_NAME)}/restart?t=10`,
       );
       if (restartRes.statusCode !== 204) {
-        // Otherwise the next identical apply sees "unchanged" and the relay keeps the old credentials.
-        await overwriteAndUnlinkSecretFile(secretFile);
         throw new ExecutorCodedError(
           `Failed to restart mail relay container (HTTP ${String(restartRes.statusCode)})`,
           "DOCKER_ENGINE_UNAVAILABLE",
         );
       }
     }
-    if (mustStart || secretChanged) {
-      await this.flushMailRelayQueue();
-    }
-
-    await this.reconnectToRoleNetworks("site_internal", MAIL_RELAY_CONTAINER_NAME, [
-      MAIL_RELAY_ALIAS,
-    ]);
+    return mustStart;
   }
 
   /** Best effort: Postfix may still be starting. The queue's own backoff delivers later anyway. */
   private async flushMailRelayQueue(): Promise<void> {
     const deadline = Date.now() + this.mailRelayFlushWaitMs;
     for (;;) {
-      const exitCode = await this.execInContainer(MAIL_RELAY_CONTAINER_NAME, [
-        "postqueue",
-        "-f",
-      ]).catch(() => null);
+      const exitCode = await this.execInContainer(
+        MAIL_RELAY_CONTAINER_NAME,
+        ["postqueue", "-f"],
+        deadline,
+      ).catch(() => -1);
       if (exitCode === 0) {
         return;
+      }
+      if (exitCode === null) {
+        break; // still running at the deadline: never start a second one
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
@@ -1309,15 +1329,18 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     );
   }
 
-  /** Runs a fixed command detached and returns its exit code, or null if it is still running after 10 s. */
+  /** Runs a fixed command detached; its exit code, or null if it is still running at the deadline. */
   private async execInContainer(
     containerRef: string,
     cmd: readonly string[],
+    deadline: number,
   ): Promise<number | null> {
+    const budget = () => ({ timeoutMs: Math.max(1, deadline - Date.now()) });
     const createRes = await this.dockerClient.request(
       "POST",
       `/containers/${encodeURIComponent(containerRef)}/exec`,
       { Cmd: cmd, AttachStdout: false, AttachStderr: false },
+      budget(),
     );
     if (createRes.statusCode !== 201) {
       throw new ExecutorCodedError(
@@ -1328,17 +1351,25 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const execId = encodeURIComponent(
       (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id,
     );
-    const startRes = await this.dockerClient.request("POST", `/exec/${execId}/start`, {
-      Detach: true,
-    });
+    const startRes = await this.dockerClient.request(
+      "POST",
+      `/exec/${execId}/start`,
+      { Detach: true },
+      budget(),
+    );
     if (startRes.statusCode !== 200) {
       throw new ExecutorCodedError(
         `Failed to start exec (HTTP ${String(startRes.statusCode)})`,
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
-    for (let i = 0; i < 50; i += 1) {
-      const res = await this.dockerClient.request("GET", `/exec/${execId}/json`);
+    for (;;) {
+      const res = await this.dockerClient.request(
+        "GET",
+        `/exec/${execId}/json`,
+        undefined,
+        budget(),
+      );
       if (res.statusCode !== 200) {
         throw new ExecutorCodedError(
           `Failed to inspect exec (HTTP ${String(res.statusCode)})`,
@@ -1350,13 +1381,17 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         ExitCode?: number | null;
       };
       if (state.Running !== true) {
-        return state.ExitCode ?? null;
+        return state.ExitCode ?? -1;
       }
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(200, remaining)));
     }
-    return null;
   }
 
+  /** Serialised like ensureIngressProxy. Called at executor start, never by jobs (they must not pull). */
   public ensureSharedDatabase(): Promise<SharedDatabaseEnsureResult> {
     this.sharedDbEnsureInFlight ??= this.ensureSharedDatabaseOnce().finally(() => {
       this.sharedDbEnsureInFlight = null;
