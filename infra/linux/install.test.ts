@@ -177,6 +177,16 @@ describe("install.sh SSH-safe firewall", () => {
     expect(r.out).toMatch(/\[STEP 10\/12\][^\n]*\n\s*\S*\s*skip/i);
   });
 
+  it("an active ufw gets a rule letting the docker bridges reach the panel on 3000 (live 504 case)", () => {
+    const r = dry({ HP_UFW_ACTIVE: "1" });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("would run ufw allow from 172.16.0.0/12 to 172.17.0.1 port 3000 proto tcp");
+  });
+
+  it("no ufw rule when ufw is not active", () => {
+    expect(dry({ HP_UFW_ACTIVE: "0" }).out).not.toContain("ufw allow");
+  });
+
   it("passes when SSH also listens on 22", () => {
     expect(dry({ HP_SSHD_PORTS: "22 2222" }).code).toBe(0);
   });

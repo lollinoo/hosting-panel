@@ -100,6 +100,7 @@ set_env_keys() {
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
+ufw_active() { command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; }
 docker0_ipv4() { { ip -4 -o addr show docker0 2>/dev/null || true; } | awk '{split($4, a, "/"); print a[1]; exit}'; }
 
 # Prints the docker0 IPv4 the web console binds to; exit 6 rather than binding to all interfaces.
@@ -527,6 +528,9 @@ SQL
     info "skip: --skip-firewall given; manage the firewall yourself (allow 22/80/443, and 3000 from docker bridges only)"
   elif ((dry_run)); then
     plan "would apply nft -f ${nft_src}, install it as ${nft_dst}, add '${include_line}' to /etc/nftables.conf if missing, enable nftables.service"
+    local ufw_on="${HP_UFW_ACTIVE-}"
+    [[ -n "${ufw_on}" ]] || { ufw_active && ufw_on=1 || ufw_on=0; }
+    if ((ufw_on)); then plan "would run ufw allow from 172.16.0.0/12 to ${bind:-<docker0 IPv4>} port 3000 proto tcp (ufw is active)"; fi
   else
     # Our file deletes/recreates only table inet hp_dedicated_filter; we never flush the ruleset
     # (that would drop Docker's iptables-nft NAT/filter tables, which Docker recreates only on restart).
@@ -538,6 +542,11 @@ SQL
     # Enable for boot only, never start/restart now: the distro nftables.conf starts with
     # "flush ruleset", which at boot runs before Docker, but now would wipe Docker's live tables.
     systemctl enable nftables
+    # ufw's own INPUT chain (policy drop) also sees proxy -> panel traffic; our table alone is not enough.
+    if ufw_active; then
+      ufw allow from 172.16.0.0/12 to "${bind}" port 3000 proto tcp comment 'hosting-panel: proxy -> panel' >/dev/null
+      info "ufw is active: allowed TCP 3000 from the Docker bridges (172.16.0.0/12) to ${bind}"
+    fi
   fi
 
   # ---------------------------------------------------------------- 11
