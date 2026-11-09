@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PresetRoleNameSchema } from "./permissions.js";
 import { SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
+import { CertificateAlertDtoSchema } from "./site-domains.js";
 
 export const PLATFORM_OPS_ORG_ID = "org_platform_ops";
 
@@ -228,7 +229,7 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   sharedHostingEnabled: z.literal(false),
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
-  acmeTlsRuntimeAvailable: z.literal(false),
+  acmeTlsRuntimeAvailable: z.boolean(),
   sftpAvailable: z.literal(false),
   productionBackupRuntimeAvailable: z.literal(false),
 });
@@ -268,7 +269,7 @@ export function createPlatformCapabilities(
       hostAgentRuntimeAvailable: isDisabled
         ? false
         : Boolean(options.hostAgentRuntimeAvailable),
-      acmeTlsRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: options.runtimeBackend === "linux-systemd",
       sftpAvailable: false,
       productionBackupRuntimeAvailable: false,
     }),
@@ -280,7 +281,7 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   sharedHostingEnabled: z.literal(false),
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
-  acmeTlsRuntimeAvailable: z.literal(false),
+  acmeTlsRuntimeAvailable: z.boolean(),
   sftpAvailable: z.literal(false),
   productionBackupRuntimeAvailable: z.literal(false),
 });
@@ -621,6 +622,7 @@ export const AdminSitesListDtoSchema = z.object({
   customers: z.array(
     z.object({ organizationId: EntityIdSchema, name: z.string(), ownerEmail: z.string() }),
   ),
+  certificateAlerts: z.array(CertificateAlertDtoSchema),
 });
 export type AdminSitesListDto = z.infer<typeof AdminSitesListDtoSchema>;
 

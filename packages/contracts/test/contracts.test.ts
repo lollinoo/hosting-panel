@@ -434,6 +434,9 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
     });
+    for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
+      expect(createPlatformCapabilities({ runtimeBackend }).acmeTlsRuntimeAvailable).toBe(false);
+    }
     expect(p2Caps).toEqual({
       phase: "phase-2",
       runtimeBackend: "linux-systemd",
@@ -441,7 +444,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       sharedHostingEnabled: false,
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
-      acmeTlsRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: true,
       sftpAvailable: false,
       productionBackupRuntimeAvailable: false,
     });

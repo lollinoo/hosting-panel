@@ -308,7 +308,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       sharedHostingEnabled: false,
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
-      acmeTlsRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: true,
       sftpAvailable: false,
       productionBackupRuntimeAvailable: false,
     });

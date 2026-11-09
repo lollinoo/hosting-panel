@@ -39,16 +39,28 @@ export function normalizeSiteDomain(raw: string): string | null {
   return d;
 }
 
+export const SiteDomainSchema = z.string().transform((v, ctx) => {
+  // IDN: non-ASCII input without URL syntax characters becomes punycode via the URL parser
+  let raw = v;
+  if (/[\u0080-\uffff]/.test(v) && !/[/:?#@]/.test(v)) {
+    try {
+      raw = new URL("http://" + v).hostname;
+    } catch {
+      raw = v;
+    }
+  }
+  const n = normalizeSiteDomain(raw);
+  if (n === null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid domain", path: [] });
+    return z.NEVER;
+  }
+  return n;
+});
+
 export const CreateManagedSiteInputSchema = z.object({
   name: z.string().trim().min(1).max(80),
-  domain: z.string().transform((v, ctx) => {
-    const n = normalizeSiteDomain(v);
-    if (n === null) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid domain", path: [] });
-      return z.NEVER;
-    }
-    return n;
-  }),
+  domain: SiteDomainSchema,
+  includeWww: z.boolean().default(false),
   phpVersion: z.enum(SUPPORTED_PHP_VERSIONS).default(DEFAULT_PHP_VERSION),
   title: z.string().min(1).max(120),
   adminUser: z.string().regex(/^[A-Za-z0-9._@-]{3,60}$/),

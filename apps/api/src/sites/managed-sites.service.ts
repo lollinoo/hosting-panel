@@ -592,6 +592,7 @@ export class ManagedSitesService {
         updatedAt: site.updatedAt.toISOString(),
       })),
       customers,
+      certificateAlerts: [], // filled by the certificate alerts task
     };
   }
 

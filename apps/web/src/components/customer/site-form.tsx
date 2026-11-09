@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useMessages } from "@/i18n/provider";
 
-export type SiteFormBody = Omit<CreateManagedSiteInput, "phpVersion"> & { phpVersion: string };
+export type SiteFormBody = Omit<CreateManagedSiteInput, "phpVersion" | "includeWww"> & { phpVersion: string; includeWww?: boolean };
 
 /** Shared by the customer page and the administrator dialog; the caller owns submission and errors. */
 export function SiteForm({

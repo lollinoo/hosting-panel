@@ -42,6 +42,7 @@ export const OPERATION_KINDS = [
   "site.provision",
   "site.delete",
   "site.reassign",
+  "site.domains",
   "host.maintenance",
   "host.security",
   "host.allocate",
