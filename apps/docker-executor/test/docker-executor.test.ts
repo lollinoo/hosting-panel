@@ -16,6 +16,10 @@ import {
 } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  type DockerContainerInspectPayload,
+  buildHardenedContainerCreatePayload,
+  detectOutOfBandContainerModification,
+  siteMailBinds,
   DockerEngineSocketAdapter,
   DockerExecutorIpcServer,
   ExecutorIpcClientError,
@@ -1576,6 +1580,162 @@ describe("site routes and certificates", () => {
     expect(await sim.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" })).toMatchObject({
       readable: false,
       certificates: [],
+    });
+  });
+});
+
+describe("site mail wiring", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const MAIL_DIR = "/srv/test-site-mail";
+  const specInput = (siteMail?: boolean) => ({
+    serviceInstanceId: "svc_mail",
+    siteId: "site_mail",
+    organizationId: "org_mail",
+    image: "wordpress:6-php8.3-apache",
+    containerName: "hp-site-mail",
+    env: {},
+    resourceLimits: { cpuMilli: 500, memoryBytes: "536870912" },
+    pidsLimit: 128,
+    revisionNumber: 1,
+    specHash: "hash_mail",
+    exposeHttp: false,
+    internalPort: 80,
+    volumeMounts: [{ volumeSuffix: "html", containerPath: "/var/www/html" }],
+    ...(siteMail !== undefined ? { siteMail } : {}),
+  });
+
+  async function setup() {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-mail-wire-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const siteMailDir = path.join(tmp, "site-mail");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      siteMailDir,
+      pullMissingImages: false,
+    });
+    return { adapter, mockDaemon, siteMailDir, tmp };
+  }
+
+  const createdBinds = (d: Awaited<ReturnType<typeof setup>>["mockDaemon"]) =>
+    [...d.containers.values()].find((c) => c.name === "hp-site-mail")?.hostConfig.Binds ?? [];
+
+  it("deploy with siteMail adds exactly the three read-only binds", async () => {
+    const { adapter, mockDaemon, siteMailDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(specInput(true)));
+    const binds = createdBinds(mockDaemon);
+    expect(binds).toHaveLength(4);
+    expect(binds.slice(1)).toEqual(siteMailBinds(siteMailDir));
+    expect((await stat(path.join(siteMailDir, "hp-mail.php"))).mode & 0o777).toBe(0o644);
+
+    const plain = await setup();
+    await plain.adapter.deployService(createApprovedServiceSpec(specInput()));
+    expect(createdBinds(plain.mockDaemon)).toHaveLength(1);
+    await expect(stat(plain.siteMailDir)).rejects.toThrow();
+  });
+
+  it("deploy over signed IPC keeps siteMail and adds the binds", async () => {
+    const { adapter, mockDaemon, siteMailDir, tmp } = await setup();
+    const socketPath = `/tmp/hp-exec-test-${randomBytes(5).toString("hex")}.sock`;
+    const server = new DockerExecutorIpcServer({
+      executor: adapter,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "uds",
+      socketPath,
+    });
+    cleanupTasks.push(() => server.stop());
+    await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "uds",
+      socketPath,
+    });
+    await client.deployService(createApprovedServiceSpec(specInput(true)));
+    expect(createdBinds(mockDaemon).slice(1)).toEqual(siteMailBinds(siteMailDir));
+    expect(tmp).toBeTruthy();
+  });
+
+  it("mail binds are not drift, a fourth host bind is", () => {
+    const base = {
+      Config: {
+        Labels: {
+          [MANAGED_DOCKER_LABELS.managed]: "true",
+          [MANAGED_DOCKER_LABELS.serviceInstanceId]: "svc_mail",
+          [MANAGED_DOCKER_LABELS.organizationId]: "org_mail",
+          [MANAGED_DOCKER_LABELS.siteId]: "site_mail",
+        },
+        Env: [],
+      },
+    };
+    const inspectWith = (binds: readonly string[]): DockerContainerInspectPayload => ({
+      Id: "ctr_mail",
+      ...base,
+      HostConfig: {
+        Privileged: false,
+        CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges:true"],
+        PidsLimit: 128,
+        RestartPolicy: { Name: "unless-stopped" },
+        NetworkMode: "hp_site_site_mail_net",
+        Binds: binds,
+      },
+    });
+    const drift = (binds: readonly string[], dir?: string) =>
+      detectOutOfBandContainerModification(
+        inspectWith(binds),
+        "svc_mail",
+        "/run/hosting-panel/secrets",
+        undefined,
+        dir,
+      );
+    expect(drift(siteMailBinds(MAIL_DIR), MAIL_DIR)).toBe(false);
+    expect(drift(siteMailBinds("/var/lib/hosting-panel/site-mail"))).toBe(false);
+    expect(drift([...siteMailBinds(MAIL_DIR), "/etc/passwd:/x:ro"], MAIL_DIR)).toBe(true);
+    expect(drift(siteMailBinds("/elsewhere"), MAIL_DIR)).toBe(true);
+  });
+
+  it("a foreign siteMailBinds entry is refused", () => {
+    const spec = createApprovedServiceSpec(specInput(true));
+    expect(() =>
+      buildHardenedContainerCreatePayload(spec, { siteMailBinds: ["/etc/passwd:/x:ro"] }),
+    ).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
+    expect(() =>
+      buildHardenedContainerCreatePayload(spec, { siteMailBinds: siteMailBinds(MAIL_DIR) }),
+    ).not.toThrow();
+  });
+
+  it("deployService connects the mail relay to the site network with alias hp-mail", async () => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(specInput(true)));
+    expect(mockDaemon.networkConnectCalls).toContainEqual({
+      network: "hp_site_site_mail_net",
+      container: "hp_mail_relay",
+      aliases: ["hp-mail"],
+    });
+  });
+
+  it("a missing relay (404) does not fail the deploy", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.missingContainers.add("hp_mail_relay");
+    const res = await adapter.deployService(createApprovedServiceSpec(specInput(true)));
+    expect(res.status).toBe("succeeded");
+  });
+
+  it("purgeSite disconnects the mail relay", async () => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.purgeSite("site_mail");
+    expect(mockDaemon.networkDisconnectCalls).toContainEqual({
+      network: "hp_site_site_mail_net",
+      container: "hp_mail_relay",
     });
   });
 });

@@ -9,6 +9,8 @@ import {
   findPlaintextSecretKeys,
   resolveWordpressCliImage,
   resolveWordpressImage,
+  MAIL_RELAY_ALIAS,
+  MAIL_RELAY_CONTAINER_NAME,
   type PhpVersion,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
@@ -25,6 +27,7 @@ import {
   type SiteJobResult,
   type SiteRoutesRequest,
 } from "@hosting-panel/executor-contracts";
+import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
 import { demuxDockerLogStream } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
@@ -354,6 +357,7 @@ export function validateExecutorServiceSpec(
       exposeHttp: input.exposeHttp,
       internalPort: input.internalPort,
       pidsLimit: input.pidsLimit,
+      siteMail: input.siteMail,
       volumeMounts: input.volumeMounts ? [...input.volumeMounts] : undefined,
       resolvedSecrets: validatedResolvedSecrets,
       rawConfig: declarativeFields,
@@ -494,6 +498,8 @@ export async function writeServiceSecrets(
 export interface BuildHardenedContainerOptions {
   readonly secretBinds?: readonly string[];
   readonly secretFileEnv?: readonly string[];
+  /** Each must be one of siteMailBinds(dir); the caller picks the directory. */
+  readonly siteMailBinds?: readonly string[];
   readonly certifiedCapabilities?: readonly string[];
 }
 
@@ -556,6 +562,16 @@ export function buildHardenedContainerCreatePayload(
         );
       }
       binds.push(secretBind);
+    }
+  }
+
+  if (options?.siteMailBinds) {
+    for (const mailBind of options.siteMailBinds) {
+      const dir = path.posix.dirname(mailBind.split(":")[0] ?? "");
+      if (!siteMailBinds(dir).includes(mailBind)) {
+        throw new ExecutorCodedError("Unknown site mail bind mount", "HOST_POLICY_DENIED");
+      }
+      binds.push(mailBind);
     }
   }
 
@@ -636,6 +652,7 @@ export function detectOutOfBandContainerModification(
   serviceInstanceId: string,
   secretsRootDir: string,
   expected?: ExpectedManagedServiceMetadata,
+  siteMailDir: string = DEFAULT_SITE_MAIL_DIR,
 ): boolean {
   const labels = inspect.Config?.Labels ?? {};
   const managedFlag = labels[MANAGED_DOCKER_LABELS.managed];
@@ -703,12 +720,13 @@ export function detectOutOfBandContainerModification(
   }
 
   const allowedVolumePrefix = `hp_vol_${serviceInstanceId}_`;
+  const allowedMailBinds = new Set(siteMailBinds(siteMailDir));
   const allowedSecretDirPrefix = `${path.resolve(secretsRootDir, serviceInstanceId)}${path.sep}`;
   for (const bind of hostConfig.Binds ?? []) {
     if (bind.includes("/var/run/docker.sock")) {
       return true;
     }
-    if (bind.startsWith(allowedVolumePrefix)) {
+    if (bind.startsWith(allowedVolumePrefix) || allowedMailBinds.has(bind)) {
       continue;
     }
     if (
@@ -918,6 +936,7 @@ export interface DockerEngineSocketAdapterOptions {
   readonly dockerSocketPath?: string;
   readonly dockerApiPrefix?: string;
   readonly secretsRootDir?: string;
+  readonly siteMailDir?: string;
   readonly ingressRootDir?: string;
   readonly traefikImage?: string;
   readonly ingressHttpPort?: number;
@@ -956,6 +975,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly dockerClient: DockerSocketHttpClient;
   private readonly secretsRootDir: string;
+  private readonly siteMailDir: string;
   private readonly ingressManager: TraefikIngressFileManager;
   private readonly traefikImage: string;
   private readonly ingressHttpPort: number;
@@ -980,6 +1000,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       timeoutMs: options?.requestTimeoutMs ?? 30_000,
     });
     this.secretsRootDir = path.resolve(options?.secretsRootDir ?? DEFAULT_SECRETS_ROOT_DIR);
+    this.siteMailDir = path.resolve(options?.siteMailDir ?? DEFAULT_SITE_MAIL_DIR);
     this.ingressManager = new TraefikIngressFileManager(
       options?.ingressRootDir ?? DEFAULT_INGRESS_ROOT_DIR,
       options?.panel ?? null,
@@ -1250,6 +1271,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       [SHARED_DB_ALIAS],
       { skipMissingNetwork: true },
     );
+    // 404 = the relay is not created yet; the API applies the mail settings later.
+    await this.connectContainerToNetwork(
+      siteNetworkName,
+      MAIL_RELAY_CONTAINER_NAME,
+      [MAIL_RELAY_ALIAS],
+      { skipMissingNetwork: true },
+    );
 
     if (spec.volumeMounts) {
       for (const mount of spec.volumeMounts) {
@@ -1264,9 +1292,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       spec.resolvedSecrets,
     );
 
+    if (spec.siteMail === true) {
+      await ensureSiteMailFiles(this.siteMailDir);
+    }
     const createPayload = buildHardenedContainerCreatePayload(spec, {
       secretBinds,
       secretFileEnv,
+      ...(spec.siteMail === true ? { siteMailBinds: siteMailBinds(this.siteMailDir) } : {}),
     });
 
     const existingByService = await this.findContainerSummaryByServiceId(spec.serviceInstanceId);
@@ -1552,6 +1584,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const edgeNet = getSiteEdgeNetworkName(siteId);
     await this.disconnectContainerFromNetwork(edgeNet, INGRESS_PROXY_CONTAINER_NAME);
     await this.disconnectContainerFromNetwork(internalNet, SHARED_DB_CONTAINER_NAME);
+    await this.disconnectContainerFromNetwork(internalNet, MAIL_RELAY_CONTAINER_NAME);
     for (const net of [edgeNet, internalNet]) {
       await this.deleteIgnoringMissing(`/networks/${encodeURIComponent(net)}`);
     }
@@ -1793,6 +1826,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       serviceInstanceId,
       this.secretsRootDir,
       expected,
+      this.siteMailDir,
     );
 
     const observedRevisionHash = labels[MANAGED_DOCKER_LABELS.specHash] || null;

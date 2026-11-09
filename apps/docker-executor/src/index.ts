@@ -121,3 +121,10 @@ export {
   loadExecutorVerificationKeyringFromEnv,
   parsePanelIngressConfigFromEnv,
 } from "./main.js";
+
+export {
+  DEFAULT_SITE_MAIL_DIR,
+  SITE_MAIL_FILES,
+  ensureSiteMailFiles,
+  siteMailBinds,
+} from "./site-mail.js";

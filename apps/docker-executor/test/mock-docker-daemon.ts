@@ -32,6 +32,9 @@ export interface MockDockerDaemon {
   readonly deletedVolumes: string[];
   readonly deletedNetworks: string[];
   readonly networkConnectCalls: Array<{ network: string; container: string; aliases?: string[] }>;
+  readonly networkDisconnectCalls: Array<{ network: string; container: string }>;
+  /** Connecting one of these containers answers 404. */
+  readonly missingContainers: Set<string>;
   /** Connects to these networks answer 404 (removed between list and connect). */
   readonly vanishedNetworks: Set<string>;
   readonly containers: Map<string, MockDockerContainerRecord>;
@@ -61,6 +64,8 @@ export async function startMockDockerDaemon(options?: {
   const deletedVolumes: string[] = [];
   const deletedNetworks: string[] = [];
   const networkConnectCalls: Array<{ network: string; container: string; aliases?: string[] }> = [];
+  const networkDisconnectCalls: Array<{ network: string; container: string }> = [];
+  const missingContainers = new Set<string>();
   const vanishedNetworks = new Set<string>();
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
@@ -210,6 +215,11 @@ export async function startMockDockerDaemon(options?: {
             container: body.Container,
             ...(body.EndpointConfig?.Aliases ? { aliases: body.EndpointConfig.Aliases } : {}),
           });
+          if (missingContainers.has(body.Container)) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: `No such container: ${body.Container}` }));
+            return;
+          }
           if (vanishedNetworks.has(netName)) {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ message: `network ${netName} not found` }));
@@ -218,8 +228,11 @@ export async function startMockDockerDaemon(options?: {
           if (target) {
             target.networks[netName] = body.EndpointConfig ?? {};
           }
-        } else if (target) {
-          delete target.networks[netName];
+        } else {
+          networkDisconnectCalls.push({ network: netName, container: body.Container });
+          if (target) {
+            delete target.networks[netName];
+          }
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({}));
@@ -422,6 +435,8 @@ export async function startMockDockerDaemon(options?: {
     deletedVolumes,
     deletedNetworks,
     networkConnectCalls,
+    networkDisconnectCalls,
+    missingContainers,
     vanishedNetworks,
     containers,
     requestedPaths,
