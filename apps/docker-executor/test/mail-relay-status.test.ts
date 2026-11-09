@@ -52,6 +52,21 @@ describe("parsePostfixDeliveries", () => {
     ]);
   });
 
+  it("classifies a suspended nexthop by the reason that follows, qmgr included", () => {
+    const q = (id: string, reason: string) => ({
+      at: T,
+      stream: "stdout" as const,
+      text: `postfix/qmgr[90]: ${id}: to=<a@b.it>, relay=none, delay=60, delays=0/0/0/60, dsn=4.3.0, status=deferred (delivery temporarily suspended: ${reason})`,
+    });
+    const r = parsePostfixDeliveries([
+      q("Q1", "connect to smtp.x:587: Connection refused"),
+      q("Q2", "lost connection with smtp.x[1.2.3.4] while receiving the initial server greeting"),
+      q("Q3", "something unforeseen"),
+      q("Q4", "host mx.tlsmail.it refused to talk to me"),
+    ]);
+    expect(r.map((d) => d.problem)).toEqual(["unreachable", "unreachable", "other", "other"]);
+  });
+
   it("a deferred message shows once with its latest reason, per recipient", () => {
     const d = parsePostfixDeliveries([
       smtp("2026-11-09T10:00:00Z", "Q1", "a@b.it>, relay=none, dsn=4.4.1, status=deferred (connect to h:587: Connection timed out)"),

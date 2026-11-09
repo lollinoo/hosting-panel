@@ -10,26 +10,26 @@ export interface MailDelivery {
   readonly detail: string;
 }
 
-// Only postfix/smtp and postfix/error log `to=`; qmgr lines carry from=/size=/nrcpt= only.
+// qmgr logs `to=` only for a dead nexthop; its from=/size=/nrcpt= lines have no `to=` and never match.
 const DELIVERY_LINE =
-  /postfix\/(?:smtp|error)\[\d+\]: ([0-9A-Za-z]+): to=<([^>]*)>,.*? status=(sent|deferred|bounced) \((.*)\)\s*$/;
+  /postfix\/(?:smtp|error|qmgr)\[\d+\]: ([0-9A-Za-z]+): to=<([^>]*)>,.*? status=(sent|deferred|bounced) \((.*)\)\s*$/;
 
-/** Most specific cause first; "delivery temporarily suspended" alone is the weakest signal. */
+/** Most specific cause first; "delivery temporarily suspended" is classified by the reason after it. */
 export function classifyMailProblem(status: "deferred" | "bounced", reason: string): MailProblem {
   if (/SASL authentication failed| 535 /.test(reason)) {
     return "auth_failed";
   }
   if (
-    /connect to|Connection (?:refused|timed out)|Network is unreachable|No route to host|host not found|Name or service not known/i.test(
+    /connect to|Connection (?:refused|timed out)|Network is unreachable|No route to host|host not found|Name or service not known|lost connection|timed out/i.test(
       reason,
     )
   ) {
     return "unreachable";
   }
-  if (/TLS|STARTTLS|certificate/i.test(reason)) {
+  if (/(?<![\w.-])(?:STARTTLS|TLS|certificate)(?![\w.-])/i.test(reason)) {
     return "tls_failed";
   }
-  if (/sasl_passwd|unknown mail transport error|No such file|delivery temporarily suspended/.test(reason)) {
+  if (/sasl_passwd|unknown mail transport error|No such file/.test(reason)) {
     return "credentials_missing";
   }
   return status === "bounced" ? "rejected" : "other";

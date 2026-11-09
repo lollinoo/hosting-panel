@@ -60,10 +60,11 @@ export async function submitLocalMail(opts: SubmitLocalMailOptions): Promise<{ q
   // Resolves with the complete (possibly multi-line) reply: the last line is "NNN text" or "NNN".
   const reply = async (): Promise<{ code: number; text: string }> => {
     for (;;) {
-      const lines = buffer.split("\r\n");
+      // The last element is an unterminated fragment: only CRLF-complete lines count.
+      const lines = buffer.split("\r\n").slice(0, -1);
       const doneAt = lines.findIndex((l) => /^\d{3}( |$)/.test(l));
       if (doneAt >= 0) {
-        buffer = lines.slice(doneAt + 1).join("\r\n");
+        buffer = buffer.split("\r\n").slice(doneAt + 1).join("\r\n");
         const text = lines.slice(0, doneAt + 1).join("\n");
         return { code: Number(lines[doneAt]!.slice(0, 3)), text };
       }
@@ -91,7 +92,7 @@ export async function submitLocalMail(opts: SubmitLocalMailOptions): Promise<{ q
   try {
     await step(null, ok);
     await step(`EHLO ${opts.heloName}`, ok);
-    await step(`MAIL FROM:<${opts.from}>`, ok);
+    await step(`MAIL FROM:<${opts.from}> BODY=8BITMIME`, ok);
     await step(`RCPT TO:<${opts.to}>`, ok);
     await step("DATA", (c) => c === 354);
     socket.write(message);

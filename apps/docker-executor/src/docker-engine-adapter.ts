@@ -1254,10 +1254,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     ]);
   }
 
-  private async readMailDeliveries(sinceSec: number): Promise<MailDelivery[]> {
+  private async readMailDeliveries(sinceSec: number, timeoutMs?: number): Promise<MailDelivery[]> {
     const res = await this.dockerClient.request(
       "GET",
       `/containers/${encodeURIComponent(MAIL_RELAY_CONTAINER_NAME)}/logs?stdout=1&stderr=1&timestamps=1&since=${String(sinceSec)}&tail=5000`,
+      undefined,
+      timeoutMs === undefined ? undefined : { timeoutMs },
     );
     if (res.statusCode !== 200) {
       throw new ExecutorCodedError(
@@ -1310,7 +1312,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     });
     const deadline = Date.now() + this.mailTestWaitMs;
     for (;;) {
-      const found = (await this.readMailDeliveries(Math.floor(startedMs / 1000) - 1))
+      // Bounded by the remaining budget so a slow daemon cannot stretch the call.
+      const found = (
+        await this.readMailDeliveries(
+          Math.floor(startedMs / 1000) - 1,
+          Math.max(1_000, Math.min(5_000, deadline - Date.now())),
+        )
+      )
         .filter((d) => d.queueId === queueId)
         .at(-1);
       if (found) {

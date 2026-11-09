@@ -43,10 +43,34 @@ describe("submitLocalMail", () => {
   it("speaks SMTP and returns the queue id", async () => {
     const f = await fake("220 hp-mail ESMTP\r\n");
     await expect(submitLocalMail({ ...base, port: f.port })).resolves.toEqual({ queueId: "4ABC123" });
-    expect(f.received).toContain("MAIL FROM:<n@x.it>");
+    expect(f.received).toContain("MAIL FROM:<n@x.it> BODY=8BITMIME");
     expect(f.received).toContain("RCPT TO:<a@b.it>");
     expect(f.received).toContain("..dot");
     expect(f.received).toContain("Subject: Hi");
+  });
+
+  it("waits for CRLF when a reply is split across chunks", async () => {
+    const server = net.createServer((sock) => {
+      const send = (parts: string[]) => parts.forEach((p, i) => setTimeout(() => sock.write(p), i * 20));
+      send(["220 he", "llo\r\n"]);
+      let data = false;
+      sock.on("data", (d) => {
+        for (const l of d.toString().split("\r\n")) {
+          if (data) {
+            if (l === ".") send(["250 2.0.0 Ok: que", "ued as 4SPLIT1\r\n"]);
+          } else if (l === "DATA") {
+            data = true;
+            sock.write("354 go\r\n");
+          } else if (l.startsWith("EHLO")) send(["250", "-x\r\n250 ok\r\n"]);
+          else if (l) send(["250", " ok\r\n"]); // bare "250" before its CRLF
+        }
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    closers.push(() => server.close());
+    await expect(
+      submitLocalMail({ ...base, port: (server.address() as net.AddressInfo).port }),
+    ).resolves.toEqual({ queueId: "4SPLIT1" });
   });
 
   it("refuses CR or LF in an address", async () => {
