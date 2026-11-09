@@ -20,7 +20,7 @@ export function classifyMailProblem(status: "deferred" | "bounced", reason: stri
     return "auth_failed";
   }
   if (
-    /connect to|Connection (?:refused|timed out)|Network is unreachable|No route to host|host not found|Name or service not known|lost connection|timed out/i.test(
+    /connect to|Connection (?:refused|timed out)|Network is unreachable|No route to host|host not found|Name or service not known|unable to look up host|Name does not resolve|lost connection|timed out/i.test(
       reason,
     )
   ) {
@@ -29,7 +29,8 @@ export function classifyMailProblem(status: "deferred" | "bounced", reason: stri
   if (/(?<![\w.-])(?:STARTTLS|TLS|certificate)(?![\w.-])/i.test(reason)) {
     return "tls_failed";
   }
-  if (/sasl_passwd|unknown mail transport error|No such file/.test(reason)) {
+  // Postfix 3.11 logs a missing sasl_passwd only as "local data error" on the delivery line (Task 9).
+  if (/sasl_passwd|unknown mail transport error|No such file|local data error/.test(reason)) {
     return "credentials_missing";
   }
   return status === "bounced" ? "rejected" : "other";

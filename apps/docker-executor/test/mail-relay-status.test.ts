@@ -52,6 +52,36 @@ describe("parsePostfixDeliveries", () => {
     ]);
   });
 
+  it("classifies the real Postfix 3.11.7 lines from the container harness (Task 9)", () => {
+    const real = (text: string) => ({ at: T, stream: "stdout" as const, text: `2026-11-09T20:54:28.776150+00:00 INFO    ${text}` });
+    const r = parsePostfixDeliveries([
+      real("postfix/smtp[518]: 9238D4939C: to=<a@b.it>, relay=mail.provider.test[10.231.0.252]:587, delay=7.2, delays=3/0.06/4.1/0, tls=secure, dsn=4.3.0, status=deferred (local data error while talking to mail.provider.test[10.231.0.252])"),
+      real("postfix/error[511]: CACE5E17D6: to=<a@b.it>, relay=none, delay=0.06, delays=0.05/0.01/0/0, dsn=4.3.0, status=deferred (delivery temporarily suspended: local data error while talking to mail.provider.test[10.231.0.252])"),
+      real("postfix/smtp[550]: EDF5AE101D: to=<a@b.it>, relay=mail.provider.test[10.231.0.252]:587, delay=4.2, delays=0.01/0.09/4.1/0, tls=secure, dsn=4.7.8, status=deferred (SASL authentication failed; server mail.provider.test[10.231.0.252] said: 535 5.7.8 Authentication credentials invalid)"),
+      real("postfix/smtp[441]: 3C40BE1700: to=<a@b.it>, relay=plain.provider.test[10.231.0.253]:587, delay=2.6, delays=0.01/0.08/2.5/0, tls=!secure, dsn=4.7.4, status=deferred (TLS is required, but was not offered by host plain.provider.test[10.231.0.253])"),
+      real("postfix/smtp[447]: C160E6925A: to=<a@b.it>, relay=mail.provider.test[10.231.0.252]:587, delay=0.08, delays=0.01/0.02/0.04/0, tls=!secure, dsn=4.7.5, status=deferred (Server certificate not verified)"),
+      real("postfix/smtp[447]: 855FC69260: to=<a@b.it>, relay=none, delay=30, delays=0.01/0/30/0, tls=secure?, dsn=4.4.1, status=deferred (connect to mail.provider.test[10.231.0.252]:587: Operation timed out)"),
+      real("postfix/smtp[536]: BDC87E1705: to=<a@b.it>, relay=none, delay=0.11, delays=0.01/0.06/0.04/0, tls=secure?, dsn=4.4.1, status=deferred (connect to mail.provider.test[10.231.0.252]:587: Connection refused)"),
+      real("postfix/error[607]: D4157E1810: to=<a@b.it>, relay=none, delay=0.07, delays=0.06/0.01/0/0, dsn=4.4.1, status=deferred (delivery temporarily suspended: connect to mail.provider.test[10.231.0.252]:587: Operation timed out)"),
+      real("postfix/smtp[393]: 43A76E1708: to=<a@b.it>, relay=none, delay=37, delays=37/0.03/0.03/0, dsn=4.3.5, status=deferred (Host or domain name not found. Name service error for name=plain.provider.test type=A: Host not found)"),
+      real("postfix/smtp[445]: 9238D4939C: to=<a@b.it>, relay=none, delay=87, delays=87/0.13/0.07/0, dsn=4.3.5, status=deferred (unable to look up host mail.provider.test: Name does not resolve)"),
+      real("postfix/smtp[550]: EDF5AE101E: to=<a@b.it>, relay=mail.provider.test[10.231.0.252]:587, delay=4.2, delays=0.01/0.09/4.1/0, tls=secure, dsn=2.0.0, status=sent (250 2.0.0 Ok: queued as 7IY3FsnnGmHtgcuIwpjEe7)"),
+    ]);
+    expect(r.map((d) => d.problem)).toEqual([
+      "credentials_missing",
+      "credentials_missing",
+      "auth_failed",
+      "tls_failed",
+      "tls_failed",
+      "unreachable",
+      "unreachable",
+      "unreachable",
+      "unreachable",
+      "unreachable",
+      null,
+    ]);
+  });
+
   it("classifies a suspended nexthop by the reason that follows, qmgr included", () => {
     const q = (id: string, reason: string) => ({
       at: T,
