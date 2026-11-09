@@ -62,7 +62,29 @@ export async function setupInstallation(
   await ensureWordpressTemplate(db);
   const [inst] = await db.select().from(platformInstallations).limit(1);
   const [host] = await db.select().from(hosts).limit(1);
-  if (inst && host) return { installationId: inst.id, hostId: host.id };
+  if (inst && host) {
+    // A rerun with a new --ipv4/--hostname (for example behind NAT) must reach the row sites read.
+    if (
+      host.ipv4Address !== input.hostIpv4 ||
+      host.hostname !== input.hostHostname ||
+      host.name !== input.hostHostname
+    ) {
+      await db
+        .update(hosts)
+        .set({ ipv4Address: input.hostIpv4, hostname: input.hostHostname, name: input.hostHostname })
+        .where(eq(hosts.id, host.id));
+      await appendAuditEvent(db, {
+        actorId: null,
+        actorType: "system",
+        organizationId: null,
+        action: "host.address.change",
+        targetType: "host",
+        targetId: host.id,
+        details: { from: host.ipv4Address, to: input.hostIpv4 },
+      });
+    }
+    return { installationId: inst.id, hostId: host.id };
+  }
 
   const fs = await statfs("/");
   const installationId = inst?.id ?? `pin_${randomUUID()}`;

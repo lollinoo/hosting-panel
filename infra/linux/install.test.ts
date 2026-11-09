@@ -21,7 +21,7 @@ function osRelease(id: string, codename: string) {
   writeFileSync(f, `ID=${id}\nVERSION_CODENAME=${codename}\n`);
   return f;
 }
-const ARGS = ["--hostname", "panel.example.com", "--admin-email", "admin@example.com", "--admin-name", "Ada Admin"];
+const ARGS = ["--hostname", "panel.example.com", "--admin-email", "admin@acme-hosting.it", "--admin-name", "Ada Admin"];
 
 function install(args: string[], env: Record<string, string> = {}) {
   const r = spawnSync("bash", [SCRIPT, ...args], {
@@ -139,6 +139,21 @@ describe("install.sh shared database and memory", () => {
     expect(r.out).toContain("at least 2 GB");
     expect(r.out).toContain("992 MB");
     expect(r.out).toContain("[STEP 12/12]");
+  });
+
+  it("installer warns when the IPv4 is private and continues", () => {
+    const r = dry({}, ["--ipv4", "10.0.0.5"]);
+    expect(r.code).toBe(0);
+    expect(r.out + r.err).toContain("WARNING: 10.0.0.5 is a private address.");
+    expect(r.out).toContain("Dry run complete");
+    expect(dry({}, ["--ipv4", "203.0.113.7"]).out).not.toContain("private address");
+  });
+
+  it("installer refuses a reserved ACME email", () => {
+    for (const e of ["ops@example.com", "ops@example.org", "ops@host.test", "ops@x.invalid"]) {
+      expect(dry({}, ["--acme-email", e]).code).toBe(2);
+    }
+    expect(dry({}, ["--acme-email", "ops@acme-hosting.it"]).code).toBe(0);
   });
 
   it("no memory warning at 4 GB", () => {

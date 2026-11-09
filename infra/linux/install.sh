@@ -12,7 +12,8 @@ Usage: sudo bash install.sh --hostname <fqdn> --admin-email <email> --admin-name
                             [--version <v> | --archive <path>] [--acme-staging]
                             [--skip-firewall] [--dry-run] [--allow-other-linux]
 
-  --acme-email   Let's Encrypt account email (default: --admin-email).
+  --acme-email   Let's Encrypt contact email (default: --admin-email). Must be a real address:
+                 Let's Encrypt rejects example.com, *.test and similar reserved domains.
   --ipv4         Public IPv4 of this server (default: source address of the default route).
   --version      Release to install (default: latest GitHub release).
   --archive      Local hosting-panel-<v>-linux-x64.tar.gz (its .sha256 must sit next to it).
@@ -56,6 +57,15 @@ step() {
 
 plan() { printf '  [DRY-RUN] %s\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
+is_private_ipv4() { # is_private_ipv4 <addr>: RFC1918, CGNAT, loopback, link-local
+  local a b
+  IFS=. read -r a b _ <<<"$1"
+  case "${a}.${b}" in
+    10.* | 127.* | 192.168 | 169.254 | 100.6[4-9] | 100.[7-9][0-9] | 100.1[01][0-9] | 100.12[0-7]) return 0 ;;
+    172.1[6-9] | 172.2[0-9] | 172.3[01]) return 0 ;;
+  esac
+  return 1
+}
 
 # Rewrites KEY=VALUE lines in an env file atomically (0400 root:root); other lines are kept
 # byte for byte, missing keys are appended. Values are never printed.
@@ -213,6 +223,11 @@ main() {
   [[ -n "${admin_name}" && "${admin_name}" != *$'\n'* ]] || die 2 "Missing or invalid --admin-name"
   acme_email="${acme_email:-${admin_email}}"
   [[ "${acme_email}" =~ ${email_re} ]] || die 2 "Invalid --acme-email"
+  local acme_domain="${acme_email##*@}"
+  case "${acme_domain}" in
+    example.com | example.net | example.org | *.example | *.test | *.invalid | *.localhost)
+      die 2 "Use a real --acme-email: Let's Encrypt rejects ${acme_domain}" ;;
+  esac
   [[ -z "${ipv4}" || "${ipv4}" =~ ${ipv4_re} ]] || die 2 "Invalid --ipv4: ${ipv4}"
   [[ -z "${version}" || -z "${archive}" ]] || die 2 "--version and --archive are mutually exclusive"
   [[ -z "${version}" || "${version}" == latest || "${version}" =~ ${_hp_semver_re} ]] || die 2 "Invalid --version: ${version}"
@@ -330,6 +345,12 @@ main() {
     fi
   fi
   info "Panel IPv4: ${ipv4}"
+  if is_private_ipv4 "${ipv4}"; then
+    info "WARNING: ${ipv4} is a private address. Customers' A records must point to this server's public IPv4; if the server is behind NAT, rerun with --ipv4 <public address>."
+  fi
+  if ((dry_run == 0)) && ! { getent ahostsv4 "${hostname}" 2>/dev/null || true; } | awk '{print $1}' | grep -qxF "${ipv4}"; then
+    info "WARNING: ${hostname} does not resolve to ${ipv4} yet. Create its A record now: until it resolves, the panel uses a temporary certificate and Let's Encrypt attempts for it fail."
+  fi
 
   # ---------------------------------------------------------------- 3
   step 3 "Docker CE"
