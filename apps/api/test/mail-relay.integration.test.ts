@@ -253,6 +253,7 @@ describe("mail relay API", () => {
 
   it("boot applies stored settings and retries until the executor answers", async () => {
     await upsertMailRelaySettings(dbClient.db, KEY.toString("hex"), { ...SETTINGS, actorId: null });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     const fresh = new InMemoryDockerSimulatorAdapter();
     fresh.failNextMailRelayApply(2);
@@ -267,6 +268,10 @@ describe("mail relay API", () => {
     await tick(); // tick 2: fails
     expect(fresh.mailRelayApplies).toEqual([]);
     await tick(); // tick 3: applied
+    expect(warn.mock.calls.map((c) => JSON.parse(String(c[0])) as Json)).toEqual([
+      { event: "mail_relay_apply_failed", code: "DOCKER_ENGINE_UNAVAILABLE" },
+      { event: "mail_relay_apply_failed", code: "DOCKER_ENGINE_UNAVAILABLE" },
+    ]);
     expect(fresh.mailRelayApplies).toEqual([{ ...STORED, password: CANARY }]);
     for (let i = 4; i <= 9; i += 1) await tick();
     expect(fresh.mailRelayApplies).toHaveLength(1);
@@ -345,6 +350,36 @@ describe("mail relay API", () => {
     const got = await call("GET", RELAY);
     expect(got.status).toBe(200);
     expect(got.body.data).toMatchObject({ configured: true, applied: true, relayRunning: null, sentLast24h: null, failures: [] });
+  });
+
+  it("save and clear answer without waiting on a wedged executor's status", async () => {
+    await saveAndApply();
+    sim.getMailRelayStatus = () => new Promise<never>(() => undefined);
+    const saved = await call("PATCH", RELAY, { ...SETTINGS, port: 465 });
+    expect(saved.status).toBe(200);
+    expect(saved.body.data).toMatchObject({ port: 465, applied: false, relayRunning: null, sentLast24h: null });
+    await app.mailRelay.ensureApplied();
+    expect((await call("DELETE", RELAY)).body.data).toMatchObject({ configured: false, relayRunning: null });
+  });
+
+  it("a test email whose executor call timed out is audited and reported as ambiguous", async () => {
+    await saveAndApply();
+    sim.sendTestMail = () => Promise.reject(coded("OPERATION_AMBIGUOUS"));
+    const res = await call("POST", `${RELAY}/test`, { to: "admin@x.it" });
+    expect(res.status).toBe(502);
+    expect(res.body.error.code).toBe("OPERATION_AMBIGUOUS");
+    const [audit] = await audits("admin.mail_relay.test");
+    expect(audit?.details).toEqual({ to: "admin@x.it", outcome: "unknown", problem: null });
+  });
+
+  it("stop waits only for the apply in flight, not for the queued ones", async () => {
+    const release = holdApplies();
+    await call("PATCH", RELAY, SETTINGS); // apply held in flight
+    void app.mailRelay.ensureApplied(true); // queued behind it
+    const stopped = app.mailRelay.stop();
+    release();
+    await stopped;
+    expect(sim.mailRelayApplies).toEqual([{ ...STORED, password: CANARY }]);
   });
 
   it("clear removes the settings and stops the relay", async () => {
@@ -431,7 +466,32 @@ describe("mail relay API", () => {
       expect(site.body.data.driftSummary).toMatchObject({ overallDriftStatus: "in_sync", driftedCount: 0 });
     });
 
+    it("a stopped site is not started by the upgrade; it is upgraded once started again", async () => {
+      const siteId = await provisionSite();
+      await stripSiteMail(siteId);
+      const action = (a: string) =>
+        call("POST", `/v1/organizations/${orgId}/managed-sites/${siteId}/actions`, { action: a }, token, {
+          "Idempotency-Key": randomUUID(),
+        });
+      expect((await action("stop")).status).toBe(202);
+      await run();
+      const before = await revisions(siteId);
+      const opsBefore = (await deploys(siteId)).length;
+
+      await app.mailRelay.tick();
+      expect(await revisions(siteId)).toHaveLength(before.length);
+      expect(await deploys(siteId)).toHaveLength(opsBefore);
+
+      expect((await action("start")).status).toBe(202);
+      await run();
+      await app.mailRelay.tick();
+      expect(await revisions(siteId)).toHaveLength(before.length + 1);
+      await run();
+      expect(sim.deployedSpecs.at(-1)).toMatchObject({ siteId, siteMail: true });
+    });
+
     it("a locked site is upgraded on a later tick", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
       const siteId = await provisionSite();
       await stripSiteMail(siteId);
       const held = await enqueueOperationTransactional(dbClient.db as unknown as HostingPanelDatabase, {

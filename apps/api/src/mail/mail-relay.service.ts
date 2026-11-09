@@ -62,7 +62,12 @@ export class MailRelayService {
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
   ) {}
 
-  public async get(): Promise<MailRelaySettingsDto> {
+  public get(): Promise<MailRelaySettingsDto> {
+    return this.#read(true);
+  }
+
+  /** `withStatus: false` answers without the executor, so a save never waits on a wedged one. */
+  async #read(withStatus: boolean): Promise<MailRelaySettingsDto> {
     const row = await getMailRelaySettingsPublic(this.dbClient.db);
     const dto: MailRelaySettingsDto = {
       configured: row !== null,
@@ -77,7 +82,7 @@ export class MailRelayService {
       sentLast24h: null,
       failures: [],
     };
-    if (row === null) return dto;
+    if (row === null || !withStatus) return dto;
     try {
       const status = await this.executor.getMailRelayStatus({ since: new Date(Date.now() - STATUS_WINDOW_MS).toISOString() });
       return { ...dto, relayRunning: status.running, sentLast24h: status.sentCount, failures: status.failures };
@@ -99,7 +104,7 @@ export class MailRelayService {
       await this.#audit(t, actorId, "admin.mail_relay.update", { ...fields, passwordChanged: password !== undefined });
     });
     // The DTO is read before the apply starts, so it says applied: false until the apply lands.
-    const dto = await this.get();
+    const dto = await this.#read(false);
     void this.ensureApplied();
     return dto;
   }
@@ -110,7 +115,7 @@ export class MailRelayService {
       await deleteMailRelaySettings(t);
       await this.#audit(t, actorId, "admin.mail_relay.clear", {});
     });
-    const dto = await this.get();
+    const dto = await this.#read(false);
     void this.ensureApplied();
     return dto;
   }
@@ -128,6 +133,11 @@ export class MailRelayService {
       result = await this.#queue(() => this.executor.sendTestMail({ to, from: mailSenderAddress(row.senderDomain) }));
     } catch (err) {
       if (UNAVAILABLE_CODES.has(codeOf(err))) throw unavailable();
+      if (codeOf(err) === "OPERATION_AMBIGUOUS") {
+        // The executor timed out after the request was written: the email may have been sent.
+        await this.#audit(this.dbClient.db, actorId, "admin.mail_relay.test", { to, outcome: "unknown", problem: null });
+        throw new ControlPlaneError("OPERATION_AMBIGUOUS", "The test email may have been sent. Check the inbox.");
+      }
       throw err;
     }
     await this.#audit(this.dbClient.db, actorId, "admin.mail_relay.test", { to, outcome: result.outcome, problem: result.problem });
@@ -160,6 +170,7 @@ export class MailRelayService {
       // A save between the two reads leaves the old fingerprint here, so the next tick applies again.
       this.#appliedFingerprint = target;
     }).catch((err: unknown) => {
+      if (this.#stopped) return;
       console.warn(JSON.stringify({ event: "mail_relay_apply_failed", code: codeOf(err) ?? "INTERNAL_ERROR" }));
     });
   }
@@ -181,6 +192,7 @@ export class MailRelayService {
   public async tick(): Promise<void> {
     this.#ticks += 1;
     await this.ensureApplied(this.#ticks % FORCED_EVERY_TICKS === 0);
+    if (this.#stopped) return;
     try {
       if ((await upgradeSitesToSiteMail(this.dbClient.db)) > 0) this.outboxWorker.triggerAsync();
     } catch (err) {
@@ -199,12 +211,17 @@ export class MailRelayService {
       clearInterval(this.#timer);
       this.#timer = null;
     }
+    // Queued work skips once stopped, so this waits only for the call in flight.
     await this.#running;
     await this.#serial;
   }
 
   #queue<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.#serial.then(work);
+    const run = this.#serial.then(() =>
+      this.#stopped
+        ? Promise.reject(new ControlPlaneError("MAIL_RELAY_UNAVAILABLE", "Email sending is stopping.", { retryable: true }))
+        : work(),
+    );
     this.#serial = run.catch(() => undefined);
     return run;
   }

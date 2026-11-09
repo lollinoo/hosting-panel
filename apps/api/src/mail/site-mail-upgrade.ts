@@ -12,6 +12,8 @@ import {
 } from "@hosting-panel/database";
 import { SERVICE_STEPS } from "../runtime/site-provisioner.js";
 
+const REVISION_MOVED = new Error("The current revision changed since it was read");
+
 /**
  * Sites deployed before 0.5.0 get one new revision with `siteMail: true` and a redeploy. Only `ready`
  * sites move; a locked one is retried on the next tick. Returns the number of deploys enqueued.
@@ -26,6 +28,8 @@ export async function upgradeSitesToSiteMail(db: HostingPanelDatabase): Promise<
       and(
         isNotNull(sites.phpVersion),
         eq(sites.status, "ready"),
+        // A deploy starts the container: a site stopped on purpose waits until it is started again.
+        eq(serviceInstances.desiredStatus, "running"),
         sql`${stackRevisions.declarativeConfig}->>'siteMail' is distinct from 'true'`,
       ),
     );
@@ -43,6 +47,12 @@ export async function upgradeSitesToSiteMail(db: HostingPanelDatabase): Promise<
           lockKey: `site:${siteId}`,
           steps: SERVICE_STEPS,
         });
+        // The lock is held now: a revision written since the list (e.g. a PHP change) must not be undone.
+        const [svc] = await t
+          .select({ currentRevisionId: serviceInstances.currentRevisionId })
+          .from(serviceInstances)
+          .where(eq(serviceInstances.id, serviceId));
+        if (svc?.currentRevisionId !== rev.id) throw REVISION_MOVED;
         await appendStackRevisionTransactional(t, {
           serviceInstanceId: serviceId,
           organizationId,
@@ -55,6 +65,7 @@ export async function upgradeSitesToSiteMail(db: HostingPanelDatabase): Promise<
       });
       enqueued += 1;
     } catch (err) {
+      if (err === REVISION_MOVED) continue; // Rolled back; the next tick reads the new revision.
       // A locked or failing site is retried on the next tick and never blocks the others.
       const code = (err as { code?: unknown } | null)?.code;
       if (code !== "RESOURCE_LOCKED") console.warn(JSON.stringify({ event: "site_mail_upgrade_failed", siteId, code: code ?? null }));
