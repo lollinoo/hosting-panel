@@ -2,7 +2,7 @@
 
 ## Container harness with a local mail provider (Task 9)
 
-**Run:** 2026-11-09 on branch `feat/step-2c-smtp-relay`, starting at `1cc101b`. The run fixed three things (`740f099`, `4ad4577`, `c80b41c`, below) and left two design questions open (O1, O2).
+**Run:** 2026-11-09 on branch `feat/step-2c-smtp-relay`, starting at `1cc101b`. The run fixed three things (`740f099`, `4ad4577`, `c80b41c`, below) and left two design questions open (O1, O2), both fixed afterwards in `0259d5f`.
 
 **Releases:** built with `corepack pnpm release:build` (Node 26.13.0) and smoke-tested with `pnpm release:smoke` (PASS each time).
 
@@ -245,9 +245,9 @@ WARNING postfix/smtpd[569]: warning: Message delivery request rate limit exceede
 - **`c80b41c` `fix(executor)`:** the real Postfix texts for missing credentials and for an unresolvable host (step 6.2, step 5) are classified correctly, with a real-line test. Verified live on 0.5.1 (`credentials_missing` through the BFF, IT and EN text).
 - Each fix passed root `pnpm test` (757 passed, 2 skipped after the last one), `pnpm lint` and `pnpm -r typecheck`.
 
-### Open items (recorded, not fixed)
+### Open items (recorded; O1 and O2 fixed afterwards)
 
-- **O1 (High, behaviour promised to customers). `Reply-To` is rewritten to `noreply@`.**
+- **O1 (High, behaviour promised to customers). `Reply-To` is rewritten to `noreply@`. Fixed in `0259d5f`** (option 1: `sender_canonical_classes=envelope_sender`, plus an inline `regexp:` `header_checks` that `REPLACE`s `From:` (display name kept) and `Sender:`). Verified live against `boky/postfix:5.2.1-alpine` and Mailpit on a throwaway internal network: quoted name with `,` and `<`, folded, bare and `Sender:` cases arrive with `Return-Path`, `From` and `Sender` at `noreply@` and `Reply-To` unchanged; `From: CEO <ceo@bank.test>` arrives as `CEO <noreply@…>`; `From: ceo@bank.test, <x@y.test>` as the bare `noreply@`.
   - `sender_canonical_classes=envelope_sender,header_sender` with `static:` rewrites every sender-class header: `From`, `Sender` and also `Reply-To`.
   - So the `Reply-To` that the mu-plugin adds, and any `Reply-To` a form plugin sets, arrives as `noreply@<sender domain>`. Replies to booking and contact mails go nowhere.
   - This contradicts ADR 0018 §5, README "Email in uscita" and the step 3.2 expectation.
@@ -256,7 +256,7 @@ WARNING postfix/smtpd[569]: warning: Message delivery request rate limit exceede
     2. a `smtp_header_checks` or `cleanup` rule that saves `Reply-To` before the rewrite;
     3. drop the promise and document that replies go to `noreply@`.
   - The anti-spoofing goal of step 4.2 must still hold for `From` and `Sender`.
-- **O2 (Medium, admin UX). A port blocked by a dropping firewall answers "Still being sent", not "unreachable".**
+- **O2 (Medium, admin UX). A port blocked by a dropping firewall answers "Still being sent", not "unreachable". Fixed in `0259d5f`** (`POSTFIX_smtp_connect_timeout=15s`; the 20 s test wait stays; unit test only, not re-run with a dropping firewall).
   - The test waits 20 s (`mailTestWaitMs`), and Postfix's `smtp_connect_timeout` is 30 s. So a silently dropped 587, the usual cloud egress block, gives `pending` at about 20 s. The `unreachable` row appears 30 s after the send, and the page's "Check Recent problems in a minute" leads there.
   - A refused port answers `unreachable` in 5 s.
   - Options: `POSTFIX_smtp_connect_timeout=15s`, which also changes the config hash and recreates the relay once; or a test wait of about 35 s (the BFF allows 45 s).
