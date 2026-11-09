@@ -233,7 +233,7 @@ export class DomainReconcilerService {
           await this.#fail(site, row, failure.problem, failure.detail, now);
         } else if (
           now.getTime() - since >= CERT_REQUEST_TIMEOUT_MS &&
-          // CP-01: a row whose real certificate is still valid keeps its resolver (a missing store reads as empty).
+          // CP-01: a row whose real certificate is still valid keeps its resolver (e.g. the store lost it).
           !(row.certExpiresAt !== null && row.certExpiresAt > now)
         ) {
           await this.#fail(site, row, "other", "No certificate and no reported failure within 10 minutes", now);
