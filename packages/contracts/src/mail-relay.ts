@@ -41,7 +41,9 @@ export const MailRelayUsernameSchema = z
   .string()
   .min(1, "username_invalid")
   .max(256, "username_invalid")
-  .regex(/^[^\s:]+$/, "username_invalid");
+  .regex(/^[^\s:]+$/, "username_invalid")
+  // The value lands in a Postfix map line: refuse every control character.
+  .refine((v) => ![...v].some((c) => c < " " || c === "\u007f"), "username_invalid");
 
 export const MailRelayPasswordSchema = z
   .string()
@@ -51,7 +53,7 @@ export const MailRelayPasswordSchema = z
   .refine((v) => v === v.trim(), "password_invalid");
 
 const iso = z.string().datetime({ offset: true });
-const MailRelayPortSchema = z.union([
+export const MailRelayPortSchema = z.union([
   z.literal(25),
   z.literal(465),
   z.literal(587),

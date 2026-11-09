@@ -5,6 +5,7 @@ import {
   MailRelayHostSchema,
   MailSenderDomainSchema,
   MailRelayPasswordSchema,
+  MailRelayPortSchema,
   MailRelayUsernameSchema,
   MailTestResultDtoSchema,
 } from "./mail-relay.js";
@@ -328,7 +329,7 @@ export type HostAgentHealthResponse = z.infer<typeof HostAgentHealthResponseSche
 
 export const MailRelayApplyRequestSchema = z.object({
   host: MailRelayHostSchema,
-  port: z.union([z.literal(25), z.literal(465), z.literal(587), z.literal(2525)]),
+  port: MailRelayPortSchema,
   username: MailRelayUsernameSchema,
   password: MailRelayPasswordSchema,
   senderDomain: MailSenderDomainSchema,

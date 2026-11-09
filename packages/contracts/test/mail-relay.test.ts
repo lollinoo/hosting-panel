@@ -29,7 +29,7 @@ describe("mail relay contracts", () => {
 
   it("username refuses a colon or whitespace", () => {
     expect(MailRelayUsernameSchema.safeParse("apikey-1@x").success).toBe(true);
-    for (const bad of ["a:b", "a b", "a\tb", ""]) {
+    for (const bad of ["a:b", "a b", "a\tb", "a\u0000b", "a\u007fb", ""]) {
       expect(MailRelayUsernameSchema.safeParse(bad).success).toBe(false);
     }
   });
