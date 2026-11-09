@@ -29,15 +29,18 @@ import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
   DOCKER_EXECUTOR_TOKEN,
+  DNS_LOOKUP_TOKEN,
   HOST_AGENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "./tokens.js";
+import { createNodeDnsLookup, DEFAULT_DNS_RESOLVERS, type DnsLookup } from "./sites/dns-check.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
   readonly dbClient: DatabaseClient;
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
+  readonly dnsLookup?: DnsLookup;
 }
 
 @Module({})
@@ -77,6 +80,10 @@ export class AppModule {
         {
           provide: HOST_AGENT_TOKEN,
           useValue: hostAgent,
+        },
+        {
+          provide: DNS_LOOKUP_TOKEN,
+          useValue: options.dnsLookup ?? createNodeDnsLookup(DEFAULT_DNS_RESOLVERS),
         },
         OidcService,
         AuthzContextService,

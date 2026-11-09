@@ -29,6 +29,7 @@ import {
   InMemoryHostSimulatorAdapter,
   SignedHostAgentIpcClient,
 } from "@hosting-panel/host-agent";
+import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -205,6 +206,7 @@ export interface CreateControlPlaneAppOptions {
   readonly runtimeBackend?: RuntimeBackend;
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
+  readonly dnsLookup?: DnsLookup;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
   readonly jwtSigningKeyPem?: string;
@@ -424,6 +426,9 @@ export async function createControlPlaneApp(
       dbClient,
       dockerExecutor,
       hostAgent,
+      dnsLookup:
+        options?.dnsLookup ??
+        createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },
