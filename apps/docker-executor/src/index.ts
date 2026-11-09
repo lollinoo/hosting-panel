@@ -51,6 +51,7 @@ export {
   HTACCESS_WORDPRESS,
   SITE_JOB_ROLE,
   WORDPRESS_INSTALL_SCRIPT,
+  WORDPRESS_SET_URL_SCRIPT,
   assertValidSiteJobRequest,
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,

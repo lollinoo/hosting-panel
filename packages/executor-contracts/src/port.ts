@@ -31,7 +31,7 @@ export interface ServiceLogLine {
 }
 
 /** One-off, allowlisted setup jobs. The API picks only the kind; the executor owns image, script and mounts. */
-export type SiteJobKind = "db.provision" | "db.drop" | "wordpress.install";
+export type SiteJobKind = "db.provision" | "db.drop" | "wordpress.install" | "wordpress.set-url";
 
 export interface SiteJobRequest {
   readonly jobId: string;

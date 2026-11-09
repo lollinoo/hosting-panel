@@ -182,7 +182,7 @@ export type ServiceInstanceActionIpcRequest = z.infer<
 
 export const SiteJobIpcRequestSchema = z.object({
   jobId: z.string().min(1).max(128),
-  kind: z.enum(["db.provision", "db.drop", "wordpress.install"]),
+  kind: z.enum(["db.provision", "db.drop", "wordpress.install", "wordpress.set-url"]),
   siteId: z.string().min(1).max(128),
   organizationId: z.string().min(1).max(128),
   serviceInstanceId: z.string().min(1).max(128).optional(),
