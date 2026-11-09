@@ -1445,7 +1445,7 @@ describe("site routes and certificates", () => {
     await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
   });
 
-  it("certificate status without panel ingress is disabled, trusted and reads acme.json", async () => {
+  it("certificate status without panel ingress is disabled, trusted and a missing acme.json is unreadable", async () => {
     const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-nopanel-"));
     cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
     const mockDaemon = await startMockDockerDaemon();
@@ -1457,7 +1457,7 @@ describe("site routes and certificates", () => {
     expect(await adapter.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" })).toEqual({
       acmeEnabled: false,
       trusted: true,
-      readable: true,
+      readable: false,
       certificates: [],
       failures: [],
     });
