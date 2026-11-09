@@ -96,6 +96,12 @@ Site type in this version (**owner decision, 2026-11-08: WordPress only**):
 - `www` and the bare domain are handled as a pair, with a choice of which one is primary (the other redirects). **(builder's call)**
 - A site can have more than one domain (aliases) only if it comes nearly free. Otherwise it is out of this version. **(builder's call)**
 - Out of this version: wildcard certificates (need DNS control), uploading custom certificates. **(builder's call)**
+- **Owner decisions, 2026-11-09 (Step 2b):**
+  - The panel's own certificate is not gated by the DNS check; create the panel's A record before installing.
+  - "Also www" is ticked by default for two-label and `www.` names, and not for subdomains.
+  - Up to 10 web addresses per site, each redirecting to the main address.
+  - When port 80 is blocked, the customer is told the server administrator has been alerted.
+  - No HSTS in this version.
 - Failures (DNS not pointing, Let's Encrypt rate limit, port 80 blocked) are shown in plain language with the next step. The panel retries with backoff and never hammers Let's Encrypt.
 - Certificate status and expiry are visible to the customer. Expiry problems raise an alert to the server administrator.
 - Implementation direction: the existing Traefik v3 data plane has a built-in ACME resolver. Use it if it fits the zero-docker-socket, file-provider-only ingress design (`ADR-014`). The proxy must keep serving existing sites while the Control Plane is down (`CP-01`), including serving existing certificates. Certificate storage must persist across proxy restarts.

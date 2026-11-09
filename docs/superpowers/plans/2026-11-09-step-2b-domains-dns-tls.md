@@ -8,7 +8,14 @@
 
 No task depends on public DNS except the last one.
 
-**Owner decisions that bind this plan:**
+**Owner decisions for 2b (2026-11-09), each in the task that owns it:**
+1. **The panel's own certificate is not gated by the DNS check.** The administrator creates the panel's A record before installing. The installer warns when it does not resolve (Task 12), and Task 14 step 1 counts the failed panel orders.
+2. **"Also www"** on the create form is checked by default for two-label names and `www.` names, and unchecked for subdomains. The API default stays off (Tasks 0 and 10).
+3. **Aliases:** up to 10 web addresses per site, each redirecting to the main address (Tasks 6 and 9).
+4. **Port 80 blocked:** the message tells the customer that the server administrator has been alerted (Tasks 9 and 10).
+5. **No HSTS** in this version (Tasks 2 and 12).
+
+**Earlier owner decisions that bind this plan:**
 - Only WordPress sites.
 - DNS stays at the registrar, and the customer creates an A record.
 - Preview addresses stay deferred.
@@ -334,6 +341,7 @@ It builds on `docs/superpowers/plans/2026-11-08-step-2a-sites-and-shared-mariadb
   - `a host without tls has no websecure router`.
   - `tls without https redirect still emits the resolver router`: `tls: true, httpsRedirect: false` emits the `_tls` router with `certResolver`. This is YAML emission only. Task 8 owns the property that an issued certificate keeps `tls`.
   - `acme disabled strips resolver and https redirect`.
+  - `no HSTS header is configured`: the site YAML contains no `stsSeconds` and no `headers:` middleware. That is owner decision 5.
   - `rejects a redirectTo with a path or a quote`: `https://hotel.it/x` and `https://hotel.it"\n  evil:` → `HOST_POLICY_DENIED`, and no file is written.
   - `rejects wildcard, IP and panel hostnames`: `*.hotel.it`, `1.2.3.4`, the panel hostname as a host, and `https://<panel hostname>` as a `redirectTo` → `HOST_POLICY_DENIED`.
   - `rejects duplicate hostnames and more than 20 hosts`.
@@ -747,6 +755,10 @@ It builds on `docs/superpowers/plans/2026-11-08-step-2a-sites-and-shared-mariadb
   - `customer adds a pair and sees the A records state`: POST `{ hostname: "bellavista.it" }` → 201, two domains, `dns.status` set by the fake lookup, and `serverIpv4` equal to the host's IPv4.
   - `adding the same name twice is idempotent; another site's name is a conflict`.
   - `the primary cannot be removed`, and `the last domain cannot be removed`.
+  - `an eleventh address is refused, and aliases redirect to the main address` (owner decision 3):
+    - With 10 rows, adding one more gives 400 "A site can have up to 10 web addresses".
+    - After an apply, every non-primary host in `appliedRoutes` has `redirectTo` set to the primary origin.
+  - `port 80 failure raises an admin alert`: a `port_80_blocked` failure appears in `listAll().certificateAlerts` as `not_issued`. The customer text promises this (owner decision 4).
   - `set primary swaps and triggers a set-url`: after `www.hotel.it` becomes primary with both certificates active, the next op's job has `siteUrl https://www.hotel.it`.
   - `main address moves only to a name with working HTTPS`: with the site on `https://hotel.it` and `www.hotel.it` `requested`, `primary` gives 400 with the "Wait until HTTPS is active" text. On a site still on `http://`, the same call succeeds.
   - `customer cannot read or change domains of another organization's site`: 404 on all five routes, including for an unassigned admin-held site.
@@ -821,6 +833,8 @@ It builds on `docs/superpowers/plans/2026-11-08-step-2a-sites-and-shared-mariadb
   - `panel lists the A records with the server IP` (`renderToStaticMarkup` with `I18nProvider`): contains `hotel.it`, `www.hotel.it` and `203.0.113.10`.
   - `every domain hint exists in both languages and names a next step`: every `hint` key exists in `it` and `en`, and is non-empty.
   - `site tabs include domains between overview and logs`.
+  - `create form ticks "Also www" for hotel.it and www.hotel.it but not for blog.hotel.it`: render `SiteForm` with each domain typed and check the checkbox state. Also, `suggestWwwPair` in `packages/contracts/test/site-domains.test.ts` returns true, true, false for those three. That is owner decision 2.
+  - `port 80 hint says the administrator was alerted`: `en.site.domains.hint.port_80_blocked` contains "administrator", and the IT text contains "amministratore". That is owner decision 4.
 - [ ] **Step 2: Run them and confirm they fail.** Run `corepack pnpm --filter @hosting-panel/web exec vitest run test/site-domains.test.ts`.
 - [ ] **Step 3: Implement.** Read `apps/web/node_modules/next/dist/docs/` for any App Router change first, as `apps/web/AGENTS.md` asks.
 - [ ] **Step 4: Run them and confirm they pass, plus `ui-copy.test.ts` and the four checks.**
@@ -867,7 +881,15 @@ It builds on `docs/superpowers/plans/2026-11-08-step-2a-sites-and-shared-mariadb
     - the usage text says the ACME email is the Let's Encrypt contact and must be real.
   - `infra/linux/install.test.ts`;
   - `README.md` (Italian):
-    - a "Domini e HTTPS" section: the A record, `www`, no AAAA, staging (`--acme-staging`), where `acme.json` lives, the alert threshold of 14 days;
+    - a "Domini e HTTPS" section covering:
+      - the A record and `www`;
+      - no AAAA records;
+      - **create the panel's A record before installing**;
+      - staging (`--acme-staging`);
+      - where `acme.json` lives;
+      - the alert threshold of 14 days;
+      - up to 10 addresses per site;
+      - no HSTS;
     - the capability table row becomes `true`.
   - `HARNESS.md`: project map entries `acme-status.ts`, `domain-reconciler.service.ts`, `site-domains-applier.ts`, `dns-check.ts` and `domain-policy.ts`; `acme*.json` in the key and state list.
   - `.agents/brain/state.md`: Step 2b status.
@@ -879,7 +901,7 @@ It builds on `docs/superpowers/plans/2026-11-08-step-2a-sites-and-shared-mariadb
 **Interfaces:**
 - **`install.sh`:**
   - `is_private_ipv4 <addr>` is true for `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `127/8` and `169.254/16`. When true it prints `WARNING: <ip> is a private address. Customers' A records must point to this server's public IPv4; if the server is behind NAT, rerun with --ipv4 <public address>.` and continues.
-  - **Panel hostname check.** When `getent ahostsv4 <hostname>` does not list `<ipv4>`, the installer prints `WARNING: <hostname> does not resolve to <ipv4> yet. Create its A record now: until it resolves, the panel uses a temporary certificate and Let's Encrypt attempts for it fail.` and continues. The dry run skips this check. README "Domini e HTTPS" says the same. This is S2 option (b); gating the panel router is left to the owner (open question 1).
+  - **Panel hostname check.** When `getent ahostsv4 <hostname>` does not list `<ipv4>`, the installer prints `WARNING: <hostname> does not resolve to <ipv4> yet. Create its A record now: until it resolves, the panel uses a temporary certificate and Let's Encrypt attempts for it fail.` and continues. The dry run skips this check. README "Domini e HTTPS" says the same. This is S2 option (b). The owner decided on 2026-11-09 not to gate the panel router (owner decision 1).
 - **`apps/api/src/cli/accounts.ts` `setupInstallation` (M3).** Today it returns early when the installation and host rows exist (lines 63-64), so a rerun with a new `--ipv4` never reaches the database. It now updates `hosts.ipv4_address`, `hostname` and `name` on the existing row when they differ, and appends an audit event `host.address.change` with `{ from, to }` (actor type `system`). The rerun advice in the NAT warning therefore works: `install.sh:542` passes `--ipv4` to `hp-accounts setup` on every run, and `executor.env` `HP_PANEL_IPV4` is already rewritten.
   - An ACME email whose domain is `example.com`, `example.net` or `example.org`, or ends in `.example`, `.test`, `.invalid` or `.localhost`, gives `die 2 "Use a real --acme-email: Let's Encrypt rejects <domain>"`.
 - **ADR 0017** records:
@@ -904,7 +926,7 @@ It builds on `docs/superpowers/plans/2026-11-08-step-2a-sites-and-shared-mariadb
   - `installer warns when the IPv4 is private and continues`: `--dry-run --ipv4 10.0.0.5 …` prints the warning and reaches `Dry run complete`.
   - `installer refuses a reserved ACME email`: `--acme-email ops@example.com` → exit 2.
   - In `apps/api/test/accounts-cli.test.ts`: `a second setup with a new --ipv4 updates the host row`. Setup with `203.0.113.10`, then with `203.0.113.20`, leaves one host row with `ipv4Address "203.0.113.20"` and a `host.address.change` audit row. A third, identical setup writes no new audit row.
-  - `step 2b docs are consistent`: README contains `Domini e HTTPS` and `acme-staging`; `openapi.yaml` contains `/v1/organizations/{orgId}/managed-sites/{siteId}/domains` and `/v1/admin/sites/{siteId}/domains`; ADR 0017 exists; the version is `0.4.0`.
+  - `step 2b docs are consistent`: README contains `Domini e HTTPS`, `acme-staging` and `HSTS`; `openapi.yaml` contains `/v1/organizations/{orgId}/managed-sites/{siteId}/domains` and `/v1/admin/sites/{siteId}/domains`; ADR 0017 exists; the version is `0.4.0`.
 - [ ] **Step 2: Run them and confirm they fail.**
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run them and confirm they pass, plus the four checks.**
@@ -1000,7 +1022,8 @@ Run on the owner's real VM: public IPv4, Ubuntu 26.04 or Debian 13, at least 2 G
 - Append the results to `docs/security/step-2b-acceptance-report.md`.
 
 - [ ] **Step 1: Install on staging:** `install.sh --hostname panel.<dom> --acme-email <real> --acme-staging …`. Expected:
-  - no private-IP warning;
+  - no private-IP warning, and no "does not resolve" warning, because the panel's A record was created before the install (owner decision 1);
+  - record how many failed panel orders the proxy log shows (`Unable to obtain ACME certificate` with `panel.<dom>`) before the panel certificate is issued. Expected: 0;
   - the panel serves a staging certificate (issuer contains `(STAGING)`) once `panel.<dom>` resolves;
   - the panel's certificate appears in `acme-staging.json`.
 - [ ] **Step 2: Add the site domain and point the registrar.**
