@@ -812,7 +812,7 @@ describe("site.domains operation", () => {
         expect(res.status).toBe(409);
         expect(res.body.error).toMatchObject({
           code: "DOMAIN_CONFLICT",
-          message: "This web address is already used by another site or by the panel.",
+          message: "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
         });
       }
     });
@@ -923,6 +923,59 @@ describe("site.domains operation", () => {
       expect(d.certRetryAt!.getTime()).toBeGreaterThanOrEqual(before);
       expect(d.certRetryAt!.getTime()).toBeLessThan(before + 60_000);
       expect(d.dnsAttempts).toBe(1); // reset to 0, then this lookup failed once (no A record)
+    });
+
+    const requestedFor = async (h: string) =>
+      (await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "site.certificate.requested"))).filter(
+        (a) => (a.details as Json).hostname === h,
+      );
+
+    async function failedThenReAdded(siteId: string, problem: "rate_limited" | "port_80_blocked") {
+      dnsAnswers.set("bellavista.it", { a: ["10.0.0.1"], aaaa: [] });
+      expect((await call("POST", base(siteId), { hostname: "bellavista.it" })).status).toBe(201);
+      expect((await dom("bellavista.it")).certStatus).toBe("requested");
+      sim.failCertificate("bellavista.it", problem, new Date().toISOString());
+      await app.domainReconciler.reconcileSite(siteId, new Date());
+      expect(await dom("bellavista.it")).toMatchObject({ certStatus: "failed", certProblem: problem });
+      expect((await call("DELETE", `${base(siteId)}/${(await dom("bellavista.it")).id}`)).status).toBe(200);
+      expect((await call("POST", base(siteId), { hostname: "bellavista.it" })).status).toBe(201);
+      return dom("bellavista.it");
+    }
+
+    it("remove then re-add a rate-limited name does not order a certificate", async () => {
+      const siteId = await createAndRun();
+      const d = await failedThenReAdded(siteId, "rate_limited");
+      expect(d).toMatchObject({ certStatus: "failed", certProblem: "rate_limited", certAttempts: 1 });
+      expect(d.certRetryAt!.getTime()).toBeGreaterThan(Date.now() + 23 * 3600_000);
+      await app.domainReconciler.reconcileSite(siteId, new Date(Date.now() + 3600_000), { forceDnsCheck: true });
+      expect((await dom("bellavista.it")).certStatus).toBe("failed");
+      expect(await requestedFor("bellavista.it")).toHaveLength(1);
+    });
+
+    it("remove then re-add a failed name keeps its backoff", async () => {
+      const siteId = await createAndRun();
+      const d = await failedThenReAdded(siteId, "port_80_blocked");
+      expect(d).toMatchObject({ certStatus: "failed", certProblem: "port_80_blocked", certAttempts: 1 });
+      expect(d.certRequestedAt).not.toBeNull();
+      await app.domainReconciler.reconcileSite(siteId, new Date(Date.now() + 10 * 60_000));
+      expect((await dom("bellavista.it")).certStatus).toBe("failed");
+      expect(await requestedFor("bellavista.it")).toHaveLength(1);
+      await app.domainReconciler.reconcileSite(siteId, new Date(Date.now() + 16 * 60_000));
+      expect((await dom("bellavista.it")).certStatus).toBe("requested");
+    });
+
+    it("adding names already on the site looks nothing up", async () => {
+      const siteId = await createAndRun();
+      expect((await call("POST", base(siteId), { hostname: "hotel.it" })).status).toBe(201);
+      expect((await dom("hotel.it")).dnsCheckedAt).toBeNull();
+    });
+
+    it("check now looks up only the chosen name", async () => {
+      const siteId = await createAndRun({ ...SITE, includeWww: true });
+      await setCert("www.hotel.it", { dnsNextCheckAt: later(1) });
+      expect((await call("POST", `${base(siteId)}/${(await dom("hotel.it")).id}/check`)).status).toBe(200);
+      expect((await dom("hotel.it")).dnsCheckedAt).not.toBeNull();
+      expect((await dom("www.hotel.it")).dnsCheckedAt).toBeNull();
     });
 
     it("customer cannot read or change domains of another organization's site", async () => {

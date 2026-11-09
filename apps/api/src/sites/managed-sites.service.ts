@@ -134,7 +134,7 @@ export class ManagedSitesService {
     if (usedDomain || panelHost) {
       throw new ControlPlaneError(
         "DOMAIN_CONFLICT",
-        "This web address is already used by another site or by the panel.",
+        "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
       );
     }
 
@@ -246,7 +246,7 @@ export class ManagedSitesService {
         if (twin) return twin;
         throw new ControlPlaneError(
           "DOMAIN_CONFLICT",
-          "This web address is already used by another site or by the panel.",
+          "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
         );
       }
       throw err;

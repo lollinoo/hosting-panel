@@ -78,11 +78,17 @@ export class DomainReconcilerService {
   }
 
   public reconcileOnce(now = new Date()): Promise<void> {
-    return this.#queue(() => this.#run(null, now, false));
+    return this.#queue(() => this.#run(null, now, () => false));
   }
 
-  public reconcileSite(siteId: string, now: Date, opts: { forceDnsCheck?: boolean } = {}): Promise<void> {
-    return this.#queue(() => this.#run(siteId, now, opts.forceDnsCheck === true));
+  /** `forceDnsIds` looks those domains up now even when not due; `forceDnsCheck` does it for every domain. */
+  public reconcileSite(
+    siteId: string,
+    now: Date,
+    opts: { forceDnsCheck?: boolean; forceDnsIds?: readonly string[] } = {},
+  ): Promise<void> {
+    const force = (id: string) => opts.forceDnsCheck === true || (opts.forceDnsIds?.includes(id) ?? false);
+    return this.#queue(() => this.#run(siteId, now, force));
   }
 
   #queue(work: () => Promise<void>): Promise<void> {
@@ -91,7 +97,7 @@ export class DomainReconcilerService {
     return run;
   }
 
-  async #run(onlySiteId: string | null, now: Date, forceDns: boolean): Promise<void> {
+  async #run(onlySiteId: string | null, now: Date, forceDns: (domainId: string) => boolean): Promise<void> {
     if (this.config.runtimeBackend === "disabled") return;
     const db = this.dbClient.db;
     const managed: ManagedSite[] = await db
@@ -141,10 +147,10 @@ export class DomainReconcilerService {
     if (enqueued) this.outboxWorker.triggerAsync();
   }
 
-  async #checkDns(site: ManagedSite, now: Date, force: boolean): Promise<void> {
+  async #checkDns(site: ManagedSite, now: Date, force: (domainId: string) => boolean): Promise<void> {
     const db = this.dbClient.db;
     for (const row of await listSiteDomains(db, site.id)) {
-      if (!force && row.dnsNextCheckAt > now) continue;
+      if (!force(row.id) && row.dnsNextCheckAt > now) continue;
       let observed = { a: [] as string[], aaaa: [] as string[] };
       let status: DnsStatus;
       try {
