@@ -34,15 +34,15 @@ export function normalizeSiteDomain(raw: string): string | null {
   if (d.length === 0 || d.length > 253 || !d.includes(".")) return null;
   const labels = d.split(".");
   if (!labels.every((l) => DOMAIN_LABEL.test(l))) return null;
-  // all-numeric TLD means an IPv4 literal
-  if (/^[0-9]+$/.test(labels[labels.length - 1]!)) return null;
+  // numeric or 0x-hex last label is an IPv4 literal to the WHATWG parser
+  if (/^(0x[0-9a-f]*|[0-9]+)$/i.test(labels[labels.length - 1]!)) return null;
   return d;
 }
 
 export const SiteDomainSchema = z.string().transform((v, ctx) => {
   // IDN: non-ASCII input without URL syntax characters becomes punycode via the URL parser
   let raw = v;
-  if (/[\u0080-\uffff]/.test(v) && !/[/:?#@]/.test(v)) {
+  if (/[\u0080-\uffff]/.test(v) && !/[/:?#@\\%\s]/.test(v)) {
     try {
       raw = new URL("http://" + v).hostname;
     } catch {

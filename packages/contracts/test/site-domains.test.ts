@@ -61,4 +61,19 @@ describe("site domains", () => {
     expect(AddSiteDomainInputSchema.parse({ hostname: "Caffè.it" }).hostname).toBe(expected);
     expect(AddSiteDomainInputSchema.safeParse({ hostname: "caffè.it/x" }).success).toBe(false);
   });
+
+  it("rejects input the URL parser would silently rewrite or read as an IP", () => {
+    for (const bad of [
+      "caffè.it\\x",
+      "caff%C3%A8.it",
+      "caffè.it\t",
+      "caf\tfè.it",
+      "*.hotel.it",
+      "1.2.3.4",
+      "1.2.3.0x4",
+      "１２７.０.０.１",
+    ]) {
+      expect(AddSiteDomainInputSchema.safeParse({ hostname: bad }).success, bad).toBe(false);
+    }
+  });
 });
