@@ -5,16 +5,22 @@ import {
   createDatabaseClient,
   domains,
   eq,
+  insertSiteDomains,
+  membershipRoles,
+  memberships,
   operations,
   operationSteps,
   outboxEvents,
+  resourceGrants,
   sites,
+  users,
   type DatabaseClient,
   type DomainRow,
 } from "@hosting-panel/database";
 import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { SiteRoutesRequest } from "@hosting-panel/executor-contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
@@ -144,6 +150,7 @@ describe("site.domains operation", () => {
   let app: ControlPlaneAppHandle;
   let sim: InMemoryDockerSimulatorAdapter;
   let token: string;
+  let adminToken: string;
   let orgId: string;
   const dnsAnswers = new Map<string, { a: string[]; aaaa: string[] } | Error>();
 
@@ -224,7 +231,7 @@ describe("site.domains operation", () => {
       driftReconcileIntervalMs: null,
       recoverUnknownOnStart: false,
     });
-    const adminToken = await login("admin@x.it", PW, admin.totpSecretBase32);
+    adminToken = await login("admin@x.it", PW, admin.totpSecretBase32);
     const created = await call(
       "POST",
       "/v1/admin/customer-account",
@@ -753,6 +760,256 @@ describe("site.domains operation", () => {
       await reconcile(0);
       expect(await dom("hotel.it")).toMatchObject({ dnsStatus: "ok", certStatus: "none" });
       expect(await domainOps(siteId)).toHaveLength(0);
+    });
+  });
+
+  describe("endpoints", () => {
+    const dom = async (h: string) => (await dbClient.db.select().from(domains).where(eq(domains.hostname, h)))[0]!;
+    const base = (siteId: string) => org(`/managed-sites/${siteId}/domains`);
+    const admin = (siteId: string) => `/v1/admin/sites/${siteId}/domains`;
+    const later = (days: number) => new Date(Date.now() + days * DAY);
+
+    async function adminHeldSite(): Promise<string> {
+      const res = await call("POST", "/v1/admin/sites", { ...SITE, name: "Albergo", domain: "albergo.it", ownerOrganizationId: null }, adminToken);
+      expect(res.status).toBe(202);
+      await run();
+      return res.body.data.siteId as string;
+    }
+
+    it("customer adds a pair and sees the A records state", async () => {
+      const siteId = await createAndRun();
+      dnsAnswers.set("bellavista.it", { a: ["10.0.0.1"], aaaa: [] });
+      const res = await call("POST", base(siteId), { hostname: "bellavista.it", includeWww: true });
+      expect(res.status).toBe(201);
+      const data = res.body.data as Json;
+      expect(data.serverIpv4).toBe("10.0.0.1");
+      expect(data.domains.map((d: Json) => [d.hostname, d.isPrimary, d.routed])).toEqual([
+        ["bellavista.it", false, true],
+        ["hotel.it", true, true],
+        ["www.bellavista.it", false, true],
+      ]);
+      const bella = data.domains.find((d: Json) => d.hostname === "bellavista.it");
+      expect(bella.dns).toMatchObject({ status: "ok", observedA: ["10.0.0.1"], observedAaaa: [] });
+      expect(data.domains.find((d: Json) => d.hostname === "www.bellavista.it").dns.status).toBe("not_found");
+      const [audit] = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "site.domain.add"));
+      expect(audit!.details).toMatchObject({ hostnames: ["bellavista.it", "www.bellavista.it"] });
+
+      const list = await call("GET", base(siteId));
+      expect(list.status).toBe(200);
+      expect(list.body.data.domains).toHaveLength(3);
+    });
+
+    it("adding the same name twice is idempotent; another site's name is a conflict", async () => {
+      const siteId = await createAndRun();
+      expect((await call("POST", base(siteId), { hostname: "bellavista.it" })).status).toBe(201);
+      const again = await call("POST", base(siteId), { hostname: "bellavista.it" });
+      expect(again.status).toBe(201);
+      expect(again.body.data.domains).toHaveLength(2);
+
+      await createAndRun({ ...SITE, name: "Other", domain: "albergo.it" });
+      for (const hostname of ["albergo.it", "panel.test"]) {
+        const res = await call("POST", base(siteId), { hostname });
+        expect(res.status).toBe(409);
+        expect(res.body.error).toMatchObject({
+          code: "DOMAIN_CONFLICT",
+          message: "This web address is already used by another site or by the panel.",
+        });
+      }
+    });
+
+    it("the primary cannot be removed, and the last domain cannot be removed", async () => {
+      const siteId = await createAndRun();
+      const only = await call("DELETE", `${base(siteId)}/${(await dom("hotel.it")).id}`);
+      expect(only.status).toBe(400);
+      expect(only.body.error.message).toBe("A site needs at least one web address.");
+
+      await call("POST", base(siteId), { hostname: "bellavista.it" });
+      const primary = await call("DELETE", `${base(siteId)}/${(await dom("hotel.it")).id}`);
+      expect(primary.status).toBe(400);
+      expect(primary.body.error.message).toBe("Choose another main address first, then remove this one.");
+
+      const removed = await call("DELETE", `${base(siteId)}/${(await dom("bellavista.it")).id}`);
+      expect(removed.status).toBe(200);
+      expect(removed.body.data.domains.map((d: Json) => d.hostname)).toEqual(["hotel.it"]);
+      expect((await call("DELETE", `${base(siteId)}/dom_nope`)).status).toBe(404);
+    });
+
+    it("an eleventh address is refused, and aliases redirect to the main address", async () => {
+      const siteId = await createAndRun();
+      const extra = Array.from({ length: 9 }, (_, i) => `alias${i}.it`);
+      await insertSiteDomains(dbClient.db, { siteId, organizationId: orgId, hostnames: extra, routed: true });
+
+      const res = await call("POST", base(siteId), { hostname: "one-more.it" });
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toBe("A site can have up to 10 web addresses. Remove one first.");
+      expect((await dbClient.db.select().from(domains).where(eq(domains.siteId, siteId)))).toHaveLength(10);
+
+      await applyDomains(siteId);
+      const hosts = sim.appliedRoutes.get(siteId)!.hosts;
+      expect(hosts).toHaveLength(10);
+      for (const h of hosts.filter((x) => x.hostname !== "hotel.it")) expect(h.redirectTo).toBe("http://hotel.it");
+    });
+
+    it("port 80 failure raises an admin alert", async () => {
+      const siteId = await createAndRun();
+      await setCert("hotel.it", { certStatus: "failed", certProblem: "port_80_blocked", certAttempts: 1 });
+      const res = await call("GET", "/v1/admin/sites", undefined, adminToken);
+      expect(res.body.data.certificateAlerts).toEqual([
+        { kind: "not_issued", siteId, siteName: "Hotel Bella", hostname: "hotel.it", expiresAt: null, problem: "port_80_blocked" },
+      ]);
+    });
+
+    it("set primary swaps and triggers a set-url", async () => {
+      const siteId = await createAndRun({ ...SITE, includeWww: true });
+      const expires = later(60);
+      for (const h of ["hotel.it", "www.hotel.it"]) {
+        await setCert(h, { certStatus: "active", certExpiresAt: expires });
+        sim.issueCertificate(h, expires.toISOString());
+      }
+      const res = await call("POST", `${base(siteId)}/${(await dom("www.hotel.it")).id}/primary`);
+      expect(res.status).toBe(200);
+      expect(res.body.data.domains.map((d: Json) => [d.hostname, d.isPrimary])).toEqual([
+        ["hotel.it", false],
+        ["www.hotel.it", true],
+      ]);
+      await run();
+      const job = sim.jobs.filter((j) => j.kind === "wordpress.set-url").at(-1)!;
+      expect(job.params).toMatchObject({ siteUrl: "https://www.hotel.it" });
+      const [audit] = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "site.domain.primary"));
+      expect(audit!.details).toMatchObject({ hostnames: ["www.hotel.it"] });
+    });
+
+    it("main address moves only to a name with working HTTPS", async () => {
+      const siteId = await createAndRun({ ...SITE, includeWww: true });
+      await dbClient.db.update(sites).set({ wordpressUrl: "https://hotel.it" }).where(eq(sites.id, siteId));
+      await setCert("www.hotel.it", { certStatus: "requested", certRequestedAt: new Date() });
+      const url = `${base(siteId)}/${(await dom("www.hotel.it")).id}/primary`;
+      const refused = await call("POST", url);
+      expect(refused.status).toBe(400);
+      expect(refused.body.error.message).toBe("Wait until HTTPS is active on this address, then make it the main address.");
+      expect((await dom("hotel.it")).isPrimary).toBe(true);
+
+      await dbClient.db.update(sites).set({ wordpressUrl: "http://hotel.it" }).where(eq(sites.id, siteId));
+      expect((await call("POST", url)).status).toBe(200);
+      expect((await dom("www.hotel.it")).isPrimary).toBe(true);
+    });
+
+    it("check now looks up DNS again, at most every 10 seconds", async () => {
+      const siteId = await createAndRun();
+      const url = `${base(siteId)}/${(await dom("hotel.it")).id}/check`;
+      dnsAnswers.set("hotel.it", { a: ["10.0.0.1"], aaaa: [] });
+      const first = await call("POST", url);
+      expect(first.status).toBe(200);
+      expect(first.body.data.domains[0].dns.status).toBe("ok");
+      dnsAnswers.set("hotel.it", { a: ["198.51.100.9"], aaaa: [] });
+      const second = await call("POST", url);
+      expect(second.body.data.domains[0].dns.status).toBe("ok");
+    });
+
+    it("check now brings a failed certificate retry forward within the policy", async () => {
+      const siteId = await createAndRun();
+      const requestedAt = new Date(Date.now() - 20 * 60_000);
+      await setCert("hotel.it", {
+        certStatus: "failed",
+        certProblem: "port_80_blocked",
+        certRequestedAt: requestedAt,
+        certRetryAt: later(1),
+        dnsAttempts: 4,
+      });
+      const before = Date.now();
+      const res = await call("POST", `${base(siteId)}/${(await dom("hotel.it")).id}/check`);
+      expect(res.status).toBe(200);
+      const d = await dom("hotel.it");
+      expect(d.certRetryAt!.getTime()).toBeGreaterThanOrEqual(before);
+      expect(d.certRetryAt!.getTime()).toBeLessThan(before + 60_000);
+      expect(d.dnsAttempts).toBe(1); // reset to 0, then this lookup failed once (no A record)
+    });
+
+    it("customer cannot read or change domains of another organization's site", async () => {
+      const siteId = await adminHeldSite();
+      const id = (await dom("albergo.it")).id;
+      const results = [
+        await call("GET", base(siteId)),
+        await call("POST", base(siteId), { hostname: "bellavista.it" }),
+        await call("DELETE", `${base(siteId)}/${id}`),
+        await call("POST", `${base(siteId)}/${id}/primary`),
+        await call("POST", `${base(siteId)}/${id}/check`),
+      ];
+      expect(results.map((r) => r.status)).toEqual([404, 404, 404, 404, 404]);
+      const adminRoutes = [
+        await call("GET", admin(siteId)),
+        await call("POST", admin(siteId), { hostname: "bellavista.it" }),
+        await call("DELETE", `${admin(siteId)}/${id}`),
+        await call("POST", `${admin(siteId)}/${id}/primary`),
+        await call("POST", `${admin(siteId)}/${id}/check`),
+      ];
+      expect(adminRoutes.map((r) => r.status)).toEqual([403, 403, 403, 403, 403]);
+      expect(await dbClient.db.select().from(domains).where(eq(domains.siteId, siteId))).toHaveLength(1);
+    });
+
+    it("a collaborator can read and check but not add", async () => {
+      const siteId = await createAndRun();
+      const userId = `usr_${randomUUID()}`;
+      const membershipId = `mem_${randomUUID()}`;
+      await dbClient.db.insert(users).values({ id: userId, email: "collab@hotel.it", name: "Collab", passwordHash: await hashPassword(PW) });
+      await dbClient.db.insert(memberships).values({ id: membershipId, organizationId: orgId, userId });
+      await dbClient.db.insert(membershipRoles).values({ id: `mrl_${randomUUID()}`, membershipId, roleId: "role_customer_collaborator" });
+      await dbClient.db
+        .insert(resourceGrants)
+        .values({ id: `rg_${randomUUID()}`, organizationId: orgId, principalUserId: userId, resourceId: siteId, permission: "site.read" });
+      const collab = await login("collab@hotel.it", PW);
+      const id = (await dom("hotel.it")).id;
+
+      expect((await call("GET", base(siteId), undefined, collab)).status).toBe(200);
+      expect((await call("POST", `${base(siteId)}/${id}/check`, undefined, collab)).status).toBe(200);
+      expect((await call("POST", base(siteId), { hostname: "bellavista.it" }, collab)).status).toBe(403);
+      expect((await call("POST", base(siteId), { hostname: "" }, collab)).status).toBe(403);
+      expect((await call("DELETE", `${base(siteId)}/${id}`, undefined, collab)).status).toBe(403);
+      expect((await call("POST", `${base(siteId)}/${id}/primary`, undefined, collab)).status).toBe(403);
+    });
+
+    it("admin manages domains of an unassigned site", async () => {
+      const siteId = await adminHeldSite();
+      const added = await call("POST", admin(siteId), { hostname: "bellavista.it" }, adminToken);
+      expect(added.status).toBe(201);
+      expect(added.body.data.domains.map((d: Json) => d.hostname)).toEqual(["albergo.it", "bellavista.it"]);
+      const [audit] = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.site.domain.add"));
+      expect(audit!.details).toMatchObject({ hostnames: ["bellavista.it"] });
+
+      const id = (await dom("bellavista.it")).id;
+      expect((await call("POST", `${admin(siteId)}/${id}/check`, undefined, adminToken)).status).toBe(200);
+      expect((await call("POST", `${admin(siteId)}/${id}/primary`, undefined, adminToken)).status).toBe(200);
+      const removed = await call("DELETE", `${admin(siteId)}/${(await dom("albergo.it")).id}`, undefined, adminToken);
+      expect(removed.status).toBe(200);
+      expect((await call("GET", admin(siteId), undefined, adminToken)).body.data.domains.map((d: Json) => d.hostname)).toEqual([
+        "bellavista.it",
+      ]);
+      const actions = (await dbClient.db.select().from(auditEvents)).map((a) => a.action).filter((a) => a.startsWith("admin.site.domain."));
+      expect(actions.sort()).toEqual(["admin.site.domain.add", "admin.site.domain.primary", "admin.site.domain.remove"]);
+      expect((await call("GET", admin("site_nope"), undefined, adminToken)).status).toBe(404);
+    });
+
+    it("admin list shows an expiring certificate alert", async () => {
+      const siteId = await createAndRun();
+      const expires = later(10);
+      await setCert("hotel.it", { certStatus: "active", certExpiresAt: expires });
+      const res = await call("GET", "/v1/admin/sites", undefined, adminToken);
+      expect(res.body.data.certificateAlerts).toEqual([
+        { kind: "expiring", siteId, siteName: "Hotel Bella", hostname: "hotel.it", expiresAt: expires.toISOString(), problem: null },
+      ]);
+      await setCert("hotel.it", { certExpiresAt: later(60) });
+      expect((await call("GET", "/v1/admin/sites", undefined, adminToken)).body.data.certificateAlerts).toEqual([]);
+      sim.issueCertificate("panel.test", expires.toISOString());
+      expect((await call("GET", "/v1/admin/sites", undefined, adminToken)).body.data.certificateAlerts).toEqual([
+        { kind: "panel_expiring", siteId: null, siteName: null, hostname: "panel.test", expiresAt: expires.toISOString(), problem: null },
+      ]);
+    });
+
+    it("capabilities report acme on linux-systemd only", async () => {
+      // local-simulator here; the linux-systemd half is in phase2-api.integration.test.ts.
+      const res = await call("GET", org("/capabilities"));
+      expect(res.status).toBe(200);
+      expect(res.body.data.acmeTlsRuntimeAvailable).toBe(false);
     });
   });
 });

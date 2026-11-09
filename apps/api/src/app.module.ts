@@ -20,6 +20,7 @@ import { ManagedSitesController } from "./controllers/managed-sites.controller.j
 import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
+import { SiteDomainsController } from "./controllers/site-domains.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
@@ -35,6 +36,7 @@ import {
 } from "./tokens.js";
 import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
+import { SiteDomainsService } from "./sites/site-domains.service.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
@@ -64,6 +66,7 @@ export class AppModule {
         AdminSitesController,
         OrganizationsController,
         ManagedSitesController,
+        SiteDomainsController,
       ],
       providers: [
         {
@@ -93,6 +96,7 @@ export class AppModule {
         SiteProvisioner,
         SiteDomainsApplier,
         ManagedSitesService,
+        SiteDomainsService,
         DriftReconcilerService,
         DomainReconcilerService,
         {

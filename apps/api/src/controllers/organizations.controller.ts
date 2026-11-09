@@ -320,7 +320,7 @@ export class OrganizationsController {
         runtimeEnabled && this.dockerExecutor.isRuntimeAvailable,
       hostAgentRuntimeAvailable:
         runtimeEnabled && this.hostAgent.isRuntimeAvailable,
-      acmeTlsRuntimeAvailable: false,
+      acmeTlsRuntimeAvailable: this.config.runtimeBackend === "linux-systemd",
       sftpAvailable: false,
       productionBackupRuntimeAvailable: false,
     };
