@@ -42,6 +42,8 @@ import {
   assertContainedPath,
   assertSafeDomain,
   assertSafeIdentifier,
+  assertSiteHostRoutes,
+  siteRouteOptions,
   buildIngressProxyContainerPayload,
   getManagedVolumeName,
   getSiteEdgeNetworkName,
@@ -240,7 +242,10 @@ export function isServiceHttpExposed(spec: ApprovedServiceSpec): boolean {
   );
 }
 
-export function validateExecutorServiceSpec(input: ApprovedServiceSpec): ApprovedServiceSpec {
+export function validateExecutorServiceSpec(
+  input: ApprovedServiceSpec,
+  reservedHosts: readonly string[] = [],
+): ApprovedServiceSpec {
   if (!input || typeof input !== "object") {
     throw new ExecutorCodedError("Service specification must be an object", "VALIDATION_ERROR");
   }
@@ -301,6 +306,11 @@ export function validateExecutorServiceSpec(input: ApprovedServiceSpec): Approve
     for (const domain of input.domains) {
       assertSafeDomain(domain);
     }
+  }
+
+  // Refused here, before any Docker call, so a bad plan never leaves a started site without a route.
+  if (input.hostRoutes !== undefined) {
+    assertSiteHostRoutes(input.hostRoutes, new Set(reservedHosts));
   }
 
   let validatedResolvedSecrets: Record<string, string> | undefined;
@@ -1217,7 +1227,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
-    const spec = validateExecutorServiceSpec(rawSpec);
+    const spec = validateExecutorServiceSpec(rawSpec, siteRouteOptions(this.panel).reservedHosts);
     const httpExposed = isServiceHttpExposed(spec);
     const hasHostPort = spec.portBindings.some((pb) => pb.hostPort !== undefined);
 

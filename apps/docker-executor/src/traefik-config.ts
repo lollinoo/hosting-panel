@@ -324,6 +324,21 @@ function assertSiteHostRoute(host: SiteHostRoute, reserved: ReadonlySet<string>)
   };
 }
 
+/** Every host and redirect passes policy; a redirect lands on another non-redirecting host of the set. */
+export function assertSiteHostRoutes(
+  routes: readonly SiteHostRoute[],
+  reserved: ReadonlySet<string>,
+): SiteHostRoute[] {
+  const hosts = routes.map((host) => assertSiteHostRoute(host, reserved));
+  const byName = new Map(hosts.map((h) => [h.hostname, h]));
+  for (const h of hosts) {
+    if (h.redirectTo === null) continue;
+    const target = byName.get(h.redirectTo.replace(/^https?:\/\//, ""));
+    if (!target || target === h || target.redirectTo !== null) hostPolicyDenied("redirect target");
+  }
+  return hosts;
+}
+
 /** Stable per hostname, so adding a name never renames the routers of the others. */
 function hostSuffix(hostname: string): string {
   return createHash("sha256").update(hostname).digest("hex").slice(0, 8);
@@ -352,15 +367,7 @@ export function buildSiteDynamicTraefikYaml(
           "VALIDATION_ERROR",
         );
       }
-      const hosts = route.hosts.map((host) => assertSiteHostRoute(host, reserved));
-      // A redirect must land on another host of this site that does not redirect itself:
-      // no loops, no chains.
-      const byName = new Map(hosts.map((h) => [h.hostname, h]));
-      for (const h of hosts) {
-        if (h.redirectTo === null) continue;
-        const target = byName.get(h.redirectTo.replace(/^https?:\/\//, ""));
-        if (!target || target === h || target.redirectTo !== null) hostPolicyDenied("redirect target");
-      }
+      const hosts = assertSiteHostRoutes(route.hosts, reserved);
       return {
         serviceInstanceId: route.serviceInstanceId,
         containerName: route.containerName,

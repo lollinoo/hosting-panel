@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -1380,7 +1380,10 @@ describe("site routes and certificates", () => {
     const serviceId = [...mockDaemon.containers.values()].find((c) => c.name === "hp-site-r")!.id;
     expect(after.some((p) => p.includes(serviceId) && !p.endsWith("/json"))).toBe(false);
     expect(after.some((p) => p.includes("name=hp-site-r"))).toBe(false);
-    expect(await readFile(routeFile(ingressRootDir), "utf8")).toMatch(/router_svc_r_[0-9a-f]{8}_tls/);
+    const hash = createHash("sha256").update("hotel.it").digest("hex").slice(0, 8);
+    const yaml = await readFile(routeFile(ingressRootDir), "utf8");
+    expect(yaml).toContain(`router_svc_r_${hash}:`);
+    expect(yaml).toContain(`router_svc_r_${hash}_tls:`);
   });
 
   it("applySiteRoutes refuses a service of another site", async () => {
@@ -1425,6 +1428,39 @@ describe("site routes and certificates", () => {
     await expect(
       adapter.applySiteRoutes(routeReq(withRedirect(null, "https://hotel.it"))),
     ).resolves.toBeUndefined();
+  });
+
+  it("a deploy with a bad hostRoute is refused before any container is created", async () => {
+    const { adapter, mockDaemon, ingressRootDir } = await setup();
+    for (const bad of [
+      hostsOf(PANEL.hostname),
+      hostsOf("Hotel.IT"),
+      [{ ...hostsOf("hotel.it")[0]!, redirectTo: "https://hotel.it" }],
+    ]) {
+      await expect(
+        adapter.deployService(createApprovedServiceSpec(input(bad))),
+      ).rejects.toMatchObject({ code: "HOST_POLICY_DENIED" });
+    }
+    expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
+    await expect(stat(routeFile(ingressRootDir))).rejects.toThrow();
+  });
+
+  it("certificate status without panel ingress is disabled, trusted and reads acme.json", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-nopanel-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    expect(await adapter.getCertificateStatus({ failuresSince: "2026-11-09T00:00:00Z" })).toEqual({
+      acmeEnabled: false,
+      trusted: true,
+      readable: true,
+      certificates: [],
+      failures: [],
+    });
   });
 
   it("a missing custom CA file is a coded error, not a raw ENOENT", async () => {

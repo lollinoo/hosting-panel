@@ -340,7 +340,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       this.failDeployOnce = false;
       throw new ExecutorCodedError("Simulated deploy failure", "DOCKER_ENGINE_UNAVAILABLE");
     }
-    const spec = validateExecutorServiceSpec(rawSpec);
+    const spec = validateExecutorServiceSpec(rawSpec, siteRouteOptions(this.panel).reservedHosts);
     this.deployedSpecs.push(rawSpec);
 
     for (const [existingSvcId, existingCtr] of this.containersByServiceId) {
