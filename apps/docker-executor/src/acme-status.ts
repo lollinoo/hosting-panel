@@ -29,8 +29,7 @@ export async function readAcmeCertificates(
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return { readable: true, certificates: [] };
-      if (code === "EACCES" || attempt >= 1) return { readable: false, certificates: [] };
+      if (code === "EACCES" || code === "ENOENT" || attempt >= 1) return { readable: false, certificates: [] };
       await sleep(200);
     }
   }

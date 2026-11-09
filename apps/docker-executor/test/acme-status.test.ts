@@ -37,11 +37,10 @@ describe("readAcmeCertificates", () => {
     }
   });
 
-  it("a missing file or resolver is readable and empty", async () => {
+  it("a missing file is unreadable, a missing resolver is readable and empty", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "acme-"));
-    const empty = { readable: true, certificates: [] };
-    expect(await readAcmeCertificates(path.join(dir, "nope.json"))).toEqual(empty);
-    expect(await readAcmeCertificates(fixture, "other")).toEqual(empty);
+    expect(await readAcmeCertificates(path.join(dir, "nope.json"))).toEqual({ readable: false, certificates: [] });
+    expect(await readAcmeCertificates(fixture, "other")).toEqual({ readable: true, certificates: [] });
   });
 });
 

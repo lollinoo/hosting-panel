@@ -56,7 +56,7 @@ export default async function SiteLayout({
         )}
         {primary && (
           <a
-            href={`https://${primary.hostname}`}
+            href={`${secure ? "https" : "http"}://${primary.hostname}`}
             target="_blank"
             rel="noopener noreferrer"
             className={`${site.phpVersion !== null && site.status === "ready" ? "" : "ml-auto "}text-sm font-medium text-primary underline-offset-4 hover:underline`}
