@@ -159,7 +159,7 @@ add_apt_repo() { # <keyring name> <key url> <list name> <repo line> <package> <m
   printf '%s\n' "$4" >"${list}"
   chmod 0644 "${list}"
   if apt-get update -q; then
-    candidate="$(apt-cache policy "$5" | awk '/Candidate:/ {print $2}')"
+    candidate="$(LC_ALL=C apt-cache policy "$5" | awk '/Candidate:/ {print $2}')"
   fi
   if [[ -z "${candidate}" || "${candidate}" == "(none)" ]]; then
     rm -f -- "${list}"

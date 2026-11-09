@@ -331,3 +331,7 @@ describe("set_env_keys", () => {
     expect(r.stdout + r.stderr).not.toContain("new.example.com");
   });
 });
+
+it("reads the apt candidate in the C locale (a localized apt prints 'Candidato:')", () => {
+  expect(readFileSync(SCRIPT, "utf8")).toMatch(/LC_ALL=C apt-cache policy "\$5" \| awk '\/Candidate:\//);
+});
