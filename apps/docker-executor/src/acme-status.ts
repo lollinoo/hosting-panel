@@ -24,8 +24,8 @@ export async function readAcmeCertificates(
   for (let attempt = 0; ; attempt += 1) {
     try {
       const text = await readFile(storePath, "utf8");
-      // Traefik may briefly leave an empty file while rewriting.
-      parsed = text.trim() === "" ? {} : JSON.parse(text);
+      // An empty file (Traefik rewrites in place) fails to parse, so it reads as unreadable.
+      parsed = JSON.parse(text);
       break;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;

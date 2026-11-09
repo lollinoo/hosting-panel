@@ -28,6 +28,15 @@ describe("readAcmeCertificates", () => {
     expect(await readAcmeCertificates(file)).toEqual({ readable: false, certificates: [] });
   });
 
+  it("an empty or whitespace-only file reads as unreadable", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "acme-"));
+    for (const [name, body] of [["a.json", ""], ["b.json", "  \n"]] as const) {
+      const file = path.join(dir, name);
+      await writeFile(file, body);
+      expect(await readAcmeCertificates(file)).toEqual({ readable: false, certificates: [] });
+    }
+  });
+
   it("a missing file or resolver is readable and empty", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "acme-"));
     const empty = { readable: true, certificates: [] };
