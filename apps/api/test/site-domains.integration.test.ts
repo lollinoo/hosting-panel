@@ -378,6 +378,61 @@ describe("site.domains operation", () => {
     expect(spec.hostRoutes).toEqual(applied);
   });
 
+  it("a publish failure after the address switch keeps the transition plan for restarts, and the retry does not switch again", async () => {
+    const siteId = await createAndRun({ ...SITE, includeWww: true });
+    await setCert("hotel.it", { certStatus: "active", certExpiresAt: new Date(Date.now() + 60 * DAY) });
+    const transition = [
+      { hostname: "hotel.it", tls: true, httpsRedirect: false, redirectTo: null },
+      { hostname: "www.hotel.it", tls: false, httpsRedirect: false, redirectTo: null },
+    ];
+    const original = sim.applySiteRoutes.bind(sim);
+    let calls = 0;
+    sim.applySiteRoutes = async (req) => {
+      calls += 1;
+      if (calls === 2) throw new Error("proxy unavailable");
+      return original(req);
+    };
+
+    const failedOp = await applyDomains(siteId);
+    expect((await opRow(failedOp)).status).toBe("failed");
+    const s = await site(siteId);
+    expect(s.wordpressUrl).toBe("https://hotel.it");
+    expect(s.appliedRoutes).toEqual(transition);
+    expect(s.appliedRoutesHash).toBe(routePlanHash(transition, "https://hotel.it"));
+
+    const res = await call("PATCH", org(`/managed-sites/${siteId}/runtime`), { phpVersion: "8.5" });
+    await run();
+    expect((await opRow(res.body.data.operationId as string)).status).toBe("succeeded");
+    expect(sim.deployedSpecs.at(-1)!.hostRoutes).toEqual(transition);
+
+    const setUrlJobs = sim.jobs.filter((j) => j.kind === "wordpress.set-url").length;
+    const retry = await applyDomains(siteId);
+    expect((await opRow(retry)).status).toBe("succeeded");
+    expect(sim.jobs.filter((j) => j.kind === "wordpress.set-url")).toHaveLength(setUrlJobs);
+    expect((await steps(retry))["update_address"]!.status).toBe("skipped");
+    expect((await site(siteId)).appliedRoutes).toEqual([
+      { hostname: "hotel.it", tls: true, httpsRedirect: true, redirectTo: null },
+      { hostname: "www.hotel.it", tls: false, httpsRedirect: false, redirectTo: "https://hotel.it" },
+    ]);
+  });
+
+  it("a restart drops a redirect to a name that is no longer routed", async () => {
+    const siteId = await createAndRun({ ...SITE, includeWww: true });
+    // The main address moved to www and the old name was removed, before site.domains ran.
+    await setCert("hotel.it", { isPrimary: false, status: "pending" });
+    await setCert("www.hotel.it", { isPrimary: true });
+    expect((await site(siteId)).appliedRoutes).toContainEqual(
+      expect.objectContaining({ hostname: "www.hotel.it", redirectTo: "http://hotel.it" }),
+    );
+
+    const res = await call("PATCH", org(`/managed-sites/${siteId}/runtime`), { phpVersion: "8.5" });
+    await run();
+    expect((await opRow(res.body.data.operationId as string)).status).toBe("succeeded");
+    expect(sim.deployedSpecs.at(-1)!.hostRoutes).toEqual([
+      { hostname: "www.hotel.it", tls: false, httpsRedirect: false, redirectTo: null },
+    ]);
+  });
+
   it("a site.domains request during provisioning is refused with RESOURCE_LOCKED", async () => {
     const res = await call("POST", org("/managed-sites"), SITE);
     const siteId = res.body.data.siteId as string;

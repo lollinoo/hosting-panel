@@ -129,10 +129,8 @@ export class SiteDomainsApplier {
           hosts,
         });
 
-      await step(
-        "prepare",
-        switchUrl ? () => publish(buildSiteHostRoutes(rows, now, { transition: true, acmeEnabled })) : null,
-      );
+      const transition = buildSiteHostRoutes(rows, now, { transition: true, acmeEnabled });
+      await step("prepare", switchUrl ? () => publish(transition) : null);
 
       await step(
         "update_address",
@@ -147,6 +145,17 @@ export class SiteDomainsApplier {
                 params: { phpVersion: site.phpVersion!, siteUrl: wanted, previousUrl: currentUrl },
               });
               if (result.exitCode !== 0) throw new SiteJobFailedError(result.exitCode, result.outputTail);
+              // WordPress is on the new address now: a restart before publish must re-publish the
+              // safe transition plan, and a retry must not run the switch again from a stale address.
+              await db
+                .update(sites)
+                .set({
+                  wordpressUrl: wanted,
+                  appliedRoutes: transition,
+                  appliedRoutesHash: routePlanHash(transition, wanted),
+                  updatedAt: new Date(),
+                })
+                .where(eq(sites.id, siteId));
             }
           : null,
       );
@@ -161,7 +170,6 @@ export class SiteDomainsApplier {
           .set({
             appliedRoutes: final,
             appliedRoutesHash: routePlanHash(final, wanted),
-            ...(switchUrl ? { wordpressUrl: wanted } : {}),
             updatedAt: new Date(),
           })
           .where(eq(sites.id, siteId));
