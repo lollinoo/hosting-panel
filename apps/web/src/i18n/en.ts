@@ -174,6 +174,13 @@ export const en: Messages = {
       adding: "Adding...",
       pending: "Updating your site's addresses. This takes a moment.",
       conflict: "This web address is already used by another site. Remove it from the other site first, or ask your administrator.",
+      errors: {
+        invalidHostname: "That doesn't look like a web address. Enter one like hotel.it or shop.hotel.it, without https:// or a path.",
+        domain_limit: "A site can have up to 10 web addresses. Remove one you don't use, then add this one.",
+        last_domain: "A site needs at least one web address. Add the new address first, then remove this one.",
+        primary_domain: "This is the main address. Choose another address as the main one first, then remove this one.",
+        needs_https: "Wait until HTTPS is active on this address, then make it the main address.",
+      },
       state: {
         settingUp: "Getting ready",
         waitingForDns: "Waiting for DNS",

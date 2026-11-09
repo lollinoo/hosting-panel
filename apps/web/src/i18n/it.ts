@@ -174,6 +174,13 @@ export const it = {
       adding: "Aggiunta...",
       pending: "Stiamo aggiornando gli indirizzi del tuo sito. Ci vuole un momento.",
       conflict: "Questo indirizzo web è già usato da un altro sito. Toglilo prima dall'altro sito, oppure chiedi al tuo amministratore.",
+      errors: {
+        invalidHostname: "Questo non sembra un indirizzo web. Scrivine uno come hotel.it o shop.hotel.it, senza https:// e senza percorso.",
+        domain_limit: "Un sito può avere al massimo 10 indirizzi web. Rimuovine uno che non usi, poi aggiungi questo.",
+        last_domain: "Un sito ha bisogno di almeno un indirizzo web. Aggiungi prima il nuovo indirizzo, poi rimuovi questo.",
+        primary_domain: "Questo è l'indirizzo principale. Scegli prima un altro indirizzo come principale, poi rimuovi questo.",
+        needs_https: "Aspetta che l'HTTPS sia attivo su questo indirizzo, poi rendilo l'indirizzo principale.",
+      },
       state: {
         settingUp: "In preparazione",
         waitingForDns: "In attesa del DNS",

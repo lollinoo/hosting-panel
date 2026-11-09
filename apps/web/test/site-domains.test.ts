@@ -22,6 +22,7 @@ import { POST as setPrimary } from "@/app/api/bff/orgs/[orgId]/managed-sites/[si
 import { POST as checkNow } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/check/route";
 import { SITE_TABS } from "@/components/customer/site-tabs";
 import { DomainsPanel, domainView } from "@/components/customer/domains-panel";
+import { domainErrorText } from "@/lib/domain-view";
 import { SiteForm } from "@/components/customer/site-form";
 
 const base = "v1/organizations/org-1/managed-sites/s1/domains";
@@ -148,6 +149,24 @@ describe("domains UI", () => {
     expect(h(itMsgs).caa_blocked).toContain("letsencrypt.org");
     expect(h(itMsgs).other).toContain("amministratore");
     for (const m of [en, itMsgs]) for (const t of Object.values(m.site.domains.hint)) expect(t.length).toBeGreaterThan(20);
+  });
+
+  it("domain API errors map to next-step copy in both languages", () => {
+    const reasons = ["domain_limit", "last_domain", "primary_domain", "needs_https"];
+    for (const m of [en, itMsgs]) {
+      const t = m.site.domains;
+      expect(domainErrorText(t, "DOMAIN_CONFLICT")).toBe(t.conflict);
+      expect(domainErrorText(t, "VALIDATION_ERROR", [{ field: "hostname", reason: "invalid_string" }])).toBe(t.errors.invalidHostname);
+      for (const r of reasons) {
+        const text = domainErrorText(t, "VALIDATION_ERROR", [{ reason: r }]);
+        expect(text).toBe(t.errors[r as keyof typeof t.errors]);
+        expect(text).not.toMatch(/validation failed/i);
+      }
+      expect(Object.keys(t.errors).sort()).toEqual(["invalidHostname", ...reasons].sort());
+      expect(domainErrorText(t, "INTERNAL_ERROR")).toBeNull();
+    }
+    expect(en.site.domains.errors.invalidHostname).toContain("hotel.it");
+    expect(itMsgs.site.domains.errors.primary_domain).toContain("principale");
   });
 
   it("state labels and pill copy are exact in both languages", () => {

@@ -25,3 +25,18 @@ export function domainView(
   }
   return { tone: "muted", label: "securing", hint: null };
 }
+
+type DomainErrors = Messages["site"]["domains"]["errors"];
+
+/** The customer text for a domain API error, or null to fall back to the generic one. */
+export function domainErrorText(
+  t: { conflict: string; errors: DomainErrors },
+  code: string,
+  details: ReadonlyArray<{ field?: string; reason?: string }> = [],
+): string | null {
+  if (code === "DOMAIN_CONFLICT") return t.conflict;
+  if (code !== "VALIDATION_ERROR") return null;
+  if (details.some((d) => d.field === "hostname")) return t.errors.invalidHostname;
+  const reason = details.find((d) => d.reason && Object.hasOwn(t.errors, d.reason))?.reason;
+  return reason ? t.errors[reason as keyof DomainErrors] : t.errors.invalidHostname;
+}

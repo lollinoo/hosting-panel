@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { errorMessage, format } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
-import { domainView } from "@/lib/domain-view";
+import { domainErrorText, domainView } from "@/lib/domain-view";
 
 export { domainView };
 
@@ -77,13 +77,7 @@ export function DomainsPanel({
         return true;
       }
       const code: string = json?.error?.code ?? "";
-      setError(
-        code === "DOMAIN_CONFLICT"
-          ? t.conflict
-          : code === "VALIDATION_ERROR" && typeof json?.error?.message === "string"
-            ? json.error.message
-            : errorMessage(m, code),
-      );
+      setError(domainErrorText(t, code, json?.error?.details) ?? errorMessage(m, code));
     } catch {
       setError(m.errors.generic);
     } finally {

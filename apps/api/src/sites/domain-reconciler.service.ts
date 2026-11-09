@@ -11,7 +11,6 @@ import {
   isNotNull,
   latestSiteOperation,
   listSiteDomains,
-  not,
   sites,
   type DatabaseClient,
   type DomainRow,

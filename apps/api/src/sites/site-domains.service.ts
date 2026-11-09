@@ -171,7 +171,7 @@ export class SiteDomainsService {
           .limit(1);
         if (elsewhere || panel) throw new ControlPlaneError("DOMAIN_CONFLICT", CONFLICT);
         if (rows.length + fresh.length > MAX_SITE_DOMAINS) {
-          throw new ControlPlaneError("VALIDATION_ERROR", "A site can have up to 10 web addresses. Remove one first.");
+          throw new ControlPlaneError("VALIDATION_ERROR", "A site can have up to 10 web addresses. Remove one first.", { details: [{ message: "A site can have up to 10 web addresses. Remove one first.", reason: "domain_limit" }] });
         }
         const routed = rows.some((r) => r.isPrimary && r.status === "active");
         const created = await insertSiteDomains(tx, { siteId, organizationId, hostnames: fresh, routed });
@@ -191,9 +191,9 @@ export class SiteDomainsService {
     await this.#locked(siteId, organizationId, async (tx, rows) => {
       const row = rows.find((r) => r.id === domainId);
       if (!row) throw notFound();
-      if (rows.length === 1) throw new ControlPlaneError("VALIDATION_ERROR", "A site needs at least one web address.");
+      if (rows.length === 1) throw new ControlPlaneError("VALIDATION_ERROR", "A site needs at least one web address.", { details: [{ message: "A site needs at least one web address.", reason: "last_domain" }] });
       if (row.isPrimary) {
-        throw new ControlPlaneError("VALIDATION_ERROR", "Choose another main address first, then remove this one.");
+        throw new ControlPlaneError("VALIDATION_ERROR", "Choose another main address first, then remove this one.", { details: [{ message: "Choose another main address first, then remove this one.", reason: "primary_domain" }] });
       }
       await tx.delete(domains).where(eq(domains.id, domainId));
     });
@@ -210,7 +210,7 @@ export class SiteDomainsService {
       if (site.wordpressUrl?.startsWith("https://") && !certificateUsable(row, new Date())) {
         throw new ControlPlaneError(
           "VALIDATION_ERROR",
-          "Wait until HTTPS is active on this address, then make it the main address.",
+          "Wait until HTTPS is active on this address, then make it the main address.", { details: [{ message: "Wait until HTTPS is active on this address, then make it the main address.", reason: "needs_https" }] },
         );
       }
       // Clear first: the one-primary-per-site index would refuse two at once.
