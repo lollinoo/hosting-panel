@@ -26,7 +26,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import type { DnsLookup } from "./dns-check.js";
-import { CERT_REQUEST_TIMEOUT_MS, certRetryAt, evaluateDns, nextDnsCheckAt, routesPending } from "./domain-policy.js";
+import { CERT_REQUEST_TIMEOUT_MS, MANUAL_CERT_RETRY_GAP_MS, certRetryAt, evaluateDns, nextDnsCheckAt, routesPending } from "./domain-policy.js";
 import { enqueueSiteDomainsOperation } from "./site-domains-applier.js";
 
 const FAILURE_WINDOW_MS = 10 * 60_000;
@@ -221,7 +221,11 @@ export class DomainReconcilerService {
         const failure = failures.find((f) => Date.parse(f.at) >= since);
         if (failure) {
           await this.#fail(site, row, failure.problem, failure.detail, now);
-        } else if (now.getTime() - since >= CERT_REQUEST_TIMEOUT_MS) {
+        } else if (
+          now.getTime() - since >= CERT_REQUEST_TIMEOUT_MS &&
+          // CP-01: a row whose real certificate is still valid keeps its resolver (a missing store reads as empty).
+          !(row.certExpiresAt !== null && row.certExpiresAt > now)
+        ) {
           await this.#fail(site, row, "other", "No certificate and no reported failure within 10 minutes", now);
         } else if (row.dnsStatus !== "ok" && row.certExpiresAt === null) {
           // Only a fresh request is DNS-gated; a re-request of a lost certificate (expiry kept) stays.
@@ -231,7 +235,9 @@ export class DomainReconcilerService {
       }
 
       const due = row.certStatus === "none" || (row.certRetryAt !== null && row.certRetryAt <= now);
-      if (due && row.dnsStatus === "ok" && row.status === "active" && report.acmeEnabled) {
+      // At most one order per 15 min, even when DNS flaps and requested→none is followed by "Check now".
+      const gapOk = !row.certRequestedAt || now.getTime() >= row.certRequestedAt.getTime() + MANUAL_CERT_RETRY_GAP_MS;
+      if (due && gapOk && row.dnsStatus === "ok" && row.status === "active" && report.acmeEnabled) {
         // certExpiresAt null marks a fresh request (see the DNS gate above).
         const ok = await this.#transition(row, { certStatus: "requested", certRequestedAt: now, certExpiresAt: null }, now);
         if (ok) await this.#audit(site, "site.certificate.requested", { hostname: row.hostname });

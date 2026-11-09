@@ -666,6 +666,38 @@ describe("site.domains operation", () => {
       expect(plan(siteId)[0]!.tls).toBe(true);
     });
 
+    it("DNS flapping with check now places at most one order per 15 min", async () => {
+      const siteId = await requested();
+      const times: number[] = [];
+      let seen = tlsRequests();
+      for (let min = 1; min <= 60; min++) {
+        if (min % 2 === 1) dnsAnswers.set("hotel.it", new Error("SERVFAIL"));
+        else pointHere("hotel.it");
+        await checkNow(siteId, "hotel.it", min);
+        if (tlsRequests() > seen) times.push(min);
+        seen = tlsRequests();
+      }
+      expect(times.length).toBeGreaterThan(0);
+      const all = [0, ...times];
+      for (let i = 1; i < all.length; i++) expect(all[i]! - all[i - 1]!).toBeGreaterThanOrEqual(15);
+    });
+
+    it("a lost certificate that is still valid never times out and keeps its resolver", async () => {
+      const siteId = await activated(); // notAfter is t0 + 90 days
+      sim.removeCertificate("hotel.it");
+      await reconcile(5);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      await reconcile(30);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      expect(plan(siteId)[0]!.tls).toBe(true);
+      await reconcile(24 * 60);
+      expect((await dom("hotel.it")).certStatus).toBe("requested");
+      expect(plan(siteId)[0]!.tls).toBe(true);
+      // Once that certificate's expiry has passed, the normal timeout applies.
+      await reconcile(91 * 24 * 60);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "failed", certProblem: "other" });
+    });
+
     it("DNS pointing away later never drops an issued certificate", async () => {
       const siteId = await activated();
       dnsAnswers.set("hotel.it", { a: ["198.51.100.9"], aaaa: [] });
