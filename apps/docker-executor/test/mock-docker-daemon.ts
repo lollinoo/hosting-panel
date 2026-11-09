@@ -41,6 +41,8 @@ export interface MockDockerDaemon {
   readonly requestedPaths: string[];
   /** POST /containers/<ref>/exec calls, by the ref used in the path. */
   readonly execCalls: Array<{ container: string; Cmd: string[] }>;
+  /** The next `remaining` container restarts answer 500. */
+  readonly failRestarts: { remaining: number };
   close(): Promise<void>;
 }
 
@@ -74,6 +76,7 @@ export async function startMockDockerDaemon(options?: {
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
+  const failRestarts = { remaining: 0 };
   let seq = 1;
 
   const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
@@ -423,6 +426,12 @@ export async function startMockDockerDaemon(options?: {
           res.end(JSON.stringify({ message: "No such container" }));
           return;
         }
+        if (action === "restart" && failRestarts.remaining > 0) {
+          failRestarts.remaining -= 1;
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "restart failed" }));
+          return;
+        }
         if (action === "start" || action === "restart") {
           target.running = true;
           target.status = "running";
@@ -471,6 +480,7 @@ export async function startMockDockerDaemon(options?: {
     containers,
     requestedPaths,
     execCalls,
+    failRestarts,
     async close() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

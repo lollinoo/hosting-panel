@@ -1266,6 +1266,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         `/containers/${encodeURIComponent(MAIL_RELAY_CONTAINER_NAME)}/restart?t=10`,
       );
       if (restartRes.statusCode !== 204) {
+        // Otherwise the next identical apply sees "unchanged" and the relay keeps the old credentials.
+        await overwriteAndUnlinkSecretFile(secretFile);
         throw new ExecutorCodedError(
           `Failed to restart mail relay container (HTTP ${String(restartRes.statusCode)})`,
           "DOCKER_ENGINE_UNAVAILABLE",

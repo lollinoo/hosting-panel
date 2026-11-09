@@ -237,6 +237,21 @@ describe("DockerEngineSocketAdapter.applyMailRelay", () => {
     );
   });
 
+  it("a failed restart is retried by the next identical apply", async () => {
+    const { adapter, mockDaemon, calls } = await setup();
+    await adapter.applyMailRelay(req);
+    const changed = { ...req, password: "new-secret" };
+
+    mockDaemon.failRestarts.remaining = 1;
+    await expect(adapter.applyMailRelay(changed)).rejects.toMatchObject({
+      code: "DOCKER_ENGINE_UNAVAILABLE",
+    });
+
+    const from = mockDaemon.requestedPaths.length;
+    await adapter.applyMailRelay(changed);
+    expect(calls(from)).toEqual({ create: 0, restart: 1, exec: 1 });
+  });
+
   it("a flush that keeps failing does not fail the apply", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const { adapter, mockDaemon, relay } = await setup({ execExitCode: 1 });
