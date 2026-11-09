@@ -71,6 +71,7 @@ export function buildMailRelayContainerPayload(input: MailRelayContainerInput) {
     `POSTFIX_sender_canonical_maps=static:${noreply}`,
     `POSTFIX_header_checks=${headerChecks}`,
     "POSTFIX_smtpd_client_message_rate_limit=200",
+    "POSTFIX_smtpd_client_recipient_rate_limit=1000",
     "POSTFIX_smtpd_client_event_limit_exceptions=127.0.0.0/8",
     "POSTFIX_anvil_rate_time_unit=3600s",
     "POSTFIX_smtpd_recipient_limit=100",

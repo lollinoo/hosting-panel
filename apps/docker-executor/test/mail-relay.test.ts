@@ -54,6 +54,7 @@ describe("buildMailRelayContainerPayload", () => {
     const env = build().Env;
     expect(env).toContain("POSTFIX_smtpd_client_event_limit_exceptions=127.0.0.0/8");
     expect(env).toContain("POSTFIX_smtpd_client_message_rate_limit=200");
+    expect(env).toContain("POSTFIX_smtpd_client_recipient_rate_limit=1000");
     expect(env).toContain("POSTFIX_anvil_rate_time_unit=3600s");
     expect(env).toContain("POSTFIX_smtpd_recipient_limit=100");
     expect(env).toContain("POSTFIX_message_size_limit=26214400");

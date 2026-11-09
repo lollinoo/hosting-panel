@@ -181,7 +181,7 @@ I siti inviano email attraverso un relay Postfix del pannello che inoltra a un f
 - **Cosa inserire**: l'**hostname** del fornitore (non un IP: il TLS è verificato e il certificato deve corrispondere a un nome), porta, utente, password e dominio mittente. I messaggi partono da `noreply@<dominio mittente>` con il nome del sito; `Reply-To` è mantenuto.
 - **Porta**: preferire la **587**. Molti fornitori cloud bloccano la porta 25 in uscita.
 - **SPF e DKIM**: verificare il dominio mittente presso il fornitore (SPF e DKIM), altrimenti i messaggi finiscono nello spam. Il cliente non deve impostare nulla.
-- **Limiti fissi**: 200 messaggi/ora per sito, 100 destinatari, 25 MiB per messaggio. Per una newsletter serve un servizio esterno.
+- **Limiti fissi**: 200 messaggi e 1000 destinatari all'ora per sito, 100 destinatari per messaggio, 25 MiB per messaggio. Per una newsletter serve un servizio esterno.
 - **Coda**: se il fornitore non risponde i messaggi restano in coda fino a 5 giorni. Dopo un riavvio del server con il pannello fermo i messaggi restano in coda e vengono consegnati (coda svuotata) quando il pannello torna e riapplica la password.
 - **Aggiornamento alla 0.5.0**: ogni sito in esecuzione viene **riavviato una volta** (pochi secondi ciascuno); i siti fermi sono aggiornati dopo il successivo avvio.
 - **Plugin SMTP del sito**: se un sito ha un proprio plugin SMTP, quello ha la precedenza.
