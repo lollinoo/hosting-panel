@@ -12,7 +12,9 @@ import {
   MAIL_RELAY_ALIAS,
   MAIL_RELAY_CONTAINER_NAME,
   MAIL_RELAY_IMAGE,
+  type MailFailureDto,
   type MailRelayApplyRequest,
+  type MailTestResult,
   type PhpVersion,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
@@ -40,6 +42,12 @@ import {
 } from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
 import { demuxDockerLogStream } from "./docker-logs.js";
+import {
+  parsePostfixDeliveries,
+  summarizeMailDeliveries,
+  type MailDelivery,
+} from "./mail-relay-status.js";
+import { submitLocalMail } from "./smtp-submit.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
@@ -966,6 +974,11 @@ export interface DockerEngineSocketAdapterOptions {
   readonly mailRelaySecretDir?: string;
   /** How long to keep retrying the post-apply queue flush (default 30 000). */
   readonly mailRelayFlushWaitMs?: number;
+  /** Test email: delay between log polls, and how long to wait for the delivery line. */
+  readonly mailTestPollMs?: number;
+  readonly mailTestWaitMs?: number;
+  /** The relay's submission port on its bridge address (tests only). */
+  readonly mailSubmitPort?: number;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1008,6 +1021,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly runningSiteJobs = new Set<string>();
   private readonly mailRelaySecretDir: string;
   private readonly mailRelayFlushWaitMs: number;
+  private readonly mailTestPollMs: number;
+  private readonly mailTestWaitMs: number;
+  private readonly mailSubmitPort: number;
   /** Applies run strictly one after the other; two different configs are never merged. */
   private mailRelayQueue: Promise<unknown> = Promise.resolve();
 
@@ -1039,6 +1055,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       options?.mailRelaySecretDir ?? DEFAULT_MAIL_RELAY_SECRET_DIR,
     );
     this.mailRelayFlushWaitMs = options?.mailRelayFlushWaitMs ?? 30_000;
+    this.mailTestPollMs = options?.mailTestPollMs ?? 1_000;
+    this.mailTestWaitMs = options?.mailTestWaitMs ?? 20_000;
+    this.mailSubmitPort = options?.mailSubmitPort ?? 587;
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1233,6 +1252,79 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     await this.reconnectToRoleNetworks("site_internal", MAIL_RELAY_CONTAINER_NAME, [
       MAIL_RELAY_ALIAS,
     ]);
+  }
+
+  private async readMailDeliveries(sinceSec: number): Promise<MailDelivery[]> {
+    const res = await this.dockerClient.request(
+      "GET",
+      `/containers/${encodeURIComponent(MAIL_RELAY_CONTAINER_NAME)}/logs?stdout=1&stderr=1&timestamps=1&since=${String(sinceSec)}&tail=5000`,
+    );
+    if (res.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to read mail relay logs (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    return parsePostfixDeliveries(demuxDockerLogStream(res.body));
+  }
+
+  public async getMailRelayStatus(req: { since: string }): Promise<{
+    present: boolean;
+    running: boolean;
+    sentCount: number;
+    failures: MailFailureDto[];
+  }> {
+    const existing = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
+    if (!existing) {
+      return { present: false, running: false, sentCount: 0, failures: [] };
+    }
+    const sinceMs = Date.parse(req.since);
+    const deliveries = await this.readMailDeliveries(Math.floor(sinceMs / 1000));
+    return {
+      present: true,
+      running: existing.State?.Running === true,
+      ...summarizeMailDeliveries(deliveries, sinceMs),
+    };
+  }
+
+  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+    const relay = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
+    const ip = (relay?.NetworkSettings?.Networks?.[MAIL_RELAY_NETWORK_NAME] as
+      | { IPAddress?: string }
+      | undefined)?.IPAddress;
+    if (relay?.State?.Running !== true || !ip) {
+      throw new ExecutorCodedError("Mail relay is not running", "MAIL_RELAY_UNAVAILABLE");
+    }
+    const startedMs = Date.now();
+    const { queueId } = await submitLocalMail({
+      host: ip,
+      port: this.mailSubmitPort,
+      heloName: this.panel?.hostname ?? "hp-mail.localdomain",
+      from: req.from,
+      to: req.to,
+      subject: "Email di prova dal pannello / Test email from the hosting panel",
+      text:
+        "Questa è un'email di prova inviata dal pannello di hosting.\n" +
+        "This is a test email sent by the hosting panel.\n",
+      timeoutMs: 5_000,
+    });
+    const deadline = Date.now() + this.mailTestWaitMs;
+    for (;;) {
+      const found = (await this.readMailDeliveries(Math.floor(startedMs / 1000) - 1))
+        .filter((d) => d.queueId === queueId)
+        .at(-1);
+      if (found) {
+        return {
+          outcome: found.status,
+          problem: found.problem,
+          detail: found.status === "sent" ? null : found.detail,
+        };
+      }
+      if (Date.now() >= deadline) {
+        return { outcome: "pending", problem: null, detail: null };
+      }
+      await new Promise((resolve) => setTimeout(resolve, this.mailTestPollMs));
+    }
   }
 
   /** Creates, starts or restarts the relay as needed; true when it was (re)created or started. */

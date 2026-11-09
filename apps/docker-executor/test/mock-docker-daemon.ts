@@ -51,6 +51,8 @@ export async function startMockDockerDaemon(options?: {
   /** Image inspect answers 404 and /images/create answers 200 with this body. */
   readonly pullBody?: string;
   readonly logsBody?: Buffer;
+  /** Like logsBody, but evaluated per request (logs that appear later). */
+  readonly logsBodyFn?: () => Buffer;
   /** POST /containers/<id>/wait answers this StatusCode (default 0); "hang" never answers. */
   readonly waitStatusCode?: number | "hang";
   /** GET /exec/<id>/json answers this ExitCode (default 0). */
@@ -129,9 +131,9 @@ export async function startMockDockerDaemon(options?: {
       }
 
       const logsMatch = /^\/containers\/([^/]+)\/logs$/.exec(routePath);
-      if (method === "GET" && logsMatch && options?.logsBody) {
+      if (method === "GET" && logsMatch && (options?.logsBody || options?.logsBodyFn)) {
         res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
-        res.end(options.logsBody);
+        res.end(options.logsBodyFn ? options.logsBodyFn() : options.logsBody);
         return;
       }
 
