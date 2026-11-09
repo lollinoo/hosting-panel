@@ -112,9 +112,9 @@ describe("per-service env files and wrappers", () => {
     expect(lines).toContain("d /run/hosting-panel/mail-relay 0755 hp-executor hp-executor -");
     expect(lines).toContain("d /run/hosting-panel 3770 root hp-ipc -");
     const boot = read("infra/linux/bootstrap-dedicated.sh");
-    for (const d of ["/run/hosting-panel/mail-relay", "/var/lib/hosting-panel/site-mail"]) {
-      expect(boot).toContain(`install -d -m 0755 -o hp-executor -g hp-executor ${d}\n`);
-    }
+    expect(boot).toContain("install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/site-mail\n");
+    // Five digits: GNU install keeps the setgid bit inherited from the 3770 parent with a plain 0755.
+    expect(boot).toContain("install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay\n");
   });
 
   it.skipIf(!hasHost)("bootstrap dry-run creates the mail directories", () => {

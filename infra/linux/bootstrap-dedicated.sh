@@ -323,7 +323,8 @@ install -m 0644 -o root -g root "${SYSTEMD_SRC_DIR}/hosting-panel-tmpfiles.conf"
 install -d -m 3770 -o root -g hp-ipc /run/hosting-panel
 chmod 3770 /run/hosting-panel
 install -d -m 0700 -o hp-executor -g hp-executor /run/hosting-panel/secrets
-install -d -m 0755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay
+# 00755: a plain 0755 keeps the setgid bit inherited from the 3770 parent (GNU install).
+install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay
 
 # 9. Install and reload systemd units
 for unit_name in "${REQUIRED_UNITS[@]}"; do
