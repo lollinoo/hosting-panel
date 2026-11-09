@@ -452,6 +452,7 @@ export const it = {
     NOT_FOUND: "Non abbiamo trovato quello che cerchi. Torna indietro e riprova.",
     VALIDATION_ERROR: "Alcuni dati non sono validi. Controlla i campi evidenziati e riprova.",
     INTERNAL_ERROR: "Qualcosa è andato storto da parte nostra. Riprova tra qualche minuto.",
+    RESOURCE_LOCKED: "Il sito sta completando un'altra modifica. Riprova tra qualche istante.",
     generic: "Si è verificato un errore. Riprova; se il problema continua contatta l'assistenza.",
   },
 } as const;

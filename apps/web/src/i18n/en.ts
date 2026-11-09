@@ -451,6 +451,7 @@ export const en: Messages = {
     NOT_FOUND: "We couldn't find what you're looking for. Go back and try again.",
     VALIDATION_ERROR: "Some details aren't valid. Check the highlighted fields and try again.",
     INTERNAL_ERROR: "Something went wrong on our side. Please try again in a few minutes.",
+    RESOURCE_LOCKED: "This site is finishing another change. Try again in a moment.",
     generic: "Something went wrong. Try again, and contact support if it keeps happening.",
   },
 };
