@@ -199,6 +199,14 @@ describe("managed WordPress sites API", () => {
     expect([...(inspect?.HostConfig?.CapAdd ?? [])].sort()).toEqual(["CHOWN", "NET_BIND_SERVICE", "SETGID", "SETUID"]);
   });
 
+  it("a new WordPress site is deployed with siteMail", async () => {
+    const { siteId } = await createAndRun();
+    expect(sim.deployedSpecs.at(-1)).toMatchObject({ siteId, siteMail: true });
+    const svc = await webService(siteId);
+    const [rev] = await dbClient.db.select().from(stackRevisions).where(eq(stackRevisions.id, svc.currentRevisionId!));
+    expect(rev?.declarativeConfig).toMatchObject({ siteMail: true });
+  });
+
   it("the site is not routed until WordPress is installed", async () => {
     sim.failNextJob("wordpress.install", 1);
     const { siteId, operationId } = await createAndRun();

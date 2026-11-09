@@ -73,6 +73,7 @@ describe("mail relay contracts", () => {
     const dto = { serverIpv4: "1.2.3.4", routesPending: false, domains: [] };
     const mail = { configured: true, fromAddress: "noreply@example.com" };
     expect(SiteDomainsDtoSchema.parse({ ...dto, mail }).mail).toEqual(mail);
+    expect(SiteDomainsDtoSchema.safeParse(dto).success).toBe(false);
   });
 
   it("mailSenderAddress prefixes noreply@", () => {

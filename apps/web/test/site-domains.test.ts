@@ -106,6 +106,7 @@ describe("domains UI", () => {
     serverIpv4: "203.0.113.10",
     routesPending: false,
     domains: [dom({ hostname: "hotel.it" }), dom({ hostname: "www.hotel.it", isPrimary: false, dns: { status: "not_found" } })],
+    mail: { configured: false, fromAddress: null },
   };
 
   it("panel lists the A records with the server IP", () => {

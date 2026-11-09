@@ -54,6 +54,7 @@ import {
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import {
+  SERVICE_STEPS,
   SITE_DELETE_STEPS,
   SITE_PROVISION_STEPS,
   SITE_REASSIGN_STEPS,
@@ -66,12 +67,6 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { restoreCertificateThrottle } from "./site-domains.service.js";
-
-const SERVICE_STEPS = [
-  { key: "validate_spec", label: "Check the request" },
-  { key: "dispatch_ipc", label: "Apply the change" },
-  { key: "reconcile_state", label: "Check the site" },
-] as const;
 
 const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
 const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "other"]);
@@ -191,6 +186,7 @@ export class ManagedSitesService {
             image: runtime.image,
             internalPort: runtime.internalPort,
             exposeHttp: true,
+            siteMail: true,
             volumeMounts: [
               {
                 volumeSuffix: runtime.volumeSuffix,

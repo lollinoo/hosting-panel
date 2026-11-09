@@ -18,4 +18,5 @@ export interface ControlPlaneRuntimeConfig {
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
   readonly domainReconcileIntervalMs?: number | null;
+  readonly mailRelayRetryIntervalMs?: number | null;
 }
