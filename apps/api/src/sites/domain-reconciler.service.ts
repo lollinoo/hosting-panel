@@ -36,6 +36,8 @@ interface ManagedSite {
   readonly id: string;
   readonly organizationId: string;
   readonly ipv4: string;
+  /** Deploying or in maintenance: only failed orders are classified, nothing else moves. */
+  readonly busy: boolean;
 }
 
 /**
@@ -100,21 +102,21 @@ export class DomainReconcilerService {
   async #run(onlySiteId: string | null, now: Date, forceDns: (domainId: string) => boolean): Promise<void> {
     if (this.config.runtimeBackend === "disabled") return;
     const db = this.dbClient.db;
-    const managed: ManagedSite[] = await db
-      .select({ id: sites.id, organizationId: sites.organizationId, ipv4: hosts.ipv4Address })
+    const rows = await db
+      .select({ id: sites.id, organizationId: sites.organizationId, ipv4: hosts.ipv4Address, status: sites.status })
       .from(sites)
       .innerJoin(hostAllocations, eq(hostAllocations.id, sites.hostAllocationId))
       .innerJoin(hosts, eq(hosts.id, hostAllocations.hostId))
       .where(
         and(
           isNotNull(sites.phpVersion),
-          not(inArray(sites.status, ["deploying", "maintenance"])),
           ...(onlySiteId ? [eq(sites.id, onlySiteId)] : []),
         ),
       );
+    const managed: ManagedSite[] = rows.map(({ status, ...r }) => ({ ...r, busy: status === "deploying" || status === "maintenance" }));
     if (managed.length === 0) return;
 
-    for (const site of managed) {
+    for (const site of managed.filter((s) => !s.busy)) {
       if (onlySiteId) await this.#checkDns(site, now, forceDns);
       else await this.#checkDns(site, now, forceDns).catch(() => undefined);
     }
@@ -139,6 +141,7 @@ export class DomainReconcilerService {
     for (const site of managed) {
       const work = async () => {
         await this.#updateCertificates(site, now, report);
+        if (site.busy) return;
         enqueued = (await this.#applyIfChanged(site, now, report.acmeEnabled)) || enqueued;
       };
       if (onlySiteId) await work();
@@ -180,6 +183,8 @@ export class DomainReconcilerService {
 
     for (const row of await listSiteDomains(this.dbClient.db, site.id)) {
       const cert = stored.get(row.hostname);
+      // A busy site's failing name must lose its resolver, or every proxy reload re-orders it.
+      if (site.busy && (row.certStatus !== "requested" || cert)) continue;
       const failures = report.failures
         .filter((f) => f.hostname === row.hostname)
         .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));

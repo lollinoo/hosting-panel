@@ -231,7 +231,10 @@ export async function buildApprovedServiceSpec(
     : site.appliedRoutes
       ? site.appliedRoutes
           .filter((h) => activeNames.has(h.hostname))
-          .map((h) => {
+          .map((h0) => {
+            // A name that lost its certificate request must not keep a resolver (it would be re-ordered on every reload).
+            const row = activeDomains.find((d) => d.hostname === h0.hostname);
+            const h = row && row.certStatus !== "active" && row.certStatus !== "requested" ? { ...h0, tls: false, httpsRedirect: false } : h0;
             // The executor refuses a redirect to a name it does not route; serve it instead.
             const target = h.redirectTo?.replace(/^https?:\/\//, "");
             return target === undefined || activeNames.has(target) ? h : { ...h, redirectTo: null };

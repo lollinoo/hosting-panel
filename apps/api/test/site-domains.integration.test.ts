@@ -397,6 +397,21 @@ describe("site.domains operation", () => {
     expect(spec.hostRoutes).toEqual(applied);
   });
 
+  it("a restart drops tls for a name whose certificate failed", async () => {
+    const siteId = await createAndRun();
+    await setCert("hotel.it", { certStatus: "requested" });
+    await applyDomains(siteId);
+    expect((await site(siteId)).appliedRoutes![0]!.tls).toBe(true);
+    await setCert("hotel.it", { certStatus: "failed", certProblem: "port_80_blocked" });
+
+    const res = await call("PATCH", org(`/managed-sites/${siteId}/runtime`), { phpVersion: "8.5" });
+    await run();
+    expect((await opRow(res.body.data.operationId as string)).status).toBe("succeeded");
+    expect(sim.deployedSpecs.at(-1)!.hostRoutes).toEqual([
+      { hostname: "hotel.it", tls: false, httpsRedirect: false, redirectTo: null },
+    ]);
+  });
+
   it("a publish failure after the address switch keeps the transition plan for restarts, and the retry does not switch again", async () => {
     const siteId = await createAndRun({ ...SITE, includeWww: true });
     await setCert("hotel.it", { certStatus: "active", certExpiresAt: new Date(Date.now() + 60 * DAY) });
@@ -575,6 +590,24 @@ describe("site.domains operation", () => {
       await reconcile(16);
       expect(await dom("hotel.it")).toMatchObject({ certStatus: "requested", certRequestedAt: at(16) });
       expect(plan(siteId)).toEqual([{ ...plain, tls: true }]);
+    });
+
+    it("a failure is classified on a deploying site, which is otherwise left alone", async () => {
+      const siteId = await requested();
+      await dbClient.db.update(sites).set({ status: "deploying" }).where(eq(sites.id, siteId));
+      const ops = (await domainOps(siteId)).length;
+      sim.failCertificate("hotel.it", "port_80_blocked", at(1).toISOString());
+      await reconcile(1);
+      expect(await dom("hotel.it")).toMatchObject({ certStatus: "failed", certProblem: "port_80_blocked" });
+      expect(await domainOps(siteId)).toHaveLength(ops);
+    });
+
+    it("a deploying site never starts a certificate request", async () => {
+      const siteId = await createAndRun();
+      pointHere("hotel.it");
+      await dbClient.db.update(sites).set({ status: "deploying" }).where(eq(sites.id, siteId));
+      await reconcile(0);
+      expect((await dom("hotel.it")).certStatus).toBe("none");
     });
 
     it("a request with no certificate and no failure after 10 minutes counts as failed", async () => {
