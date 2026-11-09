@@ -24,7 +24,8 @@ export async function forwardToUpstream(
   req: Request,
   upstreamPath: string,
   method: "GET" | "POST" | "PATCH" | "DELETE",
-  onSuccess?: (session: SessionData, body: unknown, response: NextResponse) => Promise<void>
+  onSuccess?: (session: SessionData, body: unknown, response: NextResponse) => Promise<void>,
+  opts?: { timeoutMs?: number }
 ): Promise<NextResponse> {
   const session = await getSessionFromRequest(req);
   if (method === "GET") {
@@ -48,6 +49,7 @@ export async function forwardToUpstream(
     method,
     accessToken: session!.accessToken,
     body,
+    timeoutMs: opts?.timeoutMs,
   });
   const response = bffUpstreamResponse(upstreamRes);
   if (upstreamRes.ok && onSuccess) await onSuccess(session!, body, response);

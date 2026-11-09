@@ -192,6 +192,14 @@ export function DomainsPanel({
         </CardContent>
       </Card>
 
+      <Alert role="note">
+        <AlertDescription>
+          {data.mail.configured && data.mail.fromAddress
+            ? format(t.mail.configured, { from: data.mail.fromAddress })
+            : t.mail.notConfigured}
+        </AlertDescription>
+      </Alert>
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">{t.addTitle}</CardTitle>

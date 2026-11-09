@@ -109,6 +109,18 @@ describe("domains UI", () => {
     mail: { configured: false, fromAddress: null },
   };
 
+  it("domains panel tells the customer how email is sent", () => {
+    const un = (h: string) => h.replaceAll("&#x27;", "'");
+    const off = un(renderToStaticMarkup(wrap(en, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial }))));
+    expect(off).toContain(en.site.domains.mail.notConfigured);
+    const configured = { ...initial, mail: { configured: true, fromAddress: "noreply@hotel.it" } };
+    for (const m of [en, itMsgs]) {
+      const html = un(renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial: configured }))));
+      expect(html).toContain(m.site.domains.mail.configured.replace("{from}", "noreply@hotel.it"));
+      expect(html).not.toContain(m.site.domains.mail.notConfigured);
+    }
+  });
+
   it("panel lists the A records with the server IP", () => {
     for (const m of [en, itMsgs]) {
       const html = renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial })));

@@ -45,7 +45,7 @@ describe("ui copy", () => {
   });
 
   it("customer surfaces avoid infrastructure jargon", () => {
-    const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox)\b|HCP-SPEC|AC-F|ADR-/i;
+    const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox|relay|smtp|postfix|spf|dkim)\b|HCP-SPEC|AC-F|ADR-/i;
     for (const text of copy()) expect(text).not.toMatch(jargon);
   });
 });

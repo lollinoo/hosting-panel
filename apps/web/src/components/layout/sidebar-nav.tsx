@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { FileText, Globe, Server, Shield, Users } from "lucide-react";
+import { FileText, Globe, Mail, Server, Shield, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMessages } from "@/i18n/provider";
 
@@ -12,6 +12,7 @@ export function SidebarNav() {
   const items = [
     { href: "/admin/hosts", label: t.server, icon: Server },
     { href: "/admin/sites", label: t.sites, icon: Globe },
+    { href: "/admin/mail", label: t.mail, icon: Mail },
     { href: "/admin/users", label: t.users, icon: Users },
     { href: "/admin/audit", label: t.audit, icon: FileText },
   ];
