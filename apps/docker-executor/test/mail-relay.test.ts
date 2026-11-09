@@ -75,7 +75,7 @@ describe("buildMailRelayContainerPayload", () => {
     expect("PortBindings" in p.HostConfig).toBe(false);
     expect(p.HostConfig).toMatchObject({
       CapDrop: ["ALL"],
-      CapAdd: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "NET_BIND_SERVICE", "SETGID", "SETUID"],
+      CapAdd: ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"],
       SecurityOpt: ["no-new-privileges:true"],
       Memory: 134217728,
       MemorySwap: 134217728,

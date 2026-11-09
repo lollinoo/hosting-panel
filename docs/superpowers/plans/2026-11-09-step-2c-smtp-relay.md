@@ -425,7 +425,7 @@ It builds on the 2a and 2b plans, ADRs 0015–0017, and `docs/security/step-2b-a
     **No `POSTFIX_*` value may be empty**: the image turns an empty one into `postconf -#`, which restores the default. The builder asserts this.
   - **Labels:** `io.hostingpanel.managed=true`, `io.hostingpanel.role=mail_relay`, and `io.hostingpanel.config_sha256` = sha256 of the canonical JSON of `{ Image, Env, Binds (sorted), CapAdd }`. The password is not in it.
   - **`HostConfig`:**
-    - `CapDrop ["ALL"]`, and `CapAdd ["CHOWN", "DAC_OVERRIDE", "FOWNER", "NET_BIND_SERVICE", "SETGID", "SETUID"]` (Task 9 step 2 trims it);
+    - `CapDrop ["ALL"]`, and `CapAdd ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"]` (trimmed live by Task 9 step 2 from the six first planned, which also had `FOWNER` and `NET_BIND_SERVICE`);
     - `no-new-privileges`;
     - `Memory` and `MemorySwap` 134217728, `NanoCpus` 500000000, `PidsLimit` 128;
     - `RestartPolicy unless-stopped`;

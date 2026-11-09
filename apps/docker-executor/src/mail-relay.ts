@@ -78,7 +78,8 @@ export function buildMailRelayContainerPayload(input: MailRelayContainerInput) {
     `${secretDirHostPath}:${SECRET_MOUNT_DIR}:ro`,
     `${MAIL_RELAY_SPOOL_VOLUME}:/var/spool/postfix`,
   ];
-  const CapAdd = ["CHOWN", "DAC_OVERRIDE", "FOWNER", "NET_BIND_SERVICE", "SETGID", "SETUID"];
+  // Trimmed live (Task 9): SETUID/SETGID/DAC_OVERRIDE are fatal without; CHOWN lets the image reown the spool.
+  const CapAdd = ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"];
   const configSha256 = createHash("sha256")
     .update(JSON.stringify({ Image, Env, Binds: [...Binds].sort(), CapAdd }))
     .digest("hex");
