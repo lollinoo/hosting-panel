@@ -29,6 +29,7 @@ const strip = (t: string) =>
   t
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/(^|[^:])\/\/.*$/gm, "$1")
+    .replace(/^(\s*)"[a-z]+\.[a-z]+":/gm, "$1") // operation-kind keys are identifiers, not copy
     .replace(/^\s*import[^;]*;?$/gm, "");
 const sources = () => dirs.flatMap(files).map((f) => strip(fs.readFileSync(f, "utf-8")));
 const copy = () => [
@@ -44,7 +45,7 @@ describe("ui copy", () => {
   });
 
   it("customer surfaces avoid infrastructure jargon", () => {
-    const jargon = /\b(container|docker|revision|drift|allocation|outbox)\b|HCP-SPEC|AC-F|ADR-/i;
+    const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox)\b|HCP-SPEC|AC-F|ADR-/i;
     for (const text of copy()) expect(text).not.toMatch(jargon);
   });
 });

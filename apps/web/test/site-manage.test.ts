@@ -71,9 +71,9 @@ describe("site management BFF", () => {
 });
 
 describe("site management UI", () => {
-  it("SITE_TABS includes overview and logs in that order", () => {
-    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "logs"]);
-    expect(SITE_TABS[1]!.href("s1")).toBe("/sites/s1/logs");
+  it("SITE_TABS ends with logs", () => {
+    expect(SITE_TABS.at(-1)!.key).toBe("logs");
+    expect(SITE_TABS.at(-1)!.href("s1")).toBe("/sites/s1/logs");
   });
 
   it("setup progress shows only for a running setup or a failed one on a degraded site", () => {

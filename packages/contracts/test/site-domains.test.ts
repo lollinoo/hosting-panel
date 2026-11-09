@@ -19,6 +19,7 @@ describe("site domains", () => {
     expect(suggestWwwPair("hotel.it")).toBe(true);
     expect(suggestWwwPair("www.blog.hotel.it")).toBe(true);
     expect(suggestWwwPair("blog.hotel.it")).toBe(false);
+    expect(suggestWwwPair("www.hotel.it")).toBe(true);
   });
 
   it("isSiteOrigin accepts only scheme plus host", () => {
