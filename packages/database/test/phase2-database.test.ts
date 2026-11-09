@@ -46,6 +46,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0004_sites_and_databases.sql",
       "0005_allow_revision_cascade_delete.sql",
       "0006_domains_dns_tls.sql",
+      "0007_mail_relay.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -63,6 +64,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0004_sites_and_databases.sql",
       "0005_allow_revision_cascade_delete.sql",
       "0006_domains_dns_tls.sql",
+      "0007_mail_relay.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -76,6 +78,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0004_sites_and_databases.sql",
       "0005_allow_revision_cascade_delete.sql",
       "0006_domains_dns_tls.sql",
+      "0007_mail_relay.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
