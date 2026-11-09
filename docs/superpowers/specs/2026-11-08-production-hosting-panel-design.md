@@ -56,7 +56,7 @@ Two kinds of login per server, in the same panel:
 
 - Top bar: product logo, **site switcher** dropdown (`hotelbellavista.it ▾`), language switch, account menu.
 - Opening the panel lands on the last-used site. With no sites yet, it lands on a friendly empty state with "Create your first site".
-- Site header: domain name, status pill (`Online` / `Stopped` / `Waiting for DNS` / `Problem`), certificate pill (`HTTPS valid until Feb`), and a primary action (`Open WP Admin ↗` for WordPress, `Visit site ↗` otherwise).
+- Site header: domain name, status pill (`Online` / `Stopped` / `Waiting for DNS` / `Problem`), certificate pill (`HTTPS valid until Feb`), and a primary action (`Open WP Admin ↗`).
 - Tabs per site: **Overview · WordPress** (WordPress sites only) **· Domains · Files · Database · Backups · Logs**.
 - Overview shows cards for pending updates, last backup (with download), disk use, and a plain-language recent activity feed ("Backup completed · today 03:00", "Certificate renewed · 2 days ago").
 - Account-level pages (outside a site): profile, password, 2FA, language, and a list of all sites.
@@ -71,17 +71,16 @@ Two kinds of login per server, in the same panel:
 
 ### 3.3 Sites
 
-Site types in this version:
+Site type in this version (**owner decision, 2026-11-08: WordPress only**):
 
 | Type | What it runs | Notes |
 |---|---|---|
-| **WordPress** | PHP-FPM + web server image with WordPress, database on the shared MariaDB | One-click install: site title, admin user, admin email, password |
-| **Static** | Web server serving files | Files via SFTP / file manager |
-| **PHP app** (Laravel and similar) | PHP-FPM + web server, configurable document root (e.g. `/public`) | Composer is run by the developer, not the panel **(builder's call)** |
-| **Node** ("maybe") | Node runtime with start command and port | Lowest priority type; may slip to a later step without blocking go-live |
+| **WordPress** | PHP + web server image with WordPress, database on the shared MariaDB | One-click install: site title, admin user, admin email, password |
 
-- The customer can choose the PHP version per site from a supported list, and the Node version per Node site. **(builder's call)**
-- **These four site types are the only things a customer or admin can create (owner decision).** There is no catalog of extra services (Redis, other apps). The existing service-template catalog and its screens are hidden from the product or removed; internally, templates may still be used to define the four site types. **(builder's call on how)**
+- Static, PHP-app (Laravel and similar) and Node sites are **removed from this version** (owner: "concentriamoci solo su siti WordPress"). They are not deferred to a later step of this version.
+- The PHP version is chosen per WordPress site from a supported list (currently 8.3, 8.4, 8.5; default 8.4). **(builder's call on the list)**
+- **A WordPress site is the only thing a customer or admin can create (owner decision).** There is no catalog of extra services (Redis, other apps). The existing service-template catalog and its screens are hidden from the product; internally one template row backs the WordPress type. **(builder's call on how)**
+- **Who creates sites (owner decision, 2026-11-08):** the customer can create their own sites, and the server administrator can create a site and assign it to the customer, keep it unassigned, or reassign it later. An assigned site is seen and managed by the customer exactly as if they had created it. Customers only ever see their own sites; the administrator sees all of them.
 - Each site runs in its own containers on its own network (existing per-site network isolation). The existing container hardening (`CapDrop: ALL`, `no-new-privileges`, limits) stays, relaxed only where an image genuinely requires it, with the reason documented.
 - **One shared MariaDB server per machine**, with a separate database and user per site. **(builder's call:** lighter than one DB container per site on a single-customer server.) The panel's own PostgreSQL stays separate and is never exposed to customers.
 - Site lifecycle: create, start, stop, restart, delete (with confirmation and an offer to download a final backup).
@@ -138,7 +137,7 @@ Real customers almost always already have a WordPress site elsewhere. Moving it 
 
 - Minimum: the customer or administrator can move a site in by hand with SFTP, the file manager and phpMyAdmin (this is why files and databases are part of the first go-live; see section 8).
 - Plus a simple **import wizard for WordPress** in the site's WordPress tab: upload (or SFTP-drop) a files archive and a database dump. The panel unpacks them into the site, imports the dump into the site's database, rewrites `wp-config.php` to the panel's database credentials, and replaces the old domain with the new one in the database (`wp search-replace`). **(builder's call:** archive + dump upload. Importing straight from a remote host or from vendor backup formats is out.)
-- The DNS check (3.4) lets the customer test the moved site before pointing the domain. A temporary preview address per site is a nice-to-have. **(builder's call)**
+- The DNS check (3.4) lets the customer test the moved site before pointing the domain. A temporary preview address per site is **deferred** (owner decision, 2026-11-08: the owner tests with a real test domain).
 
 ### 3.10 Outgoing email for sites (first go-live, owner decision)
 
@@ -163,6 +162,7 @@ Same clean visual style. Layout: **sidebar with server-wide sections** (Health, 
 
 | Area | Must do |
 |---|---|
+| **Sites** | List every WordPress site with its owner and status; create a site for the customer or unassigned; assign, reassign or unassign it; retry a failed setup; delete. (Day-to-day site controls for the admin come through the support view in step 6.) |
 | **Health** | CPU, RAM, disk, uptime; status of each panel component (API, web, executor, host agent, proxy, MariaDB); status of each customer container (running, stopped, restarting, drifted). In-panel alerts (disk > 90%, certificate expiring, backup failed, component down). Email notifications are later. **(builder's call)** |
 | **Updates** | See and apply updates for container images (WordPress base, PHP, MariaDB, Traefik, phpMyAdmin) and for the panel itself. OS package updates through the existing allowlisted host maintenance actions. Kernel reboots happen over SSH. **(builder's call)** |
 | **Backups** | Configure S3 and schedule/retention, test connection, see per-site status, retry, see the encryption key warning. |
@@ -176,6 +176,7 @@ Same clean visual style. Layout: **sidebar with server-wide sections** (Health, 
 
 ## 5. Installation and operation
 
+- **Minimum server size: 2 GB RAM (owner decision, 2026-11-08).** The installer warns on smaller servers but does not block.
 - A fresh Ubuntu 24.04 / Debian 12 server is turned into a panel server by one documented install procedure, building on `infra/linux/bootstrap-dedicated.sh` and the existing `systemd` units. It installs everything needed (Docker, proxy, MariaDB, panel), generates keys, and creates the first administrator.
 - The panel is reached over HTTPS on its own hostname, entered by the administrator at install time and normally under the hosting company's domain (e.g. `srv12.hostingcompany.it`), with its own Let's Encrypt certificate. Until that DNS record resolves, the installer falls back to a self-signed certificate on the server IP so first-admin setup is never blocked. **(builder's call)**
 - Branding: one product name and logo for all servers in this version. Per-company branding comes later. **(builder's call)**
@@ -196,7 +197,7 @@ Same clean visual style. Layout: **sidebar with server-wide sections** (Health, 
 
 ### Non-goals (this version)
 - Email hosting / mailboxes / receiving mail (owner: "only web hosting for now"). Outgoing site mail through a relay *is* in scope (3.10).
-- A catalog of extra services beyond the four site types.
+- Site types other than WordPress (static, PHP app, Node) and any catalog of extra services.
 - DNS hosting.
 - Central multi-server panel (`ADR-008` hub, future).
 - Several customers on one server (`Shared` mode stays gated; `ADR-011` stays open).
@@ -224,7 +225,7 @@ Same clean visual style. Layout: **sidebar with server-wide sections** (Health, 
 The work is several projects built in sequence. Each step ends with something that works on a real server. **Steps 1–4 are the first go-live line**: after them, a hotel can move its existing WordPress site in, run it on its own domain with HTTPS, send its booking and contact emails, and have nightly off-site backups.
 
 1. **Foundation**: real auth (passwords, TOTP 2FA, two roles), removal of demo login/seed from production, first-admin setup, i18n scaffolding (IT/EN), customer site-first layout shell, installer on a fresh server, release/update packaging.
-2. **Sites, domains, TLS and outgoing mail**: site types (WordPress, static, PHP app; Node if cheap), shared MariaDB, domain add + DNS check + Let's Encrypt issue/renew + HTTPS redirect, admin SMTP relay for site mail.
+2. **Sites, domains, TLS and outgoing mail**, planned as three sub-steps: **2a** WordPress sites (customer- or admin-created, assignable to the customer), shared MariaDB, lifecycle and logs; **2b** domain add + DNS check + Let's Encrypt issue/renew + HTTPS redirect; **2c** admin SMTP relay for site mail.
 3. **Backups**: S3 config, nightly encrypted per-site backups, manual backup, customer download and restore, admin status.
 4. **Files, databases and site import**: SFTP, web file manager, databases/users, phpMyAdmin, WordPress import wizard.
    — **first go-live line** —

@@ -27,6 +27,7 @@ import {
 } from "./traefik-config.js";
 
 const PANEL_INGRESS_RETRY_MS = 60_000;
+const SHARED_DATABASE_RETRY_MS = 60_000;
 
 /** Empty HP_PANEL_HOSTNAME ⇒ null (panel ingress disabled). Invalid values are logged and disable it too. */
 export function parsePanelIngressConfigFromEnv(
@@ -185,6 +186,9 @@ export async function bootstrapDockerExecutorDaemon(
         ingressHttpPort,
         ...(ingressHttpsPort !== undefined ? { ingressHttpsPort } : {}),
         panel,
+        ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
+          ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
+          : {}),
       });
   const executor: IngressCapableDockerExecutor =
     dockerAdapter ??
@@ -214,6 +218,20 @@ export async function bootstrapDockerExecutorDaemon(
     version: DEFAULT_EXECUTOR_VERSION,
   });
 
+  if (dockerAdapter) {
+    // No job survives a restart; clear leftovers before accepting new ones.
+    await dockerAdapter.cleanupOrphanJobs().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "orphan_job_cleanup_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+  }
+
   const endpoint = await server.start();
   console.info(
     JSON.stringify({
@@ -226,6 +244,31 @@ export async function bootstrapDockerExecutorDaemon(
       startedAt: new Date().toISOString(),
     }),
   );
+
+  if (dockerAdapter) {
+    // Independent of the panel ingress retry; a pull can take minutes, so startup does not wait.
+    const ensureSharedDatabase = async (): Promise<void> => {
+      try {
+        await dockerAdapter.ensureSharedDatabase();
+        console.info(
+          JSON.stringify({ component: "hp-docker-executor", event: "shared_database_ready" }),
+        );
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "shared_database_ensure_failed",
+            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+            retryInMs: SHARED_DATABASE_RETRY_MS,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        setTimeout(() => void ensureSharedDatabase(), SHARED_DATABASE_RETRY_MS).unref();
+      }
+    };
+    void ensureSharedDatabase();
+    void dockerAdapter.prewarmSiteImages();
+  }
 
   if (panel && dockerAdapter) {
     // Never crashes the executor: failures are logged and retried until the proxy is up.

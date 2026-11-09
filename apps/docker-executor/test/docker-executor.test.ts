@@ -13,7 +13,7 @@ import {
   createApprovedServiceSpec,
   type ApprovedServiceSpec,
 } from "@hosting-panel/executor-contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DockerEngineSocketAdapter,
   DockerExecutorIpcServer,
@@ -28,9 +28,9 @@ import {
   buildPanelDynamicYaml,
   buildTraefikStaticYaml,
   validateCertifiedCapabilities,
-  type DockerContainerInspectPayload,
   type PanelIngressConfig,
 } from "../src/index.js";
+import { startMockDockerDaemon } from "./mock-docker-daemon.js";
 
 const HMAC_SECRET = "0123456789abcdef0123456789abcdef-phase2-ipc-key";
 const HMAC_SIGNING_KEY: IpcSigningKey = {
@@ -43,335 +43,6 @@ const HMAC_VERIFICATION_KEY: IpcVerificationKey = {
   algorithm: "hmac-sha256",
   secret: HMAC_SECRET,
 };
-
-interface MockDockerContainerRecord {
-  id: string;
-  name: string;
-  image: string;
-  cmd?: string[];
-  user?: string;
-  env: string[];
-  labels: Record<string, string>;
-  running: boolean;
-  status: string;
-  restartCount: number;
-  hostConfig: NonNullable<DockerContainerInspectPayload["HostConfig"]>;
-  networks: Record<string, unknown>;
-}
-
-interface MockDockerDaemon {
-  readonly socketPath: string;
-  readonly createdNetworks: Array<{
-    Name: string;
-    Internal?: boolean;
-    Driver?: string;
-    Labels?: Record<string, string>;
-  }>;
-  readonly createdVolumes: string[];
-  readonly networkConnectCalls: Array<{ network: string; container: string }>;
-  /** Connects to these networks answer 404 (removed between list and connect). */
-  readonly vanishedNetworks: Set<string>;
-  readonly containers: Map<string, MockDockerContainerRecord>;
-  readonly requestedPaths: string[];
-  close(): Promise<void>;
-}
-
-async function startMockDockerDaemon(options?: {
-  readonly rejectVersionedPrefix?: boolean;
-}): Promise<MockDockerDaemon> {
-  const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
-  const createdNetworks: Array<{
-    Name: string;
-    Internal?: boolean;
-    Driver?: string;
-    Labels?: Record<string, string>;
-  }> = [];
-  const networkNames = new Set<string>();
-  const createdVolumes: string[] = [];
-  const networkConnectCalls: Array<{ network: string; container: string }> = [];
-  const vanishedNetworks = new Set<string>();
-  const containers = new Map<string, MockDockerContainerRecord>();
-  const requestedPaths: string[] = [];
-  let seq = 1;
-
-  const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
-    const byId = containers.get(ref);
-    if (byId) {
-      return byId;
-    }
-    for (const c of containers.values()) {
-      if (c.name === ref || c.name === `/${ref}`) {
-        return c;
-      }
-    }
-    return undefined;
-  };
-
-  const server = http.createServer((req, res) => {
-    const chunks: Buffer[] = [];
-    req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => {
-      const rawUrl = req.url ?? "/";
-      requestedPaths.push(rawUrl);
-      const bodyStr = Buffer.concat(chunks).toString("utf8");
-      const parsedUrl = new URL(rawUrl, "http://docker");
-
-      if (options?.rejectVersionedPrefix && parsedUrl.pathname.startsWith("/v1.45/")) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            message: "client version 1.45 is too new. Maximum supported API version is 1.43",
-          }),
-        );
-        return;
-      }
-
-      const routePath = parsedUrl.pathname.replace(/^\/v1\.\d+/, "");
-      const method = req.method ?? "GET";
-
-      if (method === "GET" && routePath === "/_ping") {
-        res.writeHead(200, { "Content-Type": "text/plain" });
-        res.end("OK");
-        return;
-      }
-
-      if (method === "GET" && routePath.startsWith("/images/") && routePath.endsWith("/json")) {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Id: "sha256:mockimage" }));
-        return;
-      }
-
-      if (method === "GET" && routePath === "/networks") {
-        const rawFilters = parsedUrl.searchParams.get("filters");
-        const filterLabels: string[] = rawFilters
-          ? ((JSON.parse(rawFilters) as { label?: string[] }).label ?? [])
-          : [];
-        const matches = createdNetworks.filter((n) =>
-          filterLabels.every((expr) => {
-            const [k = "", v] = expr.split("=");
-            return v === undefined ? k in (n.Labels ?? {}) : n.Labels?.[k] === v;
-          }),
-        );
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(matches.map((n) => ({ Name: n.Name, Labels: n.Labels ?? {} }))));
-        return;
-      }
-
-      if (method === "GET" && routePath.startsWith("/networks/")) {
-        const netName = decodeURIComponent(routePath.slice("/networks/".length));
-        if (networkNames.has(netName)) {
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ Name: netName }));
-        } else {
-          res.writeHead(404, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ message: "network not found" }));
-        }
-        return;
-      }
-
-      if (method === "POST" && routePath === "/networks/create") {
-        const body = JSON.parse(bodyStr) as {
-          Name: string;
-          Internal?: boolean;
-          Driver?: string;
-          Labels?: Record<string, string>;
-        };
-        networkNames.add(body.Name);
-        createdNetworks.push(body);
-        res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Id: `net_${body.Name}` }));
-        return;
-      }
-
-      const netConnectMatch = /^\/networks\/([^/]+)\/(connect|disconnect)$/.exec(routePath);
-      if (method === "POST" && netConnectMatch && netConnectMatch[1] && netConnectMatch[2]) {
-        const netName = decodeURIComponent(netConnectMatch[1]);
-        const action = netConnectMatch[2];
-        const body = JSON.parse(bodyStr) as { Container: string; EndpointConfig?: unknown };
-        const target = findByRef(body.Container);
-        if (action === "connect") {
-          networkConnectCalls.push({ network: netName, container: body.Container });
-          if (vanishedNetworks.has(netName)) {
-            res.writeHead(404, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ message: `network ${netName} not found` }));
-            return;
-          }
-          if (target) {
-            target.networks[netName] = body.EndpointConfig ?? {};
-          }
-        } else if (target) {
-          delete target.networks[netName];
-        }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({}));
-        return;
-      }
-
-      if (method === "POST" && routePath === "/volumes/create") {
-        const body = JSON.parse(bodyStr) as { Name: string };
-        createdVolumes.push(body.Name);
-        res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Name: body.Name }));
-        return;
-      }
-
-      if (method === "GET" && routePath === "/containers/json") {
-        const rawFilters = parsedUrl.searchParams.get("filters");
-        const filterLabels: string[] = rawFilters
-          ? ((JSON.parse(rawFilters) as { label?: string[] }).label ?? [])
-          : [];
-
-        const matches = [...containers.values()]
-          .filter((c) =>
-            filterLabels.every((expr) => {
-              const eq = expr.indexOf("=");
-              if (eq < 0) {
-                return expr in c.labels;
-              }
-              const k = expr.slice(0, eq);
-              const v = expr.slice(eq + 1);
-              return c.labels[k] === v;
-            }),
-          )
-          .map((c) => ({
-            Id: c.id,
-            Names: [`/${c.name}`],
-            Labels: c.labels,
-          }));
-
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(matches));
-        return;
-      }
-
-      if (method === "POST" && routePath === "/containers/create") {
-        const name = parsedUrl.searchParams.get("name") ?? `ctr_${String(seq)}`;
-        const payload = JSON.parse(bodyStr) as {
-          Image: string;
-          Cmd?: string[];
-          User?: string;
-          Env?: string[];
-          Labels?: Record<string, string>;
-          HostConfig: NonNullable<DockerContainerInspectPayload["HostConfig"]>;
-          NetworkingConfig?: { EndpointsConfig?: Record<string, unknown> };
-        };
-
-        const id = `${String(seq).padStart(8, "0")}abcdef0123456789abcdef0123456789abcdef0123456789abcdef01`;
-        seq += 1;
-        containers.set(id, {
-          id,
-          name,
-          image: payload.Image,
-          ...(payload.Cmd ? { cmd: payload.Cmd } : {}),
-          ...(payload.User ? { user: payload.User } : {}),
-          env: [...(payload.Env ?? [])],
-          labels: { ...(payload.Labels ?? {}) },
-          running: false,
-          status: "created",
-          restartCount: 0,
-          hostConfig: payload.HostConfig,
-          networks: { ...(payload.NetworkingConfig?.EndpointsConfig ?? {}) },
-        });
-        res.writeHead(201, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Id: id, Warnings: [] }));
-        return;
-      }
-
-      const inspectMatch = /^\/containers\/([^/]+)\/json$/.exec(routePath);
-      if (method === "GET" && inspectMatch && inspectMatch[1]) {
-        const ref = decodeURIComponent(inspectMatch[1]);
-        const target = findByRef(ref);
-        if (!target) {
-          res.writeHead(404, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ message: "No such container" }));
-          return;
-        }
-        const inspectPayload: DockerContainerInspectPayload = {
-          Id: target.id,
-          Name: `/${target.name}`,
-          RestartCount: target.restartCount,
-          State: {
-            Status: target.status,
-            Running: target.running,
-            Restarting: false,
-            OOMKilled: false,
-            Dead: false,
-          },
-          Config: {
-            Image: target.image,
-            ...(target.cmd ? { Cmd: target.cmd } : {}),
-            ...(target.user ? { User: target.user } : {}),
-            Env: target.env,
-            Labels: target.labels,
-          },
-          HostConfig: target.hostConfig,
-          NetworkSettings: {
-            Networks: target.networks,
-          },
-        };
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(inspectPayload));
-        return;
-      }
-
-      const lifecycleMatch = /^\/containers\/([^/]+)\/(start|stop|restart)$/.exec(routePath);
-      if (method === "POST" && lifecycleMatch && lifecycleMatch[1] && lifecycleMatch[2]) {
-        const ref = decodeURIComponent(lifecycleMatch[1]);
-        const action = lifecycleMatch[2];
-        const target = findByRef(ref);
-        if (!target) {
-          res.writeHead(404, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ message: "No such container" }));
-          return;
-        }
-        if (action === "start" || action === "restart") {
-          target.running = true;
-          target.status = "running";
-        } else {
-          target.running = false;
-          target.status = "exited";
-        }
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
-      const deleteMatch = /^\/containers\/([^/]+)$/.exec(routePath);
-      if (method === "DELETE" && deleteMatch && deleteMatch[1]) {
-        const ref = decodeURIComponent(deleteMatch[1]);
-        const target = findByRef(ref);
-        if (target) {
-          containers.delete(target.id);
-        }
-        res.writeHead(204);
-        res.end();
-        return;
-      }
-
-      res.writeHead(404, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ message: `Unhandled mock route: ${method} ${routePath}` }));
-    });
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(socketPath, () => resolve());
-  });
-
-  return {
-    socketPath,
-    createdNetworks,
-    createdVolumes,
-    networkConnectCalls,
-    vanishedNetworks,
-    containers,
-    requestedPaths,
-    async close() {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(socketPath, { force: true });
-    },
-  };
-}
 
 function rawUnixHttpRequest(options: {
   readonly socketPath: string;
@@ -1153,6 +824,34 @@ describe("panel ingress", () => {
     expect(payload.HostConfig.Binds.some((b) => b.includes("docker.sock"))).toBe(false);
   });
 
+  it("proxy keeps its default route on hp_ingress_net (GwPriority, O2)", () => {
+    const payload = buildIngressProxyContainerPayload({
+      staticConfigHostPath: "/s/traefik.yml",
+      dynamicDirHostPath: "/s/dynamic",
+      acmeDirHostPath: "/s/acme",
+    });
+    expect(payload.NetworkingConfig.EndpointsConfig.hp_ingress_net).toEqual({ GwPriority: 1 });
+  });
+
+  it("creates the proxy at API 1.48 and recreates one without the gateway priority", async () => {
+    const { adapter, mockDaemon, proxy, recreateCalls } = await setupAdapter(panel);
+    await adapter.ensureIngressProxy();
+    expect(
+      mockDaemon.requestedPaths.some((p) =>
+        p.startsWith(`/v1.48/containers/create?name=${INGRESS_PROXY_CONTAINER_NAME}`),
+      ),
+    ).toBe(true);
+
+    const first = proxy();
+    if (first) {
+      first.networks = { hp_ingress_net: { GwPriority: 0 } }; // proxy made by an older release
+    }
+    const mark = mockDaemon.requestedPaths.length;
+    await adapter.ensureIngressProxy();
+    expect(recreateCalls(mark).length).toBe(2);
+    expect(proxy()?.networks).toEqual({ hp_ingress_net: { GwPriority: 1 } });
+  });
+
   async function setupAdapter(panelConfig: PanelIngressConfig | null) {
     const tmpBaseDir = await mkdtemp(path.join(os.tmpdir(), "hp-panel-ingress-"));
     cleanupTasks.push(() => rm(tmpBaseDir, { recursive: true, force: true }));
@@ -1317,5 +1016,263 @@ describe("panel ingress", () => {
     await writeFile(panelFile, "stale");
     await adapter.ensureIngressProxy();
     await expect(stat(panelFile)).rejects.toThrow();
+  });
+});
+
+describe("service logs", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  async function setup(options?: Parameters<typeof startMockDockerDaemon>[0]) {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-logs-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon(options);
+    cleanupTasks.push(() => mockDaemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    return { adapter, mockDaemon };
+  }
+
+  const spec = () =>
+    createApprovedServiceSpec({
+      serviceInstanceId: "svc_logs",
+      siteId: "site_logs",
+      organizationId: "org_logs",
+      image: "ghcr.io/example/webapp:1.0.0",
+      containerName: "hp-site-logs",
+      env: {},
+      resourceLimits: { cpuMilli: 500, memoryBytes: "536870912" },
+      pidsLimit: 128,
+      revisionNumber: 1,
+      specHash: "hash_logs",
+      domains: [],
+      exposeHttp: false,
+      internalPort: 3000,
+      volumeMounts: [],
+      resolvedSecrets: {},
+    });
+
+  it("getServiceLogs clamps tail and returns demuxed lines", async () => {
+    const frame = Buffer.alloc(8);
+    const text = Buffer.from("2026-01-02T03:04:05.123456789Z hello\n");
+    frame[0] = 1;
+    frame.writeUInt32BE(text.length, 4);
+    const { adapter, mockDaemon } = await setup({
+      pullBody: "",
+      logsBody: Buffer.concat([frame, text]),
+    });
+    await adapter.deployService(spec());
+    const lines = await adapter.getServiceLogs("svc_logs", 9999);
+    expect(lines).toEqual([
+      { at: "2026-01-02T03:04:05.123456789Z", stream: "stdout", text: "hello" },
+    ]);
+    expect(mockDaemon.requestedPaths.some((p) => p.includes("/logs?") && p.includes("tail=500"))).toBe(
+      true,
+    );
+    await expect(adapter.getServiceLogs("svc_missing", 5)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
+
+  it("a pull that streams an error is reported as a failure", async () => {
+    const { adapter, mockDaemon } = await setup({
+      pullBody: '{"status":"Pulling"}\n{"error":"manifest unknown"}\n',
+    });
+    await expect(adapter.deployService(spec())).rejects.toMatchObject({
+      code: "DOCKER_ENGINE_UNAVAILABLE",
+      message: "Could not download the site software",
+    });
+    expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
+  });
+});
+
+describe("purge site", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  async function setup() {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-purge-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const ingressRootDir = path.join(tmp, "ingress");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir,
+    });
+    const dynamic = path.join(ingressRootDir, "dynamic");
+    await mkdir(dynamic, { recursive: true });
+    for (const id of ["A", "B"]) {
+      await writeFile(path.join(dynamic, `site_${id}.yml`), "x");
+      mockDaemon.volumeLabels.set(`hp_vol_${id}`, { "io.hostingpanel.site_id": id });
+      for (const net of [`hp_site_${id}_net`, `hp_edge_${id}_net`]) {
+        await fetchNetwork(mockDaemon.socketPath, net);
+      }
+    }
+    return { adapter, mockDaemon, dynamic };
+  }
+
+  function fetchNetwork(socketPath: string, Name: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        { socketPath, path: "/networks/create", method: "POST" },
+        (res) => {
+          res.resume();
+          res.on("end", resolve);
+        },
+      );
+      req.on("error", reject);
+      req.end(JSON.stringify({ Name }));
+    });
+  }
+
+  it("purgeSite removes only volumes and networks labelled with that site", async () => {
+    const { adapter, mockDaemon, dynamic } = await setup();
+    await adapter.purgeSite("A");
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+    expect([...mockDaemon.deletedNetworks].sort()).toEqual(["hp_edge_A_net", "hp_site_A_net"]);
+    await expect(stat(path.join(dynamic, "site_A.yml"))).rejects.toThrow();
+    await expect(stat(path.join(dynamic, "site_B.yml"))).resolves.toBeTruthy();
+  });
+
+  it("purgeSite refuses while a site container exists", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("c1", {
+      id: "c1",
+      name: "hp-site-a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    await expect(adapter.purgeSite("A")).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    expect(mockDaemon.deletedVolumes).toEqual([]);
+  });
+
+  it("purgeSite removes leftover job containers and is idempotent", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("j1", {
+      id: "j1",
+      name: "job",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_job" },
+      running: false,
+      status: "exited",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    await adapter.purgeSite("A");
+    await adapter.purgeSite("A");
+    expect(mockDaemon.containers.size).toBe(0);
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+  });
+});
+
+describe("site IPC", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  async function setup() {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const server = new DockerExecutorIpcServer({
+      executor: simulator,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+    return { simulator, client };
+  }
+
+  // db.provision only accepts a 64-char hex password, so the canary must be one.
+  const CANARY = "ca7a".repeat(16);
+  const provisionJob = {
+    jobId: "job_site_ipc_1",
+    kind: "db.provision" as const,
+    siteId: "site_1",
+    organizationId: "org_1",
+    params: { dbName: "wp_site_1", dbUser: "wp_site_1" },
+    resolvedSecrets: { HP_DB_PASSWORD: CANARY },
+  };
+
+  it("round-trips a job and never logs the secret", async () => {
+    const { client } = await setup();
+    const captured: string[] = [];
+    const grab = (chunk: unknown): boolean => {
+      captured.push(String(chunk));
+      return true;
+    };
+    vi.spyOn(process.stdout, "write").mockImplementation(grab);
+    vi.spyOn(process.stderr, "write").mockImplementation(grab);
+
+    const result = await client.runSiteJob(provisionJob);
+    expect(result).toMatchObject({ jobId: "job_site_ipc_1", exitCode: 0 });
+    expect(captured.join("")).not.toContain(CANARY);
+    expect(JSON.stringify(result)).not.toContain(CANARY);
+  });
+
+  it("rejects an unknown job kind with VALIDATION_ERROR", async () => {
+    const { client } = await setup();
+    await expect(
+      client.runSiteJob({ ...provisionJob, kind: "rm.rf" as never }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("serves purge and logs", async () => {
+    const { client, simulator } = await setup();
+    simulator.setServiceLogs("svc_1", [{ at: null, stream: "stdout", text: "hi" }]);
+    expect(await client.getServiceLogs("svc_1", 10)).toEqual([
+      { at: null, stream: "stdout", text: "hi" },
+    ]);
+    await expect(client.purgeSite("site_1")).resolves.toBeUndefined();
+  });
+
+  it("client uses 300 s for deploy and 510 s for job requests", async () => {
+    const { client } = await setup();
+    const timeouts: Array<number | undefined> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    const spec = createApprovedServiceSpec({
+      serviceInstanceId: "svc_t",
+      siteId: "site_t",
+      organizationId: "org_t",
+      image: "nginx:1.27-alpine",
+      containerName: "hp-t",
+    });
+    await client.deployService(spec).catch(() => undefined);
+    await client.runSiteJob(provisionJob).catch(() => undefined);
+    await client.purgeSite("site_t").catch(() => undefined);
+    await client.getServiceLogs("svc_t", 5).catch(() => undefined);
+    expect(timeouts).toEqual([300_000, 510_000, 120_000, 35_000]);
   });
 });

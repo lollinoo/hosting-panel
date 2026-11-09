@@ -4,7 +4,12 @@ import type {
   ApprovedServiceSpec,
   DockerExecutionResult,
   DockerExecutorPort,
+  ServiceLogLine,
+  SiteJobKind,
+  SiteJobRequest,
+  SiteJobResult,
 } from "@hosting-panel/executor-contracts";
+import { assertValidSiteJobRequest } from "./site-jobs.js";
 import {
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
@@ -104,6 +109,15 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly virtualSiteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
+  public readonly jobs: SiteJobRequest[] = [];
+  public readonly deployedSpecs: ApprovedServiceSpec[] = [];
+  /** Test hook awaited inside runSiteJob. */
+  public onJob?: (req: SiteJobRequest) => Promise<void>;
+  /** Test hook awaited inside deployService. */
+  public onDeploy?: (spec: ApprovedServiceSpec) => Promise<void>;
+  private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string }[] = [];
+  private failDeployOnce = false;
+  private readonly serviceLogs = new Map<string, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
@@ -192,9 +206,59 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     };
   }
 
+  public failNextJob(kind: SiteJobKind, exitCode: number, outputTail = ""): void {
+    this.failingJobs.push({ kind, exitCode, outputTail });
+  }
+
+  public failNextDeploy(): void {
+    this.failDeployOnce = true;
+  }
+
+  public setServiceLogs(serviceInstanceId: string, lines: ServiceLogLine[]): void {
+    this.serviceLogs.set(serviceInstanceId, lines);
+  }
+
+  public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
+    this.assertEngineAvailable();
+    assertValidSiteJobRequest(req);
+    this.jobs.push(req);
+    await this.onJob?.(req);
+    const idx = this.failingJobs.findIndex((f) => f.kind === req.kind);
+    const failure = idx >= 0 ? this.failingJobs.splice(idx, 1)[0] : undefined;
+    return {
+      jobId: req.jobId,
+      exitCode: failure?.exitCode ?? 0,
+      outputTail: failure?.outputTail ?? "",
+    };
+  }
+
+  public async purgeSite(siteId: string): Promise<void> {
+    this.assertEngineAvailable();
+    assertSafeIdentifier(siteId, "siteId");
+    for (const [serviceId, expected] of [...this.expectedByServiceId]) {
+      if (expected.siteId === siteId) {
+        await this.deleteService(serviceId);
+      }
+    }
+  }
+
+  public async getServiceLogs(
+    serviceInstanceId: string,
+    tail: number,
+  ): Promise<readonly ServiceLogLine[]> {
+    assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
+    return (this.serviceLogs.get(serviceInstanceId) ?? []).slice(-Math.max(1, tail));
+  }
+
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
     this.assertEngineAvailable();
+    await this.onDeploy?.(rawSpec);
+    if (this.failDeployOnce) {
+      this.failDeployOnce = false;
+      throw new ExecutorCodedError("Simulated deploy failure", "DOCKER_ENGINE_UNAVAILABLE");
+    }
     const spec = validateExecutorServiceSpec(rawSpec);
+    this.deployedSpecs.push(rawSpec);
 
     for (const [existingSvcId, existingCtr] of this.containersByServiceId) {
       if (existingSvcId !== spec.serviceInstanceId && existingCtr.name === `/${spec.containerName}`) {

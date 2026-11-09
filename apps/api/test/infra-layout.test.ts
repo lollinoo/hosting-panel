@@ -100,6 +100,12 @@ describe("per-service env files and wrappers", () => {
     expect(r.stdout).not.toContain("hosting-panel.env");
   });
 
+  it.skipIf(!hasHost)("bootstrap dry-run provisions the mariadb user, key and data dir", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    for (const s of ["hp-mariadb", "mariadb-root.key", "0440", "/var/lib/hosting-panel/mariadb/data"]) expect(r.stdout).toContain(s);
+  });
+
   it("wrappers never put DATABASE_URL in argv", () => {
     for (const w of ["hp-accounts", "hp-break-glass"]) {
       const src = read(`infra/linux/${w}`);
@@ -135,7 +141,16 @@ describe("release workflow and docs", () => {
     const readme = read("README.md");
     for (const s of ["install.sh", "hp-update", "sha256sum -c", "hp-accounts"]) expect(readme).toContain(s);
     expect(readme).not.toContain("export DATABASE_URL=");
-    expect(JSON.parse(read("package.json")).version).toBe("0.2.0");
+    expect(JSON.parse(read("package.json")).version).toBe("0.3.0");
+  });
+
+  it("step 2a docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["WordPress", "mariadb-root.key", "2 GB"]) expect(readme).toContain(s);
+    const api = read("docs/api/openapi.yaml");
+    for (const s of ["/v1/organizations/{orgId}/managed-sites", "/v1/admin/sites"]) expect(api).toContain(s);
+    expect(existsSync(join(root, "docs/architecture/adr/0016-shared-mariadb-and-site-jobs.md"))).toBe(true);
+    expect(JSON.parse(read("package.json")).version).toBe("0.3.0");
   });
 });
 

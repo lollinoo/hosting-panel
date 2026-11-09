@@ -3,8 +3,13 @@ import { chmod, mkdir, open, readdir, rm, stat, unlink } from "node:fs/promises"
 import http from "node:http";
 import path from "node:path";
 import {
+  DEFAULT_PHP_VERSION,
   SECRET_KEY_PATTERN,
+  SHARED_MARIADB_IMAGE,
   findPlaintextSecretKeys,
+  resolveWordpressCliImage,
+  resolveWordpressImage,
+  type PhpVersion,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
   type ObservedServiceStateWire,
@@ -14,7 +19,10 @@ import {
   type ApprovedServiceSpec,
   type DockerExecutionResult,
   type DockerExecutorPort,
+  type SiteJobRequest,
+  type SiteJobResult,
 } from "@hosting-panel/executor-contracts";
+import { demuxDockerLogStream } from "./docker-logs.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
@@ -35,9 +43,28 @@ import {
   getSiteInternalNetworkName,
   writeFileAtomically,
 } from "./traefik-config.js";
+import {
+  DEFAULT_SHARED_DB_ADMIN_SUBNET,
+  DEFAULT_SHARED_DB_DATA_DIR,
+  DEFAULT_SHARED_DB_ROOT_KEY_FILE,
+  SHARED_DB_ALIAS,
+  SHARED_DB_CONFIG_SHA256_LABEL,
+  SHARED_DB_CONTAINER_NAME,
+  SHARED_DB_NETWORK_NAME,
+  buildSharedDatabaseContainerPayload,
+} from "./shared-database.js";
+import {
+  DEFAULT_SITE_JOB_TIMEOUT_MS,
+  SITE_JOB_ROLE,
+  assertValidSiteJobRequest,
+  buildSiteJobContainerPayload,
+  formatSiteJobOutputTail,
+} from "./site-jobs.js";
 
 export const DEFAULT_DOCKER_SOCKET_PATH = "/var/run/docker.sock" as const;
 export const DEFAULT_DOCKER_API_PREFIX = "/v1.45" as const;
+/** GwPriority (Docker Engine 28+); the installer refuses older engines. */
+export const INGRESS_PROXY_DOCKER_API_PREFIX = "/v1.48" as const;
 export const DEFAULT_SECRETS_ROOT_DIR = "/run/hosting-panel/secrets" as const;
 export const DEFAULT_PIDS_LIMIT = 256 as const;
 export const DEFAULT_CPU_MILLI = 250 as const;
@@ -721,6 +748,8 @@ interface DockerHttpResponse {
   readonly body: Buffer;
 }
 
+const PULL_TIMEOUT_MS = 240_000;
+
 class DockerSocketHttpClient {
   private readonly socketPath: string;
   private readonly apiPrefix: string;
@@ -741,9 +770,20 @@ class DockerSocketHttpClient {
     method: string,
     endpointPath: string,
     jsonBody?: unknown,
+    options?: { readonly timeoutMs?: number; readonly apiPrefix?: string },
   ): Promise<DockerHttpResponse> {
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    if (options?.apiPrefix !== undefined) {
+      // A pinned version must fail on an older engine, never fall back and drop the new fields.
+      return this.rawRequest(method, `${options.apiPrefix}${endpointPath}`, jsonBody, timeoutMs);
+    }
     const primaryPrefix = this.useUnversionedFallback ? "" : this.apiPrefix;
-    const response = await this.rawRequest(method, `${primaryPrefix}${endpointPath}`, jsonBody);
+    const response = await this.rawRequest(
+      method,
+      `${primaryPrefix}${endpointPath}`,
+      jsonBody,
+      timeoutMs,
+    );
 
     if (
       !this.useUnversionedFallback &&
@@ -758,7 +798,7 @@ class DockerSocketHttpClient {
         text.includes("too new") ||
         text.includes("too old")
       ) {
-        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody);
+        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody, timeoutMs);
         if (fallbackResponse.statusCode < 500 && fallbackResponse.statusCode !== 404) {
           this.useUnversionedFallback = true;
           return fallbackResponse;
@@ -772,7 +812,8 @@ class DockerSocketHttpClient {
   private rawRequest(
     method: string,
     fullPath: string,
-    jsonBody?: unknown,
+    jsonBody: unknown,
+    timeoutMs: number,
   ): Promise<DockerHttpResponse> {
     const serializedBody =
       jsonBody !== undefined ? Buffer.from(JSON.stringify(jsonBody), "utf8") : undefined;
@@ -793,7 +834,7 @@ class DockerSocketHttpClient {
           path: fullPath,
           method,
           headers,
-          timeout: this.timeoutMs,
+          timeout: timeoutMs,
         },
         (res) => {
           const chunks: Buffer[] = [];
@@ -856,7 +897,19 @@ export interface DockerEngineSocketAdapterOptions {
   readonly panel?: PanelIngressConfig | null;
   readonly requestTimeoutMs?: number;
   readonly pullMissingImages?: boolean;
+  readonly sharedDbDataDir?: string;
+  readonly sharedDbRootKeyFile?: string;
+  readonly sharedDbAdminSubnet?: string;
+  /** The uid the data dir must NOT be owned by; defaults to process.getuid(). */
+  readonly executorUid?: number;
+  /** Site job wait budget; on expiry the job is killed and reports exit 124. */
+  readonly jobTimeoutMs?: number;
 }
+
+type SharedDatabaseEnsureResult = {
+  readonly component: "shared_database";
+  readonly status: "running";
+};
 
 type IngressEnsureResult = {
   readonly component: "ingress_proxy";
@@ -882,6 +935,14 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly pullMissingImages: boolean;
   private readonly expectedMetadata = new Map<string, ExpectedManagedServiceMetadata>();
   private ingressEnsureInFlight: Promise<IngressEnsureResult> | null = null;
+  private readonly sharedDbDataDir: string;
+  private readonly sharedDbRootKeyFile: string;
+  private readonly sharedDbAdminSubnet: string;
+  private readonly executorUid: number | undefined;
+  private sharedDbEnsureInFlight: Promise<SharedDatabaseEnsureResult> | null = null;
+  private readonly jobTimeoutMs: number;
+  /** `siteId:kind` of the site jobs running now. */
+  private readonly runningSiteJobs = new Set<string>();
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -898,6 +959,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.ingressHttpsPort = options?.ingressHttpsPort;
     this.panel = options?.panel ?? null;
     this.pullMissingImages = options?.pullMissingImages ?? true;
+    this.sharedDbDataDir = path.resolve(options?.sharedDbDataDir ?? DEFAULT_SHARED_DB_DATA_DIR);
+    this.sharedDbRootKeyFile = path.resolve(
+      options?.sharedDbRootKeyFile ?? DEFAULT_SHARED_DB_ROOT_KEY_FILE,
+    );
+    this.sharedDbAdminSubnet = options?.sharedDbAdminSubnet ?? DEFAULT_SHARED_DB_ADMIN_SUBNET;
+    this.executorUid = options?.executorUid ?? process.getuid?.();
+    this.jobTimeoutMs = options?.jobTimeoutMs ?? DEFAULT_SITE_JOB_TIMEOUT_MS;
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -951,10 +1019,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         "POST",
         `/containers/create?name=${encodeURIComponent(INGRESS_PROXY_CONTAINER_NAME)}`,
         payload,
+        { apiPrefix: INGRESS_PROXY_DOCKER_API_PREFIX },
       );
       if (createRes.statusCode !== 201) {
         throw new ExecutorCodedError(
-          `Failed to create managed ingress proxy container (HTTP ${String(createRes.statusCode)})`,
+          `Failed to create managed ingress proxy container (HTTP ${String(createRes.statusCode)}; needs Docker Engine 28+)`,
           "DOCKER_ENGINE_UNAVAILABLE",
         );
       }
@@ -982,6 +1051,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         existing.Config?.Labels?.[STATIC_SHA256_LABEL] !== staticSha256 ||
         sortedJson(existingBinds) !== sortedJson(payload.HostConfig.Binds) ||
         sortedJson(existing.HostConfig?.ExtraHosts) !== sortedJson(payload.HostConfig.ExtraHosts) ||
+        (
+          existing.NetworkSettings?.Networks?.[INGRESS_BRIDGE_NETWORK_NAME] as
+            | { readonly GwPriority?: number }
+            | undefined
+        )?.GwPriority !== 1 ||
         portBindingsKey(existing.HostConfig?.PortBindings) !==
           portBindingsKey(payload.HostConfig.PortBindings));
 
@@ -1031,6 +1105,95 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
+  /** Serialised like ensureIngressProxy. Called at executor start, never by jobs (they must not pull). */
+  public ensureSharedDatabase(): Promise<SharedDatabaseEnsureResult> {
+    this.sharedDbEnsureInFlight ??= this.ensureSharedDatabaseOnce().finally(() => {
+      this.sharedDbEnsureInFlight = null;
+    });
+    return this.sharedDbEnsureInFlight;
+  }
+
+  /** Cheap check for db.* jobs: fail fast instead of pulling or creating anything. */
+  public async isSharedDatabaseRunning(): Promise<boolean> {
+    const existing = await this.inspectContainerByNameOrId(SHARED_DB_CONTAINER_NAME);
+    return existing?.State?.Running === true;
+  }
+
+  private async ensureSharedDatabaseOnce(): Promise<SharedDatabaseEnsureResult> {
+    // Docker Binds would create a missing source as a root-owned directory: insist on bootstrap's.
+    const keyStat = await stat(this.sharedDbRootKeyFile).catch(() => null);
+    const dataStat = await stat(this.sharedDbDataDir).catch(() => null);
+    if (
+      !keyStat?.isFile() ||
+      !dataStat?.isDirectory() ||
+      dataStat.uid === 0 ||
+      dataStat.uid === this.executorUid
+    ) {
+      throw new ExecutorCodedError(
+        "Shared database key file or data directory is missing or unsafe. Run bootstrap first",
+        "HOST_POLICY_DENIED",
+      );
+    }
+
+    await this.ensureNetwork(SHARED_DB_NETWORK_NAME, {
+      internal: true,
+      subnet: this.sharedDbAdminSubnet,
+      labels: {
+        [MANAGED_DOCKER_LABELS.managed]: "true",
+        "io.hostingpanel.network_role": "shared_database",
+      },
+    });
+
+    const payload = buildSharedDatabaseContainerPayload({
+      user: `${String(dataStat.uid)}:${String(dataStat.gid)}`,
+      dataDirHostPath: this.sharedDbDataDir,
+      rootKeyHostPath: this.sharedDbRootKeyFile,
+      adminSubnet: this.sharedDbAdminSubnet,
+    });
+    await this.ensureImageAvailable(payload.Image);
+
+    const existing = await this.inspectContainerByNameOrId(SHARED_DB_CONTAINER_NAME);
+    // Only the label: Config.Env also holds the image's ENV, so comparing it would recreate on every start (CP-01).
+    const needsRecreate =
+      existing !== null &&
+      existing.Config?.Labels?.[SHARED_DB_CONFIG_SHA256_LABEL] !==
+        payload.Labels[SHARED_DB_CONFIG_SHA256_LABEL];
+    if (existing && needsRecreate) {
+      await this.stopAndRemoveContainer(existing.Id);
+    }
+
+    let containerId = existing?.Id ?? "";
+    if (!existing || needsRecreate) {
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(SHARED_DB_CONTAINER_NAME)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create shared database container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      containerId = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+    }
+
+    if (!existing || needsRecreate || existing.State?.Running !== true) {
+      const startRes = await this.dockerClient.request("POST", `/containers/${containerId}/start`);
+      if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+        throw new ExecutorCodedError(
+          `Failed to start shared database container (HTTP ${String(startRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+    }
+
+    // A new container starts on hp_mariadb_net only: reattach every site network (idempotent).
+    await this.reconnectToRoleNetworks("site_internal", SHARED_DB_CONTAINER_NAME, [SHARED_DB_ALIAS]);
+
+    return { component: "shared_database", status: "running" };
+  }
+
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
     const spec = validateExecutorServiceSpec(rawSpec);
     const httpExposed = isServiceHttpExposed(spec);
@@ -1047,6 +1210,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         "io.hostingpanel.network_role": "site_internal",
       },
     });
+    // 404 = hp_mariadb not created yet; ensureSharedDatabase attaches it later.
+    await this.connectContainerToNetwork(
+      siteNetworkName,
+      SHARED_DB_CONTAINER_NAME,
+      [SHARED_DB_ALIAS],
+      { skipMissingNetwork: true },
+    );
 
     if (spec.volumeMounts) {
       for (const mount of spec.volumeMounts) {
@@ -1175,6 +1345,240 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       containerStatus: "running",
       ingressConfigured,
     };
+  }
+
+  /** Worst case: pull 240 s + wait 240 s + ~20 s of create, logs and remove, inside the client's 510 s. */
+  public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
+    assertValidSiteJobRequest(req); // jobId, ids, params and secrets, before anything touches Docker
+    const lockKey = `${req.siteId}:${req.kind}`;
+    if (this.runningSiteJobs.has(lockKey)) {
+      throw new ExecutorCodedError("This setup step is already running for the site", "RESOURCE_LOCKED");
+    }
+    this.runningSiteJobs.add(lockKey);
+    let containerId: string | null = null;
+    try {
+      if (req.kind === "wordpress.install") {
+        await this.ensureImageAvailable(resolveWordpressCliImage(req.params.phpVersion as PhpVersion));
+        await this.ensureVolume(
+          getManagedVolumeName(req.serviceInstanceId!, "html"),
+          req.siteId,
+          req.serviceInstanceId!,
+        );
+      } else if (!(await this.isSharedDatabaseRunning())) {
+        // Never pull or create hp_mariadb from a job: ensureSharedDatabase owns that.
+        throw new ExecutorCodedError(
+          "The shared database is not running yet. Retry in a few minutes",
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+
+      const { secretBinds, secretFileEnv } = await writeServiceSecrets(
+        this.secretsRootDir,
+        req.jobId,
+        req.resolvedSecrets,
+      );
+      const payload = buildSiteJobContainerPayload(req, {
+        executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
+        secretBinds,
+        secretFileEnv,
+        rootKeyHostPath: this.sharedDbRootKeyFile,
+      });
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(req.jobId)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create site job container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      const id = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+      containerId = id;
+      const startRes = await this.dockerClient.request("POST", `/containers/${id}/start`);
+      if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+        throw new ExecutorCodedError(
+          `Failed to start site job container (HTTP ${String(startRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+
+      const exitCode = await this.waitForSiteJob(id);
+      const logsRes = await this.dockerClient.request(
+        "GET",
+        `/containers/${id}/logs?stdout=1&stderr=1&tail=50`,
+      );
+      const outputTail =
+        logsRes.statusCode === 200 ? formatSiteJobOutputTail(logsRes.body, req.resolvedSecrets) : "";
+      return { jobId: req.jobId, exitCode, outputTail };
+    } finally {
+      try {
+        if (containerId) {
+          // Best effort: cleanupOrphanJobs removes leftovers at the next start.
+          await this.dockerClient
+            .request("DELETE", `/containers/${containerId}?force=true&v=true`)
+            .catch(() => undefined);
+        }
+        await purgeServiceSecrets(this.secretsRootDir, req.jobId);
+      } finally {
+        this.runningSiteJobs.delete(lockKey);
+      }
+    }
+  }
+
+  private async waitForSiteJob(containerId: string): Promise<number> {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), this.jobTimeoutMs);
+    });
+    try {
+      // Our own timer decides the timeout: a socket timeout would read as DOCKER_ENGINE_UNAVAILABLE.
+      const res = await Promise.race([
+        this.dockerClient.request("POST", `/containers/${containerId}/wait`, undefined, {
+          timeoutMs: this.jobTimeoutMs + 15_000,
+        }),
+        expired,
+      ]);
+      if (res === null) {
+        await this.dockerClient
+          .request("POST", `/containers/${containerId}/kill`)
+          .catch(() => undefined);
+        return 124;
+      }
+      const body = res.statusCode === 200 ? (JSON.parse(res.body.toString("utf8")) as { StatusCode?: unknown }) : {};
+      if (typeof body.StatusCode !== "number") {
+        throw new ExecutorCodedError(
+          `Failed to wait for site job container (HTTP ${String(res.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      return body.StatusCode;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** At executor start: no job survives a restart, so every site_job container and job_* secret dir is stale. */
+  public async cleanupOrphanJobs(): Promise<void> {
+    const filters = JSON.stringify({ label: [`io.hostingpanel.role=${SITE_JOB_ROLE}`] });
+    const res = await this.dockerClient.request(
+      "GET",
+      `/containers/json?all=true&filters=${encodeURIComponent(filters)}`,
+    );
+    if (res.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to list site job containers (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    for (const job of JSON.parse(res.body.toString("utf8")) as DockerContainerListSummary[]) {
+      await this.stopAndRemoveContainer(job.Id);
+    }
+    const entries = await readdir(this.secretsRootDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith("job_")) {
+        await purgeServiceSecrets(this.secretsRootDir, entry.name);
+      }
+    }
+  }
+
+  /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */
+  public async purgeSite(siteId: string): Promise<void> {
+    assertSafeIdentifier(siteId, "siteId");
+    const listJson = async <T>(endpoint: string, label: string): Promise<T> => {
+      const filters = encodeURIComponent(JSON.stringify({ label: [label] }));
+      const res = await this.dockerClient.request("GET", `${endpoint}filters=${filters}`);
+      if (res.statusCode !== 200) {
+        throw new ExecutorCodedError(
+          `Failed to list site resources (HTTP ${String(res.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      return JSON.parse(res.body.toString("utf8")) as T;
+    };
+    const siteLabel = `${MANAGED_DOCKER_LABELS.siteId}=${siteId}`;
+    const all = await listJson<DockerContainerListSummary[]>(
+      "/containers/json?all=true&",
+      siteLabel,
+    );
+    const isJob = (c: DockerContainerListSummary): boolean =>
+      c.Labels?.["io.hostingpanel.role"] === SITE_JOB_ROLE;
+    if (all.some((c) => !isJob(c))) {
+      throw new ExecutorCodedError("The site still has a running service", "RESOURCE_LOCKED");
+    }
+    for (const job of all) {
+      await this.stopAndRemoveContainer(job.Id);
+    }
+
+    const internalNet = getSiteInternalNetworkName(siteId);
+    const edgeNet = getSiteEdgeNetworkName(siteId);
+    await this.disconnectContainerFromNetwork(edgeNet, INGRESS_PROXY_CONTAINER_NAME);
+    await this.disconnectContainerFromNetwork(internalNet, SHARED_DB_CONTAINER_NAME);
+    for (const net of [edgeNet, internalNet]) {
+      await this.deleteIgnoringMissing(`/networks/${encodeURIComponent(net)}`);
+    }
+
+    const volumes = await listJson<{ Volumes: { Name: string }[] | null }>(
+      "/volumes?",
+      siteLabel,
+    );
+    for (const volume of volumes.Volumes ?? []) {
+      await this.deleteIgnoringMissing(`/volumes/${encodeURIComponent(volume.Name)}`);
+    }
+    await this.ingressManager.removeSiteRoutes(siteId);
+  }
+
+  private async deleteIgnoringMissing(endpoint: string): Promise<void> {
+    const res = await this.dockerClient.request("DELETE", endpoint);
+    if (res.statusCode !== 204 && res.statusCode !== 404) {
+      throw new ExecutorCodedError(
+        `Failed to remove site resource (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+  }
+
+  /** Fire-and-forget at start, so the first site is created in seconds rather than minutes. */
+  public async prewarmSiteImages(): Promise<void> {
+    const images = [
+      resolveWordpressImage(DEFAULT_PHP_VERSION),
+      resolveWordpressCliImage(DEFAULT_PHP_VERSION),
+      SHARED_MARIADB_IMAGE,
+    ];
+    for (const image of images) {
+      await this.ensureImageAvailable(image).catch((err: unknown) => {
+        console.warn(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "site_image_prewarm_failed",
+            image,
+            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      });
+    }
+  }
+
+  public async getServiceLogs(serviceInstanceId: string, tail: number): Promise<ReturnType<typeof demuxDockerLogStream>> {
+    assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
+    const summary = await this.findContainerSummaryByServiceId(serviceInstanceId);
+    if (!summary) {
+      throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
+    }
+    const n = Math.min(500, Math.max(1, Math.trunc(tail) || 1));
+    const res = await this.dockerClient.request(
+      "GET",
+      `/containers/${summary.Id}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
+    );
+    if (res.statusCode !== 200) {
+      throw new ExecutorCodedError(
+        `Failed to read service logs (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+    return demuxDockerLogStream(res.body);
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
@@ -1331,6 +1735,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const pullRes = await this.dockerClient.request(
       "POST",
       `/images/create?fromImage=${encodeURIComponent(image)}`,
+      undefined,
+      { timeoutMs: PULL_TIMEOUT_MS },
     );
     if (pullRes.statusCode !== 200) {
       throw new ExecutorCodedError(
@@ -1338,11 +1744,26 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
+    // The Engine answers 200 even when the pull fails; the error is a JSON line in the stream.
+    const failed = pullRes.body
+      .toString("utf8")
+      .split("\n")
+      .some((l) => l.startsWith("{") && /"error"\s*:/.test(l));
+    if (failed) {
+      throw new ExecutorCodedError(
+        "Could not download the site software",
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
   }
 
   private async ensureNetwork(
     networkName: string,
-    options: { readonly internal: boolean; readonly labels: Readonly<Record<string, string>> },
+    options: {
+      readonly internal: boolean;
+      readonly labels: Readonly<Record<string, string>>;
+      readonly subnet?: string;
+    },
   ): Promise<void> {
     const inspectRes = await this.dockerClient.request(
       "GET",
@@ -1358,6 +1779,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       Internal: options.internal,
       CheckDuplicate: true,
       Labels: options.labels,
+      ...(options.subnet ? { IPAM: { Config: [{ Subnet: options.subnet }] } } : {}),
     });
 
     if (createRes.statusCode !== 201 && createRes.statusCode !== 409) {
@@ -1389,32 +1811,37 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
-  private async reconnectProxyToSiteEdgeNetworks(): Promise<void> {
-    const filters = JSON.stringify({ label: ["io.hostingpanel.network_role=site_edge"] });
+  private reconnectProxyToSiteEdgeNetworks(): Promise<void> {
+    return this.reconnectToRoleNetworks("site_edge", INGRESS_PROXY_CONTAINER_NAME);
+  }
+
+  private async reconnectToRoleNetworks(
+    role: "site_edge" | "site_internal",
+    containerRef: string,
+    aliases?: readonly string[],
+  ): Promise<void> {
+    const filters = JSON.stringify({ label: [`io.hostingpanel.network_role=${role}`] });
     const res = await this.dockerClient.request(
       "GET",
       `/networks?filters=${encodeURIComponent(filters)}`,
     );
     if (res.statusCode !== 200) {
       throw new ExecutorCodedError(
-        `Failed to list site edge networks (HTTP ${String(res.statusCode)})`,
+        `Failed to list ${role} networks (HTTP ${String(res.statusCode)})`,
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
     const networks = JSON.parse(res.body.toString("utf8")) as Array<{ readonly Name: string }>;
     for (const network of networks) {
-      const connected = await this.connectContainerToNetwork(
-        network.Name,
-        INGRESS_PROXY_CONTAINER_NAME,
-        undefined,
-        { skipMissingNetwork: true },
-      );
+      const connected = await this.connectContainerToNetwork(network.Name, containerRef, aliases, {
+        skipMissingNetwork: true,
+      });
       if (!connected) {
         // Removed between the list and the connect (site deleted): skip it, keep the rest.
         console.warn(
           JSON.stringify({
             component: "hp-docker-executor",
-            event: "site_edge_network_missing",
+            event: `${role}_network_missing`,
             network: network.Name,
             timestamp: new Date().toISOString(),
           }),
@@ -1520,7 +1947,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
     const rmRes = await this.dockerClient.request(
       "DELETE",
-      `/containers/${encodeURIComponent(containerId)}?force=true`,
+      // v=true drops only anonymous volumes (an image VOLUME); named volumes are never removed.
+      `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
     );
     if (rmRes.statusCode !== 204 && rmRes.statusCode !== 404) {
       throw new ExecutorCodedError(

@@ -134,10 +134,10 @@ Il bootstrap genera anche la chiave di firma JWT (`/etc/hosting-panel/jwt-signin
 
 ### Installazione su un nuovo server
 
-Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
+Requisiti: **minimo 2 GB di RAM** (l'installer avvisa sotto circa 1,8 GB e prosegue). Sistemi supportati: Ubuntu 24.04/26.04 e Debian 12/13 (Node 26, PostgreSQL 18 da PGDG, Traefik 3.7, Docker CE). Scaricare e verificare la release, poi lanciare l'installer:
 
 ```bash
-V=0.2.0
+V=0.3.0
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz
 curl -fsSLO https://github.com/lollinoo/hosting-panel/releases/download/v$V/hosting-panel-$V-linux-x64.tar.gz.sha256
 sha256sum -c hosting-panel-$V-linux-x64.tar.gz.sha256
@@ -154,6 +154,12 @@ Flag di `install.sh`: `--hostname`, `--admin-email`, `--admin-name`, `--acme-ema
 2. **Enrolment TOTP**: al passo 11 l'installer stampa **una sola volta** il segreto TOTP e l'URI `otpauth` dell'amministratore: registrarli subito in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori).
 3. **Backup**: salvare `/etc/hosting-panel` (chiavi e segreti, file `api.env`, `web.env`, `executor.env` con permessi `0400` root). Senza queste chiavi i segreti cifrati non sono recuperabili.
 4. **Salute**: `/health/live` e `/health/ready`.
+
+### Siti WordPress
+
+L'unico tipo di sito creabile è **WordPress**, con PHP `8.3`, `8.4` (predefinita) o `8.5`; la versione si cambia dalla pagina del sito. I clienti creano, avviano/fermano, aggiornano il PHP, leggono i log ed eliminano i propri siti (l'eliminazione chiede di digitare il nome del sito). L'amministratore del server usa la pagina **Siti**: crea un sito per un cliente (o lo tiene a nome della piattaforma), cambia il proprietario e riprova le operazioni fallite; ogni azione è registrata nell'audit come `admin.site.*`.
+
+I siti usano un unico MariaDB di piattaforma (`hp_mariadb`, utente di sistema `hp-mariadb`, riavvio automatico anche senza control plane). Dati: `/var/lib/hosting-panel/mariadb/data` (`0700`). Chiave root: `/etc/hosting-panel/mariadb-root.key` (32 byte, `0440 hp-mariadb:hp-executor`), generata dal bootstrap e **mai rigenerata**: va inclusa nei backup insieme ai dati. L'accesso root è limitato alla subnet `172.30.250.0/24` (modificabile con `HP_MARIADB_ADMIN_SUBNET` in `executor.env`). Dettagli: [ADR 0016](docs/architecture/adr/0016-shared-mariadb-and-site-jobs.md).
 
 #### Aggiornamento
 
@@ -215,6 +221,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0015`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, e `ADR-013..0015`).
+- [Registro delle ADR (`ADR 0001..0016`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` e `ADR-0016` MariaDB condiviso e job dei siti).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

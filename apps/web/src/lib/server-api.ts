@@ -14,6 +14,7 @@ import type {
   OperationDto,
   MeDto,
   AdminUserDto,
+  AdminSitesListDto,
   EncryptedSecretMetadataDto,
   HostTelemetryDto,
   HostDaemonHeartbeatDto,
@@ -124,4 +125,8 @@ export async function fetchServerHostTelemetry(hostId: string): Promise<HostTele
 
 export async function fetchServerAdminUsers(): Promise<AdminUserDto[]> {
   return orEmpty(await serverGet<AdminUserDto[]>("v1/admin/users"));
+}
+
+export async function fetchServerAdminSites(): Promise<AdminSitesListDto | null> {
+  return orNull(await serverGet<AdminSitesListDto>("v1/admin/sites"));
 }

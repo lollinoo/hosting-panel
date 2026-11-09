@@ -53,6 +53,16 @@ panel_proxy_ready() { # <executor.env>
   [[ "$("${docker}" inspect -f '{{.State.Running}}' hp_ingress_proxy 2>/dev/null || true)" == true ]]
 }
 
+# Waits up to <timeout> seconds for container <name> to be running. ${HP_DOCKER_CMD} as above.
+container_running_within() { # <name> <timeout seconds>
+  local deadline=$((SECONDS + $2)) docker=docker
+  ((EUID == 0)) || docker="${HP_DOCKER_CMD:-docker}"
+  until [[ "$("${docker}" inspect -f '{{.State.Running}}' "$1" 2>/dev/null || true)" == true ]]; do
+    ((SECONDS < deadline)) || return 1
+    sleep 3
+  done
+}
+
 # Waits up to <timeout> seconds for the API readiness probe, the web login page, all four
 # panel units active and (panel ingress enabled) hp_ingress_proxy running; gives up early when a
 # unit is dead. ${SYSTEMCTL} (default systemctl) is stubbable in tests.

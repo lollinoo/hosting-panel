@@ -21,12 +21,12 @@ import type { FastifyRequest } from "fastify";
 import { z } from "zod";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { OidcService } from "../auth/oidc.service.js";
+import { requireServerAdmin } from "../auth/server-admin.guard.js";
 import { generateTemporaryPassword, hashPassword } from "../auth/password.js";
 import { resetUserPassword, resetUserTotp } from "../cli/accounts.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 
-const PERMISSION = "platform.users.manage";
 const CUSTOMER_OWNER_ROLE_ID = "role_customer_owner";
 const StatusBody = z.object({ status: z.enum(["active", "disabled"]) });
 
@@ -51,10 +51,8 @@ export class AdminUsersController {
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
   ) {}
 
-  async #guard(req: FastifyRequest, targetId: string | null) {
-    const auth = await this.authz.authenticateRequest(req);
-    await this.authz.requirePlatformPermission(auth, req, PERMISSION, "user", targetId);
-    return auth;
+  #guard(req: FastifyRequest, targetId: string | null) {
+    return requireServerAdmin(this.authz, req, targetId);
   }
 
   async #findUser(userId: string) {

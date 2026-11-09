@@ -1,7 +1,7 @@
 # Active Bounded Operating Contract (`hosting-panel` — Production Hosting Panel)
 
 ## Current Macro Goal (supersedes the Phase 2 goal below)
-Build the **production hosting panel** per `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md` in six ordered steps. **Step 1a (accounts, real login, IT/EN, site-first shell) is in progress** on branch `feat/step-1a-accounts-login`; installer and release packaging (Plan 1b) are built on branch `feat/step-1b-installer-releases`: `install.sh`, `hp-update` (health check + automatic rollback), release build/smoke and the tag-driven `release.yml` workflow, version `0.2.0`. Live acceptance on the owner's VMs is still pending. Owner decisions: `.agents/brain/decisions.md`.
+Build the **production hosting panel** per `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md` in six ordered steps. **Step 1a (accounts, real login, IT/EN, site-first shell) is in progress** on branch `feat/step-1a-accounts-login`; installer and release packaging (Plan 1b) are built on branch `feat/step-1b-installer-releases`: `install.sh`, `hp-update` (health check + automatic rollback), release build/smoke and the tag-driven `release.yml` workflow, version `0.2.0`. Live acceptance on the owner's VMs is still pending. **Step 2a (WordPress sites + shared MariaDB, `ADR-0016`) is implemented on branch `feat/step-2-sites-domains-tls`**: managed-sites and admin/sites APIs, executor site jobs, customer and admin site pages, version `0.3.0`; live acceptance on the owner's VMs pending. Step 2b (domains, ACME TLS; `acmeTlsRuntimeAvailable` flips then) is next. Owner decisions: `.agents/brain/decisions.md`.
 
 ---
 

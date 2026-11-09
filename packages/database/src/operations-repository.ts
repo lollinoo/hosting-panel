@@ -6,12 +6,15 @@ import {
   findPlaintextSecretKeys,
   isTerminalOperationStatus,
   type AuditActorType,
+  type DomainStatus,
   type ErrorCode,
   type HostingMode,
   type OperationKind,
   type OperationResourceType,
   type OperationStatus,
+  type PhpVersion,
   type ServiceDesiredStatus,
+  type SiteStatus,
 } from "@hosting-panel/contracts";
 import {
   buildImmutableStackRevision,
@@ -407,6 +410,9 @@ export interface CreateSiteInput {
   readonly slug: string;
   readonly initialDomain?: string;
   readonly actorId?: string;
+  readonly status?: SiteStatus;
+  readonly phpVersion?: PhpVersion | null;
+  readonly initialDomainStatus?: DomainStatus;
 }
 
 export async function createSiteTransactional(
@@ -442,7 +448,8 @@ export async function createSiteTransactional(
         hostAllocationId: input.hostAllocationId,
         name: input.name,
         slug: input.slug,
-        status: "ready",
+        status: input.status ?? "ready",
+        phpVersion: input.phpVersion ?? null,
       })
       .returning();
 
@@ -457,7 +464,7 @@ export async function createSiteTransactional(
           organizationId: input.organizationId,
           hostname: input.initialDomain,
           isPrimary: true,
-          status: "active",
+          status: input.initialDomainStatus ?? "active",
         })
         .returning();
       domainRecord = dom;

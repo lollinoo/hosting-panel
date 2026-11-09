@@ -27,6 +27,7 @@ import type {
   OperationStepStatus,
   OrganizationStatus,
   PermissionKey,
+  PhpVersion,
   PresetRoleName,
   QuotaReservationStatus,
   ServiceDesiredStatus,
@@ -274,6 +275,7 @@ export const sites = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull(),
     status: text("status").$type<SiteStatus>().notNull().default("ready"),
+    phpVersion: text("php_version").$type<PhpVersion>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -329,7 +331,7 @@ export const serviceInstances = pgTable(
       columns: [t.siteId, t.organizationId],
       foreignColumns: [sites.id, sites.organizationId],
       name: "fk_service_instances_site_org",
-    }).onDelete("cascade"),
+    }).onUpdate("cascade").onDelete("cascade"),
   ],
 );
 
@@ -355,7 +357,7 @@ export const stackRevisions = pgTable(
       columns: [t.serviceInstanceId, t.organizationId],
       foreignColumns: [serviceInstances.id, serviceInstances.organizationId],
       name: "fk_stack_revisions_service_instance_org",
-    }).onDelete("cascade"),
+    }).onUpdate("cascade").onDelete("cascade"),
   ],
 );
 
@@ -416,7 +418,7 @@ export const domains = pgTable(
       columns: [t.siteId, t.organizationId],
       foreignColumns: [sites.id, sites.organizationId],
       name: "fk_domains_site_org",
-    }).onDelete("cascade"),
+    }).onUpdate("cascade").onDelete("cascade"),
   ],
 );
 
@@ -561,7 +563,7 @@ export const encryptedSecrets = pgTable(
       columns: [t.siteId, t.organizationId],
       foreignColumns: [sites.id, sites.organizationId],
       name: "fk_encrypted_secrets_site_org",
-    }).onDelete("cascade"),
+    }).onUpdate("cascade").onDelete("cascade"),
     index("idx_encrypted_secrets_org_site").on(t.organizationId, t.siteId),
   ],
 );
@@ -604,4 +606,27 @@ export const auditEvents = pgTable(
     timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [index("idx_audit_events_org_timestamp").on(t.organizationId, t.timestamp)],
+);
+
+export const siteDatabases = pgTable(
+  "site_databases",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    siteId: text("site_id").notNull(),
+    dbName: text("db_name").notNull().unique(),
+    dbUser: text("db_user").notNull().unique(),
+    passwordSecretId: text("password_secret_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_site_databases_site_org",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+    index("idx_site_databases_site").on(t.organizationId, t.siteId),
+  ],
 );

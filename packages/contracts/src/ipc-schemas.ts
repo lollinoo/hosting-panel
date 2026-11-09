@@ -180,6 +180,26 @@ export type ServiceInstanceActionIpcRequest = z.infer<
   typeof ServiceInstanceActionIpcRequestSchema
 >;
 
+export const SiteJobIpcRequestSchema = z.object({
+  jobId: z.string().min(1).max(128),
+  kind: z.enum(["db.provision", "db.drop", "wordpress.install"]),
+  siteId: z.string().min(1).max(128),
+  organizationId: z.string().min(1).max(128),
+  serviceInstanceId: z.string().min(1).max(128).optional(),
+  params: z.record(z.string(), z.string()),
+  resolvedSecrets: z.record(z.string(), z.string()).optional(),
+});
+export type SiteJobIpcRequest = z.infer<typeof SiteJobIpcRequestSchema>;
+
+export const SitePurgeIpcRequestSchema = z.object({ siteId: z.string().min(1).max(128) });
+export type SitePurgeIpcRequest = z.infer<typeof SitePurgeIpcRequestSchema>;
+
+export const ServiceLogsIpcRequestSchema = z.object({
+  serviceInstanceId: z.string().min(1).max(128),
+  tail: z.number().int().min(1).max(500),
+});
+export type ServiceLogsIpcRequest = z.infer<typeof ServiceLogsIpcRequestSchema>;
+
 export const ObservedServiceStateWireSchema = z.object({
   serviceInstanceId: z.string().min(1).max(128).optional(),
   observedStatus: z.string().min(1),

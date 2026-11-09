@@ -15,6 +15,7 @@ import {
   CreateHostAllocationInputSchema,
   HostMaintenanceInputSchema,
   HostSecurityInputSchema,
+  PLATFORM_OPS_ORG_ID,
   UpdateHostModeInputSchema,
   type AsyncAcceptedEnvelope,
   type HostAllocationDto,
@@ -35,6 +36,7 @@ import {
   hostAllocations,
   hosts,
   listHostAgentHeartbeats,
+  not,
   operationSteps,
   operations,
   organizations,
@@ -64,7 +66,6 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 
-const PLATFORM_OPS_ORG_ID = "org_platform_ops";
 const PLATFORM_OPS_ORG_SLUG = "platform-ops";
 
 const HOST_OPERATION_STEPS = [
@@ -809,6 +810,8 @@ export class HostsController {
         and(
           eq(hostAllocations.hostId, host.id),
           eq(hostAllocations.status, "active"),
+          // The platform-ops allocation only holds unassigned sites; host ops belong to the customer.
+          not(eq(hostAllocations.organizationId, PLATFORM_OPS_ORG_ID)),
         ),
       )
       .limit(1);

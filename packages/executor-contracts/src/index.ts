@@ -9,6 +9,9 @@ export {
   ObservedServiceStateWireSchema,
   PortBindingWireSchema,
   ServiceInstanceActionIpcRequestSchema,
+  ServiceLogsIpcRequestSchema,
+  SiteJobIpcRequestSchema,
+  SitePurgeIpcRequestSchema,
   ServiceVolumeMountWireSchema,
   VOLUME_SUFFIX_PATTERN,
   validateServiceVolumeMount,
@@ -18,5 +21,8 @@ export {
   type ObservedServiceStateWire,
   type PortBindingWire,
   type ServiceInstanceActionIpcRequest,
+  type ServiceLogsIpcRequest,
+  type SiteJobIpcRequest,
+  type SitePurgeIpcRequest,
   type ServiceVolumeMountWire,
 } from "@hosting-panel/contracts";

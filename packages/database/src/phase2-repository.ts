@@ -956,3 +956,20 @@ export async function recordObservedStateReconciliationTransactional(
     };
   });
 }
+
+/** Extends the lease of a live operation; terminal operations are left untouched. */
+export async function renewOperationLease(
+  db: DatabaseExecutor,
+  operationId: string,
+  leaseDurationMs: number,
+): Promise<void> {
+  await db
+    .update(operations)
+    .set({ leaseExpiresAt: new Date(Date.now() + leaseDurationMs), updatedAt: new Date() })
+    .where(
+      and(
+        eq(operations.id, operationId),
+        inArray(operations.status, ["processing", "accepted", "reconciling"]),
+      ),
+    );
+}

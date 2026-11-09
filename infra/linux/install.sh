@@ -24,7 +24,7 @@ is read instead; never put it on a command line (shell history, ps).
 
 Exit codes: 0 ok, 1 step failed, 2 bad arguments (or archive VERSION differs from its file
 name), 3 unsupported OS/architecture or no
-docker-ce/postgresql-18 for this release, 4 checksum failure, 5 health check timeout,
+docker-ce/postgresql-18 for this release or Docker older than 28, 4 checksum failure, 5 health check timeout,
 6 docker0 has no IPv4, 7 SSH is not on port 22 (use --skip-firewall).
 EOF
 }
@@ -98,6 +98,14 @@ panel_bind_address() {
   b="$(docker0_ipv4)"
   [[ -n "${b}" ]] || die 6 "docker0 has no IPv4 address; is Docker running with its default bridge? (refusing to bind the web console to all interfaces)"
   printf '%s\n' "${b}"
+}
+
+# The proxy keeps its default route through GwPriority (O2), which needs Docker Engine API >= 1.48.
+require_docker_api() {
+  local api
+  api="$(docker version --format '{{.Server.APIVersion}}' 2>/dev/null || true)"
+  [[ "$(printf '%s\n1.48\n' "${api:-0}" | sort -V | head -n1)" == "1.48" ]] ||
+    die 3 "Docker Engine API ${api:-unknown} is older than 1.48 (Docker 28); upgrade it: apt-get install --only-upgrade docker-ce docker-ce-cli"
 }
 
 ports_only() { { grep -E '^[0-9]+$' || true; } | sort -un; }
@@ -247,6 +255,12 @@ main() {
   read -r os_id codename <<<"${os}"
   ((dry_run)) || [[ "$(uname -m)" == x86_64 ]] || die 3 "Only x86_64 is supported (release archives are linux-x64)."
   info "Detected ${os_id} ${codename}"
+  # A "2 GB" VPS often reports 1.85-1.95 M kB, hence the 1,800,000 kB threshold; never blocks.
+  local mem_kb
+  mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' "${HP_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null || true)"
+  if [[ "${mem_kb}" =~ ^[0-9]+$ ]] && ((mem_kb < 1800000)); then
+    info "WARNING: this server has $((mem_kb / 1024)) MB of RAM; at least 2 GB is required for WordPress sites and the database. Continuing."
+  fi
   # SSH preflight (R9), done here so a lockout risk stops the install before anything changes.
   if ((skip_firewall)); then
     info "--skip-firewall: the panel firewall will not be installed"
@@ -323,7 +337,7 @@ main() {
   info "repo: ${docker_repo}"
   if ((dry_run)); then
     if pkg_installed docker-ce; then plan "skip: docker-ce already installed"; else plan "would add the repo above and install docker-ce (removing docker.io/podman-docker/containerd/runc if present)"; fi
-    plan "systemctl enable --now docker"
+    plan "systemctl enable --now docker; require Docker Engine API >= 1.48"
   else
     if ! pkg_installed docker-ce; then
       local p remove=()
@@ -338,6 +352,7 @@ main() {
       info "docker-ce already installed"
     fi
     systemctl enable --now docker
+    require_docker_api
   fi
 
   # ---------------------------------------------------------------- 4
@@ -553,12 +568,15 @@ EOF
   if ((dry_run)); then
     plan "would systemctl enable + restart ${units[*]}"
     plan "would wait up to 90 s for http://127.0.0.1:4000/health/ready, http://<docker0 IPv4>:3000/login and hp_ingress_proxy running"
+    plan "would wait up to 300 s for hp_mariadb running (first start downloads the database image)"
   else
     systemctl enable "${units[@]}"
     # restart (not just --now) so a rerun picks up the new release and env values.
     systemctl restart "${units[@]}"
     panel_health_check "${bind}" 90 "${STATE_DIR}/executor.env" || die 5 "Health check failed (timeout 90 s). Inspect: journalctl -u hp-host-agent -u hp-docker-executor -u hp-api -u hp-web -n 100"
     info "All panel services (API, web console, host agent, executor, ingress proxy) are healthy"
+    container_running_within hp_mariadb 300 || die 5 "The shared database (hp_mariadb) is not running after 300 s. Inspect: journalctl -u hp-docker-executor -n 100 and docker logs hp_mariadb"
+    info "Shared database (hp_mariadb) is running"
   fi
 
   STEP=0
@@ -601,6 +619,8 @@ EOF
 #      esse i dati cifrati e i backup non sono recuperabili.                 #
 #  !!! EN: Back up /etc/hosting-panel (keys) now — without them encrypted    #
 #      data and backups cannot be recovered.                                 #
+#      ipc.key, secrets-master.key, breakglass-jwt.key, jwt-signing.pem,     #
+#      mariadb-root.key                                                      #
 ##############################################################################
 EOF
 }

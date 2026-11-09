@@ -599,6 +599,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
           updatedAt: SAMPLE_TIMESTAMP,
         },
       ],
+      phpVersion: null,
       driftSummary: {
         totalServices: 1,
         inSyncCount: 1,

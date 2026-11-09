@@ -38,4 +38,9 @@ describe("i18n", () => {
     expect(errorMessage(en, "NOPE")).toBe(en.errors.generic);
     expect(errorMessage(en, "ACCOUNT_LOCKED")).toBe(en.errors.ACCOUNT_LOCKED);
   });
+
+  it("RESOURCE_LOCKED says the site is busy and to try again (O6)", () => {
+    expect(errorMessage(en, "RESOURCE_LOCKED")).toBe("This site is finishing another change. Try again in a moment.");
+    expect(errorMessage(itMsgs, "RESOURCE_LOCKED")).toBe("Il sito sta completando un'altra modifica. Riprova tra qualche istante.");
+  });
 });

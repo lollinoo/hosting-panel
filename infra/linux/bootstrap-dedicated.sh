@@ -130,16 +130,17 @@ fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would ensure system group: hp-ipc"
-  log_dry "Would ensure system users (${NOLOGIN_SHELL}): hp-web, hp-api (hp-ipc), hp-executor (docker,hp-ipc), hp-agent (hp-ipc)"
+  log_dry "Would ensure system users (${NOLOGIN_SHELL}): hp-web, hp-api (hp-ipc), hp-executor (docker,hp-ipc), hp-agent (hp-ipc), hp-mariadb (no supplementary groups)"
   log_dry "Would ensure directory /etc/hosting-panel (0750 root:hp-ipc)"
   log_dry "Would install /etc/hosting-panel/nftables-dedicated.conf (0640 root:hp-ipc)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/ipc.key (0440 root:hp-ipc)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/secrets-master.key (0400 hp-api:root)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
   log_dry "Would idempotently generate RSA-3072 JWT signing key /etc/hosting-panel/jwt-signing.pem (0400 hp-api:root)"
+  log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/mariadb-root.key (0440 hp-mariadb:hp-executor)"
   log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
   log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass and /usr/local/sbin/hp-update (0750 root:root)"
-  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor)"
+  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb)"
   log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
@@ -190,6 +191,8 @@ ensure_system_user "hp-web" ""
 ensure_system_user "hp-api" "hp-ipc"
 ensure_system_user "hp-executor" "docker,hp-ipc"
 ensure_system_user "hp-agent" "hp-ipc"
+# Owns the shared MariaDB data dir and runs hp_mariadb (container User); never in docker.
+ensure_system_user "hp-mariadb" ""
 
 # 7. Provision /etc/hosting-panel & idempotent cryptographic keys
 install -d -m 0750 -o root -g hp-ipc /etc/hosting-panel
@@ -258,6 +261,22 @@ else
   log_info "Preserved existing JWT signing key at ${JWT_KEY_PATH} (0400)"
 fi
 
+# Readable by MariaDB (owner) and by the executor's setup jobs (group).
+MARIADB_ROOT_KEY_PATH="/etc/hosting-panel/mariadb-root.key"
+if [[ ! -s "${MARIADB_ROOT_KEY_PATH}" ]]; then
+  tmp_db_key="$(mktemp /etc/hosting-panel/.mariadb-root.key.XXXXXX)"
+  chmod 0400 "${tmp_db_key}"
+  printf '%s' "$(generate_32_byte_hex_key)" > "${tmp_db_key}"
+  chown hp-mariadb:hp-executor "${tmp_db_key}"
+  chmod 0440 "${tmp_db_key}"
+  mv -f "${tmp_db_key}" "${MARIADB_ROOT_KEY_PATH}"
+  log_info "Generated new 32-byte MariaDB root key at ${MARIADB_ROOT_KEY_PATH}"
+else
+  chown hp-mariadb:hp-executor "${MARIADB_ROOT_KEY_PATH}"
+  chmod 0440 "${MARIADB_ROOT_KEY_PATH}"
+  log_info "Preserved existing MariaDB root key at ${MARIADB_ROOT_KEY_PATH} (0440)"
+fi
+
 # Per-service env files (0400 root:root; systemd reads them as root). Created only if absent, from a temp file.
 write_env_file() {
   local path="$1" content="$2" tmp
@@ -296,6 +315,8 @@ install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/stati
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/dynamic
 install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/acme
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/sites
+install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/mariadb
+install -d -m 0700 -o hp-mariadb -g hp-mariadb /var/lib/hosting-panel/mariadb/data
 
 install -m 0644 -o root -g root "${SYSTEMD_SRC_DIR}/hosting-panel-tmpfiles.conf" /etc/tmpfiles.d/hosting-panel.conf
 install -d -m 3770 -o root -g hp-ipc /run/hosting-panel

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { Check, ChevronDown, CircleUser, LogOut, UserCog } from "lucide-react";
+import { Check, ChevronDown, CircleUser, LogOut, Plus, UserCog } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -43,6 +43,13 @@ function SiteSwitcher({ sites }: { sites: SiteLink[] }) {
             </Link>
           </DropdownMenuItem>
         ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuItem asChild>
+          <Link href="/sites/new">
+            <Plus aria-hidden className="h-4 w-4" />
+            {m.shell.newSite}
+          </Link>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

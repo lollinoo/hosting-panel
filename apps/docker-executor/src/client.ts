@@ -11,11 +11,17 @@ import {
   type IpcSigningKey,
   type ObservedServiceStateWire,
   type ServiceInstanceActionIpcRequest,
+  type ServiceLogsIpcRequest,
+  type SiteJobIpcRequest,
+  type SitePurgeIpcRequest,
 } from "@hosting-panel/contracts";
 import type {
   ApprovedServiceSpec,
   DockerExecutionResult,
   DockerExecutorPort,
+  ServiceLogLine,
+  SiteJobRequest,
+  SiteJobResult,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
 import {
@@ -43,6 +49,29 @@ const ExecutionResultDataEnvelopeSchema = z.object({
     ingressConfigured: z.boolean().optional(),
   }),
 });
+
+const SiteJobResultDataEnvelopeSchema = z.object({
+  data: z.object({
+    jobId: z.string().min(1),
+    exitCode: z.number().int(),
+    outputTail: z.string(),
+  }),
+});
+
+const ServiceLogsDataEnvelopeSchema = z.object({
+  data: z.array(
+    z.object({
+      at: z.string().nullable(),
+      stream: z.enum(["stdout", "stderr"]),
+      text: z.string(),
+    }),
+  ),
+});
+
+/** Per-call budgets, each above the executor's own worst case for that call. */
+export const DEPLOY_TIMEOUT_MS = 300_000;
+export const SITE_JOB_TIMEOUT_MS = 510_000;
+export const SITE_PURGE_TIMEOUT_MS = 120_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -92,6 +121,8 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   private readonly socketPath?: string;
   private readonly port?: number;
   private readonly timeoutMs: number;
+  /** An explicit constructor timeout wins over the per-call budgets (tests, tuning). */
+  private readonly timeoutOverrideMs?: number;
 
   public constructor(options: SignedDockerExecutorIpcClientOptions) {
     const transport = options.transport ?? "uds";
@@ -149,6 +180,9 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     this.transport = transport;
     this.signingKey = options.signingKey;
     this.timeoutMs = options.timeoutMs ?? 35_000;
+    if (options.timeoutMs !== undefined) {
+      this.timeoutOverrideMs = options.timeoutMs;
+    }
     this.isRuntimeAvailable = options.isRuntimeAvailable ?? true;
   }
 
@@ -201,8 +235,48 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       } as DeployServiceIpcRequest["spec"],
     };
 
-    const json = await this.sendSignedJsonRequest("POST", "/v1/services/deploy", payload);
+    const json = await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/services/deploy",
+      payload,
+      DEPLOY_TIMEOUT_MS,
+    );
     return ExecutionResultDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
+    const payload: SiteJobIpcRequest = {
+      jobId: req.jobId,
+      kind: req.kind,
+      siteId: req.siteId,
+      organizationId: req.organizationId,
+      ...(req.serviceInstanceId !== undefined ? { serviceInstanceId: req.serviceInstanceId } : {}),
+      params: { ...req.params },
+      ...(req.resolvedSecrets !== undefined ? { resolvedSecrets: { ...req.resolvedSecrets } } : {}),
+    };
+    const json = await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/jobs/run",
+      payload,
+      SITE_JOB_TIMEOUT_MS,
+    );
+    return SiteJobResultDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async purgeSite(siteId: string): Promise<void> {
+    assertSafeIdentifier(siteId, "siteId");
+    const payload: SitePurgeIpcRequest = { siteId };
+    await this.sendSignedJsonRequest("POST", "/v1/sites/purge", payload, SITE_PURGE_TIMEOUT_MS);
+  }
+
+  public async getServiceLogs(
+    serviceInstanceId: string,
+    tail: number,
+  ): Promise<readonly ServiceLogLine[]> {
+    assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
+    const payload: ServiceLogsIpcRequest = { serviceInstanceId, tail };
+    const json = await this.sendSignedJsonRequest("POST", "/v1/services/logs", payload);
+    return ServiceLogsDataEnvelopeSchema.parse(json).data;
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
@@ -243,6 +317,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     method: "GET" | "POST",
     pathWithQuery: string,
     bodyObject?: unknown,
+    perCallTimeoutMs?: number,
   ): Promise<unknown> {
     const bodyBuffer =
       bodyObject !== undefined ? Buffer.from(JSON.stringify(bodyObject), "utf8") : undefined;
@@ -288,14 +363,14 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
               path: pathWithQuery,
               method,
               headers,
-              timeout: this.timeoutMs,
+              timeout: this.timeoutOverrideMs ?? perCallTimeoutMs ?? this.timeoutMs,
             }
           : {
               socketPath: this.socketPath,
               path: pathWithQuery,
               method,
               headers,
-              timeout: this.timeoutMs,
+              timeout: this.timeoutOverrideMs ?? perCallTimeoutMs ?? this.timeoutMs,
             };
 
       const req = http.request(requestOptions, (res) => {

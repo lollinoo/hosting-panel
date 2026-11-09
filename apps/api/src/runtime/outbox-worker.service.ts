@@ -1,13 +1,12 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
   ERROR_CODES,
-  SECRET_KEY_PATTERN,
   canTransitionOperation,
   isTerminalOperationStatus,
   redactSensitiveString,
   type ErrorCode,
+  type OperationKind,
   type OperationStepStatus,
-  type ServiceVolumeMountSpec,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -15,32 +14,24 @@ import {
   asc,
   claimPendingOutboxEvents,
   completeOutboxEvent,
-  desc,
-  domains,
   eq,
   failOutboxEvent,
   inArray,
-  listEncryptedSecretsMetadata,
   markExpiredOperationsUnknownTransactional,
   operationSteps,
   operations,
   outboxEvents,
   rebindDockerResourceTransactional,
   recordObservedStateReconciliationTransactional,
-  resolveDecryptedSecretRefs,
+  renewOperationLease,
   serviceInstances,
-  serviceTemplates,
   sites,
   stackRevisions,
   transitionOperation,
   updateOperationStepTransactional,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import {
-  createApprovedServiceSpec,
-  type DockerExecutorPort,
-  type PortBinding,
-} from "@hosting-panel/executor-contracts";
+import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import {
   createApprovedHostMaintenanceCommand,
   createApprovedHostSecurityCommand,
@@ -57,16 +48,21 @@ import {
   HOST_AGENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
+import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
-
-const STRUCTURED_CONFIG_KEYS: ReadonlySet<string> = new Set([
-  "image",
-  "internalPort",
-  "exposeHttp",
-  "pidsLimit",
-  "volumeMounts",
-  "portBindings",
+const DEPLOY_LEASE_MS = 6 * 60_000;
+const SITE_ACTION_FAILED = "This action did not finish. Try again in a few minutes.";
+const SITE_STEP_TEXT: Readonly<Record<string, string>> = {
+  validate_spec: "Request checked",
+  dispatch_ipc: "Change applied",
+  reconcile_state: "Site is up to date",
+};
+const SITE_OPERATION_KINDS: ReadonlySet<OperationKind> = new Set([
+  "site.provision",
+  "site.delete",
+  "site.reassign",
 ]);
 
 export interface OutboxProcessResult {
@@ -106,11 +102,6 @@ function extractRestartCount(obs: unknown): number {
   return 0;
 }
 
-function sanitizeContainerIdentifier(serviceInstanceId: string): string {
-  const cleaned = serviceInstanceId.replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `hp_svc_${cleaned}`.slice(0, 120);
-}
-
 @Injectable()
 export class OutboxWorkerService {
   #stopped = false;
@@ -125,6 +116,7 @@ export class OutboxWorkerService {
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
     @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
+    @Inject(SiteProvisioner) private readonly siteProvisioner: SiteProvisioner,
   ) {}
 
   public startBackgroundLoop(): void {
@@ -271,6 +263,9 @@ export class OutboxWorkerService {
       return "skipped";
     }
 
+    // Operations on a managed site are shown to customers: fixed friendly step texts only.
+    const siteOp = op.lockKey?.startsWith("site:") === true;
+    if (siteOp) this.#siteOperationIds.add(op.id);
     try {
       await transitionOperation(db, op.id, "processing");
       await this.#safeUpdateStep(
@@ -288,6 +283,12 @@ export class OutboxWorkerService {
         await this.#executeHostMaintenance(op, payload);
       } else if (op.kind === "host.security") {
         await this.#executeHostSecurity(op, payload);
+      } else if (op.kind === "site.provision") {
+        await this.siteProvisioner.provision(op, payload);
+      } else if (op.kind === "site.delete") {
+        await this.siteProvisioner.remove(op);
+      } else if (op.kind === "site.reassign") {
+        await this.siteProvisioner.reassign(op, payload);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -350,7 +351,8 @@ export class OutboxWorkerService {
         return "failed";
       }
 
-      await this.#failRemainingSteps(op.id, sanitizedMessage);
+      const stepMessage = siteOp ? SITE_ACTION_FAILED : sanitizedMessage;
+      await this.#failRemainingSteps(op.id, stepMessage);
 
       if (
         latestOp &&
@@ -359,12 +361,14 @@ export class OutboxWorkerService {
       ) {
         await transitionOperation(db, op.id, "failed", {
           errorCode,
-          errorMessage: sanitizedMessage,
+          errorMessage: stepMessage,
         });
       }
 
       await failOutboxEvent(db, event.id, sanitizedMessage);
       return "failed";
+    } finally {
+      this.#siteOperationIds.delete(op.id);
     }
   }
 
@@ -377,212 +381,17 @@ export class OutboxWorkerService {
     }
 
     const db = this.dbClient.db;
-    const [svc] = await db
-      .select()
-      .from(serviceInstances)
-      .where(
-        and(
-          eq(serviceInstances.id, op.resourceId),
-          eq(serviceInstances.organizationId, op.organizationId),
-        ),
-      )
-      .limit(1);
-
-    if (!svc) {
-      throw new ControlPlaneError(
-        "NOT_FOUND",
-        `Service instance '${op.resourceId}' not found`,
-      );
-    }
-
-    const [site] = await db
-      .select()
-      .from(sites)
-      .where(and(eq(sites.id, svc.siteId), eq(sites.organizationId, op.organizationId)))
-      .limit(1);
-
-    if (!site) {
-      throw new ControlPlaneError("NOT_FOUND", `Site '${svc.siteId}' not found`);
-    }
-
-    const [tpl] = await db
-      .select()
-      .from(serviceTemplates)
-      .where(eq(serviceTemplates.id, svc.serviceTemplateId))
-      .limit(1);
-
-    if (!tpl) {
-      throw new ControlPlaneError(
-        "NOT_FOUND",
-        `Service template '${svc.serviceTemplateId}' not found`,
-      );
-    }
-
-    const [rev] = svc.currentRevisionId
-      ? await db
-          .select()
-          .from(stackRevisions)
-          .where(eq(stackRevisions.id, svc.currentRevisionId))
-          .limit(1)
-      : await db
-          .select()
-          .from(stackRevisions)
-          .where(eq(stackRevisions.serviceInstanceId, svc.id))
-          .orderBy(desc(stackRevisions.revisionNumber))
-          .limit(1);
-
-    if (!rev) {
-      throw new ControlPlaneError(
-        "NOT_FOUND",
-        `Stack revision for service '${svc.id}' not found`,
-      );
-    }
-
-    const activeDomains = await db
-      .select()
-      .from(domains)
-      .where(
-        and(
-          eq(domains.siteId, site.id),
-          eq(domains.organizationId, op.organizationId),
-          eq(domains.status, "active"),
-        ),
-      )
-      .orderBy(asc(domains.hostname));
-
-    const domainHostnames = activeDomains.map((d) => d.hostname);
-
-    const rawSecretRefs = (rev.secretRefs ?? {}) as Record<string, string>;
-    let resolvedSecrets: Readonly<Record<string, string>> | undefined;
-
-    if (Object.keys(rawSecretRefs).length > 0) {
-      const metadataRows = await listEncryptedSecretsMetadata(db, {
-        organizationId: op.organizationId,
-        siteId: site.id,
-        includeOrganizationScope: true,
-      });
-      const knownRefs = new Set<string>();
-      for (const row of metadataRows) {
-        knownRefs.add(row.id);
-        knownRefs.add(row.secretKey);
-      }
-
-      const refsToResolve: Record<string, string> = {};
-      for (const [envVarName, refValue] of Object.entries(rawSecretRefs)) {
-        if (refValue.startsWith("vault://")) {
-          if (knownRefs.has(refValue)) {
-            refsToResolve[envVarName] = refValue;
-          } else if (knownRefs.has(envVarName)) {
-            // Map Phase 1 demo vault:// placeholder to the encrypted secret matching envVarName
-            refsToResolve[envVarName] = envVarName;
-          }
-          // Otherwise skip legacy Phase 1 demo placeholder with no backing encrypted_secrets row
-          continue;
-        }
-        refsToResolve[envVarName] = refValue;
-      }
-
-      if (Object.keys(refsToResolve).length > 0) {
-        resolvedSecrets = await resolveDecryptedSecretRefs(db, {
-          organizationId: op.organizationId,
-          siteId: site.id,
-          secretRefs: refsToResolve,
-          masterKey: this.config.secretsMasterKey,
-        });
-      }
-    }
-
-    const cfg = (rev.declarativeConfig ?? {}) as Record<string, unknown>;
-    const secretEnvNames = new Set(Object.keys(resolvedSecrets ?? {}));
-    const secretFileNames = new Set(
-      Array.from(secretEnvNames, (envName) => `${envName}_FILE`),
-    );
-
-    const env: Record<string, string> = {};
-    for (const [key, value] of Object.entries(cfg)) {
-      if (
-        STRUCTURED_CONFIG_KEYS.has(key) ||
-        secretEnvNames.has(key) ||
-        secretFileNames.has(key) ||
-        !SECRET_KEY_PATTERN.test(key)
-      ) {
-        continue;
-      }
-      if (
-        typeof value === "string" ||
-        typeof value === "number" ||
-        typeof value === "boolean"
-      ) {
-        env[key] = String(value);
-      }
-    }
-
-    const image =
-      typeof cfg["image"] === "string" && cfg["image"].trim().length > 0
-        ? cfg["image"].trim()
-        : tpl.defaultImage;
-
-    const rawPort = cfg["internalPort"] ?? cfg["PORT"] ?? cfg["port"] ?? tpl.defaultPort ?? 80;
-    const parsedPort =
-      typeof rawPort === "number"
-        ? rawPort
-        : typeof rawPort === "string" && /^\d+$/.test(rawPort.trim())
-          ? Number.parseInt(rawPort.trim(), 10)
-          : tpl.defaultPort || 80;
-
-    const isInternalBackingCategory =
-      tpl.category === "database" || tpl.category === "cache";
-    const exposeHttp =
-      typeof cfg["exposeHttp"] === "boolean"
-        ? cfg["exposeHttp"]
-        : !isInternalBackingCategory &&
-          Boolean(domainHostnames.length > 0 || (tpl.defaultPort ?? 0) > 0);
-
-    const pidsLimit =
-      typeof cfg["pidsLimit"] === "number" ? cfg["pidsLimit"] : undefined;
-
-    const volumeMounts = Array.isArray(cfg["volumeMounts"])
-      ? (cfg["volumeMounts"] as ServiceVolumeMountSpec[])
-      : undefined;
-
-    const portBindings = Array.isArray(cfg["portBindings"])
-      ? (cfg["portBindings"] as PortBinding[])
-      : undefined;
-
-    const resourceLimits = (rev.resourceLimits as
-      | { cpuMilli: number; memoryBytes: string }
-      | null
-      | undefined) ?? {
-      cpuMilli: tpl.minCpuMilli,
-      memoryBytes: String(tpl.minMemoryBytes),
-    };
-
-    const spec = createApprovedServiceSpec({
-      serviceInstanceId: svc.id,
-      siteId: site.id,
+    const spec = await buildApprovedServiceSpec(db, this.config, {
       organizationId: op.organizationId,
-      image,
-      containerName: sanitizeContainerIdentifier(svc.id),
-      env,
-      ...(portBindings ? { portBindings } : {}),
-      resourceLimits,
-      revisionNumber: rev.revisionNumber,
-      specHash: rev.specHash,
-      domains: exposeHttp ? domainHostnames : [],
-      exposeHttp,
-      internalPort: parsedPort,
-      ...(pidsLimit !== undefined ? { pidsLimit } : {}),
-      ...(volumeMounts !== undefined ? { volumeMounts } : {}),
-      ...(resolvedSecrets && Object.keys(resolvedSecrets).length > 0
-        ? { resolvedSecrets }
-        : {}),
+      serviceInstanceId: op.resourceId,
     });
+    const revisionNumber = spec.revisionNumber ?? 0;
 
     await this.#safeUpdateStep(
       op.id,
       "validate_spec",
       "succeeded",
-      `Validated revision #${String(rev.revisionNumber)} specification`,
+      `Validated revision #${String(revisionNumber)} specification`,
     );
     await this.#safeUpdateStep(
       op.id,
@@ -591,6 +400,8 @@ export class OutboxWorkerService {
       "Dispatching signed deploy request to docker-executor",
     );
 
+    // An image pull can outlive the 60 s claim lease.
+    await renewOperationLease(db, op.id, DEPLOY_LEASE_MS);
     const execResult = await this.dockerExecutor.deployService(spec);
 
     await transitionOperation(db, op.id, "accepted");
@@ -609,27 +420,7 @@ export class OutboxWorkerService {
       "Verifying observed container state",
     );
 
-    const obs = await this.dockerExecutor.getObservedState(svc.id);
-    const observedStatus = obs?.observedStatus ?? execResult.containerStatus ?? "running";
-    const dockerRef =
-      execResult.internalDockerRef ??
-      (obs as { internalDockerRef?: string } | null)?.internalDockerRef;
-
-    if (dockerRef) {
-      await rebindDockerResourceTransactional(db, svc.id, dockerRef, observedStatus);
-    }
-
-    await recordObservedStateReconciliationTransactional(db, {
-      serviceInstanceId: svc.id,
-      observedStatus,
-      observedRevisionHash: obs?.observedRevisionHash ?? rev.specHash,
-      outOfBandModified: Boolean(obs?.outOfBandModified),
-      rawState: {
-        restartCount: extractRestartCount(obs),
-        ingressConfigured: Boolean(execResult.ingressConfigured),
-      },
-      observedAt: obs?.observedAt ? new Date(obs.observedAt) : new Date(),
-    });
+    const observedStatus = await recordDeployedState(db, this.dockerExecutor, spec, execResult);
 
     await this.#safeUpdateStep(
       op.id,
@@ -648,12 +439,12 @@ export class OutboxWorkerService {
       organizationId: op.organizationId,
       action: "service.deploy.succeeded",
       targetType: "service_instance",
-      targetId: svc.id,
+      targetId: spec.serviceInstanceId,
       details: {
         operationId: op.id,
-        siteId: site.id,
-        revisionNumber: rev.revisionNumber,
-        specHash: rev.specHash,
+        siteId: spec.siteId,
+        revisionNumber,
+        specHash: spec.specHash,
       },
     });
   }
@@ -941,7 +732,15 @@ export class OutboxWorkerService {
     let convergedFailed = 0;
 
     for (const op of unknownOps) {
-      if (
+      if (SITE_OPERATION_KINDS.has(op.kind)) {
+        // Site steps are not safely replayable mid-way: fail and let the customer retry.
+        await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");
+        await db
+          .update(sites)
+          .set({ status: "degraded", updatedAt: now })
+          .where(eq(sites.id, op.resourceId));
+        convergedFailed += 1;
+      } else if (
         op.kind === "service.deploy" ||
         op.kind === "service.restart" ||
         op.kind === "service.stop"
@@ -1123,12 +922,22 @@ export class OutboxWorkerService {
     }
   }
 
+  readonly #siteOperationIds = new Set<string>();
+
   async #safeUpdateStep(
     operationId: string,
     stepKey: string,
     status: OperationStepStatus,
     message?: string,
   ): Promise<void> {
+    if (this.#siteOperationIds.has(operationId)) {
+      message =
+        status === "succeeded"
+          ? (SITE_STEP_TEXT[stepKey] ?? "Done")
+          : status === "running"
+            ? "In progress"
+            : "Could not finish this step";
+    }
     try {
       await updateOperationStepTransactional(
         this.dbClient.db,
