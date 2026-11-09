@@ -350,6 +350,7 @@ export const MailRelayStatusReportWireSchema = z.object({
   sentCount: z.number().int().nonnegative(),
   failures: z.array(MailFailureDtoSchema).max(50),
 });
+export type MailRelayStatusReport = z.infer<typeof MailRelayStatusReportWireSchema>;
 
 export const MailTestIpcRequestSchema = z.object({ to: z.string().email(), from: z.string().email() });
 export const MailTestIpcResponseSchema = MailTestResultDtoSchema;

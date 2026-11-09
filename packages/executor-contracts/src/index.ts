@@ -33,4 +33,5 @@ export {
   type ServiceVolumeMountWire,
 } from "@hosting-panel/contracts";
 export * from "./acme-status.js";
+export * from "./mail-relay.js";
 export type { SiteHostRoute } from "@hosting-panel/contracts";

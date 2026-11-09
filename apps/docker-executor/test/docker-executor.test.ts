@@ -1739,3 +1739,169 @@ describe("site mail wiring", () => {
     });
   });
 });
+
+describe("mail relay IPC", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const config = {
+    host: "smtp.provider.example",
+    port: 587 as const,
+    username: "user@provider.example",
+    password: "Pa:ss#w0rd inner",
+    senderDomain: "mail.hostingco.it",
+  };
+
+  async function serve(executor: ConstructorParameters<typeof DockerExecutorIpcServer>[0]["executor"]) {
+    const server = new DockerExecutorIpcServer({
+      executor,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+    const raw = async (pathname: string, body: unknown) => {
+      const text = JSON.stringify(body);
+      const headers = signIpcRequest({
+        method: "POST",
+        pathWithQuery: pathname,
+        body: text,
+        key: HMAC_SIGNING_KEY,
+        nonce: randomBytes(8).toString("hex"),
+      });
+      const res = await fetch(`http://127.0.0.1:${String(bound.port)}${pathname}`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: text,
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    return { client, raw };
+  }
+
+  it("mail relay apply goes through the signed IPC and reaches the adapter", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client } = await serve(simulator);
+    await client.applyMailRelay(config);
+    expect(simulator.mailRelay).toEqual({ ...config });
+    await client.applyMailRelay(null);
+    expect(simulator.mailRelay).toBeNull();
+    expect(simulator.mailRelayApplies).toEqual([{ ...config }, null]);
+  });
+
+  it("apply IPC rejects a password with a newline before the adapter runs", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { raw } = await serve(simulator);
+    const res = await raw("/v1/mail-relay/apply", { config: { ...config, password: "canary\nline" } });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.text).error.code).toBe("VALIDATION_ERROR");
+    expect(res.text).not.toContain("canary");
+    expect(simulator.mailRelayApplies).toEqual([]);
+  });
+
+  it("status rejects a bad since with a 400", async () => {
+    const { raw } = await serve(new InMemoryDockerSimulatorAdapter());
+    const res = await raw("/v1/mail-relay/status", { since: "not-a-date" });
+    expect(res.status).toBe(400);
+  });
+
+  it("a failed apply never leaks the password in the IPC error or on the console", async () => {
+    const canary = "canary-ipc-pw";
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-mail-ipc-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => daemon.close());
+    daemon.failCreates.remaining = 5;
+    const secretDir = path.join(tmp, "mail-relay");
+    await mkdir(secretDir);
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      pullMissingImages: false,
+      mailRelaySecretDir: secretDir,
+      mailRelayFlushWaitMs: 50,
+    });
+    const { client, raw } = await serve(adapter);
+    const captured: string[] = [];
+    const grab = (...args: unknown[]): boolean => {
+      captured.push(args.map(String).join(" "));
+      return true;
+    };
+    vi.spyOn(console, "log").mockImplementation(grab);
+    vi.spyOn(console, "error").mockImplementation(grab);
+    vi.spyOn(console, "warn").mockImplementation(grab);
+    vi.spyOn(process.stdout, "write").mockImplementation(grab);
+
+    const body = { config: { ...config, password: canary } };
+    const err = await client.applyMailRelay(body.config).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String((err as Error).message) + JSON.stringify(err)).not.toContain(canary);
+    const res = await raw("/v1/mail-relay/apply", body);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.text).not.toContain(canary);
+    expect(captured.join("\n")).not.toContain(canary);
+  });
+
+  it("status and test round-trip their wire schemas", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client } = await serve(simulator);
+    expect(await client.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" })).toEqual({
+      present: false,
+      running: false,
+      sentCount: 0,
+      failures: [],
+    });
+    await client.applyMailRelay(config);
+    await client.sendTestMail({ to: "guest@example.it", from: "noreply@mail.hostingco.it" });
+    expect(await client.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" })).toMatchObject({
+      present: true,
+      running: true,
+      sentCount: 1,
+    });
+    simulator.nextTestMailResult = { outcome: "deferred", problem: "auth_failed", detail: "535" };
+    expect(await client.sendTestMail({ to: "guest@example.it", from: "noreply@mail.hostingco.it" })).toEqual({
+      outcome: "deferred",
+      problem: "auth_failed",
+      detail: "535",
+    });
+  });
+
+  it("client uses 300 s for mail apply and 35 s for status and test", async () => {
+    const { client } = await serve(new InMemoryDockerSimulatorAdapter());
+    const timeouts: Array<number | undefined> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    await client.applyMailRelay(null).catch(() => undefined);
+    await client.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" }).catch(() => undefined);
+    await client.sendTestMail({ to: "a@b.it", from: "c@d.it" }).catch(() => undefined);
+    expect(timeouts).toEqual([300_000, 35_000, 35_000]);
+  });
+
+  it("simulator keeps siteMail on deployed specs", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    await simulator.deployService(
+      createApprovedServiceSpec({
+        serviceInstanceId: "svc_m",
+        siteId: "site_m",
+        organizationId: "org_m",
+        image: "nginx:1.27-alpine",
+        containerName: "hp-m",
+        siteMail: true,
+      }),
+    );
+    expect(simulator.deployedSpecs[0]?.siteMail).toBe(true);
+  });
+});

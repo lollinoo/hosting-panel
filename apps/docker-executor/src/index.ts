@@ -73,6 +73,8 @@ export {
   InMemoryDockerSimulatorAdapter,
   type InMemoryDockerSimulatorAdapterOptions,
   type OutOfBandMutationInput,
+  type SimulatedMailDelivery,
+  type SimulatedMailRelayState,
 } from "./simulator-adapter.js";
 
 export {

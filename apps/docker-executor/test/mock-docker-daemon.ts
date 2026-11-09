@@ -43,6 +43,8 @@ export interface MockDockerDaemon {
   readonly execCalls: Array<{ container: string; Cmd: string[] }>;
   /** The next `remaining` container restarts answer 500 (or drop the socket with `drop`). */
   readonly failRestarts: { remaining: number; drop?: boolean };
+  /** The next `remaining` container creates answer 500. */
+  readonly failCreates: { remaining: number };
   close(): Promise<void>;
 }
 
@@ -81,6 +83,7 @@ export async function startMockDockerDaemon(options?: {
   const requestedPaths: string[] = [];
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
   const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
+  const failCreates = { remaining: 0 };
   let seq = 1;
 
   const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
@@ -354,6 +357,13 @@ export async function startMockDockerDaemon(options?: {
         return;
       }
 
+      if (method === "POST" && routePath === "/containers/create" && failCreates.remaining > 0) {
+        failCreates.remaining -= 1;
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "create failed" }));
+        return;
+      }
+
       if (method === "POST" && routePath === "/containers/create") {
         const name = parsedUrl.searchParams.get("name") ?? `ctr_${String(seq)}`;
         const payload = JSON.parse(bodyStr) as {
@@ -493,6 +503,7 @@ export async function startMockDockerDaemon(options?: {
     requestedPaths,
     execCalls,
     failRestarts,
+    failCreates,
     async close() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

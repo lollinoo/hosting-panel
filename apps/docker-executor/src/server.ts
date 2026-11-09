@@ -10,6 +10,9 @@ import {
   ErrorCodeSchema,
   ExecutorHealthResponseSchema,
   IpcNonceReplayCache,
+  MailRelayApplyIpcRequestSchema,
+  MailRelayStatusIpcRequestSchema,
+  MailTestIpcRequestSchema,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
   ServiceLogsIpcRequestSchema,
@@ -471,6 +474,25 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/ingress/certificates") {
         const req = this.parseBody(CertificateStatusIpcRequestSchema, rawBody, "certificate status");
         writeJson(res, 200, { data: await this.executor.getCertificateStatus(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/mail-relay/apply") {
+        const { config } = this.parseBody(MailRelayApplyIpcRequestSchema, rawBody, "mail relay");
+        await this.executor.applyMailRelay(config);
+        writeJson(res, 200, { data: { applied: config !== null } });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/mail-relay/status") {
+        const req = this.parseBody(MailRelayStatusIpcRequestSchema, rawBody, "mail relay status");
+        writeJson(res, 200, { data: await this.executor.getMailRelayStatus(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/mail-relay/test") {
+        const req = this.parseBody(MailTestIpcRequestSchema, rawBody, "test email");
+        writeJson(res, 200, { data: await this.executor.sendTestMail(req) });
         return;
       }
 

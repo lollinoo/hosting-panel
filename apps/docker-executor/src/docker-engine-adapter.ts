@@ -1947,6 +1947,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       resolveWordpressImage(DEFAULT_PHP_VERSION),
       resolveWordpressCliImage(DEFAULT_PHP_VERSION),
       SHARED_MARIADB_IMAGE,
+      MAIL_RELAY_IMAGE,
     ];
     for (const image of images) {
       await this.ensureImageAvailable(image).catch((err: unknown) => {
