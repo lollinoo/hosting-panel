@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MAIL_RELAY_PORTS, MailRelaySettingsInputSchema } from "@hosting-panel/contracts";
 import type { MailFailureDto, MailRelaySettingsDto, MailTestResult } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -43,16 +43,19 @@ export function MailRelayForm({
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<"save" | "remove" | "test" | null>(null);
   const [removing, setRemoving] = useState(false);
+  const seq = useRef(0); // bumped by every write, so a poll that started earlier cannot overwrite it
   const [to, setTo] = useState(adminEmail);
-  const [testResult, setTestResult] = useState<MailTestResult | null>(null);
+  const [testResult, setTestResult] = useState<(MailTestResult & { to: string }) | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
 
   useEffect(() => {
     if (data.applied || gaveUp) return;
     return startMailRelayPolling({
       load: async () => {
+        const started = seq.current;
         const res = await fetch(BASE, { cache: "no-store" });
         const body = await res.json().catch(() => null);
+        if (started !== seq.current) return null;
         return res.ok && body?.data ? (body.data as MailRelaySettingsDto) : null;
       },
       onData: setData,
@@ -84,13 +87,19 @@ export function MailRelayForm({
     if (!parsed.success) {
       for (const i of parsed.error.issues) errs[i.path[0] as keyof FieldErrors] ??= i.message;
     }
+    const unknown = Object.values(errs).some((k) => !fieldText(k!));
     if (!password && !data.passwordSet) errs.password = "password_required";
     setFieldErrors(errs);
-    if (Object.keys(errs).length) return;
+    if (Object.keys(errs).length) {
+      if (unknown) setError(m.errors.VALIDATION_ERROR);
+      return;
+    }
+    seq.current++;
     setBusy("save");
     try {
       const { res, json } = await call("PATCH", BASE, input);
       if (res.ok && json?.data) {
+        seq.current++;
         setData(json.data);
         setGaveUp(false);
         setPassword("");
@@ -114,13 +123,16 @@ export function MailRelayForm({
   }
 
   async function remove() {
+    seq.current++;
     setBusy("remove");
     setError(null);
     setNotice(null);
     try {
       const { res, json } = await call("DELETE", BASE);
       if (res.ok && json?.data) {
+        seq.current++;
         setData(json.data);
+        setPassword("");
         setHost("");
         setUsername("");
         setSenderDomain("");
@@ -140,11 +152,12 @@ export function MailRelayForm({
   async function sendTest(e: React.FormEvent) {
     e.preventDefault();
     setBusy("test");
+    const sentTo = to.trim();
     setTestResult(null);
     setTestError(null);
     try {
-      const { res, json } = await call("POST", `${BASE}/test`, { to: to.trim() });
-      if (res.ok && json?.data) setTestResult(json.data);
+      const { res, json } = await call("POST", `${BASE}/test`, { to: sentTo });
+      if (res.ok && json?.data) setTestResult({ ...json.data, to: sentTo });
       else {
         const code: string = json?.error?.code ?? "";
         const key = (json?.error?.details ?? []).map((d: { message?: string }) => d.message).find((k: string | undefined) => k && fieldText(k));
@@ -161,7 +174,7 @@ export function MailRelayForm({
   const problemText = (p: MailFailureDto["problem"]) => format(t.problem[p], { host: data.host ?? "", port: data.port ?? "" });
   const when = (iso: string) => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
   const running = data.relayRunning === null ? t.unknown : data.relayRunning ? t.running : t.notRunning;
-  const err = (k: keyof FieldErrors) => (fieldErrors[k] ? <p id={`mail-${k}-err`} role="alert" className="text-sm text-destructive">{fieldText(fieldErrors[k]!)}</p> : null);
+  const err = (k: keyof FieldErrors) => (fieldErrors[k] ? <p id={`mail-${k}-err`} className="text-sm text-destructive">{fieldText(fieldErrors[k]!)}</p> : null);
 
   return (
     <div className="space-y-6">
@@ -184,7 +197,7 @@ export function MailRelayForm({
           <form className="space-y-4" onSubmit={save} noValidate>
             <div className="space-y-1.5">
               <Label htmlFor="mail-host">{t.host}</Label>
-              <Input id="mail-host" value={host} onChange={(e) => setHost(e.target.value)} autoComplete="off" placeholder={EXAMPLE_HOST} aria-describedby="mail-host-err" />
+              <Input id="mail-host" value={host} onChange={(e) => setHost(e.target.value)} autoComplete="off" placeholder={EXAMPLE_HOST} aria-invalid={!!fieldErrors.host} aria-describedby={fieldErrors.host ? "mail-host-err" : undefined} />
               {err("host")}
             </div>
             <div className="space-y-1.5">
@@ -204,7 +217,7 @@ export function MailRelayForm({
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="mail-user">{t.username}</Label>
-              <Input id="mail-user" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" aria-describedby="mail-username-err" />
+              <Input id="mail-user" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" aria-invalid={!!fieldErrors.username} aria-describedby={fieldErrors.username ? "mail-username-err" : undefined} />
               {err("username")}
             </div>
             <div className="space-y-1.5">
@@ -216,14 +229,15 @@ export function MailRelayForm({
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="new-password"
                 placeholder={data.passwordSet ? t.passwordKeep : undefined}
-                aria-describedby="mail-password-err"
+                aria-invalid={!!fieldErrors.password}
+                aria-describedby={fieldErrors.password ? "mail-password-hint mail-password-err" : "mail-password-hint"}
               />
-              <p className="text-xs text-muted-foreground">{format(t.passwordIs, { state: data.passwordSet ? t.passwordSet : t.passwordNotSet })}</p>
+              <p id="mail-password-hint" className="text-xs text-muted-foreground">{format(t.passwordIs, { state: data.passwordSet ? t.passwordSet : t.passwordNotSet })}</p>
               {err("password")}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="mail-domain">{t.senderDomain}</Label>
-              <Input id="mail-domain" value={senderDomain} onChange={(e) => setSenderDomain(e.target.value)} autoComplete="off" placeholder={EXAMPLE_DOMAIN} aria-describedby="mail-senderDomain-err" />
+              <Input id="mail-domain" value={senderDomain} onChange={(e) => setSenderDomain(e.target.value)} autoComplete="off" placeholder={EXAMPLE_DOMAIN} aria-invalid={!!fieldErrors.senderDomain} aria-describedby={fieldErrors.senderDomain ? "mail-senderDomain-err" : undefined} />
               <p className="text-xs text-muted-foreground">{t.senderHint}</p>
               {err("senderDomain")}
               {senderDomain.trim() && <p className="text-sm text-muted-foreground">{format(t.domainHint, { domain: senderDomain.trim() })}</p>}
@@ -279,7 +293,7 @@ export function MailRelayForm({
           <div role="status" className="mt-3 space-y-1 text-sm">
             {testResult && (
               <>
-                <p>{format(t.outcome[testResult.outcome], { to })}</p>
+                <p>{format(t.outcome[testResult.outcome], { to: testResult.to })}</p>
                 {testResult.problem && <p>{problemText(testResult.problem)}</p>}
                 {testResult.detail && <p className="font-mono text-xs text-muted-foreground">{testResult.detail}</p>}
               </>

@@ -73,6 +73,12 @@ describe("mail relay BFF", () => {
     expect(fetchUpstream.mock.calls[3]![1].body).toEqual({ to: "a@b.it" });
   });
 
+  it("passes an expired API session through as 401", async () => {
+    fetchUpstream.mockResolvedValue({ ok: false, status: 401, error: { error: { code: "UNAUTHENTICATED" } } });
+    expect((await GET(req("GET"))).status).toBe(401);
+    expect((await sendTest(req("POST", {}, { to: "a@b.it" }))).status).toBe(401);
+  });
+
   it("test email route allows 45 s upstream", async () => {
     fetchUpstream.mockResolvedValue({ ok: true, status: 200, data: { data: { outcome: "sent" } } });
     await sendTest(req("POST", {}, { to: "a@b.it" }));
@@ -115,6 +121,7 @@ describe("admin mail page", () => {
   it("shows the starting state and disables the test while not applied", () => {
     const html = renderToStaticMarkup(wrap(en, createElement(MailRelayForm, { csrfToken: "c", initial: dto({ applied: false, relayRunning: null, sentLast24h: null }), adminEmail: "a@b.it" })));
     expect(html).toContain(en.admin.mail.starting);
+    expect(html).toMatch(/type="submit" disabled="">Send test email/);
   });
 
   it("the page polls while the relay is starting", async () => {
@@ -131,6 +138,22 @@ describe("admin mail page", () => {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(load).toHaveBeenCalledTimes(2); // stopped once applied
       expect(seen).toEqual([false, true]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a slow load never overlaps the next tick", async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (d: MailRelaySettingsDto) => void;
+      const load = vi.fn(() => new Promise<MailRelaySettingsDto>((r) => (release = r)));
+      startMailRelayPolling({ load, onData: vi.fn(), onGiveUp: vi.fn() });
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(load).toHaveBeenCalledTimes(1);
+      release(dto({ applied: false }));
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(load).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
