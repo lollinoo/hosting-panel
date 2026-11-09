@@ -337,6 +337,21 @@ describe("panel certificate gate (owner decision: wait for DNS like the sites)",
     expect(await manager.gatePanelCertificate(PANEL, fail)).toBe(true);
   });
 
+  it("after a restart, an unreadable store and a failed or wrong lookup keep the resolver on disk", async () => {
+    const root = await tmp();
+    const first = new TraefikIngressFileManager(root, PANEL);
+    await first.gatePanelCertificate(PANEL, here);
+    await first.ensureStaticConfig(PANEL);
+    await writeFile(path.join(root, "acme", "acme.json"), ""); // Traefik rewriting in place
+    const restarted = new TraefikIngressFileManager(root, PANEL);
+    const fail = async (): Promise<never> => {
+      throw new Error("SERVFAIL");
+    };
+    expect(await restarted.gatePanelCertificate(PANEL, fail)).toBe(true);
+    expect(await restarted.gatePanelCertificate(PANEL, async () => ({ a: [], aaaa: [] }))).toBe(true);
+    expect(await panelYaml(root)).toContain("certResolver: le");
+  });
+
   it("no ACME email: never a resolver, no lookup", async () => {
     const root = await tmp();
     const panel = { ...PANEL, acmeEmail: null };

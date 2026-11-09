@@ -654,16 +654,21 @@ export class TraefikIngressFileManager {
     now: number = Date.now(),
   ): Promise<boolean> {
     const hostname = panel.hostname.trim().toLowerCase();
+    const panelFile = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
     let wanted = false;
     if (panel.acmeEmail) {
       const store = await readAcmeCertificates(path.join(this.acmeDirPath, acmeStorageFileName(panel)));
-      // A failed lookup keeps the last decision; before any decision it fails closed.
-      const previous = this.panelGateDecided && this.panelRequestCertificate;
+      // The last decision: in memory, or after a restart the file already on disk (fresh install: no).
+      const previous = this.panelGateDecided
+        ? this.panelRequestCertificate
+        : (await readFile(panelFile, "utf8").catch(() => "")).includes("certResolver: le");
       wanted = store.certificates.some((c) => c.hostname === hostname && Date.parse(c.notAfter) > now);
       if (!wanted) {
         try {
           const { a, aaaa } = await lookup(hostname);
           wanted = a.length > 0 && a.every((ip) => ip === panel.ipv4.trim()) && aaaa.length === 0;
+          // An unreadable store may hide a valid certificate: never drop the resolver on its word.
+          if (!wanted && !store.readable) wanted = previous;
         } catch {
           wanted = previous;
         }
@@ -671,9 +676,8 @@ export class TraefikIngressFileManager {
     }
     this.panelRequestCertificate = wanted;
     this.panelGateDecided = true;
-    const panelFilePath = path.join(this.dynamicDirPath, PANEL_DYNAMIC_FILE_NAME);
-    if (await stat(panelFilePath).catch(() => null)) {
-      await writeFileIfChanged(panelFilePath, buildPanelDynamicYaml(panel, wanted), 0o644);
+    if (await stat(panelFile).catch(() => null)) {
+      await writeFileIfChanged(panelFile, buildPanelDynamicYaml(panel, wanted), 0o644);
     }
     return wanted;
   }
