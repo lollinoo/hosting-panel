@@ -193,3 +193,40 @@ None. Nothing blocked the checklist.
 - O4 and O6 in a real browser and on a real server: the time zone after hydration, and the cron loopback once the name resolves publicly.
 - Port 80 blocked at a provider firewall rather than by a local nftables rule.
 - A real kernel reboot for `CP-01`.
+
+## Real VPS with Let's Encrypt (Task 14)
+
+**Run:** 2026-11-09, by the owner, on a cloud VPS. The archive was built on the VPS from branch `feat/step-2b-domains-dns-tls` with `corepack pnpm run release:build`, and installed with `infra/linux/install.sh --archive` from the same checkout, which includes the two installer fixes below.
+
+**Host:** Debian 13.7 (trixie), amd64, kernel `6.12.115+deb13.1-cloud-amd64`, system language Italian. ufw was already active with an INPUT DROP policy, allowing 22, 80 and 443. The owner's real domain is not named here.
+
+**Evidence:** the results are as the owner reported them, step by step ("all works as expected"). No raw logs or serial numbers were collected for this report.
+
+### Verdict: PASS
+
+| Step | Result |
+|---|---|
+| 1 Install on Let's Encrypt staging | PASS, after the two installer fixes below |
+| 2 Add the site domain and point the registrar | PASS: DNS check correct |
+| 3 HTTPS on staging, HTTP→HTTPS and the www pair | PASS |
+| 4 Renewal with every panel unit stopped (`certificatesDuration: 8760`) | PASS: the served certificates changed while the panel was down; the file was restored afterwards |
+| 5 Switch to production (installer rerun without `--acme-staging`) | PASS: production Let's Encrypt certificates, "HTTPS active", no browser warning |
+| 6 Units stopped, `hp-api` disabled, real reboot | PASS: HTTPS for the site, `www` and the panel right after boot; nothing recreated after re-enabling |
+| 7 Error messages on a real network | PASS: wrong A record (no order); port 80 blocked (one failed order, retry at about +15 min, then "HTTPS active"); name removed |
+| 8 Admin view | PASS: same states as the customer; alerts card empty. The optional manual change of the expiry date was not done |
+
+The owner also confirmed site deploys, logs, user setup and the login flows on this host.
+
+### Installer bugs found and fixed
+
+1. **A localized apt broke step 5** (`d93ada7`).
+   - `apt-cache policy` prints `Candidato:` in Italian, but `add_apt_repo` searched only for `Candidate:`. So the installer said that PGDG had no `postgresql-18` package for trixie, when version 18.6 was there.
+   - Fix: run the check with `LC_ALL=C`, plus a test.
+2. **An active ufw blocked the proxy → panel traffic: the panel returned 504** (`49e5a11`).
+   - ufw's INPUT chain (policy drop) also filters traffic arriving from the Docker bridges for `<docker0>:3000`. From the host the panel answered (200); from `hp_ingress_proxy` the request timed out.
+   - Fix: when ufw is active, step 10 adds `ufw allow from 172.16.0.0/12 to <docker0 IPv4> port 3000 proto tcp`, plus two dry-run tests.
+   - On this host the rule was added by hand before the fix. The installer's own ufw path was checked only with `--dry-run`.
+
+### Not covered here
+
+- The ARM64 (`aarch64`) VPS tried first was not supported: there is only the `linux-x64` archive and the installer accepts only x86_64. This is a follow-up and does not block this step.
