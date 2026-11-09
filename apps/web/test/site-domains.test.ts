@@ -185,4 +185,14 @@ describe("domains UI", () => {
       )![0].includes("checked");
     expect([checked("hotel.it"), checked("www.hotel.it"), checked("blog.hotel.it")]).toEqual([true, true, false]);
   });
+
+  it("hint drops the time sentence when there is no time, and Copy buttons name the host", () => {
+    for (const m of [en, itMsgs]) {
+      const failed = dom({ certificate: { status: "failed", problem: "other", retryAt: null }, dns: { nextCheckAt: null as unknown as string } });
+      const html = renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial: { ...initial, domains: [failed, dom({ hostname: "www.hotel.it", isPrimary: false })] } })));
+      expect(html).not.toMatch(/(on|il) \./);
+      expect(html).not.toContain("{time}");
+      for (const h of ["hotel.it", "www.hotel.it"]) expect(html).toContain(`aria-label="${m.site.domains.copyFor.replace("{host}", h).replace("'", "&#x27;")}"`);
+    }
+  });
 });

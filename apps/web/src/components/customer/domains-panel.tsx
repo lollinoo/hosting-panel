@@ -108,12 +108,10 @@ export function DomainsPanel({
   const hintText = (d: SiteDomainDto) => {
     const key = views.get(d.id)!.hint;
     if (!key) return null;
-    return format(t.hint[key], {
-      host: d.hostname,
-      ip: data.serverIpv4,
-      seen: d.dns.observedA.join(", "),
-      time: when(d.certificate.retryAt ?? d.dns.nextCheckAt),
-    });
+    const time = when(d.certificate.retryAt ?? d.dns.nextCheckAt);
+    // Without a time, drop the "We'll try again on {time}" sentence rather than print a gap.
+    const text = time ? t.hint[key] : t.hint[key].split(/(?<=\.)\s+/).filter((s) => !s.includes("{time}")).join(" ");
+    return format(text, { host: d.hostname, ip: data.serverIpv4, seen: d.dns.observedA.join(", "), time });
   };
   const suggested = suggestWwwPair(hostname.trim().toLowerCase());
   const includeWww = www ?? suggested;
@@ -146,7 +144,7 @@ export function DomainsPanel({
                   <td className="py-2 pr-4 font-mono">{d.hostname}</td>
                   <td className="py-2">
                     <span className="font-mono">{data.serverIpv4}</span>{" "}
-                    <Button type="button" variant="outline" size="sm" onClick={() => copy(data.serverIpv4)}>
+                    <Button type="button" variant="outline" size="sm" aria-label={format(t.copyFor, { host: d.hostname })} onClick={() => copy(data.serverIpv4)}>
                       {copied === data.serverIpv4 ? t.copied : t.copy}
                     </Button>
                   </td>
