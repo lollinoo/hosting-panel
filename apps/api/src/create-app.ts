@@ -32,6 +32,7 @@ import {
 } from "@hosting-panel/host-agent";
 import type { DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
+import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
@@ -218,6 +219,7 @@ export interface CreateControlPlaneAppOptions {
   readonly driftReconcileIntervalMs?: number | null;
   readonly domainReconcileIntervalMs?: number | null;
   readonly mailRelayRetryIntervalMs?: number | null;
+  readonly sftpRetryIntervalMs?: number | null;
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
@@ -240,6 +242,7 @@ export interface ControlPlaneAppHandle {
   readonly driftReconciler: DriftReconcilerService;
   readonly domainReconciler: DomainReconcilerService;
   readonly mailRelay: MailRelayService;
+  readonly siteSftp: SiteSftpService;
   close(): Promise<void>;
 }
 
@@ -377,6 +380,16 @@ export async function createControlPlaneApp(
             : 60_000)
         : null;
 
+  const envSftpIntervalRaw = process.env["HP_SFTP_RETRY_INTERVAL_MS"]?.trim();
+  const sftpRetryIntervalMs =
+    options?.sftpRetryIntervalMs !== undefined
+      ? options.sftpRetryIntervalMs
+      : shouldListen && runtimeBackend === "linux-systemd"
+        ? (envSftpIntervalRaw && /^\d+$/.test(envSftpIntervalRaw)
+            ? Number.parseInt(envSftpIntervalRaw, 10)
+            : 60_000)
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
@@ -390,6 +403,7 @@ export async function createControlPlaneApp(
     driftReconcileIntervalMs,
     domainReconcileIntervalMs,
     mailRelayRetryIntervalMs,
+    sftpRetryIntervalMs,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -490,6 +504,7 @@ export async function createControlPlaneApp(
   const driftReconciler = nestApp.get(DriftReconcilerService);
   const domainReconciler = nestApp.get(DomainReconcilerService);
   const mailRelay = nestApp.get(MailRelayService);
+  const siteSftp = nestApp.get(SiteSftpService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
@@ -502,6 +517,7 @@ export async function createControlPlaneApp(
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
   mailRelay.startBackgroundLoop();
+  siteSftp.startBackgroundLoop();
 
   let isClosed = false;
 
@@ -520,6 +536,7 @@ export async function createControlPlaneApp(
     driftReconciler,
     domainReconciler,
     mailRelay,
+    siteSftp,
     async close(): Promise<void> {
       if (isClosed) {
         return;
@@ -530,6 +547,7 @@ export async function createControlPlaneApp(
       await driftReconciler.stop();
       await domainReconciler.stop();
       await mailRelay.stop();
+      await siteSftp.stop();
       await nestApp.close();
       if (ownsDatabaseClient) {
         await dbClient.close();

@@ -108,6 +108,11 @@ class MockDockerExecutor implements DockerExecutorPort {
   ): Promise<SiteFilesResult<R["op"]>> {
     return (await this.siteFilesSpy(req)) as SiteFilesResult<R["op"]>;
   }
+
+  public applySftpAccess: DockerExecutorPort["applySftpAccess"] = (req) =>
+    this.#base.applySftpAccess(req);
+  public getSftpStatus: DockerExecutorPort["getSftpStatus"] = () =>
+    this.#base.getSftpStatus();
 }
 
 class ExecutorFailure extends Error {

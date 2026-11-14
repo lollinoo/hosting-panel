@@ -35,6 +35,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { routePlanHash } from "../sites/domain-policy.js";
+import { SiteSftpService } from "../sites/site-sftp.service.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 
 /** The claim sets a 60 s lease; one site job may take up to 510 s, so each step renews it first. */
@@ -116,6 +117,7 @@ export class SiteProvisioner {
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly executor: DockerExecutorPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
+    @Inject(SiteSftpService) private readonly sftp: SiteSftpService,
   ) {}
 
   /** Runs the site.provision steps; on failure settles the operation and the site, then rethrows. */
@@ -297,6 +299,7 @@ export class SiteProvisioner {
       });
 
       await step("remove_site", async () => {
+        await this.sftp.removeSite(op.organizationId, siteId);
         for (const svc of services) await this.executor.deleteService(svc.id);
         await this.executor.purgeSite(siteId);
       });
@@ -357,21 +360,24 @@ export class SiteProvisioner {
       // "skipped" at enqueue: the same owner change is re-issued to finish a half-done move.
       if (moveStep?.status !== "skipped") {
         await step("move_ownership", async () => {
-          if (from === to) return;
-          const [allocation] = await db
-            .select({ id: hostAllocations.id })
-            .from(hostAllocations)
-            .where(and(eq(hostAllocations.organizationId, to), eq(hostAllocations.status, "active")))
-            .limit(1);
-          if (!allocation) throw new ControlPlaneError("NOT_FOUND", `Organization '${to}' has no active allocation`);
-          await moveSiteToOrganizationTransactional(db, {
-            siteId,
-            fromOrganizationId: from,
-            toOrganizationId: to,
-            toHostAllocationId: allocation.id,
-            masterKey: this.config.secretsMasterKey.toString("hex"),
-          });
-          owner = to;
+          if (from !== to) {
+            const [allocation] = await db
+              .select({ id: hostAllocations.id })
+              .from(hostAllocations)
+              .where(and(eq(hostAllocations.organizationId, to), eq(hostAllocations.status, "active")))
+              .limit(1);
+            if (!allocation) throw new ControlPlaneError("NOT_FOUND", `Organization '${to}' has no active allocation`);
+            await moveSiteToOrganizationTransactional(db, {
+              siteId,
+              fromOrganizationId: from,
+              toOrganizationId: to,
+              toHostAllocationId: allocation.id,
+              masterKey: this.config.secretsMasterKey.toString("hex"),
+            });
+            owner = to;
+          }
+          // Best-effort: failed apply marks SFTP dirty for the periodic loop without failing or repeating the move.
+          await this.sftp.ensureApplied().catch(() => undefined);
         });
       } else if (from !== to) {
         throw new ControlPlaneError("VALIDATION_ERROR", `Site '${siteId}' is not owned by '${to}'`);
