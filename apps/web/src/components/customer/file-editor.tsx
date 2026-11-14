@@ -24,10 +24,15 @@ export type OpenedFileMeta = {
   modifiedAt: string;
 };
 
+/** True when a file uses mixed line endings or lone carriage returns so saving will normalize them. */
+export function hasMixedLineEndings(rawText: string): boolean {
+  return /\r(?!\n)/.test(rawText) || (rawText.includes("\r\n") && /(?:^|[^\r])\n/.test(rawText));
+}
+
 /** Normalizes line endings to LF for editing while remembering whether all line endings were CRLF. */
 export function decodeEditorContent(rawText: string): { text: string; crlf: boolean } {
   return {
-    crlf: rawText.includes("\r\n") && !/(?:^|[^\r])\n/.test(rawText),
+    crlf: rawText.includes("\r\n") && !hasMixedLineEndings(rawText),
     text: rawText.replace(/\r\n/g, "\n"),
   };
 }
@@ -139,6 +144,148 @@ export async function saveEditorFile(opts: {
   }
 }
 
+export interface FileEditorBodyProps {
+  fileName: string;
+  text: string;
+  mixedLineEndings: boolean;
+  tooBigNow: boolean;
+  dirty: boolean;
+  saving: boolean;
+  saveError: string | null;
+  savedNotice: boolean;
+  confirmChanged: boolean;
+  confirmDiscard: boolean;
+  textareaId?: string;
+  onTextChange: (value: string) => void;
+  onSave: (force?: boolean) => void;
+  onReload: () => void;
+  onDiscard: () => void;
+  onKeep: () => void;
+  onClose: () => void;
+}
+
+/** Editor form body separated from dialog state so tests can assert notices directly. */
+export function FileEditorBody({
+  fileName,
+  text,
+  mixedLineEndings,
+  tooBigNow,
+  dirty,
+  saving,
+  saveError,
+  savedNotice,
+  confirmChanged,
+  confirmDiscard,
+  textareaId,
+  onTextChange,
+  onSave,
+  onReload,
+  onDiscard,
+  onKeep,
+  onClose,
+}: FileEditorBodyProps) {
+  const m = useMessages();
+  const generatedId = useId();
+  const fieldId = textareaId ?? generatedId;
+
+  return (
+    <div className="space-y-4">
+      {mixedLineEndings ? (
+        <p role="status" className="text-xs text-muted-foreground">
+          {m.site.files.editor.mixedLineEndings}
+        </p>
+      ) : null}
+      <div>
+        <Label htmlFor={fieldId} className="sr-only">
+          {format(m.site.files.editor.label, { name: fileName })}
+        </Label>
+        <Textarea
+          id={fieldId}
+          value={text}
+          onChange={(e) => onTextChange(e.target.value)}
+          className="min-h-[24rem] font-mono text-sm"
+          spellCheck={false}
+        />
+      </div>
+
+      {tooBigNow ? (
+        <p role="alert" className="text-sm text-destructive">
+          {m.site.files.editor.tooBigNow}
+        </p>
+      ) : null}
+
+      {saveError ? (
+        <p role="alert" className="text-sm text-destructive">
+          {saveError}
+        </p>
+      ) : null}
+
+      {savedNotice ? (
+        <p role="status" className="text-sm text-muted-foreground">
+          {m.site.files.editor.saved}
+        </p>
+      ) : null}
+
+      {confirmChanged ? (
+        <Alert>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>{m.site.files.editor.changed}</span>
+            <span className="flex gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={saving}
+                onClick={onReload}
+              >
+                {m.site.files.editor.reload}
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                disabled={saving}
+                onClick={() => onSave(true)}
+              >
+                {m.site.files.editor.saveAnyway}
+              </Button>
+            </span>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      {confirmDiscard ? (
+        <Alert>
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>{m.site.files.editor.unsaved}</span>
+            <span className="flex gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={onKeep}>
+                {m.site.files.editor.keep}
+              </Button>
+              <Button type="button" variant="destructive" size="sm" onClick={onDiscard}>
+                {m.site.files.editor.discard}
+              </Button>
+            </span>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button type="button" variant="outline" disabled={saving} onClick={onClose}>
+          {m.site.files.editor.close}
+        </Button>
+        <Button
+          type="button"
+          disabled={saving || tooBigNow || !dirty}
+          onClick={() => onSave(false)}
+        >
+          {saving ? m.site.files.editor.saving : m.site.files.editor.save}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 interface FileEditorDialogProps {
   apiBase: string;
   csrfToken: string;
@@ -161,12 +308,12 @@ export function FileEditorDialog({
   onDownload,
 }: FileEditorDialogProps) {
   const m = useMessages();
-  const textareaId = useId();
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [savedText, setSavedText] = useState("");
   const [crlf, setCrlf] = useState(false);
+  const [mixedLineEndings, setMixedLineEndings] = useState(false);
   const [openedMeta, setOpenedMeta] = useState<OpenedFileMeta | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -196,6 +343,7 @@ export function FileEditorDialog({
     setText("");
     setSavedText("");
     setCrlf(false);
+    setMixedLineEndings(false);
     setOpenedMeta({ size: entry.size, modifiedAt: entry.modifiedAt });
     setSaveError(null);
     setSavedNotice(false);
@@ -267,6 +415,7 @@ export function FileEditorDialog({
 
         const normalized = decodeEditorContent(decoded);
         setCrlf(normalized.crlf);
+        setMixedLineEndings(hasMixedLineEndings(decoded));
         setText(normalized.text);
         setSavedText(normalized.text);
         setLoading(false);
@@ -327,6 +476,7 @@ export function FileEditorDialog({
       }
       setSavedText(outcome.savedText);
       setOpenedMeta(outcome.latestMeta);
+      setMixedLineEndings(false);
       setSavedNotice(true);
       setConfirmDiscard(false);
       setConfirmChanged(false);
@@ -374,109 +524,33 @@ export function FileEditorDialog({
             </div>
           </div>
         ) : (
-          <div className="space-y-4">
-            <div>
-              <Label htmlFor={textareaId} className="sr-only">
-                {format(m.site.files.editor.label, { name: fileName })}
-              </Label>
-              <Textarea
-                id={textareaId}
-                value={text}
-                onChange={(e) => {
-                  setText(e.target.value);
-                  setSavedNotice(false);
-                  setSaveError(null);
-                  setConfirmDiscard(false);
-                  setConfirmChanged(false);
-                }}
-                className="min-h-[24rem] font-mono text-sm"
-                spellCheck={false}
-              />
-            </div>
-
-            {tooBigNow ? (
-              <p role="alert" className="text-sm text-destructive">
-                {m.site.files.editor.tooBigNow}
-              </p>
-            ) : null}
-
-            {saveError ? (
-              <p role="alert" className="text-sm text-destructive">
-                {saveError}
-              </p>
-            ) : null}
-
-            {savedNotice ? (
-              <p role="status" className="text-sm text-muted-foreground">
-                {m.site.files.editor.saved}
-              </p>
-            ) : null}
-
-            {confirmChanged ? (
-              <Alert>
-                <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-                  <span>{m.site.files.editor.changed}</span>
-                  <span className="flex gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      disabled={saving}
-                      onClick={() => setReloadTick((n) => n + 1)}
-                    >
-                      {m.site.files.editor.reload}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      disabled={saving}
-                      onClick={() => void handleSave(true)}
-                    >
-                      {m.site.files.editor.saveAnyway}
-                    </Button>
-                  </span>
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
-            {confirmDiscard ? (
-              <Alert>
-                <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
-                  <span>{m.site.files.editor.unsaved}</span>
-                  <span className="flex gap-2">
-                    <Button type="button" variant="outline" size="sm" onClick={() => setConfirmDiscard(false)}>
-                      {m.site.files.editor.keep}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="destructive"
-                      size="sm"
-                      onClick={() => {
-                        setConfirmDiscard(false);
-                        onOpenChange(false);
-                      }}
-                    >
-                      {m.site.files.editor.discard}
-                    </Button>
-                  </span>
-                </AlertDescription>
-              </Alert>
-            ) : null}
-
-            <div className="flex flex-wrap justify-end gap-2">
-              <Button type="button" variant="outline" disabled={saving} onClick={requestClose}>
-                {m.site.files.editor.close}
-              </Button>
-              <Button
-                type="button"
-                disabled={saving || tooBigNow || !dirty}
-                onClick={() => void handleSave(false)}
-              >
-                {saving ? m.site.files.editor.saving : m.site.files.editor.save}
-              </Button>
-            </div>
-          </div>
+          <FileEditorBody
+            fileName={fileName}
+            text={text}
+            mixedLineEndings={mixedLineEndings}
+            tooBigNow={tooBigNow}
+            dirty={dirty}
+            saving={saving}
+            saveError={saveError}
+            savedNotice={savedNotice}
+            confirmChanged={confirmChanged}
+            confirmDiscard={confirmDiscard}
+            onTextChange={(nextText) => {
+              setText(nextText);
+              setSavedNotice(false);
+              setSaveError(null);
+              setConfirmDiscard(false);
+              setConfirmChanged(false);
+            }}
+            onSave={(force) => void handleSave(force)}
+            onReload={() => setReloadTick((n) => n + 1)}
+            onDiscard={() => {
+              setConfirmDiscard(false);
+              onOpenChange(false);
+            }}
+            onKeep={() => setConfirmDiscard(false)}
+            onClose={requestClose}
+          />
         )}
       </DialogContent>
     </Dialog>

@@ -24,8 +24,10 @@ import {
   guardDialogClose,
 } from "@/components/customer/file-dialogs";
 import {
+  FileEditorBody,
   decodeEditorContent,
   encodeEditorContent,
+  hasMixedLineEndings,
   saveEditorFile,
 } from "@/components/customer/file-editor";
 import {
@@ -439,7 +441,7 @@ describe("Files tab navigation and catalog", () => {
     expect(SITE_TABS[2]!.href("s1")).toBe("/sites/s1/files");
   });
 
-  it("keeps SFTP keys and wording out of cycle 1 catalogs", () => {
+  it("includes site.files.sftpLink and site.files.sftp in both catalogs while keeping file manager hints SFTP-free", () => {
     const collectKeys = (obj: Record<string, unknown>, prefix = ""): string[] =>
       Object.entries(obj).flatMap(([k, v]) => {
         const keyPath = prefix ? `${prefix}.${k}` : k;
@@ -449,7 +451,10 @@ describe("Files tab navigation and catalog", () => {
       });
 
     for (const m of [en, itMsgs]) {
+      expect(m.site.files.sftpLink.trim().length).toBeGreaterThan(0);
+      expect(collectKeys(m.site.files.sftp as unknown as Record<string, unknown>).length).toBeGreaterThan(0);
       for (const k of collectKeys(m.site.files as unknown as Record<string, unknown>)) {
+        if (k === "sftpLink" || k === "sftp" || k.startsWith("sftp.")) continue;
         expect(k, `key ${k}`).not.toMatch(/sftp/i);
       }
       expect(m.site.files.upload.largeHint).not.toMatch(/\bsftp\b/i);
@@ -627,11 +632,12 @@ describe("Files UI static markup", () => {
     expect(html).not.toMatch(/sftp/i);
   });
 
-  it("FilesNotReady and FilesPanel render expected markup and no SFTP link", () => {
+  it("FilesNotReady renders no SFTP link and FilesPanel renders one SFTP link", () => {
     for (const m of [en, itMsgs]) {
       const notReadyHtml = renderToStaticMarkup(wrap(m, createElement(FilesNotReady))).replaceAll("&#x27;", "'");
       expect(notReadyHtml).toContain(m.site.files.notReady);
       expect(notReadyHtml).not.toContain('role="toolbar"');
+      expect(notReadyHtml).not.toMatch(/sftp/i);
     }
 
     const panelHtml = renderToStaticMarkup(
@@ -640,7 +646,8 @@ describe("Files UI static markup", () => {
     expect(panelHtml).toContain('role="toolbar"');
     expect(panelHtml).toContain(`aria-label="${en.site.files.breadcrumb}"`);
     expect(panelHtml).toContain(en.site.files.loading);
-    expect(panelHtml).not.toMatch(/sftp/i);
+    expect(panelHtml).toContain(en.site.files.sftpLink);
+    expect(panelHtml.match(/href="\/sites\/s1\/files\/sftp"/g)).toHaveLength(1);
   });
 });
 
@@ -1251,5 +1258,51 @@ describe("Cycle 1 review-round-2 regression tests", () => {
     const allLf = decodeEditorContent("a\nb\nc\n");
     expect(allLf).toEqual({ text: "a\nb\nc\n", crlf: false });
     expect(encodeEditorContent(allLf.text, allLf.crlf)).toBe("a\nb\nc\n");
+  });
+
+  it("Mixed line endings: detects mixed endings, shows editor notice in EN/IT, and still saves as LF", () => {
+    const rawMixed = "a\r\nb\nc\n";
+    expect(hasMixedLineEndings(rawMixed)).toBe(true);
+    expect(hasMixedLineEndings("a\nb\r\n")).toBe(true);
+    expect(hasMixedLineEndings("a\rb\r\n")).toBe(true);
+    expect(hasMixedLineEndings("a\rb\n")).toBe(true);
+    expect(hasMixedLineEndings("a\r\nb\r\n")).toBe(false);
+    expect(hasMixedLineEndings("a\nb\n")).toBe(false);
+    expect(hasMixedLineEndings("single line")).toBe(false);
+
+    const decoded = decodeEditorContent(rawMixed);
+    expect(decoded.crlf).toBe(false);
+    expect(encodeEditorContent(decoded.text, decoded.crlf)).toBe("a\nb\nc\n");
+
+    const baseProps = {
+      fileName: "script.sh",
+      text: decoded.text,
+      mixedLineEndings: hasMixedLineEndings(rawMixed),
+      tooBigNow: false,
+      dirty: false,
+      saving: false,
+      saveError: null,
+      savedNotice: false,
+      confirmChanged: false,
+      confirmDiscard: false,
+      onTextChange: () => {},
+      onSave: () => {},
+      onReload: () => {},
+      onDiscard: () => {},
+      onKeep: () => {},
+      onClose: () => {},
+    };
+
+    for (const m of [en, itMsgs]) {
+      const mixedHtml = renderToStaticMarkup(
+        wrap(m, createElement(FileEditorBody, baseProps)),
+      ).replaceAll("&#x27;", "'");
+      expect(mixedHtml).toContain(m.site.files.editor.mixedLineEndings);
+
+      const uniformHtml = renderToStaticMarkup(
+        wrap(m, createElement(FileEditorBody, { ...baseProps, mixedLineEndings: false })),
+      ).replaceAll("&#x27;", "'");
+      expect(uniformHtml).not.toContain(m.site.files.editor.mixedLineEndings);
+    }
   });
 });
