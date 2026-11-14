@@ -49,3 +49,43 @@ moved its site data to a memory-backed volume. Three steps were added (4, 13, 17
 - The unit tests of the PHP helper program (`apps/docker-executor/test/site-files-program.test.ts`) are
   skipped on a machine without PHP, as this one is. CI installs PHP with the zip extension and runs them.
 - A real server with real WordPress traffic. Run the same script there after `hp-update`.
+
+## Part 2 — SFTP (ADR 0020)
+
+**Run:** 2026-11-14 on branch `feat/step-3-6-site-tools-and-admin`, Docker Engine `29.9.2`, Node `v26.13.1`, OpenSSH client `OpenSSH_9.6p1 Ubuntu-3ubuntu13.20` (`OpenSSL 3.0.13`), pinned image `linuxserver/openssh-server@sha256:161e0b670b31d9539ca1718bc5943e981779331b4e1c9d32e8929d7652a1f22f` (already on the machine, never pulled by the check; stand-in site container uses `alpine:3`).
+
+**Command:** `corepack pnpm --filter @hosting-panel/contracts run build && corepack pnpm --filter @hosting-panel/docker-executor run build && node infra/linux/accept-m1-sftp.mjs`
+
+**Result:** 19 of 19 steps passed twice in a row (35.8s and 35.6s; final run: `accept-m1-sftp: 19/19 passed in 35.6s`). The script exits `0` only when every step passes. Run once more on the same machine after the last fixes (host key checked before the server is stopped, the unsupported `PrintLastLog` line removed from the server's configuration): `accept-m1-sftp: 19/19 passed in 35.5s`, with `many-sessions` at `44.12MiB / 256MiB`, 61 processes.
+
+The script drives the executor's real adapter (`DockerEngineSocketAdapter.applySftpAccess`, `ensureSftpFromState`, `getSftpStatus`) together with the API's real `sha512Crypt` (`apps/api/dist/sites/sha512-crypt.js`) and real OpenSSH `sftp` / `ssh` / `ssh-keygen` clients over an ephemeral loopback port on `127.0.0.1` (password passed via `SSH_ASKPASS`). Every container, network and volume it creates starts with `hp_swarmtest_` and is removed by exact name in `finally` (also on Ctrl-C), with no prune command ever run.
+
+| # | Step | Result | What it proves |
+|---|---|---|---|
+| 1 | `setup` | PASS | Ephemeral port on `127.0.0.1`, temporary `0700` state dir, two `33:33` site volumes (with `secret-b.txt` seeded in volume B), and a running stand-in site container (`alpine:3`) mounting volume A. |
+| 2 | `apply-user-a` | PASS | Applying user A (hashed via API `sha512Crypt`) starts the SFTP container, `getSftpStatus()` reports `running=true` and the port, and `hostKeyFingerprint` matches `ssh-keygen -lf` on the generated `.pub` key. |
+| 3 | `container-hardening` | PASS | `docker inspect` confirms `Privileged=false`, `ReadonlyRootfs=true`, `CapDrop=["ALL"]`, `CapAdd=["SETGID","SETUID","SYS_CHROOT"]`, `no-new-privileges:true`, `256 MiB` memory/swap (`268435456`), `PidsLimit=512`, `0.5` CPU, no `docker.sock` mount, no bind mount outside the state directory, and no other container on the SFTP bridge network. |
+| 4 | `upload-and-ownership` | PASS | Real `sftp` `put up.txt` using `SSH_ASKPASS` succeeds and a separate `stat` container confirms `33:33` ownership inside volume A. |
+| 5 | `confinement` | PASS | `get /etc/passwd` fails, `ls -a /` lists only `.`, `..`, and `files`, and `cd ..` followed by `pwd` stays at `/`. |
+| 6 | `second-site-isolation` | PASS | Adding user B on site `sb` recreates the SFTP container with a new `Id`; user A cannot read `/srv/sftp/sb/files/secret-b.txt` or `../sb/files/secret-b.txt`, while user B (sharing uid `33`) reads `secret-b.txt`. |
+| 7 | `symlink-escape` | PASS | Symlinks created through SFTP pointing to `/etc/passwd`, `/srv/sftp/sb/files/secret-b.txt`, `../../../../etc/passwd`, and `../../../sb/files/secret-b.txt` cannot be read via SFTP, while an in-site symlink resolves inside the user's own root. |
+| 8 | `no-shell-no-pty` | PASS | `ssh -T id` produces no shell `uid=` output and `ssh -tt id` receives `PTY allocation request failed` with no `uid=`. |
+| 9 | `no-forwarding` | PASS | `ssh -N -W 127.0.0.1:22` exits `255` with `administratively prohibited`, and `ssh -N -oExitOnForwardFailure=yes -R 0:127.0.0.1:1` exits `255` within 15 seconds. |
+| 10 | `second-user-no-recreate` | PASS | Adding user A2 on already-served site `sa` keeps the same container `Id`, `State.StartedAt`, and `users/passwd` inode, and A2 logs in immediately and sees `up.txt`. |
+| 11 | `serves-without-panel` | PASS | `docker restart` of the SFTP container still serves user A2 with the same host key fingerprint, and a brand-new `DockerEngineSocketAdapter` calling `ensureSftpFromState()` keeps the same container `Id` and `State.StartedAt` while logins continue to work. |
+| 12 | `many-sessions` | PASS | User A holds 20 concurrent SFTP sessions open (opened in batches of 4 under `PerSourceMaxStartups 10`); `docker stats --no-stream` measured `44.14MiB / 256MiB (17.24%)` with `61` PIDs (`44.12MiB / 256MiB`, `61` PIDs on the prior run), while user B of site `sb` still logs in and lists `secret-b.txt`. |
+| 13 | `site-deletion-volume-removal` | PASS | Applying desired state without site B recreates the container without volume B, allowing `docker volume rm` on volume B to succeed while user A still logs in. |
+| 14 | `delete-cuts-session` | PASS | With user A2 holding an open SFTP session, applying without A2 changes `State.StartedAt`, ends or breaks A2's open session within a few seconds, refuses a new login for A2, and allows remaining user A to log in again. |
+| 15 | `add-user-no-restart` | PASS | With site A served for one user (user A) holding an open SFTP session, adding user A2 keeps the same container `Id` and `State.StartedAt`, the already-open session of user A still lists `up.txt`, and user A2 logs in. |
+| 16 | `new-password` | PASS | Applying a new `$6$` password hash for user A2 changes `State.StartedAt`, refuses the old password (`Permission denied`), and accepts the new password. |
+| 17 | `cp01-site-untouched` | PASS | The stand-in site container on volume A stays running with the same `StartedAt`, `RestartCount=0`, and no `ExecIDs` (CP-01). |
+| 18 | `empty-apply-preserves-host-key` | PASS | Applying `{ users: [] }` removes the SFTP container while preserving the host key on disk (`running=false`, same fingerprint), and re-applying restores the server with the exact same fingerprint (`known_hosts` login succeeds). |
+| 19 | `wrong-password-penalty` | PASS | Repeated wrong passwords fail with `Permission denied` (`255`), triggering `PerSourcePenalties` (`authfail:10s`, `min:15s`, so two failures block the third attempt before auth with `Connection closed`), and the correct password succeeds again within 120 seconds. |
+
+**Not covered here.**
+- Idle timeouts (`ClientAliveInterval 60`, `ClientAliveCountMax 3`, `ChannelTimeout session=30m`, `UnusedConnectionTimeout 10m`) were not waited out in real time.
+- A real server with a public IP address (this run binds `127.0.0.1` on an ephemeral high port).
+- The cloud provider firewall or external port reachability on TCP `2222`.
+- The source IP address seen by `PerSourcePenalties` behind a real network or NAT/hairpin path (on loopback/bridge here, `sshd` sees the local gateway/proxy address rather than a remote client IP).
+- SFTP logins over IPv6.
+- Memory usage under many fast uploads at once.
