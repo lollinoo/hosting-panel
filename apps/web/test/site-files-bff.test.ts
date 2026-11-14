@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiErrorEnvelopeSchema,
+  CreateSiteSftpUserRequestSchema,
   SITE_FILE_BATCH_MAX,
   SITE_FILE_CHUNK_BASE64_MAX,
   SITE_FILE_CHUNK_BYTES,
@@ -33,12 +34,20 @@ import { POST as moveFiles } from "@/app/api/bff/orgs/[orgId]/managed-sites/[sit
 import { POST as deleteFiles } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/files/delete/route";
 import { POST as archiveFiles } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/files/archive/route";
 import { POST as extractFiles } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/files/extract/route";
+import { GET as getSftp } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/sftp/route";
+import { POST as createSftpUser } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/sftp/users/route";
+import { DELETE as deleteSftpUser } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/sftp/users/[userId]/route";
+import { POST as resetSftpPassword } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/sftp/users/[userId]/reset-password/route";
+import { createSftpUserBody } from "@/components/customer/sftp-access";
 
 const BASE_UPSTREAM = "v1/organizations/org-1/managed-sites/s1";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const ctx = (orgId = "org-1", siteId = "s1") => ({
   params: Promise.resolve({ orgId, siteId }),
+});
+const userCtx = (orgId = "org-1", siteId = "s1", userId = "u-1") => ({
+  params: Promise.resolve({ orgId, siteId, userId }),
 });
 
 function makeReq(
@@ -612,6 +621,160 @@ describe("site files BFF", () => {
       accessToken: "tok",
       body: { paths: ["a\\b"] },
       timeoutMs: 60_000,
+    });
+  });
+});
+
+describe("site SFTP BFF", () => {
+  beforeEach(() => {
+    fetchUpstream.mockReset();
+    getSessionFromRequest.mockReset();
+    getSessionFromRequest.mockResolvedValue({
+      accessToken: "tok",
+      csrfToken: "csrf",
+    });
+  });
+
+  it("rejects missing session with 401 on all SFTP routes without calling upstream", async () => {
+    getSessionFromRequest.mockResolvedValue(null);
+
+    const responses = await Promise.all([
+      getSftp(makeReq("GET"), ctx()),
+      createSftpUser(makeReq("POST", { body: { name: "alice" } }), ctx()),
+      deleteSftpUser(makeReq("DELETE"), userCtx()),
+      resetSftpPassword(makeReq("POST"), userCtx()),
+    ]);
+
+    for (const res of responses) {
+      expect(res.status).toBe(401);
+      const parsed = ApiErrorEnvelopeSchema.parse(await res.json());
+      expect(parsed.error.code).toBe("UNAUTHENTICATED");
+    }
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("enforces CSRF token and Origin checks on every SFTP mutation without calling upstream", async () => {
+    const mutators: Array<() => Promise<Response>> = [
+      () => createSftpUser(makeReq("POST", { headers: { "X-CSRF-Token": "wrong" }, body: { name: "alice" } }), ctx()),
+      () => deleteSftpUser(makeReq("DELETE", { headers: { "X-CSRF-Token": "wrong" } }), userCtx()),
+      () => resetSftpPassword(makeReq("POST", { headers: { "X-CSRF-Token": "wrong" } }), userCtx()),
+      () => createSftpUser(makeReq("POST", { headers: { Origin: "https://evil.example" }, body: { name: "alice" } }), ctx()),
+      () => deleteSftpUser(makeReq("DELETE", { headers: { Origin: "https://evil.example" } }), userCtx()),
+      () => resetSftpPassword(makeReq("POST", { headers: { Origin: "https://evil.example" } }), userCtx()),
+    ];
+
+    for (const call of mutators) {
+      const res = await call();
+      expect(res.status).toBe(403);
+      const parsed = ApiErrorEnvelopeSchema.parse(await res.json());
+      expect(parsed.error.code).toBe("PERMISSION_DENIED");
+    }
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid userId segments and non-object, wrong-key, or invalid-name create payloads with 400", async () => {
+    expect((await deleteSftpUser(makeReq("DELETE"), userCtx("org-1", "s1", "../bad"))).status).toBe(400);
+    expect((await resetSftpPassword(makeReq("POST"), userCtx("org-1", "s1", "bad/id"))).status).toBe(400);
+    expect((await createSftpUser(makeReq("POST", { body: ["bad"] }), ctx())).status).toBe(400);
+    expect((await createSftpUser(makeReq("POST"), ctx())).status).toBe(400);
+
+    for (const badBody of [
+      { username: "alice" },
+      { name: "alice", extra: "bad" },
+      { name: "" },
+      { name: "bad-name" },
+      { name: "a".repeat(17) },
+      { name: 123 },
+      {},
+    ]) {
+      const res = await createSftpUser(makeReq("POST", { body: badBody }), ctx());
+      expect(res.status, `body=${JSON.stringify(badBody)}`).toBe(400);
+      expect(ApiErrorEnvelopeSchema.parse(await res.json()).error.code).toBe("VALIDATION_ERROR");
+    }
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("forwards expected upstream paths, methods, bodies, and R12 timeouts", async () => {
+    fetchUpstream.mockResolvedValue({ ok: true, status: 200, data: { data: {} } });
+
+    await getSftp(makeReq("GET"), ctx());
+    await createSftpUser(makeReq("POST", { body: { name: "alice" } }), ctx());
+    await deleteSftpUser(makeReq("DELETE"), userCtx("org-1", "s1", "u-1"));
+    await resetSftpPassword(makeReq("POST"), userCtx("org-1", "s1", "u-1"));
+
+    expect(fetchUpstream.mock.calls).toEqual([
+      [`${BASE_UPSTREAM}/sftp`, { method: "GET", accessToken: "tok", timeoutMs: 20_000 }],
+      [
+        `${BASE_UPSTREAM}/sftp/users`,
+        { method: "POST", accessToken: "tok", body: { name: "alice" }, timeoutMs: 130_000 },
+      ],
+      [`${BASE_UPSTREAM}/sftp/users/u-1`, { method: "DELETE", accessToken: "tok", timeoutMs: 130_000 }],
+      [
+        `${BASE_UPSTREAM}/sftp/users/u-1/reset-password`,
+        { method: "POST", accessToken: "tok", timeoutMs: 130_000 },
+      ],
+    ]);
+  });
+
+  it("returns unredacted temporaryPassword on 201 and reset-password, and passes through 204 and 404", async () => {
+    const createdBody = {
+      data: {
+        user: {
+          id: "u-1",
+          username: "alice",
+          createdAt: "2026-01-01T00:00:00Z",
+          passwordChangedAt: "2026-01-01T00:00:00Z",
+        },
+        temporaryPassword: "Sftp!Secret99",
+      },
+    };
+    fetchUpstream.mockResolvedValueOnce({ ok: true, status: 201, data: createdBody });
+    const createRes = await createSftpUser(makeReq("POST", { body: { name: "alice" } }), ctx());
+    expect(createRes.status).toBe(201);
+    const createJson = await createRes.json();
+    expect(createJson.data.temporaryPassword).toBe("Sftp!Secret99");
+    expect(JSON.stringify(createJson)).not.toContain("[REDACTED]");
+
+    fetchUpstream.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      data: { data: { temporaryPassword: "Reset!Secret77" } },
+    });
+    const resetRes = await resetSftpPassword(makeReq("POST"), userCtx("org-1", "s1", "u-1"));
+    expect(resetRes.status).toBe(200);
+    const resetJson = await resetRes.json();
+    expect(resetJson.data.temporaryPassword).toBe("Reset!Secret77");
+
+    fetchUpstream.mockResolvedValueOnce({ ok: true, status: 204, data: undefined });
+    const delRes = await deleteSftpUser(makeReq("DELETE"), userCtx("org-1", "s1", "u-1"));
+    expect(delRes.status).toBe(204);
+
+    const errBody = {
+      error: {
+        code: "NOT_FOUND",
+        message: "Utente non trovato",
+        requestId: "req-sftp-404",
+        retryable: false,
+        details: [],
+      },
+    };
+    fetchUpstream.mockResolvedValueOnce({ ok: false, status: 404, error: errBody });
+    const notFoundRes = await resetSftpPassword(makeReq("POST"), userCtx("org-1", "s1", "missing"));
+    expect(notFoundRes.status).toBe(404);
+    expect(await notFoundRes.json()).toEqual(errBody);
+  });
+
+  it("component create body passes CreateSiteSftpUserRequestSchema and BFF validation", async () => {
+    const body = createSftpUserBody("alice");
+    expect(CreateSiteSftpUserRequestSchema.parse(body)).toEqual({ name: "alice" });
+    fetchUpstream.mockResolvedValueOnce({ ok: true, status: 201, data: { data: {} } });
+    const res = await createSftpUser(makeReq("POST", { body }), ctx());
+    expect(res.status).toBe(201);
+    expect(fetchUpstream).toHaveBeenCalledWith(`${BASE_UPSTREAM}/sftp/users`, {
+      method: "POST",
+      accessToken: "tok",
+      body: { name: "alice" },
+      timeoutMs: 130_000,
     });
   });
 });

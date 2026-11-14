@@ -370,6 +370,7 @@ export const it = {
         label: "Contenuto di {name}",
         loading: "Apertura del file...",
         warning: "Un errore qui può bloccare il sito. Se non sei sicuro, scarica prima una copia.",
+        mixedLineEndings: "Questo file usa fine riga diversi. Salvando verranno resi tutti uguali.",
         save: "Salva",
         saving: "Salvataggio in corso...",
         saved: "Salvato.",
@@ -413,6 +414,82 @@ export const it = {
           "Questo file non è un archivio zip valido oppure contiene elementi non consentiti. Prova a crearlo di nuovo.",
         zipExists: "Qui esiste già un file o una cartella con questo nome. Scegli un altro nome.",
         zipInterrupted: "L'operazione ha richiesto troppo tempo ed è stata interrotta. Prova con meno file.",
+      },
+      sftpLink: "Collegati con un programma SFTP",
+      sftp: {
+        title: "Accesso SFTP",
+        back: "Torna ai file",
+        intro:
+          "Con un programma SFTP come FileZilla o WinSCP, tu o il tuo sviluppatore potete lavorare sui file di questo sito dal computer. Ogni persona ha il proprio nome utente e la propria password e può accedere solo ai file di questo sito.",
+        unavailable:
+          "L'accesso SFTP non è ancora disponibile su questo server. Puoi comunque gestire i file nella scheda File.",
+        details: "Dati di connessione",
+        detailsUnavailable:
+          "I dati di connessione non sono ancora disponibili. Contatta il tuo fornitore di hosting.",
+        protocol: "Protocollo",
+        host: "Indirizzo del server",
+        port: "Porta",
+        usernameHint: "Nome utente: uno degli utenti qui sotto",
+        fingerprintTitle: "Verifica l'identità del server",
+        fingerprintBody:
+          "Al primo collegamento il programma mostra un'impronta e chiede se fidarti. Prosegui solo se corrisponde a questa:",
+        copyFor: "Copia {what}",
+        copied: "Copiato",
+        users: "Utenti",
+        count: "{count} di {max} utenti",
+        empty: "Non ci sono ancora utenti SFTP. Aggiungine uno per collegarti con un programma SFTP.",
+        name: "Nome utente",
+        createdAt: "Creato",
+        passwordChanged: "Password cambiata",
+        actions: "Azioni",
+        add: "Aggiungi utente",
+        limit:
+          "Questo sito ha già il numero massimo di {max} utenti SFTP. Eliminane uno che non serve più per aggiungerne un altro.",
+        create: {
+          title: "Aggiungi un utente SFTP",
+          label: "Nome",
+          hint: "Usa da 1 a 16 lettere minuscole o numeri, senza spazi. Davanti aggiungiamo un codice breve del sito. Vedrai il nome utente completo nell'elenco.",
+          submit: "Aggiungi utente",
+          working: "Aggiunta in corso...",
+        },
+        created: {
+          title: "Utente aggiunto",
+          tempFor: "Password per {name}:",
+          copy: "Copia",
+          copied: "Copiato",
+          copyUnavailable:
+            "Qui non è possibile copiare automaticamente. Seleziona la password e copiala a mano.",
+          tempNote:
+            "Inseriscila nel programma SFTP insieme a nome utente, indirizzo del server e porta.",
+          tempOnce: "La mostriamo una sola volta: copiala adesso. Se la perdi, crea una nuova password.",
+          done: "Fatto",
+        },
+        reset: {
+          action: "Nuova password",
+          title: "Creare una nuova password per {name}?",
+          body: "La password attuale smette subito di funzionare. Chi la usa avrà bisogno di quella nuova per collegarsi. Le connessioni aperte per questo utente terminano subito e gli altri utenti SFTP vengono disconnessi per un istante (possono ricollegarsi subito).",
+          confirm: "Crea nuova password",
+          working: "Creazione in corso...",
+          doneTitle: "Nuova password pronta",
+        },
+        remove: {
+          action: "Elimina",
+          title: "Eliminare l'utente {name}?",
+          body: "{name} non potrà più collegarsi. I file del sito non vengono toccati. Le connessioni aperte per questo utente terminano subito e gli altri utenti SFTP vengono disconnessi per un istante (possono ricollegarsi subito).",
+          confirm: "Elimina utente",
+          working: "Eliminazione in corso...",
+        },
+        errors: {
+          QUOTA_EXCEEDED:
+            "Questo sito ha già il numero massimo di 10 utenti SFTP. Eliminane uno che non serve più, poi riprova.",
+          ALREADY_EXISTS: "Questo nome è già usato su questo sito. Scegline un altro.",
+          VALIDATION_ERROR:
+            "Questo nome non si può usare. Usa da 1 a 16 lettere minuscole o numeri, senza spazi.",
+          DOCKER_ENGINE_UNAVAILABLE:
+            "Al momento non è stato possibile aggiornare l'accesso SFTP. Attendi un minuto e riprova.",
+          ORGANIZATION_SUSPENDED:
+            "Il tuo account è sospeso: non è possibile gestire l'accesso SFTP. Contatta il tuo fornitore di hosting.",
+        },
       },
     },
   },

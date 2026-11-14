@@ -369,6 +369,7 @@ export const en: Messages = {
         label: "Contents of {name}",
         loading: "Opening the file...",
         warning: "A mistake here can break your website. If you're not sure, download a copy first.",
+        mixedLineEndings: "This file uses mixed line endings. Saving will make them all the same.",
         save: "Save",
         saving: "Saving...",
         saved: "Saved.",
@@ -412,6 +413,82 @@ export const en: Messages = {
           "This isn't a valid zip file or it contains items that aren't allowed. Try creating it again.",
         zipExists: "A file or folder with that name is already here. Choose another name.",
         zipInterrupted: "This took too long and was stopped. Try with fewer files.",
+      },
+      sftpLink: "Connect with an SFTP program",
+      sftp: {
+        title: "SFTP access",
+        back: "Back to files",
+        intro:
+          "With an SFTP program such as FileZilla or WinSCP, you or your web developer can work on this site's files from a computer. Each person gets their own user name and password, and can reach only this site's files.",
+        unavailable:
+          "SFTP access isn't available on this server yet. You can still manage your files in the Files tab.",
+        details: "Connection details",
+        detailsUnavailable:
+          "Connection details aren't available yet. Contact your hosting provider.",
+        protocol: "Protocol",
+        host: "Server address",
+        port: "Port",
+        usernameHint: "User name: one of the users below",
+        fingerprintTitle: "Check the server's identity",
+        fingerprintBody:
+          "The first time you connect, your program shows a fingerprint and asks whether to trust it. Continue only if it matches this one:",
+        copyFor: "Copy {what}",
+        copied: "Copied",
+        users: "Users",
+        count: "{count} of {max} users",
+        empty: "No SFTP users yet. Add one to connect with an SFTP program.",
+        name: "User name",
+        createdAt: "Created",
+        passwordChanged: "Password changed",
+        actions: "Actions",
+        add: "Add user",
+        limit:
+          "This site already has the maximum of {max} SFTP users. Delete one you no longer need to add another.",
+        create: {
+          title: "Add an SFTP user",
+          label: "Name",
+          hint: "Use 1 to 16 lowercase letters or numbers, without spaces. We add a short site code in front of it. You'll see the full login in the list.",
+          submit: "Add user",
+          working: "Adding...",
+        },
+        created: {
+          title: "User added",
+          tempFor: "Password for {name}:",
+          copy: "Copy",
+          copied: "Copied",
+          copyUnavailable:
+            "Copying isn't available here. Select the password and copy it by hand.",
+          tempNote:
+            "Enter it in your SFTP program together with the user name, server address and port.",
+          tempOnce: "We show it only once: copy it now. If you lose it, create a new password.",
+          done: "Done",
+        },
+        reset: {
+          action: "New password",
+          title: "Create a new password for {name}?",
+          body: "The current password stops working right away. Anyone who uses it will need the new one to connect. Open connections for this user end at once, and other SFTP users disconnect for a moment (they can reconnect right away).",
+          confirm: "Create new password",
+          working: "Creating...",
+          doneTitle: "New password ready",
+        },
+        remove: {
+          action: "Delete",
+          title: "Delete the user {name}?",
+          body: "{name} will no longer be able to connect. The site's files are not affected. Open connections for this user end at once, and other SFTP users disconnect for a moment (they can reconnect right away).",
+          confirm: "Delete user",
+          working: "Deleting...",
+        },
+        errors: {
+          QUOTA_EXCEEDED:
+            "This site already has the maximum of 10 SFTP users. Delete one you no longer need, then try again.",
+          ALREADY_EXISTS: "This name is already used on this site. Choose another one.",
+          VALIDATION_ERROR:
+            "That name can't be used. Use 1 to 16 lowercase letters or numbers, without spaces.",
+          DOCKER_ENGINE_UNAVAILABLE:
+            "SFTP access couldn't be updated right now. Wait a minute and try again.",
+          ORGANIZATION_SUSPENDED:
+            "Your account is suspended, so SFTP access cannot be managed. Contact your hosting provider.",
+        },
       },
     },
   },

@@ -39,20 +39,36 @@ export function classifyUpstream(res: { ok: boolean; status: number }): Upstream
   return res.status === 404 ? "notFound" : "error";
 }
 
-export type ServerResult<T> = { ok: true; data: T } | { ok: false; outcome: "notFound" | "error" };
+export type ServerResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; outcome: "notFound" | "error"; status?: number; code?: string };
 
 /**
  * GET for server components. A dead API session never renders misleading empty UI:
  * it goes through /api/session/expired, which clears the cookie and lands on /login.
  */
-export async function serverGet<T>(path: string): Promise<ServerResult<T>> {
+export async function serverGet<T>(
+  path: string,
+  opts?: { timeoutMs?: number },
+): Promise<ServerResult<T>> {
   const session = await getServerSession();
   if (!session) redirect("/login");
-  const res = await fetchUpstream<{ data: T }>(path, { accessToken: session.accessToken });
+  const upstreamOpts =
+    opts?.timeoutMs !== undefined
+      ? { accessToken: session.accessToken, timeoutMs: opts.timeoutMs }
+      : { accessToken: session.accessToken };
+  const res = await fetchUpstream<{ data: T }>(path, upstreamOpts);
   const outcome = classifyUpstream(res);
   if (outcome === "expired") redirect("/api/session/expired");
   if (outcome === "ok" && res.data?.data !== undefined) return { ok: true, data: res.data.data };
-  return { ok: false, outcome: outcome === "notFound" ? "notFound" : "error" };
+  const errObj = res.error as { error?: { code?: unknown } } | null | undefined;
+  const code = typeof errObj?.error?.code === "string" ? errObj.error.code : undefined;
+  return {
+    ok: false,
+    outcome: outcome === "notFound" ? "notFound" : "error",
+    status: res.status,
+    ...(code !== undefined ? { code } : {}),
+  };
 }
 
 const orNull = <T>(r: ServerResult<T>): T | null => (r.ok ? r.data : null);

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
   isTerminalOperationStatus,
@@ -846,6 +847,17 @@ export function FilesPanel({
         onRetry={refresh}
         locale={locale}
       />
+
+      {siteId && (
+        <div className="pt-1">
+          <Link
+            href={`/sites/${siteId}/files/sftp`}
+            className="text-sm font-medium text-primary underline-offset-4 hover:underline"
+          >
+            {m.site.files.sftpLink}
+          </Link>
+        </div>
+      )}
 
       <NameDialog
         open={newFolderOpen}

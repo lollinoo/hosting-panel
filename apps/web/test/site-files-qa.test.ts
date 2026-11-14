@@ -637,7 +637,7 @@ describe("path helpers", () => {
   });
 });
 
-describe("copy, jargon, error next steps, and cycle 1 SFTP exclusion", () => {
+describe("copy, jargon, error next steps, and SFTP link guards", () => {
   it("has parity and non-empty strings for every site.files key in both catalogs", () => {
     expect(en.site.tabs.files.trim().length).toBeGreaterThan(0);
     expect(itMsgs.site.tabs.files.trim().length).toBeGreaterThan(0);
@@ -724,10 +724,13 @@ describe("copy, jargon, error next steps, and cycle 1 SFTP exclusion", () => {
     }
   });
 
-  it("keeps SFTP keys and wording out of site.files catalogs and rendered markup", async () => {
+  it("contains site.files.sftp in both catalogs and shows one SFTP link only on FilesPanel", async () => {
     for (const [lang, m] of [["en", en], ["it", itMsgs]] as const) {
-      expect(Object.hasOwn(m.site.files, "sftpLink")).toBe(false);
+      expect(Object.hasOwn(m.site.files, "sftpLink"), `${lang}.site.files.sftpLink`).toBe(true);
+      expect(m.site.files.sftpLink.trim().length, `${lang}.site.files.sftpLink`).toBeGreaterThan(0);
+      expect(collectLeaves(m.site.files.sftp).length, `${lang}.site.files.sftp`).toBeGreaterThan(0);
       for (const [k, v] of collectLeaves(m.site.files)) {
+        if (k === "sftpLink" || k.startsWith("sftp.")) continue;
         expect(k, `${lang}.site.files key ${k}`).not.toMatch(/sftp/i);
         expect(String(v), `${lang}.site.files.${k}`).not.toMatch(/\bsftp\b/i);
       }
@@ -836,7 +839,11 @@ describe("copy, jargon, error next steps, and cycle 1 SFTP exclusion", () => {
       ),
     ];
 
-    for (const html of renderedParts) {
+    for (const html of [renderedParts[0]!, renderedParts[2]!]) {
+      expect(html).toContain(en.site.files.sftpLink);
+      expect(html.match(/href="\/sites\/s1\/files\/sftp"/g)).toHaveLength(1);
+    }
+    for (const html of [renderedParts[1]!, ...renderedParts.slice(3)]) {
       expect(html).not.toMatch(/\bsftp\b/i);
     }
   });
