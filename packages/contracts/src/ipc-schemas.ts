@@ -1,6 +1,16 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
 import {
+  SITE_FILE_BATCH_MAX,
+  SITE_FILE_CHUNK_BYTES,
+  SITE_FILE_SEGMENT_MAX_BYTES,
+  SiteFileChunkBase64Schema,
+  SiteFileEntrySchema,
+  SiteFileItemPathSchema,
+  SiteFilePathSchema,
+  SiteFileUploadIdSchema,
+} from "./site-files.js";
+import {
   MailFailureDtoSchema,
   MailRelayHostSchema,
   MailSenderDomainSchema,
@@ -354,3 +364,120 @@ export type MailRelayStatusReport = z.infer<typeof MailRelayStatusReportWireSche
 
 export const MailTestIpcRequestSchema = z.object({ to: z.string().email(), from: z.string().email() });
 export const MailTestIpcResponseSchema = MailTestResultDtoSchema;
+
+export const SITE_FILES_LIST_MAX = 5_000;
+export const SITE_FILES_MAX_FILE_BYTES = 2_147_483_648;
+
+const SiteFilesServiceIdSchema = z.string().min(1).max(128);
+const SiteFileOffsetSchema = z.number().int().min(0).max(SITE_FILES_MAX_FILE_BYTES);
+const SiteFilesBatchSchema = z.array(SiteFileItemPathSchema).min(1).max(SITE_FILE_BATCH_MAX);
+
+export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("list"),
+      path: SiteFilePathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("stat"),
+      path: SiteFilePathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("read"),
+      path: SiteFileItemPathSchema,
+      offset: SiteFileOffsetSchema,
+      length: z.number().int().min(1).max(SITE_FILE_CHUNK_BYTES),
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("write"),
+      path: SiteFileItemPathSchema,
+      uploadId: SiteFileUploadIdSchema,
+      offset: SiteFileOffsetSchema,
+      dataBase64: SiteFileChunkBase64Schema,
+      final: z.boolean(),
+      overwrite: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("mkdir"),
+      path: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("move"),
+      from: SiteFileItemPathSchema,
+      to: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("delete"),
+      paths: SiteFilesBatchSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("archive"),
+      paths: SiteFilesBatchSchema,
+      to: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("extract"),
+      path: SiteFileItemPathSchema,
+      to: SiteFilePathSchema,
+    })
+    .strict(),
+]);
+export type SiteFilesIpcRequest = z.infer<typeof SiteFilesIpcRequestSchema>;
+export type SiteFilesOp = SiteFilesIpcRequest["op"];
+
+const SiteFilesEmptyResultSchema = z.object({}).strict();
+const SiteFilesCountResultSchema = z.object({ entries: z.number().int().nonnegative() });
+// Root stat returns { name: "" }; directory entries in list always require non-empty names.
+const SiteFilesStatEntrySchema = z
+  .object({
+    ...SiteFileEntrySchema.shape,
+    name: z.string().max(SITE_FILE_SEGMENT_MAX_BYTES),
+  })
+  .strict();
+
+export const SITE_FILES_RESULT_SCHEMAS = {
+  list: z.object({
+    entries: z.array(SiteFileEntrySchema).max(SITE_FILES_LIST_MAX),
+    truncated: z.boolean(),
+  }),
+  stat: z.object({ entry: SiteFilesStatEntrySchema }),
+  read: z.object({
+    dataBase64: SiteFileChunkBase64Schema,
+    size: z.number().int().nonnegative(),
+    eof: z.boolean(),
+  }),
+  write: z.object({ received: z.number().int().nonnegative() }),
+  mkdir: SiteFilesEmptyResultSchema,
+  move: SiteFilesEmptyResultSchema,
+  delete: SiteFilesEmptyResultSchema,
+  archive: SiteFilesCountResultSchema,
+  extract: SiteFilesCountResultSchema,
+} as const;
+export type SiteFilesResultByOp = {
+  [K in SiteFilesOp]: z.infer<(typeof SITE_FILES_RESULT_SCHEMAS)[K]>;
+};

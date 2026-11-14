@@ -43,6 +43,8 @@ export const OPERATION_KINDS = [
   "site.delete",
   "site.reassign",
   "site.domains",
+  "site.files.archive",
+  "site.files.extract",
   "host.maintenance",
   "host.security",
   "host.allocate",
