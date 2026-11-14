@@ -50,7 +50,8 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Emissione / Rinnovo Certificati ACME/TLS Automatici** | ✅ **Operativo** | `acmeTlsRuntimeAvailable: true` su `linux-systemd` (`ADR-0017`, `AC-F2-10`) |
 | **Web File Manager dei Siti** | ✅ **Operativo** | Helper isolato per sito, chunk 512 KiB, zip/unzip asincroni (`ADR-0019`, `AC-F2-10`) |
 | **Accesso SFTP per Sito (Chroot)** | ✅ **Operativo** | `sftpAvailable: true` su `linux-systemd`, contenitore `hp_sftp` porta TCP `2222` (`ADR-0020`, `AC-F2-10`) |
-| **Backup Incrementali S3 di Produzione & DB Gestiti** | ❌ **Chiuso (`false`)** | `productionBackupRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
+| **Database per Sito & phpMyAdmin** | ✅ **Operativo** | `phpMyAdminAvailable: true` su `linux-systemd`, `hp_mariadb` + `hp_phpmyadmin` su `127.0.0.1` (`ADR-0021`, `AC-F2-10`) |
+| **Backup Incrementali S3 di Produzione** | ❌ **Chiuso (`false`)** | `productionBackupRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
 ---
@@ -201,6 +202,12 @@ Su runtime `linux-systemd` (`sftpAvailable: true`), i clienti con permesso `site
 
 Dettagli e limiti: [ADR 0020](docs/architecture/adr/0020-site-sftp.md).
 
+### Database dei siti e phpMyAdmin
+
+Su runtime `linux-systemd` (`phpMyAdminAvailable: true`), i clienti con permesso `site.databases.manage` gestiscono database aggiuntivi (fino a `10` per sito) e utenti database aggiuntivi (fino a `10` per sito, con grant per singolo database) nella scheda **Database** del sito: lo stato è letto direttamente da `hp_mariadb` senza tabelle speculari sul pannello, le password temporanee (`24` caratteri) sono mostrate una sola volta e solo l'hash MariaDB `*<40 hex>` attraversa l'IPC verso l'executor, senza mai riavviare MariaDB né i container WordPress (`CP-01`). Il pulsante **Apri phpMyAdmin** crea un account di sign-on temporaneo limitato ai database del sito, rilascia il cookie cifrato `hp_pma` e apre `/phpmyadmin/<siteId>/` tramite il forwarder autenticato del pannello (al massimo `2` richieste simultanee per sito con coda da `30 s`, così un sito non blocca gli altri) verso il singolo contenitore di piattaforma `hp_phpmyadmin` (`512 MiB`, `4` worker) in ascolto solo su `127.0.0.1` (`HP_PHPMYADMIN_PORT`, predefinita `8306`, stesso valore in `executor.env` e `web.env`; configurazione in `/var/lib/hosting-panel/phpmyadmin`). Il forwarder invia le richieste verso phpMyAdmin tramite il client `node:http` dedicato (`phpmyadmin-upstream.ts`), privo di timeout propri (a differenza dei `300 s` di `fetch` di Node), così operazioni da oltre `5` minuti non liberano prematuramente il posto del sito e dopo `310 s` mostrano la pagina `503` di attesa (*"phpMyAdmin sta ancora lavorando"*) finché la richiesta reale termina. Riaprire phpMyAdmin dalla scheda **Database** interrompe eventuali operazioni lente rimaste attive su quel sito.
+
+Dettagli e limiti: [ADR 0021](docs/architecture/adr/0021-site-databases.md).
+
 #### Aggiornamento
 
 ```bash
@@ -261,6 +268,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0020`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito).
+- [Registro delle ADR (`ADR 0001..0021`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

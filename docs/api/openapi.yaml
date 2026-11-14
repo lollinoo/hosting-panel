@@ -2997,6 +2997,457 @@ paths:
             more than a few seconds; user row restored (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/databases:
+    get:
+      tags: [Managed Sites]
+      operationId: getSiteDatabases
+      summary: List site databases, database users, grants, and phpMyAdmin availability (site.databases.manage)
+      description: >-
+        Returns the site's database name prefix, databases with byte sizes, database users
+        with granted database names, custom quotas, and whether phpMyAdmin sign-on is
+        available on the active backend. Allowed while a site is `deploying` or in
+        `maintenance`. Never exposes password hashes or credentials.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Site database state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDatabasesDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Organization or site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Managed Sites]
+      operationId: createSiteDatabase
+      summary: Create a custom site database (site.databases.manage)
+      description: >-
+        Creates a MariaDB database named `<prefix>_<suffix>`. Refused with `409 RESOURCE_LOCKED`
+        (`reason: not_ready`) while the site is `deploying` or in `maintenance`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteDatabaseRequest"
+      responses:
+        "201":
+          description: Custom database created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDatabaseCreatedDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Organization or site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site locked in `deploying` or `maintenance` (`RESOURCE_LOCKED`, `reason: not_ready`),
+            duplicate database name (`ALREADY_EXISTS`), or custom database limit reached
+            (`QUOTA_EXCEEDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/databases/phpmyadmin:
+    post:
+      tags: [Managed Sites]
+      operationId: openSitePhpMyAdmin
+      summary: Provision per-site phpMyAdmin sign-on credentials (site.databases.manage; web BFF only)
+      description: >-
+        Creates or rotates the site's dedicated `pma_<hex>` sign-on account and returns its
+        one-time temporary password. Consumed exclusively by the web BFF to perform a
+        server-side sign-on into phpMyAdmin; never forwarded directly to browsers.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: One-time phpMyAdmin sign-on credentials
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDatabaseSignOnDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Organization or site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "Site locked in `deploying` or `maintenance` (`RESOURCE_LOCKED`, `reason: not_ready`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: phpMyAdmin unavailable on the active runtime backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Managed Sites]
+      operationId: checkSitePhpMyAdminAccess
+      summary: Verify caller permission and site readiness for phpMyAdmin access (site.databases.manage)
+      description: >-
+        Lightweight forward-auth check called by the web BFF before proxying requests to
+        phpMyAdmin. Checks tenancy, `site.databases.manage`, suspension, phpMyAdmin capability,
+        and site readiness without calling the executor or writing an audit event.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "204":
+          description: Caller authorized and phpMyAdmin ready for this site
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Organization or site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "Site locked in `deploying` or `maintenance` (`RESOURCE_LOCKED`, `reason: not_ready`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: phpMyAdmin unavailable on the active runtime backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/databases/{name}:
+    delete:
+      tags: [Managed Sites]
+      operationId: deleteSiteDatabase
+      summary: Delete a custom site database (site.databases.manage)
+      description: >-
+        Drops a custom database owned by the site (`<prefix>_<suffix>`). Refuses deleting the
+        site's primary database with `400 VALIDATION_ERROR` (`reason: protected`), and refuses
+        names outside the site's prefix (including `pma_...` or `phpmyadmin`) with `404`.
+        Allowed while the site is `deploying` or in `maintenance`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: path
+          name: name
+          required: true
+          description: Full database name (`<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "204":
+          description: Custom database deleted
+        "400":
+          description: "Cannot delete the site's primary database (`VALIDATION_ERROR`, `reason: protected`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or database not found within site prefix (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Database metadata lock contention or concurrent change in progress (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/database-users:
+    post:
+      tags: [Managed Sites]
+      operationId: createSiteDatabaseUser
+      summary: Create a custom site database user (site.databases.manage)
+      description: >-
+        Creates a MariaDB user named `<prefix>_<suffix>` with a generated 24-character temporary
+        password returned once and never stored by the control plane. Only its MariaDB
+        native password hash is sent to the executor.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteDatabaseUserRequest"
+      responses:
+        "201":
+          description: Custom database user created (temporary password returned once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDatabaseUserCreatedDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Organization or site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site locked in `deploying` or `maintenance` (`RESOURCE_LOCKED`, `reason: not_ready`),
+            duplicate username (`ALREADY_EXISTS`), or custom user limit reached
+            (`QUOTA_EXCEEDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/database-users/{name}:
+    delete:
+      tags: [Managed Sites]
+      operationId: deleteSiteDatabaseUser
+      summary: Delete a custom site database user (site.databases.manage)
+      description: >-
+        Drops a custom database user owned by the site (`<prefix>_<suffix>`). Refuses deleting
+        the site's primary user with `400 VALIDATION_ERROR` (`reason: protected`), and refuses
+        names outside the site's prefix (including `pma_...`) with `404`. Allowed while the
+        site is `deploying` or in `maintenance`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: path
+          name: name
+          required: true
+          description: Full database username (`<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "204":
+          description: Custom database user deleted
+        "400":
+          description: "Cannot delete the site's primary database user (`VALIDATION_ERROR`, `reason: protected`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or database user not found within site prefix (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Database metadata lock contention or concurrent change in progress (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/database-users/{name}/reset-password:
+    post:
+      tags: [Managed Sites]
+      operationId: resetSiteDatabaseUserPassword
+      summary: Reset a custom database user's password (site.databases.manage)
+      description: >-
+        Generates a new 24-character temporary password returned once in the response and sends
+        only its hash to the executor. Refused for the site's primary user (`400`, `reason: protected`)
+        and while the site is `deploying` or in `maintenance` (`409`, `reason: not_ready`).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: path
+          name: name
+          required: true
+          description: Full database username (`<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "200":
+          description: Temporary password (returned once)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDatabasePasswordResetDto"
+        "400":
+          description: "Cannot reset the site's primary database user password (`VALIDATION_ERROR`, `reason: protected`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or database user not found within site prefix (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "Site locked in `deploying` or `maintenance` (`RESOURCE_LOCKED`, `reason: not_ready`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/database-users/{name}/grants/{database}:
+    put:
+      tags: [Managed Sites]
+      operationId: grantSiteDatabaseAccess
+      summary: Grant a custom database user access to a site database (site.databases.manage)
+      description: >-
+        Grants a custom database user privileges on any database belonging to the same site.
+        Refused while the site is `deploying` or in `maintenance` (`409`, `reason: not_ready`).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: path
+          name: name
+          required: true
+          description: Full database username (`<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - in: path
+          name: database
+          required: true
+          description: Full database name (`<prefix>` or `<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "204":
+          description: Database grant applied
+        "400":
+          description: "Cannot alter grants on the site's primary database user (`VALIDATION_ERROR`, `reason: protected`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, user, or database not found within site prefix (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "Site locked in `deploying` or `maintenance` (`RESOURCE_LOCKED`, `reason: not_ready`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Managed Sites]
+      operationId: revokeSiteDatabaseAccess
+      summary: Revoke a custom database user's access to a site database (site.databases.manage)
+      description: >-
+        Revokes a custom database user's privileges on a database belonging to the same site.
+        Allowed while the site is `deploying` or in `maintenance`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: path
+          name: name
+          required: true
+          description: Full database username (`<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+        - in: path
+          name: database
+          required: true
+          description: Full database name (`<prefix>` or `<prefix>_<suffix>`)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 64
+      responses:
+        "204":
+          description: Database grant revoked
+        "400":
+          description: "Cannot alter grants on the site's primary database user (`VALIDATION_ERROR`, `reason: protected`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.databases.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, user, or database not found within site prefix (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Database metadata lock contention or concurrent change in progress (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Database runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or MariaDB service unavailable or outcome unclear (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/sites:
     get:
       tags: [Admin Sites]
@@ -3484,6 +3935,7 @@ components:
         - hostAgentRuntimeAvailable
         - acmeTlsRuntimeAvailable
         - sftpAvailable
+        - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
       properties:
         phase:
@@ -3506,6 +3958,9 @@ components:
         sftpAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        phpMyAdminAvailable:
+          type: boolean
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         productionBackupRuntimeAvailable:
           type: boolean
           const: false
@@ -3519,6 +3974,7 @@ components:
         - hostAgentRuntimeAvailable
         - acmeTlsRuntimeAvailable
         - sftpAvailable
+        - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
       properties:
         hostingMode:
@@ -3534,6 +3990,9 @@ components:
         acmeTlsRuntimeAvailable:
           type: boolean
         sftpAvailable:
+          type: boolean
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        phpMyAdminAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         productionBackupRuntimeAvailable:
@@ -4725,6 +5184,138 @@ components:
           type: string
           minLength: 20
           description: One-time temporary password returned only upon password reset
+
+    CreateSiteDatabaseRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: "^[a-z0-9][a-z0-9_]{0,15}$"
+          description: Lowercase suffix appended to the site's database prefix (`<prefix>_<name>`)
+
+    CreateSiteDatabaseUserRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: "^[a-z0-9][a-z0-9_]{0,15}$"
+          description: Lowercase suffix appended to the site's database prefix (`<prefix>_<name>`)
+
+    SiteDatabaseDto:
+      type: object
+      additionalProperties: false
+      required: [name, primary, sizeBytes]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        primary:
+          type: boolean
+        sizeBytes:
+          type: integer
+          format: int64
+          minimum: 0
+
+    SiteDatabaseUserDto:
+      type: object
+      additionalProperties: false
+      required: [name, primary, databases]
+      properties:
+        name:
+          type: string
+          minLength: 1
+        primary:
+          type: boolean
+        databases:
+          type: array
+          items:
+            type: string
+            minLength: 1
+
+    SiteDatabasesDto:
+      type: object
+      additionalProperties: false
+      required: [prefix, databases, users, limits, phpMyAdminAvailable]
+      properties:
+        prefix:
+          type: string
+          minLength: 1
+        databases:
+          type: array
+          items:
+            $ref: "#/components/schemas/SiteDatabaseDto"
+        users:
+          type: array
+          items:
+            $ref: "#/components/schemas/SiteDatabaseUserDto"
+        limits:
+          type: object
+          additionalProperties: false
+          required: [databases, users]
+          properties:
+            databases:
+              type: integer
+              minimum: 1
+            users:
+              type: integer
+              minimum: 1
+        phpMyAdminAvailable:
+          type: boolean
+
+    SiteDatabaseCreatedDto:
+      type: object
+      additionalProperties: false
+      required: [database]
+      properties:
+        database:
+          $ref: "#/components/schemas/SiteDatabaseDto"
+
+    SiteDatabaseUserCreatedDto:
+      type: object
+      additionalProperties: false
+      required: [user, temporaryPassword]
+      properties:
+        user:
+          $ref: "#/components/schemas/SiteDatabaseUserDto"
+        temporaryPassword:
+          type: string
+          minLength: 24
+          pattern: "^[A-Za-z0-9]{24,}$"
+          description: One-time temporary password returned only upon database user creation
+
+    SiteDatabasePasswordResetDto:
+      type: object
+      additionalProperties: false
+      required: [temporaryPassword]
+      properties:
+        temporaryPassword:
+          type: string
+          minLength: 24
+          pattern: "^[A-Za-z0-9]{24,}$"
+          description: One-time temporary password returned only upon password reset
+
+    SiteDatabaseSignOnDto:
+      type: object
+      additionalProperties: false
+      required: [username, temporaryPassword]
+      properties:
+        username:
+          type: string
+          pattern: "^pma_[0-9a-f]{12}$"
+          description: Dedicated per-site MariaDB sign-on account (`pma_<hex>`)
+        temporaryPassword:
+          type: string
+          minLength: 24
+          pattern: "^[A-Za-z0-9]{24,}$"
+          description: One-time phpMyAdmin sign-on password consumed by the web BFF only
 
     SiteSummaryDto:
       type: object
