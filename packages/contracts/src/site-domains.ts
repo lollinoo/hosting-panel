@@ -77,6 +77,7 @@ export const SiteDomainsDtoSchema = z.object({
   serverIpv4: z.string(),
   routesPending: z.boolean(),
   domains: z.array(SiteDomainDtoSchema),
+  mail: z.object({ configured: z.boolean(), fromAddress: z.string().nullable() }),
 });
 export type SiteDomainsDto = z.infer<typeof SiteDomainsDtoSchema>;
 

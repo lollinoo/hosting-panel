@@ -290,3 +290,16 @@ describe("Phase1DisabledDockerExecutor site capabilities", () => {
     ).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });
 });
+
+describe("Phase1DisabledDockerExecutor mail", () => {
+  it("phase1 executor refuses mail calls with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    await expect(executor.applyMailRelay(null)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    await expect(executor.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" })).rejects.toMatchObject({
+      code: "NOT_SUPPORTED",
+    });
+    await expect(executor.sendTestMail({ to: "a@b.it", from: "c@d.it" })).rejects.toMatchObject({
+      code: "NOT_SUPPORTED",
+    });
+  });
+});

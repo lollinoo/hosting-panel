@@ -91,3 +91,18 @@ Source: `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md`.
 8. **SFTP and web file manager are mandatory**; databases with phpMyAdmin.
 9. **Container terminal only**: no host terminal in the panel.
 10. **Delivery order** (steps 1–6): 1 foundation (auth, roles, i18n, shell, installer); 2 sites, domains, TLS, outgoing mail; 3 backups; 4 files, databases, site import (first go-live line is steps 1–4); 5 WordPress tools; 6 admin console completion. Each step has its own plan and passes the four sensors plus a real-server check.
+
+## Step 2c Outgoing Mail Owner Decisions (2026-11-09)
+
+Source: `docs/architecture/adr/0018-outgoing-mail-relay.md`.
+
+1. **Sender**: `noreply@<sender domain>`, with the site name and `Reply-To` kept.
+2. **Send failures** are visible to the server administrator only.
+3. **Panel password-reset emails** are deferred to Step 6.
+4. **No per-site SPF/DKIM**: the customer sees "nothing to set up"; the admin page hints SPF/DKIM for the single sender domain.
+5. **A site's own SMTP plugin wins**: ours is a default mu-plugin at `PHP_INT_MIN`.
+6. **Verified TLS** to the provider: the host must be a hostname, not an IP.
+7. **Pre-0.5.0 sites** are redeployed once automatically on update; sites whose service is stopped are upgraded after they are started again.
+8. **Limits**: 200 messages/h per site, 100 recipients, 25 MiB. A newsletter needs an external service.
+9. **`CP-01` exception**: after a reboot with the panel down, mail is queued, not delivered, until the API is back and re-applies the password (it lives only in tmpfs).
+10. **Test send timeout** returns `OPERATION_AMBIGUOUS` ("may have been sent").

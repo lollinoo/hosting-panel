@@ -38,6 +38,7 @@ import {
   routesPending,
 } from "./domain-policy.js";
 import { DomainReconcilerService } from "./domain-reconciler.service.js";
+import { MailRelayService } from "../mail/mail-relay.service.js";
 
 const CONFLICT =
   "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.";
@@ -106,6 +107,7 @@ export class SiteDomainsService {
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly executor: DockerExecutorPort,
     @Inject(DomainReconcilerService) private readonly reconciler: DomainReconcilerService,
+    @Inject(MailRelayService) private readonly mailRelay: MailRelayService,
   ) {}
 
   public async list(siteId: string, organizationId: string): Promise<SiteDomainsDto> {
@@ -136,6 +138,7 @@ export class SiteDomainsService {
           trusted: r.certTrusted,
         },
       })),
+      mail: await this.mailRelay.customerView(),
     };
   }
 

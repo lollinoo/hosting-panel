@@ -9,6 +9,7 @@ import {
   DEFAULT_SECRETS_ROOT_DIR,
   DockerEngineSocketAdapter,
 } from "./docker-engine-adapter.js";
+import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles } from "./site-mail.js";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
   DEFAULT_EXECUTOR_VERSION,
@@ -179,6 +180,9 @@ export async function bootstrapDockerExecutorDaemon(
     );
   }
   const panel = parsePanelIngressConfigFromEnv(env);
+  // One value for both the adapter's drift check and the files the binds point at.
+  const siteMailDir = env.HP_SITE_MAIL_DIR?.trim() || DEFAULT_SITE_MAIL_DIR;
+  const mailRelaySecretDir = env.HP_MAIL_RELAY_SECRET_DIR?.trim();
 
   const dockerAdapter = useSimulator
     ? null
@@ -190,6 +194,8 @@ export async function bootstrapDockerExecutorDaemon(
         ingressHttpPort,
         ...(ingressHttpsPort !== undefined ? { ingressHttpsPort } : {}),
         panel,
+        siteMailDir,
+        ...(mailRelaySecretDir ? { mailRelaySecretDir } : {}),
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
           : {}),
@@ -223,6 +229,17 @@ export async function bootstrapDockerExecutorDaemon(
   });
 
   if (dockerAdapter) {
+    // Never crashes the executor: sites then fail to start only if they ask for the mail binds.
+    await ensureSiteMailFiles(siteMailDir).catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "site_mail_files_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
     // No job survives a restart; clear leftovers before accepting new ones.
     await dockerAdapter.cleanupOrphanJobs().catch((err: unknown) => {
       console.error(

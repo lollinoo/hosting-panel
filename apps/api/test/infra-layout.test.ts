@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { MAIL_RELAY_IMAGE } from "@hosting-panel/contracts";
 
 const root = resolve(__dirname, "../../..");
 const dir = mkdtempSync(join(tmpdir(), "hp-os-"));
@@ -106,6 +107,22 @@ describe("per-service env files and wrappers", () => {
     for (const s of ["hp-mariadb", "mariadb-root.key", "0440", "/var/lib/hosting-panel/mariadb/data"]) expect(r.stdout).toContain(s);
   });
 
+  it("tmpfiles creates the mail relay secret directory", () => {
+    const lines = read("infra/systemd/hosting-panel-tmpfiles.conf").split("\n");
+    expect(lines).toContain("d /run/hosting-panel/mail-relay 0755 hp-executor hp-executor -");
+    expect(lines).toContain("d /run/hosting-panel 3770 root hp-ipc -");
+    const boot = read("infra/linux/bootstrap-dedicated.sh");
+    expect(boot).toContain("install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/site-mail\n");
+    // Five digits: GNU install keeps the setgid bit inherited from the 3770 parent with a plain 0755.
+    expect(boot).toContain("install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay\n");
+  });
+
+  it.skipIf(!hasHost)("bootstrap dry-run creates the mail directories", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    for (const s of ["/run/hosting-panel/mail-relay", "/var/lib/hosting-panel/site-mail"]) expect(r.stdout).toContain(s);
+  });
+
   it("wrappers never put DATABASE_URL in argv", () => {
     for (const w of ["hp-accounts", "hp-break-glass"]) {
       const src = read(`infra/linux/${w}`);
@@ -141,7 +158,7 @@ describe("release workflow and docs", () => {
     const readme = read("README.md");
     for (const s of ["install.sh", "hp-update", "sha256sum -c", "hp-accounts"]) expect(readme).toContain(s);
     expect(readme).not.toContain("export DATABASE_URL=");
-    expect(JSON.parse(read("package.json")).version).toBe("0.4.0");
+    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
   });
 
   it("step 2a docs are consistent", () => {
@@ -150,7 +167,7 @@ describe("release workflow and docs", () => {
     const api = read("docs/api/openapi.yaml");
     for (const s of ["/v1/organizations/{orgId}/managed-sites", "/v1/admin/sites"]) expect(api).toContain(s);
     expect(existsSync(join(root, "docs/architecture/adr/0016-shared-mariadb-and-site-jobs.md"))).toBe(true);
-    expect(JSON.parse(read("package.json")).version).toBe("0.4.0");
+    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
   });
 
   it("step 2b docs are consistent", () => {
@@ -163,6 +180,16 @@ describe("release workflow and docs", () => {
     ])
       expect(api).toContain(s);
     expect(existsSync(join(root, "docs/architecture/adr/0017-domains-dns-and-acme-tls.md"))).toBe(true);
-    expect(JSON.parse(read("package.json")).version).toBe("0.4.0");
+    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+  });
+
+  it("step 2c docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["Email in uscita", "587"]) expect(readme).toContain(s);
+    expect(read("docs/api/openapi.yaml")).toContain("/v1/admin/mail-relay");
+    const adr = read("docs/architecture/adr/0018-outgoing-mail-relay.md");
+    for (const s of ["CP-01", "postqueue"]) expect(adr).toContain(s);
+    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(MAIL_RELAY_IMAGE).toBe("boky/postfix:5.2.1-alpine");
   });
 });

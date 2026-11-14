@@ -44,6 +44,16 @@ export {
 } from "./shared-database.js";
 
 export {
+  DEFAULT_MAIL_RELAY_SECRET_DIR,
+  MAIL_RELAY_NETWORK_NAME,
+  MAIL_RELAY_SASL_FILE,
+  MAIL_RELAY_SPOOL_VOLUME,
+  buildMailRelayContainerPayload,
+  buildMailRelaySaslLine,
+  type MailRelayContainerInput,
+} from "./mail-relay.js";
+
+export {
   DB_DROP_SCRIPT,
   DB_PROVISION_SCRIPT,
   DEFAULT_SITE_JOB_TIMEOUT_MS,
@@ -63,6 +73,8 @@ export {
   InMemoryDockerSimulatorAdapter,
   type InMemoryDockerSimulatorAdapterOptions,
   type OutOfBandMutationInput,
+  type SimulatedMailDelivery,
+  type SimulatedMailRelayState,
 } from "./simulator-adapter.js";
 
 export {
@@ -121,3 +133,10 @@ export {
   loadExecutorVerificationKeyringFromEnv,
   parsePanelIngressConfigFromEnv,
 } from "./main.js";
+
+export {
+  DEFAULT_SITE_MAIL_DIR,
+  SITE_MAIL_FILES,
+  ensureSiteMailFiles,
+  siteMailBinds,
+} from "./site-mail.js";

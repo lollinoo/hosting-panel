@@ -8,6 +8,7 @@ import type {
   SiteJobResult,
 } from "./port.js";
 import type { CertificateStatusReport } from "./acme-status.js";
+import type { MailRelayApplyRequest, MailRelayStatusReport, MailTestResult } from "./mail-relay.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
@@ -54,6 +55,18 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async getCertificateStatus(_req: { failuresSince: string }): Promise<CertificateStatusReport> {
+    return this.refuse();
+  }
+
+  async applyMailRelay(_req: MailRelayApplyRequest | null): Promise<void> {
+    return this.refuse();
+  }
+
+  async getMailRelayStatus(_req: { since: string }): Promise<MailRelayStatusReport> {
+    return this.refuse();
+  }
+
+  async sendTestMail(_req: { to: string; from: string }): Promise<MailTestResult> {
     return this.refuse();
   }
 

@@ -37,6 +37,7 @@ const STRUCTURED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "pidsLimit",
   "volumeMounts",
   "portBindings",
+  "siteMail",
 ]);
 
 function sanitizeContainerIdentifier(serviceInstanceId: string): string {
@@ -274,6 +275,7 @@ export async function buildApprovedServiceSpec(
     domains: hostRoutes.map((h) => h.hostname),
     hostRoutes,
     exposeHttp,
+    siteMail: cfg["siteMail"] === true,
     internalPort: parsedPort,
     ...(pidsLimit !== undefined ? { pidsLimit } : {}),
     ...(volumeMounts !== undefined ? { volumeMounts } : {}),

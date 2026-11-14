@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import type { CertProblem } from "@hosting-panel/contracts";
+import type { CertProblem, MailRelayApplyRequest } from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
   ApprovedServiceSpec,
   CertificateStatusReport,
   DockerExecutionResult,
   DockerExecutorPort,
+  MailRelayStatusReport,
+  MailTestResult,
   ServiceLogLine,
   SiteHostRoute,
   SiteJobKind,
@@ -48,6 +50,15 @@ import {
   type PanelIngressConfig,
   type SiteIngressRouteEntry,
 } from "./traefik-config.js";
+
+/** Plaintext password on purpose: Task 6 tests read it; it is simulator-only state. */
+export type SimulatedMailRelayState = MailRelayApplyRequest;
+
+export interface SimulatedMailDelivery {
+  readonly to: string;
+  readonly from: string;
+  readonly result: MailTestResult;
+}
 
 export interface OutOfBandMutationInput {
   readonly image?: string;
@@ -133,6 +144,12 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public onDeploy?: (spec: ApprovedServiceSpec) => Promise<void>;
   private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string }[] = [];
   private failDeployOnce = false;
+  public mailRelay: SimulatedMailRelayState | null = null;
+  /** Every apply in order, null for a disable. */
+  public readonly mailRelayApplies: Array<MailRelayApplyRequest | null> = [];
+  public readonly mailDeliveries: SimulatedMailDelivery[] = [];
+  public nextTestMailResult: MailTestResult = { outcome: "sent", problem: null, detail: null };
+  private failingMailApplies = 0;
   private readonly serviceLogs = new Map<string, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
 
@@ -224,6 +241,33 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
   public failNextJob(kind: SiteJobKind, exitCode: number, outputTail = ""): void {
     this.failingJobs.push({ kind, exitCode, outputTail });
+  }
+
+  public failNextMailRelayApply(n = 1): void {
+    this.failingMailApplies = n;
+  }
+
+  public async applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
+    if (this.failingMailApplies > 0) {
+      this.failingMailApplies -= 1;
+      throw new ExecutorCodedError("Simulated mail relay apply failure", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    this.mailRelayApplies.push(req === null ? null : { ...req });
+    this.mailRelay = req === null ? null : { ...req };
+  }
+
+  public async getMailRelayStatus(_req: { since: string }): Promise<MailRelayStatusReport> {
+    const present = this.mailRelay !== null;
+    return { present, running: present, sentCount: this.mailDeliveries.length, failures: [] };
+  }
+
+  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+    if (this.mailRelay === null) {
+      throw new ExecutorCodedError("Mail relay is not running", "MAIL_RELAY_UNAVAILABLE");
+    }
+    const result = { ...this.nextTestMailResult };
+    this.mailDeliveries.push({ to: req.to, from: req.from, result });
+    return result;
   }
 
   public failNextDeploy(): void {

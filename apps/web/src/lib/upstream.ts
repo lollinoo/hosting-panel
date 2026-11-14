@@ -8,6 +8,8 @@ export interface UpstreamRequestOptions {
   idempotencyKey?: string | null;
   body?: unknown;
   headers?: Record<string, string>;
+  /** Upstream budget; the default 8 s fits everything except a mail test. */
+  timeoutMs?: number;
 }
 
 export interface UpstreamResponse<T = unknown> {
@@ -43,7 +45,7 @@ export async function fetchUpstream<T = unknown>(
     requestBody = JSON.stringify(options.body);
   }
 
-  const signal = AbortSignal.timeout(8000);
+  const signal = AbortSignal.timeout(options.timeoutMs ?? 8000);
 
   try {
     const res = await fetch(url, {

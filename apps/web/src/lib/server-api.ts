@@ -20,6 +20,7 @@ import type {
   HostTelemetryDto,
   HostDaemonHeartbeatDto,
   RuntimeBackend,
+  MailRelaySettingsDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -138,4 +139,8 @@ export async function fetchServerAdminSiteDomains(siteId: string): Promise<SiteD
 
 export async function fetchServerSiteDomains(orgId: string, siteId: string): Promise<SiteDomainsDto | null> {
   return orNull(await serverGet<SiteDomainsDto>(`v1/organizations/${orgId}/managed-sites/${siteId}/domains`));
+}
+
+export async function fetchServerAdminMailRelay(): Promise<MailRelaySettingsDto | null> {
+  return orNull(await serverGet<MailRelaySettingsDto>("v1/admin/mail-relay"));
 }

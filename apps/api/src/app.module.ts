@@ -13,6 +13,7 @@ import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
+import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
 import { HostsController } from "./controllers/hosts.controller.js";
@@ -37,6 +38,7 @@ import {
 import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteDomainsService } from "./sites/site-domains.service.js";
+import { MailRelayService } from "./mail/mail-relay.service.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
@@ -67,6 +69,7 @@ export class AppModule {
         OrganizationsController,
         ManagedSitesController,
         SiteDomainsController,
+        AdminMailRelayController,
       ],
       providers: [
         {
@@ -99,6 +102,7 @@ export class AppModule {
         SiteDomainsService,
         DriftReconcilerService,
         DomainReconcilerService,
+        MailRelayService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,
@@ -114,6 +118,7 @@ export class AppModule {
         OutboxWorkerService,
         DriftReconcilerService,
         DomainReconcilerService,
+        MailRelayService,
       ],
     };
   }

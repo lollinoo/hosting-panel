@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
 import {
+  MailFailureDtoSchema,
+  MailRelayHostSchema,
+  MailSenderDomainSchema,
+  MailRelayPasswordSchema,
+  MailRelayPortSchema,
+  MailRelayUsernameSchema,
+  MailTestResultDtoSchema,
+} from "./mail-relay.js";
+import {
   HostDaemonStatusSchema,
   RuntimeBackendSchema,
   SECRET_KEY_PATTERN,
@@ -131,6 +140,7 @@ export const ApprovedServiceSpecWireSchema = z
     domains: z.array(z.string().min(1)).optional(),
     hostRoutes: z.array(SiteHostRouteSchema).max(20).optional(),
     exposeHttp: z.boolean().optional(),
+    siteMail: z.boolean().optional(),
     internalPort: z.number().int().min(1).max(65535).optional(),
     pidsLimit: z.number().int().min(16).max(4096).optional(),
     volumeMounts: z.array(ServiceVolumeMountWireSchema).optional(),
@@ -316,3 +326,31 @@ export const HostAgentHealthResponseSchema = z.object({
   checkedAt: z.string().datetime({ offset: true }),
 });
 export type HostAgentHealthResponse = z.infer<typeof HostAgentHealthResponseSchema>;
+
+export const MailRelayApplyRequestSchema = z.object({
+  host: MailRelayHostSchema,
+  port: MailRelayPortSchema,
+  username: MailRelayUsernameSchema,
+  password: MailRelayPasswordSchema,
+  senderDomain: MailSenderDomainSchema,
+});
+export type MailRelayApplyRequest = z.infer<typeof MailRelayApplyRequestSchema>;
+
+export const MailRelayApplyIpcRequestSchema = z.object({
+  config: MailRelayApplyRequestSchema.nullable(),
+});
+
+export const MailRelayStatusIpcRequestSchema = z.object({
+  since: z.string().datetime({ offset: true }),
+});
+
+export const MailRelayStatusReportWireSchema = z.object({
+  present: z.boolean(),
+  running: z.boolean(),
+  sentCount: z.number().int().nonnegative(),
+  failures: z.array(MailFailureDtoSchema).max(50),
+});
+export type MailRelayStatusReport = z.infer<typeof MailRelayStatusReportWireSchema>;
+
+export const MailTestIpcRequestSchema = z.object({ to: z.string().email(), from: z.string().email() });
+export const MailTestIpcResponseSchema = MailTestResultDtoSchema;

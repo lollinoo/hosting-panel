@@ -653,3 +653,17 @@ export const siteDatabases = pgTable(
     index("idx_site_databases_site").on(t.organizationId, t.siteId),
   ],
 );
+
+export const mailRelaySettings = pgTable("mail_relay_settings", {
+  id: text("id").primaryKey(),
+  host: text("host").notNull(),
+  port: integer("port").notNull(),
+  username: text("username").notNull(),
+  senderDomain: text("sender_domain").notNull(),
+  passwordCiphertextBase64: text("password_ciphertext_base64").notNull(),
+  passwordIvBase64: text("password_iv_base64").notNull(),
+  passwordAuthTagBase64: text("password_auth_tag_base64").notNull(),
+  passwordKeyVersion: text("password_key_version").notNull().default("v1"),
+  updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

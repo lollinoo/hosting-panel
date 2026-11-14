@@ -32,10 +32,19 @@ export interface MockDockerDaemon {
   readonly deletedVolumes: string[];
   readonly deletedNetworks: string[];
   readonly networkConnectCalls: Array<{ network: string; container: string; aliases?: string[] }>;
+  readonly networkDisconnectCalls: Array<{ network: string; container: string }>;
+  /** Connecting one of these containers answers 404. */
+  readonly missingContainers: Set<string>;
   /** Connects to these networks answer 404 (removed between list and connect). */
   readonly vanishedNetworks: Set<string>;
   readonly containers: Map<string, MockDockerContainerRecord>;
   readonly requestedPaths: string[];
+  /** POST /containers/<ref>/exec calls, by the ref used in the path. */
+  readonly execCalls: Array<{ container: string; Cmd: string[] }>;
+  /** The next `remaining` container restarts answer 500 (or drop the socket with `drop`). */
+  readonly failRestarts: { remaining: number; drop?: boolean };
+  /** The next `remaining` container creates answer 500. */
+  readonly failCreates: { remaining: number };
   close(): Promise<void>;
 }
 
@@ -44,8 +53,14 @@ export async function startMockDockerDaemon(options?: {
   /** Image inspect answers 404 and /images/create answers 200 with this body. */
   readonly pullBody?: string;
   readonly logsBody?: Buffer;
+  /** Like logsBody, but evaluated per request (logs that appear later). */
+  readonly logsBodyFn?: () => Buffer;
   /** POST /containers/<id>/wait answers this StatusCode (default 0); "hang" never answers. */
   readonly waitStatusCode?: number | "hang";
+  /** GET /exec/<id>/json answers this ExitCode (default 0). */
+  readonly execExitCode?: number;
+  /** GET /exec/<id>/json always answers Running: true. */
+  readonly execStaysRunning?: boolean;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -61,9 +76,14 @@ export async function startMockDockerDaemon(options?: {
   const deletedVolumes: string[] = [];
   const deletedNetworks: string[] = [];
   const networkConnectCalls: Array<{ network: string; container: string; aliases?: string[] }> = [];
+  const networkDisconnectCalls: Array<{ network: string; container: string }> = [];
+  const missingContainers = new Set<string>();
   const vanishedNetworks = new Set<string>();
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
+  const execCalls: Array<{ container: string; Cmd: string[] }> = [];
+  const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
+  const failCreates = { remaining: 0 };
   let seq = 1;
 
   const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
@@ -114,15 +134,44 @@ export async function startMockDockerDaemon(options?: {
       }
 
       const logsMatch = /^\/containers\/([^/]+)\/logs$/.exec(routePath);
-      if (method === "GET" && logsMatch && options?.logsBody) {
+      if (method === "GET" && logsMatch && (options?.logsBody || options?.logsBodyFn)) {
         res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
-        res.end(options.logsBody);
+        res.end(options.logsBodyFn ? options.logsBodyFn() : options.logsBody);
         return;
       }
 
       if (method === "GET" && logsMatch) {
         res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
         res.end();
+        return;
+      }
+
+      const execCreateMatch = /^\/containers\/([^/]+)\/exec$/.exec(routePath);
+      if (method === "POST" && execCreateMatch && execCreateMatch[1]) {
+        const container = decodeURIComponent(execCreateMatch[1]);
+        if (!findByRef(container)) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "No such container" }));
+          return;
+        }
+        execCalls.push({ container, Cmd: (JSON.parse(bodyStr) as { Cmd: string[] }).Cmd });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ Id: `exec_${String(execCalls.length)}` }));
+        return;
+      }
+
+      const execMatch = /^\/exec\/([^/]+)\/(start|json)$/.exec(routePath);
+      if (execMatch && ((method === "POST" && execMatch[2] === "start") || method === "GET")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          execMatch[2] === "start"
+            ? undefined
+            : JSON.stringify(
+                options?.execStaysRunning
+                  ? { Running: true, ExitCode: null }
+                  : { Running: false, ExitCode: options?.execExitCode ?? 0 },
+              ),
+        );
         return;
       }
 
@@ -210,6 +259,11 @@ export async function startMockDockerDaemon(options?: {
             container: body.Container,
             ...(body.EndpointConfig?.Aliases ? { aliases: body.EndpointConfig.Aliases } : {}),
           });
+          if (missingContainers.has(body.Container)) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: `No such container: ${body.Container}` }));
+            return;
+          }
           if (vanishedNetworks.has(netName)) {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ message: `network ${netName} not found` }));
@@ -218,8 +272,11 @@ export async function startMockDockerDaemon(options?: {
           if (target) {
             target.networks[netName] = body.EndpointConfig ?? {};
           }
-        } else if (target) {
-          delete target.networks[netName];
+        } else {
+          networkDisconnectCalls.push({ network: netName, container: body.Container });
+          if (target) {
+            delete target.networks[netName];
+          }
         }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({}));
@@ -297,6 +354,13 @@ export async function startMockDockerDaemon(options?: {
 
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(matches));
+        return;
+      }
+
+      if (method === "POST" && routePath === "/containers/create" && failCreates.remaining > 0) {
+        failCreates.remaining -= 1;
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ message: "create failed" }));
         return;
       }
 
@@ -380,6 +444,16 @@ export async function startMockDockerDaemon(options?: {
           res.end(JSON.stringify({ message: "No such container" }));
           return;
         }
+        if (action === "restart" && failRestarts.remaining > 0) {
+          failRestarts.remaining -= 1;
+          if (failRestarts.drop) {
+            req.socket.destroy();
+            return;
+          }
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "restart failed" }));
+          return;
+        }
         if (action === "start" || action === "restart") {
           target.running = true;
           target.status = "running";
@@ -422,9 +496,14 @@ export async function startMockDockerDaemon(options?: {
     deletedVolumes,
     deletedNetworks,
     networkConnectCalls,
+    networkDisconnectCalls,
+    missingContainers,
     vanishedNetworks,
     containers,
     requestedPaths,
+    execCalls,
+    failRestarts,
+    failCreates,
     async close() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));

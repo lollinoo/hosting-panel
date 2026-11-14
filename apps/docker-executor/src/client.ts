@@ -4,6 +4,8 @@ import {
   ErrorCodeSchema,
   CertificateStatusReportWireSchema,
   ExecutorHealthResponseSchema,
+  MailRelayStatusReportWireSchema,
+  MailTestIpcResponseSchema,
   ObservedServiceStateWireSchema,
   signIpcRequest,
   type CertificateStatusIpcRequest,
@@ -23,6 +25,9 @@ import type {
   DockerExecutionResult,
   DockerExecutorPort,
   CertificateStatusReport,
+  MailRelayApplyRequest,
+  MailRelayStatusReport,
+  MailTestResult,
   ServiceLogLine,
   SiteJobRequest,
   SiteJobResult,
@@ -77,6 +82,7 @@ const ServiceLogsDataEnvelopeSchema = z.object({
 export const DEPLOY_TIMEOUT_MS = 300_000;
 export const SITE_JOB_TIMEOUT_MS = 510_000;
 export const SITE_PURGE_TIMEOUT_MS = 120_000;
+export const MAIL_RELAY_APPLY_TIMEOUT_MS = 300_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -231,6 +237,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
           ? { hostRoutes: spec.hostRoutes.map((r) => ({ ...r })) }
           : {}),
         ...(spec.exposeHttp !== undefined ? { exposeHttp: spec.exposeHttp } : {}),
+        ...(spec.siteMail !== undefined ? { siteMail: spec.siteMail } : {}),
         ...(spec.internalPort !== undefined ? { internalPort: spec.internalPort } : {}),
         ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
         ...(spec.volumeMounts !== undefined
@@ -294,6 +301,28 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     const payload: CertificateStatusIpcRequest = { failuresSince: req.failuresSince };
     const json = await this.sendSignedJsonRequest("POST", "/v1/ingress/certificates", payload);
     return z.object({ data: CertificateStatusReportWireSchema }).parse(json).data;
+  }
+
+  public async applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
+    await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/mail-relay/apply",
+      { config: req },
+      MAIL_RELAY_APPLY_TIMEOUT_MS,
+    );
+  }
+
+  public async getMailRelayStatus(req: { since: string }): Promise<MailRelayStatusReport> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/status", { since: req.since });
+    return z.object({ data: MailRelayStatusReportWireSchema }).parse(json).data;
+  }
+
+  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/test", {
+      to: req.to,
+      from: req.from,
+    });
+    return z.object({ data: MailTestIpcResponseSchema }).parse(json).data;
   }
 
   public async getServiceLogs(

@@ -2521,6 +2521,121 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/mail-relay:
+    get:
+      tags: [Admin Mail]
+      operationId: adminGetMailRelay
+      summary: Outgoing mail relay settings and recent failures (server administrator only; never returns the password)
+      responses:
+        "200":
+          description: Mail relay settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MailRelaySettingsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Admin Mail]
+      operationId: adminSaveMailRelay
+      summary: Save the relay settings; applied asynchronously. Omitting password keeps the stored one
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MailRelaySettingsInput"
+      responses:
+        "200":
+          description: Mail relay settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MailRelaySettingsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Admin Mail]
+      operationId: adminClearMailRelay
+      summary: Remove the relay settings and the stored password
+      responses:
+        "200":
+          description: Mail relay settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MailRelaySettingsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/mail-relay/test:
+    post:
+      tags: [Admin Mail]
+      operationId: adminTestMailRelay
+      summary: Send a test email. A timeout returns OPERATION_AMBIGUOUS (it may have been sent)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to:
+                  type: string
+                  format: email
+      responses:
+        "200":
+          description: Outcome of the test send
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/MailTestResult"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
 
 components:
   securitySchemes:
@@ -2646,6 +2761,7 @@ components:
             - OPERATION_INTERRUPTED
             - OPERATION_AMBIGUOUS
             - DOCKER_ENGINE_UNAVAILABLE
+            - MAIL_RELAY_UNAVAILABLE
             - HOST_AGENT_UNAVAILABLE
             - INTERNAL_ERROR
         message:
@@ -3522,10 +3638,109 @@ components:
             trusted:
               type: boolean
 
+    MailRelaySettingsInput:
+      type: object
+      required: [host, port, username, senderDomain]
+      properties:
+        host:
+          type: string
+          description: Provider hostname (an IP address is refused; TLS is verified)
+        port:
+          type: integer
+          enum: [25, 465, 587, 2525]
+        username:
+          type: string
+          maxLength: 256
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Write-only; omit to keep the stored password
+        senderDomain:
+          type: string
+
+    MailFailureDto:
+      type: object
+      required: [at, recipient, status, problem, detail]
+      properties:
+        at:
+          type: string
+          format: date-time
+        recipient:
+          type: string
+        status:
+          type: string
+          enum: [deferred, bounced]
+        problem:
+          type: string
+          enum: [auth_failed, unreachable, tls_failed, rejected, credentials_missing, other]
+        detail:
+          type: string
+
+    MailRelaySettingsDto:
+      type: object
+      required: [configured, host, port, username, senderDomain, passwordSet, updatedAt, applied, relayRunning, sentLast24h, failures]
+      properties:
+        configured:
+          type: boolean
+        host:
+          type: string
+          nullable: true
+        port:
+          type: integer
+          nullable: true
+        username:
+          type: string
+          nullable: true
+        senderDomain:
+          type: string
+          nullable: true
+        passwordSet:
+          type: boolean
+        updatedAt:
+          type: string
+          nullable: true
+        applied:
+          type: boolean
+        relayRunning:
+          type: boolean
+          nullable: true
+        sentLast24h:
+          type: integer
+          nullable: true
+        failures:
+          type: array
+          items:
+            $ref: "#/components/schemas/MailFailureDto"
+
+    MailTestResult:
+      type: object
+      required: [outcome, problem, detail]
+      properties:
+        outcome:
+          type: string
+          enum: [sent, deferred, bounced, pending]
+        problem:
+          type: string
+          enum: [auth_failed, unreachable, tls_failed, rejected, credentials_missing, other]
+          nullable: true
+        detail:
+          type: string
+          nullable: true
+
     SiteDomainsDto:
       type: object
-      required: [serverIpv4, routesPending, domains]
+      required: [serverIpv4, routesPending, domains, mail]
       properties:
+        mail:
+          type: object
+          required: [configured, fromAddress]
+          properties:
+            configured:
+              type: boolean
+            fromAddress:
+              type: string
+              nullable: true
         serverIpv4:
           type: string
         routesPending:

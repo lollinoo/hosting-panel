@@ -35,6 +35,7 @@ export interface ApprovedServiceSpec {
   readonly domains?: readonly string[];
   readonly hostRoutes?: readonly SiteHostRoute[];
   readonly exposeHttp?: boolean;
+  readonly siteMail?: boolean;
   readonly internalPort?: number;
   readonly pidsLimit?: number;
   readonly volumeMounts?: readonly ServiceVolumeMountSpec[];
@@ -56,6 +57,7 @@ export interface CreateApprovedServiceSpecInput {
   readonly domains?: readonly string[];
   readonly hostRoutes?: readonly SiteHostRoute[];
   readonly exposeHttp?: boolean;
+  readonly siteMail?: boolean;
   readonly internalPort?: number;
   readonly pidsLimit?: number;
   readonly volumeMounts?: readonly ServiceVolumeMountSpec[];
@@ -207,6 +209,7 @@ export function createApprovedServiceSpec(
       ? { hostRoutes: Object.freeze(input.hostRoutes.map((r) => Object.freeze({ ...r }))) }
       : {}),
     ...(input.exposeHttp !== undefined ? { exposeHttp: input.exposeHttp } : {}),
+    ...(input.siteMail !== undefined ? { siteMail: input.siteMail } : {}),
     ...(input.internalPort !== undefined ? { internalPort: input.internalPort } : {}),
     ...(input.pidsLimit !== undefined ? { pidsLimit: input.pidsLimit } : {}),
     ...(frozenMounts !== undefined ? { volumeMounts: frozenMounts } : {}),

@@ -31,6 +31,7 @@ import {
 } from "@hosting-panel/host-agent";
 import type { DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
+import { MailRelayService } from "./mail/mail-relay.service.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -215,6 +216,7 @@ export interface CreateControlPlaneAppOptions {
   readonly outboxPollIntervalMs?: number | null;
   readonly driftReconcileIntervalMs?: number | null;
   readonly domainReconcileIntervalMs?: number | null;
+  readonly mailRelayRetryIntervalMs?: number | null;
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
@@ -236,6 +238,7 @@ export interface ControlPlaneAppHandle {
   readonly outboxWorker: OutboxWorkerService;
   readonly driftReconciler: DriftReconcilerService;
   readonly domainReconciler: DomainReconcilerService;
+  readonly mailRelay: MailRelayService;
   close(): Promise<void>;
 }
 
@@ -362,6 +365,16 @@ export async function createControlPlaneApp(
             : 60_000)
         : null;
 
+  const envMailRelayIntervalRaw = process.env["HP_MAIL_RELAY_RETRY_INTERVAL_MS"]?.trim();
+  const mailRelayRetryIntervalMs =
+    options?.mailRelayRetryIntervalMs !== undefined
+      ? options.mailRelayRetryIntervalMs
+      : shouldListen && runtimeBackend !== "disabled"
+        ? (envMailRelayIntervalRaw && /^\d+$/.test(envMailRelayIntervalRaw)
+            ? Number.parseInt(envMailRelayIntervalRaw, 10)
+            : 60_000)
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
@@ -374,6 +387,7 @@ export async function createControlPlaneApp(
     outboxPollIntervalMs,
     driftReconcileIntervalMs,
     domainReconcileIntervalMs,
+    mailRelayRetryIntervalMs,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -473,6 +487,7 @@ export async function createControlPlaneApp(
   const outboxWorker = nestApp.get(OutboxWorkerService);
   const driftReconciler = nestApp.get(DriftReconcilerService);
   const domainReconciler = nestApp.get(DomainReconcilerService);
+  const mailRelay = nestApp.get(MailRelayService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
@@ -484,6 +499,7 @@ export async function createControlPlaneApp(
   }
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
+  mailRelay.startBackgroundLoop();
 
   let isClosed = false;
 
@@ -501,6 +517,7 @@ export async function createControlPlaneApp(
     outboxWorker,
     driftReconciler,
     domainReconciler,
+    mailRelay,
     async close(): Promise<void> {
       if (isClosed) {
         return;
@@ -510,6 +527,7 @@ export async function createControlPlaneApp(
       await outboxWorker.stop();
       await driftReconciler.stop();
       await domainReconciler.stop();
+      await mailRelay.stop();
       await nestApp.close();
       if (ownsDatabaseClient) {
         await dbClient.close();

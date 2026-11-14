@@ -1,6 +1,7 @@
 import type { OperationStatus, SiteHostRoute } from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import type { CertificateStatusReport } from "./acme-status.js";
+import type { MailRelayApplyRequest, MailRelayStatusReport, MailTestResult } from "./mail-relay.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export interface DockerExecutionResult {
@@ -27,6 +28,10 @@ export interface DockerExecutorPort {
   applySiteRoutes(req: SiteRoutesRequest): Promise<void>;
   /** Read-only: hostnames, expiry and recent ACME failures. Never private keys. */
   getCertificateStatus(req: { failuresSince: string }): Promise<CertificateStatusReport>;
+  /** null disables the outgoing mail relay. The password is never logged or echoed. */
+  applyMailRelay(req: MailRelayApplyRequest | null): Promise<void>;
+  getMailRelayStatus(req: { since: string }): Promise<MailRelayStatusReport>;
+  sendTestMail(req: { to: string; from: string }): Promise<MailTestResult>;
 }
 
 export interface SiteRoutesRequest {

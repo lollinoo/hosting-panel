@@ -26,6 +26,9 @@ jobs:
         with:
           node-version-file: '.node-version'
 
+      - name: Check PHP is available (sendmail shim test)
+        run: php --version
+
       - name: Enable Corepack package manager
         run: corepack enable
 

@@ -40,6 +40,13 @@ import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js
 /** The claim sets a 60 s lease; one site job may take up to 510 s, so each step renews it first. */
 export const SITE_STEP_LEASE_MS = 12 * 60_000;
 
+/** The steps of a managed site's service.deploy, restart and stop. */
+export const SERVICE_STEPS = [
+  { key: "validate_spec", label: "Check the request" },
+  { key: "dispatch_ipc", label: "Apply the change" },
+  { key: "reconcile_state", label: "Check the site" },
+] as const;
+
 export const SITE_PROVISION_STEPS = [
   { key: "create_database", label: "Prepare the database" },
   { key: "deploy_site", label: "Start the site" },

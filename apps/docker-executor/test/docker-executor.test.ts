@@ -16,6 +16,10 @@ import {
 } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  type DockerContainerInspectPayload,
+  buildHardenedContainerCreatePayload,
+  detectOutOfBandContainerModification,
+  siteMailBinds,
   DockerEngineSocketAdapter,
   DockerExecutorIpcServer,
   ExecutorIpcClientError,
@@ -1577,5 +1581,327 @@ describe("site routes and certificates", () => {
       readable: false,
       certificates: [],
     });
+  });
+});
+
+describe("site mail wiring", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const MAIL_DIR = "/srv/test-site-mail";
+  const specInput = (siteMail?: boolean) => ({
+    serviceInstanceId: "svc_mail",
+    siteId: "site_mail",
+    organizationId: "org_mail",
+    image: "wordpress:6-php8.3-apache",
+    containerName: "hp-site-mail",
+    env: {},
+    resourceLimits: { cpuMilli: 500, memoryBytes: "536870912" },
+    pidsLimit: 128,
+    revisionNumber: 1,
+    specHash: "hash_mail",
+    exposeHttp: false,
+    internalPort: 80,
+    volumeMounts: [{ volumeSuffix: "html", containerPath: "/var/www/html" }],
+    ...(siteMail !== undefined ? { siteMail } : {}),
+  });
+
+  async function setup() {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-mail-wire-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const siteMailDir = path.join(tmp, "site-mail");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      siteMailDir,
+      pullMissingImages: false,
+    });
+    return { adapter, mockDaemon, siteMailDir, tmp };
+  }
+
+  const createdBinds = (d: Awaited<ReturnType<typeof setup>>["mockDaemon"]) =>
+    [...d.containers.values()].find((c) => c.name === "hp-site-mail")?.hostConfig.Binds ?? [];
+
+  it("deploy with siteMail adds exactly the three read-only binds", async () => {
+    const { adapter, mockDaemon, siteMailDir } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(specInput(true)));
+    const binds = createdBinds(mockDaemon);
+    expect(binds).toHaveLength(4);
+    expect(binds.slice(1)).toEqual(siteMailBinds(siteMailDir));
+    expect((await stat(path.join(siteMailDir, "hp-mail.php"))).mode & 0o777).toBe(0o644);
+
+    const plain = await setup();
+    await plain.adapter.deployService(createApprovedServiceSpec(specInput()));
+    expect(createdBinds(plain.mockDaemon)).toHaveLength(1);
+    await expect(stat(plain.siteMailDir)).rejects.toThrow();
+  });
+
+  it("deploy over signed IPC keeps siteMail and adds the binds", async () => {
+    const { adapter, mockDaemon, siteMailDir, tmp } = await setup();
+    const socketPath = `/tmp/hp-exec-test-${randomBytes(5).toString("hex")}.sock`;
+    const server = new DockerExecutorIpcServer({
+      executor: adapter,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "uds",
+      socketPath,
+    });
+    cleanupTasks.push(() => server.stop());
+    await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "uds",
+      socketPath,
+    });
+    await client.deployService(createApprovedServiceSpec(specInput(true)));
+    expect(createdBinds(mockDaemon).slice(1)).toEqual(siteMailBinds(siteMailDir));
+    expect(tmp).toBeTruthy();
+  });
+
+  it("mail binds are not drift, a fourth host bind is", () => {
+    const base = {
+      Config: {
+        Labels: {
+          [MANAGED_DOCKER_LABELS.managed]: "true",
+          [MANAGED_DOCKER_LABELS.serviceInstanceId]: "svc_mail",
+          [MANAGED_DOCKER_LABELS.organizationId]: "org_mail",
+          [MANAGED_DOCKER_LABELS.siteId]: "site_mail",
+        },
+        Env: [],
+      },
+    };
+    const inspectWith = (binds: readonly string[]): DockerContainerInspectPayload => ({
+      Id: "ctr_mail",
+      ...base,
+      HostConfig: {
+        Privileged: false,
+        CapDrop: ["ALL"],
+        SecurityOpt: ["no-new-privileges:true"],
+        PidsLimit: 128,
+        RestartPolicy: { Name: "unless-stopped" },
+        NetworkMode: "hp_site_site_mail_net",
+        Binds: binds,
+      },
+    });
+    const drift = (binds: readonly string[], dir?: string) =>
+      detectOutOfBandContainerModification(
+        inspectWith(binds),
+        "svc_mail",
+        "/run/hosting-panel/secrets",
+        undefined,
+        dir,
+      );
+    expect(drift(siteMailBinds(MAIL_DIR), MAIL_DIR)).toBe(false);
+    expect(drift(siteMailBinds("/var/lib/hosting-panel/site-mail"))).toBe(false);
+    expect(drift([...siteMailBinds(MAIL_DIR), "/etc/passwd:/x:ro"], MAIL_DIR)).toBe(true);
+    expect(drift(siteMailBinds("/elsewhere"), MAIL_DIR)).toBe(true);
+  });
+
+  it("a foreign siteMailBinds entry is refused", () => {
+    const spec = createApprovedServiceSpec(specInput(true));
+    expect(() =>
+      buildHardenedContainerCreatePayload(spec, { siteMailBinds: ["/etc/passwd:/x:ro"] }),
+    ).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
+    expect(() =>
+      buildHardenedContainerCreatePayload(spec, { siteMailBinds: siteMailBinds(MAIL_DIR) }),
+    ).not.toThrow();
+  });
+
+  it("deployService connects the mail relay to the site network with alias hp-mail", async () => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.deployService(createApprovedServiceSpec(specInput(true)));
+    expect(mockDaemon.networkConnectCalls).toContainEqual({
+      network: "hp_site_site_mail_net",
+      container: "hp_mail_relay",
+      aliases: ["hp-mail"],
+    });
+  });
+
+  it("a missing relay (404) does not fail the deploy", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.missingContainers.add("hp_mail_relay");
+    const res = await adapter.deployService(createApprovedServiceSpec(specInput(true)));
+    expect(res.status).toBe("succeeded");
+  });
+
+  it("purgeSite disconnects the mail relay", async () => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.purgeSite("site_mail");
+    expect(mockDaemon.networkDisconnectCalls).toContainEqual({
+      network: "hp_site_site_mail_net",
+      container: "hp_mail_relay",
+    });
+  });
+});
+
+describe("mail relay IPC", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const config = {
+    host: "smtp.provider.example",
+    port: 587 as const,
+    username: "user@provider.example",
+    password: "Pa:ss#w0rd inner",
+    senderDomain: "mail.hostingco.it",
+  };
+
+  async function serve(executor: ConstructorParameters<typeof DockerExecutorIpcServer>[0]["executor"]) {
+    const server = new DockerExecutorIpcServer({
+      executor,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+    const raw = async (pathname: string, body: unknown) => {
+      const text = JSON.stringify(body);
+      const headers = signIpcRequest({
+        method: "POST",
+        pathWithQuery: pathname,
+        body: text,
+        key: HMAC_SIGNING_KEY,
+        nonce: randomBytes(8).toString("hex"),
+      });
+      const res = await fetch(`http://127.0.0.1:${String(bound.port)}${pathname}`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: text,
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    return { client, raw };
+  }
+
+  it("mail relay apply goes through the signed IPC and reaches the adapter", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client } = await serve(simulator);
+    await client.applyMailRelay(config);
+    expect(simulator.mailRelay).toEqual({ ...config });
+    await client.applyMailRelay(null);
+    expect(simulator.mailRelay).toBeNull();
+    expect(simulator.mailRelayApplies).toEqual([{ ...config }, null]);
+  });
+
+  it("apply IPC rejects a password with a newline before the adapter runs", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { raw } = await serve(simulator);
+    const res = await raw("/v1/mail-relay/apply", { config: { ...config, password: "canary\nline" } });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.text).error.code).toBe("VALIDATION_ERROR");
+    expect(res.text).not.toContain("canary");
+    expect(simulator.mailRelayApplies).toEqual([]);
+  });
+
+  it("status rejects a bad since with a 400", async () => {
+    const { raw } = await serve(new InMemoryDockerSimulatorAdapter());
+    const res = await raw("/v1/mail-relay/status", { since: "not-a-date" });
+    expect(res.status).toBe(400);
+  });
+
+  it("a failed apply never leaks the password in the IPC error or on the console", async () => {
+    const canary = "canary-ipc-pw";
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-mail-ipc-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => daemon.close());
+    daemon.failCreates.remaining = 5;
+    const secretDir = path.join(tmp, "mail-relay");
+    await mkdir(secretDir);
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      pullMissingImages: false,
+      mailRelaySecretDir: secretDir,
+      mailRelayFlushWaitMs: 50,
+    });
+    const { client, raw } = await serve(adapter);
+    const captured: string[] = [];
+    const grab = (...args: unknown[]): boolean => {
+      captured.push(args.map(String).join(" "));
+      return true;
+    };
+    vi.spyOn(console, "log").mockImplementation(grab);
+    vi.spyOn(console, "error").mockImplementation(grab);
+    vi.spyOn(console, "warn").mockImplementation(grab);
+    vi.spyOn(process.stdout, "write").mockImplementation(grab);
+
+    const body = { config: { ...config, password: canary } };
+    const err = await client.applyMailRelay(body.config).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String((err as Error).message) + JSON.stringify(err)).not.toContain(canary);
+    const res = await raw("/v1/mail-relay/apply", body);
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.text).not.toContain(canary);
+    expect(captured.join("\n")).not.toContain(canary);
+  });
+
+  it("status and test round-trip their wire schemas", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client } = await serve(simulator);
+    expect(await client.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" })).toEqual({
+      present: false,
+      running: false,
+      sentCount: 0,
+      failures: [],
+    });
+    await client.applyMailRelay(config);
+    await client.sendTestMail({ to: "guest@example.it", from: "noreply@mail.hostingco.it" });
+    expect(await client.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" })).toMatchObject({
+      present: true,
+      running: true,
+      sentCount: 1,
+    });
+    simulator.nextTestMailResult = { outcome: "deferred", problem: "auth_failed", detail: "535" };
+    expect(await client.sendTestMail({ to: "guest@example.it", from: "noreply@mail.hostingco.it" })).toEqual({
+      outcome: "deferred",
+      problem: "auth_failed",
+      detail: "535",
+    });
+  });
+
+  it("client uses 300 s for mail apply and 35 s for status and test", async () => {
+    const { client } = await serve(new InMemoryDockerSimulatorAdapter());
+    const timeouts: Array<number | undefined> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    await client.applyMailRelay(null).catch(() => undefined);
+    await client.getMailRelayStatus({ since: "2026-11-09T00:00:00Z" }).catch(() => undefined);
+    await client.sendTestMail({ to: "a@b.it", from: "c@d.it" }).catch(() => undefined);
+    expect(timeouts).toEqual([300_000, 35_000, 35_000]);
+  });
+
+  it("simulator keeps siteMail on deployed specs", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    await simulator.deployService(
+      createApprovedServiceSpec({
+        serviceInstanceId: "svc_m",
+        siteId: "site_m",
+        organizationId: "org_m",
+        image: "nginx:1.27-alpine",
+        containerName: "hp-m",
+        siteMail: true,
+      }),
+    );
+    expect(simulator.deployedSpecs[0]?.siteMail).toBe(true);
   });
 });

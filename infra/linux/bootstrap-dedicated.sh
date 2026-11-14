@@ -140,8 +140,8 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/mariadb-root.key (0440 hp-mariadb:hp-executor)"
   log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
   log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass and /usr/local/sbin/hp-update (0750 root:root)"
-  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb)"
-  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor)"
+  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb), and /var/lib/hosting-panel/site-mail (0755 hp-executor:hp-executor)"
+  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor) + /run/hosting-panel/mail-relay (0755 hp-executor:hp-executor)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
   done
@@ -317,11 +317,14 @@ install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/sites
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/mariadb
 install -d -m 0700 -o hp-mariadb -g hp-mariadb /var/lib/hosting-panel/mariadb/data
+install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/site-mail
 
 install -m 0644 -o root -g root "${SYSTEMD_SRC_DIR}/hosting-panel-tmpfiles.conf" /etc/tmpfiles.d/hosting-panel.conf
 install -d -m 3770 -o root -g hp-ipc /run/hosting-panel
 chmod 3770 /run/hosting-panel
 install -d -m 0700 -o hp-executor -g hp-executor /run/hosting-panel/secrets
+# 00755: a plain 0755 keeps the setgid bit inherited from the 3770 parent (GNU install).
+install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay
 
 # 9. Install and reload systemd units
 for unit_name in "${REQUIRED_UNITS[@]}"; do
