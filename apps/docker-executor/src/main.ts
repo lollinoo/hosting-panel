@@ -9,6 +9,7 @@ import {
   DEFAULT_SECRETS_ROOT_DIR,
   DockerEngineSocketAdapter,
 } from "./docker-engine-adapter.js";
+import { DEFAULT_SITE_FILES_DIR, ensureSiteFilesProgram } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles } from "./site-mail.js";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
@@ -182,6 +183,7 @@ export async function bootstrapDockerExecutorDaemon(
   const panel = parsePanelIngressConfigFromEnv(env);
   // One value for both the adapter's drift check and the files the binds point at.
   const siteMailDir = env.HP_SITE_MAIL_DIR?.trim() || DEFAULT_SITE_MAIL_DIR;
+  const siteFilesDir = env.HP_SITE_FILES_DIR?.trim() || DEFAULT_SITE_FILES_DIR;
   const mailRelaySecretDir = env.HP_MAIL_RELAY_SECRET_DIR?.trim();
 
   const dockerAdapter = useSimulator
@@ -195,6 +197,7 @@ export async function bootstrapDockerExecutorDaemon(
         ...(ingressHttpsPort !== undefined ? { ingressHttpsPort } : {}),
         panel,
         siteMailDir,
+        siteFilesDir,
         ...(mailRelaySecretDir ? { mailRelaySecretDir } : {}),
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
@@ -235,6 +238,16 @@ export async function bootstrapDockerExecutorDaemon(
         JSON.stringify({
           component: "hp-docker-executor",
           event: "site_mail_files_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    await ensureSiteFilesProgram(siteFilesDir).catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "site_files_program_failed",
           code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
           timestamp: new Date().toISOString(),
         }),

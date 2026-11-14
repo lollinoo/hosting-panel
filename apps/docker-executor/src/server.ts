@@ -37,6 +37,7 @@ import {
   type DockerExecutorPort,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
+import { parseSiteFilesRequest } from "./site-files-helper.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
 export const DEFAULT_EXECUTOR_SOCKET_PATH = "/run/hosting-panel/executor.sock" as const;
@@ -493,6 +494,12 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/mail-relay/test") {
         const req = this.parseBody(MailTestIpcRequestSchema, rawBody, "test email");
         writeJson(res, 200, { data: await this.executor.sendTestMail(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sites/files") {
+        const req = parseSiteFilesRequest(this.parseJsonBody(rawBody));
+        writeJson(res, 200, { data: await this.executor.siteFiles(req) });
         return;
       }
 

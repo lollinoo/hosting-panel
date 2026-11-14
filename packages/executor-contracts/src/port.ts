@@ -1,8 +1,19 @@
-import type { OperationStatus, SiteHostRoute } from "@hosting-panel/contracts";
+import type {
+  OperationStatus,
+  SiteFileEntryDto,
+  SiteFilesIpcRequest,
+  SiteFilesOp,
+  SiteFilesResultByOp,
+  SiteHostRoute,
+} from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import type { CertificateStatusReport } from "./acme-status.js";
 import type { MailRelayApplyRequest, MailRelayStatusReport, MailTestResult } from "./mail-relay.js";
 import type { ApprovedServiceSpec } from "./spec.js";
+
+export type SiteFileEntry = SiteFileEntryDto;
+export type SiteFilesRequest = SiteFilesIpcRequest;
+export type SiteFilesResult<O extends SiteFilesOp = SiteFilesOp> = SiteFilesResultByOp[O];
 
 export interface DockerExecutionResult {
   readonly operationId: string;
@@ -32,6 +43,8 @@ export interface DockerExecutorPort {
   applyMailRelay(req: MailRelayApplyRequest | null): Promise<void>;
   getMailRelayStatus(req: { since: string }): Promise<MailRelayStatusReport>;
   sendTestMail(req: { to: string; from: string }): Promise<MailTestResult>;
+  /** Confined to the site's files; never touches the running site container. */
+  siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>>;
 }
 
 export interface SiteRoutesRequest {

@@ -27,10 +27,14 @@ import {
   type DockerExecutorPort,
   type CertificateStatusReport,
   type SiteHostRoute,
+  type SiteFilesRequest,
+  type SiteFilesResult,
   type SiteJobRequest,
   type SiteJobResult,
   type SiteRoutesRequest,
 } from "@hosting-panel/executor-contracts";
+import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
+import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
 import {
   DEFAULT_MAIL_RELAY_SECRET_DIR,
@@ -816,10 +820,14 @@ interface DockerHttpResponse {
 const PULL_TIMEOUT_MS = 240_000;
 
 class DockerSocketHttpClient {
-  private readonly socketPath: string;
+  public readonly socketPath: string;
   private readonly apiPrefix: string;
   private readonly timeoutMs: number;
   private useUnversionedFallback = false;
+
+  public get effectiveApiPrefix(): string {
+    return this.useUnversionedFallback ? "" : this.apiPrefix;
+  }
 
   public constructor(options: {
     readonly socketPath: string;
@@ -979,6 +987,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly mailTestWaitMs?: number;
   /** The relay's submission port on its bridge address (tests only). */
   readonly mailSubmitPort?: number;
+  readonly siteFilesDir?: string;
+  readonly filesHelperIdleMs?: number;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1024,6 +1034,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly mailTestPollMs: number;
   private readonly mailTestWaitMs: number;
   private readonly mailSubmitPort: number;
+  private readonly siteFilesHelpers: SiteFilesHelpers;
   /** Applies run strictly one after the other; two different configs are never merged. */
   private mailRelayQueue: Promise<unknown> = Promise.resolve();
 
@@ -1058,6 +1069,18 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.mailTestPollMs = options?.mailTestPollMs ?? 1_000;
     this.mailTestWaitMs = options?.mailTestWaitMs ?? 20_000;
     this.mailSubmitPort = options?.mailSubmitPort ?? 587;
+    const dockerClient = this.dockerClient;
+    this.siteFilesHelpers = new SiteFilesHelpers({
+      target: {
+        request: (m, p, b, o) => this.dockerClient.request(m, p, b, o),
+        socketPath: this.dockerClient.socketPath,
+        get apiPrefix() {
+          return dockerClient.effectiveApiPrefix;
+        },
+      },
+      programDir: path.resolve(options?.siteFilesDir ?? DEFAULT_SITE_FILES_DIR),
+      ...(options?.filesHelperIdleMs !== undefined ? { idleMs: options.filesHelperIdleMs } : {}),
+    });
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1860,6 +1883,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
+  public siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
+    return this.siteFilesHelpers.run(req);
+  }
+
   /** At executor start: no job survives a restart, so every site_job container and job_* secret dir is stale. */
   public async cleanupOrphanJobs(): Promise<void> {
     const filters = JSON.stringify({ label: [`io.hostingpanel.role=${SITE_JOB_ROLE}`] });
@@ -1882,6 +1909,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         await purgeServiceSecrets(this.secretsRootDir, entry.name);
       }
     }
+    await this.siteFilesHelpers.removeAll();
   }
 
   /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */
@@ -1903,8 +1931,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       "/containers/json?all=true&",
       siteLabel,
     );
-    const isJob = (c: DockerContainerListSummary): boolean =>
-      c.Labels?.["io.hostingpanel.role"] === SITE_JOB_ROLE;
+    const isJob = (c: DockerContainerListSummary): boolean => {
+      const role = c.Labels?.["io.hostingpanel.role"];
+      return role === SITE_JOB_ROLE || role === SITE_FILES_ROLE;
+    };
     if (all.some((c) => !isJob(c))) {
       throw new ExecutorCodedError("The site still has a running service", "RESOURCE_LOCKED");
     }

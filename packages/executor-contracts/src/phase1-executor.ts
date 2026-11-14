@@ -3,6 +3,8 @@ import type {
   DockerExecutionResult,
   DockerExecutorPort,
   ServiceLogLine,
+  SiteFilesRequest,
+  SiteFilesResult,
   SiteRoutesRequest,
   SiteJobRequest,
   SiteJobResult,
@@ -67,6 +69,10 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async sendTestMail(_req: { to: string; from: string }): Promise<MailTestResult> {
+    return this.refuse();
+  }
+
+  async siteFiles<R extends SiteFilesRequest>(_req: R): Promise<SiteFilesResult<R["op"]>> {
     return this.refuse();
   }
 
