@@ -16,6 +16,7 @@ import {
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
   ServiceLogsIpcRequestSchema,
+  SftpAccessApplyIpcRequestSchema,
   SiteJobIpcRequestSchema,
   SitePurgeIpcRequestSchema,
   SiteRoutesIpcRequestSchema,
@@ -45,6 +46,7 @@ export const DEFAULT_EXECUTOR_SOCKET_MODE = 0o660 as const;
 export const DEFAULT_EXECUTOR_VERSION = "0.2.0" as const;
 const MAX_IPC_BODY_BYTES = 1_048_576;
 const WINDOWS_NAMED_PIPE_PATTERN = /^\\\\\.\\pipe\\[a-zA-Z0-9._-]+$/;
+const EmptyObjectIpcRequestSchema = z.object({}).strict();
 
 export type IpcTransportMode = "uds" | "pipe" | "loopback-test";
 
@@ -500,6 +502,19 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/sites/files") {
         const req = parseSiteFilesRequest(this.parseJsonBody(rawBody));
         writeJson(res, 200, { data: await this.executor.siteFiles(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sftp/apply") {
+        const req = this.parseBody(SftpAccessApplyIpcRequestSchema, rawBody, "sftp access");
+        const { applied } = await this.executor.applySftpAccess(req);
+        writeJson(res, 200, { data: { applied } });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sftp/status") {
+        this.parseBody(EmptyObjectIpcRequestSchema, rawBody, "sftp status");
+        writeJson(res, 200, { data: await this.executor.getSftpStatus() });
         return;
       }
 

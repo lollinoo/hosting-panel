@@ -32,6 +32,37 @@ import {
 const PANEL_INGRESS_RETRY_MS = 60_000;
 const PANEL_CERTIFICATE_GATE_MS = 5 * 60_000;
 const SHARED_DATABASE_RETRY_MS = 60_000;
+const SFTP_ENSURE_RETRY_MS = 60_000;
+const REFUSED_SFTP_PORTS = new Set([22, 80, 443]);
+
+export function parseSftpPortFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  const raw = env.HP_SFTP_PORT?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(raw)) {
+    throw new ExecutorCodedError(
+      "HP_SFTP_PORT must be an integer between 1 and 65535",
+      "VALIDATION_ERROR",
+    );
+  }
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ExecutorCodedError(
+      "HP_SFTP_PORT must be an integer between 1 and 65535",
+      "VALIDATION_ERROR",
+    );
+  }
+  if (REFUSED_SFTP_PORTS.has(port)) {
+    throw new ExecutorCodedError(
+      "HP_SFTP_PORT cannot be 22, 80, or 443",
+      "VALIDATION_ERROR",
+    );
+  }
+  return port;
+}
 
 /** Empty HP_PANEL_HOSTNAME ⇒ null (panel ingress disabled). Invalid values are logged and disable it too. */
 export function parsePanelIngressConfigFromEnv(
@@ -185,6 +216,8 @@ export async function bootstrapDockerExecutorDaemon(
   const siteMailDir = env.HP_SITE_MAIL_DIR?.trim() || DEFAULT_SITE_MAIL_DIR;
   const siteFilesDir = env.HP_SITE_FILES_DIR?.trim() || DEFAULT_SITE_FILES_DIR;
   const mailRelaySecretDir = env.HP_MAIL_RELAY_SECRET_DIR?.trim();
+  const sftpStateDir = env.HP_SFTP_STATE_DIR?.trim();
+  const sftpPort = parseSftpPortFromEnv(env);
 
   const dockerAdapter = useSimulator
     ? null
@@ -199,6 +232,8 @@ export async function bootstrapDockerExecutorDaemon(
         siteMailDir,
         siteFilesDir,
         ...(mailRelaySecretDir ? { mailRelaySecretDir } : {}),
+        ...(sftpStateDir ? { sftpStateDir } : {}),
+        ...(sftpPort !== undefined ? { sftpPort } : {}),
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
           : {}),
@@ -301,6 +336,26 @@ export async function bootstrapDockerExecutorDaemon(
       }
     };
     void ensureSharedDatabase();
+    const ensureSftp = async (): Promise<void> => {
+      try {
+        const res = await dockerAdapter.ensureSftpFromState();
+        if (res !== null) {
+          console.info(JSON.stringify({ component: "hp-docker-executor", event: "sftp_ready" }));
+        }
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "sftp_ensure_failed",
+            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+            retryInMs: SFTP_ENSURE_RETRY_MS,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        setTimeout(() => void ensureSftp(), SFTP_ENSURE_RETRY_MS).unref();
+      }
+    };
+    void ensureSftp();
     void dockerAdapter.prewarmSiteImages();
   }
 

@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import type { CertProblem, MailRelayApplyRequest } from "@hosting-panel/contracts";
+import {
+  DEFAULT_SFTP_PORT,
+  SftpAccessApplyIpcRequestSchema,
+  type CertProblem,
+  type MailRelayApplyRequest,
+} from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
   ApprovedServiceSpec,
@@ -10,6 +15,10 @@ import type {
   MailRelayStatusReport,
   MailTestResult,
   ServiceLogLine,
+  SftpAccessApplyRequest,
+  SftpAccessUser,
+  SftpApplyResult,
+  SftpStatusReport,
   SiteFilesRequest,
   SiteFilesResult,
   SiteHostRoute,
@@ -155,6 +164,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly mailDeliveries: SimulatedMailDelivery[] = [];
   public nextTestMailResult: MailTestResult = { outcome: "sent", problem: null, detail: null };
   private failingMailApplies = 0;
+  public sftpUsers: SftpAccessUser[] = [];
+  /** Every SFTP apply request in order. */
+  public readonly sftpApplies: SftpAccessApplyRequest[] = [];
+  private failingSftpApplies = 0;
   private readonly serviceLogs = new Map<string, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
 
@@ -273,6 +286,31 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     const result = { ...this.nextTestMailResult };
     this.mailDeliveries.push({ to: req.to, from: req.from, result });
     return result;
+  }
+
+  public failNextSftpApply(n = 1): void {
+    this.failingSftpApplies = n;
+  }
+
+  public async applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const parsed = SftpAccessApplyIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid SFTP access configuration", "VALIDATION_ERROR");
+    }
+    if (this.failingSftpApplies > 0) {
+      this.failingSftpApplies -= 1;
+      throw new ExecutorCodedError("Simulated SFTP apply failure", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    const copy: SftpAccessApplyRequest = {
+      users: parsed.data.users.map((u) => ({ ...u })),
+    };
+    this.sftpApplies.push(copy);
+    this.sftpUsers = parsed.data.users.map((u) => ({ ...u }));
+    return { applied: copy.users.length };
+  }
+
+  public async getSftpStatus(): Promise<SftpStatusReport> {
+    return { running: false, port: DEFAULT_SFTP_PORT, hostKeyFingerprint: null };
   }
 
   public failNextDeploy(): void {

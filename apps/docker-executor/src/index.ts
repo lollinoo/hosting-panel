@@ -124,6 +124,8 @@ export {
 
 export {
   ExecutorIpcClientError,
+  SFTP_APPLY_TIMEOUT_MS,
+  SFTP_STATUS_TIMEOUT_MS,
   SITE_FILES_ARCHIVE_TIMEOUT_MS,
   SITE_FILES_DELETE_TIMEOUT_MS,
   SITE_FILES_TIMEOUT_MS,
@@ -135,6 +137,7 @@ export {
   bootstrapDockerExecutorDaemon,
   loadExecutorVerificationKeyringFromEnv,
   parsePanelIngressConfigFromEnv,
+  parseSftpPortFromEnv,
 } from "./main.js";
 
 export {
@@ -168,3 +171,29 @@ export {
 } from "./site-files-program.js";
 
 export { SimulatedSiteFiles, type SimSeedEntry } from "./simulator-files.js";
+
+export {
+  DEFAULT_SFTP_STATE_DIR,
+  SFTP_CONFIG_SHA256_LABEL,
+  SFTP_CONTAINER_NAME,
+  SFTP_INTERNAL_PORT,
+  SFTP_NETWORK_NAME,
+  SFTP_VOLUME_PREFIX,
+  assertSftpStateDir,
+  buildSftpContainerPayload,
+  ensureSftpStateFiles,
+  generateEd25519HostKey,
+  hasSftpHostKey,
+  readSftpHostKeyFingerprint,
+  readSftpState,
+  renderSftpSshdConfig,
+  renderSftpUserFiles,
+  sshFingerprint,
+  writeSftpState,
+  type EnsureSftpStateFilesOptions,
+  type SftpContainerCreatePayload,
+  type SftpContainerInput,
+  type SftpContainerSiteMount,
+  type SftpRenderedUserFiles,
+  type SftpStateFilesResult,
+} from "./sftp-platform.js";

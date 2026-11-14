@@ -7,6 +7,8 @@ import {
   MailRelayStatusReportWireSchema,
   MailTestIpcResponseSchema,
   ObservedServiceStateWireSchema,
+  SftpApplyIpcResponseSchema,
+  SftpStatusReportWireSchema,
   SITE_FILES_RESULT_SCHEMAS,
   signIpcRequest,
   type CertificateStatusIpcRequest,
@@ -30,6 +32,9 @@ import type {
   MailRelayStatusReport,
   MailTestResult,
   ServiceLogLine,
+  SftpAccessApplyRequest,
+  SftpApplyResult,
+  SftpStatusReport,
   SiteFilesRequest,
   SiteFilesResult,
   SiteJobRequest,
@@ -89,6 +94,8 @@ export const MAIL_RELAY_APPLY_TIMEOUT_MS = 300_000;
 export const SITE_FILES_TIMEOUT_MS = 60_000;
 export const SITE_FILES_DELETE_TIMEOUT_MS = 100_000;
 export const SITE_FILES_ARCHIVE_TIMEOUT_MS = 600_000;
+export const SFTP_APPLY_TIMEOUT_MS = 120_000;
+export const SFTP_STATUS_TIMEOUT_MS = 10_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -344,6 +351,26 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     const json = await this.sendSignedJsonRequest("POST", "/v1/sites/files", req, timeoutMs);
     const schema = SITE_FILES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
     return z.object({ data: schema }).parse(json).data as SiteFilesResult<R["op"]>;
+  }
+
+  public async applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const json = await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/sftp/apply",
+      req,
+      SFTP_APPLY_TIMEOUT_MS,
+    );
+    return z.object({ data: SftpApplyIpcResponseSchema }).parse(json).data;
+  }
+
+  public async getSftpStatus(): Promise<SftpStatusReport> {
+    const json = await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/sftp/status",
+      {},
+      SFTP_STATUS_TIMEOUT_MS,
+    );
+    return z.object({ data: SftpStatusReportWireSchema }).parse(json).data;
   }
 
   public async getServiceLogs(

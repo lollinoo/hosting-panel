@@ -4,8 +4,11 @@ import http from "node:http";
 import path from "node:path";
 import {
   DEFAULT_PHP_VERSION,
+  DEFAULT_SFTP_PORT,
   SECRET_KEY_PATTERN,
+  SFTP_IMAGE,
   SHARED_MARIADB_IMAGE,
+  SftpAccessApplyIpcRequestSchema,
   findPlaintextSecretKeys,
   resolveWordpressCliImage,
   resolveWordpressImage,
@@ -16,6 +19,7 @@ import {
   type MailRelayApplyRequest,
   type MailTestResult,
   type PhpVersion,
+  type SftpAccessUser,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
   type ObservedServiceStateWire,
@@ -26,6 +30,9 @@ import {
   type DockerExecutionResult,
   type DockerExecutorPort,
   type CertificateStatusReport,
+  type SftpAccessApplyRequest,
+  type SftpApplyResult,
+  type SftpStatusReport,
   type SiteHostRoute,
   type SiteFilesRequest,
   type SiteFilesResult,
@@ -93,6 +100,24 @@ import {
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
 } from "./site-jobs.js";
+import {
+  DEFAULT_SFTP_STATE_DIR,
+  SFTP_CONFIG_SHA256_LABEL,
+  SFTP_CONTAINER_NAME,
+  SFTP_NETWORK_NAME,
+  SFTP_VOLUME_PREFIX,
+  assertSftpStateDir,
+  buildSftpContainerPayload,
+  commitSftpStatePlan,
+  hasSftpHostKey,
+  prepareSftpStatePlan,
+  readSftpHostKeyFingerprint,
+  readSftpState,
+  writeSftpState,
+  type SftpContainerCreatePayload,
+  type SftpContainerSiteMount,
+  type SftpStatePlan,
+} from "./sftp-platform.js";
 
 export function plainHostRoute(hostname: string): SiteHostRoute {
   return { hostname, tls: false, httpsRedirect: false, redirectTo: null };
@@ -989,6 +1014,12 @@ export interface DockerEngineSocketAdapterOptions {
   readonly mailSubmitPort?: number;
   readonly siteFilesDir?: string;
   readonly filesHelperIdleMs?: number;
+  readonly sftpStateDir?: string;
+  readonly sftpPort?: number;
+  readonly sftpHostIp?: string;
+  readonly sftpContainerName?: string;
+  readonly sftpNetworkName?: string;
+  readonly sftpVolumePrefix?: string;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1037,6 +1068,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly siteFilesHelpers: SiteFilesHelpers;
   /** Applies run strictly one after the other; two different configs are never merged. */
   private mailRelayQueue: Promise<unknown> = Promise.resolve();
+  private readonly sftpStateDir: string;
+  private readonly sftpPort: number;
+  private readonly sftpHostIp: string;
+  private readonly sftpContainerName: string;
+  private readonly sftpNetworkName: string;
+  private readonly sftpVolumePrefix: string;
+  private sftpQueue: Promise<unknown> = Promise.resolve();
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -1081,6 +1119,21 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       programDir: path.resolve(options?.siteFilesDir ?? DEFAULT_SITE_FILES_DIR),
       ...(options?.filesHelperIdleMs !== undefined ? { idleMs: options.filesHelperIdleMs } : {}),
     });
+    this.sftpStateDir = path.resolve(options?.sftpStateDir ?? DEFAULT_SFTP_STATE_DIR);
+    this.sftpPort = options?.sftpPort ?? DEFAULT_SFTP_PORT;
+    if (!Number.isInteger(this.sftpPort) || this.sftpPort < 1 || this.sftpPort > 65535) {
+      throw new ExecutorCodedError(
+        "sftpPort must be an integer between 1 and 65535",
+        "VALIDATION_ERROR",
+      );
+    }
+    this.sftpHostIp = options?.sftpHostIp ?? "0.0.0.0";
+    this.sftpContainerName = options?.sftpContainerName ?? SFTP_CONTAINER_NAME;
+    this.sftpNetworkName = options?.sftpNetworkName ?? SFTP_NETWORK_NAME;
+    this.sftpVolumePrefix = options?.sftpVolumePrefix ?? SFTP_VOLUME_PREFIX;
+    assertSafeIdentifier(this.sftpContainerName, "sftpContainerName");
+    assertSafeIdentifier(this.sftpNetworkName, "sftpNetworkName");
+    assertSafeIdentifier(this.sftpVolumePrefix, "sftpVolumePrefix");
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1887,6 +1940,188 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return this.siteFilesHelpers.run(req);
   }
 
+  public applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const run = this.sftpQueue.then(() => this.applySftpAccessNow(req));
+    this.sftpQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Reconciles the platform SFTP container from persisted `state.json` on startup without touching site containers. */
+  public ensureSftpFromState(): Promise<SftpApplyResult | null> {
+    const run = this.sftpQueue.then(() => this.ensureSftpFromStateNow());
+    this.sftpQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  public async getSftpStatus(): Promise<SftpStatusReport> {
+    const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
+    const hostKeyFingerprint = await readSftpHostKeyFingerprint(this.sftpStateDir);
+    return {
+      running: existing?.State?.Running === true,
+      port: this.sftpPort,
+      hostKeyFingerprint,
+    };
+  }
+
+  private async ensureSftpFromStateNow(): Promise<SftpApplyResult | null> {
+    const state = await readSftpState(this.sftpStateDir);
+    if (state === null) {
+      return null;
+    }
+    return this.applySftpAccessNow(state);
+  }
+
+  private async applySftpAccessNow(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const parsed = SftpAccessApplyIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid SFTP access configuration", "VALIDATION_ERROR");
+    }
+    const validReq = parsed.data;
+    await assertSftpStateDir(this.sftpStateDir, this.executorUid);
+
+    const checkedSites = new Map<string, SftpContainerSiteMount | null>();
+    for (const user of validReq.users) {
+      if (checkedSites.has(user.siteId)) {
+        continue;
+      }
+      const volumeName = `${this.sftpVolumePrefix}${user.serviceInstanceId}_html`;
+      assertSafeIdentifier(volumeName, "sftpVolume");
+      const volumeRes = await this.dockerClient.request(
+        "GET",
+        `/volumes/${encodeURIComponent(volumeName)}`,
+      );
+      if (volumeRes.statusCode === 200) {
+        checkedSites.set(user.siteId, { siteId: user.siteId, volume: volumeName });
+      } else if (volumeRes.statusCode === 404) {
+        checkedSites.set(user.siteId, null);
+      } else {
+        throw new ExecutorCodedError(
+          `Failed to inspect SFTP site volume (HTTP ${String(volumeRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+    }
+
+    const activeSites: SftpContainerSiteMount[] = [];
+    for (const mount of checkedSites.values()) {
+      if (mount !== null) {
+        activeSites.push(mount);
+      }
+    }
+    const renderedUsers: SftpAccessUser[] = validReq.users.filter(
+      (user) => checkedSites.get(user.siteId) !== null,
+    );
+
+    if (renderedUsers.length === 0) {
+      const emptyPlan = (await hasSftpHostKey(this.sftpStateDir))
+        ? await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, [])
+        : null;
+      const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
+      if (existing) {
+        // Stop sshd before changing user files so open sessions of deleted or re-passworded users end and sshd never reads a half-written user/site line.
+        await this.stopAndRemoveContainer(existing.Id);
+      }
+      if (emptyPlan) {
+        await commitSftpStatePlan(emptyPlan, { writeState: false });
+      }
+      await writeSftpState(this.sftpStateDir, validReq.users);
+      return { applied: 0 };
+    }
+
+    const plan = await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, renderedUsers);
+    const { payload, configSha256 } = buildSftpContainerPayload({
+      image: SFTP_IMAGE,
+      stateDir: this.sftpStateDir,
+      hostIp: this.sftpHostIp,
+      port: this.sftpPort,
+      network: this.sftpNetworkName,
+      sites: activeSites,
+    });
+    await this.applySftpPlanAndContainer(plan, payload, configSha256);
+    await writeSftpState(this.sftpStateDir, validReq.users);
+    return { applied: renderedUsers.length };
+  }
+
+  private async stopSftpContainer(containerId: string): Promise<void> {
+    const stopRes = await this.dockerClient.request(
+      "POST",
+      `/containers/${encodeURIComponent(containerId)}/stop?t=5`,
+    );
+    if (stopRes.statusCode !== 204 && stopRes.statusCode !== 304) {
+      throw new ExecutorCodedError(
+        `Failed to stop SFTP container (HTTP ${String(stopRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+  }
+
+  private async applySftpPlanAndContainer(
+    plan: SftpStatePlan,
+    payload: SftpContainerCreatePayload,
+    configSha256: string,
+  ): Promise<void> {
+    const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
+    const needsRecreate =
+      existing !== null && existing.Config?.Labels?.[SFTP_CONFIG_SHA256_LABEL] !== configSha256;
+    const isRunningSameConfig =
+      existing !== null && !needsRecreate && existing.State?.Running === true;
+
+    if (isRunningSameConfig && plan.etcReady && plan.userChangeKind === "unchanged") {
+      return;
+    }
+
+    if (isRunningSameConfig && plan.etcReady && plan.userChangeKind === "append") {
+      await commitSftpStatePlan(plan);
+      return;
+    }
+
+    if (existing && needsRecreate) {
+      // Stop sshd before changing user files so open sessions of deleted or re-passworded users end and sshd never reads a half-written user/site line.
+      await this.stopAndRemoveContainer(existing.Id);
+    } else if (existing && existing.State?.Running === true) {
+      // Stop sshd before changing user files so open sessions of deleted or re-passworded users end and sshd never reads a half-written user/site line.
+      await this.stopSftpContainer(existing.Id);
+    }
+
+    await commitSftpStatePlan(plan);
+
+    await this.ensureNetwork(this.sftpNetworkName, {
+      internal: false,
+      labels: {
+        [MANAGED_DOCKER_LABELS.managed]: "true",
+        "io.hostingpanel.network_role": "sftp",
+      },
+    });
+
+    let containerId = existing?.Id ?? "";
+    if (!existing || needsRecreate) {
+      await this.ensureImageAvailable(payload.Image);
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(this.sftpContainerName)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create SFTP container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      containerId = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+    }
+
+    const startRes = await this.dockerClient.request(
+      "POST",
+      `/containers/${encodeURIComponent(containerId)}/start`,
+    );
+    if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+      throw new ExecutorCodedError(
+        `Failed to start SFTP container (HTTP ${String(startRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+  }
+
   /** At executor start: no job survives a restart, so every site_job container and job_* secret dir is stale. */
   public async cleanupOrphanJobs(): Promise<void> {
     const filters = JSON.stringify({ label: [`io.hostingpanel.role=${SITE_JOB_ROLE}`] });
@@ -1978,6 +2213,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       resolveWordpressCliImage(DEFAULT_PHP_VERSION),
       SHARED_MARIADB_IMAGE,
       MAIL_RELAY_IMAGE,
+      SFTP_IMAGE,
     ];
     for (const image of images) {
       await this.ensureImageAvailable(image).catch((err: unknown) => {
@@ -2453,6 +2689,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       // v=true drops only anonymous volumes (an image VOLUME); named volumes are never removed.
       `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
     );
+    if (rmRes.statusCode === 409) {
+      // A concurrent removal may finish first (e.g. site purge vs. files-helper idle sweep); treat gone as removed.
+      const remaining = await this.inspectContainerByNameOrId(containerId);
+      if (remaining === null) {
+        return;
+      }
+    }
     if (rmRes.statusCode !== 204 && rmRes.statusCode !== 404) {
       throw new ExecutorCodedError(
         `Failed to remove previous container instance (HTTP ${String(rmRes.statusCode)})`,

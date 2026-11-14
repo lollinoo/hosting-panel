@@ -1211,6 +1211,52 @@ describe("purge site", () => {
     expect(mockDaemon.containers.size).toBe(0);
     expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
   });
+
+  it("stopAndRemoveContainer treats HTTP 409 followed by 404 inspect as already removed", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("f1", {
+      id: "f1",
+      name: "hp_files_svc_a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_files" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    mockDaemon.deleteConflicts.remaining = 1;
+    mockDaemon.deleteConflicts.removeFromMap = true;
+
+    await expect(adapter.purgeSite("A")).resolves.toBeUndefined();
+    expect(mockDaemon.containers.size).toBe(0);
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+    expect(mockDaemon.requestedPaths).toContain("/v1.45/containers/f1/json");
+  });
+
+  it("stopAndRemoveContainer still fails when HTTP 409 is followed by 200 inspect", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("f2", {
+      id: "f2",
+      name: "hp_files_svc_a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_files" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    mockDaemon.deleteConflicts.remaining = 1;
+    mockDaemon.deleteConflicts.removeFromMap = false;
+
+    await expect(adapter.purgeSite("A")).rejects.toMatchObject({
+      code: "DOCKER_ENGINE_UNAVAILABLE",
+    });
+    expect(mockDaemon.deletedVolumes).toEqual([]);
+  });
 });
 
 describe("site IPC", () => {

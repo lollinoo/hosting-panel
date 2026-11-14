@@ -7,10 +7,12 @@ export interface MockDockerContainerRecord {
   id: string;
   name: string;
   image: string;
+  entrypoint?: string[];
   cmd?: string[];
   user?: string;
   env: string[];
   labels: Record<string, string>;
+  exposedPorts?: Record<string, unknown>;
   running: boolean;
   status: string;
   restartCount: number;
@@ -45,6 +47,10 @@ export interface MockDockerDaemon {
   readonly failRestarts: { remaining: number; drop?: boolean };
   /** The next `remaining` container creates answer 500. */
   readonly failCreates: { remaining: number };
+  /** The next `remaining` container starts answer 500. */
+  readonly failStarts: { remaining: number };
+  /** The next `remaining` container deletes answer 409 (optionally removing from containers so inspect 404s). */
+  readonly deleteConflicts: { remaining: number; removeFromMap?: boolean };
   close(): Promise<void>;
 }
 
@@ -61,6 +67,8 @@ export async function startMockDockerDaemon(options?: {
   readonly execExitCode?: number;
   /** GET /exec/<id>/json always answers Running: true. */
   readonly execStaysRunning?: boolean;
+  /** Optional hook invoked right as each mock request arrives (after parsing method and routePath). */
+  readonly onRequest?: (method: string, routePath: string) => void;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -84,6 +92,9 @@ export async function startMockDockerDaemon(options?: {
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
   const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
   const failCreates = { remaining: 0 };
+  const failStarts = { remaining: 0 };
+  const deleteConflicts: { remaining: number; removeFromMap?: boolean } = { remaining: 0 };
+  const pulledImages = new Set<string>();
   let seq = 1;
 
   const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
@@ -120,6 +131,7 @@ export async function startMockDockerDaemon(options?: {
 
       const routePath = parsedUrl.pathname.replace(/^\/v1\.\d+/, "");
       const method = req.method ?? "GET";
+      options?.onRequest?.(method, routePath);
 
       if (method === "GET" && routePath === "/_ping") {
         res.writeHead(200, { "Content-Type": "text/plain" });
@@ -128,6 +140,10 @@ export async function startMockDockerDaemon(options?: {
       }
 
       if (method === "POST" && routePath === "/images/create" && options?.pullBody !== undefined) {
+        const fromImage = parsedUrl.searchParams.get("fromImage");
+        if (fromImage && !/"error"\s*:/.test(options.pullBody)) {
+          pulledImages.add(fromImage);
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(options.pullBody);
         return;
@@ -191,7 +207,10 @@ export async function startMockDockerDaemon(options?: {
       }
 
       if (method === "GET" && routePath.startsWith("/images/") && routePath.endsWith("/json")) {
-        if (options?.pullBody !== undefined) {
+        const imageName = decodeURIComponent(
+          routePath.slice("/images/".length, -"/json".length),
+        );
+        if (options?.pullBody !== undefined && !pulledImages.has(imageName)) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message: "No such image" }));
           return;
@@ -310,6 +329,20 @@ export async function startMockDockerDaemon(options?: {
         return;
       }
 
+      const volumeInspectMatch = /^\/volumes\/([^/]+)$/.exec(routePath);
+      if (method === "GET" && volumeInspectMatch && volumeInspectMatch[1]) {
+        const name = decodeURIComponent(volumeInspectMatch[1]);
+        const labels = volumeLabels.get(name);
+        if (!labels) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "no such volume" }));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ Name: name, Labels: labels }));
+        return;
+      }
+
       const resourceDeleteMatch = /^\/(volumes|networks)\/([^/]+)$/.exec(routePath);
       if (method === "DELETE" && resourceDeleteMatch && resourceDeleteMatch[2]) {
         const name = decodeURIComponent(resourceDeleteMatch[2]);
@@ -368,10 +401,12 @@ export async function startMockDockerDaemon(options?: {
         const name = parsedUrl.searchParams.get("name") ?? `ctr_${String(seq)}`;
         const payload = JSON.parse(bodyStr) as {
           Image: string;
+          Entrypoint?: string[];
           Cmd?: string[];
           User?: string;
           Env?: string[];
           Labels?: Record<string, string>;
+          ExposedPorts?: Record<string, unknown>;
           HostConfig: NonNullable<DockerContainerInspectPayload["HostConfig"]>;
           NetworkingConfig?: { EndpointsConfig?: Record<string, unknown> };
         };
@@ -382,10 +417,12 @@ export async function startMockDockerDaemon(options?: {
           id,
           name,
           image: payload.Image,
+          ...(payload.Entrypoint ? { entrypoint: payload.Entrypoint } : {}),
           ...(payload.Cmd ? { cmd: payload.Cmd } : {}),
           ...(payload.User ? { user: payload.User } : {}),
           env: [...(payload.Env ?? [])],
           labels: { ...(payload.Labels ?? {}) },
+          ...(payload.ExposedPorts ? { exposedPorts: payload.ExposedPorts } : {}),
           running: false,
           status: "created",
           restartCount: 0,
@@ -454,6 +491,12 @@ export async function startMockDockerDaemon(options?: {
           res.end(JSON.stringify({ message: "restart failed" }));
           return;
         }
+        if (action === "start" && failStarts.remaining > 0) {
+          failStarts.remaining -= 1;
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "start failed" }));
+          return;
+        }
         if (action === "start" || action === "restart") {
           target.running = true;
           target.status = "running";
@@ -470,6 +513,15 @@ export async function startMockDockerDaemon(options?: {
       if (method === "DELETE" && deleteMatch && deleteMatch[1]) {
         const ref = decodeURIComponent(deleteMatch[1]);
         const target = findByRef(ref);
+        if (deleteConflicts.remaining > 0) {
+          deleteConflicts.remaining -= 1;
+          if (deleteConflicts.removeFromMap && target) {
+            containers.delete(target.id);
+          }
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "removal of container is already in progress" }));
+          return;
+        }
         if (target) {
           containers.delete(target.id);
         }
@@ -504,6 +556,8 @@ export async function startMockDockerDaemon(options?: {
     execCalls,
     failRestarts,
     failCreates,
+    failStarts,
+    deleteConflicts,
     async close() {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
