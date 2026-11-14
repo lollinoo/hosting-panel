@@ -19,6 +19,8 @@ import type {
   SftpAccessUser,
   SftpApplyResult,
   SftpStatusReport,
+  SiteDatabasesRequest,
+  SiteDatabasesResult,
   SiteFilesRequest,
   SiteFilesResult,
   SiteHostRoute,
@@ -28,6 +30,7 @@ import type {
   SiteRoutesRequest,
   StoredCertificate,
 } from "@hosting-panel/executor-contracts";
+import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { assertValidSiteJobRequest } from "./site-jobs.js";
 import {
@@ -141,6 +144,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly serviceToSite = new Map<string, string>();
   private readonly siteServices = new Map<string, Set<string>>();
   public readonly files = new SimulatedSiteFiles();
+  public readonly databases = new SimulatedSiteDatabases();
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
@@ -328,9 +332,17 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     await this.onJob?.(req);
     const idx = this.failingJobs.findIndex((f) => f.kind === req.kind);
     const failure = idx >= 0 ? this.failingJobs.splice(idx, 1)[0] : undefined;
+    const exitCode = failure?.exitCode ?? 0;
+    if (exitCode === 0) {
+      if (req.kind === "db.provision") {
+        this.databases.provision(req.siteId);
+      } else if (req.kind === "db.drop") {
+        this.databases.drop(req.siteId);
+      }
+    }
     return {
       jobId: req.jobId,
-      exitCode: failure?.exitCode ?? 0,
+      exitCode,
       outputTail: failure?.outputTail ?? "",
     };
   }
@@ -338,6 +350,13 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
     this.assertEngineAvailable();
     return this.files.handle(req);
+  }
+
+  public async siteDatabases<R extends SiteDatabasesRequest>(
+    req: R,
+  ): Promise<SiteDatabasesResult<R["op"]>> {
+    this.assertEngineAvailable();
+    return this.databases.handle(req);
   }
 
   public async purgeSite(siteId: string): Promise<void> {

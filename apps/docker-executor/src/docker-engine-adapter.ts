@@ -3,8 +3,10 @@ import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, unlink } from "
 import http from "node:http";
 import path from "node:path";
 import {
+  DEFAULT_PHPMYADMIN_PORT,
   DEFAULT_PHP_VERSION,
   DEFAULT_SFTP_PORT,
+  PHPMYADMIN_IMAGE,
   SECRET_KEY_PATTERN,
   SFTP_IMAGE,
   SHARED_MARIADB_IMAGE,
@@ -33,6 +35,8 @@ import {
   type SftpAccessApplyRequest,
   type SftpApplyResult,
   type SftpStatusReport,
+  type SiteDatabasesRequest,
+  type SiteDatabasesResult,
   type SiteHostRoute,
   type SiteFilesRequest,
   type SiteFilesResult,
@@ -40,6 +44,14 @@ import {
   type SiteJobResult,
   type SiteRoutesRequest,
 } from "@hosting-panel/executor-contracts";
+import {
+  DEFAULT_PHPMYADMIN_CONFIG_DIR,
+  PHPMYADMIN_CONTAINER_NAME,
+  PHPMYADMIN_NETWORK_NAME,
+  ensurePhpMyAdminContainer,
+  type PhpMyAdminDeps,
+} from "./phpmyadmin-platform.js";
+import { SiteDatabasesRunner, mariadbRootExec } from "./site-databases.js";
 import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
@@ -1020,6 +1032,11 @@ export interface DockerEngineSocketAdapterOptions {
   readonly sftpContainerName?: string;
   readonly sftpNetworkName?: string;
   readonly sftpVolumePrefix?: string;
+  readonly sharedDbContainerName?: string;
+  readonly phpMyAdminPort?: number;
+  readonly phpMyAdminContainerName?: string;
+  readonly phpMyAdminNetworkName?: string;
+  readonly phpMyAdminConfigDir?: string;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1066,6 +1083,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly mailTestWaitMs: number;
   private readonly mailSubmitPort: number;
   private readonly siteFilesHelpers: SiteFilesHelpers;
+  private readonly databases: SiteDatabasesRunner;
+  private readonly sharedDbContainerName: string;
+  private readonly phpMyAdminPort: number;
+  private readonly phpMyAdminContainerName: string;
+  private readonly phpMyAdminNetworkName: string;
+  private readonly phpMyAdminConfigDir: string;
+  private phpMyAdminEnsureInFlight: { ifPresent: boolean; promise: Promise<void> } | null = null;
   /** Applies run strictly one after the other; two different configs are never merged. */
   private mailRelayQueue: Promise<unknown> = Promise.resolve();
   private readonly sftpStateDir: string;
@@ -1093,6 +1117,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.ingressHttpsPort = options?.ingressHttpsPort;
     this.panel = options?.panel ?? null;
     this.pullMissingImages = options?.pullMissingImages ?? true;
+    this.sharedDbContainerName = options?.sharedDbContainerName ?? SHARED_DB_CONTAINER_NAME;
+    assertSafeIdentifier(this.sharedDbContainerName, "sharedDbContainerName");
     this.sharedDbDataDir = path.resolve(options?.sharedDbDataDir ?? DEFAULT_SHARED_DB_DATA_DIR);
     this.sharedDbRootKeyFile = path.resolve(
       options?.sharedDbRootKeyFile ?? DEFAULT_SHARED_DB_ROOT_KEY_FILE,
@@ -1107,17 +1133,37 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.mailTestPollMs = options?.mailTestPollMs ?? 1_000;
     this.mailTestWaitMs = options?.mailTestWaitMs ?? 20_000;
     this.mailSubmitPort = options?.mailSubmitPort ?? 587;
+    this.phpMyAdminPort = options?.phpMyAdminPort ?? DEFAULT_PHPMYADMIN_PORT;
+    if (!Number.isInteger(this.phpMyAdminPort) || this.phpMyAdminPort < 1 || this.phpMyAdminPort > 65535) {
+      throw new ExecutorCodedError(
+        "phpMyAdminPort must be an integer between 1 and 65535",
+        "VALIDATION_ERROR",
+      );
+    }
+    this.phpMyAdminContainerName = options?.phpMyAdminContainerName ?? PHPMYADMIN_CONTAINER_NAME;
+    this.phpMyAdminNetworkName = options?.phpMyAdminNetworkName ?? PHPMYADMIN_NETWORK_NAME;
+    this.phpMyAdminConfigDir = path.resolve(
+      options?.phpMyAdminConfigDir ?? DEFAULT_PHPMYADMIN_CONFIG_DIR,
+    );
+    assertSafeIdentifier(this.phpMyAdminContainerName, "phpMyAdminContainerName");
+    assertSafeIdentifier(this.phpMyAdminNetworkName, "phpMyAdminNetworkName");
     const dockerClient = this.dockerClient;
-    this.siteFilesHelpers = new SiteFilesHelpers({
-      target: {
-        request: (m, p, b, o) => this.dockerClient.request(m, p, b, o),
-        socketPath: this.dockerClient.socketPath,
-        get apiPrefix() {
-          return dockerClient.effectiveApiPrefix;
-        },
+    const execTarget = {
+      request: (m: string, p: string, b?: unknown, o?: { readonly timeoutMs?: number }) =>
+        this.dockerClient.request(m, p, b, o),
+      socketPath: this.dockerClient.socketPath,
+      get apiPrefix() {
+        return dockerClient.effectiveApiPrefix;
       },
+    };
+    this.siteFilesHelpers = new SiteFilesHelpers({
+      target: execTarget,
       programDir: path.resolve(options?.siteFilesDir ?? DEFAULT_SITE_FILES_DIR),
       ...(options?.filesHelperIdleMs !== undefined ? { idleMs: options.filesHelperIdleMs } : {}),
+    });
+    this.databases = new SiteDatabasesRunner({
+      runSql: mariadbRootExec(execTarget, this.sharedDbContainerName),
+      ensurePhpMyAdmin: () => this.ensurePhpMyAdmin(),
     });
     this.sftpStateDir = path.resolve(options?.sftpStateDir ?? DEFAULT_SFTP_STATE_DIR);
     this.sftpPort = options?.sftpPort ?? DEFAULT_SFTP_PORT;
@@ -1940,6 +1986,60 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return this.siteFilesHelpers.run(req);
   }
 
+  public siteDatabases<R extends SiteDatabasesRequest>(
+    req: R,
+  ): Promise<SiteDatabasesResult<R["op"]>> {
+    return this.databases.run(req);
+  }
+
+  public ensurePhpMyAdmin(opts?: { ifPresent?: boolean }): Promise<void> {
+    const ifPresent = opts?.ifPresent === true;
+    const inFlight = this.phpMyAdminEnsureInFlight;
+    if (inFlight && (ifPresent || !inFlight.ifPresent)) {
+      return inFlight.promise;
+    }
+
+    const deps: PhpMyAdminDeps = {
+      containerName: this.phpMyAdminContainerName,
+      networkName: this.phpMyAdminNetworkName,
+      configDir: this.phpMyAdminConfigDir,
+      port: this.phpMyAdminPort,
+      sharedDbContainerName: this.sharedDbContainerName,
+      ensureImageAvailable: (image) => this.ensureImageAvailable(image),
+      ensureNetwork: (name, o) => this.ensureNetwork(name, o),
+      connectContainerToNetwork: (net, ref, aliases) =>
+        this.connectContainerToNetwork(net, ref, aliases),
+      inspectContainerByNameOrId: async (ref) => {
+        const inspected = await this.inspectContainerByNameOrId(ref);
+        if (!inspected) {
+          return null;
+        }
+        return {
+          Id: inspected.Id,
+          State: { Running: inspected.State?.Running === true },
+          Config: {
+            ...(inspected.Config?.Labels ? { Labels: { ...inspected.Config.Labels } } : {}),
+          },
+        };
+      },
+      stopAndRemoveContainer: (id) => this.stopAndRemoveContainer(id),
+      request: (method, endpointPath, body, o) =>
+        this.dockerClient.request(method, endpointPath, body, o),
+    };
+
+    const run = (): Promise<void> => ensurePhpMyAdminContainer(deps, opts);
+    // Serialize behind an in-flight ifPresent check instead of sharing its early return.
+    const promise = (inFlight ? inFlight.promise.catch(() => undefined).then(run) : run()).finally(
+      () => {
+        if (this.phpMyAdminEnsureInFlight?.promise === promise) {
+          this.phpMyAdminEnsureInFlight = null;
+        }
+      },
+    );
+    this.phpMyAdminEnsureInFlight = { ifPresent, promise };
+    return promise;
+  }
+
   public applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
     const run = this.sftpQueue.then(() => this.applySftpAccessNow(req));
     this.sftpQueue = run.catch(() => undefined);
@@ -2214,6 +2314,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       SHARED_MARIADB_IMAGE,
       MAIL_RELAY_IMAGE,
       SFTP_IMAGE,
+      PHPMYADMIN_IMAGE,
     ];
     for (const image of images) {
       await this.ensureImageAvailable(image).catch((err: unknown) => {

@@ -17,6 +17,7 @@ import {
   ServiceInstanceActionIpcRequestSchema,
   ServiceLogsIpcRequestSchema,
   SftpAccessApplyIpcRequestSchema,
+  SiteDatabasesIpcRequestSchema,
   SiteJobIpcRequestSchema,
   SitePurgeIpcRequestSchema,
   SiteRoutesIpcRequestSchema,
@@ -502,6 +503,12 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/sites/files") {
         const req = parseSiteFilesRequest(this.parseJsonBody(rawBody));
         writeJson(res, 200, { data: await this.executor.siteFiles(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sites/databases") {
+        const req = this.parseBody(SiteDatabasesIpcRequestSchema, rawBody, "site databases");
+        writeJson(res, 200, { data: await this.executor.siteDatabases(req) });
         return;
       }
 

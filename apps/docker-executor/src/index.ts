@@ -59,6 +59,7 @@ export {
   DEFAULT_SITE_JOB_TIMEOUT_MS,
   HTACCESS_PANEL,
   HTACCESS_WORDPRESS,
+  MARIADB_OWN_MAX_USER_CONNECTIONS,
   SITE_JOB_ROLE,
   WORDPRESS_INSTALL_SCRIPT,
   WORDPRESS_SET_URL_SCRIPT,
@@ -126,6 +127,8 @@ export {
   ExecutorIpcClientError,
   SFTP_APPLY_TIMEOUT_MS,
   SFTP_STATUS_TIMEOUT_MS,
+  SITE_DATABASES_SIGNON_TIMEOUT_MS,
+  SITE_DATABASES_TIMEOUT_MS,
   SITE_FILES_ARCHIVE_TIMEOUT_MS,
   SITE_FILES_DELETE_TIMEOUT_MS,
   SITE_FILES_TIMEOUT_MS,
@@ -137,6 +140,7 @@ export {
   bootstrapDockerExecutorDaemon,
   loadExecutorVerificationKeyringFromEnv,
   parsePanelIngressConfigFromEnv,
+  parsePhpMyAdminPortFromEnv,
   parseSftpPortFromEnv,
 } from "./main.js";
 
@@ -197,3 +201,33 @@ export {
   type SftpRenderedUserFiles,
   type SftpStateFilesResult,
 } from "./sftp-platform.js";
+
+export {
+  MARIADB_EXTRA_MAX_USER_CONNECTIONS,
+  MARIADB_SIGNON_MAX_USER_CONNECTIONS,
+  SiteDatabasesRunner,
+  buildSiteDatabasesBatch,
+  buildStateQuery,
+  checkSiteDatabasesOp,
+  mapMariadbError,
+  mariadbRootExec,
+  parseSiteDatabasesRequest,
+  parseSiteDatabasesState,
+  toListResult,
+  type ExecResult,
+  type SiteDatabasesDeps,
+  type SiteDatabasesState,
+} from "./site-databases.js";
+
+export { SimulatedSiteDatabases } from "./simulator-databases.js";
+
+export {
+  DEFAULT_PHPMYADMIN_CONFIG_DIR,
+  PHPMYADMIN_CONFIG_SHA256_LABEL,
+  PHPMYADMIN_CONTAINER_NAME,
+  PHPMYADMIN_NETWORK_NAME,
+  buildPhpMyAdminContainerPayload,
+  ensurePhpMyAdminContainer,
+  renderPhpMyAdminConfig,
+  type PhpMyAdminDeps,
+} from "./phpmyadmin-platform.js";

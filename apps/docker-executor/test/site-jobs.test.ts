@@ -6,7 +6,9 @@ import { SHARED_MARIADB_IMAGE, resolveWordpressCliImage } from "@hosting-panel/c
 import type { SiteJobRequest } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DB_PROVISION_SCRIPT,
   DockerEngineSocketAdapter,
+  MARIADB_OWN_MAX_USER_CONNECTIONS,
   SHARED_DB_CONTAINER_NAME,
   SHARED_DB_NETWORK_NAME,
   WORDPRESS_SET_URL_SCRIPT,
@@ -219,7 +221,83 @@ describe("buildSiteJobContainerPayload", () => {
     expect(payload.Cmd[2]).toContain("*[!0-9a-f]*) exit 64");
     expect(payload.Cmd[2]).toContain("-eq 64");
     expect(payload.Cmd[2]).not.toContain("wp_site_a");
-    expect(payload.Env).toEqual(expect.arrayContaining(["HP_DB_NAME=wp_site_a", "HP_DB_USER=wp_site_a"]));
+    expect(payload.Env).toEqual(
+      expect.arrayContaining([
+        "HP_DB_NAME=wp_site_a",
+        "HP_DB_NAME_ESCAPED=wp\\_site\\_a",
+        "HP_DB_USER=wp_site_a",
+      ]),
+    );
+  });
+
+  it("db.provision caps the primary user at MARIADB_OWN_MAX_USER_CONNECTIONS (40) inside DB_PROVISION_SCRIPT (R40)", () => {
+    expect(MARIADB_OWN_MAX_USER_CONNECTIONS).toBe(40);
+    expect(DB_PROVISION_SCRIPT).toContain(
+      `ALTER USER '$HP_DB_USER'@'%' IDENTIFIED BY '$pw' WITH MAX_USER_CONNECTIONS ${String(MARIADB_OWN_MAX_USER_CONNECTIONS)};`,
+    );
+  });
+
+  it("db.provision escapes underscores in HP_DB_NAME_ESCAPED and pins the rendered SQL grant (R30)", async () => {
+    const req = dbJob("db.provision", {
+      params: { dbName: "wp_0123456789ab", dbUser: "wp_0123456789ab" },
+    });
+    const payload = buildSiteJobContainerPayload(req, ctx);
+    expect(payload.Cmd[2]).toBe(DB_PROVISION_SCRIPT);
+    expect(DB_PROVISION_SCRIPT).toBe(
+      [
+        "set -eu",
+        "pw=$(cat /run/secrets/HP_DB_PASSWORD 2>/dev/null || true)",
+        'case "$pw" in *[!0-9a-f]*) exit 64;; esac',
+        '[ "${#pw}" -eq 64 ] || exit 64',
+        "printf '[client]\\nuser=root\\nhost=hp-mariadb\\npassword=%s\\n' \"$(cat /run/secrets/mariadb-root)\" > /tmp/c.cnf",
+        "i=0; until mariadb --defaults-extra-file=/tmp/c.cnf -e 'SELECT 1' >/dev/null 2>&1; do i=$((i+1)); [ \"$i\" -ge 30 ] && exit 11; sleep 2; done",
+        "mariadb --defaults-extra-file=/tmp/c.cnf <<SQL",
+        "CREATE DATABASE IF NOT EXISTS \\`$HP_DB_NAME\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+        "CREATE USER IF NOT EXISTS '$HP_DB_USER'@'%' IDENTIFIED BY '$pw';",
+        `ALTER USER '$HP_DB_USER'@'%' IDENTIFIED BY '$pw' WITH MAX_USER_CONNECTIONS ${String(MARIADB_OWN_MAX_USER_CONNECTIONS)};`,
+        "GRANT ALL PRIVILEGES ON \\`$HP_DB_NAME_ESCAPED\\`.* TO '$HP_DB_USER'@'%';",
+        "SQL",
+        "",
+      ].join("\n"),
+    );
+    expect(payload.Env).toContain("HP_DB_NAME=wp_0123456789ab");
+    expect(payload.Env).toContain("HP_DB_NAME_ESCAPED=wp\\_0123456789ab");
+    expect(payload.Env).toContain("HP_DB_USER=wp_0123456789ab");
+
+    // Verify db.drop and wordpress.install do not inject HP_DB_NAME_ESCAPED
+    const dropPayload = buildSiteJobContainerPayload(dbJob("db.drop"), ctx);
+    expect(dropPayload.Env.some((e) => e.startsWith("HP_DB_NAME_ESCAPED="))).toBe(false);
+    const wpPayload = buildSiteJobContainerPayload(wpInstall(), ctx);
+    expect(wpPayload.Env.some((e) => e.startsWith("HP_DB_NAME_ESCAPED="))).toBe(false);
+
+    // Execute the heredoc in /bin/sh with a recording mariadb shim to verify exact SQL bytes on stdin.
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hp-dbprov-shim-"));
+    cleanupTasks.push(() => rm(dir, { recursive: true, force: true }));
+    const sqlOut = path.join(dir, "rendered.sql");
+    await writeFile(path.join(dir, "mariadb"), `#!/bin/sh\ncat > "${sqlOut}"\nexit 0\n`, {
+      mode: 0o755,
+    });
+    const heredocStart = DB_PROVISION_SCRIPT.indexOf("mariadb --defaults-extra-file=/tmp/c.cnf <<SQL");
+    const heredocScript = `set -eu\npw="${DB_PW}"\n${DB_PROVISION_SCRIPT.slice(heredocStart)}`;
+    execFileSync("sh", ["-c", heredocScript], {
+      env: {
+        PATH: `${dir}:/usr/bin:/bin`,
+        HP_DB_NAME: "wp_0123456789ab",
+        HP_DB_NAME_ESCAPED: "wp\\_0123456789ab",
+        HP_DB_USER: "wp_0123456789ab",
+      },
+      stdio: "pipe",
+    });
+    const renderedSql = await readFile(sqlOut, "utf8");
+    expect(renderedSql).toBe(
+      [
+        "CREATE DATABASE IF NOT EXISTS `wp_0123456789ab` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+        `CREATE USER IF NOT EXISTS 'wp_0123456789ab'@'%' IDENTIFIED BY '${DB_PW}';`,
+        `ALTER USER 'wp_0123456789ab'@'%' IDENTIFIED BY '${DB_PW}' WITH MAX_USER_CONNECTIONS 40;`,
+        "GRANT ALL PRIVILEGES ON `wp\\_0123456789ab`.* TO 'wp_0123456789ab'@'%';",
+        "",
+      ].join("\n"),
+    );
   });
 
   it("wordpress.install script is idempotent and refuses a foreign wp-config.php", () => {

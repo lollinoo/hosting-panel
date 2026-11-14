@@ -21,6 +21,8 @@ import {
 
 export const SITE_JOB_ROLE = "site_job" as const;
 export const DEFAULT_SITE_JOB_TIMEOUT_MS = 240_000;
+/** Max concurrent connections for a site's primary WordPress database user (R40). */
+export const MARIADB_OWN_MAX_USER_CONNECTIONS = 40;
 const JOB_MEMORY_BYTES = 536870912;
 
 // The texts below are fixed: params reach them only as $HP_* env, secrets only as /run/secrets files.
@@ -38,8 +40,8 @@ ${DB_CONNECT_PREAMBLE}
 mariadb --defaults-extra-file=/tmp/c.cnf <<SQL
 CREATE DATABASE IF NOT EXISTS \\\`$HP_DB_NAME\\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$HP_DB_USER'@'%' IDENTIFIED BY '$pw';
-ALTER USER '$HP_DB_USER'@'%' IDENTIFIED BY '$pw';
-GRANT ALL PRIVILEGES ON \\\`$HP_DB_NAME\\\`.* TO '$HP_DB_USER'@'%';
+ALTER USER '$HP_DB_USER'@'%' IDENTIFIED BY '$pw' WITH MAX_USER_CONNECTIONS ${String(MARIADB_OWN_MAX_USER_CONNECTIONS)};
+GRANT ALL PRIVILEGES ON \\\`$HP_DB_NAME_ESCAPED\\\`.* TO '$HP_DB_USER'@'%';
 SQL
 `;
 
@@ -249,6 +251,10 @@ export function buildSiteJobContainerPayload(req: SiteJobRequest, ctx: SiteJobCo
   const env = Object.entries(req.params)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([key, value]) => `${paramEnvName(key)}=${value}`);
+  if (req.kind === "db.provision" && req.params.dbName !== undefined) {
+    // Underscores are single-character wildcards in MariaDB database-level GRANT patterns (R30).
+    env.push(`HP_DB_NAME_ESCAPED=${req.params.dbName.replaceAll("_", "\\_")}`);
+  }
   const isWordpress = req.kind === "wordpress.install" || req.kind === "wordpress.set-url";
   if (req.kind === "wordpress.install") {
     env.push(`HP_HTACCESS_WORDPRESS=${HTACCESS_WORDPRESS}`, `HP_HTACCESS_PANEL=${HTACCESS_PANEL}`);

@@ -9,6 +9,7 @@ import {
   ObservedServiceStateWireSchema,
   SftpApplyIpcResponseSchema,
   SftpStatusReportWireSchema,
+  SITE_DATABASES_RESULT_SCHEMAS,
   SITE_FILES_RESULT_SCHEMAS,
   signIpcRequest,
   type CertificateStatusIpcRequest,
@@ -35,6 +36,8 @@ import type {
   SftpAccessApplyRequest,
   SftpApplyResult,
   SftpStatusReport,
+  SiteDatabasesRequest,
+  SiteDatabasesResult,
   SiteFilesRequest,
   SiteFilesResult,
   SiteJobRequest,
@@ -96,6 +99,8 @@ export const SITE_FILES_DELETE_TIMEOUT_MS = 100_000;
 export const SITE_FILES_ARCHIVE_TIMEOUT_MS = 600_000;
 export const SFTP_APPLY_TIMEOUT_MS = 120_000;
 export const SFTP_STATUS_TIMEOUT_MS = 10_000;
+export const SITE_DATABASES_TIMEOUT_MS = 75_000;
+export const SITE_DATABASES_SIGNON_TIMEOUT_MS = 120_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -351,6 +356,18 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     const json = await this.sendSignedJsonRequest("POST", "/v1/sites/files", req, timeoutMs);
     const schema = SITE_FILES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
     return z.object({ data: schema }).parse(json).data as SiteFilesResult<R["op"]>;
+  }
+
+  public async siteDatabases<R extends SiteDatabasesRequest>(
+    req: R,
+  ): Promise<SiteDatabasesResult<R["op"]>> {
+    const timeoutMs =
+      req.op === "phpMyAdminSignOn"
+        ? SITE_DATABASES_SIGNON_TIMEOUT_MS
+        : SITE_DATABASES_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/sites/databases", req, timeoutMs);
+    const schema = SITE_DATABASES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as SiteDatabasesResult<R["op"]>;
   }
 
   public async applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
