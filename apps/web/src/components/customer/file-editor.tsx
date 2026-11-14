@@ -24,10 +24,10 @@ export type OpenedFileMeta = {
   modifiedAt: string;
 };
 
-/** Normalizes line endings to LF for editing while remembering whether the file used CRLF. */
+/** Normalizes line endings to LF for editing while remembering whether all line endings were CRLF. */
 export function decodeEditorContent(rawText: string): { text: string; crlf: boolean } {
   return {
-    crlf: rawText.includes("\r\n"),
+    crlf: rawText.includes("\r\n") && !/(?:^|[^\r])\n/.test(rawText),
     text: rawText.replace(/\r\n/g, "\n"),
   };
 }
@@ -126,7 +126,7 @@ export async function saveEditorFile(opts: {
     const refreshed = await fetchParentEntry(opts.apiBase, opts.path, fetchImpl);
     const latestMeta = refreshed?.entry
       ? { size: refreshed.entry.size, modifiedAt: refreshed.entry.modifiedAt }
-      : opts.openedMeta;
+      : null;
 
     return {
       status: "saved",

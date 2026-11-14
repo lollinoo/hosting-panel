@@ -118,13 +118,14 @@ export function createInAppNavigationHandler(opts: {
 export async function drainUploadQueue(opts: {
   getNextWaiting: () => UploadItem | undefined;
   shouldStop: () => boolean;
+  isUnmounted?: () => boolean;
   onStart: (id: string) => void;
   sendItem: (item: UploadItem, signal: AbortSignal) => Promise<UploadOutcome>;
   setAbortController: (ctrl: AbortController | null) => void;
   onOutcome: (item: UploadItem, outcome: UploadOutcome, aborted: boolean) => void;
   onUnexpectedError: (item: UploadItem) => void;
 }): Promise<void> {
-  while (!opts.shouldStop()) {
+  while (!opts.shouldStop() && !opts.isUnmounted?.()) {
     const nextItem = opts.getNextWaiting();
     if (!nextItem) break;
 
@@ -135,11 +136,11 @@ export async function drainUploadQueue(opts: {
     try {
       const outcome = await opts.sendItem(nextItem, ctrl.signal);
       opts.setAbortController(null);
-      if (opts.shouldStop()) break;
+      if (opts.isUnmounted?.()) break;
       opts.onOutcome(nextItem, outcome, ctrl.signal.aborted);
     } catch {
       opts.setAbortController(null);
-      if (opts.shouldStop()) break;
+      if (opts.isUnmounted?.()) break;
       opts.onUnexpectedError(nextItem);
     }
   }
@@ -218,7 +219,8 @@ export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone }: 
     try {
       await drainUploadQueue({
         getNextWaiting: () => itemsRef.current.find((it) => it.status === "waiting"),
-        shouldStop: () => pausedRef.current || unmountedRef.current,
+        shouldStop: () => pausedRef.current,
+        isUnmounted: () => unmountedRef.current,
         onStart: (id) => updateOne(id, (cur) => ({ ...cur, status: "uploading", error: null })),
         setAbortController: (ctrl) => {
           abortRef.current = ctrl;

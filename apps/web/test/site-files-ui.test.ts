@@ -1075,3 +1075,181 @@ describe("Cycle 1 fix-round-1 regression tests", () => {
     expect(isRootNotReadyResponse("", 503, "DOCKER_ENGINE_UNAVAILABLE")).toBe(false);
   });
 });
+
+describe("Cycle 1 review-round-2 regression tests", () => {
+  it("Low 1: drainUploadQueue still records onOutcome and onUnexpectedError if paused during sendItem, and stops only if unmounted", async () => {
+    const queue: UploadItem[] = [
+      { id: "1", file: new File(["a"], "a.txt"), path: "a.txt", overwrite: false, sent: 0, status: "waiting", error: null },
+      { id: "2", file: new File(["b"], "b.txt"), path: "b.txt", overwrite: false, sent: 0, status: "waiting", error: null },
+    ];
+    let paused = false;
+    let unmounted = false;
+    const onOutcome = vi.fn((item: UploadItem, outcome: { ok: boolean }) => {
+      const target = queue.find((x) => x.id === item.id)!;
+      target.status = outcome.ok ? "done" : "failed";
+    });
+    const onUnexpectedError = vi.fn((item: UploadItem) => {
+      const target = queue.find((x) => x.id === item.id)!;
+      target.status = "failed";
+    });
+
+    await drainUploadQueue({
+      getNextWaiting: () => queue.find((it) => it.status === "waiting"),
+      shouldStop: () => paused,
+      isUnmounted: () => unmounted,
+      onStart: (id) => {
+        queue.find((x) => x.id === id)!.status = "uploading";
+      },
+      sendItem: async () => {
+        paused = true;
+        return { ok: true };
+      },
+      setAbortController: () => {},
+      onOutcome,
+      onUnexpectedError,
+    });
+
+    expect(onOutcome).toHaveBeenCalledTimes(1);
+    expect(queue[0]!.status).toBe("done");
+    expect(queue[1]!.status).toBe("waiting");
+
+    // Same when sendItem rejects unexpectedly while paused
+    const errQueue: UploadItem[] = [
+      { id: "3", file: new File(["c"], "c.txt"), path: "c.txt", overwrite: false, sent: 0, status: "waiting", error: null },
+    ];
+    paused = false;
+    const onErr = vi.fn((item: UploadItem) => {
+      errQueue.find((x) => x.id === item.id)!.status = "failed";
+    });
+    await drainUploadQueue({
+      getNextWaiting: () => errQueue.find((it) => it.status === "waiting"),
+      shouldStop: () => paused,
+      isUnmounted: () => unmounted,
+      onStart: (id) => {
+        errQueue.find((x) => x.id === id)!.status = "uploading";
+      },
+      sendItem: async () => {
+        paused = true;
+        throw new Error("boom");
+      },
+      setAbortController: () => {},
+      onOutcome: () => {},
+      onUnexpectedError: onErr,
+    });
+    expect(onErr).toHaveBeenCalledTimes(1);
+    expect(errQueue[0]!.status).toBe("failed");
+
+    // Unmounted mid-flight still suppresses onOutcome
+    const unmountedQueue: UploadItem[] = [
+      { id: "4", file: new File(["d"], "d.txt"), path: "d.txt", overwrite: false, sent: 0, status: "waiting", error: null },
+    ];
+    paused = false;
+    const onUnmountedOutcome = vi.fn();
+    await drainUploadQueue({
+      getNextWaiting: () => unmountedQueue.find((it) => it.status === "waiting"),
+      shouldStop: () => paused,
+      isUnmounted: () => unmounted,
+      onStart: (id) => {
+        unmountedQueue.find((x) => x.id === id)!.status = "uploading";
+      },
+      sendItem: async () => {
+        unmounted = true;
+        return { ok: true };
+      },
+      setAbortController: () => {},
+      onOutcome: onUnmountedOutcome,
+      onUnexpectedError: () => {},
+    });
+    expect(onUnmountedOutcome).not.toHaveBeenCalled();
+  });
+
+  it("Low 2: saveEditorFile sets latestMeta to null when post-save folder reload fails so the next save skips conflict check", async () => {
+    let getCount = 0;
+    const fetchFirstSave = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ data: { size: 120 } }), { status: 200 });
+      }
+      getCount += 1;
+      if (getCount === 1) {
+        return new Response(
+          JSON.stringify({
+            data: {
+              entries: [entry({ name: "wp-config.php", size: 100, modifiedAt: "2026-11-10T10:30:00Z" })],
+              truncated: false,
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ error: { code: "INTERNAL_ERROR" } }), { status: 500 });
+    });
+
+    const first = await saveEditorFile({
+      apiBase: "/api/bff/orgs/o1/managed-sites/s1",
+      csrfToken: "csrf",
+      path: "wp-config.php",
+      text: "updated once",
+      crlf: false,
+      openedMeta: { size: 100, modifiedAt: "2026-11-10T10:30:00Z" },
+      messages: en,
+      fetchFn: fetchFirstSave as unknown as typeof fetch,
+    });
+    expect(first).toEqual({
+      status: "saved",
+      savedText: "updated once",
+      crlf: false,
+      latestMeta: null,
+    });
+    if (first.status !== "saved") return;
+
+    const fetchSecondSave = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        return new Response(JSON.stringify({ data: { size: 135 } }), { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            entries: [entry({ name: "wp-config.php", size: 135, modifiedAt: "2026-11-10T10:31:00Z" })],
+            truncated: false,
+          },
+        }),
+        { status: 200 },
+      );
+    });
+
+    const second = await saveEditorFile({
+      apiBase: "/api/bff/orgs/o1/managed-sites/s1",
+      csrfToken: "csrf",
+      path: "wp-config.php",
+      text: "updated twice",
+      crlf: false,
+      openedMeta: first.latestMeta,
+      messages: en,
+      fetchFn: fetchSecondSave as unknown as typeof fetch,
+    });
+    expect(second).toEqual({
+      status: "saved",
+      savedText: "updated twice",
+      crlf: false,
+      latestMeta: { size: 135, modifiedAt: "2026-11-10T10:31:00Z" },
+    });
+  });
+
+  it("Low 3: decodeEditorContent sets crlf only when every line ending is CRLF so mixed files keep Unix endings", () => {
+    const mixed = decodeEditorContent("a\r\nb\nc\n");
+    expect(mixed).toEqual({ text: "a\nb\nc\n", crlf: false });
+    expect(encodeEditorContent(mixed.text, mixed.crlf)).toBe("a\nb\nc\n");
+
+    const lfThenCrlf = decodeEditorContent("a\nb\r\n");
+    expect(lfThenCrlf).toEqual({ text: "a\nb\n", crlf: false });
+    expect(encodeEditorContent(lfThenCrlf.text, lfThenCrlf.crlf)).toBe("a\nb\n");
+
+    const allCrlf = decodeEditorContent("a\r\nb\r\nc\r\n");
+    expect(allCrlf).toEqual({ text: "a\nb\nc\n", crlf: true });
+    expect(encodeEditorContent(allCrlf.text, allCrlf.crlf)).toBe("a\r\nb\r\nc\r\n");
+
+    const allLf = decodeEditorContent("a\nb\nc\n");
+    expect(allLf).toEqual({ text: "a\nb\nc\n", crlf: false });
+    expect(encodeEditorContent(allLf.text, allLf.crlf)).toBe("a\nb\nc\n");
+  });
+});
