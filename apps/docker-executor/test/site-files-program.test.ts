@@ -378,28 +378,65 @@ describe("site files program (real php)", () => {
 
   it.skipIf(!hasPhp)("clamps out-of-range mtime values to year 0000..9999 in list and stat", async () => {
     const script = await writeProgramScript();
-    const root = await makeTempDir();
+    // Prefer /dev/shm (tmpfs on Linux) so out-of-range timestamps survive kernel storage without ext4 clamping.
+    let root: string | null = null;
+    if (process.platform === "linux") {
+      try {
+        root = await mkdtemp(path.join("/dev/shm", "hp-site-files-prog-"));
+        cleanup.push(() => rm(root!, { recursive: true, force: true }));
+      } catch {
+        root = null;
+      }
+    }
+    if (root === null) {
+      root = await makeTempDir();
+    }
+
     const futureFile = path.join(root, "future.txt");
     const pastFile = path.join(root, "past.txt");
     await writeFile(futureFile, "f");
     await writeFile(pastFile, "p");
 
-    await utimes(futureFile, 253402300800, 253402300800);
-    await utimes(pastFile, -62167219201, -62167219201);
+    // Use PHP touch() because Node fs.utimes() silently drops negative timestamps on Linux.
+    const setRes = spawnSync(
+      "php",
+      [
+        "-r",
+        "touch($argv[1], (int)$argv[2]); touch($argv[3], (int)$argv[4]); clearstatcache(); echo json_encode([stat($argv[1])['mtime'], stat($argv[3])['mtime']]);",
+        futureFile,
+        "253402300800",
+        pastFile,
+        "-62167219201",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(setRes.status).toBe(0);
+    const [storedFuture, storedPast] = JSON.parse(setRes.stdout) as [number, number];
+    expect(storedFuture).toBeGreaterThanOrEqual(2_147_483_647);
+    expect(storedPast).toBeLessThan(0);
+
+    const clampIso = (sec: number): string => {
+      const clamped = Math.max(-62_167_219_200, Math.min(253_402_300_799, sec));
+      return new Date(clamped * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+    };
+    const expectedFuture = clampIso(storedFuture);
+    const expectedPast = clampIso(storedPast);
+    if (storedFuture > 253_402_300_799) {
+      expect(expectedFuture).toBe("9999-12-31T23:59:59Z");
+    }
+    if (storedPast < -62_167_219_200) {
+      expect(expectedPast).toBe("0000-01-01T00:00:00Z");
+    }
 
     const futureStat = expectOk(runPhp(script, root, { op: "stat", path: "future.txt" }), "stat");
-    expect(futureStat.entry.modifiedAt).toBe("9999-12-31T23:59:59Z");
+    expect(futureStat.entry.modifiedAt).toBe(expectedFuture);
 
     const pastStat = expectOk(runPhp(script, root, { op: "stat", path: "past.txt" }), "stat");
-    expect(pastStat.entry.modifiedAt).toBe("0000-01-01T00:00:00Z");
+    expect(pastStat.entry.modifiedAt).toBe(expectedPast);
 
     const listed = expectOk(runPhp(script, root, { op: "list", path: "" }), "list");
-    expect(listed.entries.find((e) => e.name === "future.txt")?.modifiedAt).toBe(
-      "9999-12-31T23:59:59Z",
-    );
-    expect(listed.entries.find((e) => e.name === "past.txt")?.modifiedAt).toBe(
-      "0000-01-01T00:00:00Z",
-    );
+    expect(listed.entries.find((e) => e.name === "future.txt")?.modifiedAt).toBe(expectedFuture);
+    expect(listed.entries.find((e) => e.name === "past.txt")?.modifiedAt).toBe(expectedPast);
   });
 
   it.skipIf(!hasPhp)("stat handles root and entries without following symlinks", async () => {

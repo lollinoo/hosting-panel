@@ -128,15 +128,10 @@ async function createFakeHelperDocker(): Promise<{
     const match = /^\/exec\/([^/]+)\/start$/.exec(urlPath);
     const execId = match?.[1] ? decodeURIComponent(match[1]) : "";
     const meta = execPayloads.get(execId);
-    const contentLength = Number(req.headers["content-length"] ?? 0);
+    const parsedLength = Number(req.headers["content-length"] ?? 0);
+    const contentLength = Number.isFinite(parsedLength) && parsedLength > 0 ? parsedLength : 0;
 
-    const bodyChunks: Buffer[] = head.length > 0 ? [head] : [];
-    let bodyBytes = head.length;
-
-    const handleUpgraded = () => {
-      const full = Buffer.concat(bodyChunks);
-      const trailing = full.subarray(contentLength);
-
+    const handleUpgraded = (trailing: Buffer) => {
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n",
       );
@@ -173,20 +168,67 @@ async function createFakeHelperDocker(): Promise<{
       });
     };
 
-    if (bodyBytes >= contentLength) {
-      handleUpgraded();
-      return;
-    }
-
-    const onBodyChunk = (chunk: Buffer) => {
-      bodyChunks.push(chunk);
-      bodyBytes += chunk.length;
-      if (bodyBytes >= contentLength) {
-        socket.off("data", onBodyChunk);
-        handleUpgraded();
-      }
+    // Node 26 consumes Content-Length bytes into `req` during Upgrade (leaving `head` for post-body bytes);
+    // Node <=24 stops before the body and delivers it through `head` and raw `socket`.
+    const reqChunks: Buffer[] = [];
+    let closed = false;
+    const onReqError = () => {
+      closed = true;
     };
-    socket.on("data", onBodyChunk);
+    const onSocketClose = () => {
+      closed = true;
+      req.off("error", onReqError);
+    };
+    req.on("error", onReqError);
+    socket.once("close", onSocketClose);
+
+    req.on("data", (chunk: Buffer) => {
+      reqChunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (closed) return;
+      const reqBody = Buffer.concat(reqChunks);
+      if (reqBody.length >= contentLength) {
+        req.off("error", onReqError);
+        socket.off("close", onSocketClose);
+        handleUpgraded(Buffer.concat([reqBody.subarray(contentLength), head]));
+        return;
+      }
+
+      const initial = Buffer.concat([reqBody, head]);
+      const bodyChunks: Buffer[] = initial.length > 0 ? [initial] : [];
+      let bodyBytes = initial.length;
+
+      const onReadable = () => {
+        for (;;) {
+          const chunk = socket.read() as Buffer | null;
+          if (chunk === null) break;
+          bodyChunks.push(chunk);
+          bodyBytes += chunk.length;
+          if (bodyBytes >= contentLength) {
+            socket.off("readable", onReadable);
+            finish();
+            return;
+          }
+        }
+      };
+      const onAbort = () => socket.off("readable", onReadable);
+
+      const finish = () => {
+        req.off("error", onReqError);
+        socket.off("close", onSocketClose);
+        socket.off("close", onAbort);
+        handleUpgraded(Buffer.concat(bodyChunks).subarray(contentLength));
+      };
+
+      if (bodyBytes >= contentLength) {
+        finish();
+        return;
+      }
+
+      socket.once("close", onAbort);
+      socket.on("readable", onReadable);
+    });
   });
 
   await new Promise<void>((resolve) => {

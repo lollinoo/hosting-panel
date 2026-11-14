@@ -175,37 +175,81 @@ async function startFakeExecEngine(apiPrefix = "/v1.45"): Promise<FakeExecEngine
     const urlPath = stripPrefix((req.url ?? "/").split("?")[0] ?? "/");
     const startMatch = /^\/exec\/([^/]+)\/start$/.exec(urlPath);
     const execId = startMatch?.[1] ? decodeURIComponent(startMatch[1]) : "";
-    const contentLength = Number(req.headers["content-length"] ?? 0);
+    const parsedLength = Number(req.headers["content-length"] ?? 0);
+    const contentLength = Number.isFinite(parsedLength) && parsedLength > 0 ? parsedLength : 0;
 
-    // Node's http.Server fires `upgrade` once headers arrive, so the POST JSON body sits in `head`
-    // (or the next socket chunks) until `contentLength` bytes have been consumed.
-    const bodyChunks: Buffer[] = head.length > 0 ? [head] : [];
-    let bodyBytes = head.length;
-
-    const dispatch = () => {
-      const full = Buffer.concat(bodyChunks);
-      const startJson = full.subarray(0, contentLength);
-      const trailing = full.subarray(contentLength);
-      if (trailing.length > 0) {
-        socket.unshift(trailing);
-      }
-      startHandler(execId, req, socket, startJson, execMap.get(execId));
+    // Node 26 consumes Content-Length bytes into `req` during Upgrade (leaving `head` for post-body bytes);
+    // Node <=24 stops before the body and delivers it through `head` and raw `socket`.
+    const reqChunks: Buffer[] = [];
+    let closed = false;
+    const onReqError = () => {
+      closed = true;
     };
+    const onSocketClose = () => {
+      closed = true;
+      req.off("error", onReqError);
+    };
+    req.on("error", onReqError);
+    socket.once("close", onSocketClose);
 
-    if (bodyBytes >= contentLength) {
-      dispatch();
-      return;
-    }
+    req.on("data", (chunk: Buffer) => {
+      reqChunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (closed) return;
+      const reqBody = Buffer.concat(reqChunks);
+      if (reqBody.length >= contentLength) {
+        req.off("error", onReqError);
+        socket.off("close", onSocketClose);
+        const startJson = reqBody.subarray(0, contentLength);
+        const trailing = Buffer.concat([reqBody.subarray(contentLength), head]);
+        if (trailing.length > 0) {
+          socket.unshift(trailing);
+        }
+        startHandler(execId, req, socket, startJson, execMap.get(execId));
+        return;
+      }
 
-    const onBodyChunk = (chunk: Buffer) => {
-      bodyChunks.push(chunk);
-      bodyBytes += chunk.length;
+      const initial = Buffer.concat([reqBody, head]);
+      const bodyChunks: Buffer[] = initial.length > 0 ? [initial] : [];
+      let bodyBytes = initial.length;
+
+      const onReadable = () => {
+        for (;;) {
+          const chunk = socket.read() as Buffer | null;
+          if (chunk === null) break;
+          bodyChunks.push(chunk);
+          bodyBytes += chunk.length;
+          if (bodyBytes >= contentLength) {
+            socket.off("readable", onReadable);
+            dispatch();
+            return;
+          }
+        }
+      };
+      const onAbort = () => socket.off("readable", onReadable);
+
+      const dispatch = () => {
+        req.off("error", onReqError);
+        socket.off("close", onSocketClose);
+        socket.off("close", onAbort);
+        const full = Buffer.concat(bodyChunks);
+        const startJson = full.subarray(0, contentLength);
+        const trailing = full.subarray(contentLength);
+        if (trailing.length > 0) {
+          socket.unshift(trailing);
+        }
+        startHandler(execId, req, socket, startJson, execMap.get(execId));
+      };
+
       if (bodyBytes >= contentLength) {
-        socket.off("data", onBodyChunk);
         dispatch();
+        return;
       }
-    };
-    socket.on("data", onBodyChunk);
+
+      socket.once("close", onAbort);
+      socket.on("readable", onReadable);
+    });
   });
 
   await new Promise<void>((resolve) => {
