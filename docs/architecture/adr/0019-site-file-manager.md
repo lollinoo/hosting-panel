@@ -1,0 +1,34 @@
+# ADR 0019 — File Manager dei Siti: Helper Isolato per Sito, Chunk Base64 e Zip Asincroni
+
+- **Stato:** `APPROVATO — M1a`
+- **Data:** 2026-11-14
+- **Riferimento:** spec `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md`, `CP-01`, `ADR-0016`, `ADR-0018`
+- **Migrazioni:** nessuna (solo file manager web; SFTP nel ciclo 2)
+
+## 1. Contesto
+
+I file dei siti WordPress risiedono nel volume nominato Docker `hp_vol_<serviceInstanceId>_html` (proprietà `33:33` / `www-data`, con `wp-content/mu-plugins/hp-mail.php` di proprietà di root). Il demone `hp-docker-executor` viene eseguito come utente non privilegiato (`hp-executor`) e non può accedere direttamente alle directory dei volumi sull'host. Serve un file manager web per il cliente (navigazione, upload/download, modifica testo, nuove cartelle, sposta/rinomina, eliminazione, archiviazione ed estrazione zip) senza interferire con il container WordPress in esecuzione (`CP-01`).
+
+## 2. Decisioni
+
+1. **Confinamento tramite mount namespace (`hp_files_<serviceInstanceId>`).** Ogni operazione sui file viene eseguita via `docker exec` (primitiva dedicata con `stdin` e demux `stdout`/`stderr` in `docker-exec.ts`) dentro un container helper dedicato per sito, con etichetta `io.hostingpanel.role=site_files` (senza `service_instance_id`, così non viene mai scambiato per il container del sito). L'helper usa l'immagine WordPress già presente sul nodo (mai scaricata al volo, `Entrypoint: ["sleep", "infinity"]`), verifica prima che il volume esista (mai creato implicitamente) e monta **solo** quel volume in `/var/www/html:rw` più la directory del programma in sola lettura (`/usr/local/lib/hp-files:ro`). Configurazione: `User: "33:33"`, `NetworkMode: "none"`, `CapDrop: ["ALL"]`, `no-new-privileges:true`, `ReadonlyRootfs: true`, `PidsLimit: 64`, `Memory: 512 MiB`, `NanoCpus: 1e9`, `/tmp` su `tmpfs` (`16m, noexec, nosuid, nodev`). Viene avviato su richiesta e rimosso per inattività (predefinito 10 min), all'avvio dell'executor e prima di `purgeSite`.
+2. **Programma fisso e regole sui path come secondo livello.** Un unico programma PHP fisso (`hp-files.php`) legge una richiesta JSON su `stdin` e risponde su `stdout` con esito o errore (`code` e token chiuso `reason` in `SITE_FILE_ERROR_REASONS`). Le regole sui path (`SiteFilePathSchema` in `packages/contracts/src/site-files.ts`, ripetute in PHP) vietano `/` iniziale, segmenti `.` o `..`, caratteri di controllo, segmenti oltre `255` byte UTF-8, path oltre `1024` caratteri e nomi con prefisso `.htpanel-`. I link simbolici non sono mai seguiti in `list`/`stat`/`delete`/`archive`, e `realpath` rifiuta qualsiasi destinazione fuori da `/var/www/html` (`PERMISSION_DENIED` con `reason: protected`).
+3. **Chunk base64 da 512 KiB nel canale JSON firmato esistente.** Nessun nuovo trasporto streaming né modifica alla firma HMAC IPC: i byte viaggiano in chunk base64 da al massimo `512 KiB` (`524,288` byte grezzi, `699,052` caratteri base64) entro il limite di `1 MiB` di Fastify e dell'IPC. Gli upload sono indirizzati da `uploadId` e `offset`, scritti su file temporanei `.htpanel-upload-<uploadId>.part` (nascosti da `list` e bloccati in HTTP da Apache `<FilesMatch "^\.ht">`, ripuliti dopo 24 h) e rinominati atomicamente su `final: true`; i reinvii di chunk sono sicuri (`offset > size` risponde `VALIDATION_ERROR`/`upload_mismatch`; `overwrite: false` su target esistente risponde `409 ALREADY_EXISTS`). L'audit registra un solo evento sul chunk finale; il download BFF ricompone i chunk in uno stream verso il browser.
+4. **Zip ed unzip asincroni e limitati.** `POST /files/archive` e `POST /files/extract` rispondono `202 Accepted` (`site.files.archive` e `site.files.extract`, `Idempotency-Key` obbligatoria, lock `site:<id>`, timeout IPC executor `600 s` entro il lease `SITE_STEP_LEASE_MS` di `12 min`), perché alberi WordPress di centinaia di MiB superano i timeout sincroni di API/BFF. L'estrazione ispeziona prima la central directory, rifiuta voci con path traversal, prefissi Windows, duplicati o symlink (`archive_unsafe`), non sovrascrive file esistenti (`ALREADY_EXISTS`) e annulla le creazioni in caso di errore. I permessi `site.files.read` e `site.files.write` vengono caricati anche all'avvio dell'API tramite `ensurePresetRolesAndPermissions`.
+
+## 3. Alternative scartate
+
+- **Accesso ai path sull'host dall'executor:** richiederebbe privilegi `root` o `CAP_DAC_READ_SEARCH` su `/var/lib/docker/volumes`, perdendo il confinamento nel mount namespace.
+- **`docker exec` nel container WordPress in esecuzione:** violerebbe `CP-01`, esporrebbe le operazioni file al processo web pubblico e non funzionerebbe sui siti arrestati.
+- **Nuovo trasporto streaming o multipart su UDS/API/BFF:** complicherebbe la firma HMAC IPC e i parser Fastify/BFF senza benefici reali rispetto ai chunk base64 (i trasferimenti massivi restano assegnati a SFTP).
+- **Endpoint Docker archive (`/containers/{id}/archive`):** espongono stream tar grezzi privi di controllo su symlink, zip-bomb, staging idempotente per offset e voci protette.
+
+## 4. Conseguenze e limiti noti
+
+- **Dimensione file e spazio disco:** singoli file limitati a `2 GiB` (`2,147,483,648` byte) con riserva minima di `1 GiB` libero su disco (`disk_full`); in M1 non esistono quote disco per singolo sito.
+- **Limiti di lista e zip:** `list` restituisce al più `5,000` voci (`truncated: true`), i batch `delete`/`archive` al più `100` path; `archive`/`extract` si fermano a `20,000` voci, `1 GiB` non compresso, profondità `32` e rapporto di compressione `200` (sopra `1 MiB`), escludendo symlink e file `.htpanel-*`.
+- **Voci protette e concorrenza:** `wp-content/mu-plugins/hp-mail.php` e i suoi antenati (`wp-content`, `wp-content/mu-plugins`) non sono modificabili né eliminabili (`protected`). Scritture sincrone durante un `archive` possono produrre un archivio misto; una swap-race da codice PHP del sito resta comunque confinata al volume del sito o al rootfs in sola lettura dell'helper.
+- **Corsia dedicata nel worker per zip ed unzip:** `site.files.archive` e `site.files.extract` vengono eseguiti in una corsia dedicata di `OutboxWorkerService` e non ritardano mai le altre operazioni (i lavori file di siti diversi continuano comunque a essere eseguiti uno alla volta).
+- **Soglia minima di `1 GiB` libero mantenuta intenzionalmente:** la soglia protegge il database e gli altri siti sul disco condiviso; l'eliminazione non è mai bloccata e un percorso non scrivibile viene rifiutato come `protected` prima del controllo dello spazio libero.
+- **Isolamento dei timeout sulla singola operazione:** un'operazione sui file che va in timeout arresta solo se stessa, mai le altre operazioni sui file in corso sullo stesso sito.
+- **SFTP nel ciclo 2:** i trasferimenti massivi via client SFTP arrivano nel ciclo 2; `sftpAvailable` resta `false` in questa fase.
