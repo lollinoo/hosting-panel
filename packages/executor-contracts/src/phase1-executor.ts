@@ -1,3 +1,8 @@
+import type {
+  SftpAccessApplyRequest,
+  SftpApplyResult,
+  SftpStatusReport,
+} from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import type {
   DockerExecutionResult,
@@ -73,6 +78,14 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async siteFiles<R extends SiteFilesRequest>(_req: R): Promise<SiteFilesResult<R["op"]>> {
+    return this.refuse();
+  }
+
+  async applySftpAccess(_req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    return this.refuse();
+  }
+
+  async getSftpStatus(): Promise<SftpStatusReport> {
     return this.refuse();
   }
 

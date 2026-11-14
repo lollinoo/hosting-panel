@@ -481,3 +481,56 @@ export const SITE_FILES_RESULT_SCHEMAS = {
 export type SiteFilesResultByOp = {
   [K in SiteFilesOp]: z.infer<(typeof SITE_FILES_RESULT_SCHEMAS)[K]>;
 };
+
+export const SFTP_USERNAME_PATTERN = /^[a-z][a-z0-9]{1,14}_[a-z0-9]{1,16}$/;
+/** sha512-crypt; the charset excludes ':' and newlines, so it is safe to render into /etc/shadow. */
+export const SHA512_CRYPT_HASH_PATTERN =
+  /^\$6\$(?:rounds=[0-9]{4,9}\$)?[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86}$/;
+/** Ids rendered into passwd lines, chroot paths and volume names. */
+const SftpIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
+export const SFTP_MAX_USERS = 2000;
+
+export const SftpAccessUserSchema = z
+  .object({
+    username: z.string().regex(SFTP_USERNAME_PATTERN),
+    passwordHash: z.string().regex(SHA512_CRYPT_HASH_PATTERN),
+    siteId: SftpIdSchema,
+    serviceInstanceId: SftpIdSchema,
+  })
+  .strict();
+
+export const SftpAccessApplyIpcRequestSchema = z
+  .object({ users: z.array(SftpAccessUserSchema).max(SFTP_MAX_USERS) })
+  .strict()
+  .superRefine(({ users }, ctx) => {
+    const names = new Set<string>();
+    const volumeOf = new Map<string, string>();
+    users.forEach((u, i) => {
+      if (names.has(u.username)) {
+        ctx.addIssue({ code: "custom", path: ["users", i, "username"], message: "duplicate username" });
+      }
+      names.add(u.username);
+      const svc = volumeOf.get(u.siteId);
+      if (svc !== undefined && svc !== u.serviceInstanceId) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["users", i, "serviceInstanceId"],
+          message: "one service per site",
+        });
+      }
+      volumeOf.set(u.siteId, u.serviceInstanceId);
+    });
+  });
+
+export const SftpApplyIpcResponseSchema = z.object({ applied: z.number().int().nonnegative() });
+
+export const SftpStatusReportWireSchema = z.object({
+  running: z.boolean(),
+  port: z.number().int().min(1).max(65535),
+  hostKeyFingerprint: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}$/).nullable(),
+});
+
+export type SftpAccessUser = z.infer<typeof SftpAccessUserSchema>;
+export type SftpAccessApplyRequest = z.infer<typeof SftpAccessApplyIpcRequestSchema>;
+export type SftpApplyResult = z.infer<typeof SftpApplyIpcResponseSchema>;
+export type SftpStatusReport = z.infer<typeof SftpStatusReportWireSchema>;

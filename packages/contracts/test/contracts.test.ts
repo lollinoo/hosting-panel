@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ApiErrorEnvelopeSchema,
+  CreateSiteSftpUserRequestSchema,
   DEFAULT_PLATFORM_CAPABILITIES,
   ERROR_CODES,
   ERROR_CODE_HTTP_STATUS,
@@ -24,7 +25,9 @@ import {
   SITE_FILE_ERROR_REASONS,
   SITE_FILE_REASON_CODES,
   SITE_FILES_RESULT_SCHEMAS,
+  SITE_SFTP_MAX_USERS,
   ServiceTemplateDtoSchema,
+  SftpUserNameSchema,
   SiteDetailDtoSchema,
   SiteFileArchiveRequestSchema,
   SiteFileChunkBase64Schema,
@@ -40,6 +43,10 @@ import {
   SiteFileUploadIdSchema,
   SiteFileWriteResultDtoSchema,
   SiteFilesIpcRequestSchema,
+  SiteSftpDtoSchema,
+  SiteSftpPasswordResetDtoSchema,
+  SiteSftpUserCreatedDtoSchema,
+  SiteSftpUserDtoSchema,
   UpsertEncryptedSecretInputSchema,
   canTransitionOperation,
   createErrorEnvelope,
@@ -49,6 +56,7 @@ import {
   findUnsafeDockerInputFields,
   isDefaultRetryableErrorCode,
   isMutatingPermission,
+  isSftpAvailable,
   isTerminalOperationStatus,
   redactSensitiveString,
   redactSensitiveValue,
@@ -57,9 +65,9 @@ import {
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 35 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(35);
-    expect(new Set(PERMISSION_KEYS).size).toBe(35);
+  it("defines exactly 36 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(36);
+    expect(new Set(PERMISSION_KEYS).size).toBe(36);
 
     for (const key of PERMISSION_KEYS) {
       expect(PermissionKeySchema.parse(key)).toBe(key);
@@ -105,6 +113,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(hostingPerms).toContain("site.create");
     expect(hostingPerms).toContain("site.files.read");
     expect(hostingPerms).toContain("site.files.write");
+    expect(hostingPerms).toContain("site.sftp.manage");
     expect(hostingPerms).toContain("service.deploy");
     expect(hostingPerms).toContain("quota.manage");
 
@@ -123,6 +132,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(ownerPerms).toContain("site.create");
     expect(ownerPerms).toContain("site.files.read");
     expect(ownerPerms).toContain("site.files.write");
+    expect(ownerPerms).toContain("site.sftp.manage");
     expect(ownerPerms).toContain("service.create");
     expect(ownerPerms).not.toContain("host.maintenance.execute");
     expect(ownerPerms).not.toContain("template.manage");
@@ -143,6 +153,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(isMutatingPermission("service.read")).toBe(false);
     expect(isMutatingPermission("site.create")).toBe(true);
     expect(isMutatingPermission("site.files.write")).toBe(true);
+    expect(isMutatingPermission("site.sftp.manage")).toBe(true);
     expect(isMutatingPermission("service.deploy")).toBe(true);
     expect(isMutatingPermission("host.maintenance.execute")).toBe(true);
   });
@@ -465,8 +476,11 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
     });
+    expect(isSftpAvailable("linux-systemd")).toBe(true);
     for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
       expect(createPlatformCapabilities({ runtimeBackend }).acmeTlsRuntimeAvailable).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).sftpAvailable).toBe(false);
+      expect(isSftpAvailable(runtimeBackend)).toBe(false);
     }
     expect(p2Caps).toEqual({
       phase: "phase-2",
@@ -476,7 +490,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
-      sftpAvailable: false,
+      sftpAvailable: true,
       productionBackupRuntimeAvailable: false,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
@@ -781,5 +795,49 @@ describe("@hosting-panel/contracts — Site Files Schemas & Reasons", () => {
         writable: true,
       },
     });
+  });
+});
+
+describe("@hosting-panel/contracts — Site SFTP Schemas & DTO Security", () => {
+  it("normalizes and validates SftpUserNameSchema and CreateSiteSftpUserRequestSchema", () => {
+    expect(SITE_SFTP_MAX_USERS).toBe(10);
+    expect(SftpUserNameSchema.parse(" Dev1 ")).toBe("dev1");
+    expect(CreateSiteSftpUserRequestSchema.parse({ name: " Dev1 " })).toEqual({ name: "dev1" });
+
+    for (const bad of ["", "   ", "a_b", "a-b", "a".repeat(17), "dev.1"]) {
+      const res = SftpUserNameSchema.safeParse(bad);
+      expect(res.success, `expected '${bad}' to fail`).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]?.message).toBe("invalid_name");
+      }
+    }
+  });
+
+  it("validates every new SFTP DTO and rejects forbidden public DTO keys", () => {
+    const userDto = SiteSftpUserDtoSchema.parse({
+      id: "sftp_usr_01",
+      username: "s01234567_dev1",
+      createdAt: SAMPLE_TIMESTAMP,
+      passwordChangedAt: SAMPLE_TIMESTAMP,
+    });
+    const sftpDto = SiteSftpDtoSchema.parse({
+      available: true,
+      host: "203.0.113.10",
+      port: 2222,
+      hostKeyFingerprint: "SHA256:abcdef0123456789abcdef0123456789abcdef01234",
+      users: [userDto],
+    });
+    const createdDto = SiteSftpUserCreatedDtoSchema.parse({
+      user: userDto,
+      temporaryPassword: "a".repeat(24),
+    });
+    const resetDto = SiteSftpPasswordResetDtoSchema.parse({
+      temporaryPassword: "b".repeat(24),
+    });
+
+    for (const dto of [userDto, sftpDto, createdDto, resetDto]) {
+      expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);
+    }
+    expect(findForbiddenPublicDtoKeys({ passwordHash: "$6$salt$hash" })).toEqual(["passwordHash"]);
   });
 });

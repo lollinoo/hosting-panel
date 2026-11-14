@@ -222,6 +222,11 @@ export const RUNTIME_BACKENDS = ["linux-systemd", "local-simulator", "disabled"]
 export const RuntimeBackendSchema = z.enum(RUNTIME_BACKENDS);
 export type RuntimeBackend = z.infer<typeof RuntimeBackendSchema>;
 
+/** SFTP is available only when the control plane runs on the Linux systemd backend. */
+export function isSftpAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -230,7 +235,7 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.boolean(),
-  sftpAvailable: z.literal(false),
+  sftpAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.literal(false),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
@@ -270,7 +275,7 @@ export function createPlatformCapabilities(
         ? false
         : Boolean(options.hostAgentRuntimeAvailable),
       acmeTlsRuntimeAvailable: options.runtimeBackend === "linux-systemd",
-      sftpAvailable: false,
+      sftpAvailable: isSftpAvailable(options.runtimeBackend),
       productionBackupRuntimeAvailable: false,
     }),
   );
@@ -282,7 +287,7 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.boolean(),
-  sftpAvailable: z.literal(false),
+  sftpAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.literal(false),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;

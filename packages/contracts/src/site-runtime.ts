@@ -8,6 +8,10 @@ export type PhpVersion = (typeof SUPPORTED_PHP_VERSIONS)[number];
 export const DEFAULT_PHP_VERSION: PhpVersion = "8.4";
 
 export const SHARED_MARIADB_IMAGE = "mariadb:12.3.3";
+// 10.3_p1-r2-ls243 (OpenSSH 10.3p1, Alpine 3.24). Update: docker buildx imagetools inspect linuxserver/openssh-server:<tag>
+export const SFTP_IMAGE =
+  "linuxserver/openssh-server@sha256:161e0b670b31d9539ca1718bc5943e981779331b4e1c9d32e8929d7652a1f22f" as const;
+export const DEFAULT_SFTP_PORT = 2222 as const;
 export const resolveWordpressImage = (php: PhpVersion): string => `wordpress:7.1.4-php${php}-apache`;
 export const resolveWordpressCliImage = (php: PhpVersion): string => `wordpress:cli-2.12.0-php${php}`;
 

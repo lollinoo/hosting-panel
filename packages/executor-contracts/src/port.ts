@@ -1,5 +1,8 @@
 import type {
   OperationStatus,
+  SftpAccessApplyRequest,
+  SftpApplyResult,
+  SftpStatusReport,
   SiteFileEntryDto,
   SiteFilesIpcRequest,
   SiteFilesOp,
@@ -45,6 +48,9 @@ export interface DockerExecutorPort {
   sendTestMail(req: { to: string; from: string }): Promise<MailTestResult>;
   /** Confined to the site's files; never touches the running site container. */
   siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>>;
+  /** Full desired state; an empty list removes hp_sftp (host keys stay). */
+  applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult>;
+  getSftpStatus(): Promise<SftpStatusReport>;
 }
 
 export interface SiteRoutesRequest {
