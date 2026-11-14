@@ -41,7 +41,7 @@ export interface PublicSessionDto {
 
 const DEFAULT_SECRET = "hosting-panel-secure-session-key-32-chars-minimum-prod-grade!";
 
-function getSessionSecretKey(): Uint8Array {
+export function getSessionSecretKey(): Uint8Array {
   const configured = process.env.BFF_SESSION_SECRET;
   if (process.env.NODE_ENV === "production" && (!configured || configured.length < 32)) {
     throw new Error("BFF_SESSION_SECRET must be set to at least 32 characters in production");
