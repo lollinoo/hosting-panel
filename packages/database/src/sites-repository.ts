@@ -6,7 +6,7 @@ import {
 } from "@hosting-panel/contracts";
 import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
-import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites } from "./schema.js";
+import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites, siteSftpUsers } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
 
 export const WORDPRESS_TEMPLATE_ID = "tpl_site_wordpress";
@@ -101,6 +101,9 @@ export async function moveSiteToOrganizationTransactional(
         secretKey: row.secretKey,
       }),
     }));
+
+    // SFTP logins belong to the previous owner: drop them instead of cascading organization_id.
+    await tx.delete(siteSftpUsers).where(eq(siteSftpUsers.siteId, siteId));
 
     await tx
       .update(sites)

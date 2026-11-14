@@ -654,6 +654,29 @@ export const siteDatabases = pgTable(
   ],
 );
 
+export const siteSftpUsers = pgTable(
+  "site_sftp_users",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    siteId: text("site_id").notNull(),
+    username: text("username").notNull().unique(),
+    passwordHash: text("password_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_site_sftp_users_site_org",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+    index("idx_site_sftp_users_site").on(t.organizationId, t.siteId),
+  ],
+);
+
 export const mailRelaySettings = pgTable("mail_relay_settings", {
   id: text("id").primaryKey(),
   host: text("host").notNull(),
