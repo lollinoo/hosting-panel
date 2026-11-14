@@ -22,11 +22,14 @@ import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
 import { SiteDomainsController } from "./controllers/site-domains.controller.js";
+import { SiteFilesController } from "./controllers/site-files.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
+import { SiteFilesApplier } from "./sites/site-files-applier.js";
+import { SiteFilesService } from "./sites/site-files.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -69,6 +72,7 @@ export class AppModule {
         OrganizationsController,
         ManagedSitesController,
         SiteDomainsController,
+        SiteFilesController,
         AdminMailRelayController,
       ],
       providers: [
@@ -98,8 +102,10 @@ export class AppModule {
         OutboxWorkerService,
         SiteProvisioner,
         SiteDomainsApplier,
+        SiteFilesApplier,
         ManagedSitesService,
         SiteDomainsService,
+        SiteFilesService,
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,

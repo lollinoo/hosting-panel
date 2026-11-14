@@ -7,3 +7,4 @@ export * from "./ipc-schemas.js";
 export * from "./site-runtime.js";
 export * from "./site-domains.js";
 export * from "./mail-relay.js";
+export * from "./site-files.js";

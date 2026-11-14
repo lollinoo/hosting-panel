@@ -10,6 +10,8 @@ import type {
   MailRelayStatusReport,
   MailTestResult,
   ServiceLogLine,
+  SiteFilesRequest,
+  SiteFilesResult,
   SiteHostRoute,
   SiteJobKind,
   SiteJobRequest,
@@ -17,6 +19,7 @@ import type {
   SiteRoutesRequest,
   StoredCertificate,
 } from "@hosting-panel/executor-contracts";
+import { SimulatedSiteFiles } from "./simulator-files.js";
 import { assertValidSiteJobRequest } from "./site-jobs.js";
 import {
   buildHardenedContainerCreatePayload,
@@ -127,6 +130,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly virtualSecretFiles = new Map<string, Set<string>>();
   private readonly virtualSiteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
+  private readonly siteServices = new Map<string, Set<string>>();
+  public readonly files = new SimulatedSiteFiles();
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
@@ -292,6 +297,11 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     };
   }
 
+  public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
+    this.assertEngineAvailable();
+    return this.files.handle(req);
+  }
+
   public async purgeSite(siteId: string): Promise<void> {
     this.assertEngineAvailable();
     assertSafeIdentifier(siteId, "siteId");
@@ -300,6 +310,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
         await this.deleteService(serviceId);
       }
     }
+    for (const serviceId of this.siteServices.get(siteId) ?? []) {
+      this.files.drop(serviceId);
+    }
+    this.siteServices.delete(siteId);
   }
 
   public async applySiteRoutes(req: SiteRoutesRequest): Promise<void> {
@@ -483,6 +497,15 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       revisionNumber: spec.revisionNumber ?? 1,
       expectedEnv: createPayload.Env,
     });
+    let svcs = this.siteServices.get(spec.siteId);
+    if (!svcs) {
+      svcs = new Set();
+      this.siteServices.set(spec.siteId, svcs);
+    }
+    svcs.add(spec.serviceInstanceId);
+    if (spec.volumeMounts?.some((m) => m.volumeSuffix === "html")) {
+      this.files.create(spec.serviceInstanceId);
+    }
 
     const hosts: readonly SiteHostRoute[] =
       spec.hostRoutes ?? (spec.domains ?? []).map(plainHostRoute);

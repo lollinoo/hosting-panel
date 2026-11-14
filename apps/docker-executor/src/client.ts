@@ -7,6 +7,7 @@ import {
   MailRelayStatusReportWireSchema,
   MailTestIpcResponseSchema,
   ObservedServiceStateWireSchema,
+  SITE_FILES_RESULT_SCHEMAS,
   signIpcRequest,
   type CertificateStatusIpcRequest,
   type DeployServiceIpcRequest,
@@ -29,6 +30,8 @@ import type {
   MailRelayStatusReport,
   MailTestResult,
   ServiceLogLine,
+  SiteFilesRequest,
+  SiteFilesResult,
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
@@ -83,6 +86,9 @@ export const DEPLOY_TIMEOUT_MS = 300_000;
 export const SITE_JOB_TIMEOUT_MS = 510_000;
 export const SITE_PURGE_TIMEOUT_MS = 120_000;
 export const MAIL_RELAY_APPLY_TIMEOUT_MS = 300_000;
+export const SITE_FILES_TIMEOUT_MS = 60_000;
+export const SITE_FILES_DELETE_TIMEOUT_MS = 100_000;
+export const SITE_FILES_ARCHIVE_TIMEOUT_MS = 600_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -124,6 +130,8 @@ export interface SignedDockerExecutorIpcClientOptions {
   readonly timeoutMs?: number;
   readonly isRuntimeAvailable?: boolean;
 }
+
+const handledIpcSockets = new WeakSet<object>();
 
 export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   public readonly isRuntimeAvailable: boolean;
@@ -325,6 +333,19 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     return z.object({ data: MailTestIpcResponseSchema }).parse(json).data;
   }
 
+  public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
+    assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    const timeoutMs =
+      req.op === "archive" || req.op === "extract"
+        ? SITE_FILES_ARCHIVE_TIMEOUT_MS
+        : req.op === "delete"
+          ? SITE_FILES_DELETE_TIMEOUT_MS
+          : SITE_FILES_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/sites/files", req, timeoutMs);
+    const schema = SITE_FILES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as SiteFilesResult<R["op"]>;
+  }
+
   public async getServiceLogs(
     serviceInstanceId: string,
     tail: number,
@@ -464,6 +485,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       });
 
       req.on("socket", (sock) => {
+        if (!handledIpcSockets.has(sock)) {
+          handledIpcSockets.add(sock);
+          // Swallow post-settlement socket errors (e.g. write EPIPE after an early server reply).
+          sock.on("error", () => undefined);
+        }
         if (!sock.connecting) {
           socketConnected = true;
         } else {

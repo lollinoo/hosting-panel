@@ -124,6 +124,9 @@ export {
 
 export {
   ExecutorIpcClientError,
+  SITE_FILES_ARCHIVE_TIMEOUT_MS,
+  SITE_FILES_DELETE_TIMEOUT_MS,
+  SITE_FILES_TIMEOUT_MS,
   SignedDockerExecutorIpcClient,
   type SignedDockerExecutorIpcClientOptions,
 } from "./client.js";
@@ -140,3 +143,28 @@ export {
   ensureSiteMailFiles,
   siteMailBinds,
 } from "./site-mail.js";
+
+export {
+  runDockerExec,
+  startDockerExec,
+  type DockerExecResult,
+  type DockerExecSpec,
+  type DockerExecTarget,
+  type DockerJsonRequest,
+} from "./docker-exec.js";
+
+export {
+  SITE_FILES_ROLE,
+  SiteFilesHelpers,
+  buildSiteFilesHelperPayload,
+  parseSiteFilesRequest,
+  siteFilesHelperName,
+} from "./site-files-helper.js";
+
+export {
+  DEFAULT_SITE_FILES_DIR,
+  SITE_FILES_PROGRAM,
+  ensureSiteFilesProgram,
+} from "./site-files-program.js";
+
+export { SimulatedSiteFiles, type SimSeedEntry } from "./simulator-files.js";

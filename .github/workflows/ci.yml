@@ -29,6 +29,9 @@ jobs:
       - name: Check PHP is available (sendmail shim test)
         run: php --version
 
+      - name: Check PHP ZipArchive extension is available
+        run: php -r 'exit(class_exists("ZipArchive")?0:1);'
+
       - name: Enable Corepack package manager
         run: corepack enable
 

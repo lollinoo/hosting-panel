@@ -14,6 +14,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   createDatabaseClient,
+  ensurePresetRolesAndPermissions,
   ensureWordpressTemplate,
   parseSecretsMasterKey,
   seedPhase1Dataset,
@@ -326,6 +327,7 @@ export async function createControlPlaneApp(
   if (ownsDatabaseClient) {
     await dbClient.migrate();
     await ensureWordpressTemplate(dbClient.db);
+    await ensurePresetRolesAndPermissions(dbClient.db);
   }
 
   const oidcIssuer =

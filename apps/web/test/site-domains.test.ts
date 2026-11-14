@@ -200,8 +200,8 @@ describe("domains UI", () => {
     expect(en.site.domains.conflict).toMatch(/Remove it from the other site first, or ask your administrator\.$/);
   });
 
-  it("site tabs include domains between overview and logs", () => {
-    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "logs"]);
+  it("site tabs include domains and files between overview and logs", () => {
+    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "files", "logs"]);
     expect(SITE_TABS[1]!.href("s1")).toBe("/sites/s1/domains");
   });
 

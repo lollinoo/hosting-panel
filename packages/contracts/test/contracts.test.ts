@@ -19,8 +19,27 @@ import {
   PermissionKeySchema,
   PlatformCapabilitiesDtoSchema,
   RUNTIME_BACKENDS,
+  SITE_FILE_BATCH_MAX,
+  SITE_FILE_CHUNK_BYTES,
+  SITE_FILE_ERROR_REASONS,
+  SITE_FILE_REASON_CODES,
+  SITE_FILES_RESULT_SCHEMAS,
   ServiceTemplateDtoSchema,
   SiteDetailDtoSchema,
+  SiteFileArchiveRequestSchema,
+  SiteFileChunkBase64Schema,
+  SiteFileDeleteRequestSchema,
+  SiteFileEntrySchema,
+  SiteFileExtractRequestSchema,
+  SiteFileItemPathSchema,
+  SiteFileListDtoSchema,
+  SiteFileListQuerySchema,
+  SiteFileMoveRequestSchema,
+  SiteFilePathSchema,
+  SiteFileReadQuerySchema,
+  SiteFileUploadIdSchema,
+  SiteFileWriteResultDtoSchema,
+  SiteFilesIpcRequestSchema,
   UpsertEncryptedSecretInputSchema,
   canTransitionOperation,
   createErrorEnvelope,
@@ -38,9 +57,9 @@ import {
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 33 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(33);
-    expect(new Set(PERMISSION_KEYS).size).toBe(33);
+  it("defines exactly 35 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(35);
+    expect(new Set(PERMISSION_KEYS).size).toBe(35);
 
     for (const key of PERMISSION_KEYS) {
       expect(PermissionKeySchema.parse(key)).toBe(key);
@@ -84,6 +103,8 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(hostingPerms).toContain("allocation.create");
     expect(hostingPerms).toContain("template.manage");
     expect(hostingPerms).toContain("site.create");
+    expect(hostingPerms).toContain("site.files.read");
+    expect(hostingPerms).toContain("site.files.write");
     expect(hostingPerms).toContain("service.deploy");
     expect(hostingPerms).toContain("quota.manage");
 
@@ -100,6 +121,8 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(ownerPerms).toContain("organization.read");
     expect(ownerPerms).toContain("organization.members.manage");
     expect(ownerPerms).toContain("site.create");
+    expect(ownerPerms).toContain("site.files.read");
+    expect(ownerPerms).toContain("site.files.write");
     expect(ownerPerms).toContain("service.create");
     expect(ownerPerms).not.toContain("host.maintenance.execute");
     expect(ownerPerms).not.toContain("template.manage");
@@ -116,8 +139,10 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
   it("correctly identifies mutating vs read-only permissions", () => {
     expect(isMutatingPermission("host.read")).toBe(false);
     expect(isMutatingPermission("site.read")).toBe(false);
+    expect(isMutatingPermission("site.files.read")).toBe(false);
     expect(isMutatingPermission("service.read")).toBe(false);
     expect(isMutatingPermission("site.create")).toBe(true);
+    expect(isMutatingPermission("site.files.write")).toBe(true);
     expect(isMutatingPermission("service.deploy")).toBe(true);
     expect(isMutatingPermission("host.maintenance.execute")).toBe(true);
   });
@@ -144,6 +169,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "DEDICATED_HOST_OCCUPIED",
       "SHARED_MODE_GATED",
       "DOMAIN_CONFLICT",
+      "ALREADY_EXISTS",
       "LAST_OWNER_PROTECTED",
       "NOT_SUPPORTED",
       "OPERATION_INTERRUPTED",
@@ -176,6 +202,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.VALIDATION_ERROR).toBe(400);
     expect(ERROR_CODE_HTTP_STATUS.DEDICATED_HOST_OCCUPIED).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.SHARED_MODE_GATED).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.ALREADY_EXISTS).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.NOT_SUPPORTED).toBe(422);
     expect(ERROR_CODE_HTTP_STATUS.OPERATION_AMBIGUOUS).toBe(502);
     expect(ERROR_CODE_HTTP_STATUS.DOCKER_ENGINE_UNAVAILABLE).toBe(503);
@@ -188,6 +215,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(isDefaultRetryableErrorCode("HOST_AGENT_UNAVAILABLE")).toBe(true);
     expect(isDefaultRetryableErrorCode("VALIDATION_ERROR")).toBe(false);
     expect(isDefaultRetryableErrorCode("NOT_FOUND")).toBe(false);
+    expect(isDefaultRetryableErrorCode("ALREADY_EXISTS")).toBe(false);
   });
 
   it("creates structured ApiErrorEnvelope", () => {
@@ -399,6 +427,8 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
   it("validates PlatformCapabilitiesDto with truthful Phase 1 defaults & Phase 2 runtime factory", () => {
     expect(RUNTIME_BACKENDS).toEqual(["linux-systemd", "local-simulator", "disabled"]);
     expect(OPERATION_KINDS).toContain("host.security");
+    expect(OPERATION_KINDS).toContain("site.files.archive");
+    expect(OPERATION_KINDS).toContain("site.files.extract");
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,
@@ -613,5 +643,143 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       },
     };
     expect(SiteDetailDtoSchema.parse(siteDetail)).toEqual(siteDetail);
+  });
+});
+
+describe("@hosting-panel/contracts — Site Files Schemas & Reasons", () => {
+  it("validates SiteFilePathSchema normalization and invalid segment refusals", () => {
+    expect(SiteFilePathSchema.parse("")).toBe("");
+    expect(SiteFilePathSchema.parse("a/b")).toBe("a/b");
+    expect(SiteFilePathSchema.parse("a/b/")).toBe("a/b");
+    expect(SiteFilePathSchema.parse("a//b/")).toBe("a/b");
+    expect(SiteFilePathSchema.parse("a".repeat(255))).toBe("a".repeat(255));
+    expect(SiteFilePathSchema.parse(".htaccess")).toBe(".htaccess");
+
+    const invalidPaths = [
+      "/a/b",
+      "/",
+      ".",
+      "a/./b",
+      "..",
+      "a/../b",
+      `a/${String.fromCharCode(0)}b`,
+      "a/\nb",
+      `a/${String.fromCharCode(0x7f)}b`,
+      "a".repeat(256),
+      "é".repeat(128),
+      ".htpanel-x",
+      "wp-content/.htpanel-upload-0123456789abcdef.part",
+    ];
+    for (const candidate of invalidPaths) {
+      const res = SiteFilePathSchema.safeParse(candidate);
+      expect(res.success, `expected '${candidate}' to fail`).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]?.message).toBe("invalid_path");
+      }
+    }
+
+    expect(SiteFileItemPathSchema.safeParse("").success).toBe(false);
+    expect(SiteFileListQuerySchema.parse({})).toEqual({ path: "" });
+    expect(SiteFileReadQuerySchema.parse({ path: "index.php" })).toEqual({
+      path: "index.php",
+      offset: 0,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+  });
+
+  it("enforces base64 chunk bounds and upload id format", () => {
+    expect(SiteFileChunkBase64Schema.parse("")).toBe("");
+    const exactLimit = Buffer.alloc(SITE_FILE_CHUNK_BYTES).toString("base64");
+    expect(SiteFileChunkBase64Schema.safeParse(exactLimit).success).toBe(true);
+
+    const overLimit = Buffer.alloc(SITE_FILE_CHUNK_BYTES + 1).toString("base64");
+    const overRes = SiteFileChunkBase64Schema.safeParse(overLimit);
+    expect(overRes.success).toBe(false);
+    expect(overRes.success ? undefined : overRes.error.issues[0]?.message).toBe("too_large");
+
+    expect(SiteFileChunkBase64Schema.safeParse("abc").success).toBe(false);
+    expect(SiteFileChunkBase64Schema.safeParse("A=AA").success).toBe(false);
+
+    expect(SiteFileUploadIdSchema.safeParse("upload_0123456789").success).toBe(true);
+    expect(SiteFileUploadIdSchema.safeParse("a".repeat(64)).success).toBe(true);
+    expect(SiteFileUploadIdSchema.safeParse("short_123456789").success).toBe(false);
+    expect(SiteFileUploadIdSchema.safeParse("a".repeat(65)).success).toBe(false);
+    expect(SiteFileUploadIdSchema.safeParse("bad/id_1234567890").success).toBe(false);
+  });
+
+  it("maps every SITE_FILE_ERROR_REASONS token to an ErrorCode in SITE_FILE_REASON_CODES", () => {
+    expect(new Set(SITE_FILE_ERROR_REASONS).size).toBe(SITE_FILE_ERROR_REASONS.length);
+    expect(Object.keys(SITE_FILE_REASON_CODES).sort()).toEqual([...SITE_FILE_ERROR_REASONS].sort());
+
+    const errorCodeSet = new Set<string>(ERROR_CODES);
+    for (const reason of SITE_FILE_ERROR_REASONS) {
+      expect(errorCodeSet.has(SITE_FILE_REASON_CODES[reason])).toBe(true);
+    }
+    expect(SITE_FILE_REASON_CODES.exists).toBe("ALREADY_EXISTS");
+    expect(SITE_FILE_REASON_CODES.zip_unavailable).toBe("NOT_SUPPORTED");
+    expect(SITE_FILE_REASON_CODES.not_ready).toBe("RESOURCE_LOCKED");
+    expect(SITE_FILE_REASON_CODES.protected).toBe("PERMISSION_DENIED");
+  });
+
+  it("enforces batch bounds, move constraints, DTO security, and IPC schemas", () => {
+    const validBatch = Array.from({ length: SITE_FILE_BATCH_MAX }, (_, i) => `file-${String(i)}.txt`);
+    expect(SiteFileDeleteRequestSchema.safeParse({ paths: validBatch }).success).toBe(true);
+    expect(
+      SiteFileDeleteRequestSchema.safeParse({ paths: [...validBatch, "extra.txt"] }).success,
+    ).toBe(false);
+
+    expect(SiteFileMoveRequestSchema.safeParse({ from: "dir", to: "dir" }).success).toBe(false);
+    expect(SiteFileMoveRequestSchema.safeParse({ from: "dir", to: "dir/sub" }).success).toBe(false);
+    expect(SiteFileMoveRequestSchema.safeParse({ from: "dir", to: "dir2" }).success).toBe(true);
+
+    expect(SiteFileArchiveRequestSchema.safeParse({ paths: ["a"], to: "out.txt" }).success).toBe(
+      false,
+    );
+    expect(SiteFileArchiveRequestSchema.safeParse({ paths: ["a"], to: "out.zip" }).success).toBe(
+      true,
+    );
+    expect(SiteFileExtractRequestSchema.safeParse({ path: "out.zip", to: "" }).success).toBe(true);
+
+    const listDto = {
+      entries: [
+        {
+          name: "index.php",
+          kind: "file" as const,
+          size: 42,
+          modifiedAt: SAMPLE_TIMESTAMP,
+          writable: true,
+        },
+      ],
+      truncated: false,
+    };
+    expect(SiteFileListDtoSchema.parse(listDto)).toEqual(listDto);
+    expect(findForbiddenPublicDtoKeys(listDto)).toEqual([]);
+    expect(
+      findForbiddenPublicDtoKeys({ dataBase64: "YQ==", size: 1, eof: true }),
+    ).toEqual([]);
+    expect(SiteFileWriteResultDtoSchema.parse({ received: 10 })).toEqual({ received: 10 });
+
+    expect(
+      SiteFilesIpcRequestSchema.parse({
+        serviceInstanceId: "svc_1",
+        op: "list",
+        path: "",
+      }),
+    ).toEqual({ serviceInstanceId: "svc_1", op: "list", path: "" });
+
+    expect(SiteFileEntrySchema.safeParse({ ...listDto.entries[0], name: "" }).success).toBe(false);
+    expect(
+      SITE_FILES_RESULT_SCHEMAS.stat.parse({
+        entry: { ...listDto.entries[0], name: "", kind: "dir", size: 0 },
+      }),
+    ).toEqual({
+      entry: {
+        name: "",
+        kind: "dir",
+        size: 0,
+        modifiedAt: SAMPLE_TIMESTAMP,
+        writable: true,
+      },
+    });
   });
 });

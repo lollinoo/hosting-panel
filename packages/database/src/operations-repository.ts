@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, not, sql } from "drizzle-orm";
 import {
   canTransitionOperation,
   findForbiddenPublicDtoKeys,
@@ -1077,16 +1077,47 @@ export async function transitionOperation(
   });
 }
 
+export interface ClaimPendingOutboxFilter {
+  readonly includeKinds?: readonly OperationKind[];
+  readonly excludeKinds?: readonly OperationKind[];
+}
+
 export async function claimPendingOutboxEvents(
   db: HostingPanelDatabase,
   batchSize: number = 10,
   leaseDurationMs: number = DEFAULT_OPERATION_LEASE_DURATION_MS,
+  filter?: ClaimPendingOutboxFilter,
 ) {
+  if (filter?.includeKinds && filter.includeKinds.length === 0) {
+    return [];
+  }
+
   return db.transaction(async (tx) => {
+    const hasOperationKindIn = (kinds: readonly OperationKind[]) =>
+      exists(
+        tx
+          .select({ one: sql`1` })
+          .from(operations)
+          .where(
+            and(
+              eq(operations.id, sql`${outboxEvents.payload}->>'operationId'`),
+              inArray(operations.kind, [...kinds]),
+            ),
+          ),
+      );
+
+    const conditions = [eq(outboxEvents.status, "pending")];
+    if (filter?.includeKinds && filter.includeKinds.length > 0) {
+      conditions.push(hasOperationKindIn(filter.includeKinds));
+    }
+    if (filter?.excludeKinds && filter.excludeKinds.length > 0) {
+      conditions.push(not(hasOperationKindIn(filter.excludeKinds)));
+    }
+
     const pending = await tx
       .select()
       .from(outboxEvents)
-      .where(eq(outboxEvents.status, "pending"))
+      .where(and(...conditions))
       .orderBy(asc(outboxEvents.createdAt))
       .limit(batchSize)
       .for("update", { skipLocked: true });

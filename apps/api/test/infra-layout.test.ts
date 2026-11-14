@@ -192,4 +192,33 @@ describe("release workflow and docs", () => {
     expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
     expect(MAIL_RELAY_IMAGE).toBe("boky/postfix:5.2.1-alpine");
   });
+
+  it("m1a file manager docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["Web File Manager dei Siti", "sftpAvailable: false", "ADR-0019"]) {
+      expect(readme).toContain(s);
+    }
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/files",
+      "/files/content",
+      "/files/folders",
+      "/files/move",
+      "/files/delete",
+      "/files/archive",
+      "/files/extract",
+      "ALREADY_EXISTS",
+      "site.files.archive",
+      "site.files.extract",
+      "site.files.read",
+      "site.files.write",
+    ]) {
+      expect(api).toContain(s);
+    }
+    const adr = read("docs/architecture/adr/0019-site-file-manager.md");
+    for (const s of ["hp_files_", "512 KiB", "2 GiB", "site.files.archive"]) {
+      expect(adr).toContain(s);
+    }
+    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+  });
 });

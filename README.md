@@ -48,7 +48,8 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Modalità Shared Hosting (`sharedHostingEnabled`)** | ❌ **Chiuso (`false`)** | Restituisce `409 SHARED_MODE_GATED` (`AC-F1-06`, `AC-F2-10`) |
 | **Quote Disco per Volumi Condivisi (`ADR-011`)** | ❌ **`OPEN — prima di Shared`** | Differito a `HCP-SPEC-007` (`AC-F2-10`) |
 | **Emissione / Rinnovo Certificati ACME/TLS Automatici** | ✅ **Operativo** | `acmeTlsRuntimeAvailable: true` su `linux-systemd` (`ADR-0017`, `AC-F2-10`) |
-| **Server SFTP Chroot & Web File Manager** | ❌ **Chiuso (`false`)** | `sftpAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
+| **Web File Manager dei Siti** | ✅ **Operativo** | Helper isolato per sito, chunk 512 KiB, zip/unzip asincroni (`ADR-0019`, `AC-F2-10`) |
+| **Server SFTP Chroot** | ❌ **Chiuso (`false`)** | `sftpAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
 | **Backup Incrementali S3 di Produzione & DB Gestiti** | ❌ **Chiuso (`false`)** | `productionBackupRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
@@ -188,6 +189,12 @@ I siti inviano email attraverso un relay Postfix del pannello che inoltra a un f
 
 Dettagli e limiti: [ADR 0018](docs/architecture/adr/0018-outgoing-mail-relay.md).
 
+### File manager dei siti
+
+Dalla scheda **File** del sito i clienti navigano le directory, caricano e scaricano file (a chunk base64 fino a 512 KiB ciascuno, fino a 2 GiB per file), modificano file di testo, creano cartelle, spostano/rinominano, eliminano ed eseguono archiviazione ed estrazione `.zip` asincrone (`202 Accepted` con `Idempotency-Key`). Le operazioni girano in un helper isolato per sito (`hp_files_<id>`) senza rete e con filesystem root in sola lettura, senza toccare il container del sito. Voci protette: `wp-content/mu-plugins/hp-mail.php` e cartelle antenate. L'accesso SFTP (`sftpAvailable: false`) non è ancora disponibile.
+
+Dettagli e limiti: [ADR 0019](docs/architecture/adr/0019-site-file-manager.md).
+
 #### Aggiornamento
 
 ```bash
@@ -248,6 +255,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0018`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita).
+- [Registro delle ADR (`ADR 0001..0019`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

@@ -2375,6 +2375,458 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files:
+    get:
+      tags: [Managed Sites]
+      operationId: listSiteFiles
+      summary: List entries in a site folder (site.files.read)
+      description: >-
+        Paths are relative to the site's files (`""` is the root) and travel in the query
+        or the body, never as URL path segments. Hidden `.htpanel-*` staging files and
+        entries with invalid UTF-8 names are omitted. At most 5,000 entries are returned;
+        `truncated` is `true` when more exist.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: query
+          name: path
+          required: false
+          description: Relative `/`-separated folder path (`""` for root)
+          schema:
+            type: string
+            maxLength: 1024
+            default: ""
+      responses:
+        "200":
+          description: Folder entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteFileListDto"
+        "400":
+          description: >-
+            Invalid path (`VALIDATION_ERROR`; schema validation puts `invalid_path` in
+            `details[].message` and Zod's issue code in `details[].reason`) or target is not a
+            directory from the files layer (`not_a_directory`, `invalid_path` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.read` permission or symlink resolves outside the site's files (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, folder, or site files not found (`NOT_FOUND`; reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Site deploying, in maintenance, or missing a deployed service (`RESOURCE_LOCKED`; reason `not_ready`), or helper timed out (`OPERATION_INTERRUPTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without a reply (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Files helper or executor unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files/content:
+    get:
+      tags: [Managed Sites]
+      operationId: readSiteFileChunk
+      summary: Read a base64 chunk of a site file (site.files.read)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        A chunk is at most 512 KiB (524,288 bytes) before base64.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: query
+          name: path
+          required: true
+          description: Relative `/`-separated file path (non-empty)
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        - in: query
+          name: offset
+          required: false
+          description: Zero-based byte offset to start reading from
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 9007199254740991
+            default: 0
+        - in: query
+          name: length
+          required: false
+          description: Maximum raw bytes to read (at most 524,288 bytes / 512 KiB before base64)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 524288
+            default: 524288
+      responses:
+        "200":
+          description: Base64-encoded file chunk
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteFileChunkDto"
+        "400":
+          description: >-
+            Invalid path or query (`VALIDATION_ERROR`; schema validation puts `invalid_path` in
+            `details[].message` and Zod's issue code in `details[].reason`), or directory
+            target / offset past EOF from the files layer (`is_a_directory`, `upload_mismatch`,
+            `invalid_path` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.read` permission or symlink resolves outside the site's files (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, file, or site files not found (`NOT_FOUND`; reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Site not ready (`RESOURCE_LOCKED`; reason `not_ready`) or helper timed out (`OPERATION_INTERRUPTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without a reply (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Files helper or executor unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+    put:
+      tags: [Managed Sites]
+      operationId: writeSiteFileChunk
+      summary: Upload a base64 chunk of a site file (site.files.write)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        A chunk is at most 512 KiB (524,288 bytes) before base64. Uploads are addressed
+        by `uploadId` and `offset` and are safe to resend: chunks write to a hidden
+        staging file next to the target and `final: true` atomically renames it into
+        place (audited once on the final chunk). Writing at `offset > 0` when the staging
+        file is missing or shorter returns `VALIDATION_ERROR` (`upload_mismatch`).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteFileWriteRequest"
+      responses:
+        "200":
+          description: Bytes currently staged (or final file size when `final` is `true`)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteFileWriteResultDto"
+        "400":
+          description: >-
+            Invalid path or invalid base64/oversized chunk (`VALIDATION_ERROR`; schema validation
+            puts `invalid_path`, `invalid_base64`, or `too_large` in `details[].message` and
+            Zod's issue code in `details[].reason`), or staging offset mismatch from the files
+            layer (`upload_mismatch`, `invalid_path` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.write` permission or protected path (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, parent folder, or site files not found (`NOT_FOUND`; reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Target already exists when `overwrite` is `false` or is a folder/link
+            (`ALREADY_EXISTS`; reason `exists`), file exceeds 2 GiB or less than 1 GiB disk
+            free (`QUOTA_EXCEEDED`; reasons `too_large`, `disk_full`), site not ready
+            (`RESOURCE_LOCKED`; reason `not_ready`), or helper timed out (`OPERATION_INTERRUPTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without a reply (`OPERATION_AMBIGUOUS`); uploads are addressed by `uploadId` and `offset` and are safe to resend
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Files helper or executor unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files/folders:
+    post:
+      tags: [Managed Sites]
+      operationId: createSiteFileFolder
+      summary: Create a folder inside a site's files (site.files.write)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        The parent directory must already exist (non-recursive).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteFileFolderRequest"
+      responses:
+        "204":
+          description: Folder created
+        "400":
+          description: >-
+            Invalid path (`VALIDATION_ERROR`; schema validation puts `invalid_path` in
+            `details[].message` and Zod's issue code in `details[].reason`) or parent is not a
+            directory from the files layer (`not_a_directory`, `invalid_path` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.write` permission or protected path (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, parent folder, or site files not found (`NOT_FOUND`; reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Entry already exists (`ALREADY_EXISTS`; reason `exists`), disk full
+            (`QUOTA_EXCEEDED`; reason `disk_full`), site not ready (`RESOURCE_LOCKED`;
+            reason `not_ready`), or helper timed out (`OPERATION_INTERRUPTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without a reply (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Files helper or executor unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files/move:
+    post:
+      tags: [Managed Sites]
+      operationId: moveSiteFile
+      summary: Move or rename a file, folder, or link (site.files.write)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        Cannot move a folder into itself or overwrite an existing target.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteFileMoveRequest"
+      responses:
+        "204":
+          description: Entry moved or renamed
+        "400":
+          description: >-
+            Invalid path or moving a folder into itself (`VALIDATION_ERROR`; schema validation puts
+            `invalid_path` in `details[].message` and Zod's issue code in `details[].reason`), or
+            refusal from the files layer (`invalid_path`, `not_a_directory` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.write` permission or protected path (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, source entry, destination parent, or site files not found (`NOT_FOUND`; reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Destination already exists (`ALREADY_EXISTS`; reason `exists`), site not ready (`RESOURCE_LOCKED`; reason `not_ready`), or helper timed out (`OPERATION_INTERRUPTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without a reply (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Files helper or executor unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files/delete:
+    post:
+      tags: [Managed Sites]
+      operationId: deleteSiteFiles
+      summary: Delete one or more files, folders, or links (site.files.write)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        Accepts 1 to 100 paths per request. Symbolic links are unlinked without following
+        their target.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteFileDeleteRequest"
+      responses:
+        "204":
+          description: Entries deleted
+        "400":
+          description: >-
+            Invalid path or empty/oversized batch (`VALIDATION_ERROR`; schema validation puts
+            `invalid_path` in `details[].message` and Zod's issue code in `details[].reason`), or
+            refusal from the files layer (`invalid_path` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.write` permission or protected path (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site, target entry, or site files not found (`NOT_FOUND`; reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Site not ready (`RESOURCE_LOCKED`; reason `not_ready`) or helper timed out (`OPERATION_INTERRUPTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without a reply (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Files helper or executor unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files/archive:
+    post:
+      tags: [Managed Sites]
+      operationId: archiveSiteFiles
+      summary: Enqueue asynchronous creation of a zip archive (site.files.write)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        Enqueues an asynchronous `site.files.archive` operation (`202 Accepted`) locked
+        per site; poll `/v1/organizations/{orgId}/operations/{opId}` for completion.
+        All source paths must share the same parent folder; links and `.htpanel-*` files
+        are skipped. Bounded to 20,000 entries, 1 GiB uncompressed, and depth 32.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteFileArchiveRequest"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          description: >-
+            Invalid path, non-`.zip` target, or missing/invalid `Idempotency-Key`
+            (`VALIDATION_ERROR`; schema validation puts `invalid_path` or `not_a_zip` in
+            `details[].message` and Zod's issue code in `details[].reason`; header errors put
+            `MISSING_IDEMPOTENCY_KEY` or `INVALID_IDEMPOTENCY_KEY` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.write` permission or protected path (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site not ready or locked by another operation (`RESOURCE_LOCKED`; reason `not_ready`),
+            or reused `Idempotency-Key` for another request (`IDEMPOTENCY_CONFLICT`). Worker execution
+            errors (`ALREADY_EXISTS`/`exists`, `QUOTA_EXCEEDED`/`archive_limit`/`disk_full`,
+            `OPERATION_INTERRUPTED`) are recorded on the operation.
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/files/extract:
+    post:
+      tags: [Managed Sites]
+      operationId: extractSiteFileArchive
+      summary: Enqueue asynchronous extraction of a zip archive (site.files.write)
+      description: >-
+        Paths are relative to the site's files and travel in the query or the body.
+        Enqueues an asynchronous `site.files.extract` operation (`202 Accepted`) locked
+        per site; poll `/v1/organizations/{orgId}/operations/{opId}` for completion.
+        Creates `to` when missing (`""` extracts into the root), never overwrites
+        existing files (`ALREADY_EXISTS`), refuses unsafe/symlink zip entries
+        (`archive_unsafe`), and enforces zip bounds (20,000 entries, 1 GiB uncompressed,
+        depth 32, ratio 200 over 1 MiB).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteFileExtractRequest"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          description: >-
+            Invalid path, non-`.zip` source, or missing/invalid `Idempotency-Key`
+            (`VALIDATION_ERROR`; schema validation puts `invalid_path` or `not_a_zip` in
+            `details[].message` and Zod's issue code in `details[].reason`; header errors put
+            `MISSING_IDEMPOTENCY_KEY` or `INVALID_IDEMPOTENCY_KEY` in `details[].reason`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.files.write` permission or protected path (`PERMISSION_DENIED`; reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site not ready or locked by another operation (`RESOURCE_LOCKED`; reason `not_ready`),
+            or reused `Idempotency-Key` for another request (`IDEMPOTENCY_CONFLICT`). Worker execution
+            errors (`ALREADY_EXISTS`/`exists`, `QUOTA_EXCEEDED`/`archive_limit`/`disk_full`,
+            `VALIDATION_ERROR`/`archive_unsafe`, `OPERATION_INTERRUPTED`) are recorded on the operation.
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Runtime execution disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/sites:
     get:
       tags: [Admin Sites]
@@ -2756,6 +3208,7 @@ components:
             - DEDICATED_HOST_OCCUPIED
             - SHARED_MODE_GATED
             - DOMAIN_CONFLICT
+            - ALREADY_EXISTS
             - LAST_OWNER_PROTECTED
             - NOT_SUPPORTED
             - OPERATION_INTERRUPTED
@@ -3832,6 +4285,196 @@ components:
         text:
           type: string
 
+    SiteFilePath:
+      type: string
+      maxLength: 1024
+      description: >-
+        Path relative to the site's files (`""` is the root), `/`-separated, and traveling
+        in the query or request body. Consecutive slashes and a trailing slash are
+        normalized; leading `/`, `.` or `..` segments, segments starting with `.htpanel-`,
+        control characters (`0x00`-`0x1F`, `0x7F`), and segments exceeding 255 UTF-8 bytes
+        are rejected.
+
+    SiteFileItemPath:
+      type: string
+      minLength: 1
+      maxLength: 1024
+      description: >-
+        Non-empty relative path to an entry inside the site's files (`""` is rejected).
+        Follows the same normalization and segment rules as `SiteFilePath`.
+
+    SiteFileZipPath:
+      type: string
+      minLength: 1
+      maxLength: 1024
+      pattern: "\\.[zZ][iI][pP]$"
+      description: >-
+        Non-empty relative path ending with `.zip` (case-insensitive) inside the site's
+        files. Follows the same rules as `SiteFileItemPath`.
+
+    SiteFileErrorReason:
+      type: string
+      description: Closed refusal reason token returned in `error.details[].reason` for file operations
+      enum:
+        - invalid_path
+        - not_found
+        - exists
+        - not_a_directory
+        - is_a_directory
+        - protected
+        - too_large
+        - archive_limit
+        - upload_mismatch
+        - not_a_zip
+        - disk_full
+        - archive_unsafe
+        - zip_unavailable
+        - not_ready
+
+    SiteFileEntryDto:
+      type: object
+      additionalProperties: false
+      required: [name, kind, size, modifiedAt, writable]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        kind:
+          type: string
+          enum: [file, dir, link, other]
+        size:
+          type: integer
+          minimum: 0
+        modifiedAt:
+          type: string
+          format: date-time
+        writable:
+          type: boolean
+
+    SiteFileListDto:
+      type: object
+      additionalProperties: false
+      required: [entries, truncated]
+      properties:
+        entries:
+          type: array
+          description: Directory entries (sorted directories-first, capped at 5,000 per listing)
+          items:
+            $ref: "#/components/schemas/SiteFileEntryDto"
+        truncated:
+          type: boolean
+
+    SiteFileChunkDto:
+      type: object
+      additionalProperties: false
+      required: [dataBase64, size, eof]
+      properties:
+        dataBase64:
+          type: string
+          description: Base64-encoded chunk bytes (at most 524,288 bytes / 512 KiB before base64)
+        size:
+          type: integer
+          minimum: 0
+          description: Total file size in bytes
+        eof:
+          type: boolean
+
+    SiteFileWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [path, uploadId, offset, dataBase64, final, overwrite]
+      description: >-
+        Chunked file upload payload. Uploads are addressed by `uploadId` and `offset` and
+        are safe to resend. A chunk is at most 512 KiB (524,288 bytes) before base64;
+        maximum total file size is 2 GiB (2,147,483,648 bytes).
+      properties:
+        path:
+          $ref: "#/components/schemas/SiteFileItemPath"
+        uploadId:
+          type: string
+          minLength: 16
+          maxLength: 64
+          pattern: "^[A-Za-z0-9_-]{16,64}$"
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        dataBase64:
+          type: string
+          maxLength: 699052
+          pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+          description: "Base64-encoded chunk bytes (at most 524,288 bytes / 512 KiB before base64; empty allowed on `final: true`)"
+        final:
+          type: boolean
+        overwrite:
+          type: boolean
+
+    SiteFileWriteResultDto:
+      type: object
+      additionalProperties: false
+      required: [received]
+      properties:
+        received:
+          type: integer
+          minimum: 0
+          description: Staged byte count after writing the chunk (or final file size when `final` is `true`)
+
+    SiteFileFolderRequest:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          $ref: "#/components/schemas/SiteFileItemPath"
+
+    SiteFileMoveRequest:
+      type: object
+      additionalProperties: false
+      required: [from, to]
+      description: "`to` must differ from `from` and cannot lie inside `from/`."
+      properties:
+        from:
+          $ref: "#/components/schemas/SiteFileItemPath"
+        to:
+          $ref: "#/components/schemas/SiteFileItemPath"
+
+    SiteFileDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [paths]
+      properties:
+        paths:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SiteFileItemPath"
+
+    SiteFileArchiveRequest:
+      type: object
+      additionalProperties: false
+      required: [paths, to]
+      properties:
+        paths:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SiteFileItemPath"
+        to:
+          $ref: "#/components/schemas/SiteFileZipPath"
+
+    SiteFileExtractRequest:
+      type: object
+      additionalProperties: false
+      required: [path, to]
+      properties:
+        path:
+          $ref: "#/components/schemas/SiteFileZipPath"
+        to:
+          $ref: "#/components/schemas/SiteFilePath"
+
     SiteSummaryDto:
       type: object
       required: [id, organizationId, hostAllocationId, name, slug, status, createdAt, updatedAt]
@@ -4189,6 +4832,8 @@ components:
             - service.restart
             - service.stop
             - site.deploy
+            - site.files.archive
+            - site.files.extract
             - host.maintenance
             - host.security
             - host.allocate
