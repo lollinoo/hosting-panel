@@ -3,6 +3,9 @@ import type {
   SftpAccessApplyRequest,
   SftpApplyResult,
   SftpStatusReport,
+  SiteDatabasesIpcRequest,
+  SiteDatabasesOp,
+  SiteDatabasesResultByOp,
   SiteFileEntryDto,
   SiteFilesIpcRequest,
   SiteFilesOp,
@@ -14,6 +17,8 @@ import type { CertificateStatusReport } from "./acme-status.js";
 import type { MailRelayApplyRequest, MailRelayStatusReport, MailTestResult } from "./mail-relay.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
+export type SiteDatabasesRequest = SiteDatabasesIpcRequest;
+export type SiteDatabasesResult<O extends SiteDatabasesOp = SiteDatabasesOp> = SiteDatabasesResultByOp[O];
 export type SiteFileEntry = SiteFileEntryDto;
 export type SiteFilesRequest = SiteFilesIpcRequest;
 export type SiteFilesResult<O extends SiteFilesOp = SiteFilesOp> = SiteFilesResultByOp[O];
@@ -48,6 +53,7 @@ export interface DockerExecutorPort {
   sendTestMail(req: { to: string; from: string }): Promise<MailTestResult>;
   /** Confined to the site's files; never touches the running site container. */
   siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>>;
+  siteDatabases<R extends SiteDatabasesRequest>(req: R): Promise<SiteDatabasesResult<R["op"]>>;
   /** Full desired state; an empty list removes hp_sftp (host keys stay). */
   applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult>;
   getSftpStatus(): Promise<SftpStatusReport>;

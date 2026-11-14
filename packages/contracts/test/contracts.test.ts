@@ -56,6 +56,7 @@ import {
   findUnsafeDockerInputFields,
   isDefaultRetryableErrorCode,
   isMutatingPermission,
+  isPhpMyAdminAvailable,
   isSftpAvailable,
   isTerminalOperationStatus,
   redactSensitiveString,
@@ -65,9 +66,9 @@ import {
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 36 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(36);
-    expect(new Set(PERMISSION_KEYS).size).toBe(36);
+  it("defines exactly 37 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(37);
+    expect(new Set(PERMISSION_KEYS).size).toBe(37);
 
     for (const key of PERMISSION_KEYS) {
       expect(PermissionKeySchema.parse(key)).toBe(key);
@@ -114,6 +115,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(hostingPerms).toContain("site.files.read");
     expect(hostingPerms).toContain("site.files.write");
     expect(hostingPerms).toContain("site.sftp.manage");
+    expect(hostingPerms).toContain("site.databases.manage");
     expect(hostingPerms).toContain("service.deploy");
     expect(hostingPerms).toContain("quota.manage");
 
@@ -133,6 +135,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(ownerPerms).toContain("site.files.read");
     expect(ownerPerms).toContain("site.files.write");
     expect(ownerPerms).toContain("site.sftp.manage");
+    expect(ownerPerms).toContain("site.databases.manage");
     expect(ownerPerms).toContain("service.create");
     expect(ownerPerms).not.toContain("host.maintenance.execute");
     expect(ownerPerms).not.toContain("template.manage");
@@ -154,6 +157,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(isMutatingPermission("site.create")).toBe(true);
     expect(isMutatingPermission("site.files.write")).toBe(true);
     expect(isMutatingPermission("site.sftp.manage")).toBe(true);
+    expect(isMutatingPermission("site.databases.manage")).toBe(true);
     expect(isMutatingPermission("service.deploy")).toBe(true);
     expect(isMutatingPermission("host.maintenance.execute")).toBe(true);
   });
@@ -460,6 +464,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       hostAgentRuntimeAvailable: false,
       acmeTlsRuntimeAvailable: false,
       sftpAvailable: false,
+      phpMyAdminAvailable: false,
       productionBackupRuntimeAvailable: false,
     });
     expect(legacyParsed.runtimeBackend).toBe("disabled");
@@ -477,10 +482,13 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       hostAgentRuntimeAvailable: true,
     });
     expect(isSftpAvailable("linux-systemd")).toBe(true);
+    expect(isPhpMyAdminAvailable("linux-systemd")).toBe(true);
     for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
       expect(createPlatformCapabilities({ runtimeBackend }).acmeTlsRuntimeAvailable).toBe(false);
       expect(createPlatformCapabilities({ runtimeBackend }).sftpAvailable).toBe(false);
       expect(isSftpAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).phpMyAdminAvailable).toBe(false);
+      expect(isPhpMyAdminAvailable(runtimeBackend)).toBe(false);
     }
     expect(p2Caps).toEqual({
       phase: "phase-2",
@@ -491,6 +499,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
       sftpAvailable: true,
+      phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: false,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);

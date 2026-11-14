@@ -12,6 +12,11 @@ export const SHARED_MARIADB_IMAGE = "mariadb:12.3.3";
 export const SFTP_IMAGE =
   "linuxserver/openssh-server@sha256:161e0b670b31d9539ca1718bc5943e981779331b4e1c9d32e8929d7652a1f22f" as const;
 export const DEFAULT_SFTP_PORT = 2222 as const;
+// Update: docker buildx imagetools inspect phpmyadmin:5.2.3-apache
+export const PHPMYADMIN_IMAGE =
+  "phpmyadmin@sha256:e4b3eb5305cd42d21512bb55def2bab52625d56df927ad4ee1864a9354c84d40" as const;
+export const DEFAULT_PHPMYADMIN_PORT = 8306 as const;
+export const PHPMYADMIN_UPLOAD_LIMIT_MB = 32 as const;
 export const resolveWordpressImage = (php: PhpVersion): string => `wordpress:7.1.4-php${php}-apache`;
 export const resolveWordpressCliImage = (php: PhpVersion): string => `wordpress:cli-2.12.0-php${php}`;
 

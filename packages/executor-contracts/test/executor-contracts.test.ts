@@ -6,6 +6,7 @@ import {
   Phase1DisabledDockerExecutor,
   ServiceInstanceActionIpcRequestSchema,
   createApprovedServiceSpec,
+  type SiteDatabasesRequest,
 } from "../src/index.js";
 
 describe("@hosting-panel/executor-contracts — ApprovedServiceSpec Factory (AC-F1-04 & AC-F2-03)", () => {
@@ -301,5 +302,33 @@ describe("Phase1DisabledDockerExecutor mail", () => {
     await expect(executor.sendTestMail({ to: "a@b.it", from: "c@d.it" })).rejects.toMatchObject({
       code: "NOT_SUPPORTED",
     });
+  });
+});
+
+describe("Phase1DisabledDockerExecutor siteDatabases", () => {
+  it("returns {} for dropAll and refuses every other operation with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const siteId = "site_1";
+    const db = "wp_0123456789ab_shop";
+    const user = "wp_0123456789ab_app";
+    const passwordHash = "*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19";
+
+    await expect(executor.siteDatabases({ siteId, op: "dropAll" })).resolves.toEqual({});
+
+    const refusedOps: SiteDatabasesRequest[] = [
+      { siteId, op: "list" },
+      { siteId, op: "createDatabase", database: db },
+      { siteId, op: "deleteDatabase", database: db },
+      { siteId, op: "createUser", user, passwordHash },
+      { siteId, op: "setUserPassword", user, passwordHash },
+      { siteId, op: "deleteUser", user },
+      { siteId, op: "grant", user, database: db },
+      { siteId, op: "revoke", user, database: db },
+      { siteId, op: "phpMyAdminSignOn", passwordHash },
+    ];
+
+    for (const req of refusedOps) {
+      await expect(executor.siteDatabases(req)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    }
   });
 });

@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
 import {
+  MYSQL_NATIVE_PASSWORD_HASH_PATTERN,
+  SITE_DATABASE_CUSTOM_NAME_PATTERN,
+  SITE_DATABASE_NAME_PATTERN,
+  SITE_DATABASE_SIGNON_USER_PATTERN,
+} from "./site-databases.js";
+import {
   SITE_FILE_BATCH_MAX,
   SITE_FILE_CHUNK_BYTES,
   SITE_FILE_SEGMENT_MAX_BYTES,
@@ -534,3 +540,110 @@ export type SftpAccessUser = z.infer<typeof SftpAccessUserSchema>;
 export type SftpAccessApplyRequest = z.infer<typeof SftpAccessApplyIpcRequestSchema>;
 export type SftpApplyResult = z.infer<typeof SftpApplyIpcResponseSchema>;
 export type SftpStatusReport = z.infer<typeof SftpStatusReportWireSchema>;
+
+const SiteDatabasesSiteIdSchema = z.string().min(1).max(128);
+const SiteDatabaseNameSchema = z.string().regex(SITE_DATABASE_NAME_PATTERN);
+const SiteDatabaseCustomNameSchema = z.string().regex(SITE_DATABASE_CUSTOM_NAME_PATTERN);
+const MysqlPasswordHashSchema = z.string().regex(MYSQL_NATIVE_PASSWORD_HASH_PATTERN);
+
+export const SiteDatabasesIpcRequestSchema = z.discriminatedUnion("op", [
+  z.object({ siteId: SiteDatabasesSiteIdSchema, op: z.literal("list") }).strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("createDatabase"),
+      database: SiteDatabaseCustomNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("deleteDatabase"),
+      database: SiteDatabaseCustomNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("createUser"),
+      user: SiteDatabaseCustomNameSchema,
+      passwordHash: MysqlPasswordHashSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("setUserPassword"),
+      user: SiteDatabaseCustomNameSchema,
+      passwordHash: MysqlPasswordHashSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("deleteUser"),
+      user: SiteDatabaseCustomNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("grant"),
+      user: SiteDatabaseCustomNameSchema,
+      database: SiteDatabaseNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("revoke"),
+      user: SiteDatabaseCustomNameSchema,
+      database: SiteDatabaseNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("phpMyAdminSignOn"),
+      passwordHash: MysqlPasswordHashSchema,
+    })
+    .strict(),
+  z.object({ siteId: SiteDatabasesSiteIdSchema, op: z.literal("dropAll") }).strict(),
+]);
+export type SiteDatabasesIpcRequest = z.infer<typeof SiteDatabasesIpcRequestSchema>;
+export type SiteDatabasesOp = SiteDatabasesIpcRequest["op"];
+
+export const SiteDatabaseEntrySchema = z
+  .object({ name: SiteDatabaseNameSchema, primary: z.boolean(), sizeBytes: z.number().int().min(0) })
+  .strict();
+export const SiteDatabaseUserEntrySchema = z
+  .object({
+    name: SiteDatabaseNameSchema,
+    primary: z.boolean(),
+    databases: z.array(SiteDatabaseNameSchema),
+  })
+  .strict();
+export type SiteDatabaseEntry = z.infer<typeof SiteDatabaseEntrySchema>;
+export type SiteDatabaseUserEntry = z.infer<typeof SiteDatabaseUserEntrySchema>;
+
+const SiteDatabasesEmptyResultSchema = z.object({}).strict();
+export const SITE_DATABASES_RESULT_SCHEMAS = {
+  list: z
+    .object({
+      databases: z.array(SiteDatabaseEntrySchema),
+      users: z.array(SiteDatabaseUserEntrySchema),
+    })
+    .strict(),
+  createDatabase: SiteDatabasesEmptyResultSchema,
+  deleteDatabase: SiteDatabasesEmptyResultSchema,
+  createUser: SiteDatabasesEmptyResultSchema,
+  setUserPassword: SiteDatabasesEmptyResultSchema,
+  deleteUser: SiteDatabasesEmptyResultSchema,
+  grant: SiteDatabasesEmptyResultSchema,
+  revoke: SiteDatabasesEmptyResultSchema,
+  phpMyAdminSignOn: z.object({ username: z.string().regex(SITE_DATABASE_SIGNON_USER_PATTERN) }).strict(),
+  dropAll: SiteDatabasesEmptyResultSchema,
+} as const satisfies { [K in SiteDatabasesOp]: z.ZodType };
+export type SiteDatabasesResultByOp = {
+  [K in SiteDatabasesOp]: z.infer<(typeof SITE_DATABASES_RESULT_SCHEMAS)[K]>;
+};

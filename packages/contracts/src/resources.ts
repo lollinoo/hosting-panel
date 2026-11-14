@@ -227,6 +227,11 @@ export function isSftpAvailable(runtimeBackend: RuntimeBackend): boolean {
   return runtimeBackend === "linux-systemd";
 }
 
+/** phpMyAdmin runs only on the Linux systemd backend. */
+export function isPhpMyAdminAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -236,6 +241,7 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.boolean(),
   sftpAvailable: z.boolean(),
+  phpMyAdminAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.literal(false),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
@@ -249,6 +255,7 @@ export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.fre
   hostAgentRuntimeAvailable: false,
   acmeTlsRuntimeAvailable: false,
   sftpAvailable: false,
+  phpMyAdminAvailable: false,
   productionBackupRuntimeAvailable: false,
 });
 
@@ -276,6 +283,7 @@ export function createPlatformCapabilities(
         : Boolean(options.hostAgentRuntimeAvailable),
       acmeTlsRuntimeAvailable: options.runtimeBackend === "linux-systemd",
       sftpAvailable: isSftpAvailable(options.runtimeBackend),
+      phpMyAdminAvailable: isPhpMyAdminAvailable(options.runtimeBackend),
       productionBackupRuntimeAvailable: false,
     }),
   );
@@ -288,6 +296,7 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.boolean(),
   sftpAvailable: z.boolean(),
+  phpMyAdminAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.literal(false),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;

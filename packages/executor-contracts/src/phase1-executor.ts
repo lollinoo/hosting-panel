@@ -8,6 +8,8 @@ import type {
   DockerExecutionResult,
   DockerExecutorPort,
   ServiceLogLine,
+  SiteDatabasesRequest,
+  SiteDatabasesResult,
   SiteFilesRequest,
   SiteFilesResult,
   SiteRoutesRequest,
@@ -78,6 +80,13 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async siteFiles<R extends SiteFilesRequest>(_req: R): Promise<SiteFilesResult<R["op"]>> {
+    return this.refuse();
+  }
+
+  async siteDatabases<R extends SiteDatabasesRequest>(req: R): Promise<SiteDatabasesResult<R["op"]>> {
+    if (req.op === "dropAll") {
+      return {} as SiteDatabasesResult<R["op"]>;
+    }
     return this.refuse();
   }
 
