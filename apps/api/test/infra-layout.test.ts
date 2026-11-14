@@ -248,4 +248,59 @@ describe("release workflow and docs", () => {
     }
     expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
   });
+
+  it("m2 site databases and phpmyadmin docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of [
+      "Database per Sito & phpMyAdmin",
+      "phpMyAdminAvailable: true",
+      "ADR-0021",
+      "docs/architecture/adr/0021-site-databases.md",
+    ]) {
+      expect(readme).toContain(s);
+    }
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/databases:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/databases/phpmyadmin:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/databases/{name}:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/database-users:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/database-users/{name}:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/database-users/{name}/reset-password:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/database-users/{name}/grants/{database}:",
+      "site.databases.manage",
+      "phpMyAdminAvailable",
+      "CreateSiteDatabaseRequest",
+      "CreateSiteDatabaseUserRequest",
+      "SiteDatabaseDto",
+      "SiteDatabaseUserDto",
+      "SiteDatabasesDto",
+      "SiteDatabaseCreatedDto",
+      "SiteDatabaseUserCreatedDto",
+      "SiteDatabasePasswordResetDto",
+      "SiteDatabaseSignOnDto",
+    ]) {
+      expect(api).toContain(s);
+    }
+    const adr = read("docs/architecture/adr/0021-site-databases.md");
+    for (const s of [
+      "ADR 0021",
+      "hp_mariadb",
+      "hp_phpmyadmin",
+      "127.0.0.1",
+      "8306",
+      "site.databases.manage",
+      "phpMyAdminAvailable",
+      "/var/lib/hosting-panel/phpmyadmin",
+      "CP-01",
+    ]) {
+      expect(adr).toContain(s);
+    }
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(
+      "install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/phpmyadmin",
+    );
+    const envExample = read(".env.example");
+    expect(envExample).toContain("HP_PHPMYADMIN_PORT=8306");
+  });
 });
