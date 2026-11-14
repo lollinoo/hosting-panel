@@ -310,6 +310,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
       sftpAvailable: true,
+      phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: false,
     });
 
@@ -325,6 +326,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
       sftpAvailable: true,
+      phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: false,
     });
 

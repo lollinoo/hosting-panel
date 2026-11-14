@@ -41,6 +41,7 @@ import {
   type ReadMeta,
   type ResourceQuotaDto,
   type ServiceInstanceDto,
+  isPhpMyAdminAvailable,
   isSftpAvailable,
   type SiteDetailDto,
   type SiteSummaryDto,
@@ -323,6 +324,7 @@ export class OrganizationsController {
         runtimeEnabled && this.hostAgent.isRuntimeAvailable,
       acmeTlsRuntimeAvailable: this.config.runtimeBackend === "linux-systemd",
       sftpAvailable: isSftpAvailable(this.config.runtimeBackend),
+      phpMyAdminAvailable: isPhpMyAdminAvailable(this.config.runtimeBackend),
       productionBackupRuntimeAvailable: false,
     };
   }

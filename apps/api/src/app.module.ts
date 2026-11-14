@@ -22,6 +22,7 @@ import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
 import { SiteDomainsController } from "./controllers/site-domains.controller.js";
+import { SiteDatabasesController } from "./controllers/site-databases.controller.js";
 import { SiteFilesController } from "./controllers/site-files.controller.js";
 import { SiteSftpController } from "./controllers/site-sftp.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
@@ -30,6 +31,7 @@ import { SiteProvisioner } from "./runtime/site-provisioner.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import { SiteFilesApplier } from "./sites/site-files-applier.js";
+import { SiteDatabasesService } from "./sites/site-databases.service.js";
 import { SiteFilesService } from "./sites/site-files.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import {
@@ -76,6 +78,7 @@ export class AppModule {
         SiteDomainsController,
         SiteFilesController,
         SiteSftpController,
+        SiteDatabasesController,
         AdminMailRelayController,
       ],
       providers: [
@@ -110,6 +113,7 @@ export class AppModule {
         SiteDomainsService,
         SiteFilesService,
         SiteSftpService,
+        SiteDatabasesService,
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
@@ -130,6 +134,7 @@ export class AppModule {
         DomainReconcilerService,
         MailRelayService,
         SiteSftpService,
+        SiteDatabasesService,
       ],
     };
   }

@@ -1,9 +1,10 @@
-import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
   canTransitionOperation,
   isTerminalOperationStatus,
+  mysqlNativePasswordHash,
   redactSensitiveString,
+  siteDatabasePrefix,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -35,6 +36,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { routePlanHash } from "../sites/domain-policy.js";
+import { generateDatabasePassword } from "../sites/site-databases.service.js";
 import { SiteSftpService } from "../sites/site-sftp.service.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 
@@ -99,7 +101,7 @@ export const SITE_SETUP_FAILED = "Site setup did not finish";
 
 /** Database name and user of a site's WordPress database. */
 export function siteDatabaseIdentifier(siteId: string): string {
-  return `wp_${createHash("sha256").update(siteId).digest("hex").slice(0, 12)}`;
+  return siteDatabasePrefix(siteId);
 }
 
 export class SiteJobFailedError extends Error {
@@ -296,6 +298,13 @@ export class SiteProvisioner {
             params: { dbName: siteDb.dbName, dbUser: siteDb.dbUser },
           });
         }
+        try {
+          await this.executor.siteDatabases({ siteId, op: "dropAll" });
+        } catch (err) {
+          if ((err as { code?: unknown } | null)?.code !== "NOT_SUPPORTED") {
+            throw err;
+          }
+        }
       });
 
       await step("remove_site", async () => {
@@ -384,6 +393,8 @@ export class SiteProvisioner {
       }
 
       await step("redeploy", async () => {
+        // Rotate extra MariaDB user passwords after ownership transfer while keeping primary user and grants intact.
+        await rotateExtraDatabaseUsers(this.executor, siteId);
         const services = await db
           .select({ id: serviceInstances.id })
           .from(serviceInstances)
@@ -499,6 +510,29 @@ export class SiteProvisioner {
           : redactSensitiveString(err instanceof Error ? err.message : String(err)).slice(0, 4096),
       },
     });
+  }
+}
+
+// Rotate every extra MariaDB user's password on site transfer while ignoring backends without database support.
+async function rotateExtraDatabaseUsers(executor: DockerExecutorPort, siteId: string): Promise<void> {
+  const primaryUser = siteDatabasePrefix(siteId);
+  try {
+    const listed = await executor.siteDatabases({ siteId, op: "list" });
+    for (const user of listed.users) {
+      if (user.primary || user.name === primaryUser) {
+        continue;
+      }
+      await executor.siteDatabases({
+        siteId,
+        op: "setUserPassword",
+        user: user.name,
+        passwordHash: mysqlNativePasswordHash(generateDatabasePassword()),
+      });
+    }
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code !== "NOT_SUPPORTED") {
+      throw err;
+    }
   }
 }
 

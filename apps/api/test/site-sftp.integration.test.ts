@@ -420,10 +420,12 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
     const meRes = await call("GET", "/v1/me");
     expect(meRes.status).toBe(200);
     expect(meRes.body.data.platformCapabilities.sftpAvailable).toBe(true);
+    expect(meRes.body.data.platformCapabilities.phpMyAdminAvailable).toBe(true);
 
     const capRes = await call("GET", `/v1/organizations/${orgAId}/capabilities`);
     expect(capRes.status).toBe(200);
     expect(capRes.body.data.sftpAvailable).toBe(true);
+    expect(capRes.body.data.phpMyAdminAvailable).toBe(true);
   });
 
   it("GET /sftp returns host IPv4, port and fingerprint from spy, and degrades port/fingerprint to null with 200 when getSftpStatus throws", async () => {
@@ -1359,12 +1361,14 @@ describe("site SFTP HTTP API on local-simulator backend", () => {
     const meRes = await httpJson(app.baseUrl!, "GET", "/v1/me", { token: ownerToken });
     expect(meRes.status).toBe(200);
     expect(meRes.body.data.platformCapabilities.sftpAvailable).toBe(false);
+    expect(meRes.body.data.platformCapabilities.phpMyAdminAvailable).toBe(false);
 
     const capRes = await httpJson(app.baseUrl!, "GET", `/v1/organizations/${orgId}/capabilities`, {
       token: ownerToken,
     });
     expect(capRes.status).toBe(200);
     expect(capRes.body.data.sftpAvailable).toBe(false);
+    expect(capRes.body.data.phpMyAdminAvailable).toBe(false);
 
     const statusSpy = vi.spyOn(sim, "getSftpStatus");
     const applySpy = vi.spyOn(sim, "applySftpAccess");

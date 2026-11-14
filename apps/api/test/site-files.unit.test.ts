@@ -109,6 +109,9 @@ class MockDockerExecutor implements DockerExecutorPort {
     return (await this.siteFilesSpy(req)) as SiteFilesResult<R["op"]>;
   }
 
+  public siteDatabases: DockerExecutorPort["siteDatabases"] = (req) =>
+    this.#base.siteDatabases(req);
+
   public applySftpAccess: DockerExecutorPort["applySftpAccess"] = (req) =>
     this.#base.applySftpAccess(req);
   public getSftpStatus: DockerExecutorPort["getSftpStatus"] = () =>

@@ -226,6 +226,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
       expect(caps.hostAgentRuntimeAvailable).toBe(false);
       expect(caps.acmeTlsRuntimeAvailable).toBe(false);
       expect(caps.sftpAvailable).toBe(false);
+      expect(caps.phpMyAdminAvailable).toBe(false);
       expect(caps.productionBackupRuntimeAvailable).toBe(false);
     });
 
@@ -682,6 +683,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
       expect(res.body.data.hostAgentRuntimeAvailable).toBe(false);
       expect(res.body.data.acmeTlsRuntimeAvailable).toBe(false);
       expect(res.body.data.sftpAvailable).toBe(false);
+      expect(res.body.data.phpMyAdminAvailable).toBe(false);
       expect(res.body.data.productionBackupRuntimeAvailable).toBe(false);
     });
 
