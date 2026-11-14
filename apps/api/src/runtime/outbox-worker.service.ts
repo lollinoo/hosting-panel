@@ -29,6 +29,7 @@ import {
   stackRevisions,
   transitionOperation,
   updateOperationStepTransactional,
+  type ClaimPendingOutboxFilter,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
@@ -50,6 +51,7 @@ import {
 } from "../tokens.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
+import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
 import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
@@ -65,6 +67,17 @@ const SITE_OPERATION_KINDS: ReadonlySet<OperationKind> = new Set([
   "site.delete",
   "site.reassign",
 ]);
+const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
+  "site.files.archive",
+  "site.files.extract",
+];
+
+interface OutboxLaneState {
+  readonly filter: ClaimPendingOutboxFilter;
+  activePromise: Promise<OutboxProcessResult> | null;
+  scheduledImmediate: NodeJS.Immediate | null;
+  pendingTrigger: boolean;
+}
 
 export interface OutboxProcessResult {
   readonly claimed: number;
@@ -106,11 +119,20 @@ function extractRestartCount(obs: unknown): number {
 @Injectable()
 export class OutboxWorkerService {
   #stopped = false;
-  #scheduledImmediate: NodeJS.Immediate | null = null;
   #pollTimer: NodeJS.Timeout | null = null;
-  #activeRunPromise: Promise<OutboxProcessResult> | null = null;
   #activeRecoveryPromise: Promise<UnknownRecoveryResult> | null = null;
-  #pendingTrigger = false;
+  readonly #mainLane: OutboxLaneState = {
+    filter: { excludeKinds: FILE_ARCHIVE_OPERATION_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  readonly #fileLane: OutboxLaneState = {
+    filter: { includeKinds: FILE_ARCHIVE_OPERATION_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -119,6 +141,7 @@ export class OutboxWorkerService {
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(SiteProvisioner) private readonly siteProvisioner: SiteProvisioner,
     @Inject(SiteDomainsApplier) private readonly siteDomainsApplier: SiteDomainsApplier,
+    @Inject(SiteFilesApplier) private readonly siteFilesApplier: SiteFilesApplier,
   ) {}
 
   public startBackgroundLoop(): void {
@@ -142,31 +165,19 @@ export class OutboxWorkerService {
       return;
     }
 
-    if (this.#activeRunPromise !== null) {
-      this.#pendingTrigger = true;
-      return;
-    }
-
-    if (this.#scheduledImmediate !== null) {
-      return;
-    }
-
-    this.#scheduledImmediate = setImmediate(() => {
-      this.#scheduledImmediate = null;
-      if (this.#stopped) {
-        return;
-      }
-      void this.#drainPendingTriggers();
-    });
+    this.#triggerLane(this.#mainLane);
+    this.#triggerLane(this.#fileLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
-    this.#pendingTrigger = false;
 
-    if (this.#scheduledImmediate !== null) {
-      clearImmediate(this.#scheduledImmediate);
-      this.#scheduledImmediate = null;
+    for (const lane of [this.#mainLane, this.#fileLane]) {
+      lane.pendingTrigger = false;
+      if (lane.scheduledImmediate !== null) {
+        clearImmediate(lane.scheduledImmediate);
+        lane.scheduledImmediate = null;
+      }
     }
 
     if (this.#pollTimer !== null) {
@@ -174,39 +185,73 @@ export class OutboxWorkerService {
       this.#pollTimer = null;
     }
 
-    if (this.#activeRunPromise !== null) {
-      await this.#activeRunPromise.catch(() => undefined);
-    }
-
-    if (this.#activeRecoveryPromise !== null) {
-      await this.#activeRecoveryPromise.catch(() => undefined);
-    }
+    await Promise.all([
+      this.#mainLane.activePromise?.catch(() => undefined),
+      this.#fileLane.activePromise?.catch(() => undefined),
+      this.#activeRecoveryPromise?.catch(() => undefined),
+    ]);
   }
 
-  async #drainPendingTriggers(): Promise<void> {
+  #triggerLane(lane: OutboxLaneState): void {
+    if (lane.activePromise !== null) {
+      lane.pendingTrigger = true;
+      return;
+    }
+
+    if (lane.scheduledImmediate !== null) {
+      return;
+    }
+
+    lane.scheduledImmediate = setImmediate(() => {
+      lane.scheduledImmediate = null;
+      if (this.#stopped) {
+        return;
+      }
+      void this.#drainLane(lane);
+    });
+  }
+
+  async #drainLane(lane: OutboxLaneState): Promise<void> {
     do {
-      this.#pendingTrigger = false;
-      await this.processPendingOnce().catch(() => undefined);
-    } while (this.#pendingTrigger && !this.#stopped);
+      lane.pendingTrigger = false;
+      await this.#runLane(lane, 10).catch(() => undefined);
+    } while (lane.pendingTrigger && !this.#stopped);
   }
 
-  public async processPendingOnce(batchSize: number = 10): Promise<OutboxProcessResult> {
-    if (this.#activeRunPromise !== null) {
-      return this.#activeRunPromise;
+  async #runLane(lane: OutboxLaneState, batchSize: number): Promise<OutboxProcessResult> {
+    if (lane.activePromise !== null) {
+      return lane.activePromise;
     }
 
-    const promise = this.#executeBatch(batchSize);
-    this.#activeRunPromise = promise;
+    const promise = this.#executeBatch(batchSize, lane.filter);
+    lane.activePromise = promise;
     try {
       return await promise;
     } finally {
-      this.#activeRunPromise = null;
+      if (lane.activePromise === promise) {
+        lane.activePromise = null;
+      }
     }
   }
 
-  async #executeBatch(batchSize: number): Promise<OutboxProcessResult> {
+  public async processPendingOnce(batchSize: number = 10): Promise<OutboxProcessResult> {
+    const [mainResult, fileResult] = await Promise.all([
+      this.#runLane(this.#mainLane, batchSize),
+      this.#runLane(this.#fileLane, batchSize),
+    ]);
+    return {
+      claimed: mainResult.claimed + fileResult.claimed,
+      succeeded: mainResult.succeeded + fileResult.succeeded,
+      failed: mainResult.failed + fileResult.failed,
+    };
+  }
+
+  async #executeBatch(
+    batchSize: number,
+    filter: ClaimPendingOutboxFilter,
+  ): Promise<OutboxProcessResult> {
     const db = this.dbClient.db;
-    const claimedEvents = await claimPendingOutboxEvents(db, batchSize);
+    const claimedEvents = await claimPendingOutboxEvents(db, batchSize, undefined, filter);
     if (claimedEvents.length === 0) {
       return { claimed: 0, succeeded: 0, failed: 0 };
     }
@@ -293,6 +338,8 @@ export class OutboxWorkerService {
         await this.siteProvisioner.reassign(op, payload);
       } else if (op.kind === "site.domains") {
         await this.siteDomainsApplier.apply(op);
+      } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
+        await this.siteFilesApplier.apply(op, payload);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -739,6 +786,10 @@ export class OutboxWorkerService {
       if (op.kind === "site.domains") {
         // Only routes changed: the site keeps its status and the reconciler re-enqueues.
         await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
+        convergedFailed += 1;
+      } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
+        // File archive/extract operations never leave the site degraded and are never blindly replayed.
+        await this.#convergeUnknownToFailed(op, SITE_FILES_INTERRUPTED);
         convergedFailed += 1;
       } else if (SITE_OPERATION_KINDS.has(op.kind)) {
         // Site steps are not safely replayable mid-way: fail and let the customer retry.
