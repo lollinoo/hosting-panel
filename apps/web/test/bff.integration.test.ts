@@ -214,6 +214,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
                 hostAgentRuntimeAvailable: isPhase2,
                 acmeTlsRuntimeAvailable: false,
                 sftpAvailable: false,
+                phpMyAdminAvailable: false,
                 productionBackupRuntimeAvailable: false,
               },
             },
@@ -1152,6 +1153,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       expect(caps.sharedHostingEnabled).toBe(false);
       expect(caps.acmeTlsRuntimeAvailable).toBe(false);
       expect(caps.sftpAvailable).toBe(false);
+      expect(caps.phpMyAdminAvailable).toBe(false);
       expect(caps.productionBackupRuntimeAvailable).toBe(false);
 
       // Missing CSRF on lifecycle must fail with 403

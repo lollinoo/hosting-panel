@@ -107,6 +107,7 @@ export const en: Messages = {
       overview: "Overview",
       domains: "Web addresses",
       files: "Files",
+      database: "Database",
       logs: "Logs",
     },
     status: {
@@ -489,6 +490,129 @@ export const en: Messages = {
           ORGANIZATION_SUSPENDED:
             "Your account is suspended, so SFTP access cannot be managed. Contact your hosting provider.",
         },
+      },
+    },
+    database: {
+      title: "Database",
+      intro:
+        "Your site keeps its content in a database. Here you can add databases and users for other programs, choose which user can use which database, and open phpMyAdmin to work on the data.",
+      prefixNote: "Every name starts with {prefix}_ so it belongs only to this site.",
+      loadFailed: "The databases couldn't be loaded right now. Wait a minute and reload the page.",
+      unavailable: "Databases can't be managed on this server. Contact your hosting provider if you need it.",
+      primaryBadge: "Used by your site",
+      primaryNote:
+        "Your site needs this database and its user to work, so you can't delete them or change them here.",
+      name: "Name",
+      actions: "Actions",
+      databases: {
+        heading: "Databases",
+        size: "Size",
+        count: "{count} of {max} extra databases",
+        empty: "You haven't added any databases yet.",
+        add: "Add database",
+        limit:
+          "This site already has the maximum of {max} extra databases. Delete one you no longer need to add another.",
+        create: {
+          title: "Add a database",
+          label: "Name",
+          hint: "Use 1 to 16 lowercase letters, numbers or underscores, starting with a letter or number.",
+          preview: "Full name: {name}",
+          submit: "Add database",
+          working: "Adding...",
+        },
+        remove: {
+          action: "Delete",
+          title: "Delete the database {name}?",
+          body: "All tables and data in {name} are deleted for good and can't be recovered. Users lose access to it, and programs that use it stop working.",
+          confirm: "Delete database",
+          working: "Deleting...",
+        },
+      },
+      users: {
+        heading: "Database users",
+        access: "Can use",
+        noAccess: "No databases yet",
+        count: "{count} of {max} extra users",
+        empty: "You haven't added any database users yet.",
+        add: "Add user",
+        limit:
+          "This site already has the maximum of {max} extra database users. Delete one you no longer need to add another.",
+        create: {
+          title: "Add a database user",
+          label: "Name",
+          hint: "Use 1 to 16 lowercase letters, numbers or underscores, starting with a letter or number.",
+          preview: "Full user name: {name}",
+          submit: "Add user",
+          working: "Adding...",
+        },
+        created: {
+          title: "User added",
+          tempFor: "Password for {name}:",
+          copy: "Copy",
+          copied: "Copied",
+          copyUnavailable:
+            "Copying isn't available here. Select the password and copy it by hand.",
+          tempNote:
+            "Use it in your site's code together with the user name. The database server is the same one WordPress uses (DB_HOST in wp-config.php).",
+          tempOnce: "We show it only once: copy it now. If you lose it, create a new password.",
+          done: "Done",
+        },
+        reset: {
+          action: "New password",
+          title: "Create a new password for {name}?",
+          body: "The current password stops working right away and open connections for this user are closed at once. Update every program that uses it.",
+          confirm: "Create new password",
+          working: "Creating...",
+          doneTitle: "New password ready",
+        },
+        remove: {
+          action: "Delete",
+          title: "Delete the user {name}?",
+          body: "{name} can no longer use any database and open connections for this user are closed at once. The databases and their data are not affected.",
+          confirm: "Delete user",
+          working: "Deleting...",
+        },
+        grants: {
+          action: "Choose databases",
+          title: "Databases {name} can use",
+          hint: "{name} gets full access to each database you tick and loses access to the ones you untick. Removing access closes any open connections for this user at once.",
+          noDatabases: "Add a database first.",
+          save: "Save",
+          working: "Saving...",
+          partial: "Some changes couldn't be saved. The list now shows what is in place.",
+        },
+      },
+      phpmyadmin: {
+        heading: "phpMyAdmin",
+        body: "Open phpMyAdmin to browse tables, run queries, and import or export data. You sign in automatically and see only this site's databases.",
+        warning:
+          "Changes in phpMyAdmin take effect at once. If you delete your site's own database there, your site stops working.",
+        importNote:
+          "phpMyAdmin accepts files up to 32 MB, and the upload must finish within a minute. For a larger database, compress the file (.gz or .zip) or split it into smaller parts.",
+        open: "Open phpMyAdmin",
+        opening: "Opening...",
+        unavailable: "phpMyAdmin isn't available on this server. Contact your hosting provider if you need it.",
+        popupBlocked: "Your browser blocked the new tab. Allow pop-ups for this panel and try again.",
+        downTitle: "phpMyAdmin isn't available right now",
+        downBody: "Wait a minute and try again. If it keeps happening, contact your hosting provider.",
+        backToDatabases: "Back to the site's databases",
+      },
+      errors: {
+        QUOTA_EXCEEDED:
+          "This site already has the maximum of 10 extra databases or users. Delete one you no longer need, then try again.",
+        ALREADY_EXISTS: "This name is already used on this site. Choose another one.",
+        VALIDATION_ERROR:
+          "That name can't be used. Use 1 to 16 lowercase letters, numbers or underscores, starting with a letter or number.",
+        NOT_FOUND:
+          "This database or user no longer exists. The list has been updated. Contact your hosting provider if you need it.",
+        RESOURCE_LOCKED: "Another change is still running. Wait a minute and try again.",
+        DOCKER_ENGINE_UNAVAILABLE:
+          "The databases couldn't be updated right now. Wait a minute and try again.",
+        OPERATION_AMBIGUOUS:
+          "We couldn't confirm the change. The list has been updated: check it before trying again.",
+        NOT_SUPPORTED: "This isn't available on this server. Contact your hosting provider if you need it.",
+        ORGANIZATION_SUSPENDED:
+          "Your account is suspended, so databases cannot be managed. Contact your hosting provider.",
       },
     },
   },

@@ -107,6 +107,7 @@ export const it = {
       overview: "Panoramica",
       domains: "Indirizzi web",
       files: "File",
+      database: "Database",
       logs: "Log",
     },
     status: {
@@ -490,6 +491,135 @@ export const it = {
           ORGANIZATION_SUSPENDED:
             "Il tuo account è sospeso: non è possibile gestire l'accesso SFTP. Contatta il tuo fornitore di hosting.",
         },
+      },
+    },
+    database: {
+      title: "Database",
+      intro:
+        "Il tuo sito conserva i contenuti in un database. Qui puoi aggiungere database e utenti per altri programmi, scegliere quale utente può usare quale database e aprire phpMyAdmin per lavorare sui dati.",
+      prefixNote: "Ogni nome inizia con {prefix}_ così appartiene solo a questo sito.",
+      loadFailed: "Non è stato possibile caricare i database. Attendi un minuto e ricarica la pagina.",
+      unavailable:
+        "Su questo server non è possibile gestire i database. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+      primaryBadge: "Usato dal sito",
+      primaryNote:
+        "Il sito ha bisogno di questo database e del suo utente per funzionare, quindi non puoi eliminarli né modificarli qui.",
+      name: "Nome",
+      actions: "Azioni",
+      databases: {
+        heading: "Database",
+        size: "Dimensione",
+        count: "{count} di {max} database aggiuntivi",
+        empty: "Non hai ancora aggiunto database.",
+        add: "Aggiungi database",
+        limit:
+          "Questo sito ha già il massimo di {max} database aggiuntivi. Eliminane uno che non ti serve più per aggiungerne un altro.",
+        create: {
+          title: "Aggiungi un database",
+          label: "Nome",
+          hint: "Usa da 1 a 16 lettere minuscole, numeri o trattini bassi, iniziando con una lettera o un numero.",
+          preview: "Nome completo: {name}",
+          submit: "Aggiungi database",
+          working: "Aggiunta in corso...",
+        },
+        remove: {
+          action: "Elimina",
+          title: "Eliminare il database {name}?",
+          body: "Tutte le tabelle e i dati di {name} vengono eliminati definitivamente e non si possono recuperare. Gli utenti perdono l'accesso e i programmi che lo usano smettono di funzionare.",
+          confirm: "Elimina database",
+          working: "Eliminazione in corso...",
+        },
+      },
+      users: {
+        heading: "Utenti del database",
+        access: "Può usare",
+        noAccess: "Ancora nessun database",
+        count: "{count} di {max} utenti aggiuntivi",
+        empty: "Non hai ancora aggiunto utenti del database.",
+        add: "Aggiungi utente",
+        limit:
+          "Questo sito ha già il massimo di {max} utenti del database aggiuntivi. Eliminane uno che non ti serve più per aggiungerne un altro.",
+        create: {
+          title: "Aggiungi un utente del database",
+          label: "Nome",
+          hint: "Usa da 1 a 16 lettere minuscole, numeri o trattini bassi, iniziando con una lettera o un numero.",
+          preview: "Nome utente completo: {name}",
+          submit: "Aggiungi utente",
+          working: "Aggiunta in corso...",
+        },
+        created: {
+          title: "Utente aggiunto",
+          tempFor: "Password per {name}:",
+          copy: "Copia",
+          copied: "Copiata",
+          copyUnavailable:
+            "Qui non è possibile copiare. Seleziona la password e copiala a mano.",
+          tempNote:
+            "Usala nel codice del sito insieme al nome utente. Il server del database è lo stesso che usa WordPress (DB_HOST in wp-config.php).",
+          tempOnce: "La mostriamo una sola volta: copiala ora. Se la perdi, crea una nuova password.",
+          done: "Fatto",
+        },
+        reset: {
+          action: "Nuova password",
+          title: "Creare una nuova password per {name}?",
+          body: "La password attuale smette subito di funzionare e le connessioni aperte di questo utente si chiudono immediatamente. Aggiorna tutti i programmi che la usano.",
+          confirm: "Crea nuova password",
+          working: "Creazione in corso...",
+          doneTitle: "Nuova password pronta",
+        },
+        remove: {
+          action: "Elimina",
+          title: "Eliminare l'utente {name}?",
+          body: "{name} non potrà più usare nessun database e le connessioni aperte di questo utente si chiudono immediatamente. I database e i loro dati non vengono toccati.",
+          confirm: "Elimina utente",
+          working: "Eliminazione in corso...",
+        },
+        grants: {
+          action: "Scegli i database",
+          title: "Database che {name} può usare",
+          hint: "{name} ottiene accesso completo a ogni database che selezioni e lo perde su quelli che deselezioni. Rimuovere l'accesso chiude subito le eventuali connessioni aperte di questo utente.",
+          noDatabases: "Aggiungi prima un database.",
+          save: "Salva",
+          working: "Salvataggio in corso...",
+          partial:
+            "Alcune modifiche non sono state salvate. L'elenco ora mostra la situazione attuale.",
+        },
+      },
+      phpmyadmin: {
+        heading: "phpMyAdmin",
+        body: "Apri phpMyAdmin per consultare le tabelle, eseguire query e importare o esportare dati. L'accesso è automatico e vedi solo i database di questo sito.",
+        warning:
+          "Le modifiche fatte in phpMyAdmin hanno effetto subito. Se elimini lì il database del sito, il sito smette di funzionare.",
+        importNote:
+          "phpMyAdmin accetta file fino a 32 MB e il caricamento deve finire entro un minuto. Per un database più grande, comprimi il file (.gz o .zip) o dividilo in parti più piccole.",
+        open: "Apri phpMyAdmin",
+        opening: "Apertura in corso...",
+        unavailable:
+          "phpMyAdmin non è disponibile su questo server. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+        popupBlocked:
+          "Il browser ha bloccato la nuova scheda. Consenti i pop-up per questo pannello e riprova.",
+        downTitle: "phpMyAdmin non è disponibile in questo momento",
+        downBody:
+          "Attendi un minuto e riprova. Se il problema continua, contatta il tuo fornitore di hosting.",
+        backToDatabases: "Torna ai database del sito",
+      },
+      errors: {
+        QUOTA_EXCEEDED:
+          "Questo sito ha già il massimo di 10 database o utenti aggiuntivi. Eliminane uno che non ti serve più e riprova.",
+        ALREADY_EXISTS: "Questo nome è già usato su questo sito. Scegline un altro.",
+        VALIDATION_ERROR:
+          "Questo nome non si può usare. Usa da 1 a 16 lettere minuscole, numeri o trattini bassi, iniziando con una lettera o un numero.",
+        NOT_FOUND:
+          "Questo database o utente non esiste più. L'elenco è stato aggiornato. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+        RESOURCE_LOCKED: "Un'altra modifica è ancora in corso. Attendi un minuto e riprova.",
+        DOCKER_ENGINE_UNAVAILABLE:
+          "Non è stato possibile aggiornare i database. Attendi un minuto e riprova.",
+        OPERATION_AMBIGUOUS:
+          "Non abbiamo potuto confermare la modifica. L'elenco è stato aggiornato: controllalo prima di riprovare.",
+        NOT_SUPPORTED:
+          "Non disponibile su questo server. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+        ORGANIZATION_SUSPENDED:
+          "Il tuo account è sospeso: non è possibile gestire i database. Contatta il tuo fornitore di hosting.",
       },
     },
   },
