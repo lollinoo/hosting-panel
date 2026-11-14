@@ -106,6 +106,7 @@ export const en: Messages = {
     tabs: {
       overview: "Overview",
       domains: "Web addresses",
+      files: "Files",
       logs: "Logs",
     },
     status: {
@@ -244,6 +245,174 @@ export const en: Messages = {
       loading: "Loading...",
       empty: "Nothing to show yet.",
       unavailable: "Logs are not available right now. Try again in a minute.",
+    },
+    files: {
+      rootLabel: "Site files",
+      breadcrumb: "Folder path",
+      loading: "Loading files...",
+      empty: "This folder is empty. Drag files here or choose Upload.",
+      notReady: "Your site is still being set up. Its files will appear here as soon as it is ready.",
+      retry: "Try again",
+      cancel: "Cancel",
+      truncated:
+        "This folder has too many items to show here, so only the first ones are listed. Move some items into subfolders to see them all.",
+      selected: "{count} selected",
+      nameRule: "A name can't be empty, contain / or be just dots.",
+      dropHint: "Drop files here to upload them to this folder",
+      folderUploadHint:
+        "Folders can't be uploaded directly. Compress the folder to a zip on your computer, upload the zip, then choose Unzip.",
+      list: {
+        caption: "Files and folders in {folder}",
+        name: "Name",
+        size: "Size",
+        changed: "Last changed",
+        selectAll: "Select everything in this folder",
+        select: "Select {name}",
+        folder: "Folder",
+        protected: "Protected: managed by the panel",
+        shortcut: "Shortcut: can't be opened here",
+      },
+      actions: {
+        toolbar: "File actions",
+        upload: "Upload",
+        newFolder: "New folder",
+        download: "Download",
+        edit: "Edit",
+        rename: "Rename",
+        move: "Move",
+        compress: "Compress to zip",
+        extract: "Unzip",
+        delete: "Delete",
+        clear: "Clear selection",
+        protectedHint: "Some selected items are protected and can't be changed.",
+      },
+      upload: {
+        title: "Uploads",
+        summary: "{done} of {total} files uploaded",
+        bytes: "{sent} of {total}",
+        waiting: "Waiting",
+        uploading: "Uploading",
+        done: "Uploaded",
+        failed: "Not uploaded",
+        cancelled: "Cancelled",
+        cancelOne: "Cancel upload of {name}",
+        retryOne: "Try again to upload {name}",
+        cancelAll: "Cancel all",
+        dismiss: "Close",
+        largeHint:
+          "Very large files can take a long time to upload, and this page must stay open until they finish.",
+        leaveWarning: "Uploads are still running. Leaving this page stops them.",
+        sessionEnded:
+          "Your session has ended. Sign in again in another tab, then choose Try again: the upload continues where it stopped.",
+        replaceTitle: "Replace existing files?",
+        replaceBody:
+          "These files already exist in this folder: {names}. If you replace them, the current versions are lost.",
+        replace: "Replace",
+        skip: "Skip these files",
+      },
+      newFolder: {
+        title: "New folder",
+        label: "Folder name",
+        submit: "Create folder",
+        working: "Creating...",
+      },
+      rename: {
+        title: "Rename {name}",
+        label: "New name",
+        submit: "Rename",
+        working: "Renaming...",
+        warning: "If your website uses this item, the pages that point to it stop working.",
+      },
+      move: {
+        titleOne: "Move {name}",
+        titleMany: "Move {count} items",
+        choose: "Choose the folder to move to",
+        here: "Move here",
+        working: "Moving...",
+        open: "Open folder {name}",
+        noFolders: "There are no folders here.",
+        intoItself: "A folder can't be moved inside itself. Choose another folder.",
+        sameFolder: "These items are already in this folder. Choose another folder.",
+      },
+      delete: {
+        titleOne: "Delete {name}?",
+        titleMany: "Delete {count} items?",
+        bodyFile:
+          "This file will be deleted for good. There is no undo, and your website may stop working if it uses this file.",
+        bodyFolder:
+          "This folder and everything inside it will be deleted for good. There is no undo, and your website may stop working if it uses these files.",
+        bodyMany:
+          "These {count} items, and everything inside the folders, will be deleted for good. There is no undo, and your website may stop working if it uses them.",
+        confirm: "Delete for good",
+        working: "Deleting...",
+      },
+      compress: {
+        title: "Compress to zip",
+        label: "Name of the zip file",
+        hint: "The zip file is saved in this folder. Your files stay as they are.",
+        defaultName: "archive",
+        submit: "Compress",
+        working:
+          "Compressing... Large folders can take a few minutes. You can keep working on this page.",
+        done: "{name} is ready, with {count} items.",
+      },
+      extract: {
+        title: "Unzip {name}",
+        label: "Unzip into the folder",
+        hint: "We create the folder if it doesn't exist. Leave the box empty to unzip right here. Files that already exist are never replaced.",
+        submit: "Unzip",
+        working: "Unzipping... Large zip files can take a few minutes. You can keep working on this page.",
+        done: "Unzipped {count} items.",
+      },
+      editor: {
+        title: "Edit {name}",
+        label: "Contents of {name}",
+        loading: "Opening the file...",
+        warning: "A mistake here can break your website. If you're not sure, download a copy first.",
+        save: "Save",
+        saving: "Saving...",
+        saved: "Saved.",
+        close: "Close",
+        unsaved: "You have changes that aren't saved.",
+        discard: "Close without saving",
+        keep: "Keep editing",
+        changed: "This file changed somewhere else after you opened it.",
+        saveAnyway: "Save anyway",
+        reload: "Reload file",
+        tooBig:
+          "This file is too big to edit here (over 512 KB). Download it, edit it on your computer and upload it again.",
+        tooBigNow:
+          "The text is now over 512 KB and can't be saved here. Shorten it, or edit the file on your computer.",
+        notText: "This file isn't plain text, so it can't be edited here. You can download it instead.",
+      },
+      errors: {
+        NOT_FOUND:
+          "This file or folder is no longer there. Someone may have moved or deleted it. Refresh the list and try again.",
+        ALREADY_EXISTS: "Something with this name already exists here. Choose another name.",
+        VALIDATION_ERROR:
+          "This name or location can't be used. A name can't contain / or be just dots. Change it and try again.",
+        PERMISSION_DENIED:
+          "This item is protected and can't be changed here. If you need to change it, ask your administrator.",
+        NOT_SUPPORTED: "Files can't be managed on this server yet. Contact your hosting provider.",
+        DOCKER_ENGINE_UNAVAILABLE: "Your site's files can't be reached right now. Wait a minute and try again.",
+        OPERATION_AMBIGUOUS:
+          "We lost the connection before the server answered, so the change may or may not have been made. Refresh the list to check.",
+        OPERATION_INTERRUPTED:
+          "This took too long and was stopped, so it may only be partly done. Refresh the list and try again.",
+        UNAUTHENTICATED: "Your session has ended. Sign in again to continue.",
+        ORGANIZATION_SUSPENDED:
+          "Your account is suspended, so files can be viewed but not changed. Contact your hosting provider.",
+        uploadRead: "We couldn't read this file from your computer. Choose it again.",
+        uploadTooLarge: "This file is over the 2 GB limit. Choose a smaller file or split it first.",
+        quotaUpload:
+          "There isn't enough space on the server for this file. Delete files you no longer need and try again.",
+        quotaZip:
+          "This is too big to compress or unzip here, or there isn't enough space left. Try with fewer items, delete files you no longer need, or extract on your computer and upload the files.",
+        zipValidation:
+          "This isn't a valid zip file or it contains items that aren't allowed. Try creating it again.",
+        zipExists: "A file or folder with that name is already here. Choose another name.",
+        zipInterrupted: "This took too long and was stopped. Try with fewer files.",
+      },
     },
   },
   admin: {
@@ -598,6 +767,7 @@ export const en: Messages = {
     VALIDATION_ERROR: "Some details aren't valid. Check the highlighted fields and try again.",
     INTERNAL_ERROR: "Something went wrong on our side. Please try again in a few minutes.",
     RESOURCE_LOCKED: "This site is finishing another change. Try again in a moment.",
+    ALREADY_EXISTS: "That name is already in use. Choose another one.",
     generic: "Something went wrong. Try again, and contact support if it keeps happening.",
   },
 };

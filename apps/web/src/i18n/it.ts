@@ -106,6 +106,7 @@ export const it = {
     tabs: {
       overview: "Panoramica",
       domains: "Indirizzi web",
+      files: "File",
       logs: "Log",
     },
     status: {
@@ -244,6 +245,175 @@ export const it = {
       loading: "Caricamento...",
       empty: "Non c'è ancora nulla da mostrare.",
       unavailable: "I log non sono disponibili in questo momento. Riprova tra un minuto.",
+    },
+    files: {
+      rootLabel: "File del sito",
+      breadcrumb: "Percorso della cartella",
+      loading: "Caricamento dei file...",
+      empty: "Questa cartella è vuota. Trascina qui i file oppure scegli Carica.",
+      notReady: "Il sito è ancora in preparazione. I suoi file compariranno qui appena sarà pronto.",
+      retry: "Riprova",
+      cancel: "Annulla",
+      truncated:
+        "Questa cartella contiene troppi elementi: ne mostriamo solo i primi. Sposta alcuni elementi in sottocartelle per vederli tutti.",
+      selected: "{count} selezionati",
+      nameRule: "Il nome non può essere vuoto, contenere / o essere composto solo da punti.",
+      dropHint: "Rilascia qui i file per caricarli in questa cartella",
+      folderUploadHint:
+        "Le cartelle non si possono caricare direttamente. Comprimi la cartella in uno zip sul tuo computer, carica lo zip e poi scegli Estrai.",
+      list: {
+        caption: "File e cartelle in {folder}",
+        name: "Nome",
+        size: "Dimensione",
+        changed: "Ultima modifica",
+        selectAll: "Seleziona tutto in questa cartella",
+        select: "Seleziona {name}",
+        folder: "Cartella",
+        protected: "Protetto: gestito dal pannello",
+        shortcut: "Collegamento: non si può aprire da qui",
+      },
+      actions: {
+        toolbar: "Azioni sui file",
+        upload: "Carica",
+        newFolder: "Nuova cartella",
+        download: "Scarica",
+        edit: "Modifica",
+        rename: "Rinomina",
+        move: "Sposta",
+        compress: "Comprimi in zip",
+        extract: "Estrai",
+        delete: "Elimina",
+        clear: "Annulla selezione",
+        protectedHint: "Alcuni elementi selezionati sono protetti e non si possono modificare.",
+      },
+      upload: {
+        title: "Caricamenti",
+        summary: "{done} di {total} file caricati",
+        bytes: "{sent} di {total}",
+        waiting: "In attesa",
+        uploading: "Caricamento in corso",
+        done: "Caricato",
+        failed: "Non caricato",
+        cancelled: "Annullato",
+        cancelOne: "Annulla il caricamento di {name}",
+        retryOne: "Riprova a caricare {name}",
+        cancelAll: "Annulla tutti",
+        dismiss: "Chiudi",
+        largeHint:
+          "I file molto grandi possono richiedere molto tempo per il caricamento e questa pagina deve restare aperta fino al termine.",
+        leaveWarning: "Ci sono caricamenti in corso. Se lasci questa pagina verranno interrotti.",
+        sessionEnded:
+          "La sessione è scaduta. Accedi di nuovo in un'altra scheda, poi scegli Riprova: il caricamento riparte da dove si era fermato.",
+        replaceTitle: "Sostituire i file esistenti?",
+        replaceBody:
+          "Questi file esistono già in questa cartella: {names}. Se li sostituisci, le versioni attuali andranno perse.",
+        replace: "Sostituisci",
+        skip: "Salta questi file",
+      },
+      newFolder: {
+        title: "Nuova cartella",
+        label: "Nome della cartella",
+        submit: "Crea cartella",
+        working: "Creazione in corso...",
+      },
+      rename: {
+        title: "Rinomina {name}",
+        label: "Nuovo nome",
+        submit: "Rinomina",
+        working: "Rinomina in corso...",
+        warning: "Se il sito usa questo elemento, le pagine che lo richiamano smetteranno di funzionare.",
+      },
+      move: {
+        titleOne: "Sposta {name}",
+        titleMany: "Sposta {count} elementi",
+        choose: "Scegli la cartella di destinazione",
+        here: "Sposta qui",
+        working: "Spostamento in corso...",
+        open: "Apri la cartella {name}",
+        noFolders: "Qui non ci sono cartelle.",
+        intoItself: "Una cartella non può essere spostata dentro sé stessa. Scegli un'altra cartella.",
+        sameFolder: "Questi elementi sono già in questa cartella. Scegline un'altra.",
+      },
+      delete: {
+        titleOne: "Eliminare {name}?",
+        titleMany: "Eliminare {count} elementi?",
+        bodyFile:
+          "Il file verrà eliminato definitivamente. Non si può annullare e il sito potrebbe smettere di funzionare se usa questo file.",
+        bodyFolder:
+          "La cartella e tutto il suo contenuto verranno eliminati definitivamente. Non si può annullare e il sito potrebbe smettere di funzionare se usa questi file.",
+        bodyMany:
+          "Questi {count} elementi, con tutto il contenuto delle cartelle, verranno eliminati definitivamente. Non si può annullare e il sito potrebbe smettere di funzionare se li usa.",
+        confirm: "Elimina definitivamente",
+        working: "Eliminazione in corso...",
+      },
+      compress: {
+        title: "Comprimi in zip",
+        label: "Nome del file zip",
+        hint: "Il file zip viene salvato in questa cartella. I tuoi file restano come sono.",
+        defaultName: "archivio",
+        submit: "Comprimi",
+        working:
+          "Compressione in corso... Le cartelle grandi possono richiedere qualche minuto. Puoi continuare a usare questa pagina.",
+        done: "{name} è pronto, con {count} elementi.",
+      },
+      extract: {
+        title: "Estrai {name}",
+        label: "Estrai nella cartella",
+        hint: "Se la cartella non esiste la creiamo. Lascia il campo vuoto per estrarre qui. I file già presenti non vengono mai sostituiti.",
+        submit: "Estrai",
+        working:
+          "Estrazione in corso... Gli zip grandi possono richiedere qualche minuto. Puoi continuare a usare questa pagina.",
+        done: "Estratti {count} elementi.",
+      },
+      editor: {
+        title: "Modifica {name}",
+        label: "Contenuto di {name}",
+        loading: "Apertura del file...",
+        warning: "Un errore qui può bloccare il sito. Se non sei sicuro, scarica prima una copia.",
+        save: "Salva",
+        saving: "Salvataggio in corso...",
+        saved: "Salvato.",
+        close: "Chiudi",
+        unsaved: "Hai modifiche non salvate.",
+        discard: "Chiudi senza salvare",
+        keep: "Continua a modificare",
+        changed: "Questo file è stato modificato altrove dopo che lo hai aperto.",
+        saveAnyway: "Salva comunque",
+        reload: "Ricarica il file",
+        tooBig:
+          "Questo file è troppo grande per modificarlo qui (oltre 512 KB). Scaricalo, modificalo sul tuo computer e caricalo di nuovo.",
+        tooBigNow:
+          "Il testo ora supera 512 KB e non si può salvare qui. Accorcialo oppure modifica il file sul tuo computer.",
+        notText: "Questo file non è testo semplice, quindi non si può modificare qui. Puoi invece scaricarlo.",
+      },
+      errors: {
+        NOT_FOUND:
+          "Questo file o cartella non c'è più: forse è stato spostato o eliminato. Aggiorna l'elenco e riprova.",
+        ALREADY_EXISTS: "Qui esiste già un elemento con questo nome. Scegli un altro nome.",
+        VALIDATION_ERROR:
+          "Questo nome o percorso non si può usare. Il nome non può contenere / o essere composto solo da punti. Correggilo e riprova.",
+        PERMISSION_DENIED:
+          "Questo elemento è protetto e non si può modificare da qui. Se devi cambiarlo, chiedi al tuo amministratore.",
+        NOT_SUPPORTED: "Su questo server la gestione dei file non è ancora disponibile. Contatta il tuo fornitore di hosting.",
+        DOCKER_ENGINE_UNAVAILABLE: "Al momento i file del sito non sono raggiungibili. Attendi un minuto e riprova.",
+        OPERATION_AMBIGUOUS:
+          "Abbiamo perso la connessione prima della risposta del server: la modifica potrebbe essere stata fatta oppure no. Aggiorna l'elenco per controllare.",
+        OPERATION_INTERRUPTED:
+          "L'operazione ha richiesto troppo tempo ed è stata interrotta: potrebbe essere stata completata solo in parte. Aggiorna l'elenco e riprova.",
+        UNAUTHENTICATED: "La sessione è scaduta. Accedi di nuovo per continuare.",
+        ORGANIZATION_SUSPENDED:
+          "Il tuo account è sospeso: puoi vedere i file ma non modificarli. Contatta il tuo fornitore di hosting.",
+        uploadRead: "Non è stato possibile leggere questo file dal tuo computer. Scegli di nuovo il file.",
+        uploadTooLarge: "Questo file supera il limite di 2 GB. Scegli un file più piccolo o dividilo prima di caricarlo.",
+        quotaUpload:
+          "Sul server non c'è abbastanza spazio per questo file. Elimina i file che non ti servono più e riprova.",
+        quotaZip:
+          "È troppo grande per comprimerlo o estrarlo qui, oppure lo spazio non basta. Prova con meno elementi, elimina i file che non ti servono più oppure estrai sul tuo computer e carica i file.",
+        zipValidation:
+          "Questo file non è un archivio zip valido oppure contiene elementi non consentiti. Prova a crearlo di nuovo.",
+        zipExists: "Qui esiste già un file o una cartella con questo nome. Scegli un altro nome.",
+        zipInterrupted: "L'operazione ha richiesto troppo tempo ed è stata interrotta. Prova con meno file.",
+      },
     },
   },
   admin: {
@@ -599,6 +769,7 @@ export const it = {
     VALIDATION_ERROR: "Alcuni dati non sono validi. Controlla i campi evidenziati e riprova.",
     INTERNAL_ERROR: "Qualcosa è andato storto da parte nostra. Riprova tra qualche minuto.",
     RESOURCE_LOCKED: "Il sito sta completando un'altra modifica. Riprova tra qualche istante.",
+    ALREADY_EXISTS: "Questo nome è già in uso. Scegline un altro.",
     generic: "Si è verificato un errore. Riprova; se il problema continua contatta l'assistenza.",
   },
 } as const;
