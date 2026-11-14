@@ -18,6 +18,7 @@ import {
   listEncryptedSecretsMetadata,
   listHostAgentHeartbeats,
   markExpiredOperationsUnknownTransactional,
+  outboxEvents,
   recordObservedStateReconciliationTransactional,
   resolveDecryptedSecretRefs,
   schemaMigrations,
@@ -569,5 +570,97 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       .from(auditEvents)
       .where(eq(auditEvents.targetId, DEMO_IDS.services.betaPortalNode));
     expect(allAudits.some((a) => a.action === "service.drift.detected")).toBe(true);
+  });
+
+  it("7. claimPendingOutboxEvents filters by operation kind without claiming other lanes", async () => {
+    const fileKinds = ["site.files.archive", "site.files.extract"] as const;
+
+    const opArchive = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.files.archive",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeShop,
+      idempotencyKey: "idem-claim-filter-arch-1",
+      lockKey: "site:claim-filter-1",
+      outboxPayload: { op: "archive", paths: ["index.php"], to: "out.zip" },
+    });
+    const opExtract = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.files.extract",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeBlog,
+      idempotencyKey: "idem-claim-filter-ext-1",
+      lockKey: "site:claim-filter-2",
+      outboxPayload: { op: "extract", path: "out.zip", to: "dest" },
+    });
+    const opMain = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.beta,
+      kind: "site.provision",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.betaPortal,
+      idempotencyKey: "idem-claim-filter-main-1",
+      lockKey: "site:claim-filter-3",
+    });
+
+    // includeKinds claims only archive/extract and leaves site.provision pending
+    const fileClaimed = await claimPendingOutboxEvents(client.db, 10, 60_000, {
+      includeKinds: fileKinds,
+    });
+    expect(fileClaimed.map((e) => e.id)).toEqual([
+      opArchive.outbox!.id,
+      opExtract.outbox!.id,
+    ]);
+    const [mainPending] = await client.db
+      .select()
+      .from(outboxEvents)
+      .where(eq(outboxEvents.id, opMain.outbox!.id));
+    expect(mainPending?.status).toBe("pending");
+
+    // excludeKinds now claims the remaining site.provision event (and any earlier non-file rows)
+    const mainClaimed = await claimPendingOutboxEvents(client.db, 50, 60_000, {
+      excludeKinds: fileKinds,
+    });
+    expect(mainClaimed.map((e) => e.id)).toContain(opMain.outbox!.id);
+    expect(mainClaimed.map((e) => e.id)).not.toContain(opArchive.outbox!.id);
+    expect(mainClaimed.map((e) => e.id)).not.toContain(opExtract.outbox!.id);
+
+    // Reverse order: excludeKinds claims main work first and leaves file jobs pending
+    const opArchive2 = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.files.archive",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeShop,
+      idempotencyKey: "idem-claim-filter-arch-2",
+      lockKey: "site:claim-filter-4",
+      outboxPayload: { op: "archive", paths: ["index.php"], to: "out2.zip" },
+    });
+    const opDomains2 = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.beta,
+      kind: "site.domains",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.betaPortal,
+      idempotencyKey: "idem-claim-filter-dom-2",
+      lockKey: "site:claim-filter-5",
+    });
+
+    const mainFirst = await claimPendingOutboxEvents(client.db, 50, 60_000, {
+      excludeKinds: fileKinds,
+    });
+    expect(mainFirst.map((e) => e.id)).toEqual([opDomains2.outbox!.id]);
+    const [arch2Pending] = await client.db
+      .select()
+      .from(outboxEvents)
+      .where(eq(outboxEvents.id, opArchive2.outbox!.id));
+    expect(arch2Pending?.status).toBe("pending");
+
+    const fileAfter = await claimPendingOutboxEvents(client.db, 10, 60_000, {
+      includeKinds: fileKinds,
+    });
+    expect(fileAfter.map((e) => e.id)).toEqual([opArchive2.outbox!.id]);
+
+    for (const enq of [opArchive, opExtract, opMain, opArchive2, opDomains2]) {
+      await completeOutboxEvent(client.db, enq.outbox!.id);
+      await transitionOperation(client.db, enq.operation.id, "cancelled");
+    }
   });
 });
