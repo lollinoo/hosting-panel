@@ -1,4 +1,10 @@
-import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomBytes,
+} from "node:crypto";
 import { chmod, lstat, mkdir, open, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -409,33 +415,41 @@ export function sshFingerprint(pubLine: string): string {
   return `SHA256:${digest}`;
 }
 
+function invalidOpenSshPrivateKeyError(): ExecutorCodedError {
+  return new ExecutorCodedError("Invalid OpenSSH host private key", "HOST_POLICY_DENIED");
+}
+
 function readSshWireString(
   buf: Buffer,
   offset: number,
 ): { readonly value: Buffer; readonly next: number } {
-  if (offset + 4 > buf.length) {
-    throw new ExecutorCodedError("Invalid OpenSSH host private key", "HOST_POLICY_DENIED");
+  if (offset < 0 || offset + 4 > buf.length) {
+    throw invalidOpenSshPrivateKeyError();
   }
   const len = buf.readUInt32BE(offset);
   const next = offset + 4 + len;
   if (next > buf.length) {
-    throw new ExecutorCodedError("Invalid OpenSSH host private key", "HOST_POLICY_DENIED");
+    throw invalidOpenSshPrivateKeyError();
   }
   return { value: buf.subarray(offset + 4, next), next };
 }
 
-function publicKeyLineFromOpenSshPrivateKey(pem: string): string {
+export function publicKeyLineFromOpenSshPrivateKey(pem: string): string {
   const match =
     /^-----BEGIN OPENSSH PRIVATE KEY-----\r?\n([\s\S]+?)\r?\n-----END OPENSSH PRIVATE KEY-----$/.exec(
       pem.trim(),
     );
   if (!match?.[1]) {
-    throw new ExecutorCodedError("Invalid OpenSSH host private key", "HOST_POLICY_DENIED");
+    throw invalidOpenSshPrivateKeyError();
   }
-  const body = Buffer.from(match[1].replace(/\s+/g, ""), "base64");
+  const b64 = match[1].replace(/\s+/g, "");
+  if (b64.length === 0 || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  const body = Buffer.from(b64, "base64");
   const magic = Buffer.from("openssh-key-v1\0", "ascii");
   if (body.length < magic.length || !body.subarray(0, magic.length).equals(magic)) {
-    throw new ExecutorCodedError("Invalid OpenSSH host private key", "HOST_POLICY_DENIED");
+    throw invalidOpenSshPrivateKeyError();
   }
   let offset = magic.length;
   const cipher = readSshWireString(body, offset);
@@ -454,25 +468,85 @@ function publicKeyLineFromOpenSshPrivateKey(pem: string): string {
       "HOST_POLICY_DENIED",
     );
   }
+  if (kdfOptions.value.length !== 0) {
+    throw invalidOpenSshPrivateKeyError();
+  }
   const keyCount = body.readUInt32BE(offset);
   offset += 4;
   if (keyCount < 1) {
     throw new ExecutorCodedError("SFTP host private key contains no keys", "HOST_POLICY_DENIED");
   }
+  if (keyCount !== 1) {
+    throw invalidOpenSshPrivateKeyError();
+  }
   const pubEntry = readSshWireString(body, offset);
   const pubBlob = pubEntry.value;
   const privEntry = readSshWireString(body, pubEntry.next);
-  if (
-    privEntry.value.length < 8 ||
-    !privEntry.value.subarray(0, 4).equals(privEntry.value.subarray(4, 8))
-  ) {
-    throw new ExecutorCodedError("Invalid OpenSSH host private key", "HOST_POLICY_DENIED");
+  if (privEntry.next !== body.length) {
+    throw invalidOpenSshPrivateKeyError();
   }
+
   const keyTypeBuf = readSshWireString(pubBlob, 0);
   const keyType = keyTypeBuf.value.toString("ascii");
   if (keyType !== "ssh-ed25519" || pubBlob.length <= keyTypeBuf.next) {
     throw new ExecutorCodedError("Invalid SFTP host public key blob", "HOST_POLICY_DENIED");
   }
+  const outerPubBuf = readSshWireString(pubBlob, keyTypeBuf.next);
+  if (outerPubBuf.value.length !== 32 || outerPubBuf.next !== pubBlob.length) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+
+  const priv = privEntry.value;
+  if (priv.length < 8 || !priv.subarray(0, 4).equals(priv.subarray(4, 8))) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  const privType = readSshWireString(priv, 8);
+  if (privType.value.toString("ascii") !== keyType) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  const privPub = readSshWireString(priv, privType.next);
+  if (privPub.value.length !== 32 || !privPub.value.equals(outerPubBuf.value)) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  const privSecret = readSshWireString(priv, privPub.next);
+  if (
+    privSecret.value.length !== 64 ||
+    !privSecret.value.subarray(32, 64).equals(privPub.value)
+  ) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  const privComment = readSshWireString(priv, privSecret.next);
+  const padLen = priv.length - privComment.next;
+  if (priv.length % 8 !== 0 || padLen >= 8) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  for (let i = 0; i < padLen; i += 1) {
+    if (priv[privComment.next + i] !== i + 1) {
+      throw invalidOpenSshPrivateKeyError();
+    }
+  }
+
+  const seed32 = privSecret.value.subarray(0, 32);
+  const expectedPubB64Url = privPub.value.toString("base64url");
+  let derivedPubB64Url: string | undefined;
+  try {
+    const privateKey = createPrivateKey({
+      key: {
+        kty: "OKP",
+        crv: "Ed25519",
+        d: seed32.toString("base64url"),
+        x: expectedPubB64Url,
+      },
+      format: "jwk",
+    });
+    derivedPubB64Url = createPublicKey(privateKey).export({ format: "jwk" }).x;
+  } catch {
+    throw invalidOpenSshPrivateKeyError();
+  }
+  if (derivedPubB64Url !== expectedPubB64Url) {
+    throw invalidOpenSshPrivateKeyError();
+  }
+
   return `${keyType} ${pubBlob.toString("base64")} hp_sftp\n`;
 }
 
@@ -658,13 +732,23 @@ export async function prepareSftpStatePlan(
   const keyExists = Boolean(keyStat?.isFile());
   let derivedPublicKeyLine: string | null = null;
   if (keyExists) {
-    let privateKeyPem: string;
-    try {
-      privateKeyPem = await readFile(keyPath, "utf8");
-    } catch {
-      throw new ExecutorCodedError("Failed to read SFTP host private key", "HOST_POLICY_DENIED");
+    if (validUsers.length > 0) {
+      let privateKeyPem: string;
+      try {
+        privateKeyPem = await readFile(keyPath, "utf8");
+      } catch {
+        throw new ExecutorCodedError("Failed to read SFTP host private key", "HOST_POLICY_DENIED");
+      }
+      derivedPublicKeyLine = publicKeyLineFromOpenSshPrivateKey(privateKeyPem);
+    } else {
+      // On the no-user path, a damaged or unreadable host key must not block removing the container or emptying user files.
+      try {
+        const privateKeyPem = await readFile(keyPath, "utf8");
+        derivedPublicKeyLine = publicKeyLineFromOpenSshPrivateKey(privateKeyPem);
+      } catch {
+        derivedPublicKeyLine = null;
+      }
     }
-    derivedPublicKeyLine = publicKeyLineFromOpenSshPrivateKey(privateKeyPem);
   }
   const pubFile = await inspectRegularFile(pubPath);
   const existingPub = pubFile ? pubFile.buffer.toString("utf8") : null;
@@ -777,16 +861,18 @@ export async function commitSftpStatePlan(
       await chmod(sshdConfigPath, 0o444);
     }
 
-    if (plan.keyExists && plan.derivedPublicKeyLine !== null) {
-      publicKeyLine = plan.derivedPublicKeyLine;
-      if (!plan.pubReady) {
-        await writeFileAtomically(pubPath, publicKeyLine, 0o444, 0o755);
-      } else if (plan.pubMode !== 0o444) {
-        await chmod(pubPath, 0o444);
-      }
-      const keyStat = await lstat(keyPath);
-      if ((keyStat.mode & 0o777) !== 0o444) {
-        await chmod(keyPath, 0o444);
+    if (plan.keyExists) {
+      if (plan.derivedPublicKeyLine !== null) {
+        publicKeyLine = plan.derivedPublicKeyLine;
+        if (!plan.pubReady) {
+          await writeFileAtomically(pubPath, publicKeyLine, 0o444, 0o755);
+        } else if (plan.pubMode !== 0o444) {
+          await chmod(pubPath, 0o444);
+        }
+        const keyStat = await lstat(keyPath);
+        if ((keyStat.mode & 0o777) !== 0o444) {
+          await chmod(keyPath, 0o444);
+        }
       }
     } else {
       const generated = generateEd25519HostKey();
