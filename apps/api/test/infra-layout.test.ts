@@ -195,9 +195,10 @@ describe("release workflow and docs", () => {
 
   it("m1a file manager docs are consistent", () => {
     const readme = read("README.md");
-    for (const s of ["Web File Manager dei Siti", "sftpAvailable: false", "ADR-0019"]) {
+    for (const s of ["Web File Manager dei Siti", "ADR-0019"]) {
       expect(readme).toContain(s);
     }
+    expect(readme).not.toContain("sftpAvailable: false");
     const api = read("docs/api/openapi.yaml");
     for (const s of [
       "/v1/organizations/{orgId}/managed-sites/{siteId}/files",
@@ -217,6 +218,32 @@ describe("release workflow and docs", () => {
     }
     const adr = read("docs/architecture/adr/0019-site-file-manager.md");
     for (const s of ["hp_files_", "512 KiB", "2 GiB", "site.files.archive"]) {
+      expect(adr).toContain(s);
+    }
+    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+  });
+
+  it("m1b site sftp docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["Accesso SFTP per Sito", "sftpAvailable: true", "ADR-0020"]) {
+      expect(readme).toContain(s);
+    }
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/sftp:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/sftp/users:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/sftp/users/{userId}/reset-password:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/sftp/users/{userId}:",
+      "site.sftp.manage",
+      "CreateSiteSftpUserRequest",
+      "SiteSftpDto",
+      "SiteSftpUserCreatedDto",
+      "SiteSftpPasswordResetDto",
+    ]) {
+      expect(api).toContain(s);
+    }
+    const adr = read("docs/architecture/adr/0020-site-sftp.md");
+    for (const s of ["hp_sftp", "2222", "site.sftp.manage", "/var/lib/hosting-panel/sftp"]) {
       expect(adr).toContain(s);
     }
     expect(JSON.parse(read("package.json")).version).toBe("0.5.0");

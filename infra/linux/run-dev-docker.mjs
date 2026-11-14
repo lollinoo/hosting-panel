@@ -23,6 +23,7 @@ const RUNTIME_DIR = process.env["HP_LIVE_DIR"]?.trim() || "/tmp/hp-live";
 const SOCKETS_DIR = path.join(RUNTIME_DIR, "sockets");
 const SECRETS_DIR = path.join(RUNTIME_DIR, "secrets");
 const INGRESS_DIR = path.join(RUNTIME_DIR, "ingress");
+const SFTP_STATE_DIR = path.join(RUNTIME_DIR, "sftp");
 
 const IPC_KEY_FILE = path.join(RUNTIME_DIR, "ipc.key");
 const MASTER_KEY_FILE = path.join(RUNTIME_DIR, "secrets-master.key");
@@ -36,6 +37,7 @@ const HOST_AGENT_SOCK = path.join(SOCKETS_DIR, "host-agent.sock");
 const API_PORT = process.env["API_PORT"]?.trim() || "4000";
 const WEB_PORT = process.env["WEB_PORT"]?.trim() || "3000";
 const INGRESS_HTTP_PORT = process.env["HP_INGRESS_HTTP_PORT"]?.trim() || "18080";
+const SFTP_PORT = process.env["HP_SFTP_PORT"]?.trim() || "2222";
 
 /** Dev-only temporary RSA key (PKCS#8) for the API JWT signing key; reused while the file exists. */
 async function ensureJwtKeyFile(filePath) {
@@ -119,6 +121,8 @@ async function main() {
   await mkdir(SOCKETS_DIR, { recursive: true, mode: 0o700 });
   await mkdir(SECRETS_DIR, { recursive: true, mode: 0o700 });
   await chmod(SECRETS_DIR, 0o700);
+  await mkdir(SFTP_STATE_DIR, { recursive: true, mode: 0o700 });
+  await chmod(SFTP_STATE_DIR, 0o700);
 
   const ingressStaticDir = path.join(INGRESS_DIR, "static");
   const ingressDynamicDir = path.join(INGRESS_DIR, "dynamic");
@@ -182,6 +186,8 @@ async function main() {
     `export HP_SECRETS_ROOT_DIR="${SECRETS_DIR}"`,
     `export HP_INGRESS_ROOT_DIR="${INGRESS_DIR}"`,
     `export HP_INGRESS_HTTP_PORT="${INGRESS_HTTP_PORT}"`,
+    `export HP_SFTP_STATE_DIR="${SFTP_STATE_DIR}"`,
+    `export HP_SFTP_PORT="${SFTP_PORT}"`,
     `export HP_NFTABLES_RULESET_PATH="${nftablesRulesetPath}"`,
     "",
   ].join("\n");
@@ -205,6 +211,8 @@ async function main() {
     HP_SECRETS_ROOT_DIR: SECRETS_DIR,
     HP_INGRESS_ROOT_DIR: INGRESS_DIR,
     HP_INGRESS_HTTP_PORT: INGRESS_HTTP_PORT,
+    HP_SFTP_STATE_DIR: SFTP_STATE_DIR,
+    HP_SFTP_PORT: SFTP_PORT,
     HP_NFTABLES_RULESET_PATH: nftablesRulesetPath,
     API_HOST: "127.0.0.1",
     API_PORT,
@@ -277,7 +285,7 @@ async function main() {
   );
 
   console.log(
-    `[dev:docker] Stack starting -> Web UI: http://127.0.0.1:${WEB_PORT} | API: http://127.0.0.1:${API_PORT} | Traefik HTTP: :${INGRESS_HTTP_PORT} (Ctrl+C to stop)`,
+    `[dev:docker] Stack starting -> Web UI: http://127.0.0.1:${WEB_PORT} | API: http://127.0.0.1:${API_PORT} | Traefik HTTP: :${INGRESS_HTTP_PORT} | SFTP: :${SFTP_PORT} (Ctrl+C to stop)`,
   );
 }
 

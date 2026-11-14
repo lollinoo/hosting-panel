@@ -525,7 +525,7 @@ SQL
   local nft_src="${ROOT}/current/infra/linux/nftables-dedicated.conf" nft_dst=/etc/nftables.d/hosting-panel.nft
   local include_line="include \"${nft_dst}\""
   if ((skip_firewall)); then
-    info "skip: --skip-firewall given; manage the firewall yourself (allow 22/80/443, and 3000 from docker bridges only)"
+    info "skip: --skip-firewall given; manage the firewall yourself (allow 22/80/443/2222, and 3000 from docker bridges only)"
   elif ((dry_run)); then
     plan "would apply nft -f ${nft_src}, install it as ${nft_dst}, add '${include_line}' to /etc/nftables.conf if missing, enable nftables.service"
     local ufw_on="${HP_UFW_ACTIVE-}"
@@ -624,6 +624,8 @@ EOF
 
  DNS:    create an A record   ${hostname}.  A  ${ipv4}
          The Let's Encrypt certificate is obtained automatically once it resolves.
+
+ SFTP:   SFTP for sites listens on TCP 2222; open it in your provider firewall if you use one.
 EOF
   if [[ -n "${totp_secret}" ]]; then
     cat <<EOF
