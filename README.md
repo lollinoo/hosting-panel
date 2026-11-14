@@ -49,7 +49,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Quote Disco per Volumi Condivisi (`ADR-011`)** | ❌ **`OPEN — prima di Shared`** | Differito a `HCP-SPEC-007` (`AC-F2-10`) |
 | **Emissione / Rinnovo Certificati ACME/TLS Automatici** | ✅ **Operativo** | `acmeTlsRuntimeAvailable: true` su `linux-systemd` (`ADR-0017`, `AC-F2-10`) |
 | **Web File Manager dei Siti** | ✅ **Operativo** | Helper isolato per sito, chunk 512 KiB, zip/unzip asincroni (`ADR-0019`, `AC-F2-10`) |
-| **Server SFTP Chroot** | ❌ **Chiuso (`false`)** | `sftpAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
+| **Accesso SFTP per Sito (Chroot)** | ✅ **Operativo** | `sftpAvailable: true` su `linux-systemd`, contenitore `hp_sftp` porta TCP `2222` (`ADR-0020`, `AC-F2-10`) |
 | **Backup Incrementali S3 di Produzione & DB Gestiti** | ❌ **Chiuso (`false`)** | `productionBackupRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
@@ -191,9 +191,15 @@ Dettagli e limiti: [ADR 0018](docs/architecture/adr/0018-outgoing-mail-relay.md)
 
 ### File manager dei siti
 
-Dalla scheda **File** del sito i clienti navigano le directory, caricano e scaricano file (a chunk base64 fino a 512 KiB ciascuno, fino a 2 GiB per file), modificano file di testo, creano cartelle, spostano/rinominano, eliminano ed eseguono archiviazione ed estrazione `.zip` asincrone (`202 Accepted` con `Idempotency-Key`). Le operazioni girano in un helper isolato per sito (`hp_files_<id>`) senza rete e con filesystem root in sola lettura, senza toccare il container del sito. Voci protette: `wp-content/mu-plugins/hp-mail.php` e cartelle antenate. L'accesso SFTP (`sftpAvailable: false`) non è ancora disponibile.
+Dalla scheda **File** del sito i clienti navigano le directory, caricano e scaricano file (a chunk base64 fino a 512 KiB ciascuno, fino a 2 GiB per file), modificano file di testo, creano cartelle, spostano/rinominano, eliminano ed eseguono archiviazione ed estrazione `.zip` asincrone (`202 Accepted` con `Idempotency-Key`). Le operazioni girano in un helper isolato per sito (`hp_files_<id>`) senza rete e con filesystem root in sola lettura, senza toccare il container del sito. Voci protette: `wp-content/mu-plugins/hp-mail.php` e cartelle antenate.
 
 Dettagli e limiti: [ADR 0019](docs/architecture/adr/0019-site-file-manager.md).
+
+### Accesso SFTP dei siti
+
+Su runtime `linux-systemd` (`sftpAvailable: true`), i clienti con permesso `site.sftp.manage` gestiscono utenti SFTP per sito (fino a `10` per sito) dal link **SFTP** nella scheda **File**: password temporanee mostrate una sola volta (hash `$6$` in DB e su `/etc/shadow` bindato), nessuna shell, nessun forwarding e chroot sul volume del sito (`/files`). Un unico contenitore di piattaforma isolato (`hp_sftp`, immagine digest-pinned `linuxserver/openssh-server`, porta TCP `2222` su `HP_SFTP_PORT`, solo IPv4) serve tutti i siti senza toccare i container WordPress (`CP-01`). Aprire TCP `2222` nell'eventuale firewall del provider cloud; il comportamento su server Docker/VM reale è verificato a tempo di installazione e collaudo.
+
+Dettagli e limiti: [ADR 0020](docs/architecture/adr/0020-site-sftp.md).
 
 #### Aggiornamento
 
@@ -255,6 +261,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0019`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti).
+- [Registro delle ADR (`ADR 0001..0020`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

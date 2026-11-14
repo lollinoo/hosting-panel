@@ -9,8 +9,9 @@ info:
     host placement and quota reservations, immutable stack revisions, write-only
     AES-256-GCM encrypted secrets, transactional outbox lifecycle operations over
     signed Unix Domain Socket IPC (`docker-executor` and `host-agent`), `unknown`
-    crash recovery, and observe-only drift reconciliation. Shared hosting, ACME
-    TLS, SFTP, and production backups remain gated (`false`).
+    crash recovery, and observe-only drift reconciliation. Shared hosting and
+    production backups remain gated (`false`); ACME TLS and site SFTP are
+    available when `runtimeBackend` is `linux-systemd`.
 servers:
   - url: http://127.0.0.1:4000
     description: Local embedded control-plane development server
@@ -2827,6 +2828,175 @@ paths:
           description: Runtime execution disabled (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/sftp:
+    get:
+      tags: [Managed Sites]
+      operationId: getSiteSftp
+      summary: Get site SFTP connection details and users (site.sftp.manage)
+      description: >-
+        Returns SFTP availability, host IP, published TCP port, Ed25519 host key
+        fingerprint, and the site's SFTP users (`passwordChangedAt`, never hashes).
+        `available` is `true` only when `runtimeBackend` is `linux-systemd`; when SFTP
+        is not available on this server (`available: false`), `host`, `port`, and
+        `hostKeyFingerprint` are all `null` and `users` is empty. If SFTP is available
+        and executor status lookup fails, `port` and `hostKeyFingerprint` fall back to
+        `null` without failing the request.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: SFTP connection details and user list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteSftpDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.sftp.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/sftp/users:
+    post:
+      tags: [Managed Sites]
+      operationId: createSiteSftpUser
+      summary: Create an SFTP user for a site (site.sftp.manage)
+      description: >-
+        Creates a site-confined password-only SFTP user (`username = s<sha256(siteId)[0..8]>_<name>`).
+        Enforces at most 10 SFTP users per site (`SITE_SFTP_MAX_USERS`). Returns `temporaryPassword`
+        once; only its `$6$` SHA-512 crypt hash is stored and synced to `hp_sftp`.
+        Rolls back the database insert if executor application fails.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteSftpUserRequest"
+      responses:
+        "201":
+          description: Created user and one-time temporary password
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteSftpUserCreatedDto"
+        "400":
+          description: Invalid `name` (`VALIDATION_ERROR`; `invalid_name`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.sftp.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Username already exists (`ALREADY_EXISTS`), per-site 10-user quota reached
+            (`QUOTA_EXCEEDED`), or site is being set up or deleted (`RESOURCE_LOCKED`; reason `not_ready`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: SFTP unavailable on the active runtime backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            Executor or `hp_sftp` container unavailable, or the SFTP queue was busy for
+            more than a few seconds; database write rolled back (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/sftp/users/{userId}/reset-password:
+    post:
+      tags: [Managed Sites]
+      operationId: resetSiteSftpUserPassword
+      summary: Reset an SFTP user's password (site.sftp.manage)
+      description: >-
+        Generates a new one-time `temporaryPassword`, updates the `$6$` hash in place,
+        and pushes the updated desired state to `hp_sftp`. Restores the previous hash if
+        executor application fails.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/UserIdParam"
+      responses:
+        "200":
+          description: New one-time temporary password
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteSftpPasswordResetDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.sftp.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or SFTP user not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Site is being set up or deleted (`RESOURCE_LOCKED`; reason `not_ready`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: SFTP unavailable on the active runtime backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            Executor or `hp_sftp` container unavailable, or the SFTP queue was busy for
+            more than a few seconds; database hash restored (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/sftp/users/{userId}:
+    delete:
+      tags: [Managed Sites]
+      operationId: deleteSiteSftpUser
+      summary: Delete an SFTP user from a site (site.sftp.manage)
+      description: >-
+        Deletes the SFTP user row and applies the updated desired state to `hp_sftp`.
+        If this was the site's last SFTP user, `hp_sftp` is recreated without that site's
+        volume (or removed if no users remain anywhere). Restores the user row if executor
+        application fails.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/UserIdParam"
+      responses:
+        "204":
+          description: SFTP user deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.sftp.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or SFTP user not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: SFTP unavailable on the active runtime backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            Executor or `hp_sftp` container unavailable, or the SFTP queue was busy for
+            more than a few seconds; user row restored (`DOCKER_ENGINE_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/sites:
     get:
       tags: [Admin Sites]
@@ -3127,6 +3297,12 @@ components:
       required: true
       schema:
         type: string
+    UserIdParam:
+      in: path
+      name: userId
+      required: true
+      schema:
+        type: string
     ServiceIdParam:
       in: path
       name: serviceId
@@ -3329,7 +3505,7 @@ components:
           type: boolean
         sftpAvailable:
           type: boolean
-          const: false
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         productionBackupRuntimeAvailable:
           type: boolean
           const: false
@@ -3359,7 +3535,7 @@ components:
           type: boolean
         sftpAvailable:
           type: boolean
-          const: false
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         productionBackupRuntimeAvailable:
           type: boolean
           const: false
@@ -4474,6 +4650,81 @@ components:
           $ref: "#/components/schemas/SiteFileZipPath"
         to:
           $ref: "#/components/schemas/SiteFilePath"
+
+    CreateSiteSftpUserRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 16
+          pattern: "^[a-z0-9]{1,16}$"
+          description: User suffix (trimmed and lowercased server-side) appended to `s<sha256(siteId)[0..8]>_`
+
+    SiteSftpUserDto:
+      type: object
+      additionalProperties: false
+      required: [id, username, createdAt, passwordChangedAt]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+          pattern: "^[a-z][a-z0-9]{1,14}_[a-z0-9]{1,16}$"
+        createdAt:
+          type: string
+          format: date-time
+        passwordChangedAt:
+          type: string
+          format: date-time
+
+    SiteSftpDto:
+      type: object
+      additionalProperties: false
+      required: [available, host, port, hostKeyFingerprint, users]
+      properties:
+        available:
+          type: boolean
+        host:
+          type: string
+          nullable: true
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          nullable: true
+        hostKeyFingerprint:
+          type: string
+          nullable: true
+        users:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/SiteSftpUserDto"
+
+    SiteSftpUserCreatedDto:
+      type: object
+      additionalProperties: false
+      required: [user, temporaryPassword]
+      properties:
+        user:
+          $ref: "#/components/schemas/SiteSftpUserDto"
+        temporaryPassword:
+          type: string
+          minLength: 20
+          description: One-time temporary password returned only upon user creation
+
+    SiteSftpPasswordResetDto:
+      type: object
+      additionalProperties: false
+      required: [temporaryPassword]
+      properties:
+        temporaryPassword:
+          type: string
+          minLength: 20
+          description: One-time temporary password returned only upon password reset
 
     SiteSummaryDto:
       type: object

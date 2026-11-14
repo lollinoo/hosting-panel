@@ -31,7 +31,7 @@ Durable log of settled architectural and product boundary decisions aligned via 
 ## Phase 2 Settled `/grill-me` Design Decisions (`HCP-SPEC-003` — 2026-11-07)
 
 1. **Scope & Deliverable Boundary (`Q1`)**:
-   - Author the normative specification `docs/architecture/hcp-spec-003-phase-2.md`, close `ADR-010`, and implement the full Phase 2 runtime inside the monorepo (`apps/docker-executor`, `apps/host-agent`, authenticated IPC, Outbox/Reconciler, minimal `Dedicated` ingress proxy, `systemd` units, Linux bootstrap/break-glass scripts, and `AC-F1-08` outage harness), while keeping `Shared Hosting`, `ADR-011`, `ACME/TLS`, `SFTP`, and production `Backups` strictly closed/gated.
+   - Author the normative specification `docs/architecture/hcp-spec-003-phase-2.md`, close `ADR-010`, and implement the full Phase 2 runtime inside the monorepo (`apps/docker-executor`, `apps/host-agent`, authenticated IPC, Outbox/Reconciler, minimal `Dedicated` ingress proxy, `systemd` units, Linux bootstrap/break-glass scripts, and `AC-F1-08` outage harness), while initially keeping `Shared Hosting`, `ADR-011`, `ACME/TLS` (later enabled in `ADR-0017`), `SFTP` (later enabled in `ADR-0020`), and production `Backups` strictly closed/gated (`Shared Hosting` and production `Backups` remain gated).
 
 2. **Split-Agent Process Topology & Toolchain (`Q2` — Closing `ADR-010` Part 1)**:
    - Enforce three separate privilege domains (`hp-api`/`hp-web`, `hp-docker-executor`, `hp-host-agent`) deployed as independent `systemd` services.
@@ -64,7 +64,7 @@ Durable log of settled architectural and product boundary decisions aligned via 
    - Mount resolved secrets JIT as read-only files (`0444 :ro` inside `0700`-confined per-service directories for `CapDrop: ["ALL"]` non-root UID compatibility) on `tmpfs` (`/run/hosting-panel/secrets/<serviceId>/<ref>`, Docker `*_FILE` pattern) so plaintext secrets never appear in `stack_revisions`, `outbox_events`, `Config.Env` (`docker inspect`), DTOs, or logs.
 
 9. **Dynamic `PlatformCapabilitiesDto` & Truthful 3-Console `shadcn@4.23.0` Unlock (`Q9` — `AC-F1-10`)**:
-   - Evolve `PlatformCapabilitiesDto` to expose `phase: "phase-1" | "phase-2"` and `runtimeBackend: "linux-systemd" | "local-simulator" | "disabled"`, keeping `sharedHostingEnabled`, `acmeTlsRuntimeAvailable`, `sftpAvailable`, and `productionBackupRuntimeAvailable` strictly `false`.
+   - Evolve `PlatformCapabilitiesDto` to expose `phase: "phase-1" | "phase-2"` and `runtimeBackend: "linux-systemd" | "local-simulator" | "disabled"`, keeping `sharedHostingEnabled` and `productionBackupRuntimeAvailable` strictly `false` (while `acmeTlsRuntimeAvailable` was later unlocked on `linux-systemd` per `ADR-0017` and `sftpAvailable` was unlocked on `linux-systemd` per `ADR-0020`).
    - Unlock async `202 Accepted` lifecycle controls, `OperationTimeline`, write-only encrypted secret refs, `in_sync`/`drifted` badges, and `InfrastructureAdmin` host telemetry/maintenance/security controls across `apps/web`.
 
 ---
@@ -106,3 +106,14 @@ Source: `docs/architecture/adr/0018-outgoing-mail-relay.md`.
 8. **Limits**: 200 messages/h per site, 100 recipients, 25 MiB. A newsletter needs an external service.
 9. **`CP-01` exception**: after a reboot with the panel down, mail is queued, not delivered, until the API is back and re-applies the password (it lives only in tmpfs).
 10. **Test send timeout** returns `OPERATION_AMBIGUOUS` ("may have been sent").
+
+## M1a/M1b File Manager & Site SFTP Decisions (2026-11-14)
+
+Sources: `docs/architecture/adr/0019-site-file-manager.md`, `docs/architecture/adr/0020-site-sftp.md`.
+
+1. **Web File Manager (`ADR-0019`)**: isolated per-site `hp_files_<id>` helper container (`network=none`, read-only rootfs, 512 KiB base64 chunks, 2 GiB file cap, async 202 zip/unzip, protected `wp-content/mu-plugins/hp-mail.php`).
+2. **Site SFTP (`ADR-0020`, `sftpAvailable: true` on `linux-systemd`)**: single shared digest-pinned `hp_sftp` container (`linuxserver/openssh-server`, port TCP `2222` / `HP_SFTP_PORT`, isolated `hp_sftp_net` bridge) serving chrooted site volumes (`/srv/sftp/<siteId>/files`, UID/GID `33:33`).
+3. **Auth & isolation**: password-only SFTP (no SSH keys in cycle 2, no shell, no forwarding); `sha512Crypt` lives in `apps/api/src/sites/sha512-crypt.ts` (`@hosting-panel/contracts` stays browser-safe). Passwords shown once; only `$6$` hashes are persisted (`site_sftp_users`, migration `0008`) and pushed over IPC.
+4. **In-place user files & selective recreate**: bind-mounted `passwd`/`group`/`shadow` rewritten in place (`r+` + `ftruncate`) per login without restarting `hp_sftp`; container recreates only when the active site-volume set, image, port, or `sshd_config` changes (`1–3 s` session drop, never touching site containers per `CP-01`).
+5. **Compensation, convergence & deletion**: DB writes roll back on executor failure/timeout (`503 DOCKER_ENGINE_UNAVAILABLE`), converged by `HP_SFTP_RETRY_INTERVAL_MS` (`60_000` ms default on `linux-systemd`); `SiteProvisioner.remove` calls `removeSite` before `deleteService`/`purgeSite`.
+6. **No firewall rule change**: Docker-published port `2222` traverses DNAT/`FORWARD` bypassing `nftables` `input` and `ufw`; only `bootstrap-dedicated.sh` (`/var/lib/hosting-panel/sftp`, `0700` `hp-executor`) and `install.sh` texts change. Zero new npm dependencies.
