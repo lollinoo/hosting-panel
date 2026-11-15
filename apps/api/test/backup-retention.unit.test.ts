@@ -139,4 +139,35 @@ describe("backup retention selectExpired", () => {
     expect(result.forget.map((row) => row.id)).toEqual(["bak_366"]);
     expect(result.drop).toEqual([]);
   });
+  it("R10: keeps the 3 newest good pre_update copies and forgets the oldest of 4", () => {
+    const copies = [1, 2, 3, 4].map((n) =>
+      makeRow({ id: `bak_p${String(n)}`, kind: "pre_update", startedAt: daysAgo(0, -(5 - n) * 60_000) }),
+    );
+
+    const result = selectExpired(copies, NOW, RETENTION_DAYS, true);
+
+    expect(result.forget.map((row) => row.id)).toEqual(["bak_p1"]);
+    expect(result.drop).toEqual([]);
+  });
+
+  it("R11: 3 manual and 3 pre_update copies use separate slots, none is excess", () => {
+    const rows = [1, 2, 3].flatMap((n) => [
+      makeRow({ id: `bak_m${String(n)}`, kind: "manual", startedAt: daysAgo(0, -n * 60_000) }),
+      makeRow({ id: `bak_p${String(n)}`, kind: "pre_update", startedAt: daysAgo(0, -n * 30_000) }),
+    ]);
+
+    const result = selectExpired(rows, NOW, RETENTION_DAYS, true);
+
+    expect(result.forget).toEqual([]);
+    expect(result.drop).toEqual([]);
+  });
+
+  it("R12: a kept pre_update copy still expires by age, but the newest good copy of the site stays", () => {
+    const old = makeRow({ id: "bak_p_old", kind: "pre_update", startedAt: daysAgo(20) });
+    const oldest = makeRow({ id: "bak_p_oldest", kind: "pre_update", startedAt: daysAgo(30) });
+
+    expect(selectExpired([old, oldest], NOW, RETENTION_DAYS, true).forget.map((row) => row.id)).toEqual([
+      "bak_p_oldest",
+    ]);
+  });
 });

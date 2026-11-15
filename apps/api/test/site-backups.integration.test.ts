@@ -393,6 +393,7 @@ describe("site backups API and outbox execution", () => {
       domainReconcileIntervalMs: null,
       mailRelayRetryIntervalMs: null,
       sftpRetryIntervalMs: null,
+      backupScheduleIntervalMs: null,
       recoverUnknownOnStart: false,
     });
     applier = app.nestApp.get(SiteBackupsApplier);
@@ -948,6 +949,7 @@ describe("site backups API and outbox execution", () => {
       domainReconcileIntervalMs: null,
       mailRelayRetryIntervalMs: null,
       sftpRetryIntervalMs: null,
+      backupScheduleIntervalMs: null,
       recoverUnknownOnStart: false,
     });
 

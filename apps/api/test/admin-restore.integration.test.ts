@@ -186,6 +186,7 @@ describe("administrator's restore of a site where nothing may exist", () => {
       domainReconcileIntervalMs: null,
       mailRelayRetryIntervalMs: null,
       sftpRetryIntervalMs: null,
+      backupScheduleIntervalMs: null,
       recoverUnknownOnStart: false,
     });
     applier = app.nestApp.get(SiteBackupsApplier);

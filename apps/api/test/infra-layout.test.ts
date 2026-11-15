@@ -259,6 +259,18 @@ describe("release workflow and docs", () => {
     ]) {
       expect(api).toContain(s);
     }
+    for (const s of [
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/refresh:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/updates:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/administrators/{userId}/password-reset:",
+      "SiteWordpressDto:",
+      "wordpressToolsAvailable",
+      "site.wordpress.update",
+      "pre_update",
+    ]) {
+      expect(api).toContain(s);
+    }
     const adr = read("docs/architecture/adr/0020-site-sftp.md");
     for (const s of ["hp_sftp", "2222", "site.sftp.manage", "/var/lib/hosting-panel/sftp"]) {
       expect(adr).toContain(s);

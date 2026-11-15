@@ -185,58 +185,74 @@ export class SiteBackupsApplier {
       return "settled";
     }
 
+    const settled = await this.settleBackupJob(op.id);
+    if (settled === "pending") {
+      return "pending";
+    }
+    if (settled === "succeeded") {
+      await this.succeedOperation(op.id);
+    } else {
+      await this.failOperation(op.id, settled.code, settled.message);
+    }
+    return "settled";
+  }
+
+  /** Settles the backup row and steps of an interrupted job; the error is what the operation fails with. */
+  public async settleBackupJob(opId: string): Promise<"pending" | "succeeded" | ControlPlaneError> {
+    const db = this.dbClient.db;
     let statusRes: BackupJobStatus;
     try {
-      statusRes = await this.dockerExecutor.backups({ action: "status", jobId: op.id });
+      statusRes = await this.dockerExecutor.backups({ action: "status", jobId: opId });
     } catch {
       return "pending";
     }
 
     if (statusRes.state === "running") {
-      if (!(await this.isPastPollDeadline(op.id))) {
+      if (!(await this.isPastPollDeadline(opId))) {
         return "pending";
       }
       statusRes = { ...statusRes, state: "failed", failure: "timeout" };
     }
 
     if (statusRes.state === "succeeded") {
-      await settleSiteBackup(db, op.id, {
+      await settleSiteBackup(db, opId, {
         status: "succeeded",
         snapshotId: statusRes.snapshot?.snapshotId ?? null,
         sizeBytes: statusRes.snapshot?.totalBytes ?? null,
         problem: null,
       });
-      await this.safeUpdateStep(op.id, "backup", "succeeded", "Backup uploaded");
+      await this.safeUpdateStep(opId, "backup", "succeeded", "Backup uploaded");
       await this.safeUpdateStep(
-        op.id,
+        opId,
         "retention",
         "skipped",
         "Skipped after recovery; will run next night",
       );
-      await this.succeedOperation(op.id);
-      return "settled";
+      return "succeeded";
     }
 
     if (statusRes.state === "failed") {
       const problem = normalizeBackupProblem(statusRes.failure);
       const code: ErrorCode =
         problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR";
-      await settleSiteBackup(db, op.id, { status: "failed", problem });
-      await this.#failStepAndOperation(op.id, "Backup did not finish", code, "Backup did not finish.");
-      return "settled";
+      await settleSiteBackup(db, opId, { status: "failed", problem });
+      await this.#failSteps(opId, "Backup did not finish");
+      return new ControlPlaneError(code, "Backup did not finish.");
     }
 
-    await settleSiteBackup(db, op.id, { status: "failed", problem: "interrupted" });
-    await this.#failStepAndOperation(
-      op.id,
-      SITE_BACKUPS_INTERRUPTED,
-      "OPERATION_INTERRUPTED",
-      SITE_BACKUPS_INTERRUPTED,
-    );
-    return "settled";
+    await settleSiteBackup(db, opId, { status: "failed", problem: "interrupted" });
+    await this.#failSteps(opId, SITE_BACKUPS_INTERRUPTED);
+    return new ControlPlaneError("OPERATION_INTERRUPTED", SITE_BACKUPS_INTERRUPTED);
   }
 
   async #applyCreate(op: BackupOperationRef): Promise<void> {
+    await this.runBackupStep(op);
+    await this.#runRetentionStep(op);
+    await this.succeedOperation(op.id);
+  }
+
+  /** Takes the backup of the operation's site; on failure settles the row, fails the operation and throws. */
+  public async runBackupStep(op: BackupOperationRef): Promise<void> {
     const db = this.dbClient.db;
     await renewOperationLease(db, op.id, this.leaseMs);
     await this.safeUpdateStep(op.id, "backup", "running", "Backing up site files and databases");
@@ -335,9 +351,6 @@ export class SiteBackupsApplier {
       await this.#failStepAndOperation(op.id, safeMessage, code, safeMessage);
       throw err instanceof ControlPlaneError ? err : new ControlPlaneError(code, safeMessage);
     }
-
-    await this.#runRetentionStep(op);
-    await this.succeedOperation(op.id);
   }
 
   /** Fails the operation as interrupted when its backup row is gone or no longer running. */
@@ -511,6 +524,11 @@ export class SiteBackupsApplier {
     errorCode: ErrorCode,
     errorMessage: string,
   ): Promise<void> {
+    await this.#failSteps(operationId, stepMessage);
+    await this.failOperation(operationId, errorCode, errorMessage);
+  }
+
+  async #failSteps(operationId: string, stepMessage: string): Promise<void> {
     await this.safeUpdateStep(operationId, "backup", "failed", stepMessage);
     await this.safeUpdateStep(
       operationId,
@@ -518,7 +536,6 @@ export class SiteBackupsApplier {
       "skipped",
       "Skipped because backup did not finish",
     );
-    await this.failOperation(operationId, errorCode, errorMessage);
   }
 
   /** @internal */

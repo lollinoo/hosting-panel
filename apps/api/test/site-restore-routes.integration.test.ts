@@ -283,6 +283,7 @@ describe("M3b site restore & download routes and service", () => {
       domainReconcileIntervalMs: null,
       mailRelayRetryIntervalMs: null,
       sftpRetryIntervalMs: null,
+      backupScheduleIntervalMs: null,
       recoverUnknownOnStart: false,
     });
 
@@ -659,6 +660,7 @@ describe("M3b site restore & download routes and service", () => {
       domainReconcileIntervalMs: null,
       mailRelayRetryIntervalMs: null,
       sftpRetryIntervalMs: null,
+      backupScheduleIntervalMs: null,
       recoverUnknownOnStart: false,
     });
     try {

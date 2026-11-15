@@ -390,6 +390,7 @@ describe("site restore and download applier (M3b)", () => {
       domainReconcileIntervalMs: null,
       mailRelayRetryIntervalMs: null,
       sftpRetryIntervalMs: null,
+      backupScheduleIntervalMs: null,
       recoverUnknownOnStart: false,
     });
     applier = app.nestApp.get(SiteBackupsApplier);
@@ -1616,9 +1617,12 @@ describe("site restore and download applier (M3b)", () => {
         throw new Error("simulated transient database failure");
       }
     };
-    await expect(app.outboxWorker.recoverUnknownOperations()).rejects.toThrow(
-      "simulated transient database failure",
-    );
+    await expect(app.outboxWorker.recoverUnknownOperations()).resolves.toEqual({
+      markedUnknown: 0,
+      convergedSucceeded: 0,
+      convergedFailed: 0,
+      recoveryErrors: [{ kind: "site.backups.restore", operationId, errorCode: "INTERNAL_ERROR" }],
+    });
     const [stillUnknownOp] = await dbClient.db
       .select()
       .from(operations)

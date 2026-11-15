@@ -42,6 +42,7 @@ import {
   type ResourceQuotaDto,
   type ServiceInstanceDto,
   isBackupAvailable,
+  isWordpressToolsAvailable,
   isPhpMyAdminAvailable,
   isSftpAvailable,
   type SiteDetailDto,
@@ -327,6 +328,7 @@ export class OrganizationsController {
       sftpAvailable: isSftpAvailable(this.config.runtimeBackend),
       phpMyAdminAvailable: isPhpMyAdminAvailable(this.config.runtimeBackend),
       productionBackupRuntimeAvailable: isBackupAvailable(this.config.runtimeBackend),
+      wordpressToolsAvailable: isWordpressToolsAvailable(this.config.runtimeBackend),
     };
   }
 

@@ -357,6 +357,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       sftpAvailable: true,
       phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: true,
+      wordpressToolsAvailable: true,
     });
 
     const orgRes = await requestJson<{ data: OrganizationDetailDto }>(
@@ -373,6 +374,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       sftpAvailable: true,
       phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: true,
+      wordpressToolsAvailable: true,
     });
 
     const capRes = await requestJson<{ data: OrganizationCapabilitiesDto }>(

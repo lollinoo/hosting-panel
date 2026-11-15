@@ -1,6 +1,7 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   ERROR_CODES,
+  WORDPRESS_OPERATION_KINDS,
   canTransitionOperation,
   isTerminalOperationStatus,
   redactSensitiveString,
@@ -57,6 +58,7 @@ import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
 import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
 import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
+import { SITE_WORDPRESS_INTERRUPTED, SiteWordpressApplier } from "../sites/site-wordpress-applier.js";
 import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
@@ -101,7 +103,11 @@ export interface UnknownRecoveryResult {
   readonly markedUnknown: number;
   readonly convergedSucceeded: number;
   readonly convergedFailed: number;
+  /** Operations whose recovery threw this pass; they stay unknown. Present only when not empty. */
+  readonly recoveryErrors?: readonly RecoveryError[];
 }
+
+type RecoveryError = { readonly kind: string; readonly operationId: string; readonly errorCode: ErrorCode };
 
 function extractErrorCode(err: unknown, fallback: ErrorCode = "INTERNAL_ERROR"): ErrorCode {
   if (
@@ -134,7 +140,13 @@ export class OutboxWorkerService {
   #pollTimer: NodeJS.Timeout | null = null;
   #activeRecoveryPromise: Promise<UnknownRecoveryResult> | null = null;
   readonly #mainLane: OutboxLaneState = {
-    filter: { excludeKinds: [...FILE_ARCHIVE_OPERATION_KINDS, ...BACKUP_OPERATION_KINDS] },
+    filter: {
+      excludeKinds: [
+        ...FILE_ARCHIVE_OPERATION_KINDS,
+        ...BACKUP_OPERATION_KINDS,
+        ...WORDPRESS_OPERATION_KINDS,
+      ],
+    },
     activePromise: null,
     scheduledImmediate: null,
     pendingTrigger: false,
@@ -151,8 +163,15 @@ export class OutboxWorkerService {
     scheduledImmediate: null,
     pendingTrigger: false,
   };
+  readonly #wordpressLane: OutboxLaneState = {
+    filter: { includeKinds: WORDPRESS_OPERATION_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
 
   readonly #backupsApplier: SiteBackupsApplier;
+  readonly #wordpressApplier: SiteWordpressApplier;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -166,6 +185,12 @@ export class OutboxWorkerService {
   ) {
     this.#backupsApplier =
       siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
+    this.#wordpressApplier = new SiteWordpressApplier(
+      this.#backupsApplier,
+      dbClient,
+      dockerExecutor,
+      config,
+    );
   }
 
   public startBackgroundLoop(): void {
@@ -192,12 +217,13 @@ export class OutboxWorkerService {
     this.#triggerLane(this.#mainLane);
     this.#triggerLane(this.#fileLane);
     this.#triggerLane(this.#backupLane);
+    this.#triggerLane(this.#wordpressLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
 
-    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane]) {
+    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane]) {
       lane.pendingTrigger = false;
       if (lane.scheduledImmediate !== null) {
         clearImmediate(lane.scheduledImmediate);
@@ -214,6 +240,7 @@ export class OutboxWorkerService {
       this.#mainLane.activePromise?.catch(() => undefined),
       this.#fileLane.activePromise?.catch(() => undefined),
       this.#backupLane.activePromise?.catch(() => undefined),
+      this.#wordpressLane.activePromise?.catch(() => undefined),
       this.#activeRecoveryPromise?.catch(() => undefined),
     ]);
   }
@@ -261,15 +288,16 @@ export class OutboxWorkerService {
   }
 
   public async processPendingOnce(batchSize: number = 10): Promise<OutboxProcessResult> {
-    const [mainResult, fileResult, backupResult] = await Promise.all([
+    const results = await Promise.all([
       this.#runLane(this.#mainLane, batchSize),
       this.#runLane(this.#fileLane, batchSize),
       this.#runLane(this.#backupLane, batchSize),
+      this.#runLane(this.#wordpressLane, batchSize),
     ]);
     return {
-      claimed: mainResult.claimed + fileResult.claimed + backupResult.claimed,
-      succeeded: mainResult.succeeded + fileResult.succeeded + backupResult.succeeded,
-      failed: mainResult.failed + fileResult.failed + backupResult.failed,
+      claimed: results.reduce((n, r) => n + r.claimed, 0),
+      succeeded: results.reduce((n, r) => n + r.succeeded, 0),
+      failed: results.reduce((n, r) => n + r.failed, 0),
     };
   }
 
@@ -369,6 +397,8 @@ export class OutboxWorkerService {
         await this.siteFilesApplier.apply(op, payload);
       } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
         await this.#backupsApplier.apply(op);
+      } else if ((WORDPRESS_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
+        await this.#wordpressApplier.apply(op);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -841,188 +871,204 @@ export class OutboxWorkerService {
 
     let convergedSucceeded = 0;
     let convergedFailed = 0;
+    const recoveryErrors: RecoveryError[] = [];
 
     for (const op of unknownOps) {
-      if (op.kind === "site.domains") {
-        // Only routes changed: the site keeps its status and the reconciler re-enqueues.
-        await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
-        convergedFailed += 1;
-      } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
-        // File archive/extract operations never leave the site degraded and are never blindly replayed.
-        await this.#convergeUnknownToFailed(op, SITE_FILES_INTERRUPTED);
-        convergedFailed += 1;
-      } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
-        // Backup recovery checks executor status and never replays start or marks the site degraded.
-        const outcome = await this.#backupsApplier.recover(op);
-        if (outcome === "pending") {
-          continue;
-        }
-        const [settled] = await db
-          .select({
-            status: operations.status,
-            errorCode: operations.errorCode,
-            errorMessage: operations.errorMessage,
-          })
-          .from(operations)
-          .where(eq(operations.id, op.id))
-          .limit(1);
-        if (settled?.status === "succeeded") {
-          await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
-          await appendAuditEvent(db, {
-            actorId: null,
-            actorType: "system",
-            organizationId: op.organizationId,
-            action: "operation.recovered.succeeded",
-            targetType: "operation",
-            targetId: op.id,
-            details: {
-              kind: op.kind,
-              resourceType: op.resourceType,
-              resourceId: op.resourceId,
-            },
-          });
-          convergedSucceeded += 1;
-        } else {
-          const reason = settled?.errorMessage ?? SITE_BACKUPS_INTERRUPTED;
-          const errorCode = settled?.errorCode ?? "OPERATION_INTERRUPTED";
-          await this.#settleAssociatedOutboxEvents(op.id, "failed", reason);
-          await appendAuditEvent(db, {
-            actorId: null,
-            actorType: "system",
-            organizationId: op.organizationId,
-            action: "operation.recovered.failed",
-            targetType: "operation",
-            targetId: op.id,
-            details: {
-              kind: op.kind,
-              resourceType: op.resourceType,
-              resourceId: op.resourceId,
-              errorCode,
-              reason,
-            },
-          });
+      try {
+        if (op.kind === "site.domains") {
+          // Only routes changed: the site keeps its status and the reconciler re-enqueues.
+          await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
           convergedFailed += 1;
-        }
-      } else if (SITE_OPERATION_KINDS.has(op.kind)) {
-        // Site steps are not safely replayable mid-way: fail and let the customer retry.
-        await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");
-        await db
-          .update(sites)
-          .set({ status: "degraded", updatedAt: now })
-          .where(eq(sites.id, op.resourceId));
-        convergedFailed += 1;
-      } else if (
-        op.kind === "service.deploy" ||
-        op.kind === "service.restart" ||
-        op.kind === "service.stop"
-      ) {
-        if (!this.dockerExecutor.isRuntimeAvailable) {
-          await this.#convergeUnknownToFailed(
-            op,
-            "Operation interrupted while Docker executor runtime was unavailable; read-only recovery could not verify target state",
-          );
+        } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
+          // File archive/extract operations never leave the site degraded and are never blindly replayed.
+          await this.#convergeUnknownToFailed(op, SITE_FILES_INTERRUPTED);
           convergedFailed += 1;
-          continue;
-        }
-
-        const [svc] = await db
-          .select()
-          .from(serviceInstances)
-          .where(eq(serviceInstances.id, op.resourceId))
-          .limit(1);
-
-        const [currentRev] =
-          svc?.currentRevisionId
-            ? await db
-                .select()
-                .from(stackRevisions)
-                .where(eq(stackRevisions.id, svc.currentRevisionId))
-                .limit(1)
-            : [undefined];
-
-        // Strictly read-only inspection (AC-F2-07)
-        let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
-        try {
-          obs = await this.dockerExecutor.getObservedState(op.resourceId);
-        } catch {
-          // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
-          continue;
-        }
-
-        const targetMatched =
-          op.kind === "service.stop"
-            ? obs !== null && obs.observedStatus === "stopped"
-            : obs !== null &&
-              obs.observedStatus === "running" &&
-              Boolean(currentRev?.specHash) &&
-              obs.observedRevisionHash === currentRev?.specHash &&
-              !obs.outOfBandModified;
-
-        if (targetMatched && obs !== null) {
-          await transitionOperation(db, op.id, "reconciling", {
-            errorCode: null,
-            errorMessage: null,
-          });
-
-          if (svc) {
-            await recordObservedStateReconciliationTransactional(db, {
-              serviceInstanceId: svc.id,
-              observedStatus: obs.observedStatus,
-              observedRevisionHash: obs.observedRevisionHash ?? null,
-              outOfBandModified: Boolean(obs.outOfBandModified),
-              rawState: {
-                restartCount: extractRestartCount(obs),
-                recoveredFromUnknown: true,
+        } else if (op.kind === "site.wordpress.inspect") {
+          // A check changes nothing on the site: fail it and let the customer ask again.
+          await this.#convergeUnknownToFailed(op, SITE_WORDPRESS_INTERRUPTED);
+          convergedFailed += 1;
+        } else if (
+          (BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind) ||
+          op.kind === "site.wordpress.update"
+        ) {
+          // Backup and update recovery never replay a change; the applier settles what it can.
+          const outcome =
+            op.kind === "site.wordpress.update"
+              ? await this.#wordpressApplier.recover(op)
+              : await this.#backupsApplier.recover(op);
+          if (outcome === "pending") {
+            continue;
+          }
+          const [settled] = await db
+            .select({
+              status: operations.status,
+              errorCode: operations.errorCode,
+              errorMessage: operations.errorMessage,
+            })
+            .from(operations)
+            .where(eq(operations.id, op.id))
+            .limit(1);
+          if (settled?.status === "succeeded") {
+            await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+            await appendAuditEvent(db, {
+              actorId: null,
+              actorType: "system",
+              organizationId: op.organizationId,
+              action: "operation.recovered.succeeded",
+              targetType: "operation",
+              targetId: op.id,
+              details: {
+                kind: op.kind,
+                resourceType: op.resourceType,
+                resourceId: op.resourceId,
               },
-              observedAt: obs.observedAt ? new Date(obs.observedAt) : now,
             });
+            convergedSucceeded += 1;
+          } else {
+            const reason = settled?.errorMessage ?? SITE_BACKUPS_INTERRUPTED;
+            const errorCode = settled?.errorCode ?? "OPERATION_INTERRUPTED";
+            await this.#settleAssociatedOutboxEvents(op.id, "failed", reason);
+            await appendAuditEvent(db, {
+              actorId: null,
+              actorType: "system",
+              organizationId: op.organizationId,
+              action: "operation.recovered.failed",
+              targetType: "operation",
+              targetId: op.id,
+              details: {
+                kind: op.kind,
+                resourceType: op.resourceType,
+                resourceId: op.resourceId,
+                errorCode,
+                reason,
+              },
+            });
+            convergedFailed += 1;
+          }
+        } else if (SITE_OPERATION_KINDS.has(op.kind)) {
+          // Site steps are not safely replayable mid-way: fail and let the customer retry.
+          await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");
+          await db
+            .update(sites)
+            .set({ status: "degraded", updatedAt: now })
+            .where(eq(sites.id, op.resourceId));
+          convergedFailed += 1;
+        } else if (
+          op.kind === "service.deploy" ||
+          op.kind === "service.restart" ||
+          op.kind === "service.stop"
+        ) {
+          if (!this.dockerExecutor.isRuntimeAvailable) {
+            await this.#convergeUnknownToFailed(
+              op,
+              "Operation interrupted while Docker executor runtime was unavailable; read-only recovery could not verify target state",
+            );
+            convergedFailed += 1;
+            continue;
           }
 
-          await this.#settleNonTerminalSteps(
-            op.id,
-            "succeeded",
-            "Verified via read-only crash recovery reconciliation (TH-08)",
-          );
+          const [svc] = await db
+            .select()
+            .from(serviceInstances)
+            .where(eq(serviceInstances.id, op.resourceId))
+            .limit(1);
 
-          await transitionOperation(db, op.id, "succeeded", {
-            errorCode: null,
-            errorMessage: null,
-          });
+          const [currentRev] =
+            svc?.currentRevisionId
+              ? await db
+                  .select()
+                  .from(stackRevisions)
+                  .where(eq(stackRevisions.id, svc.currentRevisionId))
+                  .limit(1)
+              : [undefined];
 
-          await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+          // Strictly read-only inspection (AC-F2-07)
+          let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
+          try {
+            obs = await this.dockerExecutor.getObservedState(op.resourceId);
+          } catch {
+            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
+            continue;
+          }
 
-          await appendAuditEvent(db, {
-            actorId: null,
-            actorType: "system",
-            organizationId: op.organizationId,
-            action: "operation.recovered.succeeded",
-            targetType: "operation",
-            targetId: op.id,
-            details: {
-              kind: op.kind,
-              resourceType: op.resourceType,
-              resourceId: op.resourceId,
-            },
-          });
+          const targetMatched =
+            op.kind === "service.stop"
+              ? obs !== null && obs.observedStatus === "stopped"
+              : obs !== null &&
+                obs.observedStatus === "running" &&
+                Boolean(currentRev?.specHash) &&
+                obs.observedRevisionHash === currentRev?.specHash &&
+                !obs.outOfBandModified;
 
-          convergedSucceeded += 1;
+          if (targetMatched && obs !== null) {
+            await transitionOperation(db, op.id, "reconciling", {
+              errorCode: null,
+              errorMessage: null,
+            });
+
+            if (svc) {
+              await recordObservedStateReconciliationTransactional(db, {
+                serviceInstanceId: svc.id,
+                observedStatus: obs.observedStatus,
+                observedRevisionHash: obs.observedRevisionHash ?? null,
+                outOfBandModified: Boolean(obs.outOfBandModified),
+                rawState: {
+                  restartCount: extractRestartCount(obs),
+                  recoveredFromUnknown: true,
+                },
+                observedAt: obs.observedAt ? new Date(obs.observedAt) : now,
+              });
+            }
+
+            await this.#settleNonTerminalSteps(
+              op.id,
+              "succeeded",
+              "Verified via read-only crash recovery reconciliation (TH-08)",
+            );
+
+            await transitionOperation(db, op.id, "succeeded", {
+              errorCode: null,
+              errorMessage: null,
+            });
+
+            await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+
+            await appendAuditEvent(db, {
+              actorId: null,
+              actorType: "system",
+              organizationId: op.organizationId,
+              action: "operation.recovered.succeeded",
+              targetType: "operation",
+              targetId: op.id,
+              details: {
+                kind: op.kind,
+                resourceType: op.resourceType,
+                resourceId: op.resourceId,
+              },
+            });
+
+            convergedSucceeded += 1;
+          } else {
+            const mismatchDetail =
+              obs === null
+                ? "target container was absent during read-only recovery"
+                : `observed container status '${obs.observedStatus}' (hash=${String(obs.observedRevisionHash)}) did not match desired target`;
+            await this.#convergeUnknownToFailed(
+              op,
+              `Operation interrupted before convergence: ${mismatchDetail} (TH-08)`,
+            );
+            convergedFailed += 1;
+          }
         } else {
-          const mismatchDetail =
-            obs === null
-              ? "target container was absent during read-only recovery"
-              : `observed container status '${obs.observedStatus}' (hash=${String(obs.observedRevisionHash)}) did not match desired target`;
           await this.#convergeUnknownToFailed(
             op,
-            `Operation interrupted before convergence: ${mismatchDetail} (TH-08)`,
+            `Host operation '${op.kind}' was interrupted in flight; automatic replay is prohibited (TH-08)`,
           );
           convergedFailed += 1;
         }
-      } else {
-        await this.#convergeUnknownToFailed(
-          op,
-          `Host operation '${op.kind}' was interrupted in flight; automatic replay is prohibited (TH-08)`,
-        );
-        convergedFailed += 1;
+      } catch (err) {
+        // One recovery that throws leaves its operation as it is and never blocks the next (R141).
+        recoveryErrors.push({ kind: op.kind, operationId: op.id, errorCode: extractErrorCode(err) });
       }
     }
 
@@ -1030,6 +1076,7 @@ export class OutboxWorkerService {
       markedUnknown: newlyMarked.length,
       convergedSucceeded,
       convergedFailed,
+      ...(recoveryErrors.length > 0 ? { recoveryErrors } : {}),
     };
   }
 

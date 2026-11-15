@@ -1,4 +1,9 @@
-import { MANUAL_BACKUPS_KEPT, type BackupKind, type BackupStatus } from "@hosting-panel/contracts";
+import {
+  MANUAL_BACKUPS_KEPT,
+  PRE_UPDATE_BACKUPS_KEPT,
+  type BackupKind,
+  type BackupStatus,
+} from "@hosting-panel/contracts";
 
 export interface RetentionRow {
   id: string;
@@ -9,6 +14,11 @@ export interface RetentionRow {
 }
 
 const MS_PER_DAY = 86_400_000;
+// Good copies kept per kind, each in its own slots; nightly copies only expire by age.
+const KEPT_PER_KIND: Partial<Record<BackupKind, number>> = {
+  manual: MANUAL_BACKUPS_KEPT,
+  pre_update: PRE_UPDATE_BACKUPS_KEPT,
+};
 
 /** Selects expired or excess backups to forget in S3 or drop from the database. */
 export function selectExpired(
@@ -27,11 +37,13 @@ export function selectExpired(
   const newestSucceededId = siteExists
     ? byNewest.find((row) => row.status === "succeeded")?.id
     : undefined;
-  const keptManualIds = new Set(
-    byNewest
-      .filter((row) => row.kind === "manual" && row.status === "succeeded")
-      .slice(0, MANUAL_BACKUPS_KEPT)
-      .map((row) => row.id),
+  const kept = new Set(
+    Object.entries(KEPT_PER_KIND).flatMap(([kind, count]) =>
+      byNewest
+        .filter((row) => row.kind === kind && row.status === "succeeded")
+        .slice(0, count)
+        .map((row) => row.id),
+    ),
   );
 
   const forget: RetentionRow[] = [];
@@ -42,9 +54,8 @@ export function selectExpired(
       continue;
     }
     const expired = row.startedAt.getTime() < cutoffMs;
-    const excessManual =
-      row.kind === "manual" && row.status === "succeeded" && !keptManualIds.has(row.id);
-    if (!expired && !excessManual) {
+    const excess = row.kind in KEPT_PER_KIND && row.status === "succeeded" && !kept.has(row.id);
+    if (!expired && !excess) {
       continue;
     }
     (row.snapshotId ? forget : drop).push(row);
