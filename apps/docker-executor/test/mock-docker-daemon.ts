@@ -39,6 +39,8 @@ export interface MockDockerDaemon {
   readonly missingContainers: Set<string>;
   /** Connects to these networks answer 404 (removed between list and connect). */
   readonly vanishedNetworks: Set<string>;
+  /** Look-ups (GET) and connects of these networks answer 500. */
+  readonly brokenNetworks: { readonly lookup: Set<string>; readonly connect: Set<string> };
   readonly containers: Map<string, MockDockerContainerRecord>;
   readonly requestedPaths: string[];
   /** POST /containers/<ref>/exec calls, by the ref used in the path. */
@@ -87,6 +89,7 @@ export async function startMockDockerDaemon(options?: {
   const networkDisconnectCalls: Array<{ network: string; container: string }> = [];
   const missingContainers = new Set<string>();
   const vanishedNetworks = new Set<string>();
+  const brokenNetworks = { lookup: new Set<string>(), connect: new Set<string>() };
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
@@ -238,7 +241,10 @@ export async function startMockDockerDaemon(options?: {
 
       if (method === "GET" && routePath.startsWith("/networks/")) {
         const netName = decodeURIComponent(routePath.slice("/networks/".length));
-        if (networkNames.has(netName)) {
+        if (brokenNetworks.lookup.has(netName)) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "engine broke" }));
+        } else if (networkNames.has(netName)) {
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ Name: netName }));
         } else {
@@ -281,6 +287,11 @@ export async function startMockDockerDaemon(options?: {
           if (missingContainers.has(body.Container)) {
             res.writeHead(404, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ message: `No such container: ${body.Container}` }));
+            return;
+          }
+          if (brokenNetworks.connect.has(netName)) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ message: `engine broke on ${netName}` }));
             return;
           }
           if (vanishedNetworks.has(netName)) {
@@ -551,6 +562,7 @@ export async function startMockDockerDaemon(options?: {
     networkDisconnectCalls,
     missingContainers,
     vanishedNetworks,
+    brokenNetworks,
     containers,
     requestedPaths,
     execCalls,

@@ -7,6 +7,8 @@ import {
   type BackupsResultByAction,
   type CertProblem,
   type MailRelayApplyRequest,
+  type WordpressStateResult,
+  type WordpressUpdateResult,
 } from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
@@ -35,7 +37,7 @@ import type {
 import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
-import { assertValidSiteJobRequest } from "./site-jobs.js";
+import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
 import {
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
@@ -130,6 +132,19 @@ function buildDeterministicSimRef(prefix: string, seed: string): string {
   return hex;
 }
 
+/** The state every simulated WordPress site starts with. */
+export const SIMULATED_WORDPRESS_STATE: WordpressStateResult = {
+  coreVersion: "7.1.4",
+  coreUpdate: null,
+  updatesKnown: true,
+  plugins: [
+    { name: "akismet", title: "Akismet Anti-spam", status: "inactive", version: "5.7.2", updateVersion: null },
+    { name: "classic-editor", title: "Classic Editor", status: "active", version: "1.6.0", updateVersion: "1.7.0" },
+  ],
+  themes: [{ name: "twentytwentyfive", title: "Twenty Twenty-Five", status: "active", version: "1.5", updateVersion: null }],
+  administrators: [{ id: 1, login: "admin" }],
+};
+
 export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
@@ -164,7 +179,11 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public onJob?: (req: SiteJobRequest) => Promise<void>;
   /** Test hook awaited inside deployService. */
   public onDeploy?: (spec: ApprovedServiceSpec) => Promise<void>;
-  private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string }[] = [];
+  private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string; stdout?: string }[] = [];
+  /** Per site, seeded from SIMULATED_WORDPRESS_STATE on first use. */
+  public readonly wordpressSites = new Map<string, WordpressStateResult>();
+  /** false: wordpress.org is unreachable (inspect says unknown, update exits 30). */
+  public wordpressOnline = true;
   private failDeployOnce = false;
   public mailRelay: SimulatedMailRelayState | null = null;
   /** Every apply in order, null for a disable. */
@@ -265,8 +284,9 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     };
   }
 
-  public failNextJob(kind: SiteJobKind, exitCode: number, outputTail = ""): void {
-    this.failingJobs.push({ kind, exitCode, outputTail });
+  /** stdout: the raw result text, checked by the same parser as the real adapter. */
+  public failNextJob(kind: SiteJobKind, exitCode: number, outputTail = "", stdout?: string): void {
+    this.failingJobs.push({ kind, exitCode, outputTail, ...(stdout !== undefined ? { stdout } : {}) });
   }
 
   public failNextMailRelayApply(n = 1): void {
@@ -336,7 +356,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     await this.onJob?.(req);
     const idx = this.failingJobs.findIndex((f) => f.kind === req.kind);
     const failure = idx >= 0 ? this.failingJobs.splice(idx, 1)[0] : undefined;
-    const exitCode = failure?.exitCode ?? 0;
+    const run = failure ?? { exitCode: 0, outputTail: "", ...this.simulateWordpressJob(req) };
+    const exitCode = run.exitCode;
     if (exitCode === 0) {
       if (req.kind === "db.provision") {
         this.databases.provision(req.siteId);
@@ -344,11 +365,55 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
         this.databases.drop(req.siteId);
       }
     }
+    const result = run.stdout === undefined ? undefined : parseWordpressJobResult(req.kind, run.stdout);
     return {
       jobId: req.jobId,
       exitCode,
-      outputTail: failure?.outputTail ?? "",
+      outputTail: run.outputTail,
+      ...(result !== undefined ? { result } : {}),
     };
+  }
+
+  /** The effect and stdout of inspect, update and reset on the site's stored state. */
+  private simulateWordpressJob(req: SiteJobRequest): { exitCode?: number; stdout?: string } {
+    if (req.kind !== "wordpress.inspect" && req.kind !== "wordpress.update" && req.kind !== "wordpress.reset-password") {
+      return {};
+    }
+    let site = this.wordpressSites.get(req.siteId);
+    if (site === undefined) {
+      site = structuredClone(SIMULATED_WORDPRESS_STATE);
+      this.wordpressSites.set(req.siteId, site);
+    }
+    const line = (v: unknown) => `${JSON.stringify(v)}\n`;
+    if (req.kind === "wordpress.reset-password") {
+      return { exitCode: site.administrators.some((a) => String(a.id) === req.params.userId) ? 0 : 40 };
+    }
+    if (req.kind === "wordpress.inspect") {
+      if (this.wordpressOnline) return { stdout: line(site) };
+      const unknown = <T>(i: T) => ({ ...i, updateVersion: null });
+      return {
+        stdout: line({ ...site, coreUpdate: null, updatesKnown: false, plugins: site.plugins.map(unknown), themes: site.themes.map(unknown) }),
+      };
+    }
+    if (!this.wordpressOnline) return { exitCode: 30 };
+    const target = req.params.target ?? "";
+    const items: WordpressUpdateResult["items"] = [];
+    if ((target === "core" || target === "all") && site.coreUpdate !== null) {
+      items.push({ type: "core", name: "wordpress", oldVersion: site.coreVersion, newVersion: site.coreUpdate, status: "updated" });
+      site.coreVersion = site.coreUpdate;
+      site.coreUpdate = null;
+    }
+    for (const [type, list] of [["plugin", site.plugins], ["theme", site.themes]] as const) {
+      if (target.startsWith(`${type}:`) && !list.some((i) => `${type}:${i.name}` === target)) return { exitCode: 31 };
+      for (const item of list) {
+        if ((target === "all" || target === `${type}:${item.name}`) && item.updateVersion !== null) {
+          items.push({ type, name: item.name, oldVersion: item.version, newVersion: item.updateVersion, status: "updated" });
+          item.version = item.updateVersion;
+          item.updateVersion = null;
+        }
+      }
+    }
+    return { stdout: line({ items }) };
   }
 
   public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {

@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { SHARED_MARIADB_IMAGE, resolveWordpressCliImage } from "@hosting-panel/contracts";
 import type { SiteJobRequest } from "@hosting-panel/executor-contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { readJobStdout } from "../src/docker-logs.js";
 import {
   DB_PROVISION_SCRIPT,
   DockerEngineSocketAdapter,
@@ -15,7 +17,28 @@ import {
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
 } from "../src/index.js";
+import {
+  DB_DROP_SCRIPT,
+  DEFAULT_SITE_JOB_TIMEOUT_MS,
+  SITE_JOB_SPECS,
+  WORDPRESS_INSPECT_SCRIPT,
+  WORDPRESS_INSTALL_SCRIPT,
+  WORDPRESS_RESET_PASSWORD_SCRIPT,
+  WORDPRESS_RESULT_MAX_BYTES,
+  WORDPRESS_SETTLE_SCRIPT,
+  WORDPRESS_UPDATE_SCRIPT,
+  parseWordpressJobResult,
+  siteJobTimeoutMs,
+} from "../src/site-jobs.js";
 import { startMockDockerDaemon } from "./mock-docker-daemon.js";
+
+const logFrame = (stream: 1 | 2, text: string) => {
+  const payload = Buffer.from(text);
+  const header = Buffer.alloc(8);
+  header[0] = stream;
+  header.writeUInt32BE(payload.length, 4);
+  return Buffer.concat([header, payload]);
+};
 
 const cleanupTasks: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -81,7 +104,7 @@ function dbJob(kind: "db.provision" | "db.drop", overrides?: Partial<SiteJobRequ
 describe("wordpress.set-url", () => {
   it("set-url passes URLs only as env", () => {
     const payload = buildSiteJobContainerPayload(setUrl(), ctx);
-    expect(payload.Cmd[2]).toBe(WORDPRESS_SET_URL_SCRIPT);
+    expect(payload.Entrypoint?.[2]).toBe(WORDPRESS_SET_URL_SCRIPT);
     expect(payload.Env).toContain("HP_SITE_URL=https://hotel.it");
     expect(payload.Env).toContain("HP_PREVIOUS_URL=http://hotel.it");
   });
@@ -160,7 +183,7 @@ describe("wordpress.set-url", () => {
 });
 
 describe("buildSiteJobContainerPayload", () => {
-  it("wordpress.install passes customer values only as env and never inside Cmd", () => {
+  it("wordpress.install passes customer values only as env and never inside its command", () => {
     const title = `L'Hôtel "Bella" $(id)`;
     const req = wpInstall({ params: { ...wpInstall().params, title } });
     const payload = buildSiteJobContainerPayload(req, {
@@ -170,9 +193,9 @@ describe("buildSiteJobContainerPayload", () => {
         "HP_DB_PASSWORD_FILE=/run/secrets/HP_DB_PASSWORD",
       ],
     });
-    expect(payload.Cmd.slice(0, 2)).toEqual(["sh", "-c"]);
-    expect(payload.Cmd[2]).not.toContain("Bella");
-    expect(payload.Cmd[2]).not.toContain("$(id)");
+    expect(payload.Entrypoint?.slice(0, 2)).toEqual(["sh", "-c"]);
+    expect(payload.Entrypoint?.[2]).not.toContain("Bella");
+    expect(payload.Entrypoint?.[2]).not.toContain("$(id)");
     expect(payload.Env).toContain(`HP_TITLE=${title}`);
     expect(payload.Env.some((e) => e.includes(ADMIN_PW))).toBe(false);
     expect(payload.Env).toContain("HP_ADMIN_PASSWORD_FILE=/run/secrets/HP_ADMIN_PASSWORD");
@@ -214,13 +237,14 @@ describe("buildSiteJobContainerPayload", () => {
     const payload = buildSiteJobContainerPayload(dbJob("db.provision"), ctx);
     expect(JSON.stringify(payload.Env)).not.toContain(DB_PW);
     expect(JSON.stringify(payload.Cmd)).not.toContain(DB_PW);
+    expect(payload.Cmd?.[2]).toBe(DB_PROVISION_SCRIPT);
   });
 
   it("db.provision script re-checks the password is 64 hex", () => {
     const payload = buildSiteJobContainerPayload(dbJob("db.provision"), ctx);
-    expect(payload.Cmd[2]).toContain("*[!0-9a-f]*) exit 64");
-    expect(payload.Cmd[2]).toContain("-eq 64");
-    expect(payload.Cmd[2]).not.toContain("wp_site_a");
+    expect(payload.Cmd?.[2]).toContain("*[!0-9a-f]*) exit 64");
+    expect(payload.Cmd?.[2]).toContain("-eq 64");
+    expect(payload.Cmd?.[2]).not.toContain("wp_site_a");
     expect(payload.Env).toEqual(
       expect.arrayContaining([
         "HP_DB_NAME=wp_site_a",
@@ -242,7 +266,7 @@ describe("buildSiteJobContainerPayload", () => {
       params: { dbName: "wp_0123456789ab", dbUser: "wp_0123456789ab" },
     });
     const payload = buildSiteJobContainerPayload(req, ctx);
-    expect(payload.Cmd[2]).toBe(DB_PROVISION_SCRIPT);
+    expect(payload.Cmd?.[2]).toBe(DB_PROVISION_SCRIPT);
     expect(DB_PROVISION_SCRIPT).toBe(
       [
         "set -eu",
@@ -302,10 +326,10 @@ describe("buildSiteJobContainerPayload", () => {
 
   it("wordpress.install script is idempotent and refuses a foreign wp-config.php", () => {
     const payload = buildSiteJobContainerPayload(wpInstall(), ctx);
-    const script = payload.Cmd[2];
+    const script = payload.Entrypoint?.[2] ?? "";
     expect(script).toContain("wp config has HP_MANAGED");
     expect(script).toContain("exit 20");
-    expect(script).toContain("wp core is-installed ||");
+    expect(script).toContain("if ! wp core is-installed; then");
     expect(script).not.toContain("--hard");
     const htaccess = payload.Env.find((e) => e.startsWith("HP_HTACCESS_WORDPRESS="));
     expect(htaccess).toContain("# BEGIN WordPress");
@@ -367,6 +391,276 @@ describe("buildSiteJobContainerPayload", () => {
       expect("CapAdd" in payload.HostConfig).toBe(false);
       expect("ExposedPorts" in payload).toBe(false);
     }
+  });
+});
+
+const NEW_KINDS = ["wordpress.inspect", "wordpress.update", "wordpress.settle", "wordpress.reset-password"] as const;
+type NewKind = (typeof NEW_KINDS)[number];
+
+function wpJob(kind: NewKind, overrides?: Partial<SiteJobRequest>): SiteJobRequest {
+  const extra: Record<NewKind, Record<string, string>> = {
+    "wordpress.inspect": {},
+    "wordpress.update": { target: "plugin:classic-editor" },
+    "wordpress.settle": {},
+    "wordpress.reset-password": { userId: "1" },
+  };
+  return {
+    jobId: "job_wpt_1",
+    kind,
+    siteId: "site_a",
+    organizationId: "org_a",
+    serviceInstanceId: "svc_a",
+    params: { phpVersion: "8.4", ...extra[kind] },
+    ...(kind === "wordpress.reset-password" ? { resolvedSecrets: { HP_ADMIN_PASSWORD: ADMIN_PW } } : {}),
+    ...overrides,
+  };
+}
+
+const SCRIPTS: Record<SiteJobRequest["kind"], string> = {
+  "db.provision": DB_PROVISION_SCRIPT,
+  "db.drop": DB_DROP_SCRIPT,
+  "wordpress.install": WORDPRESS_INSTALL_SCRIPT,
+  "wordpress.set-url": WORDPRESS_SET_URL_SCRIPT,
+  "wordpress.inspect": WORDPRESS_INSPECT_SCRIPT,
+  "wordpress.update": WORDPRESS_UPDATE_SCRIPT,
+  "wordpress.settle": WORDPRESS_SETTLE_SCRIPT,
+  "wordpress.reset-password": WORDPRESS_RESET_PASSWORD_SCRIPT,
+};
+
+/** Positions of $HP_ / ${HP_ outside double quotes (single quotes and escapes respected). */
+function unquotedHpReads(script: string): string[] {
+  const found: string[] = [];
+  let state: "none" | "single" | "double" = "none";
+  for (let i = 0; i < script.length; i += 1) {
+    const c = script[i]!;
+    if (state === "single") {
+      if (c === "'") state = "none";
+      continue;
+    }
+    if (c === "\\") {
+      i += 1;
+      continue;
+    }
+    if (state === "none" && c === "'") state = "single";
+    else if (c === '"') state = state === "double" ? "none" : "double";
+    else if (state === "none" && c === "$" && /^\{?HP_/.test(script.slice(i + 1, i + 5))) {
+      found.push(script.slice(i, i + 24));
+    }
+  }
+  return found;
+}
+
+describe("WordPress tools kinds", () => {
+  const expectInvalid = (req: SiteJobRequest) =>
+    expect(() => buildSiteJobContainerPayload(req, ctx)).toThrow(
+      expect.objectContaining({ code: "VALIDATION_ERROR" }),
+    );
+
+  it("accepts the four kinds with their closed params", () => {
+    for (const kind of NEW_KINDS) {
+      expect(() => buildSiteJobContainerPayload(wpJob(kind), ctx)).not.toThrow();
+    }
+    for (const target of ["all", "core", "plugin:classic-editor", "theme:twentytwentyfive"]) {
+      expect(() =>
+        buildSiteJobContainerPayload(wpJob("wordpress.update", { params: { phpVersion: "8.4", target } }), ctx),
+      ).not.toThrow();
+    }
+  });
+
+  it("refuses unknown params, secrets, bad targets, bad user ids and a bad phpVersion", () => {
+    for (const kind of NEW_KINDS) {
+      const base = wpJob(kind);
+      expectInvalid({ ...base, params: { ...base.params, image: "evil" } });
+      expectInvalid({ ...base, params: { ...base.params, phpVersion: "7.4" } });
+      expectInvalid({ ...base, serviceInstanceId: undefined });
+      expectInvalid({ ...base, resolvedSecrets: { ...base.resolvedSecrets, HP_DB_PASSWORD: DB_PW } });
+    }
+    for (const kind of ["wordpress.inspect", "wordpress.update", "wordpress.settle"] as const) {
+      expectInvalid(wpJob(kind, { resolvedSecrets: { HP_ADMIN_PASSWORD: ADMIN_PW } }));
+    }
+    for (const target of ["plugin:-x", "plugin:a b", "core;id", "plugin:", "plugin:../x", "$(id)", ""]) {
+      expectInvalid(wpJob("wordpress.update", { params: { phpVersion: "8.4", target } }));
+    }
+    expectInvalid(wpJob("wordpress.update", { params: { phpVersion: "8.4" } }));
+    for (const userId of ["0", "01", "-1", "1 OR 1", "12345678901"]) {
+      expectInvalid(wpJob("wordpress.reset-password", { params: { phpVersion: "8.4", userId } }));
+    }
+    expectInvalid(wpJob("wordpress.reset-password", { resolvedSecrets: {} }));
+    expectInvalid(wpJob("wordpress.reset-password", { resolvedSecrets: { HP_ADMIN_PASSWORD: "short" } }));
+    expectInvalid(wpJob("wordpress.reset-password", { resolvedSecrets: { HP_ADMIN_PASSWORD: "a\nb-long-enough" } }));
+    expectInvalid({ ...wpJob("wordpress.inspect"), kind: "wordpress.eval" as SiteJobRequest["kind"] });
+  });
+
+  // R139: a wp-cli job replaces the image's entry point (no start-up script, no Cmd) and runs under an init.
+  it("puts values only in Env and the constant script last in the command, for every kind", () => {
+    const hostile = "Hôtel $(id) `x` \"q\" 'q' ; rm -rf /";
+    const reqs: SiteJobRequest[] = [
+      dbJob("db.provision"),
+      dbJob("db.drop"),
+      wpInstall({ params: { ...wpInstall().params, title: hostile } }),
+      setUrl(),
+      ...NEW_KINDS.map((k) => wpJob(k)),
+      wpJob("wordpress.update", { params: { phpVersion: "8.4", target: "plugin:a.b_c-d" } }),
+      wpJob("wordpress.reset-password", { params: { phpVersion: "8.4", userId: "9999999999" } }),
+    ];
+    for (const req of reqs) {
+      const payload = buildSiteJobContainerPayload(req, {
+        ...ctx,
+        secretFileEnv: Object.keys(req.resolvedSecrets ?? {}).map((n) => `${n}_FILE=/run/secrets/${n}`),
+      });
+      const isDb = req.kind.startsWith("db.");
+      const command = isDb ? payload.Cmd : payload.Entrypoint;
+      if (isDb) {
+        expect(payload, req.kind).not.toHaveProperty("Entrypoint");
+        expect(payload.HostConfig, req.kind).not.toHaveProperty("Init");
+      } else {
+        expect(payload, req.kind).not.toHaveProperty("Cmd");
+        expect(payload.HostConfig.Init, req.kind).toBe(true);
+      }
+      if ((NEW_KINDS as readonly string[]).includes(req.kind)) {
+        expect(command).toEqual([
+          "timeout",
+          "-s",
+          "KILL",
+          String(siteJobTimeoutMs(req.kind) / 1000 + 5),
+          "sh",
+          "-c",
+          SCRIPTS[req.kind],
+        ]);
+      } else {
+        expect(command, req.kind).toEqual(["sh", "-c", SCRIPTS[req.kind]]);
+      }
+      // The prefix and the constant are fixed above, so a value can only travel in Env.
+      for (const [key, value] of Object.entries(req.params)) {
+        expect(payload.Env).toContain(`HP_${key.replace(/[A-Z]/g, (c) => `_${c}`).toUpperCase()}=${value}`);
+      }
+      const cmd = JSON.stringify(command);
+      for (const value of Object.values(req.resolvedSecrets ?? {})) {
+        expect(cmd).not.toContain(value);
+        expect(payload.Env.some((e) => e.includes(value))).toBe(false);
+      }
+    }
+    const update = buildSiteJobContainerPayload(
+      wpJob("wordpress.update", { params: { phpVersion: "8.4", target: "theme:twentytwentyfive" } }),
+      ctx,
+    );
+    expect(update.Env).toContain("HP_TARGET=theme:twentytwentyfive");
+    const reset = buildSiteJobContainerPayload(wpJob("wordpress.reset-password"), ctx);
+    expect(reset.Env).toContain("HP_USER_ID=1");
+  });
+
+  it("every script passes the static check", () => {
+    for (const [kind, script] of Object.entries(SCRIPTS)) {
+      expect(script, kind).not.toMatch(/(^|[;&|(]\s*)eval\b/m);
+      expect(script, kind).not.toContain("--prompt");
+      // The db scripts splice pattern-checked identifiers into a SQL heredoc, where quotes and backticks are SQL.
+      if (kind.startsWith("db.")) continue;
+      expect(script, kind).not.toContain("`");
+      expect(unquotedHpReads(script), kind).toEqual([]);
+    }
+    const reads = unquotedHpReads('a=$HP_X; b="$HP_Y"; c=\'$HP_Z\'; d="\\"$HP_W"');
+    expect(reads.map((r) => r.slice(0, 5))).toEqual(["$HP_X"]);
+    expect("x; eval y").toMatch(/(^|[;&|(]\s*)eval\b/m);
+    expect("wp eval 'x'").not.toMatch(/(^|[;&|(]\s*)eval\b/m);
+    expect(WORDPRESS_INSTALL_SCRIPT).toContain("wp_slash");
+    expect(WORDPRESS_RESET_PASSWORD_SCRIPT).toContain("wp_set_password(wp_slash($p), $u->ID)");
+    expect(WORDPRESS_RESET_PASSWORD_SCRIPT).toContain("destroy_all()");
+    for (const script of [WORDPRESS_INSPECT_SCRIPT, WORDPRESS_UPDATE_SCRIPT]) {
+      expect(script).toMatch(/\n\{\n[\s\S]*\n\} >&2\nphp -r '/);
+    }
+    expect(WORDPRESS_SETTLE_SCRIPT).not.toContain("wp ");
+    // R140/R147.1: "known" needs `response`, which only an answered lookup writes (also with no plugin); a failed read is "not known".
+    expect(WORDPRESS_INSPECT_SCRIPT).toMatch(/get_site_transient\(\$t\); if \(!is_object\(\$v\) \|\| !isset\(\$v->response\)\) exit\(1\);[^\n]*\|\| true\n/);
+    expect(WORDPRESS_INSPECT_SCRIPT).not.toContain("$v->checked");
+    expect(WORDPRESS_INSPECT_SCRIPT).toContain('$known = is_file("/tmp/hp/core.json") && is_file("/tmp/hp/answered");');
+  });
+
+  it("image, user, volume, network reach, limits and result per kind", () => {
+    for (const kind of NEW_KINDS) {
+      const payload = buildSiteJobContainerPayload(wpJob(kind, { params: { ...wpJob(kind).params, phpVersion: "8.3" } }), ctx);
+      expect(payload.Image).toBe(resolveWordpressCliImage("8.3"));
+      expect(payload.User).toBe("33:33");
+      expect(payload.WorkingDir).toBe("/var/www/html");
+      expect(payload.HostConfig.NetworkMode).toBe("hp_site_site_a_net");
+      expect(payload.HostConfig.Binds).toEqual(["hp_vol_svc_a_html:/var/www/html"]);
+    }
+    expect(Object.keys(SITE_JOB_SPECS).filter((k) => SITE_JOB_SPECS[k as NewKind].edgeNetwork === true).sort()).toEqual([
+      "wordpress.inspect",
+      "wordpress.update",
+    ]);
+    expect(Object.keys(SITE_JOB_SPECS).filter((k) => SITE_JOB_SPECS[k as NewKind].result !== undefined).sort()).toEqual([
+      "wordpress.inspect",
+      "wordpress.update",
+    ]);
+    expect(siteJobTimeoutMs("wordpress.inspect")).toBe(240_000);
+    expect(siteJobTimeoutMs("wordpress.update")).toBe(240_000);
+    expect(siteJobTimeoutMs("wordpress.settle")).toBe(60_000);
+    expect(siteJobTimeoutMs("wordpress.reset-password")).toBe(60_000);
+    for (const kind of ["db.provision", "db.drop", "wordpress.install", "wordpress.set-url"] as const) {
+      expect(siteJobTimeoutMs(kind)).toBe(DEFAULT_SITE_JOB_TIMEOUT_MS);
+    }
+  });
+
+  it("bounds the log of every site job", () => {
+    for (const req of [dbJob("db.provision"), dbJob("db.drop"), wpInstall(), setUrl(), ...NEW_KINDS.map((k) => wpJob(k))]) {
+      expect(buildSiteJobContainerPayload(req, ctx).HostConfig.LogConfig).toEqual({
+        Type: "json-file",
+        Config: { "max-size": "1m", "max-file": "1" },
+      });
+    }
+  });
+});
+
+describe("parseWordpressJobResult", () => {
+  const plugin = (i: number) => ({
+    name: `plugin-${String(i)}`,
+    title: `Plugin ${String(i)}`,
+    status: "active",
+    version: "1.0",
+    updateVersion: null,
+  });
+  const state = (over: Record<string, unknown> = {}) => ({
+    coreVersion: "7.1.4",
+    coreUpdate: null,
+    updatesKnown: true,
+    plugins: Array.from({ length: 66 }, (_, i) => plugin(i)),
+    themes: [],
+    administrators: [{ id: 1, login: "admin" }],
+    ...over,
+  });
+  const line = (v: unknown) => `${JSON.stringify(v)}\n`;
+
+  it("passes a valid state with 66 plugins whole, and an update result", () => {
+    expect(parseWordpressJobResult("wordpress.inspect", line(state()))).toEqual(state());
+    const items = { items: [{ type: "core", name: "wordpress", oldVersion: "7.1.3", newVersion: "7.1.4", status: "updated" }] };
+    expect(parseWordpressJobResult("wordpress.update", line(items))).toEqual(items);
+  });
+
+  it("answers undefined for anything else, never throws", () => {
+    const bad: Array<[SiteJobRequest["kind"], string]> = [
+      ["wordpress.inspect", line(state({ plugins: [{ ...plugin(1), title: "x".repeat(WORDPRESS_RESULT_MAX_BYTES) }] }))],
+      ["wordpress.inspect", `${"{".padEnd(WORDPRESS_RESULT_MAX_BYTES + 1, " ")}`],
+      ["wordpress.inspect", line(state()) + line(state())],
+      ["wordpress.inspect", "not json\n"],
+      ["wordpress.inspect", ""],
+      ["wordpress.inspect", "null\n"],
+      ["wordpress.inspect", line({ items: [] })],
+      ["wordpress.update", line(state())],
+      ["wordpress.inspect", line(state({ plugins: [{ ...plugin(1), status: "gone" }] }))],
+      ["wordpress.inspect", line(state({ extra: true }))],
+      ["wordpress.inspect", line(state({ plugins: Array.from({ length: 501 }, (_, i) => plugin(i)) }))],
+      ["wordpress.inspect", line(state({ administrators: Array.from({ length: 201 }, (_, i) => ({ id: i + 1, login: "a" })) }))],
+      ["wordpress.inspect", line(state({ plugins: [{ ...plugin(1), name: "a\u0001b" }] }))],
+      ["wordpress.inspect", line(state({ plugins: [{ ...plugin(1), name: "a‮b" }] }))],
+    ];
+    for (const [kind, stdout] of bad) {
+      expect(parseWordpressJobResult(kind, stdout)).toBeUndefined();
+    }
+    for (const kind of ["db.provision", "db.drop", "wordpress.install", "wordpress.set-url", "wordpress.settle", "wordpress.reset-password"] as const) {
+      expect(parseWordpressJobResult(kind, line(state()))).toBeUndefined();
+      expect(parseWordpressJobResult(kind, line({ items: [] }))).toBeUndefined();
+    }
+    expect(parseWordpressJobResult("rm.rf" as SiteJobRequest["kind"], line(state()))).toBeUndefined();
   });
 });
 
@@ -507,5 +801,160 @@ describe("DockerEngineSocketAdapter.runSiteJob", () => {
     expect(jobContainers()).toEqual([]);
     expect(mockDaemon.containers.has("mariadb-id")).toBe(true);
     expect((await readdir(secretsRootDir)).sort()).toEqual(["svc_keep"]);
+  });
+
+  describe("WordPress tools kinds", () => {
+    const stateLine = JSON.stringify({
+      coreVersion: "6.8.1",
+      coreUpdate: null,
+      updatesKnown: true,
+      plugins: [],
+      themes: [],
+      administrators: [{ id: 1, login: "admin" }],
+    });
+    // Logs by stream: the adapter's query decides which frames come back.
+    async function wpSetup(stdout: string, stderr = "wp said hello\n", options?: Parameters<typeof setup>[0]) {
+      const box: { paths: string[] } = { paths: [] };
+      const s = await setup({
+        waitStatusCode: 0,
+        ...options,
+        logsBodyFn: () => {
+          const q = new URL(box.paths.at(-1) ?? "/", "http://docker").searchParams;
+          return Buffer.concat([
+            ...(q.get("stdout") === "1" ? [logFrame(1, stdout)] : []),
+            ...(q.get("stderr") === "1" ? [logFrame(2, stderr)] : []),
+          ]);
+        },
+      });
+      box.paths = s.mockDaemon.requestedPaths;
+      return s;
+    }
+    const order = (paths: string[], re: RegExp) => paths.findIndex((p) => re.test(p));
+    // The mock knows a network once it is created through its API.
+    const createNetwork = (socketPath: string, Name: string) =>
+      new Promise<void>((resolve, reject) => {
+        const req = http.request({ socketPath, path: "/networks/create", method: "POST" }, (res) => {
+          res.resume();
+          res.on("end", () => resolve());
+        });
+        req.on("error", reject);
+        req.end(JSON.stringify({ Name }));
+      });
+
+    it("connects the edge network after create and before start, for inspect and update only", async () => {
+      for (const kind of NEW_KINDS) {
+        const { adapter, mockDaemon } = await wpSetup(`${stateLine}\n`);
+        await createNetwork(mockDaemon.socketPath, "hp_edge_site_a_net");
+        await adapter.runSiteJob(wpJob(kind));
+        const edge = mockDaemon.networkConnectCalls.filter((c) => c.network === "hp_edge_site_a_net");
+        const paths = mockDaemon.requestedPaths;
+        if (SITE_JOB_SPECS[kind].edgeNetwork) {
+          expect(edge, kind).toHaveLength(1);
+          const connect = order(paths, /\/networks\/hp_edge_site_a_net\/connect/);
+          expect(order(paths, /\/containers\/create/)).toBeLessThan(connect);
+          expect(connect).toBeLessThan(order(paths, /\/containers\/[^/]+\/start/));
+        } else {
+          expect(mockDaemon.networkConnectCalls, kind).toEqual([]);
+        }
+      }
+    });
+
+    // The real engine accepts a connect of a created container to a missing network, then fails the start.
+    it("a missing edge network is not an error: the job runs on the site network only", async () => {
+      const { adapter, mockDaemon } = await wpSetup(`${stateLine}\n`);
+      const result = await adapter.runSiteJob(wpJob("wordpress.inspect"));
+      expect(result).toMatchObject({ exitCode: 0, result: { updatesKnown: true } });
+      expect(mockDaemon.networkConnectCalls).toEqual([]);
+      expect(mockDaemon.requestedPaths.some((p) => /\/containers\/[^/]+\/start/.test(p))).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/hp_|mockcontainer|\/tmp\//);
+    });
+
+    // K3: a broken connect or look-up of the edge network ends the job with one fixed sentence.
+    it("a failed connect or look-up of the edge network gives the fixed sentence and removes the container", async () => {
+      for (const broken of ["connect", "lookup"] as const) {
+        const { adapter, mockDaemon, jobContainers } = await wpSetup(`${stateLine}\n`);
+        await createNetwork(mockDaemon.socketPath, "hp_edge_site_a_net");
+        mockDaemon.brokenNetworks[broken].add("hp_edge_site_a_net");
+        const err = await adapter.runSiteJob(wpJob("wordpress.inspect")).catch((e: unknown) => e);
+        expect(err, broken).toMatchObject({
+          code: "DOCKER_ENGINE_UNAVAILABLE",
+          message: "Could not connect the site tools to the internet",
+        });
+        expect(String((err as Error).message)).not.toMatch(/hp_|_net|job_|engine broke/);
+        expect(mockDaemon.networkConnectCalls, broken).toHaveLength(broken === "connect" ? 1 : 0);
+        expect(mockDaemon.requestedPaths.some((p) => /\/containers\/[^/]+\/start/.test(p)), broken).toBe(false);
+        expect(jobContainers(), broken).toEqual([]);
+      }
+    });
+
+    it("reads the result from stdout only and the tail from stderr only", async () => {
+      const { adapter, mockDaemon } = await wpSetup(`${stateLine}\n`, "loading site\n");
+      const result = await adapter.runSiteJob(wpJob("wordpress.inspect"));
+      expect(result.result).toEqual(JSON.parse(stateLine));
+      expect(result.outputTail).toBe("loading site");
+      const logs = mockDaemon.requestedPaths.filter((p) => p.includes("/logs?"));
+      expect(logs.some((p) => p.includes("stdout=1&stderr=0"))).toBe(true);
+      expect(logs.filter((p) => !p.includes("stdout=1&stderr=0")).every((p) => p.includes("stdout=0&stderr=1"))).toBe(true);
+      expect(JSON.stringify(result)).not.toMatch(/hp_|mockcontainer|\/tmp\//);
+    });
+
+    it("a result over the ceiling or one that does not parse gives no result and no exception", async () => {
+      const over = `${JSON.stringify({ ...JSON.parse(stateLine), pad: "x".repeat(WORDPRESS_RESULT_MAX_BYTES) })}\n`;
+      for (const stdout of [over, "not json\n", `${stateLine}\n${stateLine}\n`]) {
+        const { adapter } = await wpSetup(stdout);
+        const result = await adapter.runSiteJob(wpJob("wordpress.inspect"));
+        expect(result.exitCode).toBe(0);
+        expect(result).not.toHaveProperty("result");
+      }
+    });
+
+    it("a kind without a result never carries one and keeps its full tail", async () => {
+      for (const kind of ["wordpress.settle", "wordpress.reset-password"] as const) {
+        const { adapter, mockDaemon } = await wpSetup(`${stateLine}\n`);
+        const result = await adapter.runSiteJob(wpJob(kind));
+        expect(result, kind).not.toHaveProperty("result");
+        expect(mockDaemon.requestedPaths.some((p) => p.includes("stderr=0")), kind).toBe(false);
+      }
+    });
+
+    it("a reset that does not end answers 124 after its own limit, not the adapter's", async () => {
+      const real = globalThis.setTimeout;
+      const delays: number[] = [];
+      vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+        delays.push(ms ?? 0);
+        return real(fn, ms === siteJobTimeoutMs("wordpress.reset-password") ? 20 : ms);
+      }) as typeof setTimeout);
+      cleanupTasks.push(async () => vi.restoreAllMocks());
+      const { adapter, mockDaemon } = await wpSetup("", "", { waitStatusCode: "hang" });
+      const result = await adapter.runSiteJob(wpJob("wordpress.reset-password"));
+      expect(result.exitCode).toBe(124);
+      expect(delays).toContain(60_000);
+      expect(delays).not.toContain(DEFAULT_SITE_JOB_TIMEOUT_MS);
+      expect(mockDaemon.requestedPaths.some((p) => /\/containers\/[^/]+\/kill/.test(p))).toBe(true);
+    });
+
+    it("a reset with the image missing answers DOCKER_ENGINE_UNAVAILABLE and pulls nothing", async () => {
+      const { adapter, mockDaemon } = await wpSetup("", "", { pullBody: "{}" });
+      const err = await adapter.runSiteJob(wpJob("wordpress.reset-password")).catch((e: unknown) => e);
+      expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+      expect(String((err as Error).message)).not.toMatch(/hp_|wordpress:|\/tmp\/|job_/);
+      expect(mockDaemon.requestedPaths.some((p) => p.includes("/images/create"))).toBe(false);
+      expect(mockDaemon.requestedPaths.some((p) => p.includes("/containers/create"))).toBe(false);
+    });
+  });
+});
+
+describe("readJobStdout", () => {
+  it("joins stdout frames only and keeps whole lines", () => {
+    const body = Buffer.concat([logFrame(1, '{"a":'), logFrame(2, "noise\n"), logFrame(1, "1}\n")]);
+    expect(readJobStdout(body, 100)).toBe('{"a":1}\n');
+  });
+
+  it("refuses a body over the ceiling without copying the rest", () => {
+    const body = Buffer.concat(Array.from({ length: 64 }, () => logFrame(1, "y".repeat(65_536))));
+    const concat = vi.spyOn(Buffer, "concat");
+    cleanupTasks.push(async () => vi.restoreAllMocks());
+    expect(readJobStdout(body, WORDPRESS_RESULT_MAX_BYTES)).toBeNull();
+    expect(concat).not.toHaveBeenCalled();
   });
 });

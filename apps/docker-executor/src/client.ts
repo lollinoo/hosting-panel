@@ -13,6 +13,7 @@ import {
   SITE_DATABASES_RESULT_SCHEMAS,
   SITE_FILES_RESULT_SCHEMAS,
   signIpcRequest,
+  WORDPRESS_RESET_CLIENT_WAIT_MS,
   type CertificateStatusIpcRequest,
   type DeployServiceIpcRequest,
   type ErrorCode,
@@ -52,6 +53,7 @@ import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
   type IpcTransportMode,
 } from "./server.js";
+import { SITE_JOB_SPECS } from "./site-jobs.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
 const ExecutionResultDataEnvelopeSchema = z.object({
@@ -79,6 +81,7 @@ const SiteJobResultDataEnvelopeSchema = z.object({
     jobId: z.string().min(1),
     exitCode: z.number().int(),
     outputTail: z.string(),
+    result: z.unknown().optional(),
   }),
 });
 
@@ -298,9 +301,12 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       "POST",
       "/v1/jobs/run",
       payload,
-      SITE_JOB_TIMEOUT_MS,
+      req.kind === "wordpress.reset-password" ? WORDPRESS_RESET_CLIENT_WAIT_MS : SITE_JOB_TIMEOUT_MS,
     );
-    return SiteJobResultDataEnvelopeSchema.parse(json).data;
+    const { result, ...data } = SiteJobResultDataEnvelopeSchema.parse(json).data;
+    // Checked again on this side against the kind's own schema; a result that fails is dropped (result_unreadable).
+    const checked = result === undefined ? undefined : SITE_JOB_SPECS[req.kind].result?.safeParse(result);
+    return checked?.success === true ? { ...data, result: checked.data } : data;
   }
 
   public async purgeSite(siteId: string): Promise<void> {

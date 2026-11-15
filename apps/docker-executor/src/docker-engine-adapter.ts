@@ -76,7 +76,7 @@ import {
   buildMailRelaySaslLine,
 } from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
-import { demuxDockerLogStream } from "./docker-logs.js";
+import { demuxDockerLogStream, readJobStdout } from "./docker-logs.js";
 import {
   parsePostfixDeliveries,
   summarizeMailDeliveries,
@@ -120,9 +120,13 @@ import {
 import {
   DEFAULT_SITE_JOB_TIMEOUT_MS,
   SITE_JOB_ROLE,
+  SITE_JOB_SPECS,
+  WORDPRESS_RESULT_MAX_BYTES,
   assertValidSiteJobRequest,
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
+  parseWordpressJobResult,
+  siteJobTimeoutMs,
 } from "./site-jobs.js";
 import {
   DEFAULT_SFTP_STATE_DIR,
@@ -1931,8 +1935,20 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.runningSiteJobs.add(lockKey);
     let containerId: string | null = null;
     try {
-      if (req.kind === "wordpress.install" || req.kind === "wordpress.set-url") {
-        await this.ensureImageAvailable(resolveWordpressCliImage(req.params.phpVersion as PhpVersion));
+      if (req.kind.startsWith("wordpress.")) {
+        const image = resolveWordpressCliImage(req.params.phpVersion as PhpVersion);
+        if (req.kind === "wordpress.reset-password") {
+          // Never pull here: the reset must answer inside the client's 75 s.
+          const imageRes = await this.dockerClient.request("GET", `/images/${encodeURIComponent(image)}/json`);
+          if (imageRes.statusCode !== 200) {
+            throw new ExecutorCodedError(
+              "The site tools are not ready yet. Retry in a few minutes",
+              "DOCKER_ENGINE_UNAVAILABLE",
+            );
+          }
+        } else {
+          await this.ensureImageAvailable(image);
+        }
         // set-url works on the existing html volume and must never create an empty one.
         if (req.kind === "wordpress.install") {
           await this.ensureVolume(
@@ -1973,6 +1989,24 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       }
       const id = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
       containerId = id;
+      const spec = SITE_JOB_SPECS[req.kind];
+      if (spec.edgeNetwork) {
+        // A missing edge network is not an error: the job runs offline and reports updates as unknown.
+        // Look first: the engine accepts a connect of a created container to a missing network, then fails the start.
+        const edge = getSiteEdgeNetworkName(req.siteId);
+        const edgeRes = await this.dockerClient.request("GET", `/networks/${encodeURIComponent(edge)}`);
+        const edgeFailed = new ExecutorCodedError(
+          "Could not connect the site tools to the internet",
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+        if (edgeRes.statusCode === 200) {
+          await this.connectContainerToNetwork(edge, id, undefined, { skipMissingNetwork: true }).catch(() => {
+            throw edgeFailed;
+          });
+        } else if (edgeRes.statusCode !== 404) {
+          throw edgeFailed;
+        }
+      }
       const startRes = await this.dockerClient.request("POST", `/containers/${id}/start`);
       if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
         throw new ExecutorCodedError(
@@ -1981,14 +2015,21 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         );
       }
 
-      const exitCode = await this.waitForSiteJob(id);
+      const exitCode = await this.waitForSiteJob(id, Math.min(siteJobTimeoutMs(req.kind), this.jobTimeoutMs));
+      // A kind with a result keeps stdout for it alone; the tail then comes from stderr.
       const logsRes = await this.dockerClient.request(
         "GET",
-        `/containers/${id}/logs?stdout=1&stderr=1&tail=50`,
+        `/containers/${id}/logs?stdout=${spec.result ? "0" : "1"}&stderr=1&tail=50`,
       );
       const outputTail =
         logsRes.statusCode === 200 ? formatSiteJobOutputTail(logsRes.body, req.resolvedSecrets) : "";
-      return { jobId: req.jobId, exitCode, outputTail };
+      if (!spec.result) {
+        return { jobId: req.jobId, exitCode, outputTail };
+      }
+      const outRes = await this.dockerClient.request("GET", `/containers/${id}/logs?stdout=1&stderr=0`);
+      const stdout = outRes.statusCode === 200 ? readJobStdout(outRes.body, WORDPRESS_RESULT_MAX_BYTES) : null;
+      const result = stdout === null ? undefined : parseWordpressJobResult(req.kind, stdout);
+      return { jobId: req.jobId, exitCode, outputTail, ...(result ? { result } : {}) };
     } finally {
       try {
         if (containerId) {
@@ -2004,16 +2045,16 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
-  private async waitForSiteJob(containerId: string): Promise<number> {
+  private async waitForSiteJob(containerId: string, limitMs: number): Promise<number> {
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), this.jobTimeoutMs);
+      timer = setTimeout(() => resolve(null), limitMs);
     });
     try {
       // Our own timer decides the timeout: a socket timeout would read as DOCKER_ENGINE_UNAVAILABLE.
       const res = await Promise.race([
         this.dockerClient.request("POST", `/containers/${containerId}/wait`, undefined, {
-          timeoutMs: this.jobTimeoutMs + 15_000,
+          timeoutMs: limitMs + 15_000,
         }),
         expired,
       ]);

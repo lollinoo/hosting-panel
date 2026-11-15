@@ -33,3 +33,21 @@ export function demuxDockerLogStream(buf: Buffer): ServiceLogLine[] {
   }
   return lines;
 }
+
+/** Joins the stdout frames of a log body; null once they pass `ceiling` bytes (the rest is never copied). */
+export function readJobStdout(body: Buffer, ceiling: number): string | null {
+  const parts: Buffer[] = [];
+  let total = 0;
+  for (let offset = 0; offset + 8 <= body.length; ) {
+    const end = Math.min(body.length, offset + 8 + body.readUInt32BE(offset + 4));
+    if (body[offset] === 1) {
+      total += end - offset - 8;
+      if (total > ceiling) {
+        return null;
+      }
+      parts.push(body.subarray(offset + 8, end));
+    }
+    offset = end;
+  }
+  return Buffer.concat(parts, total).toString("utf8");
+}
