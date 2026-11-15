@@ -60,6 +60,7 @@ import {
   BackupRunner,
   DEFAULT_BACKUP_KEY_FILE,
   DEFAULT_BACKUP_NETWORK_NAME,
+  DEFAULT_BACKUP_WORK_DIR,
 } from "./backup-runner.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
@@ -1046,6 +1047,7 @@ export interface DockerEngineSocketAdapterOptions {
   readonly phpMyAdminNetworkName?: string;
   readonly phpMyAdminConfigDir?: string;
   readonly backupKeyFile?: string;
+  readonly backupWorkDir?: string;
   readonly backupNetworkName?: string;
   readonly sharedDbNetworkName?: string;
 }
@@ -1217,9 +1219,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       secretsRootDir: this.secretsRootDir,
       backupKeyFile: this.backupKeyFile,
       sharedDbRootKeyFile: this.sharedDbRootKeyFile,
+      sharedDbDataDir: this.sharedDbDataDir,
       sharedDbNetworkName: this.sharedDbNetworkName,
       backupNetworkName: this.backupNetworkName,
       executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
+      backupWorkDir: path.resolve(options?.backupWorkDir ?? DEFAULT_BACKUP_WORK_DIR),
     });
   }
 
@@ -2039,6 +2043,16 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return this.backupRunner.run(req);
   }
 
+  /** Settles non-ended restore notes left behind by an interrupted executor before accepting IPC traffic. */
+  public settleRestores(): Promise<void> {
+    return this.backupRunner.settleRestores();
+  }
+
+  /** Clears leftover download archives from before a restart so stale bytes are never served. */
+  public emptyArchives(): Promise<void> {
+    return this.backupRunner.emptyArchives();
+  }
+
   public ensurePhpMyAdmin(opts?: { ifPresent?: boolean }): Promise<void> {
     const ifPresent = opts?.ifPresent === true;
     const inFlight = this.phpMyAdminEnsureInFlight;
@@ -2321,6 +2335,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     if (all.some((c) => !isJob(c))) {
       throw new ExecutorCodedError("The site still has a running service", "RESOURCE_LOCKED");
     }
+    // Check restore settlement before deleting containers, volumes, or routes so purge never leaves orphaned state.
+    await this.backupRunner.forgetSite(siteId);
     for (const job of all) {
       await this.stopAndRemoveContainer(job.Id);
     }

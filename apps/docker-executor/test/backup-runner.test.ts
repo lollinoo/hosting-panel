@@ -410,6 +410,8 @@ async function setupRunner(opts?: {
     sharedDbNetworkName: "hp_db_net",
     backupNetworkName: DEFAULT_BACKUP_NETWORK_NAME,
     executorUser: "990:990",
+    backupWorkDir: path.join(tmpDir, "backup-work"),
+    sharedDbDataDir: path.join(tmpDir, "mariadb-data"),
     now: opts?.now,
     fetch: opts?.fetch ?? makeOkFetch(),
   };

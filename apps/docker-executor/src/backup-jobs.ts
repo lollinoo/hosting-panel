@@ -21,6 +21,7 @@ export { S3_PROBE_BUDGET_MS, S3_PROBE_REQUEST_TIMEOUT_MS };
 export const BACKUP_JOB_MEMORY_BYTES = 536_870_912 as const;
 export const BACKUP_TMPFS = "rw,nosuid,nodev,noexec,size=128m,mode=1777" as const;
 export const BACKUP_DISK_FREE_FLOOR_BYTES = 1_073_741_824 as const;
+export const BACKUP_DUMP_SIZE_FACTOR = 2 as const;
 export const BACKUP_MAX_RUNNING_JOBS = 2 as const;
 export const BACKUP_STATUS_TTL_MS = 86_400_000 as const;
 export const BACKUP_STATUS_MAX = 500 as const;
@@ -46,7 +47,7 @@ export const BACKUP_DUMP_SCRIPT = [
   'free=$(df -Pk /run/mysqld | awk \'NR==2{print $4}\'); [ "$free" -ge "$HP_NEED_KB" ] || exit 75',
   'MYSQL_PWD="$(cat /run/secrets/mariadb-root)"; export MYSQL_PWD',
   "for db in $HP_DBS; do",
-  '  mariadb-dump -h hp-mariadb -u root --default-character-set=utf8mb4 --single-transaction --skip-lock-tables --routines --triggers --events --hex-blob --skip-dump-date --result-file="/run/mysqld/$db.sql" "$db" || exit 76',
+  '  mariadb-dump -h hp-mariadb -u root --default-character-set=utf8mb4 --single-transaction --skip-lock-tables --routines --triggers --events --hex-blob --skip-dump-date --result-file="/run/mysqld/$db.sql" "$db" 2>/tmp/err || { grep -q \'errno 28\' /tmp/err && exit 75; cat /tmp/err >&2; exit 76; }',
   "done",
 ].join("\n");
 
@@ -89,19 +90,22 @@ export type BackupResticRepoKind =
 
 export type BackupSnapshotSummary = NonNullable<BackupJobStatus["snapshot"]>;
 
-function assertSafeSecretBinds(secretBinds: readonly string[]): void {
+/** Validates that all job secret bind mounts are read-only and never target docker.sock. */
+export function assertSafeSecretBinds(secretBinds: readonly string[]): void {
   if (secretBinds.some((b) => !b.endsWith(":ro") || b.includes("docker.sock"))) {
     throw new ExecutorCodedError("Job secret binds must be read-only tmpfs files", "HOST_POLICY_DENIED");
   }
 }
 
-function assertSafeSecretFileEnv(secretFileEnv: readonly string[]): void {
+/** Validates that secret environment entries pass file paths (*_FILE=) rather than raw values. */
+export function assertSafeSecretFileEnv(secretFileEnv: readonly string[]): void {
   if (secretFileEnv.some((entry) => !entry.includes("_FILE="))) {
     throw new ExecutorCodedError("Secret env entries must reference files only", "HOST_POLICY_DENIED");
   }
 }
 
-function assertSafeBindPath(hostPath: string, field: string): string {
+/** Validates a host or volume bind source path before placing it in HostConfig.Binds. */
+export function assertSafeBindPath(hostPath: string, field: string): string {
   if (
     typeof hostPath !== "string" ||
     hostPath.length === 0 ||
@@ -113,7 +117,8 @@ function assertSafeBindPath(hostPath: string, field: string): string {
   return hostPath;
 }
 
-function assertRegion(region: string): string {
+/** Validates an S3 region string for restic target options. */
+export function assertRegion(region: string): string {
   if (!REGION_PATTERN.test(region)) {
     throw new ExecutorCodedError("Invalid storage region", "VALIDATION_ERROR");
   }
@@ -127,7 +132,8 @@ function assertJobId(jobId: string): string {
   return jobId;
 }
 
-function buildBackupHostConfig(
+/** Builds the standard hardened HostConfig shared across backup, restore, and archive job containers. */
+export function buildBackupHostConfig(
   networkMode: string,
   binds: readonly string[],
 ): BackupContainerCreatePayload["HostConfig"] {
@@ -155,13 +161,15 @@ function buildBackupHostConfig(
   };
 }
 
-function buildResticBasePayload(input: {
+/** Builds a hardened restic container create payload with S3 secret mounts and cache env. */
+export function buildResticBasePayload(input: {
   readonly repoKind: BackupResticRepoKind;
   readonly target: BackupTarget;
   readonly backupNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
   readonly labels: Readonly<Record<string, string>>;
+  readonly user?: string;
   readonly extraEnv?: readonly string[];
   readonly binds?: readonly string[];
   readonly entrypoint?: readonly string[];
@@ -182,7 +190,7 @@ function buildResticBasePayload(input: {
     Image: RESTIC_IMAGE,
     ...(input.entrypoint !== undefined ? { Entrypoint: input.entrypoint } : {}),
     ...(input.cmd !== undefined ? { Cmd: input.cmd } : {}),
-    User: BACKUP_RESTIC_USER,
+    User: input.user ?? BACKUP_RESTIC_USER,
     Hostname: BACKUP_HOSTNAME,
     Env: env,
     Labels: input.labels,
@@ -193,7 +201,8 @@ function buildResticBasePayload(input: {
   };
 }
 
-function buildJobLabels(siteId: string, jobId: string): Readonly<Record<string, string>> {
+/** Builds standard managed container labels for a site backup/restore/archive job. */
+export function buildJobLabels(siteId: string, jobId: string): Readonly<Record<string, string>> {
   return {
     "io.hostingpanel.managed": "true",
     "io.hostingpanel.role": SITE_JOB_ROLE,
@@ -232,7 +241,7 @@ export function computeDumpNeedKb(
   let totalBytes = 0;
   for (const db of databases) {
     if (Number.isFinite(db.sizeBytes) && db.sizeBytes > 0) {
-      totalBytes += db.sizeBytes;
+      totalBytes += Math.ceil(db.sizeBytes * BACKUP_DUMP_SIZE_FACTOR);
     }
   }
   return Math.ceil((totalBytes + floorBytes) / 1024);
@@ -407,6 +416,8 @@ export function buildBackupUploadContainerPayload(input: {
         BACKUP_HOSTNAME,
         "--tag",
         jobId,
+        "--exclude",
+        "/backup/files/.hp_rs_*",
         ...paths,
       ],
     }),

@@ -1,8 +1,10 @@
 import {
   BACKUP_FAILURE_CLASSES,
   BACKUPS_RESULT_SCHEMAS,
+  BackupArchiveChunkSchema,
   BackupJobStatusSchema,
   BackupTestResultSchema,
+  SITE_FILE_CHUNK_BYTES,
   type BackupsIpcRequest,
 } from "@hosting-panel/contracts";
 import { describe, expect, it } from "vitest";
@@ -596,5 +598,634 @@ describe("SimulatedBackups", () => {
       outcome: "ok",
       problem: null,
     });
+  });
+});
+
+const SIM_ARCHIVE_SIZE_BYTES = 1_048_577;
+const EMPTY_ZIP_EOCD = Buffer.from([
+  0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+]);
+const JOB_5 = `op_${"5".repeat(32)}`;
+const JOB_6 = `op_${"6".repeat(32)}`;
+
+async function createSiteSnapshot(
+  sim: SimulatedBackups,
+  jobId: string,
+  siteId: string,
+): Promise<string> {
+  await sim.handle({
+    action: "start",
+    jobId,
+    siteId,
+    serviceInstanceId: `svc_${siteId}`,
+    target: VALID_TARGET,
+  });
+  const settled = await sim.handle({ action: "status", jobId });
+  expect(settled.state).toBe("succeeded");
+  if (!settled.snapshot) {
+    throw new Error("Expected snapshot from simulated start job");
+  }
+  return settled.snapshot.snapshotId;
+}
+
+describe("SimulatedBackups M3b restore and archive actions", () => {
+  it("handles restore lifecycle, idempotency, locking, and unknown snapshot failure", async () => {
+    const sim = new SimulatedBackups();
+    const snapA = await createSiteSnapshot(sim, JOB_1, "site_a");
+    const snapB = await createSiteSnapshot(sim, JOB_2, "site_b");
+
+    const started = await sim.handle({
+      action: "restore",
+      jobId: JOB_3,
+      siteId: "site_a",
+      serviceInstanceId: "svc_a",
+      target: VALID_TARGET,
+      snapshotId: snapA,
+    });
+    expect(started).toEqual({
+      jobId: JOB_3,
+      state: "running",
+      failure: null,
+      snapshot: null,
+    });
+    expect("archive" in started).toBe(false);
+
+    // Same jobId repeats status without failing or starting a second job.
+    expect(
+      await sim.handle({
+        action: "restore",
+        jobId: JOB_3,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId: snapA,
+      }),
+    ).toEqual(started);
+
+    // Same-site running lock while restore is still running.
+    await expect(
+      sim.handle({
+        action: "restore",
+        jobId: JOB_4,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId: snapA,
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    await expect(
+      sim.handle({
+        action: "start",
+        jobId: JOB_4,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+
+    // Global running job limit (2 across sites).
+    await sim.handle({
+      action: "restore",
+      jobId: JOB_4,
+      siteId: "site_b",
+      serviceInstanceId: "svc_b",
+      target: VALID_TARGET,
+      snapshotId: snapB,
+    });
+    await expect(
+      sim.handle({
+        action: "restore",
+        jobId: JOB_5,
+        siteId: "site_c",
+        serviceInstanceId: "svc_c",
+        target: VALID_TARGET,
+        snapshotId: snapA,
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+
+    // Settle JOB_3 -> succeeded with no snapshot and no archive.
+    const settledRestore = await sim.handle({ action: "status", jobId: JOB_3 });
+    expect(settledRestore).toEqual({
+      jobId: JOB_3,
+      state: "succeeded",
+      failure: null,
+      snapshot: null,
+    });
+    expect("archive" in settledRestore).toBe(false);
+    expect(() => BACKUPS_RESULT_SCHEMAS.restore.parse(settledRestore)).not.toThrow();
+
+    // Idempotent repeat after completion returns settled status even while site_b runs.
+    expect(
+      await sim.handle({
+        action: "restore",
+        jobId: JOB_3,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId: snapA,
+      }),
+    ).toEqual(settledRestore);
+
+    // Unknown snapshot on site_a (both SNAP_MISSING and another site's snapB) fails with "other".
+    await sim.handle({
+      action: "restore",
+      jobId: JOB_5,
+      siteId: "site_a",
+      serviceInstanceId: "svc_a",
+      target: VALID_TARGET,
+      snapshotId: snapB,
+    });
+    expect(await sim.handle({ action: "status", jobId: JOB_5 })).toEqual({
+      jobId: JOB_5,
+      state: "failed",
+      failure: "other",
+      snapshot: null,
+    });
+
+    await sim.handle({
+      action: "restore",
+      jobId: JOB_6,
+      siteId: "site_empty",
+      serviceInstanceId: "svc_empty",
+      target: VALID_TARGET,
+      snapshotId: SNAP_MISSING,
+    });
+    expect(await sim.handle({ action: "status", jobId: JOB_6 })).toEqual({
+      jobId: JOB_6,
+      state: "failed",
+      failure: "other",
+      snapshot: null,
+    });
+  });
+
+  it("handles archive lifecycle, 60-minute expiry metadata, one-per-site replacement, and unknown snapshot failure", async () => {
+    const sim = new SimulatedBackups();
+    const snapA = await createSiteSnapshot(sim, JOB_1, "site_a");
+    const snapB = await createSiteSnapshot(sim, JOB_2, "site_b");
+
+    // Archive on site_a
+    const archStart = await sim.handle({
+      action: "archive",
+      jobId: JOB_3,
+      siteId: "site_a",
+      target: VALID_TARGET,
+      snapshotId: snapA,
+    });
+    expect(archStart).toEqual({
+      jobId: JOB_3,
+      state: "running",
+      failure: null,
+      snapshot: null,
+    });
+    // Reading before settlement throws RESOURCE_LOCKED "archive_preparing".
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED", message: "archive_preparing" });
+
+    // Archive on site_b concurrently within limit of 2.
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_4,
+      siteId: "site_b",
+      target: VALID_TARGET,
+      snapshotId: snapB,
+    });
+
+    const archDoneA = await sim.handle({ action: "status", jobId: JOB_3 });
+    expect(() => BACKUPS_RESULT_SCHEMAS.archive.parse(archDoneA)).not.toThrow();
+    expect(archDoneA.state).toBe("succeeded");
+    expect(archDoneA.snapshot).toBeNull();
+    expect(archDoneA.archive?.sizeBytes).toBe(SIM_ARCHIVE_SIZE_BYTES);
+    const readyMs = Date.parse(archDoneA.archive!.readyAt);
+    const expiresMs = Date.parse(archDoneA.archive!.expiresAt);
+    expect(Number.isFinite(readyMs)).toBe(true);
+    expect(expiresMs - readyMs).toBe(60 * 60 * 1000);
+
+    // Repeat archive with same jobId returns settled status without restarting.
+    expect(
+      await sim.handle({
+        action: "archive",
+        jobId: JOB_3,
+        siteId: "site_a",
+        target: VALID_TARGET,
+        snapshotId: snapA,
+      }),
+    ).toEqual(archDoneA);
+
+    const archDoneB = await sim.handle({ action: "status", jobId: JOB_4 });
+    expect(archDoneB.state).toBe("succeeded");
+
+    // New archive on site_a replaces JOB_3; JOB_3 reads throw archive_gone, site_b's JOB_4 stays readable.
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_5,
+      siteId: "site_a",
+      target: VALID_TARGET,
+      snapshotId: snapA,
+    });
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+    expect(await sim.handle({ action: "discardArchive", jobId: JOB_3 })).toEqual({
+      discarded: false,
+    });
+    await sim.handle({ action: "status", jobId: JOB_5 });
+    const chunkA = await sim.handle({
+      action: "readArchive",
+      jobId: JOB_5,
+      offset: 0,
+      length: 64,
+    });
+    const chunkB = await sim.handle({
+      action: "readArchive",
+      jobId: JOB_4,
+      offset: 0,
+      length: 64,
+    });
+    expect(chunkA.size).toBe(SIM_ARCHIVE_SIZE_BYTES);
+    expect(chunkB.size).toBe(SIM_ARCHIVE_SIZE_BYTES);
+    expect(chunkA.dataBase64).not.toBe(chunkB.dataBase64);
+
+    // Unknown snapshot on archive fails with "other", has no archive metadata, and yields archive_gone on read.
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_6,
+      siteId: "site_b",
+      target: VALID_TARGET,
+      snapshotId: SNAP_MISSING,
+    });
+    const failedArch = await sim.handle({ action: "status", jobId: JOB_6 });
+    expect(failedArch).toEqual({
+      jobId: JOB_6,
+      state: "failed",
+      failure: "other",
+      snapshot: null,
+    });
+    expect("archive" in failedArch).toBe(false);
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_6, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+  });
+
+  it("reads 1,048,577 deterministic bytes across three SITE_FILE_CHUNK_BYTES chunks ending in empty-zip EOCD", async () => {
+    const sim = new SimulatedBackups();
+    const snap = await createSiteSnapshot(sim, JOB_1, "site_zip");
+
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_2,
+      siteId: "site_zip",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    const settled = await sim.handle({ action: "status", jobId: JOB_2 });
+    expect(settled.state).toBe("succeeded");
+
+    const c1 = await sim.handle({
+      action: "readArchive",
+      jobId: JOB_2,
+      offset: 0,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+    const c2 = await sim.handle({
+      action: "readArchive",
+      jobId: JOB_2,
+      offset: SITE_FILE_CHUNK_BYTES,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+    const c3 = await sim.handle({
+      action: "readArchive",
+      jobId: JOB_2,
+      offset: SITE_FILE_CHUNK_BYTES * 2,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+
+    for (const chunk of [c1, c2, c3]) {
+      expect(() => BackupArchiveChunkSchema.parse(chunk)).not.toThrow();
+      expect(chunk.size).toBe(SIM_ARCHIVE_SIZE_BYTES);
+    }
+    expect(c1.eof).toBe(false);
+    expect(c2.eof).toBe(false);
+    expect(c3.eof).toBe(true);
+
+    const b1 = Buffer.from(c1.dataBase64, "base64");
+    const b2 = Buffer.from(c2.dataBase64, "base64");
+    const b3 = Buffer.from(c3.dataBase64, "base64");
+    expect(b1.length).toBe(SITE_FILE_CHUNK_BYTES);
+    expect(b2.length).toBe(SITE_FILE_CHUNK_BYTES);
+    expect(b3.length).toBe(1);
+
+    const full = Buffer.concat([b1, b2, b3]);
+    expect(full.length).toBe(SIM_ARCHIVE_SIZE_BYTES);
+    expect(full.subarray(full.length - EMPTY_ZIP_EOCD.length).equals(EMPTY_ZIP_EOCD)).toBe(true);
+
+    // Deterministic across repeated reads.
+    const c1Again = await sim.handle({
+      action: "readArchive",
+      jobId: JOB_2,
+      offset: 0,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+    expect(c1Again).toEqual(c1);
+
+    // Offset at or past size returns empty data with eof: true.
+    expect(
+      await sim.handle({
+        action: "readArchive",
+        jobId: JOB_2,
+        offset: SIM_ARCHIVE_SIZE_BYTES,
+        length: 1024,
+      }),
+    ).toEqual({
+      dataBase64: "",
+      size: SIM_ARCHIVE_SIZE_BYTES,
+      eof: true,
+    });
+    expect(
+      await sim.handle({
+        action: "readArchive",
+        jobId: JOB_2,
+        offset: SIM_ARCHIVE_SIZE_BYTES + 5000,
+        length: 1024,
+      }),
+    ).toEqual({
+      dataBase64: "",
+      size: SIM_ARCHIVE_SIZE_BYTES,
+      eof: true,
+    });
+
+    // Unknown or non-archive jobs fail readArchive with NOT_FOUND archive_gone.
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_6, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_1, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+  });
+
+  it("supports discardArchive, idempotent settle, and hooks (failNext, holdJobs/finishHeld, expireArchives, simulateRestart)", async () => {
+    const sim = new SimulatedBackups();
+    const snap = await createSiteSnapshot(sim, JOB_1, "site_hooks");
+
+    // settle on unseen jobId answers unknown and starts nothing.
+    expect(await sim.handle({ action: "settle", jobId: JOB_6 })).toEqual({
+      jobId: JOB_6,
+      state: "unknown",
+      failure: null,
+      snapshot: null,
+    });
+    expect(await sim.handle({ action: "status", jobId: JOB_6 })).toEqual({
+      jobId: JOB_6,
+      state: "unknown",
+      failure: null,
+      snapshot: null,
+    });
+
+    // failNext applies to restore and archive (failed archive has no bytes).
+    sim.failNext("restore_prepare_failed");
+    await sim.handle({
+      action: "restore",
+      jobId: JOB_2,
+      siteId: "site_hooks",
+      serviceInstanceId: "svc_hooks",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    const failedRestore = await sim.handle({ action: "settle", jobId: JOB_2 });
+    expect(failedRestore).toEqual({
+      jobId: JOB_2,
+      state: "failed",
+      failure: "restore_prepare_failed",
+      snapshot: null,
+    });
+    expect(await sim.handle({ action: "settle", jobId: JOB_2 })).toEqual(failedRestore);
+
+    sim.failNext("no_space");
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_3,
+      siteId: "site_hooks",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    const failedArch = await sim.handle({ action: "status", jobId: JOB_3 });
+    expect(failedArch).toEqual({
+      jobId: JOB_3,
+      state: "failed",
+      failure: "no_space",
+      snapshot: null,
+    });
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+    expect(await sim.handle({ action: "discardArchive", jobId: JOB_3 })).toEqual({
+      discarded: false,
+    });
+
+    // holdJobs keeps restore and archive running until finishHeld().
+    const snapOther = await createSiteSnapshot(sim, `op_${"c".repeat(32)}`, "site_other");
+    const heldArchJob = `op_${"d".repeat(32)}`;
+    sim.holdJobs(true);
+    await sim.handle({
+      action: "restore",
+      jobId: JOB_4,
+      siteId: "site_hooks",
+      serviceInstanceId: "svc_hooks",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    await sim.handle({
+      action: "archive",
+      jobId: heldArchJob,
+      siteId: "site_other",
+      target: VALID_TARGET,
+      snapshotId: snapOther,
+    });
+
+    expect((await sim.handle({ action: "status", jobId: JOB_4 })).state).toBe("running");
+    expect((await sim.handle({ action: "settle", jobId: JOB_4 })).state).toBe("running");
+    expect((await sim.handle({ action: "status", jobId: heldArchJob })).state).toBe("running");
+    expect((await sim.handle({ action: "settle", jobId: heldArchJob })).state).toBe("running");
+    await expect(
+      sim.handle({ action: "readArchive", jobId: heldArchJob, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED", message: "archive_preparing" });
+    sim.finishHeld();
+    expect((await sim.handle({ action: "status", jobId: JOB_4 })).state).toBe("succeeded");
+    const heldArchDone = await sim.handle({ action: "status", jobId: heldArchJob });
+    expect(heldArchDone.state).toBe("succeeded");
+    expect(heldArchDone.archive?.sizeBytes).toBe(SIM_ARCHIVE_SIZE_BYTES);
+    expect(await sim.handle({ action: "discardArchive", jobId: heldArchJob })).toEqual({
+      discarded: true,
+    });
+
+    // Archive on site_hooks -> finishHeld -> readable -> discardArchive.
+    sim.holdJobs(true);
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_5,
+      siteId: "site_hooks",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    expect((await sim.handle({ action: "status", jobId: JOB_5 })).state).toBe("running");
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_5, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED", message: "archive_preparing" });
+    sim.finishHeld();
+    const archReady = await sim.handle({ action: "status", jobId: JOB_5 });
+    expect(archReady.state).toBe("succeeded");
+    expect(archReady.archive?.sizeBytes).toBe(SIM_ARCHIVE_SIZE_BYTES);
+
+    expect(await sim.handle({ action: "discardArchive", jobId: JOB_5 })).toEqual({
+      discarded: true,
+    });
+    expect(await sim.handle({ action: "discardArchive", jobId: JOB_5 })).toEqual({
+      discarded: false,
+    });
+    await expect(
+      sim.handle({ action: "readArchive", jobId: JOB_5, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+
+    // expireArchives expires every ready archive.
+    const snap2 = await createSiteSnapshot(sim, `op_${"7".repeat(32)}`, "site_exp");
+    const archJob1 = `op_${"8".repeat(32)}`;
+    const archJob2 = `op_${"9".repeat(32)}`;
+    await sim.handle({
+      action: "archive",
+      jobId: archJob1,
+      siteId: "site_hooks",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    await sim.handle({
+      action: "archive",
+      jobId: archJob2,
+      siteId: "site_exp",
+      target: VALID_TARGET,
+      snapshotId: snap2,
+    });
+    await sim.handle({ action: "status", jobId: archJob1 });
+    await sim.handle({ action: "status", jobId: archJob2 });
+    sim.expireArchives();
+    await expect(
+      sim.handle({ action: "readArchive", jobId: archJob1, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+    await expect(
+      sim.handle({ action: "readArchive", jobId: archJob2, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+    expect(await sim.handle({ action: "discardArchive", jobId: archJob1 })).toEqual({
+      discarded: false,
+    });
+
+    // simulateRestart:
+    // - running restore -> failed + interrupted on both status and settle
+    // - finished restore (JOB_2 failed, JOB_4 succeeded) keeps its answer
+    // - archive jobs -> unknown and reads -> archive_gone
+    // - backup jobs -> unknown, snapshots kept
+    const runningRestore = `op_${"a".repeat(32)}`;
+    const liveArchive = `op_${"b".repeat(32)}`;
+    await sim.handle({
+      action: "archive",
+      jobId: liveArchive,
+      siteId: "site_exp",
+      target: VALID_TARGET,
+      snapshotId: snap2,
+    });
+    await sim.handle({ action: "status", jobId: liveArchive });
+
+    sim.holdJobs(true);
+    await sim.handle({
+      action: "restore",
+      jobId: runningRestore,
+      siteId: "site_hooks",
+      serviceInstanceId: "svc_hooks",
+      target: VALID_TARGET,
+      snapshotId: snap,
+    });
+    sim.simulateRestart();
+    sim.holdJobs(false);
+
+    const interruptedStatus = await sim.handle({ action: "status", jobId: runningRestore });
+    expect(interruptedStatus).toEqual({
+      jobId: runningRestore,
+      state: "failed",
+      failure: "interrupted",
+      snapshot: null,
+    });
+    expect(await sim.handle({ action: "settle", jobId: runningRestore })).toEqual(interruptedStatus);
+    expect(await sim.handle({ action: "settle", jobId: runningRestore })).toEqual(interruptedStatus);
+
+    // Finished restores preserved across simulateRestart.
+    expect(await sim.handle({ action: "status", jobId: JOB_2 })).toEqual(failedRestore);
+    expect(await sim.handle({ action: "settle", jobId: JOB_2 })).toEqual(failedRestore);
+    expect((await sim.handle({ action: "status", jobId: JOB_4 })).state).toBe("succeeded");
+    expect((await sim.handle({ action: "settle", jobId: JOB_4 })).state).toBe("succeeded");
+
+    // Archive and backup jobs cleared to unknown.
+    expect((await sim.handle({ action: "status", jobId: liveArchive })).state).toBe("unknown");
+    expect((await sim.handle({ action: "settle", jobId: liveArchive })).state).toBe("unknown");
+    await expect(
+      sim.handle({ action: "readArchive", jobId: liveArchive, offset: 0, length: 64 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+    expect((await sim.handle({ action: "status", jobId: JOB_1 })).state).toBe("unknown");
+    expect(sim.snapshots("site_hooks")).toContain(snap);
+  });
+
+  it("never exposes paths, schema names, container names, or secrets in any simulator result or error", async () => {
+    const sim = new SimulatedBackups();
+    const snap = await createSiteSnapshot(sim, JOB_1, "site_leak");
+
+    const payloads: unknown[] = [];
+    payloads.push(await sim.handle({ action: "test", target: VALID_TARGET }));
+    payloads.push(
+      await sim.handle({
+        action: "restore",
+        jobId: JOB_2,
+        siteId: "site_leak",
+        serviceInstanceId: "svc_leak",
+        target: VALID_TARGET,
+        snapshotId: snap,
+      }),
+    );
+    payloads.push(await sim.handle({ action: "settle", jobId: JOB_2 }));
+    payloads.push(await sim.handle({ action: "status", jobId: JOB_2 }));
+    payloads.push(
+      await sim.handle({
+        action: "archive",
+        jobId: JOB_3,
+        siteId: "site_leak",
+        target: VALID_TARGET,
+        snapshotId: snap,
+      }),
+    );
+    try {
+      await sim.handle({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 });
+    } catch (err) {
+      payloads.push({ error: (err as Error).message });
+    }
+    payloads.push(await sim.handle({ action: "status", jobId: JOB_3 }));
+    payloads.push(await sim.handle({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 }));
+    payloads.push(await sim.handle({ action: "discardArchive", jobId: JOB_3 }));
+    try {
+      await sim.handle({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 });
+    } catch (err) {
+      payloads.push({ error: (err as Error).message });
+    }
+
+    const serialized = JSON.stringify(payloads);
+    for (const forbidden of [
+      VALID_TARGET.secretAccessKey,
+      "/var/",
+      "/etc/",
+      "/run/",
+      "hp_bk_",
+      "hp_rn_",
+      "Schema",
+      "BACKUPS_",
+      "mariadb",
+      "docker",
+    ]) {
+      expect(serialized).not.toContain(forbidden);
+    }
   });
 });

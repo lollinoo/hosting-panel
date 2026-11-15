@@ -13,7 +13,7 @@ import {
   DEFAULT_SECRETS_ROOT_DIR,
   DockerEngineSocketAdapter,
 } from "./docker-engine-adapter.js";
-import { DEFAULT_BACKUP_KEY_FILE } from "./backup-runner.js";
+import { DEFAULT_BACKUP_KEY_FILE, DEFAULT_BACKUP_WORK_DIR } from "./backup-runner.js";
 import { DEFAULT_PHPMYADMIN_CONFIG_DIR } from "./phpmyadmin-platform.js";
 import { DEFAULT_SITE_FILES_DIR, ensureSiteFilesProgram } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles } from "./site-mail.js";
@@ -251,6 +251,7 @@ export async function bootstrapDockerExecutorDaemon(
     env.HP_PHPMYADMIN_CONFIG_DIR?.trim() || DEFAULT_PHPMYADMIN_CONFIG_DIR;
   const phpMyAdminPort = parsePhpMyAdminPortFromEnv(env);
   const backupKeyFile = env.HP_BACKUP_KEY_FILE?.trim() || DEFAULT_BACKUP_KEY_FILE;
+  const backupWorkDir = env.HP_BACKUP_WORK_DIR?.trim() || DEFAULT_BACKUP_WORK_DIR;
 
   const dockerAdapter = useSimulator
     ? null
@@ -270,6 +271,7 @@ export async function bootstrapDockerExecutorDaemon(
         phpMyAdminConfigDir,
         phpMyAdminPort,
         backupKeyFile,
+        backupWorkDir,
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
           : {}),
@@ -324,12 +326,32 @@ export async function bootstrapDockerExecutorDaemon(
         }),
       );
     });
-    // No job survives a restart; clear leftovers before accepting new ones.
+    // No job survives a restart; clear leftovers before accepting new ones (R82: orphans -> settle -> archives).
     await dockerAdapter.cleanupOrphanJobs().catch((err: unknown) => {
       console.error(
         JSON.stringify({
           component: "hp-docker-executor",
           event: "orphan_job_cleanup_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    await dockerAdapter.settleRestores().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "restore_settle_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    await dockerAdapter.emptyArchives().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "archive_cleanup_failed",
           code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
           timestamp: new Date().toISOString(),
         }),

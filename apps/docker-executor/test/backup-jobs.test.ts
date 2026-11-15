@@ -2,6 +2,7 @@ import { RESTIC_IMAGE, SHARED_MARIADB_IMAGE, type BackupTarget } from "@hosting-
 import { describe, expect, it } from "vitest";
 import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
+  BACKUP_DUMP_SIZE_FACTOR,
   BACKUP_HOSTNAME,
   BACKUP_JOB_MEMORY_BYTES,
   BACKUP_TMPFS,
@@ -192,11 +193,12 @@ describe("backup-jobs pure builders", () => {
     expect(dump.payload.Cmd?.[1]).toBe("-c");
     expect(dump.payload.Cmd?.[2]).toContain("mariadb-dump -h hp-mariadb -u root");
     expect(dump.payload.Cmd?.[2]).toContain("--single-transaction");
+    expect(dump.payload.Cmd?.[2]).toContain("errno 28");
     expect(dump.payload.Cmd?.[2]).toContain("exit 75");
     expect(dump.payload.Cmd?.[2]).toContain("exit 76");
     expect(dump.payload.Env).toEqual([
       "HP_DBS=wp_0123456789ab wp_0123456789ab_extra",
-      `HP_NEED_KB=${String(Math.ceil((1024 + 2048 + BACKUP_DISK_FREE_FLOOR_BYTES) / 1024))}`,
+      `HP_NEED_KB=${String(Math.ceil((1024 * BACKUP_DUMP_SIZE_FACTOR + 2048 * BACKUP_DUMP_SIZE_FACTOR + BACKUP_DISK_FREE_FLOOR_BYTES) / 1024))}`,
     ]);
     expect(dump.payload.HostConfig.Binds).toEqual([
       "/etc/hosting-panel/mariadb-root.key:/run/secrets/mariadb-root:ro",
@@ -231,6 +233,8 @@ describe("backup-jobs pure builders", () => {
       BACKUP_HOSTNAME,
       "--tag",
       JOB_ID,
+      "--exclude",
+      "/backup/files/.hp_rs_*",
       "/backup/files",
       "/backup/databases",
     ]);
@@ -264,6 +268,8 @@ describe("backup-jobs pure builders", () => {
       BACKUP_HOSTNAME,
       "--tag",
       JOB_ID,
+      "--exclude",
+      "/backup/files/.hp_rs_*",
       "/backup/files",
     ]);
     expect(uploadNoDb.payload.HostConfig.Binds).toEqual([
@@ -433,11 +439,13 @@ describe("backup-jobs pure builders", () => {
     ).toBeNull();
   });
 
-  it("computes HP_NEED_KB with ceiling rounding", () => {
+  it("computes HP_NEED_KB with E12 size factor and ceiling rounding", () => {
+    expect(BACKUP_DUMP_SIZE_FACTOR).toBe(2);
     expect(computeDumpNeedKb([], 1024)).toBe(1);
+    expect(computeDumpNeedKb([{ sizeBytes: 1_048_576 }], 0)).toBe(2048);
     expect(computeDumpNeedKb([{ sizeBytes: 1 }], 1024)).toBe(2);
-    expect(computeDumpNeedKb([{ sizeBytes: 512 }, { sizeBytes: 512 }], 1024)).toBe(2);
-    expect(computeDumpNeedKb([{ sizeBytes: 513 }, { sizeBytes: 512 }], 1024)).toBe(3);
+    expect(computeDumpNeedKb([{ sizeBytes: 512 }, { sizeBytes: 512 }], 1024)).toBe(3);
+    expect(computeDumpNeedKb([{ sizeBytes: 513 }, { sizeBytes: 512 }], 1024)).toBe(4);
     expect(computeDumpNeedKb([])).toBe(1_048_576);
   });
 

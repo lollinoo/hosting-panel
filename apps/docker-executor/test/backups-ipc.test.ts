@@ -3,6 +3,7 @@ import {
   BACKUPS_RESULT_SCHEMAS,
   BackupJobStatusSchema,
   BackupTestResultSchema,
+  SITE_FILE_CHUNK_BYTES,
   signIpcRequest,
   type IpcSigningKey,
   type IpcVerificationKey,
@@ -382,6 +383,326 @@ describe("Backups over signed loopback IPC (127.0.0.1:0) and simulator", () => {
         (
           await sendAndRecord(
             { action: "test", target: VALID_TARGET },
+            {
+              keyId: "hmac-v1",
+              algorithm: "hmac-sha256",
+              secret: "wrong-hmac-secret-0123456789abcdef0123456789abcdef",
+            },
+          )
+        ).status,
+      ).toBe(401);
+    } finally {
+      for (const spy of spies) {
+        spy.mockRestore();
+      }
+    }
+
+    const combinedHttp = httpBodies.join("\n");
+    const combinedLogs = capturedLogs.join("\n");
+    expect(combinedHttp).not.toContain(SENTINEL_SECRET);
+    expect(combinedHttp).not.toContain(SENTINEL_SPACE_SECRET);
+    expect(combinedLogs).not.toContain(SENTINEL_SECRET);
+    expect(combinedLogs).not.toContain(SENTINEL_SPACE_SECRET);
+  });
+
+  it("round-trips restore, archive, readArchive, discardArchive, settle, full SITE_FILE_CHUNK_BYTES chunks, and coded errors", async () => {
+    const { simulator, client } = await createLoopbackHarness();
+    const JOB_3 = `op_${"c".repeat(32)}`;
+    const JOB_4 = `op_${"d".repeat(32)}`;
+
+    // Seed a snapshot via start + status.
+    await client.backups({
+      action: "start",
+      jobId: JOB_1,
+      siteId: "site_m3b_1",
+      serviceInstanceId: "svc_m3b_1",
+      target: VALID_TARGET,
+    });
+    const startDone = await client.backups({ action: "status", jobId: JOB_1 });
+    expect(startDone.state).toBe("succeeded");
+    const snapshotId = startDone.snapshot!.snapshotId;
+
+    // 1. restore + settle round trips
+    const restoreStarted = await client.backups({
+      action: "restore",
+      jobId: JOB_2,
+      siteId: "site_m3b_1",
+      serviceInstanceId: "svc_m3b_1",
+      target: VALID_TARGET,
+      snapshotId,
+    });
+    expect(() => BACKUPS_RESULT_SCHEMAS.restore.parse(restoreStarted)).not.toThrow();
+    expect(restoreStarted.state).toBe("running");
+
+    const restoreSettled = await client.backups({ action: "settle", jobId: JOB_2 });
+    expect(() => BACKUPS_RESULT_SCHEMAS.settle.parse(restoreSettled)).not.toThrow();
+    expect(restoreSettled).toEqual({
+      jobId: JOB_2,
+      state: "succeeded",
+      failure: null,
+      snapshot: null,
+    });
+
+    // 2. archive held -> RESOURCE_LOCKED archive_preparing -> finishHeld -> status archive metadata
+    simulator.backupState.holdJobs(true);
+    const archiveStarted = await client.backups({
+      action: "archive",
+      jobId: JOB_3,
+      siteId: "site_m3b_1",
+      target: VALID_TARGET,
+      snapshotId,
+    });
+    expect(() => BACKUPS_RESULT_SCHEMAS.archive.parse(archiveStarted)).not.toThrow();
+    expect(archiveStarted.state).toBe("running");
+
+    const preparingErr = await client
+      .backups({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 })
+      .catch((e: unknown) => e);
+    expect(preparingErr).toBeInstanceOf(ExecutorIpcClientError);
+    expect((preparingErr as ExecutorIpcClientError).code).toBe("RESOURCE_LOCKED");
+    expect((preparingErr as ExecutorIpcClientError).statusCode).toBe(409);
+    expect((preparingErr as ExecutorIpcClientError).message).toBe("archive_preparing");
+
+    simulator.backupState.finishHeld();
+    const archiveReady = await client.backups({ action: "status", jobId: JOB_3 });
+    expect(() => BACKUPS_RESULT_SCHEMAS.archive.parse(archiveReady)).not.toThrow();
+    expect(archiveReady.state).toBe("succeeded");
+    expect(archiveReady.archive?.sizeBytes).toBe(1_048_577);
+
+    // 3. readArchive with full SITE_FILE_CHUNK_BYTES chunks passes server & client size limits
+    const c1 = await client.backups({
+      action: "readArchive",
+      jobId: JOB_3,
+      offset: 0,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+    expect(() => BACKUPS_RESULT_SCHEMAS.readArchive.parse(c1)).not.toThrow();
+    expect(Buffer.from(c1.dataBase64, "base64").length).toBe(SITE_FILE_CHUNK_BYTES);
+    expect(c1.size).toBe(1_048_577);
+    expect(c1.eof).toBe(false);
+
+    const c2 = await client.backups({
+      action: "readArchive",
+      jobId: JOB_3,
+      offset: SITE_FILE_CHUNK_BYTES,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+    expect(() => BACKUPS_RESULT_SCHEMAS.readArchive.parse(c2)).not.toThrow();
+    expect(Buffer.from(c2.dataBase64, "base64").length).toBe(SITE_FILE_CHUNK_BYTES);
+    expect(c2.eof).toBe(false);
+
+    const c3 = await client.backups({
+      action: "readArchive",
+      jobId: JOB_3,
+      offset: SITE_FILE_CHUNK_BYTES * 2,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+    expect(() => BACKUPS_RESULT_SCHEMAS.readArchive.parse(c3)).not.toThrow();
+    expect(Buffer.from(c3.dataBase64, "base64").length).toBe(1);
+    expect(c3.eof).toBe(true);
+
+    // 4. discardArchive + NOT_FOUND archive_gone
+    const discardedFirst = await client.backups({ action: "discardArchive", jobId: JOB_3 });
+    expect(() => BACKUPS_RESULT_SCHEMAS.discardArchive.parse(discardedFirst)).not.toThrow();
+    expect(discardedFirst).toEqual({ discarded: true });
+
+    const discardedSecond = await client.backups({ action: "discardArchive", jobId: JOB_3 });
+    expect(discardedSecond).toEqual({ discarded: false });
+
+    for (const deadJob of [JOB_3, JOB_4]) {
+      const goneErr = await client
+        .backups({ action: "readArchive", jobId: deadJob, offset: 0, length: 64 })
+        .catch((e: unknown) => e);
+      expect(goneErr).toBeInstanceOf(ExecutorIpcClientError);
+      expect((goneErr as ExecutorIpcClientError).code).toBe("NOT_FOUND");
+      expect((goneErr as ExecutorIpcClientError).statusCode).toBe(404);
+      expect((goneErr as ExecutorIpcClientError).message).toBe("archive_gone");
+    }
+  });
+
+  it("rejects malformed M3b requests (extra keys, invalid jobId/snapshotId, invalid readArchive bounds)", async () => {
+    const { simulator, rawPost } = await createLoopbackHarness();
+    const backupsSpy = vi.spyOn(simulator, "backups");
+
+    const invalidPayloads: unknown[] = [
+      // Extra keys
+      {
+        action: "restore",
+        jobId: JOB_1,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId: SNAP_DUMMY,
+        extra: true,
+      },
+      {
+        action: "archive",
+        jobId: JOB_1,
+        siteId: "site_a",
+        target: VALID_TARGET,
+        snapshotId: SNAP_DUMMY,
+        extra: 1,
+      },
+      { action: "readArchive", jobId: JOB_1, offset: 0, length: 64, extra: "x" },
+      { action: "discardArchive", jobId: JOB_1, extra: "x" },
+      { action: "settle", jobId: JOB_1, extra: "x" },
+      // Invalid jobIds (not op_ + 32 lowercase hex digits)
+      {
+        action: "restore",
+        jobId: FORGET_1,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId: SNAP_DUMMY,
+      },
+      {
+        action: "archive",
+        jobId: `${JOB_1}-archive`,
+        siteId: "site_a",
+        target: VALID_TARGET,
+        snapshotId: SNAP_DUMMY,
+      },
+      { action: "readArchive", jobId: `op_${"A".repeat(32)}`, offset: 0, length: 64 },
+      { action: "discardArchive", jobId: `op_${"a".repeat(31)}` },
+      { action: "settle", jobId: "not-an-op-id" },
+      // Invalid snapshotId
+      {
+        action: "restore",
+        jobId: JOB_1,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId: "c".repeat(63),
+      },
+      {
+        action: "archive",
+        jobId: JOB_1,
+        siteId: "site_a",
+        target: VALID_TARGET,
+        snapshotId: "C".repeat(64),
+      },
+      // Invalid readArchive length & offset
+      { action: "readArchive", jobId: JOB_1, offset: 0, length: 0 },
+      { action: "readArchive", jobId: JOB_1, offset: 0, length: SITE_FILE_CHUNK_BYTES + 1 },
+      { action: "readArchive", jobId: JOB_1, offset: -1, length: 64 },
+    ];
+
+    for (const payload of invalidPayloads) {
+      const res = await rawPost("/v1/backups", payload);
+      expect(res.status).toBe(400);
+      const parsed = JSON.parse(res.text) as { error: { code: string } };
+      expect(parsed.error.code).toBe("VALIDATION_ERROR");
+    }
+
+    expect(backupsSpy).not.toHaveBeenCalled();
+  });
+
+  it("never leaks secretAccessKey in HTTP responses or logs across M3b actions", async () => {
+    const { simulator, rawPost } = await createLoopbackHarness();
+    const JOB_3 = `op_${"c".repeat(32)}`;
+    const JOB_4 = `op_${"d".repeat(32)}`;
+    const capturedLogs: string[] = [];
+    const httpBodies: string[] = [];
+
+    const capture = (...args: unknown[]): boolean => {
+      capturedLogs.push(args.map(String).join(" "));
+      return true;
+    };
+
+    const spies = [
+      vi.spyOn(console, "log").mockImplementation(capture),
+      vi.spyOn(console, "error").mockImplementation(capture),
+      vi.spyOn(console, "warn").mockImplementation(capture),
+      vi.spyOn(console, "info").mockImplementation(capture),
+      vi.spyOn(console, "debug").mockImplementation(capture),
+      vi.spyOn(process.stdout, "write").mockImplementation(capture),
+      vi.spyOn(process.stderr, "write").mockImplementation(capture),
+    ];
+
+    try {
+      const sendAndRecord = async (body: unknown, key = SIGNING_KEY) => {
+        const res = await rawPost("/v1/backups", body, key);
+        httpBodies.push(res.text);
+        return res;
+      };
+
+      expect(
+        (
+          await sendAndRecord({
+            action: "start",
+            jobId: JOB_1,
+            siteId: "site_m3b_leak",
+            serviceInstanceId: "svc_m3b_leak",
+            target: VALID_TARGET,
+          })
+        ).status,
+      ).toBe(200);
+      const startDone = await sendAndRecord({ action: "status", jobId: JOB_1 });
+      const snapId = (
+        JSON.parse(startDone.text) as { data: { snapshot: { snapshotId: string } } }
+      ).data.snapshot.snapshotId;
+
+      expect(
+        (
+          await sendAndRecord({
+            action: "restore",
+            jobId: JOB_2,
+            siteId: "site_m3b_leak",
+            serviceInstanceId: "svc_m3b_leak",
+            target: VALID_TARGET,
+            snapshotId: snapId,
+          })
+        ).status,
+      ).toBe(200);
+      expect((await sendAndRecord({ action: "settle", jobId: JOB_2 })).status).toBe(200);
+
+      simulator.backupState.holdJobs(true);
+      expect(
+        (
+          await sendAndRecord({
+            action: "archive",
+            jobId: JOB_3,
+            siteId: "site_m3b_leak",
+            target: VALID_TARGET,
+            snapshotId: snapId,
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (await sendAndRecord({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 })).status,
+      ).toBe(409);
+      simulator.backupState.finishHeld();
+      expect((await sendAndRecord({ action: "status", jobId: JOB_3 })).status).toBe(200);
+      expect(
+        (await sendAndRecord({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 })).status,
+      ).toBe(200);
+      expect((await sendAndRecord({ action: "discardArchive", jobId: JOB_3 })).status).toBe(200);
+      expect(
+        (await sendAndRecord({ action: "readArchive", jobId: JOB_3, offset: 0, length: 64 })).status,
+      ).toBe(404);
+
+      expect(
+        (
+          await sendAndRecord({
+            action: "restore",
+            jobId: JOB_4,
+            siteId: "site_m3b_leak",
+            serviceInstanceId: "svc_m3b_leak",
+            target: { ...VALID_TARGET, secretAccessKey: SENTINEL_SPACE_SECRET },
+            snapshotId: snapId,
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        (
+          await sendAndRecord(
+            {
+              action: "archive",
+              jobId: JOB_4,
+              siteId: "site_m3b_leak",
+              target: VALID_TARGET,
+              snapshotId: snapId,
+            },
             {
               keyId: "hmac-v1",
               algorithm: "hmac-sha256",

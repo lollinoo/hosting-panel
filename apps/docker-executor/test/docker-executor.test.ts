@@ -21,6 +21,7 @@ import {
   BACKUPS_TEST_TIMEOUT_MS,
   BACKUPS_TIMEOUT_MS,
   DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_WORK_DIR,
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
   siteMailBinds,
@@ -37,9 +38,11 @@ import {
   buildIngressProxyContainerPayload,
   buildPanelDynamicYaml,
   buildTraefikStaticYaml,
+  readRestoreNote,
   validateCertifiedCapabilities,
   type PanelIngressConfig,
 } from "../src/index.js";
+import { writeRestoreNote } from "../src/restore-jobs.js";
 import { startMockDockerDaemon } from "./mock-docker-daemon.js";
 
 const HMAC_SECRET = "0123456789abcdef0123456789abcdef-phase2-ipc-key";
@@ -1262,6 +1265,91 @@ describe("purge site", () => {
     });
     expect(mockDaemon.deletedVolumes).toEqual([]);
   });
+
+  it("purgeSite blocks on unsettled restore notes before touching site resources and clears ended notes and staging volumes once settled", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-purge-restore-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const ingressRootDir = path.join(tmp, "ingress");
+    const backupWorkDir = path.join(tmp, "backups");
+    const restoresDir = path.join(backupWorkDir, "restores");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir,
+      backupWorkDir,
+    });
+    const dynamic = path.join(ingressRootDir, "dynamic");
+    await mkdir(dynamic, { recursive: true });
+    for (const id of ["A", "B"]) {
+      await writeFile(path.join(dynamic, `site_${id}.yml`), "x");
+      mockDaemon.volumeLabels.set(`hp_vol_${id}`, { "io.hostingpanel.site_id": id });
+      for (const net of [`hp_site_${id}_net`, `hp_edge_${id}_net`]) {
+        await fetchNetwork(mockDaemon.socketPath, net);
+      }
+    }
+
+    const jobAPending = `op_${"1".repeat(32)}`;
+    const jobAUndo = `op_${"2".repeat(32)}`;
+    const jobBUndo = `op_${"3".repeat(32)}`;
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobAPending,
+      siteId: "A",
+      serviceInstanceId: "svc_A",
+      stage: "switched",
+    });
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobAUndo,
+      siteId: "A",
+      serviceInstanceId: "svc_A",
+      stage: "ended",
+      state: "failed",
+      failure: "undo_incomplete",
+      endedAt: "2026-11-15T01:00:00.000Z",
+    });
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobBUndo,
+      siteId: "B",
+      serviceInstanceId: "svc_B",
+      stage: "ended",
+      state: "failed",
+      failure: "undo_incomplete",
+      endedAt: "2026-11-15T01:00:00.000Z",
+    });
+    mockDaemon.volumeLabels.set(`hp_bk_${jobAUndo}`, { "io.hostingpanel.role": "backup_staging" });
+    mockDaemon.volumeLabels.set(`hp_bk_${jobBUndo}`, { "io.hostingpanel.role": "backup_staging" });
+
+    await expect(adapter.purgeSite("A")).rejects.toMatchObject({
+      code: "RESOURCE_LOCKED",
+    });
+    expect(mockDaemon.deletedVolumes).toEqual([]);
+    expect(await readdir(dynamic)).toContain("site_A.yml");
+
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobAPending,
+      siteId: "A",
+      serviceInstanceId: "svc_A",
+      stage: "ended",
+      state: "succeeded",
+      failure: null,
+      endedAt: "2026-11-15T02:00:00.000Z",
+    });
+
+    await expect(adapter.purgeSite("A")).resolves.toBeUndefined();
+    expect(mockDaemon.deletedVolumes).toContain(`hp_bk_${jobAUndo}`);
+    expect(mockDaemon.deletedVolumes).toContain("hp_vol_A");
+    expect(mockDaemon.deletedVolumes).not.toContain(`hp_bk_${jobBUndo}`);
+    expect(mockDaemon.deletedVolumes).not.toContain("hp_vol_B");
+    expect(await readRestoreNote(restoresDir, jobAPending)).toBeNull();
+    expect(await readRestoreNote(restoresDir, jobAUndo)).toBeNull();
+    expect(await readRestoreNote(restoresDir, jobBUndo)).not.toBeNull();
+    expect(await readdir(dynamic)).toEqual(["site_B.yml"]);
+  });
 });
 
 describe("site IPC", () => {
@@ -2204,6 +2292,173 @@ describe("backups shared base and IPC", () => {
       daemon.requestedPaths.some(
         (p) => p.includes("/images/create") && p.includes(encodeURIComponent(RESTIC_IMAGE)),
       ),
+    ).toBe(true);
+  });
+
+  it("wires backupWorkDir, settleRestores, and emptyArchives through DockerEngineSocketAdapter", async () => {
+    expect(DEFAULT_BACKUP_WORK_DIR).toBe("/var/lib/hosting-panel/backups");
+
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-adapter-m3b-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => daemon.close());
+    const backupWorkDir = path.join(tmp, "custom-backups");
+    const restoresDir = path.join(backupWorkDir, "restores");
+    const archivesDir = path.join(backupWorkDir, "archives");
+    const jobPrepare = `op_${"4".repeat(32)}`;
+
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobPrepare,
+      siteId: "site_a",
+      serviceInstanceId: "svc_a",
+      stage: "prepare",
+    });
+    daemon.volumeLabels.set(`hp_bk_${jobPrepare}`, { "io.hostingpanel.role": "backup_staging" });
+    await mkdir(archivesDir, { recursive: true });
+    await writeFile(path.join(archivesDir, `op_${"5".repeat(32)}.zip`), "PK");
+
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      backupWorkDir,
+      sharedDbDataDir: path.join(tmp, "mariadb"),
+    });
+
+    await adapter.settleRestores();
+    expect(daemon.deletedVolumes).toContain(`hp_bk_${jobPrepare}`);
+    expect(await readRestoreNote(restoresDir, jobPrepare)).toMatchObject({
+      stage: "ended",
+      state: "failed",
+      failure: "interrupted",
+    });
+    await expect(adapter.backups({ action: "status", jobId: jobPrepare })).resolves.toEqual({
+      jobId: jobPrepare,
+      state: "failed",
+      failure: "interrupted",
+      snapshot: null,
+    });
+
+    await adapter.emptyArchives();
+    expect(await readdir(archivesDir)).toEqual([]);
+    await expect(
+      adapter.backups({ action: "readArchive", jobId: jobPrepare, offset: 0, length: 16 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+  });
+
+  it("bootstrapDockerExecutorDaemon reads HP_BACKUP_WORK_DIR and runs cleanupOrphanJobs -> settleRestores -> emptyArchives before listening, surviving settle failures", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-boot-r82-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => daemon.close());
+
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "ensureSharedDatabase").mockResolvedValue({
+      component: "shared_database",
+      status: "running",
+    });
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "ensureSftpFromState").mockResolvedValue(null);
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "ensurePhpMyAdmin").mockResolvedValue(undefined);
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "prewarmSiteImages").mockResolvedValue();
+
+    const backupWorkDir = path.join(tmp, "backups");
+    const restoresDir = path.join(backupWorkDir, "restores");
+    const archivesDir = path.join(backupWorkDir, "archives");
+    const orphanJob = `op_${"6".repeat(32)}`;
+    const prepareJob = `op_${"7".repeat(32)}`;
+
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: prepareJob,
+      siteId: "site_r82",
+      serviceInstanceId: "svc_r82",
+      stage: "prepare",
+    });
+    daemon.volumeLabels.set(`hp_bk_${orphanJob}`, { "io.hostingpanel.role": "backup_staging" });
+    daemon.volumeLabels.set(`hp_bk_${prepareJob}`, { "io.hostingpanel.role": "backup_staging" });
+    await mkdir(archivesDir, { recursive: true });
+    await writeFile(path.join(archivesDir, `op_${"8".repeat(32)}.zip`), "PK");
+
+    const order: string[] = [];
+    let orphanExistsAtStart = true;
+    let prepareVolExistsAtStart = true;
+    let prepareNoteAtStart: unknown = null;
+    let archivesAtStart: string[] = ["not-checked"];
+
+    const origCleanup = DockerEngineSocketAdapter.prototype.cleanupOrphanJobs;
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "cleanupOrphanJobs").mockImplementation(
+      async function (this: DockerEngineSocketAdapter) {
+        order.push("cleanupOrphanJobs");
+        return origCleanup.call(this);
+      },
+    );
+    const origSettle = DockerEngineSocketAdapter.prototype.settleRestores;
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "settleRestores").mockImplementation(
+      async function (this: DockerEngineSocketAdapter) {
+        order.push("settleRestores");
+        return origSettle.call(this);
+      },
+    );
+    const origEmptyArchives = DockerEngineSocketAdapter.prototype.emptyArchives;
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "emptyArchives").mockImplementation(
+      async function (this: DockerEngineSocketAdapter) {
+        order.push("emptyArchives");
+        return origEmptyArchives.call(this);
+      },
+    );
+    const origStart = DockerExecutorIpcServer.prototype.start;
+    vi.spyOn(DockerExecutorIpcServer.prototype, "start").mockImplementation(
+      async function (this: DockerExecutorIpcServer) {
+        order.push("server.start");
+        orphanExistsAtStart = daemon.volumeLabels.has(`hp_bk_${orphanJob}`);
+        prepareVolExistsAtStart = daemon.volumeLabels.has(`hp_bk_${prepareJob}`);
+        prepareNoteAtStart = await readRestoreNote(restoresDir, prepareJob);
+        archivesAtStart = await readdir(archivesDir);
+        return origStart.call(this);
+      },
+    );
+
+    const baseEnv = {
+      HP_IPC_KEY: HMAC_SECRET,
+      HP_IPC_KEY_ID: "hmac-v1",
+      HP_IPC_TRANSPORT: "loopback-test",
+      HP_EXECUTOR_BACKEND: "linux-systemd",
+      HP_DOCKER_SOCKET_PATH: daemon.socketPath,
+      HP_SECRETS_ROOT_DIR: path.join(tmp, "secrets"),
+      HP_INGRESS_ROOT_DIR: path.join(tmp, "ingress"),
+      HP_SITE_MAIL_DIR: path.join(tmp, "mail"),
+      HP_SITE_FILES_DIR: path.join(tmp, "site-files"),
+      HP_SFTP_STATE_DIR: path.join(tmp, "sftp"),
+      HP_PHPMYADMIN_CONFIG_DIR: path.join(tmp, "pma"),
+      HP_BACKUP_KEY_FILE: path.join(tmp, "backup.key"),
+      HP_BACKUP_WORK_DIR: backupWorkDir,
+    };
+
+    const booted = await bootstrapDockerExecutorDaemon(baseEnv);
+    cleanupTasks.push(() => booted.stop());
+
+    expect(order).toEqual(["cleanupOrphanJobs", "settleRestores", "emptyArchives", "server.start"]);
+    expect(orphanExistsAtStart).toBe(false);
+    expect(prepareVolExistsAtStart).toBe(false);
+    expect(prepareNoteAtStart).toMatchObject({
+      stage: "ended",
+      state: "failed",
+      failure: "interrupted",
+    });
+    expect(archivesAtStart).toEqual([]);
+
+    // Startup still succeeds if settleRestores throws: logs event and still empties archives.
+    await writeFile(path.join(archivesDir, `op_${"9".repeat(32)}.zip`), "PK");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "settleRestores").mockRejectedValueOnce(
+      new Error("boom"),
+    );
+
+    const booted2 = await bootstrapDockerExecutorDaemon(baseEnv);
+    cleanupTasks.push(() => booted2.stop());
+    expect(await readdir(archivesDir)).toEqual([]);
+    expect(
+      errSpy.mock.calls.some((call) => String(call[0]).includes('"event":"restore_settle_failed"')),
     ).toBe(true);
   });
 });
