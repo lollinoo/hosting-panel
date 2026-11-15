@@ -4191,6 +4191,217 @@ paths:
           description: Executor or backup archive read temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress:
+    get:
+      tags: [Managed Sites]
+      operationId: getSiteWordpress
+      summary: WordPress tab state of a site (`site.read`)
+      description: >-
+        Returns the last stored check (`state`), the running `site.wordpress.inspect` or
+        `site.wordpress.update` operation and the last finished update. A site that was never
+        checked answers `{backupsConfigured: false|true, state: null, runningOperation: null, lastUpdate: null}`.
+        The same `200` with an empty state (`state`, `runningOperation` and `lastUpdate` null) answers
+        for a site that is not WordPress and on a server without the WordPress tools; only the three
+        POST routes answer `422 NOT_SUPPORTED`. A suspended organization still reads its stored state;
+        its three POST routes answer `403`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: WordPress tab state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.read` permission (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/refresh:
+    post:
+      tags: [Managed Sites]
+      operationId: refreshSiteWordpress
+      summary: Enqueue a `site.wordpress.inspect` check of core, plugins, themes and administrators (`site.update`, 202 Accepted)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "202":
+          description: Accepted; follow the returned operation URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, links]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressAcceptedDto"
+                  links:
+                    type: object
+                    required: [operation]
+                    properties:
+                      operation:
+                        type: string
+        "400":
+          description: Non-empty body or missing/invalid `Idempotency-Key` (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`), locked by another
+            operation (`RESOURCE_LOCKED`), or reused `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/updates:
+    post:
+      tags: [Managed Sites]
+      operationId: updateSiteWordpress
+      summary: Enqueue a `site.wordpress.update` of everything, core, one plugin or one theme (`site.update`, 202 Accepted)
+      description: >-
+        When backups are configured a `pre_update` copy of the site is taken first; its row carries
+        the update's operation id. Counts toward the hourly limit of 6 heavy actions per site.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteWordpressUpdateRequest"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, links]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressAcceptedDto"
+                  links:
+                    type: object
+                    required: [operation]
+                    properties:
+                      operation:
+                        type: string
+        "400":
+          description: >-
+            Invalid body or missing/invalid `Idempotency-Key` (`VALIDATION_ERROR`), or the plugin or
+            theme is not in the last check (`VALIDATION_ERROR`, reason `item_unknown`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`), locked by another
+            operation (`RESOURCE_LOCKED`), reused `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`), or
+            hourly limit of 6 heavy actions per site reached (`QUOTA_EXCEEDED`,
+            `details[].field: retryAt`, `Retry-After` header)
+          $ref: "#/components/responses/QuotaConflictErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/administrators/{userId}/password-reset:
+    post:
+      tags: [Managed Sites]
+      operationId: resetSiteWordpressAdministratorPassword
+      summary: Set a new password for a WordPress administrator (`site.update`)
+      description: >-
+        Synchronous. The new one-time `temporaryPassword` is answered only when the site confirms
+        the change; it is never stored by the panel. `userId` must be an administrator in the last check.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/UserIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: New one-time temporary password
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressPasswordResetDto"
+        "400":
+          description: >-
+            Non-empty body (`VALIDATION_ERROR`), or `userId` is not an administrator of the site
+            (`VALIDATION_ERROR`, reason `administrator_unknown`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`) or another operation
+            is running on the site (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            The password was not confirmed (`DOCKER_ENGINE_UNAVAILABLE`, retryable; reason
+            `not_installed`, `config_broken`, `database_unreachable` or `unavailable`)
+          $ref: "#/components/responses/ErrorResponse"
+
 
 components:
   securitySchemes:
@@ -4441,6 +4652,7 @@ components:
         - sftpAvailable
         - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
+        - wordpressToolsAvailable
       properties:
         phase:
           type: string
@@ -4468,6 +4680,9 @@ components:
         productionBackupRuntimeAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        wordpressToolsAvailable:
+          type: boolean
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
 
     OrganizationCapabilitiesDto:
       type: object
@@ -4480,6 +4695,7 @@ components:
         - sftpAvailable
         - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
+        - wordpressToolsAvailable
       properties:
         hostingMode:
           type: string
@@ -4500,6 +4716,9 @@ components:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         productionBackupRuntimeAvailable:
+          type: boolean
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        wordpressToolsAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
 
@@ -5553,7 +5772,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [nightly, manual]
+          enum: [nightly, manual, pre_update]
         status:
           type: string
           enum: [running, succeeded, failed]
@@ -5666,6 +5885,199 @@ components:
         lastRestore:
           $ref: "#/components/schemas/BackupLastRestore"
           nullable: true
+
+    SiteWordpressPlugin:
+      type: object
+      additionalProperties: false
+      required: [name, title, status, version, updateVersion]
+      properties:
+        name:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          description: Plugins use active, inactive, active-network, must-use, dropin; themes use active, inactive, parent
+          enum: [active, inactive, active-network, must-use, dropin, parent]
+        version:
+          type: string
+          nullable: true
+        updateVersion:
+          type: string
+          nullable: true
+
+    SiteWordpressStateDto:
+      type: object
+      additionalProperties: false
+      required: [checkedAt, coreVersion, coreUpdate, updatesKnown, plugins, themes, administrators, problem]
+      properties:
+        checkedAt:
+          type: string
+          format: date-time
+        coreVersion:
+          type: string
+          nullable: true
+          description: null only when the check stored a problem
+        coreUpdate:
+          type: string
+          nullable: true
+        updatesKnown:
+          type: boolean
+        plugins:
+          type: array
+          maxItems: 500
+          items:
+            $ref: "#/components/schemas/SiteWordpressPlugin"
+        themes:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/SiteWordpressPlugin"
+        administrators:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, login]
+            properties:
+              id:
+                type: integer
+                minimum: 1
+              login:
+                type: string
+        problem:
+          $ref: "#/components/schemas/SiteWordpressProblem"
+          nullable: true
+
+    SiteWordpressProblem:
+      type: string
+      enum:
+        - wordpress_org_unreachable
+        - config_broken
+        - database_unreachable
+        - not_installed
+        - backup_failed
+        - items_failed
+        - item_unknown
+        - outcome_unknown
+        - interrupted
+
+    SiteWordpressUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [scope]
+      description: "`name` is required for `plugin` and `theme` and forbidden otherwise."
+      properties:
+        scope:
+          type: string
+          enum: [all, core, plugin, theme]
+        name:
+          type: string
+          pattern: "^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$"
+
+    SiteWordpressLastUpdateDto:
+      type: object
+      additionalProperties: false
+      required: [operationId, target, status, finishedAt, problem, backup, items]
+      properties:
+        operationId:
+          type: string
+        target:
+          $ref: "#/components/schemas/SiteWordpressUpdateRequest"
+        status:
+          type: string
+          enum: [succeeded, failed]
+        finishedAt:
+          type: string
+          format: date-time
+        problem:
+          $ref: "#/components/schemas/SiteWordpressProblem"
+          nullable: true
+        backup:
+          type: string
+          enum: [taken, skipped, failed]
+        items:
+          type: array
+          maxItems: 701
+          items:
+            type: object
+            additionalProperties: false
+            required: [type, name, oldVersion, newVersion, status]
+            properties:
+              type:
+                type: string
+                enum: [core, plugin, theme]
+              name:
+                type: string
+              oldVersion:
+                type: string
+                nullable: true
+              newVersion:
+                type: string
+                nullable: true
+              status:
+                type: string
+                enum: [updated, failed]
+
+    SiteWordpressDto:
+      type: object
+      additionalProperties: false
+      required: [backupsConfigured, state, runningOperation, lastUpdate]
+      properties:
+        backupsConfigured:
+          type: boolean
+        state:
+          $ref: "#/components/schemas/SiteWordpressStateDto"
+          nullable: true
+        runningOperation:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [id, kind, status, steps]
+          properties:
+            id:
+              type: string
+            kind:
+              type: string
+              enum: [site.wordpress.inspect, site.wordpress.update]
+            status:
+              type: string
+            steps:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [key, status]
+                properties:
+                  key:
+                    type: string
+                    enum: [inspect, backup, update, settle]
+                  status:
+                    type: string
+        lastUpdate:
+          $ref: "#/components/schemas/SiteWordpressLastUpdateDto"
+          nullable: true
+
+    SiteWordpressAcceptedDto:
+      type: object
+      additionalProperties: false
+      required: [siteId, operationId]
+      properties:
+        siteId:
+          type: string
+        operationId:
+          type: string
+
+    SiteWordpressPasswordResetDto:
+      type: object
+      additionalProperties: false
+      required: [temporaryPassword]
+      properties:
+        temporaryPassword:
+          type: string
+          minLength: 24
+          description: One-time temporary password; shown once and never stored by the panel
 
     SiteBackupAccepted:
       type: object
@@ -6542,6 +6954,8 @@ components:
             - site.backups.prune
             - site.backups.restore
             - site.backups.download
+            - site.wordpress.inspect
+            - site.wordpress.update
             - panel.backups.create
             - host.maintenance
             - host.security

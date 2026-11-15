@@ -52,6 +52,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Accesso SFTP per Sito (Chroot)** | ✅ **Operativo** | `sftpAvailable: true` su `linux-systemd`, contenitore `hp_sftp` porta TCP `2222` (`ADR-0020`, `AC-F2-10`) |
 | **Database per Sito & phpMyAdmin** | ✅ **Operativo** | `phpMyAdminAvailable: true` su `linux-systemd`, `hp_mariadb` + `hp_phpmyadmin` su `127.0.0.1` (`ADR-0021`, `AC-F2-10`) |
 | **Backup dei Siti (S3)** | ✅ **Attivo su linux-systemd** | `productionBackupRuntimeAvailable: true` (`ADR-0022`) |
+| **Strumenti WordPress** | ✅ **Attivo su linux-systemd** | `wordpressToolsAvailable: true`: versioni, aggiornamenti con copia preventiva, reimpostazione della password di un amministratore (`ADR-0023`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
 ---
@@ -208,6 +209,17 @@ Su runtime `linux-systemd` (`phpMyAdminAvailable: true`), i clienti con permesso
 
 Dettagli e limiti: [ADR 0021](docs/architecture/adr/0021-site-databases.md).
 
+### Strumenti WordPress
+
+Attivi solo su runtime `linux-systemd` (`wordpressToolsAvailable: true`). Ogni sito WordPress ha la scheda **WordPress**, subito dopo Panoramica.
+
+- **Versioni.** La scheda mostra la versione di WordPress, i plugin, i temi e gli amministratori del sito, con le versioni nuove disponibili. «Controlla ora» rilegge tutto; la scheda lo fa anche da sola quando l'ultimo controllo ha più di `12` ore. Se wordpress.org non risponde, la scheda dice che gli aggiornamenti non sono noti, mai che il sito è aggiornato. La Panoramica mostra quanti aggiornamenti sono in attesa.
+- **Aggiornamenti.** Il cliente aggiorna WordPress, un plugin, un tema o tutto insieme, dopo una conferma. Subito prima il pannello prende una copia del sito (sono tenute le ultime `3`). Se la copia non riesce, non si aggiorna nulla. Se i backup non sono configurati sul server, la conferma dice che nessuna copia sarà presa. Non c'è un pulsante per annullare: per tornare indietro si ripristina la copia dalla scheda **Backup**. Un aggiornamento conta nel limite di `6` azioni pesanti l'ora per sito.
+- **Password di un amministratore.** «Reimposta password» crea una nuova password, la mostra una sola volta e disconnette quella persona da ogni dispositivo. La vecchia password smette subito di funzionare. Il pannello non la salva e non la invia per email.
+- **Privacy.** Un controllo o un aggiornamento contatta wordpress.org, e WordPress gli invia l'indirizzo del sito.
+
+Dettagli e limiti: [ADR 0023](docs/architecture/adr/0023-wordpress-tools.md).
+
 ### Backup dei Siti
 
 Su runtime `linux-systemd` (`productionBackupRuntimeAvailable: true`), il pannello esegue e conserva backup cifrati dei siti WordPress su storage compatibile S3 tramite contenitore effimero `restic/restic:0.19.1` gestito da `hp-docker-executor`. Gli amministratori configurano la destinazione S3 (endpoint, regione, bucket, prefisso e credenziali), eseguono il test di connessione e impostano la pianificazione notturna in **UTC** (predefinita `02:00 UTC`, eseguita un sito dopo l'altro) e la conservazione automatica (`1–365` giorni, predefinita `14` giorni; i backup manuali conservati sono al massimo `3` per sito e l'ultimo backup valido di un sito esistente non viene mai eliminato dalla rotazione). I clienti con permesso `site.backups.manage` consultano la cronologia e gestiscono backup manuali, ripristini e download dalla scheda **Backup** del sito. Ogni archivio include i file del sito e un dump logico per ciascun database MariaDB del sito senza riavviare i contenitori (`CP-01`), ed è cifrato con la chiave di installazione `/etc/hosting-panel/backup.key` (`0440 root:hp-executor`), creata una sola volta al bootstrap e mai sovrascritta dagli aggiornamenti. Dalla scheda **Backup** il cliente può ripristinare l'intero sito sul posto (mai singoli file o un singolo database) dietro conferma esplicita del nome del sito e pagina di manutenzione automatica con annullamento in caso di errore. Può inoltre preparare e scaricare una copia decifrata in un unico archivio ZIP (al massimo uno per sito, conservato `60` minuti nella cartella protetta `/var/lib/hosting-panel/backups`; creazione manuale, ripristino e preparazione download condividono il limite di `6` azioni pesanti l'ora per sito).
@@ -303,6 +315,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0022`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3).
+- [Registro delle ADR (`ADR 0001..0023`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.
