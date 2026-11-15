@@ -172,6 +172,12 @@ function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): BackupExecut
               },
         } as BackupsResultByAction[R["action"]];
       }
+      case "restore":
+      case "archive":
+      case "readArchive":
+      case "discardArchive":
+      case "settle":
+        throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];
 

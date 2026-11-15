@@ -34,6 +34,7 @@ import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "./backups/backup-settings.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import { SiteBackupsService } from "./backups/site-backups.service.js";
+import { SiteRestoreService } from "./backups/site-restore.service.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import { SiteFilesApplier } from "./sites/site-files-applier.js";
@@ -124,6 +125,7 @@ export class AppModule {
         SiteSftpService,
         SiteDatabasesService,
         SiteBackupsService,
+        SiteRestoreService,
         BackupSettingsService,
         BackupSchedulerService,
         DriftReconcilerService,
@@ -148,6 +150,7 @@ export class AppModule {
         SiteSftpService,
         SiteDatabasesService,
         SiteBackupsService,
+        SiteRestoreService,
         BackupSchedulerService,
       ],
     };

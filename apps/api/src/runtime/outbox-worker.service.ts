@@ -79,6 +79,8 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
 export const BACKUP_OPERATION_KINDS = [
   "site.backups.create",
   "site.backups.prune",
+  "site.backups.restore",
+  "site.backups.download",
 ] as const satisfies readonly OperationKind[];
 
 interface OutboxLaneState {

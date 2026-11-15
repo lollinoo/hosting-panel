@@ -121,6 +121,12 @@ function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): BackupExecut
               },
         } as BackupsResultByAction[R["action"]];
       }
+      case "restore":
+      case "archive":
+      case "readArchive":
+      case "discardArchive":
+      case "settle":
+        throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];
 
@@ -801,11 +807,17 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
         }),
       });
 
-      const accepted = await rawRequest(app.baseUrl!, "POST", customerUrl(orgAId, siteAId), {
-        token: ownerAToken,
-        headers: { "Idempotency-Key": randomUUID() },
-        body: {},
-      });
+      // Use the admin run route (exempt from M3b's 6/hr customer heavy-action quota) across the 20 classes.
+      const accepted = await rawRequest(
+        app.baseUrl!,
+        "POST",
+        `/v1/admin/backups/sites/${siteAId}/run`,
+        {
+          token: adminToken,
+          headers: { "Idempotency-Key": randomUUID() },
+          body: {},
+        },
+      );
       expect(accepted.status, failureClass).toBe(202);
       await app.outboxWorker.processPendingOnce();
 

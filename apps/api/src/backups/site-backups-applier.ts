@@ -37,6 +37,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { selectExpired } from "./backup-retention.js";
+import { SiteRestoreApplier } from "./site-restore-applier.js";
 
 export const BACKUP_LEASE_MS = 120_000;
 export const BACKUP_POLL_MS = 5_000;
@@ -52,20 +53,22 @@ const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const FAILURE_CLASS_SET: ReadonlySet<string> = new Set(BACKUP_FAILURE_CLASSES);
 const MAX_FORGET_BATCH = 100;
 
-/** Accepts only known executor failure classes, falling back to 'other'. */
-function normalizeBackupProblem(failure: unknown): BackupProblem {
+/** Accepts only known executor failure classes, falling back to 'other'. @internal */
+export function normalizeBackupProblem(failure: unknown): BackupProblem {
   return typeof failure === "string" && FAILURE_CLASS_SET.has(failure)
     ? (failure as BackupProblem)
     : "other";
 }
 
-class BackupSettledFailure extends Error {
+/** @internal */
+export class BackupSettledFailure extends Error {
   public constructor(public readonly causeError: ControlPlaneError) {
     super(causeError.message);
   }
 }
 
-function isTerminalStepStatus(status: string): boolean {
+/** @internal */
+export function isTerminalStepStatus(status: string): boolean {
   return (
     status === "succeeded" ||
     status === "failed" ||
@@ -74,7 +77,8 @@ function isTerminalStepStatus(status: string): boolean {
   );
 }
 
-function isAmbiguousError(err: unknown): boolean {
+/** @internal */
+export function isAmbiguousError(err: unknown): boolean {
   if (err instanceof ControlPlaneError && err.code === "OPERATION_AMBIGUOUS") {
     return true;
   }
@@ -85,7 +89,8 @@ function isAmbiguousError(err: unknown): boolean {
   return obj.code === "OPERATION_AMBIGUOUS" || obj.ambiguousOutcome === true;
 }
 
-function extractKnownErrorCode(err: unknown): ErrorCode | null {
+/** @internal */
+export function extractKnownErrorCode(err: unknown): ErrorCode | null {
   if (typeof err !== "object" || err === null || !("code" in err)) {
     return null;
   }
@@ -99,6 +104,7 @@ function extractKnownErrorCode(err: unknown): ErrorCode | null {
 @Injectable()
 export class SiteBackupsApplier {
   readonly #logger = new Logger(SiteBackupsApplier.name);
+  readonly #restore: SiteRestoreApplier;
   public leaseMs = BACKUP_LEASE_MS;
   public pollMs = BACKUP_POLL_MS;
   public pollGiveUpMs = BACKUP_POLL_GIVE_UP_MS;
@@ -107,10 +113,16 @@ export class SiteBackupsApplier {
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
-  ) {}
+  ) {
+    this.#restore = new SiteRestoreApplier(this, dbClient, dockerExecutor, config);
+  }
 
-  /** Applies one queued backup creation or orphan prune operation. */
+  /** Applies one queued backup, prune, restore, or archive download operation. */
   public async apply(op: BackupOperationRef): Promise<void> {
+    if (op.kind === "site.backups.restore" || op.kind === "site.backups.download") {
+      await this.#restore.apply(op);
+      return;
+    }
     if (op.kind === "site.backups.create") {
       await this.#applyCreate(op);
       return;
@@ -122,8 +134,11 @@ export class SiteBackupsApplier {
     throw new ControlPlaneError("NOT_SUPPORTED", `Unsupported backup operation kind '${op.kind}'`);
   }
 
-  /** Reconciles an expired backup or prune operation without blindly replaying mutations. */
+  /** Reconciles an expired backup, prune, restore, or download operation without blindly replaying mutations. */
   public async recover(op: BackupOperationRef): Promise<"settled" | "pending"> {
+    if (op.kind === "site.backups.restore" || op.kind === "site.backups.download") {
+      return this.#restore.recover(op);
+    }
     const db = this.dbClient.db;
     const steps = await db
       .select()
@@ -144,7 +159,7 @@ export class SiteBackupsApplier {
           "Will retry next night",
         );
       }
-      await this.#succeedOperation(op.id);
+      await this.succeedOperation(op.id);
       return "settled";
     }
 
@@ -166,14 +181,14 @@ export class SiteBackupsApplier {
         sizeBytes: statusRes.snapshot?.totalBytes ?? null,
         problem: null,
       });
-      await this.#safeUpdateStep(op.id, "backup", "succeeded", "Backup uploaded");
-      await this.#safeUpdateStep(
+      await this.safeUpdateStep(op.id, "backup", "succeeded", "Backup uploaded");
+      await this.safeUpdateStep(
         op.id,
         "retention",
         "skipped",
         "Skipped after recovery; will run next night",
       );
-      await this.#succeedOperation(op.id);
+      await this.succeedOperation(op.id);
       return "settled";
     }
 
@@ -199,7 +214,7 @@ export class SiteBackupsApplier {
   async #applyCreate(op: BackupOperationRef): Promise<void> {
     const db = this.dbClient.db;
     await renewOperationLease(db, op.id, this.leaseMs);
-    await this.#safeUpdateStep(op.id, "backup", "running", "Backing up site files and databases");
+    await this.safeUpdateStep(op.id, "backup", "running", "Backing up site files and databases");
 
     try {
       await this.#ensureBackupRowStillRunning(op.id);
@@ -247,7 +262,7 @@ export class SiteBackupsApplier {
         target,
       });
 
-      const statusRes = await this.#pollJobStatus(op.id, op.id, startRes);
+      const statusRes = await this.pollJobStatus(op.id, op.id, startRes);
 
       if (statusRes.state === "succeeded") {
         await settleSiteBackup(db, op.id, {
@@ -256,7 +271,7 @@ export class SiteBackupsApplier {
           sizeBytes: statusRes.snapshot?.totalBytes ?? null,
           problem: null,
         });
-        await this.#safeUpdateStep(op.id, "backup", "succeeded", "Backup uploaded");
+        await this.safeUpdateStep(op.id, "backup", "succeeded", "Backup uploaded");
       } else if (statusRes.state === "failed") {
         const problem = normalizeBackupProblem(statusRes.failure);
         const code: ErrorCode =
@@ -297,7 +312,7 @@ export class SiteBackupsApplier {
     }
 
     await this.#runRetentionStep(op);
-    await this.#succeedOperation(op.id);
+    await this.succeedOperation(op.id);
   }
 
   /** Fails the operation as interrupted when its backup row is gone or no longer running. */
@@ -317,13 +332,13 @@ export class SiteBackupsApplier {
   async #applyPrune(op: BackupOperationRef): Promise<void> {
     await renewOperationLease(this.dbClient.db, op.id, this.leaseMs);
     await this.#runRetentionStep(op);
-    await this.#succeedOperation(op.id);
+    await this.succeedOperation(op.id);
   }
 
   async #runRetentionStep(op: BackupOperationRef): Promise<void> {
     const db = this.dbClient.db;
     await renewOperationLease(db, op.id, this.leaseMs);
-    await this.#safeUpdateStep(op.id, "retention", "running", "Removing old backups");
+    await this.safeUpdateStep(op.id, "retention", "running", "Removing old backups");
 
     try {
       const settings = await getBackupSettingsPublic(db);
@@ -334,11 +349,12 @@ export class SiteBackupsApplier {
         .where(eq(sites.id, op.resourceId))
         .limit(1);
       const rows = await listSiteBackups(db, op.resourceId);
+      const rowsById = new Map(rows.map((row) => [row.id, row]));
       const { forget, drop } = selectExpired(rows, new Date(), retentionDays, Boolean(siteRow));
 
-      await deleteSiteBackups(
-        db,
+      await this.#discardAndDeleteBackupRows(
         drop.map((row) => row.id),
+        rowsById,
       );
 
       if (forget.length > 0) {
@@ -360,42 +376,45 @@ export class SiteBackupsApplier {
             target,
             snapshotIds,
           });
-          const forgetStatus = await this.#pollJobStatus(op.id, forgetJobId, startForget);
+          const forgetStatus = await this.pollJobStatus(op.id, forgetJobId, startForget);
           if (forgetStatus.state !== "succeeded") {
             throw new ControlPlaneError("INTERNAL_ERROR", "retention_forget_failed");
           }
-          await deleteSiteBackups(
-            db,
+          await this.#discardAndDeleteBackupRows(
             batch.map((row) => row.id),
+            rowsById,
           );
         }
       }
 
-      await this.#safeUpdateStep(op.id, "retention", "succeeded", "Old backups checked");
+      await this.safeUpdateStep(op.id, "retention", "succeeded", "Old backups checked");
     } catch (err) {
+      if (isAmbiguousError(err)) {
+        throw err;
+      }
       const code = extractKnownErrorCode(err) ?? "RETENTION_ERROR";
       // Never log secrets, snapshot IDs, or host paths from retention failures.
       this.#logger.warn(`Retention step skipped for ${op.id} (${code}); will retry next night`);
-      await this.#safeUpdateStep(op.id, "retention", "succeeded", "Will retry next night");
+      await this.safeUpdateStep(op.id, "retention", "succeeded", "Will retry next night");
     }
   }
 
-  async #pollJobStatus(
+  /** @internal */
+  public async pollJobStatus(
     operationId: string,
     jobId: string,
     initial: BackupJobStatus,
   ): Promise<BackupJobStatus> {
-    const db = this.dbClient.db;
     let statusRes = initial;
     let pollErrorSinceMs: number | null = null;
     let firstPoll = true;
 
     while (statusRes.state === "running") {
-      await renewOperationLease(db, operationId, this.leaseMs);
+      await this.#renewLeaseOrAmbiguous(operationId);
       // First status poll executes without waiting so synchronous executors finish at once.
       if (!firstPoll && this.pollMs > 0) {
         await this.#delay(this.pollMs);
-        await renewOperationLease(db, operationId, this.leaseMs);
+        await this.#renewLeaseOrAmbiguous(operationId);
       }
       firstPoll = false;
 
@@ -420,7 +439,8 @@ export class SiteBackupsApplier {
     return statusRes;
   }
 
-  async #safeUpdateStep(
+  /** @internal */
+  public async safeUpdateStep(
     operationId: string,
     stepKey: string,
     status: "running" | "succeeded" | "failed" | "skipped",
@@ -451,17 +471,18 @@ export class SiteBackupsApplier {
     errorCode: ErrorCode,
     errorMessage: string,
   ): Promise<void> {
-    await this.#safeUpdateStep(operationId, "backup", "failed", stepMessage);
-    await this.#safeUpdateStep(
+    await this.safeUpdateStep(operationId, "backup", "failed", stepMessage);
+    await this.safeUpdateStep(
       operationId,
       "retention",
       "skipped",
       "Skipped because backup did not finish",
     );
-    await this.#failOperation(operationId, errorCode, errorMessage);
+    await this.failOperation(operationId, errorCode, errorMessage);
   }
 
-  async #succeedOperation(operationId: string): Promise<void> {
+  /** @internal */
+  public async succeedOperation(operationId: string): Promise<void> {
     const db = this.dbClient.db;
     const [op] = await db
       .select({ status: operations.status })
@@ -485,7 +506,8 @@ export class SiteBackupsApplier {
     });
   }
 
-  async #failOperation(
+  /** @internal */
+  public async failOperation(
     operationId: string,
     errorCode: ErrorCode,
     errorMessage: string,
@@ -505,6 +527,41 @@ export class SiteBackupsApplier {
       errorCode,
       errorMessage,
     });
+  }
+
+  async #discardAndDeleteBackupRows(
+    ids: readonly string[],
+    rowsById: ReadonlyMap<string, typeof siteBackups.$inferSelect>,
+  ): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    for (const id of ids) {
+      const row = rowsById.get(id);
+      if (row && row.archiveStatus !== null && row.archiveOperationId !== null) {
+        try {
+          await this.dockerExecutor.backups({
+            action: "discardArchive",
+            jobId: row.archiveOperationId,
+          });
+        } catch {
+          // Executor expires uncollected archives after 60 minutes anyway; do not block retention.
+        }
+      }
+    }
+    await deleteSiteBackups(this.dbClient.db, [...ids]);
+  }
+
+  /** Converts lease-renewal failures during polling into ambiguous operation errors. */
+  async #renewLeaseOrAmbiguous(operationId: string): Promise<void> {
+    try {
+      await renewOperationLease(this.dbClient.db, operationId, this.leaseMs);
+    } catch {
+      throw new ControlPlaneError(
+        "OPERATION_AMBIGUOUS",
+        "Could not renew backup operation lease while polling",
+      );
+    }
   }
 
   #delay(ms: number): Promise<void> {

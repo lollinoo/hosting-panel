@@ -59,6 +59,9 @@ import {
   SITE_BACKUP_STEPS,
   SiteBackupsService,
 } from "../src/backups/site-backups.service.js";
+import { SITE_ARCHIVE_STEPS, SITE_RESTORE_STEPS } from "../src/backups/site-restore-applier.js";
+import { assertHeavyActionAllowed } from "../src/backups/site-restore.service.js";
+import { ControlPlaneError } from "../src/common/control-plane.error.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { BACKUP_OPERATION_KINDS } from "../src/runtime/outbox-worker.service.js";
@@ -224,6 +227,12 @@ export function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): Backu
               },
         } as BackupsResultByAction[R["action"]];
       }
+      case "restore":
+      case "archive":
+      case "readArchive":
+      case "discardArchive":
+      case "settle":
+        throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];
 
@@ -537,7 +546,14 @@ describe("site backups API and outbox execution", () => {
   it("exposes frozen step/kind constants and SiteBackupsService.enqueueBackupTx/admin prefix", async () => {
     expect(SITE_BACKUP_STEPS).toHaveLength(2);
     expect(SITE_BACKUP_PRUNE_STEPS).toHaveLength(1);
-    expect(BACKUP_OPERATION_KINDS).toEqual(["site.backups.create", "site.backups.prune"]);
+    expect(SITE_RESTORE_STEPS.map((s) => s.key)).toEqual(["restore", "update_address"]);
+    expect(SITE_ARCHIVE_STEPS.map((s) => s.key)).toEqual(["prepare"]);
+    expect(BACKUP_OPERATION_KINDS).toEqual([
+      "site.backups.create",
+      "site.backups.prune",
+      "site.backups.restore",
+      "site.backups.download",
+    ]);
 
     const [siteRow] = await dbClient.db.select().from(sites).where(eq(sites.id, siteA1Id)).limit(1);
     const service = app.nestApp.get(SiteBackupsService);
@@ -1824,5 +1840,114 @@ describe("site backups API and outbox execution", () => {
     expect(steps.find((s) => s.key === "backup")?.status).toBe("failed");
     expect(steps.find((s) => s.key === "retention")?.status).toBe("skipped");
     expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
+  });
+
+  it("M3b assertHeavyActionAllowed: exempts admins and refuses a customer's seventh action inside 60 minutes with QUOTA_EXCEEDED and retryAt", async () => {
+    const authzService = app.nestApp.get(AuthzContextService);
+    const fakeAdminReq = {
+      headers: { authorization: `Bearer ${adminToken}` },
+      ip: "127.0.0.1",
+    } as unknown as FastifyRequest;
+    const fakeOwnerReq = {
+      headers: { authorization: `Bearer ${ownerAToken}` },
+      ip: "127.0.0.1",
+    } as unknown as FastifyRequest;
+    const adminAuth = await authzService.authenticateRequest(fakeAdminReq);
+    const ownerAuth = await authzService.authenticateRequest(fakeOwnerReq);
+
+    const t0 = new Date("2026-11-15T12:00:00.000Z");
+    const min = 60_000;
+    const kinds = [
+      "site.backups.create",
+      "site.backups.restore",
+      "site.backups.download",
+      "site.backups.create",
+      "site.backups.restore",
+      "site.backups.download",
+    ] as const;
+
+    // Seed 5 customer actions first: 6th action must be allowed.
+    for (let i = 0; i < 5; i++) {
+      await dbClient.db.insert(operations).values({
+        id: `op_heavy_${i}_${randomUUID().slice(0, 8)}`,
+        organizationId: orgAId,
+        requestedByUserId: ownerAUserId,
+        kind: kinds[i]!,
+        status: "succeeded",
+        resourceType: "site",
+        resourceId: siteA1Id,
+        submittedAt: new Date(t0.getTime() - (50 - i * 10) * min),
+      });
+    }
+
+    const sixthOpId = `op_heavy_6_${randomUUID().slice(0, 8)}`;
+    await dbClient.db.insert(operations).values({
+      id: sixthOpId,
+      organizationId: orgAId,
+      requestedByUserId: ownerAUserId,
+      kind: kinds[5]!,
+      status: "queued",
+      resourceType: "site",
+      resourceId: siteA1Id,
+      submittedAt: new Date(t0.getTime() - 5 * min),
+    });
+
+    await expect(
+      assertHeavyActionAllowed(
+        dbClient.db,
+        siteA1Id,
+        { auth: ownerAuth, req: fakeOwnerReq },
+        { id: sixthOpId, submittedAt: new Date(t0.getTime() - 5 * min) },
+      ),
+    ).resolves.toBeUndefined();
+
+    // 7th action at t0 (6 earlier actions at -50, -40, -30, -20, -10, -5 min) is refused.
+    const seventhOpId = `op_heavy_7_${randomUUID().slice(0, 8)}`;
+    await dbClient.db.insert(operations).values({
+      id: seventhOpId,
+      organizationId: orgAId,
+      requestedByUserId: ownerAUserId,
+      kind: "site.backups.restore",
+      status: "queued",
+      resourceType: "site",
+      resourceId: siteA1Id,
+      submittedAt: t0,
+    });
+
+    // Administrator bypasses the heavy-action limit completely.
+    await expect(
+      assertHeavyActionAllowed(
+        dbClient.db,
+        siteA1Id,
+        { auth: adminAuth, req: fakeAdminReq, actionPrefix: "admin.site.backups" },
+        { id: seventhOpId, submittedAt: t0 },
+      ),
+    ).resolves.toBeUndefined();
+
+    const expectedRetryAt = new Date(t0.getTime() - 50 * min + 60 * 60_000);
+    let caught: unknown;
+    try {
+      await assertHeavyActionAllowed(
+        dbClient.db,
+        siteA1Id,
+        { auth: ownerAuth, req: fakeOwnerReq },
+        { id: seventhOpId, submittedAt: t0 },
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ControlPlaneError);
+    const err = caught as ControlPlaneError;
+    expect(err.code).toBe("QUOTA_EXCEEDED");
+    expect(err.message).toContain(expectedRetryAt.toISOString());
+    expect(err.details).toEqual([
+      {
+        field: "retryAt",
+        reason: "too_many_requests",
+        message: expectedRetryAt.toISOString(),
+      },
+    ]);
+    expect(err.retryAfterMs).toBe(10 * min);
   });
 });
