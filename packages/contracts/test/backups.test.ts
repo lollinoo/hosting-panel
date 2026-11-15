@@ -8,9 +8,13 @@ import {
   BACKUP_PROBLEMS,
   BACKUP_STATUSES,
   BACKUPS_RESULT_SCHEMAS,
+  BackupArchiveChunkDtoSchema,
+  BackupArchiveChunkSchema,
+  BackupArchiveDtoSchema,
   BackupBucketSchema,
   BackupEndpointSchema,
   BackupJobStatusSchema,
+  BackupLastRestoreDtoSchema,
   BackupPrefixSchema,
   BackupProblemSchema,
   BackupRegionSchema,
@@ -22,11 +26,17 @@ import {
   BackupsIpcRequestSchema,
   DEFAULT_BACKUP_HOUR_UTC,
   DEFAULT_BACKUP_RETENTION_DAYS,
+  HEAVY_ACTIONS_PER_HOUR,
+  HEAVY_ACTION_WINDOW_MS,
+  HEAVY_BACKUP_OPERATION_KINDS,
   MANUAL_BACKUPS_KEPT,
   RESTIC_IMAGE,
+  RestoreBackupInputSchema,
+  SITE_FILE_CHUNK_BYTES,
   SiteBackupAcceptedDtoSchema,
   SiteBackupDtoSchema,
   SiteBackupsDtoSchema,
+  backupArchiveFileName,
   type BackupsIpcRequest,
 } from "../src/index.js";
 
@@ -68,10 +78,17 @@ describe("backups IPC schemas and constants", () => {
       "timeout",
       "interrupted",
       "other",
+      "restore_prepare_failed",
+      "switch_undone",
+      "undo_incomplete",
+      "definer_missing",
     ]);
+    expect(BACKUP_FAILURE_CLASSES).toHaveLength(20);
     expect(BACKUP_JOB_STATES).toEqual(["running", "succeeded", "failed", "unknown"]);
     expect(BACKUP_JOB_ID_PATTERN.test(VALID_JOB_ID)).toBe(true);
     expect(BACKUP_JOB_ID_PATTERN.test(FORGET_JOB_ID)).toBe(true);
+    expect(BACKUP_JOB_ID_PATTERN.test(`${VALID_JOB_ID}-restore`)).toBe(false);
+    expect(BACKUP_JOB_ID_PATTERN.test(`${VALID_JOB_ID}-archive`)).toBe(false);
     expect(RESTIC_IMAGE).toBe(
       "restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510",
     );
@@ -94,6 +111,35 @@ describe("backups IPC schemas and constants", () => {
         siteId: "site_01",
         target: VALID_TARGET,
         snapshotIds: [SNAPSHOT_ID],
+      },
+      {
+        action: "restore",
+        jobId: VALID_JOB_ID,
+        siteId: "site_01",
+        serviceInstanceId: "svc_01",
+        target: VALID_TARGET,
+        snapshotId: SNAPSHOT_ID,
+      },
+      {
+        action: "archive",
+        jobId: VALID_JOB_ID,
+        siteId: "site_01",
+        target: VALID_TARGET,
+        snapshotId: SNAPSHOT_ID,
+      },
+      {
+        action: "readArchive",
+        jobId: VALID_JOB_ID,
+        offset: 0,
+        length: SITE_FILE_CHUNK_BYTES,
+      },
+      {
+        action: "discardArchive",
+        jobId: VALID_JOB_ID,
+      },
+      {
+        action: "settle",
+        jobId: VALID_JOB_ID,
       },
     ];
 
@@ -190,6 +236,124 @@ describe("backups IPC schemas and constants", () => {
         target: { ...VALID_TARGET, secretAccessKey: "secret with space" },
       }).success,
     ).toBe(false);
+
+    // Five new actions: unknown key and invalid jobId (including -restore suffix)
+    const validNewRequests: Record<string, unknown>[] = [
+      {
+        action: "restore",
+        jobId: VALID_JOB_ID,
+        siteId: "site_01",
+        serviceInstanceId: "svc_01",
+        target: VALID_TARGET,
+        snapshotId: SNAPSHOT_ID,
+      },
+      {
+        action: "archive",
+        jobId: VALID_JOB_ID,
+        siteId: "site_01",
+        target: VALID_TARGET,
+        snapshotId: SNAPSHOT_ID,
+      },
+      {
+        action: "readArchive",
+        jobId: VALID_JOB_ID,
+        offset: 0,
+        length: 1,
+      },
+      {
+        action: "discardArchive",
+        jobId: VALID_JOB_ID,
+      },
+      {
+        action: "settle",
+        jobId: VALID_JOB_ID,
+      },
+    ];
+    for (const base of validNewRequests) {
+      expect(BackupsIpcRequestSchema.safeParse({ ...base, extra: 1 }).success).toBe(false);
+      for (const badJobId of [
+        "bad",
+        "op_123",
+        `op_${"g".repeat(32)}`,
+        `op_${"A".repeat(32)}`,
+        `${VALID_JOB_ID}-restore`,
+        `${VALID_JOB_ID}-archive`,
+        FORGET_JOB_ID,
+      ]) {
+        expect(BackupsIpcRequestSchema.safeParse({ ...base, jobId: badJobId }).success).toBe(false);
+      }
+    }
+
+    // snapshotId and loopback target checks on restore and archive
+    for (const action of ["restore", "archive"] as const) {
+      const base =
+        action === "restore"
+          ? {
+              action,
+              jobId: VALID_JOB_ID,
+              siteId: "site_01",
+              serviceInstanceId: "svc_01",
+              target: VALID_TARGET,
+              snapshotId: SNAPSHOT_ID,
+            }
+          : {
+              action,
+              jobId: VALID_JOB_ID,
+              siteId: "site_01",
+              target: VALID_TARGET,
+              snapshotId: SNAPSHOT_ID,
+            };
+
+      expect(
+        BackupsIpcRequestSchema.safeParse({ ...base, snapshotId: "b".repeat(63) }).success,
+      ).toBe(false);
+      expect(
+        BackupsIpcRequestSchema.safeParse({ ...base, snapshotId: `B${"b".repeat(63)}` }).success,
+      ).toBe(false);
+      expect(
+        BackupsIpcRequestSchema.safeParse({
+          ...base,
+          target: { ...VALID_TARGET, endpoint: "http://127.0.0.1:9000" },
+        }).success,
+      ).toBe(false);
+    }
+
+    // restore without serviceInstanceId
+    expect(
+      BackupsIpcRequestSchema.safeParse({
+        action: "restore",
+        jobId: VALID_JOB_ID,
+        siteId: "site_01",
+        target: VALID_TARGET,
+        snapshotId: SNAPSHOT_ID,
+      }).success,
+    ).toBe(false);
+
+    // readArchive bounds
+    expect(
+      BackupsIpcRequestSchema.safeParse({
+        action: "readArchive",
+        jobId: VALID_JOB_ID,
+        offset: -1,
+        length: 64,
+      }).success,
+    ).toBe(false);
+    expect(
+      BackupsIpcRequestSchema.safeParse({
+        action: "readArchive",
+        jobId: VALID_JOB_ID,
+        offset: 0,
+        length: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      BackupsIpcRequestSchema.safeParse({
+        action: "readArchive",
+        jobId: VALID_JOB_ID,
+        offset: 0,
+        length: SITE_FILE_CHUNK_BYTES + 1,
+      }).success,
+    ).toBe(false);
   });
 
   it("validates IPC result schemas", () => {
@@ -214,6 +378,42 @@ describe("backups IPC schemas and constants", () => {
       }).success,
     ).toBe(true);
     expect(
+      BackupJobStatusSchema.safeParse({
+        jobId: VALID_JOB_ID,
+        state: "succeeded",
+        failure: null,
+        snapshot: null,
+        archive: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      BackupJobStatusSchema.safeParse({
+        jobId: VALID_JOB_ID,
+        state: "succeeded",
+        failure: null,
+        snapshot: null,
+        archive: {
+          sizeBytes: 2048,
+          readyAt: "2026-11-15T01:00:00.000Z",
+          expiresAt: "2026-11-15T02:00:00.000Z",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      BackupJobStatusSchema.safeParse({
+        jobId: VALID_JOB_ID,
+        state: "succeeded",
+        failure: null,
+        snapshot: null,
+        archive: {
+          sizeBytes: 2048,
+          readyAt: "2026-11-15T01:00:00.000Z",
+          expiresAt: "2026-11-15T02:00:00.000Z",
+          extra: 1,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
       BACKUPS_RESULT_SCHEMAS.status.safeParse({
         jobId: FORGET_JOB_ID,
         state: "unknown",
@@ -221,20 +421,76 @@ describe("backups IPC schemas and constants", () => {
         snapshot: null,
       }).success,
     ).toBe(true);
+    expect(
+      BACKUPS_RESULT_SCHEMAS.restore.safeParse({
+        jobId: VALID_JOB_ID,
+        state: "failed",
+        failure: "undo_incomplete",
+        snapshot: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      BACKUPS_RESULT_SCHEMAS.archive.safeParse({
+        jobId: VALID_JOB_ID,
+        state: "succeeded",
+        failure: null,
+        snapshot: null,
+        archive: {
+          sizeBytes: 512,
+          readyAt: "2026-11-15T01:00:00.000Z",
+          expiresAt: "2026-11-15T02:00:00.000Z",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      BACKUPS_RESULT_SCHEMAS.settle.safeParse({
+        jobId: VALID_JOB_ID,
+        state: "succeeded",
+        failure: null,
+        snapshot: null,
+      }).success,
+    ).toBe(true);
+
+    const chunkPayload = {
+      dataBase64: Buffer.from("zip-bytes").toString("base64"),
+      size: 9,
+      eof: true,
+    };
+    expect(BackupArchiveChunkSchema.safeParse(chunkPayload).success).toBe(true);
+    expect(BACKUPS_RESULT_SCHEMAS.readArchive.safeParse(chunkPayload).success).toBe(true);
+    expect(
+      BACKUPS_RESULT_SCHEMAS.readArchive.safeParse({ ...chunkPayload, extra: 1 }).success,
+    ).toBe(false);
+
+    expect(BACKUPS_RESULT_SCHEMAS.discardArchive.safeParse({ discarded: true }).success).toBe(true);
+    expect(
+      BACKUPS_RESULT_SCHEMAS.discardArchive.safeParse({ discarded: false, extra: 1 }).success,
+    ).toBe(false);
   });
 });
 
 describe("backups public contracts (R55, R56)", () => {
-  it("BACKUP_PROBLEMS has 17 distinct names matching BACKUP_FAILURE_CLASSES plus site_busy", () => {
-    expect(BACKUP_PROBLEMS).toHaveLength(17);
-    expect(new Set(BACKUP_PROBLEMS).size).toBe(17);
-    expect(BACKUP_PROBLEMS).toEqual([...BACKUP_FAILURE_CLASSES, "site_busy"]);
+  it("BACKUP_PROBLEMS has 22 distinct names matching BACKUP_FAILURE_CLASSES plus site_busy and address_not_updated", () => {
+    expect(BACKUP_PROBLEMS).toHaveLength(22);
+    expect(new Set(BACKUP_PROBLEMS).size).toBe(22);
+    expect(BACKUP_PROBLEMS).toEqual([
+      ...BACKUP_FAILURE_CLASSES,
+      "site_busy",
+      "address_not_updated",
+    ]);
     for (const p of BACKUP_PROBLEMS) {
       expect(BackupProblemSchema.safeParse(p).success).toBe(true);
     }
     expect(MANUAL_BACKUPS_KEPT).toBe(3);
     expect(DEFAULT_BACKUP_HOUR_UTC).toBe(2);
     expect(DEFAULT_BACKUP_RETENTION_DAYS).toBe(14);
+    expect(HEAVY_ACTIONS_PER_HOUR).toBe(6);
+    expect(HEAVY_ACTION_WINDOW_MS).toBe(60 * 60_000);
+    expect(HEAVY_BACKUP_OPERATION_KINDS).toEqual([
+      "site.backups.create",
+      "site.backups.restore",
+      "site.backups.download",
+    ]);
     expect(BACKUP_KINDS).toEqual(["nightly", "manual"]);
     expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed"]);
   });
@@ -403,6 +659,23 @@ describe("backups public contracts (R55, R56)", () => {
         finishedAt: "2026-11-15T01:01:00.000Z",
         sizeBytes: 1024,
         problem: null,
+        archive: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      SiteBackupDtoSchema.safeParse({
+        id: "bk_01",
+        kind: "manual",
+        status: "succeeded",
+        startedAt: "2026-11-15T01:00:00.000Z",
+        finishedAt: "2026-11-15T01:01:00.000Z",
+        sizeBytes: 1024,
+        problem: null,
+        archive: {
+          status: "ready",
+          readyUntil: "2026-11-15T02:00:00.000Z",
+          problem: null,
+        },
       }).success,
     ).toBe(true);
     expect(
@@ -412,6 +685,24 @@ describe("backups public contracts (R55, R56)", () => {
         retentionDays: 14,
         manualKept: MANUAL_BACKUPS_KEPT,
         runningOperationId: null,
+        lastRestore: null,
+        backups: [],
+      }).success,
+    ).toBe(true);
+    expect(
+      SiteBackupsDtoSchema.safeParse({
+        available: true,
+        configured: true,
+        retentionDays: 14,
+        manualKept: MANUAL_BACKUPS_KEPT,
+        runningOperationId: null,
+        lastRestore: {
+          backupId: "bk_01",
+          backupStartedAt: "2026-11-15T01:00:00.000Z",
+          status: "succeeded",
+          finishedAt: "2026-11-15T02:00:00.000Z",
+          problem: "address_not_updated",
+        },
         backups: [],
       }).success,
     ).toBe(true);
@@ -435,5 +726,75 @@ describe("backups public contracts (R55, R56)", () => {
         operationId: VALID_JOB_ID,
       }).success,
     ).toBe(true);
+    expect(
+      BackupArchiveDtoSchema.safeParse({
+        status: "failed",
+        readyUntil: null,
+        problem: "no_space",
+      }).success,
+    ).toBe(true);
+    expect(
+      BackupLastRestoreDtoSchema.safeParse({
+        backupId: "bk_01",
+        backupStartedAt: "2026-11-15T01:00:00.000Z",
+        status: "failed",
+        finishedAt: "2026-11-15T02:00:00.000Z",
+        problem: "undo_incomplete",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("validates RestoreBackupInputSchema, BackupArchiveChunkDtoSchema, and backupArchiveFileName", () => {
+    expect(RestoreBackupInputSchema.safeParse({ confirmName: "My Site" }).success).toBe(true);
+    expect(RestoreBackupInputSchema.safeParse({ confirmName: "a".repeat(255) }).success).toBe(true);
+    expect(
+      RestoreBackupInputSchema.safeParse({ confirmName: "My Site", extra: 1 }).success,
+    ).toBe(false);
+    expect(RestoreBackupInputSchema.safeParse({ confirmName: "a".repeat(256) }).success).toBe(
+      false,
+    );
+
+    const chunk = {
+      dataBase64: "YQ==",
+      size: 1,
+      eof: true,
+      fileName: "mysite-backup-2026-11-15-0304.zip",
+    };
+    expect(BackupArchiveChunkDtoSchema.safeParse(chunk).success).toBe(true);
+    expect(
+      BackupArchiveChunkDtoSchema.safeParse({ ...chunk, fileName: "a/b.zip" }).success,
+    ).toBe(false);
+    expect(
+      BackupArchiveChunkDtoSchema.safeParse({ ...chunk, fileName: "backup.tar.gz" }).success,
+    ).toBe(false);
+    expect(
+      BackupArchiveChunkDtoSchema.safeParse({ ...chunk, extra: 1 }).success,
+    ).toBe(false);
+
+    const hostileNames = [
+      "../../etc/passwd",
+      "",
+      "...",
+      "---",
+      ".-.-.",
+      "   ",
+      "Café à la crème",
+      "\"'hello'\"",
+      "a".repeat(300),
+      `.${"a".repeat(300)}`,
+      `${"-".repeat(100)}${"b".repeat(100)}`,
+    ];
+    const startedAtUtc = new Date("2026-11-15T03:04:05.000Z");
+    for (const rawName of hostileNames) {
+      const out = backupArchiveFileName(rawName, startedAtUtc);
+      expect(out, `hostile=${rawName}`).toMatch(/^[A-Za-z0-9._-]{1,120}\.zip$/);
+      expect(out, `hostile=${rawName}`).not.toMatch(/^[.-]/);
+      expect(out, `hostile=${rawName}`).toMatch(/-backup-2026-11-15-0304\.zip$/);
+    }
+
+    // Offset timestamps are rendered in UTC, not local timezone.
+    expect(backupArchiveFileName("Shop", new Date("2026-11-15T23:30:00-05:00"))).toBe(
+      "Shop-backup-2026-11-16-0430.zip",
+    );
   });
 });

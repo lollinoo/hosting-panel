@@ -1,11 +1,24 @@
 import { z } from "zod";
 import { BACKUP_FAILURE_CLASSES, BackupTargetSchema } from "./ipc-schemas.js";
+import type { OperationKind } from "./operations.js";
+import { SiteFileChunkDtoSchema } from "./site-files.js";
 
 export const MANUAL_BACKUPS_KEPT = 3;
 export const DEFAULT_BACKUP_HOUR_UTC = 2;
 export const DEFAULT_BACKUP_RETENTION_DAYS = 14;
+export const HEAVY_ACTIONS_PER_HOUR = 6;
+export const HEAVY_ACTION_WINDOW_MS = 60 * 60_000;
+export const HEAVY_BACKUP_OPERATION_KINDS = [
+  "site.backups.create",
+  "site.backups.restore",
+  "site.backups.download",
+] as const satisfies readonly OperationKind[];
 
-export const BACKUP_PROBLEMS = [...BACKUP_FAILURE_CLASSES, "site_busy"] as const;
+export const BACKUP_PROBLEMS = [
+  ...BACKUP_FAILURE_CLASSES,
+  "site_busy",
+  "address_not_updated",
+] as const;
 export const BackupProblemSchema = z.enum(BACKUP_PROBLEMS);
 export type BackupProblem = z.infer<typeof BackupProblemSchema>;
 
@@ -95,6 +108,29 @@ export const BackupSettingsDtoSchema = z.object({
 });
 export type BackupSettingsDto = z.infer<typeof BackupSettingsDtoSchema>;
 
+export const RestoreBackupInputSchema = z
+  .object({
+    confirmName: z.string().max(255),
+  })
+  .strict();
+export type RestoreBackupInput = z.infer<typeof RestoreBackupInputSchema>;
+
+export const BackupArchiveDtoSchema = z.object({
+  status: z.enum(["preparing", "ready", "failed"]),
+  readyUntil: z.string().nullable(),
+  problem: BackupProblemSchema.nullable(),
+});
+export type BackupArchiveDto = z.infer<typeof BackupArchiveDtoSchema>;
+
+export const BackupLastRestoreDtoSchema = z.object({
+  backupId: z.string(),
+  backupStartedAt: z.string(),
+  status: z.enum(["running", "succeeded", "failed"]),
+  finishedAt: z.string().nullable(),
+  problem: BackupProblemSchema.nullable(),
+});
+export type BackupLastRestoreDto = z.infer<typeof BackupLastRestoreDtoSchema>;
+
 export const SiteBackupDtoSchema = z.object({
   id: z.string(),
   kind: z.enum(BACKUP_KINDS),
@@ -103,6 +139,7 @@ export const SiteBackupDtoSchema = z.object({
   finishedAt: z.string().nullable(),
   sizeBytes: z.number().int().nullable(),
   problem: BackupProblemSchema.nullable(),
+  archive: BackupArchiveDtoSchema.nullable(),
 });
 export type SiteBackupDto = z.infer<typeof SiteBackupDtoSchema>;
 
@@ -112,9 +149,26 @@ export const SiteBackupsDtoSchema = z.object({
   retentionDays: z.number().int(),
   manualKept: z.literal(MANUAL_BACKUPS_KEPT),
   runningOperationId: z.string().nullable(),
+  lastRestore: BackupLastRestoreDtoSchema.nullable(),
   backups: z.array(SiteBackupDtoSchema),
 });
 export type SiteBackupsDto = z.infer<typeof SiteBackupsDtoSchema>;
+
+export const BackupArchiveChunkDtoSchema = SiteFileChunkDtoSchema.extend({
+  fileName: z.string().regex(/^[A-Za-z0-9._-]{1,120}\.zip$/),
+}).strict();
+export type BackupArchiveChunkDto = z.infer<typeof BackupArchiveChunkDtoSchema>;
+
+/** Builds a safe UTC download file name (<site>-backup-YYYY-MM-DD-HHmm.zip). */
+export function backupArchiveFileName(siteName: string, startedAt: Date): string {
+  const safe =
+    siteName
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^[.-]+/, "")
+      .slice(0, 80) || "site";
+  const t = startedAt.toISOString();
+  return `${safe}-backup-${t.slice(0, 10)}-${t.slice(11, 13)}${t.slice(14, 16)}.zip`;
+}
 
 export const AdminSiteBackupStatusDtoSchema = z.object({
   siteId: z.string(),

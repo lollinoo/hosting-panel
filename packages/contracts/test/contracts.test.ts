@@ -451,6 +451,8 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(OPERATION_KINDS).toContain("site.files.extract");
     expect(OPERATION_KINDS).toContain("site.backups.create");
     expect(OPERATION_KINDS).toContain("site.backups.prune");
+    expect(OPERATION_KINDS).toContain("site.backups.restore");
+    expect(OPERATION_KINDS).toContain("site.backups.download");
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,

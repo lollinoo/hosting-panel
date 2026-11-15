@@ -665,6 +665,10 @@ export const BACKUP_FAILURE_CLASSES = [
   "timeout",
   "interrupted",
   "other",
+  "restore_prepare_failed",
+  "switch_undone",
+  "undo_incomplete",
+  "definer_missing",
 ] as const;
 
 export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
@@ -673,6 +677,8 @@ export const BACKUP_JOB_STATES = ["running", "succeeded", "failed", "unknown"] a
 export type BackupJobState = (typeof BACKUP_JOB_STATES)[number];
 
 export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-forget)?$/;
+const BackupOpJobIdSchema = z.string().regex(/^op_[0-9a-f]{32}$/);
+const BackupSnapshotIdSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const BackupPathIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
 // Exclude backtick because AWS credentials INI wraps values in backticks to preserve '#' and ';'.
 const BackupKeySchema = z.string().regex(/^(?!.*`)[\x21-\x7e]{1,256}$/);
@@ -741,6 +747,45 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       snapshotIds: z.array(z.string().regex(/^[0-9a-f]{64}$/)).min(1).max(100),
     })
     .strict(),
+  z
+    .object({
+      action: z.literal("restore"),
+      jobId: BackupOpJobIdSchema,
+      siteId: BackupPathIdSchema,
+      serviceInstanceId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      snapshotId: BackupSnapshotIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("archive"),
+      jobId: BackupOpJobIdSchema,
+      siteId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      snapshotId: BackupSnapshotIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("readArchive"),
+      jobId: BackupOpJobIdSchema,
+      offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+      length: z.number().int().min(1).max(SITE_FILE_CHUNK_BYTES),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("discardArchive"),
+      jobId: BackupOpJobIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("settle"),
+      jobId: BackupOpJobIdSchema,
+    })
+    .strict(),
 ]);
 
 const BackupCountSchema = z.number().int().nonnegative();
@@ -769,10 +814,29 @@ export const BackupJobStatusSchema = z
       })
       .strict()
       .nullable(),
+    archive: z
+      .object({
+        sizeBytes: BackupCountSchema,
+        readyAt: z.string().datetime(),
+        expiresAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
   })
   .strict();
 
 export type BackupJobStatus = z.infer<typeof BackupJobStatusSchema>;
+
+export const BackupArchiveChunkSchema = z
+  .object({
+    dataBase64: SiteFileChunkBase64Schema,
+    size: BackupCountSchema,
+    eof: z.boolean(),
+  })
+  .strict();
+
+export type BackupArchiveChunk = z.infer<typeof BackupArchiveChunkSchema>;
 
 export type BackupsIpcRequest = z.infer<typeof BackupsIpcRequestSchema>;
 export type BackupsAction = BackupsIpcRequest["action"];
@@ -782,6 +846,11 @@ export const BACKUPS_RESULT_SCHEMAS = {
   start: BackupJobStatusSchema,
   status: BackupJobStatusSchema,
   forget: BackupJobStatusSchema,
+  restore: BackupJobStatusSchema,
+  archive: BackupJobStatusSchema,
+  readArchive: BackupArchiveChunkSchema,
+  discardArchive: z.object({ discarded: z.boolean() }).strict(),
+  settle: BackupJobStatusSchema,
 } as const satisfies { [K in BackupsAction]: z.ZodType };
 
 export type BackupsResultByAction = {

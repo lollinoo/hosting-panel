@@ -50,6 +50,8 @@ export const OPERATION_KINDS = [
   "host.allocate",
   "site.backups.create",
   "site.backups.prune",
+  "site.backups.restore",
+  "site.backups.download",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);
