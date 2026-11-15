@@ -43,7 +43,11 @@ import {
   type PanelIngressConfig,
 } from "../src/index.js";
 import { writeRestoreNote } from "../src/restore-jobs.js";
-import { startMockDockerDaemon } from "./mock-docker-daemon.js";
+import {
+  REMOVAL_IN_PROGRESS_POLL_MS,
+  REMOVAL_IN_PROGRESS_WAIT_MS,
+} from "../src/docker-engine-adapter.js";
+import { type MockDockerDaemon, startMockDockerDaemon } from "./mock-docker-daemon.js";
 
 const HMAC_SECRET = "0123456789abcdef0123456789abcdef-phase2-ipc-key";
 const HMAC_SIGNING_KEY: IpcSigningKey = {
@@ -1243,8 +1247,61 @@ describe("purge site", () => {
     expect(mockDaemon.requestedPaths).toContain("/v1.45/containers/f1/json");
   });
 
+  // Skips the poll pause; the container leaves the mock after `goneAfter` looks (never when null).
+  function removalInProgress(mockDaemon: MockDockerDaemon, id: string, goneAfter: number | null) {
+    const realSetTimeout = globalThis.setTimeout;
+    const pauses: number[] = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === REMOVAL_IN_PROGRESS_POLL_MS) {
+        pauses.push(ms);
+        return realSetTimeout(fn, 0);
+      }
+      return realSetTimeout(fn, ms);
+    }) as typeof setTimeout);
+    cleanupTasks.push(async () => {
+      vi.restoreAllMocks();
+    });
+    let looks = 0;
+    const push = mockDaemon.requestedPaths.push.bind(mockDaemon.requestedPaths);
+    mockDaemon.requestedPaths.push = (...paths: string[]) => {
+      for (const p of paths) {
+        if (p === `/v1.45/containers/${id}/json` && ++looks > (goneAfter ?? Infinity)) {
+          mockDaemon.containers.delete(id);
+        }
+      }
+      return push(...paths);
+    };
+    return { pauses, looks: () => looks };
+  }
+
+  it("stopAndRemoveContainer waits after HTTP 409 until the concurrent removal is done", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("f3", {
+      id: "f3",
+      name: "hp_files_svc_a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_files" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    mockDaemon.deleteConflicts.remaining = 1;
+    mockDaemon.deleteConflicts.removeFromMap = false;
+    const probe = removalInProgress(mockDaemon, "f3", 2);
+
+    await expect(adapter.purgeSite("A")).resolves.toBeUndefined();
+    expect(probe.looks()).toBe(3);
+    expect(probe.pauses).toHaveLength(2);
+    expect(mockDaemon.containers.size).toBe(0);
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+  });
+
   it("stopAndRemoveContainer still fails when HTTP 409 is followed by 200 inspect", async () => {
     const { adapter, mockDaemon } = await setup();
+    const probe = removalInProgress(mockDaemon, "f2", null);
     mockDaemon.containers.set("f2", {
       id: "f2",
       name: "hp_files_svc_a",
@@ -1263,6 +1320,8 @@ describe("purge site", () => {
     await expect(adapter.purgeSite("A")).rejects.toMatchObject({
       code: "DOCKER_ENGINE_UNAVAILABLE",
     });
+    expect(probe.pauses).toHaveLength(REMOVAL_IN_PROGRESS_WAIT_MS / REMOVAL_IN_PROGRESS_POLL_MS);
+    expect(probe.looks()).toBe(REMOVAL_IN_PROGRESS_WAIT_MS / REMOVAL_IN_PROGRESS_POLL_MS + 1);
     expect(mockDaemon.deletedVolumes).toEqual([]);
   });
 

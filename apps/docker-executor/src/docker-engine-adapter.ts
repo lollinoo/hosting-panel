@@ -864,6 +864,10 @@ interface DockerHttpResponse {
 }
 
 const PULL_TIMEOUT_MS = 240_000;
+/** Longest wait for a concurrent removal of the same container to finish. */
+export const REMOVAL_IN_PROGRESS_WAIT_MS = 5_000;
+/** Pause between checks while that removal finishes. */
+export const REMOVAL_IN_PROGRESS_POLL_MS = 100;
 
 class DockerSocketHttpClient {
   public readonly socketPath: string;
@@ -2856,10 +2860,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
     );
     if (rmRes.statusCode === 409) {
-      // A concurrent removal may finish first (e.g. site purge vs. files-helper idle sweep); treat gone as removed.
-      const remaining = await this.inspectContainerByNameOrId(containerId);
-      if (remaining === null) {
-        return;
+      // With force=true Docker answers 409 only while another removal of this container runs; wait for it.
+      for (let waited = 0; ; waited += REMOVAL_IN_PROGRESS_POLL_MS) {
+        if ((await this.inspectContainerByNameOrId(containerId)) === null) {
+          return;
+        }
+        if (waited >= REMOVAL_IN_PROGRESS_WAIT_MS) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, REMOVAL_IN_PROGRESS_POLL_MS));
       }
     }
     if (rmRes.statusCode !== 204 && rmRes.statusCode !== 404) {
