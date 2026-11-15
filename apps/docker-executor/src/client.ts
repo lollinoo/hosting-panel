@@ -1,6 +1,7 @@
 import http from "node:http";
 import {
   ApiErrorEnvelopeSchema,
+  BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
   CertificateStatusReportWireSchema,
   ExecutorHealthResponseSchema,
@@ -26,6 +27,8 @@ import {
 } from "@hosting-panel/contracts";
 import type {
   ApprovedServiceSpec,
+  BackupsRequest,
+  BackupsResult,
   DockerExecutionResult,
   DockerExecutorPort,
   CertificateStatusReport,
@@ -101,6 +104,8 @@ export const SFTP_APPLY_TIMEOUT_MS = 120_000;
 export const SFTP_STATUS_TIMEOUT_MS = 10_000;
 export const SITE_DATABASES_TIMEOUT_MS = 75_000;
 export const SITE_DATABASES_SIGNON_TIMEOUT_MS = 120_000;
+export const BACKUPS_TEST_TIMEOUT_MS = 40_000;
+export const BACKUPS_TIMEOUT_MS = 30_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -388,6 +393,14 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       SFTP_STATUS_TIMEOUT_MS,
     );
     return z.object({ data: SftpStatusReportWireSchema }).parse(json).data;
+  }
+
+  public async backups<R extends BackupsRequest>(req: R): Promise<BackupsResult<R["action"]>> {
+    const timeoutMs =
+      req.action === "test" ? BACKUPS_TEST_TIMEOUT_MS : BACKUPS_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
+    const schema = BACKUPS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as BackupsResult<R["action"]>;
   }
 
   public async getServiceLogs(

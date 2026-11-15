@@ -13,6 +13,7 @@ import {
   DEFAULT_SECRETS_ROOT_DIR,
   DockerEngineSocketAdapter,
 } from "./docker-engine-adapter.js";
+import { DEFAULT_BACKUP_KEY_FILE } from "./backup-runner.js";
 import { DEFAULT_PHPMYADMIN_CONFIG_DIR } from "./phpmyadmin-platform.js";
 import { DEFAULT_SITE_FILES_DIR, ensureSiteFilesProgram } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles } from "./site-mail.js";
@@ -249,6 +250,7 @@ export async function bootstrapDockerExecutorDaemon(
   const phpMyAdminConfigDir =
     env.HP_PHPMYADMIN_CONFIG_DIR?.trim() || DEFAULT_PHPMYADMIN_CONFIG_DIR;
   const phpMyAdminPort = parsePhpMyAdminPortFromEnv(env);
+  const backupKeyFile = env.HP_BACKUP_KEY_FILE?.trim() || DEFAULT_BACKUP_KEY_FILE;
 
   const dockerAdapter = useSimulator
     ? null
@@ -267,6 +269,7 @@ export async function bootstrapDockerExecutorDaemon(
         ...(sftpPort !== undefined ? { sftpPort } : {}),
         phpMyAdminConfigDir,
         phpMyAdminPort,
+        backupKeyFile,
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
           : {}),

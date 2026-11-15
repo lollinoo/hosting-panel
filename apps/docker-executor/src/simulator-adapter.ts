@@ -3,6 +3,8 @@ import path from "node:path";
 import {
   DEFAULT_SFTP_PORT,
   SftpAccessApplyIpcRequestSchema,
+  type BackupsIpcRequest,
+  type BackupsResultByAction,
   type CertProblem,
   type MailRelayApplyRequest,
 } from "@hosting-panel/contracts";
@@ -31,6 +33,7 @@ import type {
   StoredCertificate,
 } from "@hosting-panel/executor-contracts";
 import { SimulatedSiteDatabases } from "./simulator-databases.js";
+import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { assertValidSiteJobRequest } from "./site-jobs.js";
 import {
@@ -145,6 +148,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly siteServices = new Map<string, Set<string>>();
   public readonly files = new SimulatedSiteFiles();
   public readonly databases = new SimulatedSiteDatabases();
+  public readonly backupState = new SimulatedBackups();
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
@@ -357,6 +361,13 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   ): Promise<SiteDatabasesResult<R["op"]>> {
     this.assertEngineAvailable();
     return this.databases.handle(req);
+  }
+
+  public async backups<R extends BackupsIpcRequest>(
+    req: R,
+  ): Promise<BackupsResultByAction[R["action"]]> {
+    this.assertEngineAvailable();
+    return this.backupState.handle(req);
   }
 
   public async purgeSite(siteId: string): Promise<void> {

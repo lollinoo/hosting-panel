@@ -4,6 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
+  BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
   ERROR_CODE_HTTP_STATUS,
@@ -522,6 +523,12 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/sftp/status") {
         this.parseBody(EmptyObjectIpcRequestSchema, rawBody, "sftp status");
         writeJson(res, 200, { data: await this.executor.getSftpStatus() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/backups") {
+        const req = this.parseBody(BackupsIpcRequestSchema, rawBody, "backups");
+        writeJson(res, 200, { data: await this.executor.backups(req) });
         return;
       }
 

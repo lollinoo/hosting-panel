@@ -7,6 +7,7 @@ import {
   DEFAULT_PHP_VERSION,
   DEFAULT_SFTP_PORT,
   PHPMYADMIN_IMAGE,
+  RESTIC_IMAGE,
   SECRET_KEY_PATTERN,
   SFTP_IMAGE,
   SHARED_MARIADB_IMAGE,
@@ -17,6 +18,8 @@ import {
   MAIL_RELAY_ALIAS,
   MAIL_RELAY_CONTAINER_NAME,
   MAIL_RELAY_IMAGE,
+  type BackupsIpcRequest,
+  type BackupsResultByAction,
   type MailFailureDto,
   type MailRelayApplyRequest,
   type MailTestResult,
@@ -53,6 +56,11 @@ import {
 } from "./phpmyadmin-platform.js";
 import { SiteDatabasesRunner, mariadbRootExec } from "./site-databases.js";
 import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
+import {
+  BackupRunner,
+  DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_NETWORK_NAME,
+} from "./backup-runner.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
 import {
@@ -1037,6 +1045,9 @@ export interface DockerEngineSocketAdapterOptions {
   readonly phpMyAdminContainerName?: string;
   readonly phpMyAdminNetworkName?: string;
   readonly phpMyAdminConfigDir?: string;
+  readonly backupKeyFile?: string;
+  readonly backupNetworkName?: string;
+  readonly sharedDbNetworkName?: string;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1099,6 +1110,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly sftpNetworkName: string;
   private readonly sftpVolumePrefix: string;
   private sftpQueue: Promise<unknown> = Promise.resolve();
+  private readonly backupKeyFile: string;
+  private readonly backupNetworkName: string;
+  private readonly sharedDbNetworkName: string;
+  private readonly backupRunner: BackupRunner;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.dockerClient = new DockerSocketHttpClient({
@@ -1180,6 +1195,32 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     assertSafeIdentifier(this.sftpContainerName, "sftpContainerName");
     assertSafeIdentifier(this.sftpNetworkName, "sftpNetworkName");
     assertSafeIdentifier(this.sftpVolumePrefix, "sftpVolumePrefix");
+    this.backupKeyFile = path.resolve(options?.backupKeyFile ?? DEFAULT_BACKUP_KEY_FILE);
+    this.backupNetworkName = options?.backupNetworkName ?? DEFAULT_BACKUP_NETWORK_NAME;
+    this.sharedDbNetworkName = options?.sharedDbNetworkName ?? SHARED_DB_NETWORK_NAME;
+    assertSafeIdentifier(this.backupNetworkName, "backupNetworkName");
+    assertSafeIdentifier(this.sharedDbNetworkName, "sharedDbNetworkName");
+    this.backupRunner = new BackupRunner({
+      request: (method, endpointPath, body, opts) =>
+        this.dockerClient.request(method, endpointPath, body, opts),
+      ensureImage: (image) => this.ensureImageAvailable(image),
+      ensureBackupNetwork: () =>
+        this.ensureNetwork(this.backupNetworkName, {
+          internal: false,
+          labels: {
+            [MANAGED_DOCKER_LABELS.managed]: "true",
+            "io.hostingpanel.network_role": "backup",
+          },
+        }),
+      listSiteDatabases: async (siteId) =>
+        (await this.databases.run({ siteId, op: "list" })).databases,
+      secretsRootDir: this.secretsRootDir,
+      backupKeyFile: this.backupKeyFile,
+      sharedDbRootKeyFile: this.sharedDbRootKeyFile,
+      sharedDbNetworkName: this.sharedDbNetworkName,
+      backupNetworkName: this.backupNetworkName,
+      executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
+    });
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1992,6 +2033,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return this.databases.run(req);
   }
 
+  public backups<R extends BackupsIpcRequest>(
+    req: R,
+  ): Promise<BackupsResultByAction[R["action"]]> {
+    return this.backupRunner.run(req);
+  }
+
   public ensurePhpMyAdmin(opts?: { ifPresent?: boolean }): Promise<void> {
     const ifPresent = opts?.ifPresent === true;
     const inFlight = this.phpMyAdminEnsureInFlight;
@@ -2245,6 +2292,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       }
     }
     await this.siteFilesHelpers.removeAll();
+    await this.backupRunner.removeOrphans();
   }
 
   /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */
@@ -2315,6 +2363,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       MAIL_RELAY_IMAGE,
       SFTP_IMAGE,
       PHPMYADMIN_IMAGE,
+      RESTIC_IMAGE,
     ];
     for (const image of images) {
       await this.ensureImageAvailable(image).catch((err: unknown) => {

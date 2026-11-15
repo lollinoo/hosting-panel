@@ -124,6 +124,8 @@ export {
 } from "./server.js";
 
 export {
+  BACKUPS_TEST_TIMEOUT_MS,
+  BACKUPS_TIMEOUT_MS,
   ExecutorIpcClientError,
   SFTP_APPLY_TIMEOUT_MS,
   SFTP_STATUS_TIMEOUT_MS,
@@ -220,6 +222,64 @@ export {
 } from "./site-databases.js";
 
 export { SimulatedSiteDatabases } from "./simulator-databases.js";
+
+export { SimulatedBackups } from "./simulator-backups.js";
+
+export {
+  BackupRunner,
+  DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_NETWORK_NAME,
+  type BackupRunnerDeps,
+  type DockerRequest,
+} from "./backup-runner.js";
+
+export {
+  S3RequestError,
+  S3_PROBE_BUDGET_MS,
+  S3_PROBE_REQUEST_TIMEOUT_MS,
+  probeS3,
+  s3Request,
+  signV4,
+} from "./s3-probe.js";
+
+export {
+  BACKUP_DISK_FREE_FLOOR_BYTES,
+  BACKUP_DUMP_SCRIPT,
+  BACKUP_DUMP_TIMEOUT_MS,
+  BACKUP_FORGET_TIMEOUT_MS,
+  BACKUP_HOSTNAME,
+  BACKUP_JOB_MEMORY_BYTES,
+  BACKUP_MAX_RUNNING_JOBS,
+  BACKUP_REPO_JOB_SCRIPT,
+  BACKUP_REPO_STEP_TIMEOUT_MS,
+  BACKUP_REPO_TEST_SCRIPT,
+  BACKUP_RESTIC_CACHE_DIR,
+  BACKUP_RESTIC_USER,
+  BACKUP_STAGING_VOLUME_ROLE,
+  BACKUP_STATUS_MAX,
+  BACKUP_STATUS_TTL_MS,
+  BACKUP_TEST_BUDGET_MS,
+  BACKUP_TMPFS,
+  BACKUP_UPLOAD_TIMEOUT_MS,
+  buildAwsSharedCredentials,
+  buildBackupDumpContainerPayload,
+  buildBackupForgetContainerPayload,
+  buildBackupRepoContainerPayload,
+  buildBackupStagingVolumePayload,
+  buildBackupUploadContainerPayload,
+  buildPartialSnapshotDropContainerPayload,
+  buildResticRepositoryUrl,
+  classifyDumpExitCode,
+  classifyResticExitCode,
+  classifyResticStderr,
+  computeDumpNeedKb,
+  parseBackupKeyFileContent,
+  parseResticSummary,
+  type BackupContainerCreatePayload,
+  type BackupContainerSpec,
+  type BackupResticRepoKind,
+  type BackupSnapshotSummary,
+} from "./backup-jobs.js";
 
 export {
   DEFAULT_PHPMYADMIN_CONFIG_DIR,

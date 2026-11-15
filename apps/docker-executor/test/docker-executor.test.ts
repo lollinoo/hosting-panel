@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import {
+  RESTIC_IMAGE,
   generateEd25519IpcKeyPair,
   signIpcRequest,
   type IpcSigningKey,
@@ -17,6 +18,9 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type DockerContainerInspectPayload,
+  BACKUPS_TEST_TIMEOUT_MS,
+  BACKUPS_TIMEOUT_MS,
+  DEFAULT_BACKUP_KEY_FILE,
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
   siteMailBinds,
@@ -27,6 +31,7 @@ import {
   InMemoryDockerSimulatorAdapter,
   MANAGED_DOCKER_LABELS,
   SignedDockerExecutorIpcClient,
+  SimulatedBackups,
   bootstrapDockerExecutorDaemon,
   parsePanelIngressConfigFromEnv,
   buildIngressProxyContainerPayload,
@@ -1949,5 +1954,256 @@ describe("mail relay IPC", () => {
       }),
     );
     expect(simulator.deployedSpecs[0]?.siteMail).toBe(true);
+  });
+});
+
+describe("backups shared base and IPC", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const validJobId = `op_${"a".repeat(32)}`;
+  const validForgetJobId = `${validJobId}-forget`;
+  const validSnapshotId = "b".repeat(64);
+  const validTarget = {
+    endpoint: "https://s3.example.com:9000",
+    region: "us-east-1",
+    bucket: "panel-backups",
+    prefix: "prod",
+    accessKeyId: "AKIAEXAMPLE123",
+    secretAccessKey: "sentinel-s3-secret-value-999",
+  };
+
+  async function serve(executor: ConstructorParameters<typeof DockerExecutorIpcServer>[0]["executor"]) {
+    const server = new DockerExecutorIpcServer({
+      executor,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+    const raw = async (pathname: string, body: unknown) => {
+      const text = JSON.stringify(body);
+      const headers = signIpcRequest({
+        method: "POST",
+        pathWithQuery: pathname,
+        body: text,
+        key: HMAC_SIGNING_KEY,
+        nonce: randomBytes(8).toString("hex"),
+      });
+      const res = await fetch(`http://127.0.0.1:${String(bound.port)}${pathname}`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: text,
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    return { client, raw, port: bound.port };
+  }
+
+  it("POST /v1/backups never logs or echoes sentinel secrets when validation fails", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { raw } = await serve(simulator);
+    const sentinel = "sentinel-s3-secret-do-not-leak";
+
+    const captured: string[] = [];
+    const grab = (...args: unknown[]): boolean => {
+      captured.push(args.map(String).join(" "));
+      return true;
+    };
+    vi.spyOn(console, "log").mockImplementation(grab);
+    vi.spyOn(console, "error").mockImplementation(grab);
+    vi.spyOn(console, "warn").mockImplementation(grab);
+    vi.spyOn(process.stdout, "write").mockImplementation(grab);
+    vi.spyOn(process.stderr, "write").mockImplementation(grab);
+
+    const invalidCases = [
+      {
+        action: "test",
+        target: { ...validTarget, endpoint: "http://127.0.0.1:9000", secretAccessKey: sentinel },
+      },
+      {
+        action: "test",
+        target: { ...validTarget, region: "US-EAST-1", secretAccessKey: sentinel },
+      },
+      {
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: "bad job",
+        target: { ...validTarget, secretAccessKey: sentinel },
+        extraUnknownField: sentinel,
+      },
+    ];
+
+    for (const body of invalidCases) {
+      const res = await raw("/v1/backups", body);
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.text).error.code).toBe("VALIDATION_ERROR");
+      expect(res.text).not.toContain(sentinel);
+    }
+    expect(captured.join("\n")).not.toContain(sentinel);
+  });
+
+  it("SignedDockerExecutorIpcClient uses 40s for test, 30s for other actions, parses results, and never replays dropped POST", async () => {
+    expect(BACKUPS_TEST_TIMEOUT_MS).toBe(40_000);
+    expect(BACKUPS_TIMEOUT_MS).toBe(30_000);
+
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    vi.spyOn(simulator, "backups").mockImplementation(async (req) => {
+      if (req.action === "test") {
+        return { outcome: "ok", problem: null } as never;
+      }
+      if (req.action === "start") {
+        return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
+      }
+      if (req.action === "status") {
+        return { jobId: req.jobId, state: "succeeded", failure: null, snapshot: null } as never;
+      }
+      return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
+    });
+
+    const { client } = await serve(simulator);
+    await expect(client.backups({ action: "test", target: validTarget })).resolves.toEqual({
+      outcome: "ok",
+      problem: null,
+    });
+    await expect(
+      client.backups({
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: validJobId,
+        target: validTarget,
+      }),
+    ).resolves.toEqual({ jobId: validJobId, state: "running", failure: null, snapshot: null });
+    await expect(client.backups({ action: "status", jobId: validJobId })).resolves.toEqual({
+      jobId: validJobId,
+      state: "succeeded",
+      failure: null,
+      snapshot: null,
+    });
+    await expect(
+      client.backups({
+        action: "forget",
+        siteId: "site_1",
+        jobId: validForgetJobId,
+        snapshotIds: [validSnapshotId],
+        target: validTarget,
+      }),
+    ).resolves.toEqual({ jobId: validForgetJobId, state: "running", failure: null, snapshot: null });
+
+    // Verify per-action socket timeouts.
+    const timeouts: Array<number | undefined> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    await client.backups({ action: "test", target: validTarget }).catch(() => undefined);
+    await client
+      .backups({
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: validJobId,
+        target: validTarget,
+      })
+      .catch(() => undefined);
+    await client.backups({ action: "status", jobId: validJobId }).catch(() => undefined);
+    await client
+      .backups({
+        action: "forget",
+        siteId: "site_1",
+        jobId: validForgetJobId,
+        snapshotIds: [validSnapshotId],
+        target: validTarget,
+      })
+      .catch(() => undefined);
+    expect(timeouts).toEqual([40_000, 30_000, 30_000, 30_000]);
+
+    vi.restoreAllMocks();
+
+    // Verify POST /v1/backups is never replayed when the server drops the connection mid-flight.
+    let hits = 0;
+    const dropServer = http.createServer((_req, res) => {
+      hits += 1;
+      res.socket?.destroy();
+    });
+    await new Promise<void>((resolve) => dropServer.listen(0, "127.0.0.1", () => resolve()));
+    cleanupTasks.push(() => new Promise<void>((resolve) => dropServer.close(() => resolve())));
+    const addr = dropServer.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error("Expected TCP address");
+    }
+    const dropClient = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: addr.port,
+    });
+    const dropErr = await dropClient
+      .backups({
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: validJobId,
+        target: validTarget,
+      })
+      .catch((e: unknown) => e);
+    expect(dropErr).toBeInstanceOf(ExecutorIpcClientError);
+    expect((dropErr as ExecutorIpcClientError).code).toBe("OPERATION_AMBIGUOUS");
+    expect(hits).toBe(1);
+  });
+
+  it("wires default backup key file, simulator adapter state, unknown status, and RESTIC_IMAGE prewarm", async () => {
+    expect(DEFAULT_BACKUP_KEY_FILE).toBe("/etc/hosting-panel/backup.key");
+
+    const simAdapter = new InMemoryDockerSimulatorAdapter();
+    expect(simAdapter.backupState).toBeInstanceOf(SimulatedBackups);
+    await expect(
+      simAdapter.backups({ action: "status", jobId: validJobId }),
+    ).resolves.toEqual({
+      jobId: validJobId,
+      state: "unknown",
+      failure: null,
+      snapshot: null,
+    });
+    simAdapter.setEngineReachable(false);
+    await expect(
+      simAdapter.backups({ action: "status", jobId: validJobId }),
+    ).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-backup-adapter-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon({ pullBody: '{"status":"Pulling"}\n' });
+    cleanupTasks.push(() => daemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    await expect(
+      adapter.backups({ action: "status", jobId: validJobId }),
+    ).resolves.toEqual({
+      jobId: validJobId,
+      state: "unknown",
+      failure: null,
+      snapshot: null,
+    });
+    await adapter.cleanupOrphanJobs();
+    await adapter.prewarmSiteImages();
+    expect(
+      daemon.requestedPaths.some(
+        (p) => p.includes("/images/create") && p.includes(encodeURIComponent(RESTIC_IMAGE)),
+      ),
+    ).toBe(true);
   });
 });
