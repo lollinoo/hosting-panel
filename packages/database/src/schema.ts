@@ -746,3 +746,23 @@ export const siteBackups = pgTable(
   },
   (t) => [index("idx_site_backups_site_started").on(t.siteId, t.startedAt)],
 );
+
+export const siteWordpressState = pgTable(
+  "site_wordpress_state",
+  {
+    siteId: text("site_id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    state: jsonb("state").$type<unknown>(),
+    lastUpdate: jsonb("last_update").$type<unknown>(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_site_wordpress_state_site_org",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+  ],
+);

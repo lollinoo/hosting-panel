@@ -15,16 +15,21 @@ import {
   eq,
   failOutboxEvent,
   generateSecretsMasterKeyHex,
+  getSiteWordpressState,
   listEncryptedSecretsMetadata,
   listHostAgentHeartbeats,
   markExpiredOperationsUnknownTransactional,
   outboxEvents,
   recordObservedStateReconciliationTransactional,
   resolveDecryptedSecretRefs,
+  saveSiteWordpressLastUpdate,
+  saveSiteWordpressState,
   schemaMigrations,
   seedPhase1Dataset,
   sql,
   serviceInstances,
+  siteBackups,
+  sites,
   stackRevisions,
   transitionOperation,
   unlockOperationBreakGlassTransactional,
@@ -53,6 +58,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0009_backups.sql",
       "0010_backup_restore.sql",
       "0011_panel_backup.sql",
+      "0012_wordpress_tools.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -75,6 +81,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0009_backups.sql",
       "0010_backup_restore.sql",
       "0011_panel_backup.sql",
+      "0012_wordpress_tools.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -93,6 +100,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0009_backups.sql",
       "0010_backup_restore.sql",
       "0011_panel_backup.sql",
+      "0012_wordpress_tools.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
@@ -112,6 +120,31 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'backup_settings'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%last_panel_backup_status%'`,
     );
     expect(String((check.rows[0] as { def: string }).def)).toMatch(/succeeded.*failed/);
+  });
+
+  it("1c. 0012 accepts pre_update copies and keeps one WordPress state row per site", async () => {
+    const db = client.db;
+    await db.insert(siteBackups).values({ id: "bk_0012_pre", siteId: DEMO_IDS.sites.acmeShop, kind: "pre_update", status: "running" });
+    await expect(
+      db.execute(sql`INSERT INTO site_backups (id, site_id, kind, status) VALUES ('bk_0012_bad', 'x', 'other', 'running')`),
+    ).rejects.toThrow();
+
+    const acme = { organizationId: DEMO_IDS.organizations.acme, siteId: "site_0012_wp" };
+    await db.insert(sites).values({ id: acme.siteId, organizationId: acme.organizationId, hostAllocationId: DEMO_IDS.allocations.acme, name: "WP", slug: "wp-0012" });
+    expect(await getSiteWordpressState(db, acme)).toBeNull();
+
+    await saveSiteWordpressState(db, { ...acme, state: { v: 1 } });
+    await saveSiteWordpressState(db, { ...acme, state: { v: 2 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: null });
+    await saveSiteWordpressLastUpdate(db, { ...acme, lastUpdate: { u: 1 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: { u: 1 } });
+    await saveSiteWordpressState(db, { ...acme, state: { v: 3 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 3 }, lastUpdate: { u: 1 } });
+
+    expect(await getSiteWordpressState(db, { ...acme, organizationId: DEMO_IDS.organizations.beta })).toBeNull();
+
+    await db.delete(sites).where(eq(sites.id, acme.siteId));
+    expect((await db.execute(sql`SELECT count(*)::int AS n FROM site_wordpress_state`)).rows[0]).toEqual({ n: 0 });
   });
 
   it("2. encrypts and decrypts secrets with AES-256-GCM + tenant/site/key AAD binding (AC-F2-05)", () => {
