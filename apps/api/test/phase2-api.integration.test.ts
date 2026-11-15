@@ -81,6 +81,53 @@ async function listTypeScriptFiles(dirPath: string): Promise<string[]> {
   return collected;
 }
 
+const PANEL_DUMP_FILE = "backups/panel-dump.ts";
+
+// Violations of AC-F2-01 / R118 in one apps/api/src file; only panel-dump.ts may run pg_dump.
+function apiSourceViolations(relPath: string, content: string): string[] {
+  const v: string[] = [];
+  if (content.includes("/var/run/docker.sock")) v.push("docker.sock");
+  if (content.includes("sh -c")) v.push("sh -c");
+  if (relPath !== PANEL_DUMP_FILE) {
+    if (content.includes("child_process")) v.push("child_process");
+    return v;
+  }
+  if (content.split("child_process").length !== 2 || !content.includes('import { execFile } from "node:child_process";')) {
+    v.push("child_process import other than execFile");
+  }
+  for (const bad of ["exec(", "execSync", "execFileSync", "spawn", "fork(", "shell: true"]) {
+    if (content.includes(bad)) v.push(bad);
+  }
+  if (!content.includes("shell: false")) v.push("no shell: false");
+  if (content.replace('import { execFile } from "node:child_process";', "").replace("promisify(execFile)", "").includes("execFile")) {
+    v.push("execFile used outside the runner");
+  }
+  const programs = [...content.matchAll(/\brun\(\s*([^,)]*)/g)].map((m) => m[1]);
+  if (programs.length === 0 || programs.some((p) => p !== "PG_DUMP_PATH")) v.push("program is not PG_DUMP_PATH");
+  if (!content.includes('export const PG_DUMP_PATH = "/usr/lib/postgresql/18/bin/pg_dump";')) v.push("PG_DUMP_PATH changed");
+  return v;
+}
+
+describe("AC-F2-01 guard (R118) fails on forbidden process use", () => {
+  it("accepts the real panel-dump.ts and rejects each forged content", async () => {
+    const real = await readFile(path.join(API_SRC_DIR, PANEL_DUMP_FILE), "utf8");
+    expect(apiSourceViolations(PANEL_DUMP_FILE, real)).toEqual([]);
+    const cases: [string, string][] = [
+      ["other.ts", 'import { spawn } from "node:child_process";'],
+      ["other.ts", 'const cp = require("child_process");'],
+      ["other.ts", 'const cp = await import("node:child_process");'],
+      [PANEL_DUMP_FILE, `${real}\nspawn(PG_DUMP_PATH, []);`],
+      [PANEL_DUMP_FILE, `${real}\nexec("pg_dump");`],
+      [PANEL_DUMP_FILE, real.replace("shell: false", "shell: true")],
+      [PANEL_DUMP_FILE, `import { spawn } from "node:child_process";\n${real}`],
+      [PANEL_DUMP_FILE, real.replace("run(PG_DUMP_PATH", "run(cmd.file")],
+      [PANEL_DUMP_FILE, `${real}\nexecFile("/bin/sh", ["-c", "id"]);`],
+      [PANEL_DUMP_FILE, `${real}\n// sh -c`],
+    ];
+    for (const [rel, content] of cases) expect(apiSourceViolations(rel, content), content.slice(-60)).not.toEqual([]);
+  });
+});
+
 describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets & Reconciler Suite (HCP-SPEC-003)", () => {
   let tmpDir: string;
   let secretsRootDir: string;
@@ -262,15 +309,13 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     }
   });
 
-  it("1. AC-F2-01 & OpenAPI alignment: apps/api has zero docker.sock or child_process usage and OpenAPI documents Phase 2 routes", async () => {
+  it("1. AC-F2-01 & OpenAPI alignment: apps/api has zero docker.sock usage, runs no program but pg_dump from panel-dump.ts, and OpenAPI documents Phase 2 routes", async () => {
     const srcFiles = await listTypeScriptFiles(API_SRC_DIR);
     expect(srcFiles.length).toBeGreaterThan(5);
 
     for (const filePath of srcFiles) {
-      const content = await readFile(filePath, "utf8");
-      expect(content).not.toContain("/var/run/docker.sock");
-      expect(content).not.toMatch(/from\s+["'](?:node:)?child_process["']/);
-      expect(content).not.toContain("sh -c");
+      const rel = path.relative(API_SRC_DIR, filePath).split(path.sep).join("/");
+      expect(apiSourceViolations(rel, await readFile(filePath, "utf8")), rel).toEqual([]);
     }
 
     const openApiRaw = await readFile(OPENAPI_YAML_PATH, "utf8");

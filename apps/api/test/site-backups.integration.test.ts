@@ -49,6 +49,7 @@ import { totpCodeAt } from "../src/auth/totp.js";
 import { BackupSettingsService } from "../src/backups/backup-settings.service.js";
 import {
   BACKUP_LEASE_MS,
+  BACKUP_POLL_DEADLINE_MS,
   BACKUP_POLL_GIVE_UP_MS,
   BACKUP_POLL_MS,
   SITE_BACKUPS_INTERRUPTED,
@@ -232,6 +233,8 @@ export function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): Backu
       case "readArchive":
       case "discardArchive":
       case "settle":
+      case "panelStart":
+      case "siteState":
         throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];
@@ -519,6 +522,7 @@ describe("site backups API and outbox execution", () => {
     applier.leaseMs = BACKUP_LEASE_MS;
     applier.pollMs = BACKUP_POLL_MS;
     applier.pollGiveUpMs = BACKUP_POLL_GIVE_UP_MS;
+    applier.pollDeadlineMs = BACKUP_POLL_DEADLINE_MS;
 
     await dbClient.db.delete(siteBackups);
     await dbClient.db.delete(outboxEvents);
@@ -553,6 +557,7 @@ describe("site backups API and outbox execution", () => {
       "site.backups.prune",
       "site.backups.restore",
       "site.backups.download",
+      "panel.backups.create",
     ]);
 
     const [siteRow] = await dbClient.db.select().from(sites).where(eq(sites.id, siteA1Id)).limit(1);
@@ -1138,6 +1143,123 @@ describe("site backups API and outbox execution", () => {
 
     const [siteFinal] = await dbClient.db.select().from(sites).where(eq(sites.id, siteA1Id));
     expect(siteFinal?.status).toBe("ready");
+  });
+
+  it("R120: a backup the executor keeps running past the poll deadline ends the poll as ambiguous, recording nothing", async () => {
+    applier.pollMs = 0;
+    applier.pollDeadlineMs = 1;
+    executorScript.setStatusSequence("*", [{ jobId: "held", state: "running", failure: null, snapshot: null }]);
+    const res = await httpRequest(app.baseUrl!, "POST", backupsUrl(orgAId, siteA1Id), {
+      token: ownerAToken,
+      headers: { "Idempotency-Key": randomUUID() },
+    });
+    expect(res.status).toBe(202);
+    await app.outboxWorker.processPendingOnce();
+
+    const [op] = await dbClient.db.select().from(operations).where(eq(operations.kind, "site.backups.create"));
+    expect(op?.status).toBe("unknown");
+    const [row] = await dbClient.db.select().from(siteBackups).where(eq(siteBackups.operationId, op!.id));
+    expect(row).toMatchObject({ status: "running", problem: null });
+    expect((await newAudits()).filter((a) => a.action.startsWith("operation.recovered"))).toEqual([]);
+  });
+
+  it("R120: recovery fails create and download still running past the deadline with timeout once; younger ones and a restore stay pending", async () => {
+    const old = new Date(Date.now() - BACKUP_POLL_DEADLINE_MS - 60_000);
+    const running: BackupJobStatus = { jobId: "x", state: "running", failure: null, snapshot: null };
+    const scripted = sim.backups;
+    vi.spyOn(sim, "backups").mockImplementation((async (req: BackupsIpcRequest) =>
+      req.action === "settle" ? { ...running, jobId: req.jobId } : scripted(req)) as typeof sim.backups);
+    const recoverSpy = vi.spyOn(applier, "recover");
+
+    const unknownOp = async (
+      kind: "site.backups.create" | "site.backups.download" | "site.backups.restore",
+      startedAt: Date,
+    ): Promise<{ opId: string; backupId: string }> => {
+      const steps = { "site.backups.create": SITE_BACKUP_STEPS, "site.backups.download": SITE_ARCHIVE_STEPS, "site.backups.restore": SITE_RESTORE_STEPS }[kind];
+      const { operation } = await enqueueOperationTransactional(dbClient.db, {
+        organizationId: orgAId,
+        kind,
+        resourceType: "site",
+        resourceId: siteA1Id,
+        requestedByUserId: ownerAUserId,
+        lockKey: `r120:${randomUUID()}`,
+        leaseDurationMs: BACKUP_LEASE_MS,
+        steps,
+        outboxPayload: { siteId: siteA1Id },
+      });
+      const { id: backupId } = await insertSiteBackup(dbClient.db, {
+        siteId: siteA1Id,
+        kind: "manual",
+        status: "running",
+        operationId: kind === "site.backups.create" ? operation.id : null,
+      });
+      if (kind !== "site.backups.create") {
+        await dbClient.db
+          .update(siteBackups)
+          .set({
+            status: "succeeded",
+            snapshotId: SNAP_HEX_OK,
+            ...(kind === "site.backups.download"
+              ? { archiveOperationId: operation.id, archiveStatus: "preparing" as const }
+              : { restoreOperationId: operation.id, restoreStatus: "running" as const }),
+          })
+          .where(eq(siteBackups.id, backupId));
+      }
+      await dbClient.db
+        .update(operations)
+        .set({ status: "unknown", startedAt, submittedAt: startedAt })
+        .where(eq(operations.id, operation.id));
+      await dbClient.db
+        .update(operationSteps)
+        .set({ status: "running" })
+        .where(and(eq(operationSteps.operationId, operation.id), eq(operationSteps.key, steps[0].key)));
+      executorScript.setStatusSequence(operation.id, [{ ...running, jobId: operation.id }]);
+      return { opId: operation.id, backupId };
+    };
+    const opOf = async (id: string) => (await dbClient.db.select().from(operations).where(eq(operations.id, id)))[0]!;
+    const rowOf = async (id: string) => (await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, id)))[0]!;
+    const recoveredAudits = async (id: string) =>
+      (await newAudits()).filter((a) => a.action.startsWith("operation.recovered") && a.targetId === id);
+
+    const create = await unknownOp("site.backups.create", old);
+    const download = await unknownOp("site.backups.download", old);
+    const restore = await unknownOp("site.backups.restore", old);
+    const young = await unknownOp("site.backups.create", new Date());
+    const youngDownload = await unknownOp("site.backups.download", new Date());
+
+    const first = await app.outboxWorker.recoverUnknownOperations();
+    await app.outboxWorker.recoverUnknownOperations();
+    expect(first.convergedFailed).toBe(2);
+
+    const outcomes = await Promise.all(recoverSpy.mock.results.map((r) => r.value as Promise<string>));
+    const byOp = new Map(recoverSpy.mock.calls.map((c, i) => [c[0].id, outcomes[i]]));
+    expect(byOp.get(create.opId)).toBe("settled");
+    expect(byOp.get(download.opId)).toBe("settled");
+    expect(byOp.get(restore.opId)).toBe("pending");
+    expect(byOp.get(young.opId)).toBe("pending");
+
+    expect(await opOf(create.opId)).toMatchObject({ status: "failed" });
+    expect(await rowOf(create.backupId)).toMatchObject({ status: "failed", problem: "timeout" });
+    expect(await opOf(download.opId)).toMatchObject({ status: "failed" });
+    expect(await rowOf(download.backupId)).toMatchObject({ archiveStatus: "failed", archiveProblem: "timeout" });
+    for (const id of [create.opId, download.opId]) {
+      expect((await recoveredAudits(id)).map((a) => a.action)).toEqual(["operation.recovered.failed"]);
+    }
+
+    // R120 (c): a restore is never declared done or failed without the executor's word.
+    expect((await opOf(restore.opId)).status).toBe("unknown");
+    expect((await rowOf(restore.backupId)).restoreStatus).toBe("running");
+    expect(await recoveredAudits(restore.opId)).toEqual([]);
+    expect((await newAudits()).filter((a) => a.action.endsWith("restore.finished"))).toEqual([]);
+
+    for (const y of [young, youngDownload]) {
+      expect((await opOf(y.opId)).status).toBe("unknown");
+      expect(await recoveredAudits(y.opId)).toEqual([]);
+    }
+    expect((await rowOf(young.backupId)).status).toBe("running");
+    expect((await rowOf(youngDownload.backupId)).archiveStatus).toBe("preparing");
+    // Nothing but status questions reached the scripted executor (settle is answered by the spy).
+    expect(executorScript.calls.every((c) => c.action === "status")).toBe(true);
   });
 
   it("T13 & prune: ignores forget failures (keeps rows and succeeds op) and runs site.backups.prune for deleted sites", async () => {

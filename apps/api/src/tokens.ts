@@ -21,4 +21,6 @@ export interface ControlPlaneRuntimeConfig {
   readonly mailRelayRetryIntervalMs?: number | null;
   readonly sftpRetryIntervalMs?: number | null;
   readonly backupScheduleIntervalMs?: number | null;
+  // Holds the database password: never logged, never in a DTO.
+  readonly panelDump?: { readonly dir: string; readonly databaseUrl: string } | null;
 }

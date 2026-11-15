@@ -10,8 +10,10 @@ import {
   asc,
   eq,
   getBackupTarget,
+  listSiteDatabases,
   operationSteps,
   renewOperationLease,
+  resolveDecryptedSecretRefs,
   settleSiteArchive,
   settleSiteRestore,
   siteBackups,
@@ -21,6 +23,7 @@ import {
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import { buildApprovedServiceSpec, recordDeployedState } from "../runtime/service-spec.js";
 import { SITE_STEP_LEASE_MS } from "../runtime/site-provisioner.js";
 import { resolveSiteFilesServiceId } from "../sites/site-files.service.js";
 import type { ControlPlaneRuntimeConfig } from "../tokens.js";
@@ -40,6 +43,15 @@ export const SITE_RESTORE_STEPS = [
   { key: "update_address", label: "Update the site address" },
 ] as const satisfies readonly { key: string; label: string }[];
 
+/** Ordered steps of an administrator's restore, which also works where nothing of the site exists. */
+export const ADMIN_SITE_RESTORE_STEPS = [
+  { key: "provision_database", label: "Create the site database" },
+  { key: "restore", label: "Put the backup back" },
+  { key: "start_site", label: "Start the site" },
+  { key: "update_address", label: "Update the site address" },
+  { key: "sftp", label: "Turn file access back on" },
+] as const satisfies readonly { key: string; label: string }[];
+
 /** Ordered step definitions for backup archive download preparation operations. */
 export const SITE_ARCHIVE_STEPS = [
   { key: "prepare", label: "Prepare the download" },
@@ -53,6 +65,18 @@ const ADDRESS_RUNNING_MSG = "Updating site address";
 const ADDRESS_DONE_MSG = "Site address updated";
 const ADDRESS_SKIPPED_MSG = "Site has no address; skipped";
 const ADDRESS_FAILED_MSG = "Could not update the site address";
+const DB_RUNNING_MSG = "Creating the site database";
+const DB_DONE_MSG = "Site database created";
+const DB_FAILED_MSG = "Could not create the site database";
+const START_RUNNING_MSG = "Starting the site";
+const START_DONE_MSG = "Site started";
+const START_SKIPPED_MSG = "The site is already running; skipped";
+const START_FAILED_MSG = "The files are back but the site did not start. Redeploy the site.";
+const SFTP_RUNNING_MSG = "Turning file access back on";
+const SFTP_DONE_MSG = "File access is on";
+const SFTP_SKIPPED_MSG = "File access is not available; skipped";
+const SFTP_FAILED_MSG = "Could not turn file access back on";
+const NOT_FINISHED_MSG = "Skipped because restore did not finish";
 const ARCHIVE_RUNNING_MSG = "Preparing download archive";
 const ARCHIVE_DONE_MSG = "Download archive is ready";
 const ARCHIVE_FAILED_MSG = "Download preparation did not finish.";
@@ -99,7 +123,10 @@ export class SiteRestoreApplier {
   /** Executes a queued site restore operation, runs E7 address reconciliation, and settles state/audit. */
   public async applyRestore(op: BackupOperationRef): Promise<void> {
     const db = this.dbClient.db;
-    await this.parent.safeUpdateStep(op.id, "restore", "running", RESTORE_RUNNING_MSG);
+    const admin = await this.#isAdminRun(op.id);
+    if (!admin) {
+      await this.parent.safeUpdateStep(op.id, "restore", "running", RESTORE_RUNNING_MSG);
+    }
     await renewOperationLease(db, op.id, this.parent.leaseMs);
 
     let restored = false;
@@ -145,6 +172,13 @@ export class SiteRestoreApplier {
         throw new BackupSettledFailure(err);
       }
 
+      let createVolume = false;
+      if (admin) {
+        createVolume = await this.#runProvisionStep(op, site, serviceInstanceId);
+        await this.parent.safeUpdateStep(op.id, "restore", "running", RESTORE_RUNNING_MSG);
+        await renewOperationLease(db, op.id, this.parent.leaseMs);
+      }
+
       const startRes = await this.dockerExecutor.backups({
         action: "restore",
         jobId: op.id,
@@ -152,6 +186,7 @@ export class SiteRestoreApplier {
         serviceInstanceId,
         target,
         snapshotId: row.snapshotId,
+        ...(createVolume ? { createVolume: true as const } : {}),
       });
 
       const statusRes = await this.parent.pollJobStatus(op.id, op.id, startRes);
@@ -289,6 +324,17 @@ export class SiteRestoreApplier {
       .orderBy(asc(operationSteps.id));
 
     const restoreStep = steps.find((step) => step.key === "restore");
+    if (restoreStep?.status === "pending") {
+      // Stopped before the restore began: nothing was put back, so fail without asking the executor.
+      await this.#settleRestoreRowAndAudit(op, "failed", "interrupted");
+      await this.#failRestoreStepsAndOp(
+        op.id,
+        RESTORE_INTERRUPTED_MSG,
+        "OPERATION_INTERRUPTED",
+        RESTORE_INTERRUPTED_MSG,
+      );
+      return "settled";
+    }
     if (restoreStep?.status === "succeeded") {
       // Restore already completed before crash; only run the idempotent E7 tail and settle.
       await this.#finishRestore(
@@ -324,7 +370,10 @@ export class SiteRestoreApplier {
     }
 
     if (statusRes.state === "running") {
-      return "pending";
+      if (!(await this.parent.isPastPollDeadline(op.id))) {
+        return "pending";
+      }
+      statusRes = { ...statusRes, state: "failed", failure: "timeout" };
     }
 
     await this.#finishDownload(op, statusRes, { throwOnFailure: false });
@@ -339,7 +388,24 @@ export class SiteRestoreApplier {
   ): Promise<void> {
     if (statusRes.state === "succeeded") {
       await this.parent.safeUpdateStep(op.id, "restore", "succeeded", RESTORE_DONE_MSG);
+      const admin = await this.#isAdminRun(op.id);
+      if (admin) {
+        const startFailure = await this.#runStartSite(op, ctx);
+        if (startFailure) {
+          await this.parent.safeUpdateStep(op.id, "update_address", "skipped", START_FAILED_MSG);
+          await this.parent.safeUpdateStep(op.id, "sftp", "skipped", START_FAILED_MSG);
+          await this.#settleRestoreRowAndAudit(op, "succeeded", "site_not_started");
+          await this.parent.failOperation(op.id, startFailure.code, START_FAILED_MSG);
+          if (opts.throwOnFailure) {
+            throw new BackupSettledFailure(startFailure);
+          }
+          return;
+        }
+      }
       const problem = await this.#runAddressStep(op, ctx);
+      if (admin) {
+        await this.#runSftpStep(op);
+      }
       await this.#settleRestoreRowAndAudit(op, "succeeded", problem);
       await this.parent.succeedOperation(op.id);
       return;
@@ -529,11 +595,12 @@ export class SiteRestoreApplier {
       }
 
       await settleSiteRestore(tx, op.id, { status: outcome, problem });
+      const admin = await this.#isAdminRun(op.id, tx as unknown as HostingPanelDatabase);
       await appendAuditEvent(tx as unknown as HostingPanelDatabase, {
         actorId: null,
         actorType: "system",
         organizationId: op.organizationId,
-        action: "site.backups.restore.finished",
+        action: admin ? "admin.site.backups.restore.finished" : "site.backups.restore.finished",
         targetType: "site",
         targetId: op.resourceId,
         details: {
@@ -552,14 +619,156 @@ export class SiteRestoreApplier {
     errorCode: ErrorCode,
     errorMessage: string,
   ): Promise<void> {
-    await this.parent.safeUpdateStep(operationId, "restore", "failed", stepMessage);
-    await this.parent.safeUpdateStep(
-      operationId,
-      "update_address",
-      "skipped",
-      "Skipped because restore did not finish",
-    );
+    const open = await this.dbClient.db
+      .select({ key: operationSteps.key, status: operationSteps.status })
+      .from(operationSteps)
+      .where(eq(operationSteps.operationId, operationId))
+      .orderBy(asc(operationSteps.id));
+    for (const step of open) {
+      if (isTerminalStepStatus(step.status)) continue;
+      // The restore and any step cut off while running fail; steps never begun are skipped.
+      const failed = step.key === "restore" || step.status === "running";
+      await this.parent.safeUpdateStep(
+        operationId,
+        step.key,
+        failed ? "failed" : "skipped",
+        failed ? stepMessage : NOT_FINISHED_MSG,
+      );
+    }
     await this.parent.failOperation(operationId, errorCode, errorMessage);
+  }
+
+  /** An administrator's run is the one queued with a provision_database step. */
+  async #isAdminRun(operationId: string, db: HostingPanelDatabase = this.dbClient.db): Promise<boolean> {
+    const [step] = await db
+      .select({ id: operationSteps.id })
+      .from(operationSteps)
+      .where(and(eq(operationSteps.operationId, operationId), eq(operationSteps.key, "provision_database")))
+      .limit(1);
+    return step !== undefined;
+  }
+
+  /** R119: asks what exists and always ensures the site database and user; returns createVolume. A known failure settles restore_prepare_failed. */
+  async #runProvisionStep(
+    op: BackupOperationRef,
+    site: RestoreSiteRef,
+    serviceInstanceId: string,
+  ): Promise<boolean> {
+    const db = this.dbClient.db;
+    await this.parent.safeUpdateStep(op.id, "provision_database", "running", DB_RUNNING_MSG);
+    await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+    let createVolume: boolean;
+    try {
+      const state = await this.dockerExecutor.backups({
+        action: "siteState",
+        siteId: site.id,
+        serviceInstanceId,
+      });
+      createVolume = !state.filesVolume;
+      const [siteDb] = await listSiteDatabases(db, {
+        organizationId: site.organizationId,
+        siteId: site.id,
+      });
+      if (!siteDb) {
+        throw new ControlPlaneError("NOT_FOUND", DB_FAILED_MSG);
+      }
+      const res = await this.dockerExecutor.runSiteJob({
+        jobId: `job_${op.id.replace(/^op_/, "")}_rdb`,
+        kind: "db.provision",
+        siteId: site.id,
+        organizationId: site.organizationId,
+        params: { dbName: siteDb.dbName, dbUser: siteDb.dbUser },
+        resolvedSecrets: await resolveDecryptedSecretRefs(db, {
+          organizationId: site.organizationId,
+          siteId: site.id,
+          secretRefs: { HP_DB_PASSWORD: "SITE_DB_PASSWORD" },
+          masterKey: this.config.secretsMasterKey,
+        }),
+      });
+      if (res.exitCode !== 0) {
+        throw new ControlPlaneError("INTERNAL_ERROR", DB_FAILED_MSG);
+      }
+    } catch (err) {
+      if (isAmbiguousError(err)) throw err;
+      const code = extractKnownErrorCode(err) ?? "INTERNAL_ERROR";
+      await this.parent.safeUpdateStep(op.id, "provision_database", "failed", DB_FAILED_MSG);
+      await this.parent.safeUpdateStep(op.id, "restore", "skipped", NOT_FINISHED_MSG);
+      await this.#settleRestoreRowAndAudit(op, "failed", "restore_prepare_failed");
+      await this.#failRestoreStepsAndOp(op.id, DB_FAILED_MSG, code, DB_FAILED_MSG);
+      throw new BackupSettledFailure(new ControlPlaneError(code, DB_FAILED_MSG));
+    }
+    await this.parent.safeUpdateStep(op.id, "provision_database", "succeeded", DB_DONE_MSG);
+    return createVolume;
+  }
+
+  /** CP-01: asks again right before deploying and deploys only when nothing runs; never installs or restarts. */
+  async #runStartSite(
+    op: BackupOperationRef,
+    ctx: RestoreContext | undefined,
+  ): Promise<ControlPlaneError | null> {
+    const db = this.dbClient.db;
+    const [existing] = await db
+      .select({ status: operationSteps.status })
+      .from(operationSteps)
+      .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "start_site")))
+      .limit(1);
+    if (existing && isTerminalStepStatus(existing.status)) {
+      return existing.status === "failed"
+        ? new ControlPlaneError("INTERNAL_ERROR", START_FAILED_MSG)
+        : null;
+    }
+
+    await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+    await this.parent.safeUpdateStep(op.id, "start_site", "running", START_RUNNING_MSG);
+    try {
+      const site = ctx?.site ?? (await this.#findRestoreSite(op.resourceId));
+      if (!site) {
+        throw new ControlPlaneError("NOT_FOUND", "Site not found for restore");
+      }
+      const serviceInstanceId =
+        ctx?.serviceInstanceId ??
+        (await resolveSiteFilesServiceId(db, this.dockerExecutor, this.config, site));
+      const state = await this.dockerExecutor.backups({
+        action: "siteState",
+        siteId: site.id,
+        serviceInstanceId,
+      });
+      if (state.container) {
+        await this.parent.safeUpdateStep(op.id, "start_site", "skipped", START_SKIPPED_MSG);
+        return null;
+      }
+      const spec = await buildApprovedServiceSpec(db, this.config, {
+        organizationId: site.organizationId,
+        serviceInstanceId,
+      });
+      await recordDeployedState(db, this.dockerExecutor, spec, await this.dockerExecutor.deployService(spec));
+      await db.update(sites).set({ status: "ready", updatedAt: new Date() }).where(eq(sites.id, site.id));
+    } catch (err) {
+      // R104: an unknown outcome is left to recovery, which asks again before any deploy.
+      if (isAmbiguousError(err)) throw err;
+      await this.parent.safeUpdateStep(op.id, "start_site", "failed", START_FAILED_MSG);
+      await db.update(sites).set({ status: "degraded", updatedAt: new Date() }).where(eq(sites.id, op.resourceId));
+      return new ControlPlaneError(extractKnownErrorCode(err) ?? "INTERNAL_ERROR", START_FAILED_MSG);
+    }
+    await this.parent.safeUpdateStep(op.id, "start_site", "succeeded", START_DONE_MSG);
+    return null;
+  }
+
+  /** Re-applies file access after a restore; a failure is noted on the step only. */
+  async #runSftpStep(op: BackupOperationRef): Promise<void> {
+    const sftp = this.parent.sftp;
+    if (!sftp) {
+      await this.parent.safeUpdateStep(op.id, "sftp", "skipped", SFTP_SKIPPED_MSG);
+      return;
+    }
+    await this.parent.safeUpdateStep(op.id, "sftp", "running", SFTP_RUNNING_MSG);
+    try {
+      await sftp.ensureApplied(true);
+    } catch {
+      await this.parent.safeUpdateStep(op.id, "sftp", "failed", SFTP_FAILED_MSG);
+      return;
+    }
+    await this.parent.safeUpdateStep(op.id, "sftp", "succeeded", SFTP_DONE_MSG);
   }
 
   /** Aborts without touching any superseded/missing row if restore_status is no longer running. */

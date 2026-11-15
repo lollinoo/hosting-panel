@@ -81,6 +81,7 @@ export const BACKUP_OPERATION_KINDS = [
   "site.backups.prune",
   "site.backups.restore",
   "site.backups.download",
+  "panel.backups.create",
 ] as const satisfies readonly OperationKind[];
 
 interface OutboxLaneState {

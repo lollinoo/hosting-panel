@@ -2,6 +2,7 @@ import "reflect-metadata";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { isAbsolute } from "node:path";
 import { NestFactory } from "@nestjs/core";
 import {
   FastifyAdapter,
@@ -35,6 +36,7 @@ import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
+import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -222,6 +224,7 @@ export interface CreateControlPlaneAppOptions {
   readonly mailRelayRetryIntervalMs?: number | null;
   readonly sftpRetryIntervalMs?: number | null;
   readonly backupScheduleIntervalMs?: number | null;
+  readonly panelDump?: ControlPlaneRuntimeConfig["panelDump"];
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
@@ -403,6 +406,14 @@ export async function createControlPlaneApp(
             : 5_000)
         : null;
 
+  const panelDumpDir = process.env["HP_PANEL_DUMP_DIR"]?.trim();
+  const panelDump =
+    options?.panelDump !== undefined
+      ? options.panelDump
+      : panelDumpDir && isAbsolute(panelDumpDir) && databaseUrl?.trim()
+        ? { dir: panelDumpDir, databaseUrl: databaseUrl.trim() }
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
@@ -418,6 +429,7 @@ export async function createControlPlaneApp(
     mailRelayRetryIntervalMs,
     sftpRetryIntervalMs,
     backupScheduleIntervalMs,
+    panelDump,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -523,6 +535,7 @@ export async function createControlPlaneApp(
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
+    await nestApp.get(SiteBackupsApplier).panel.sweepStaleDumps().catch(() => undefined);
   }
 
   outboxWorker.startBackgroundLoop();

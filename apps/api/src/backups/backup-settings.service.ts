@@ -18,6 +18,7 @@ import {
   getBackupTarget,
   listAdminBackupStatus,
   recordBackupTest,
+  sumNewestBackupSizes,
   upsertBackupSettings,
   type BackupSettingsRow,
   type DatabaseClient,
@@ -34,7 +35,11 @@ import {
 
 const FAILURE_CLASS_SET: ReadonlySet<string> = new Set(BACKUP_FAILURE_CLASSES);
 
-function toSettingsDto(available: boolean, row: BackupSettingsRow | null): BackupSettingsDto {
+function toSettingsDto(
+  available: boolean,
+  row: BackupSettingsRow | null,
+  newestBackupsTotalBytes: number,
+): BackupSettingsDto {
   return {
     available,
     configured: row !== null,
@@ -56,6 +61,15 @@ function toSettingsDto(available: boolean, row: BackupSettingsRow | null): Backu
           }
         : null,
     updatedAt: row ? row.updatedAt.toISOString() : null,
+    lastPanelBackup:
+      row?.lastPanelBackupAt && row.lastPanelBackupStatus
+        ? {
+            at: row.lastPanelBackupAt.toISOString(),
+            status: row.lastPanelBackupStatus,
+            problem: row.lastPanelBackupProblem,
+          }
+        : null,
+    newestBackupsTotalBytes,
   };
 }
 
@@ -97,7 +111,7 @@ export class BackupSettingsService {
   public async get(): Promise<BackupSettingsDto> {
     const available = isBackupAvailable(this.config.runtimeBackend);
     const row = await getBackupSettingsPublic(this.dbClient.db);
-    return toSettingsDto(available, row);
+    return toSettingsDto(available, row, await sumNewestBackupSizes(this.dbClient.db));
   }
 
   /** Validates and saves the S3 target settings, wiping stale backup records when target location changes. */

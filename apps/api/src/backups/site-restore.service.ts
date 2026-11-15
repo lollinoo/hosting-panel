@@ -2,6 +2,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import {
   backupArchiveFileName,
   isBackupAvailable,
+  type AdminRestoreBackupInput,
   type BackupArchiveChunk,
   type BackupArchiveChunkDto,
   type RestoreBackupInput,
@@ -16,8 +17,10 @@ import {
   getBackupSettingsPublic,
   getSiteBackup,
   heavyActionRetryAt,
+  listSiteBackups,
   markSiteArchivePreparing,
   markSiteRestoreRunning,
+  operations,
   outboxEvents,
   sql,
   type DatabaseClient,
@@ -39,7 +42,11 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { BACKUP_LEASE_MS } from "./site-backups-applier.js";
-import { SITE_ARCHIVE_STEPS, SITE_RESTORE_STEPS } from "./site-restore-applier.js";
+import {
+  ADMIN_SITE_RESTORE_STEPS,
+  SITE_ARCHIVE_STEPS,
+  SITE_RESTORE_STEPS,
+} from "./site-restore-applier.js";
 import type { BackupSiteRef, SiteBackupActor } from "./site-backups.service.js";
 
 const BACKUP_ID_PATTERN = /^bkp_[0-9a-f]{32}$/;
@@ -52,6 +59,19 @@ export interface BackupArchiveReadQuery {
 
 function backupNotFoundError(): ControlPlaneError {
   return new ControlPlaneError("NOT_FOUND", "Backup not found");
+}
+
+function noSucceededBackupError(): ControlPlaneError {
+  return new ControlPlaneError("VALIDATION_ERROR", "There is no succeeded backup of this site to restore.", {
+    details: [{ field: "backupId", message: "no_succeeded_backup" }],
+  });
+}
+
+function confirmNameError(): ControlPlaneError {
+  const message = "Type the exact name of the site to restore it.";
+  return new ControlPlaneError("VALIDATION_ERROR", message, {
+    details: [{ field: "confirmName", message }],
+  });
 }
 
 function archiveGoneError(): ControlPlaneError {
@@ -109,7 +129,7 @@ export async function appendUserBackupAudit(
   db: DatabaseExecutor,
   site: Pick<BackupSiteRef, "id" | "organizationId">,
   actor: SiteBackupActor,
-  actionSuffix: "create" | "restore" | "download" | "download.fetched",
+  actionSuffix: "create" | "restore" | "restore.requested" | "download" | "download.fetched",
   details: Record<string, unknown>,
 ): Promise<void> {
   const actionPrefix = actor.actionPrefix ?? "site.backups";
@@ -178,18 +198,7 @@ export class SiteRestoreService {
     await assertBackupInfrastructureReady(this.dbClient.db, this.config.runtimeBackend, site.status);
 
     if (input.confirmName.trim() !== site.name) {
-      throw new ControlPlaneError(
-        "VALIDATION_ERROR",
-        "Type the exact name of the site to restore it.",
-        {
-          details: [
-            {
-              field: "confirmName",
-              message: "Type the exact name of the site to restore it.",
-            },
-          ],
-        },
-      );
+      throw confirmNameError();
     }
 
     return await this.#enqueueBackupAction({
@@ -201,6 +210,45 @@ export class SiteRestoreService {
       steps: SITE_RESTORE_STEPS,
       markRunning: (tx, operationId) => markSiteRestoreRunning(tx, row.id, operationId),
       auditSuffix: "restore",
+    });
+  }
+
+  /** Queues an administrator's restore of the named or newest succeeded copy, without the customers' limit. */
+  public async restoreAsAdmin(
+    site: BackupSiteRef & { name: string },
+    actor: SiteBackupActor,
+    input: AdminRestoreBackupInput,
+    idempotencyKey: string,
+  ): Promise<SiteBackupAcceptedDto> {
+    // A replay keeps the copy the first request chose, even when a newer one exists now.
+    const backupId =
+      input.backupId ?? (await this.#replayedBackupId(site, idempotencyKey)) ?? null;
+    let row: SiteBackupRow | undefined;
+    if (backupId !== null) {
+      row = await this.#requireManagedBackup(site.id, backupId).catch(() => undefined);
+    } else {
+      row = (await listSiteBackups(this.dbClient.db, site.id)).find(
+        (b) => b.status === "succeeded" && b.snapshotId !== null,
+      );
+    }
+    if (!row) {
+      throw noSucceededBackupError();
+    }
+    await assertBackupInfrastructureReady(this.dbClient.db, this.config.runtimeBackend, site.status);
+    if (input.confirmName.trim() !== site.name) {
+      throw confirmNameError();
+    }
+
+    const backupRowId = row.id;
+    return await this.#enqueueBackupAction({
+      site,
+      actor,
+      backupId: backupRowId,
+      idempotencyKey,
+      kind: "site.backups.restore",
+      steps: ADMIN_SITE_RESTORE_STEPS,
+      markRunning: (tx, operationId) => markSiteRestoreRunning(tx, backupRowId, operationId),
+      auditSuffix: "restore.requested",
     });
   }
 
@@ -334,6 +382,24 @@ export class SiteRestoreService {
     return row;
   }
 
+  /** Backup id of an earlier restore of this site queued with the same idempotency key, if any. */
+  async #replayedBackupId(site: BackupSiteRef, idempotencyKey: string): Promise<string | undefined> {
+    const [evt] = await this.dbClient.db
+      .select({ backupId: sql<string | null>`${outboxEvents.payload}->>'backupId'` })
+      .from(outboxEvents)
+      .innerJoin(operations, sql`${operations.id} = ${outboxEvents.payload}->>'operationId'`)
+      .where(
+        and(
+          eq(operations.organizationId, site.organizationId),
+          eq(operations.idempotencyKey, idempotencyKey),
+          eq(operations.kind, "site.backups.restore"),
+          eq(operations.resourceId, site.id),
+        ),
+      )
+      .limit(1);
+    return evt?.backupId ?? undefined;
+  }
+
   async #enqueueBackupAction(opts: {
     readonly site: BackupSiteRef & { name: string };
     readonly actor: SiteBackupActor;
@@ -342,7 +408,7 @@ export class SiteRestoreService {
     readonly kind: "site.backups.restore" | "site.backups.download";
     readonly steps: readonly { readonly key: string; readonly label: string }[];
     readonly markRunning: (tx: DatabaseExecutor, operationId: string) => Promise<void>;
-    readonly auditSuffix: "restore" | "download";
+    readonly auditSuffix: "restore" | "restore.requested" | "download";
   }): Promise<SiteBackupAcceptedDto> {
     const operationId = await this.dbClient.db.transaction(async (tx) => {
       const enqueued = await enqueueOperationTransactional(

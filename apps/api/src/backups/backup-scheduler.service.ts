@@ -29,6 +29,7 @@ import {
   DATABASE_CLIENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { PANEL_BACKUP_STEPS } from "./panel-backup-applier.js";
 import { BACKUP_LEASE_MS } from "./site-backups-applier.js";
 import { SITE_BACKUP_PRUNE_STEPS, SiteBackupsService } from "./site-backups.service.js";
 
@@ -44,7 +45,7 @@ function isResourceLockedError(err: unknown): boolean {
   );
 }
 
-/** Schedules nightly UTC site backups one site at a time and queues orphan prunes when done. */
+/** Schedules nightly UTC site backups one site at a time, then queues orphan prunes and the panel copy. */
 @Injectable()
 export class BackupSchedulerService {
   #timer: NodeJS.Timeout | null = null;
@@ -227,9 +228,10 @@ export class BackupSchedulerService {
             pruned,
           },
         });
+        const panelQueued = await this.#enqueuePanelBackup(tx, runState.lastNightlyRunOn ?? today);
         await finishNightlyRun(tx);
 
-        return pruned > 0;
+        return pruned > 0 || panelQueued;
       });
     } finally {
       this.#inFlightTicks -= 1;
@@ -237,6 +239,33 @@ export class BackupSchedulerService {
 
     if (shouldTriggerOutbox) {
       this.outboxWorker.triggerAsync();
+    }
+  }
+
+  /** Queues tonight's panel copy after the sites; a busy lock never fails the run. */
+  async #enqueuePanelBackup(tx: DatabaseExecutor, date: string): Promise<boolean> {
+    if (!this.config.panelDump) {
+      return false;
+    }
+    await this.#ensurePlatformOpsOrg(tx);
+    try {
+      await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
+        organizationId: PLATFORM_OPS_ORG_ID,
+        kind: "panel.backups.create",
+        resourceType: "host",
+        resourceId: "panel",
+        idempotencyKey: `panel-backup:${date}`,
+        lockKey: "panel:db",
+        leaseDurationMs: BACKUP_LEASE_MS,
+        steps: PANEL_BACKUP_STEPS,
+        outboxPayload: {},
+      });
+      return true;
+    } catch (err: unknown) {
+      if (isResourceLockedError(err)) {
+        return false;
+      }
+      throw err;
     }
   }
 

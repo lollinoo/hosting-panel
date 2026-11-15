@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import {
   BACKUP_FAILURE_CLASSES,
   DEFAULT_BACKUP_RETENTION_DAYS,
@@ -30,6 +30,7 @@ import {
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { resolveSiteFilesServiceId } from "../sites/site-files.service.js";
+import { SiteSftpService } from "../sites/site-sftp.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -37,11 +38,19 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { selectExpired } from "./backup-retention.js";
+import { PanelBackupApplier } from "./panel-backup-applier.js";
 import { SiteRestoreApplier } from "./site-restore-applier.js";
 
 export const BACKUP_LEASE_MS = 120_000;
 export const BACKUP_POLL_MS = 5_000;
 export const BACKUP_POLL_GIVE_UP_MS = 120_000;
+/**
+ * R120: past the summed executor limits of a backup (backup-jobs.ts repo+dump+upload+forget ≈ 3h31m) and of a
+ * restore (backup-runner.ts 3 image pulls 12m + volume owner 1h + restore-jobs.ts fetch 2h + prepare 1h + switch 2m
+ * + files 1m + finish 30m = 4h45m; a failed path with both undos ≤ 4h25m). A restore also runs finish (30m) once per
+ * same-site undo_incomplete leftover, so from 3 leftovers it can pass this and turns unknown (R120 c accepts it).
+ */
+export const BACKUP_POLL_DEADLINE_MS = 6 * 3_600_000;
 export const SITE_BACKUPS_INTERRUPTED = "This backup was interrupted before it finished.";
 
 export type BackupOperationRef = Pick<
@@ -108,16 +117,22 @@ export class SiteBackupsApplier {
   public leaseMs = BACKUP_LEASE_MS;
   public pollMs = BACKUP_POLL_MS;
   public pollGiveUpMs = BACKUP_POLL_GIVE_UP_MS;
+  public pollDeadlineMs = BACKUP_POLL_DEADLINE_MS;
+  public readonly sftp: SiteSftpService | null;
+  public readonly panel: PanelBackupApplier;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
+    @Optional() @Inject(SiteSftpService) sftp?: SiteSftpService,
   ) {
+    this.sftp = sftp ?? null;
     this.#restore = new SiteRestoreApplier(this, dbClient, dockerExecutor, config);
+    this.panel = new PanelBackupApplier(this, dbClient, dockerExecutor, config);
   }
 
-  /** Applies one queued backup, prune, restore, or archive download operation. */
+  /** Applies one queued backup, prune, restore, archive download, or panel copy operation. */
   public async apply(op: BackupOperationRef): Promise<void> {
     if (op.kind === "site.backups.restore" || op.kind === "site.backups.download") {
       await this.#restore.apply(op);
@@ -131,6 +146,10 @@ export class SiteBackupsApplier {
       await this.#applyPrune(op);
       return;
     }
+    if (op.kind === "panel.backups.create") {
+      await this.panel.apply(op);
+      return;
+    }
     throw new ControlPlaneError("NOT_SUPPORTED", `Unsupported backup operation kind '${op.kind}'`);
   }
 
@@ -138,6 +157,9 @@ export class SiteBackupsApplier {
   public async recover(op: BackupOperationRef): Promise<"settled" | "pending"> {
     if (op.kind === "site.backups.restore" || op.kind === "site.backups.download") {
       return this.#restore.recover(op);
+    }
+    if (op.kind === "panel.backups.create") {
+      return this.panel.recover(op);
     }
     const db = this.dbClient.db;
     const steps = await db
@@ -171,7 +193,10 @@ export class SiteBackupsApplier {
     }
 
     if (statusRes.state === "running") {
-      return "pending";
+      if (!(await this.isPastPollDeadline(op.id))) {
+        return "pending";
+      }
+      statusRes = { ...statusRes, state: "failed", failure: "timeout" };
     }
 
     if (statusRes.state === "succeeded") {
@@ -408,6 +433,7 @@ export class SiteBackupsApplier {
     let statusRes = initial;
     let pollErrorSinceMs: number | null = null;
     let firstPoll = true;
+    const startedMs = Date.now();
 
     while (statusRes.state === "running") {
       await this.#renewLeaseOrAmbiguous(operationId);
@@ -434,9 +460,23 @@ export class SiteBackupsApplier {
           await this.#delay(1);
         }
       }
+      if (statusRes.state === "running" && Date.now() - startedMs >= this.pollDeadlineMs) {
+        throw new ControlPlaneError("OPERATION_AMBIGUOUS", "Backup job is still running past the poll deadline");
+      }
     }
 
     return statusRes;
+  }
+
+  /** @internal R120: true when the operation began longer ago than the poll deadline. */
+  public async isPastPollDeadline(operationId: string): Promise<boolean> {
+    const [row] = await this.dbClient.db
+      .select({ startedAt: operations.startedAt, submittedAt: operations.submittedAt })
+      .from(operations)
+      .where(eq(operations.id, operationId))
+      .limit(1);
+    const since = row?.startedAt ?? row?.submittedAt;
+    return since !== undefined && Date.now() - since.getTime() > this.pollDeadlineMs;
   }
 
   /** @internal */

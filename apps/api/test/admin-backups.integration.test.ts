@@ -177,6 +177,8 @@ function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): BackupExecut
       case "readArchive":
       case "discardArchive":
       case "settle":
+      case "panelStart":
+      case "siteState":
         throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];
@@ -578,6 +580,8 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       lastNightlyRunOn: null,
       lastTest: null,
       updatedAt: null,
+      lastPanelBackup: null,
+      newestBackupsTotalBytes: 0,
     });
 
     const { secretAccessKey: _omitted, ...withoutSecret } = SETTINGS;
