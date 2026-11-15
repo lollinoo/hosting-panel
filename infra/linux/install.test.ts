@@ -345,3 +345,14 @@ describe("set_env_keys", () => {
 it("reads the apt candidate in the C locale (a localized apt prints 'Candidato:')", () => {
   expect(readFileSync(SCRIPT, "utf8")).toMatch(/LC_ALL=C apt-cache policy "\$5" \| awk '\/Candidate:\//);
 });
+
+it("closing warning box names backup.key, carries the bilingual warning, and keeps every line at 78 columns", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  expect(src).toContain("backup.key cifra i backup");
+  expect(src).toContain("backup.key encrypts the site backups");
+  const match = /^#{78}\n[\s\S]*?^#{78}$/m.exec(src);
+  expect(match).not.toBeNull();
+  for (const line of match![0].split("\n")) {
+    expect([...line].length, line).toBe(78);
+  }
+});

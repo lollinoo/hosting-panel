@@ -652,7 +652,11 @@ EOF
 #  !!! EN: Back up /etc/hosting-panel (keys) now — without them encrypted    #
 #      data and backups cannot be recovered.                                 #
 #      ipc.key, secrets-master.key, breakglass-jwt.key, jwt-signing.pem,     #
-#      mariadb-root.key                                                      #
+#      mariadb-root.key, backup.key                                          #
+#  !!! IT: backup.key cifra i backup dei siti: se va perso, nessun           #
+#      backup potrà più essere letto. Copialo subito fuori dal server.       #
+#  !!! EN: backup.key encrypts the site backups: if it is lost, no           #
+#      backup can ever be read again. Copy it off this server now.           #
 ##############################################################################
 EOF
 }

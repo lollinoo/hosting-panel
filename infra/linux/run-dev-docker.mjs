@@ -30,6 +30,7 @@ const IPC_KEY_FILE = path.join(RUNTIME_DIR, "ipc.key");
 const MASTER_KEY_FILE = path.join(RUNTIME_DIR, "secrets-master.key");
 const BREAKGLASS_KEY_FILE = path.join(RUNTIME_DIR, "breakglass-jwt.key");
 const JWT_KEY_FILE = path.join(RUNTIME_DIR, "jwt-signing.pem");
+const BACKUP_KEY_FILE = path.join(RUNTIME_DIR, "backup.key");
 const ENV_SH_FILE = path.join(RUNTIME_DIR, "env.sh");
 
 const EXECUTOR_SOCK = path.join(SOCKETS_DIR, "executor.sock");
@@ -169,6 +170,8 @@ async function main() {
   const masterKey = await ensureSecretKeyFile(MASTER_KEY_FILE);
   const breakglassKey = await ensureSecretKeyFile(BREAKGLASS_KEY_FILE);
   await ensureJwtKeyFile(JWT_KEY_FILE);
+  await ensureSecretKeyFile(BACKUP_KEY_FILE);
+  await chmod(BACKUP_KEY_FILE, 0o640); // Executor reads the key file and stages it into job secrets tmpfs
 
   const nftablesRulesetPath = path.join(REPO_ROOT, "infra/linux/nftables-dedicated.conf");
 
@@ -183,6 +186,7 @@ async function main() {
     `export HP_BREAKGLASS_KEY_FILE="${BREAKGLASS_KEY_FILE}"`,
     `export HP_BREAKGLASS_KEY="${breakglassKey}"`,
     `export HP_JWT_SIGNING_KEY_FILE="${JWT_KEY_FILE}"`,
+    `export HP_BACKUP_KEY_FILE="${BACKUP_KEY_FILE}"`,
     `export ENABLE_DEV_OIDC="true"`,
     `export HP_SEED_DEMO="true"`,
     `export HP_EXECUTOR_SOCKET_PATH="${EXECUTOR_SOCK}"`,
@@ -209,6 +213,7 @@ async function main() {
     HP_BREAKGLASS_KEY_FILE: BREAKGLASS_KEY_FILE,
     HP_BREAKGLASS_KEY: breakglassKey,
     HP_JWT_SIGNING_KEY_FILE: JWT_KEY_FILE,
+    HP_BACKUP_KEY_FILE: BACKUP_KEY_FILE,
     // Dev launcher only: explicit opt-in to dev OIDC and the demo dataset.
     ENABLE_DEV_OIDC: "true",
     HP_SEED_DEMO: "true",
