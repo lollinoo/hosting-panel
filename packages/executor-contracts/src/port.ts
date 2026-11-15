@@ -14,6 +14,8 @@ import type {
   SiteFilesOp,
   SiteFilesResultByOp,
   SiteHostRoute,
+  WordpressStateResult,
+  WordpressUpdateResult,
 } from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import type { CertificateStatusReport } from "./acme-status.js";
@@ -80,7 +82,15 @@ export interface ServiceLogLine {
 }
 
 /** One-off, allowlisted setup jobs. The API picks only the kind; the executor owns image, script and mounts. */
-export type SiteJobKind = "db.provision" | "db.drop" | "wordpress.install" | "wordpress.set-url";
+export type SiteJobKind =
+  | "db.provision"
+  | "db.drop"
+  | "wordpress.install"
+  | "wordpress.set-url"
+  | "wordpress.inspect"
+  | "wordpress.update"
+  | "wordpress.settle"
+  | "wordpress.reset-password";
 
 export interface SiteJobRequest {
   readonly jobId: string;
@@ -97,4 +107,6 @@ export interface SiteJobResult {
   readonly exitCode: number;
   /** Last 50 lines, at most 4 KiB, redacted. */
   readonly outputTail: string;
+  /** inspect and update only, present only when it passed the schema. */
+  readonly result?: WordpressStateResult | WordpressUpdateResult;
 }

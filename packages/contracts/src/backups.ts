@@ -4,6 +4,7 @@ import type { OperationKind } from "./operations.js";
 import { SiteFileChunkDtoSchema } from "./site-files.js";
 
 export const MANUAL_BACKUPS_KEPT = 3;
+export const PRE_UPDATE_BACKUPS_KEPT = 3;
 export const DEFAULT_BACKUP_HOUR_UTC = 2;
 export const DEFAULT_BACKUP_RETENTION_DAYS = 14;
 export const HEAVY_ACTIONS_PER_HOUR = 6;
@@ -12,6 +13,7 @@ export const HEAVY_BACKUP_OPERATION_KINDS = [
   "site.backups.create",
   "site.backups.restore",
   "site.backups.download",
+  "site.wordpress.update",
 ] as const satisfies readonly OperationKind[];
 
 export const BACKUP_PROBLEMS = [
@@ -25,7 +27,7 @@ export const BACKUP_PROBLEMS = [
 export const BackupProblemSchema = z.enum(BACKUP_PROBLEMS);
 export type BackupProblem = z.infer<typeof BackupProblemSchema>;
 
-export const BACKUP_KINDS = ["nightly", "manual"] as const;
+export const BACKUP_KINDS = ["nightly", "manual", "pre_update"] as const;
 export type BackupKind = (typeof BACKUP_KINDS)[number];
 
 export const BACKUP_STATUSES = ["running", "succeeded", "failed"] as const;

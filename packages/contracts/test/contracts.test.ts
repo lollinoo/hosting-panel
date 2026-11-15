@@ -57,6 +57,15 @@ import {
   findUnsafeDockerInputFields,
   isDefaultRetryableErrorCode,
   isBackupAvailable,
+  isWordpressToolsAvailable,
+  isWordpressSite,
+  BACKUP_KINDS,
+  HEAVY_BACKUP_OPERATION_KINDS,
+  WORDPRESS_OPERATION_KINDS,
+  SiteWordpressUpdateRequestSchema,
+  SiteWordpressStateDtoSchema,
+  SiteWordpressLastUpdateDtoSchema,
+  SiteWordpressPasswordResetDtoSchema,
   isMutatingPermission,
   isPhpMyAdminAvailable,
   isSftpAvailable,
@@ -460,6 +469,8 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(OPERATION_KINDS).toContain("site.backups.restore");
     expect(OPERATION_KINDS).toContain("site.backups.download");
     expect(OPERATION_KINDS).toContain("panel.backups.create");
+    expect(OPERATION_KINDS).toContain("site.wordpress.inspect");
+    expect(OPERATION_KINDS).toContain("site.wordpress.update");
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,
@@ -482,6 +493,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       sftpAvailable: false,
       phpMyAdminAvailable: false,
       productionBackupRuntimeAvailable: false,
+      wordpressToolsAvailable: false,
     });
     expect(legacyParsed.runtimeBackend).toBe("disabled");
 
@@ -500,6 +512,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(isSftpAvailable("linux-systemd")).toBe(true);
     expect(isPhpMyAdminAvailable("linux-systemd")).toBe(true);
     expect(isBackupAvailable("linux-systemd")).toBe(true);
+    expect(isWordpressToolsAvailable("linux-systemd")).toBe(true);
     for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
       expect(createPlatformCapabilities({ runtimeBackend }).acmeTlsRuntimeAvailable).toBe(false);
       expect(createPlatformCapabilities({ runtimeBackend }).sftpAvailable).toBe(false);
@@ -510,6 +523,8 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
         false,
       );
       expect(isBackupAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).wordpressToolsAvailable).toBe(false);
+      expect(isWordpressToolsAvailable(runtimeBackend)).toBe(false);
     }
     expect(p2Caps).toEqual({
       phase: "phase-2",
@@ -522,6 +537,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       sftpAvailable: true,
       phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: true,
+      wordpressToolsAvailable: true,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
     expect(
@@ -534,6 +550,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
         sftpAvailable: true,
         phpMyAdminAvailable: true,
         productionBackupRuntimeAvailable: true,
+        wordpressToolsAvailable: true,
       }).productionBackupRuntimeAvailable,
     ).toBe(true);
 
@@ -881,5 +898,71 @@ describe("@hosting-panel/contracts — Site SFTP Schemas & DTO Security", () => 
       expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);
     }
     expect(findForbiddenPublicDtoKeys({ passwordHash: "$6$salt$hash" })).toEqual(["passwordHash"]);
+  });
+});
+
+describe("@hosting-panel/contracts — WordPress tools DTOs", () => {
+  const plugin = { name: "akismet", title: "Akismet", status: "active", version: "5.0", updateVersion: null };
+  const state = {
+    coreVersion: "6.8",
+    coreUpdate: null,
+    updatesKnown: true,
+    plugins: [plugin],
+    themes: [],
+    administrators: [{ id: 1, login: "admin" }],
+    checkedAt: "2026-11-15T10:00:00.000Z",
+    problem: null,
+  };
+  const item = { type: "plugin", name: "akismet", oldVersion: "5.0", newVersion: "5.1", status: "updated" };
+  const lastUpdate = {
+    operationId: "op_1",
+    target: { scope: "all" },
+    status: "succeeded",
+    finishedAt: "2026-11-15T10:00:00.000Z",
+    problem: null,
+    backup: "taken",
+    items: [item],
+  };
+
+  it("isWordpressSite holds today's rule", () => {
+    expect(isWordpressSite({ phpVersion: "8.4" })).toBe(true);
+    expect(isWordpressSite({ phpVersion: null })).toBe(false);
+  });
+
+  it("kinds and backup lists grow", () => {
+    expect(WORDPRESS_OPERATION_KINDS).toEqual(["site.wordpress.inspect", "site.wordpress.update"]);
+    expect(BACKUP_KINDS).toContain("pre_update");
+    expect(HEAVY_BACKUP_OPERATION_KINDS).toContain("site.wordpress.update");
+  });
+
+  it("the update request is closed", () => {
+    const ok = (v: unknown) => SiteWordpressUpdateRequestSchema.safeParse(v).success;
+    expect(ok({ scope: "all" })).toBe(true);
+    expect(ok({ scope: "core" })).toBe(true);
+    expect(ok({ scope: "plugin", name: "akismet" })).toBe(true);
+    expect(ok({ scope: "theme", name: "twentytwentyfive" })).toBe(true);
+    expect(ok({ scope: "all", name: "akismet" })).toBe(false);
+    expect(ok({ scope: "core", extra: 1 })).toBe(false);
+    expect(ok({ scope: "plugin" })).toBe(false);
+    expect(ok({ scope: "plugin", name: "-rf" })).toBe(false);
+    expect(ok({ scope: "theme", name: "a b" })).toBe(false);
+    expect(ok({ scope: "plugin", name: "../x" })).toBe(false);
+  });
+
+  it("the DTOs are bounded", () => {
+    expect(SiteWordpressStateDtoSchema.safeParse(state).success).toBe(true);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, coreVersion: null, problem: "config_broken" }).success).toBe(true);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, plugins: Array(501).fill(plugin) }).success).toBe(false);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, problem: "site_stopped" }).success).toBe(false);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, extra: 1 }).success).toBe(false);
+    expect(SiteWordpressLastUpdateDtoSchema.safeParse(lastUpdate).success).toBe(true);
+    expect(SiteWordpressLastUpdateDtoSchema.safeParse({ ...lastUpdate, items: Array(702).fill(item) }).success).toBe(false);
+  });
+
+  it("the reset answer holds only the temporary password", () => {
+    const pw = "A".repeat(24);
+    expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: pw }).success).toBe(true);
+    expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: pw, password: pw }).success).toBe(false);
+    expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: "short" }).success).toBe(false);
   });
 });

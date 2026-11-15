@@ -237,6 +237,11 @@ export function isBackupAvailable(runtimeBackend: RuntimeBackend): boolean {
   return runtimeBackend === "linux-systemd";
 }
 
+/** WordPress tools run only on the Linux systemd backend. */
+export function isWordpressToolsAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -248,6 +253,7 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   sftpAvailable: z.boolean(),
   phpMyAdminAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.boolean(),
+  wordpressToolsAvailable: z.boolean(),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
 
@@ -262,6 +268,7 @@ export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.fre
   sftpAvailable: false,
   phpMyAdminAvailable: false,
   productionBackupRuntimeAvailable: false,
+  wordpressToolsAvailable: false,
 });
 
 export interface CreatePlatformCapabilitiesOptions {
@@ -290,6 +297,7 @@ export function createPlatformCapabilities(
       sftpAvailable: isSftpAvailable(options.runtimeBackend),
       phpMyAdminAvailable: isPhpMyAdminAvailable(options.runtimeBackend),
       productionBackupRuntimeAvailable: isBackupAvailable(options.runtimeBackend),
+      wordpressToolsAvailable: isWordpressToolsAvailable(options.runtimeBackend),
     }),
   );
 }
@@ -303,6 +311,7 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   sftpAvailable: z.boolean(),
   phpMyAdminAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.boolean(),
+  wordpressToolsAvailable: z.boolean(),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;
 
