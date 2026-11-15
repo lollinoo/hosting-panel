@@ -99,6 +99,7 @@ class MockDockerExecutor implements DockerExecutorPort {
     this.#base.applySftpAccess(req);
   public getSftpStatus: DockerExecutorPort["getSftpStatus"] = () =>
     this.#base.getSftpStatus();
+  public backups: DockerExecutorPort["backups"] = (req) => this.#base.backups(req);
 }
 
 function createRuntimeConfig(

@@ -20,4 +20,5 @@ export interface ControlPlaneRuntimeConfig {
   readonly domainReconcileIntervalMs?: number | null;
   readonly mailRelayRetryIntervalMs?: number | null;
   readonly sftpRetryIntervalMs?: number | null;
+  readonly backupScheduleIntervalMs?: number | null;
 }

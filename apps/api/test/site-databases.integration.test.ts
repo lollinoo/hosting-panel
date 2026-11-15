@@ -132,6 +132,7 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
   public applySftpAccess: DockerExecutorPort["applySftpAccess"] = (req) =>
     this.sim.applySftpAccess(req);
   public getSftpStatus: DockerExecutorPort["getSftpStatus"] = () => this.sim.getSftpStatus();
+  public backups: DockerExecutorPort["backups"] = (req) => this.sim.backups(req);
 
   public async runSiteJob(req: SiteJobRequest) {
     const res = await this.sim.runSiteJob(req);

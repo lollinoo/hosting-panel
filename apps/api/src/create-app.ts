@@ -34,6 +34,7 @@ import type { DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
+import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -220,6 +221,7 @@ export interface CreateControlPlaneAppOptions {
   readonly domainReconcileIntervalMs?: number | null;
   readonly mailRelayRetryIntervalMs?: number | null;
   readonly sftpRetryIntervalMs?: number | null;
+  readonly backupScheduleIntervalMs?: number | null;
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
@@ -243,6 +245,7 @@ export interface ControlPlaneAppHandle {
   readonly domainReconciler: DomainReconcilerService;
   readonly mailRelay: MailRelayService;
   readonly siteSftp: SiteSftpService;
+  readonly backupScheduler: BackupSchedulerService;
   close(): Promise<void>;
 }
 
@@ -390,6 +393,16 @@ export async function createControlPlaneApp(
             : 60_000)
         : null;
 
+  const envBackupScheduleRaw = process.env["HP_BACKUP_SCHEDULE_INTERVAL_MS"]?.trim();
+  const backupScheduleIntervalMs =
+    options?.backupScheduleIntervalMs !== undefined
+      ? options.backupScheduleIntervalMs
+      : shouldListen && runtimeBackend === "linux-systemd"
+        ? (envBackupScheduleRaw && /^\d+$/.test(envBackupScheduleRaw)
+            ? Number.parseInt(envBackupScheduleRaw, 10)
+            : 5_000)
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
@@ -404,6 +417,7 @@ export async function createControlPlaneApp(
     domainReconcileIntervalMs,
     mailRelayRetryIntervalMs,
     sftpRetryIntervalMs,
+    backupScheduleIntervalMs,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -505,6 +519,7 @@ export async function createControlPlaneApp(
   const domainReconciler = nestApp.get(DomainReconcilerService);
   const mailRelay = nestApp.get(MailRelayService);
   const siteSftp = nestApp.get(SiteSftpService);
+  const backupScheduler = nestApp.get(BackupSchedulerService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
@@ -518,6 +533,7 @@ export async function createControlPlaneApp(
   domainReconciler.startBackgroundLoop();
   mailRelay.startBackgroundLoop();
   siteSftp.startBackgroundLoop();
+  backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
 
   let isClosed = false;
 
@@ -537,12 +553,14 @@ export async function createControlPlaneApp(
     domainReconciler,
     mailRelay,
     siteSftp,
+    backupScheduler,
     async close(): Promise<void> {
       if (isClosed) {
         return;
       }
       isClosed = true;
 
+      await backupScheduler.stop();
       await outboxWorker.stop();
       await driftReconciler.stop();
       await domainReconciler.stop();

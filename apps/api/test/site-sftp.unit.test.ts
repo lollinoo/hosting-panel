@@ -324,6 +324,7 @@ class FakeDockerExecutor implements DockerExecutorPort {
 
   public applySftpAccess: DockerExecutorPort["applySftpAccess"] = (req) => this.applySpy(req);
   public getSftpStatus: DockerExecutorPort["getSftpStatus"] = () => this.statusSpy();
+  public backups: DockerExecutorPort["backups"] = (req) => this.#base.backups(req);
 }
 
 function createFakeDbClient(): DatabaseClient {

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   ERROR_CODES,
   canTransitionOperation,
@@ -17,15 +17,19 @@ import {
   eq,
   failOutboxEvent,
   inArray,
+  isNull,
+  lte,
   markExpiredOperationsUnknownTransactional,
   operationSteps,
   operations,
+  or,
   outboxEvents,
   rebindDockerResourceTransactional,
   recordObservedStateReconciliationTransactional,
   renewOperationLease,
   serviceInstances,
   sites,
+  sql,
   stackRevisions,
   transitionOperation,
   updateOperationStepTransactional,
@@ -52,6 +56,7 @@ import {
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
 import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
+import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
 import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
@@ -71,6 +76,10 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
   "site.files.archive",
   "site.files.extract",
 ];
+export const BACKUP_OPERATION_KINDS = [
+  "site.backups.create",
+  "site.backups.prune",
+] as const satisfies readonly OperationKind[];
 
 interface OutboxLaneState {
   readonly filter: ClaimPendingOutboxFilter;
@@ -122,7 +131,7 @@ export class OutboxWorkerService {
   #pollTimer: NodeJS.Timeout | null = null;
   #activeRecoveryPromise: Promise<UnknownRecoveryResult> | null = null;
   readonly #mainLane: OutboxLaneState = {
-    filter: { excludeKinds: FILE_ARCHIVE_OPERATION_KINDS },
+    filter: { excludeKinds: [...FILE_ARCHIVE_OPERATION_KINDS, ...BACKUP_OPERATION_KINDS] },
     activePromise: null,
     scheduledImmediate: null,
     pendingTrigger: false,
@@ -133,6 +142,14 @@ export class OutboxWorkerService {
     scheduledImmediate: null,
     pendingTrigger: false,
   };
+  readonly #backupLane: OutboxLaneState = {
+    filter: { includeKinds: BACKUP_OPERATION_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+
+  readonly #backupsApplier: SiteBackupsApplier;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -142,7 +159,11 @@ export class OutboxWorkerService {
     @Inject(SiteProvisioner) private readonly siteProvisioner: SiteProvisioner,
     @Inject(SiteDomainsApplier) private readonly siteDomainsApplier: SiteDomainsApplier,
     @Inject(SiteFilesApplier) private readonly siteFilesApplier: SiteFilesApplier,
-  ) {}
+    @Optional() @Inject(SiteBackupsApplier) siteBackupsApplier?: SiteBackupsApplier,
+  ) {
+    this.#backupsApplier =
+      siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
+  }
 
   public startBackgroundLoop(): void {
     const intervalMs = this.config.outboxPollIntervalMs;
@@ -167,12 +188,13 @@ export class OutboxWorkerService {
 
     this.#triggerLane(this.#mainLane);
     this.#triggerLane(this.#fileLane);
+    this.#triggerLane(this.#backupLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
 
-    for (const lane of [this.#mainLane, this.#fileLane]) {
+    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane]) {
       lane.pendingTrigger = false;
       if (lane.scheduledImmediate !== null) {
         clearImmediate(lane.scheduledImmediate);
@@ -188,6 +210,7 @@ export class OutboxWorkerService {
     await Promise.all([
       this.#mainLane.activePromise?.catch(() => undefined),
       this.#fileLane.activePromise?.catch(() => undefined),
+      this.#backupLane.activePromise?.catch(() => undefined),
       this.#activeRecoveryPromise?.catch(() => undefined),
     ]);
   }
@@ -235,14 +258,15 @@ export class OutboxWorkerService {
   }
 
   public async processPendingOnce(batchSize: number = 10): Promise<OutboxProcessResult> {
-    const [mainResult, fileResult] = await Promise.all([
+    const [mainResult, fileResult, backupResult] = await Promise.all([
       this.#runLane(this.#mainLane, batchSize),
       this.#runLane(this.#fileLane, batchSize),
+      this.#runLane(this.#backupLane, batchSize),
     ]);
     return {
-      claimed: mainResult.claimed + fileResult.claimed,
-      succeeded: mainResult.succeeded + fileResult.succeeded,
-      failed: mainResult.failed + fileResult.failed,
+      claimed: mainResult.claimed + fileResult.claimed + backupResult.claimed,
+      succeeded: mainResult.succeeded + fileResult.succeeded + backupResult.succeeded,
+      failed: mainResult.failed + fileResult.failed + backupResult.failed,
     };
   }
 
@@ -340,6 +364,8 @@ export class OutboxWorkerService {
         await this.siteDomainsApplier.apply(op);
       } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
         await this.siteFilesApplier.apply(op, payload);
+      } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
+        await this.#backupsApplier.apply(op);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -771,6 +797,37 @@ export class OutboxWorkerService {
 
   async #executeUnknownRecovery(now: Date): Promise<UnknownRecoveryResult> {
     const db = this.dbClient.db;
+    // Requeue stale claims left by a stopped worker while the operation is still queued.
+    await db.transaction(async (tx) => {
+      const staleEvents = await tx
+        .select({ id: outboxEvents.id })
+        .from(outboxEvents)
+        .innerJoin(
+          operations,
+          eq(operations.id, sql`${outboxEvents.payload}->>'operationId'`),
+        )
+        .where(
+          and(
+            eq(outboxEvents.status, "processing"),
+            eq(operations.status, "queued"),
+            or(isNull(operations.leaseExpiresAt), lte(operations.leaseExpiresAt, now)),
+          ),
+        )
+        .for("update");
+
+      if (staleEvents.length > 0) {
+        await tx
+          .update(outboxEvents)
+          .set({ status: "pending", lockedAt: null })
+          .where(
+            inArray(
+              outboxEvents.id,
+              staleEvents.map((row) => row.id),
+            ),
+          );
+      }
+    });
+
     const newlyMarked = await markExpiredOperationsUnknownTransactional(db, now);
 
     const unknownOps = await db
@@ -791,6 +848,58 @@ export class OutboxWorkerService {
         // File archive/extract operations never leave the site degraded and are never blindly replayed.
         await this.#convergeUnknownToFailed(op, SITE_FILES_INTERRUPTED);
         convergedFailed += 1;
+      } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
+        // Backup recovery checks executor status and never replays start or marks the site degraded.
+        const outcome = await this.#backupsApplier.recover(op);
+        if (outcome === "pending") {
+          continue;
+        }
+        const [settled] = await db
+          .select({
+            status: operations.status,
+            errorCode: operations.errorCode,
+            errorMessage: operations.errorMessage,
+          })
+          .from(operations)
+          .where(eq(operations.id, op.id))
+          .limit(1);
+        if (settled?.status === "succeeded") {
+          await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+          await appendAuditEvent(db, {
+            actorId: null,
+            actorType: "system",
+            organizationId: op.organizationId,
+            action: "operation.recovered.succeeded",
+            targetType: "operation",
+            targetId: op.id,
+            details: {
+              kind: op.kind,
+              resourceType: op.resourceType,
+              resourceId: op.resourceId,
+            },
+          });
+          convergedSucceeded += 1;
+        } else {
+          const reason = settled?.errorMessage ?? SITE_BACKUPS_INTERRUPTED;
+          const errorCode = settled?.errorCode ?? "OPERATION_INTERRUPTED";
+          await this.#settleAssociatedOutboxEvents(op.id, "failed", reason);
+          await appendAuditEvent(db, {
+            actorId: null,
+            actorType: "system",
+            organizationId: op.organizationId,
+            action: "operation.recovered.failed",
+            targetType: "operation",
+            targetId: op.id,
+            details: {
+              kind: op.kind,
+              resourceType: op.resourceType,
+              resourceId: op.resourceId,
+              errorCode,
+              reason,
+            },
+          });
+          convergedFailed += 1;
+        }
       } else if (SITE_OPERATION_KINDS.has(op.kind)) {
         // Site steps are not safely replayable mid-way: fail and let the customer retry.
         await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");

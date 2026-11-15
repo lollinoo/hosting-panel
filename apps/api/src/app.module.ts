@@ -13,6 +13,7 @@ import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
+import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
@@ -23,11 +24,16 @@ import { OrganizationsController } from "./controllers/organizations.controller.
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
 import { SiteDomainsController } from "./controllers/site-domains.controller.js";
 import { SiteDatabasesController } from "./controllers/site-databases.controller.js";
+import { SiteBackupsController } from "./controllers/site-backups.controller.js";
 import { SiteFilesController } from "./controllers/site-files.controller.js";
 import { SiteSftpController } from "./controllers/site-sftp.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
+import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
+import { BackupSettingsService } from "./backups/backup-settings.service.js";
+import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
+import { SiteBackupsService } from "./backups/site-backups.service.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import { SiteFilesApplier } from "./sites/site-files-applier.js";
@@ -79,7 +85,9 @@ export class AppModule {
         SiteFilesController,
         SiteSftpController,
         SiteDatabasesController,
+        SiteBackupsController,
         AdminMailRelayController,
+        AdminBackupsController,
       ],
       providers: [
         {
@@ -109,11 +117,15 @@ export class AppModule {
         SiteProvisioner,
         SiteDomainsApplier,
         SiteFilesApplier,
+        SiteBackupsApplier,
         ManagedSitesService,
         SiteDomainsService,
         SiteFilesService,
         SiteSftpService,
         SiteDatabasesService,
+        SiteBackupsService,
+        BackupSettingsService,
+        BackupSchedulerService,
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
@@ -135,6 +147,8 @@ export class AppModule {
         MailRelayService,
         SiteSftpService,
         SiteDatabasesService,
+        SiteBackupsService,
+        BackupSchedulerService,
       ],
     };
   }
