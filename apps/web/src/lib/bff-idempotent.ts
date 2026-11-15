@@ -1,15 +1,16 @@
 import { getSessionFromRequest } from "@/lib/server-session";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
 import { bffErrorResponse } from "@/lib/bff-response";
-import { bffUpstreamResponse } from "@/lib/bff-proxy";
+import { bffUpstreamResponse, readBoundedJsonBody } from "@/lib/bff-proxy";
 import { fetchUpstream } from "@/lib/upstream";
 
-/** Admin mutation pass-through: CSRF + Origin, path segments checked, Idempotency-Key and JSON body required. */
+/** Admin mutation pass-through: CSRF + Origin, path segments checked, Idempotency-Key and bounded JSON body required. */
 export async function forwardIdempotent(
   req: Request,
   segments: Record<string, string>,
   upstreamPath: string,
   method: "POST" | "DELETE",
+  opts?: { timeoutMs?: number },
 ) {
   const segmentError = validatePathSegments(segments);
   if (segmentError) return segmentError;
@@ -22,13 +23,15 @@ export async function forwardIdempotent(
       { field: "idempotency-key", message: "Intestazione richiesta" },
     ]);
   }
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400);
-  }
+  const parsed = await readBoundedJsonBody(req, { requireJsonBody: true });
+  if (!parsed.ok) return parsed.response;
   return bffUpstreamResponse(
-    await fetchUpstream(upstreamPath, { method, accessToken: session!.accessToken, idempotencyKey, body }),
+    await fetchUpstream(upstreamPath, {
+      method,
+      accessToken: session!.accessToken,
+      idempotencyKey,
+      body: parsed.body,
+      timeoutMs: opts?.timeoutMs,
+    }),
   );
 }
