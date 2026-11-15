@@ -607,7 +607,7 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
     expect(await getErrRes.text()).toBe("");
   });
 
-  it("enforces E15 wording, IT/EN key parity, next-step advice on all 22 problems, and E12(c) key_file_missing texts", () => {
+  it("enforces E15 wording, IT/EN key parity, next-step advice on all 26 problems, and E12(c) key_file_missing texts", () => {
     const forbiddenE15 =
       /snapshot|schema|restic|docker|container|image|volume|network|revision|files\/|databases\//i;
     const enNext = /check|fix|use|put|free|try|give|create|reload|save|enter|set up|contact|make|restore|wait/i;
@@ -636,8 +636,8 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
       expect(Object.keys(en.site.backups[section]).length).toBeGreaterThan(0);
     }
 
-    // 3. All 22 BACKUP_PROBLEMS exist in site.backups.problem, site.backups.copyProblem, and admin.backups.problem with next steps
-    expect(BACKUP_PROBLEMS).toHaveLength(22);
+    // 3. All 26 BACKUP_PROBLEMS exist in site.backups.problem, site.backups.copyProblem, and admin.backups.problem with next steps
+    expect(BACKUP_PROBLEMS).toHaveLength(26);
     for (const problem of BACKUP_PROBLEMS) {
       for (const [localeName, catalog, re] of [
         ["en", en, enNext],

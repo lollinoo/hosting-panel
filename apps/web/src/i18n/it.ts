@@ -696,6 +696,14 @@ export const it = {
           "Questo backup contiene viste, trigger o procedure del database che appartengono a un utente del database eliminato dopo il backup. Ricrea quell'utente con lo stesso nome nella scheda Database e riprova; se non sai quale sia, contatta il tuo fornitore di hosting.",
         address_not_updated:
           "Non è stato possibile reimpostare l'indirizzo del sito: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+        panel_dump_failed:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_tool_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_not_started:
+          "I file e i database del sito sono tornati, ma il sito non è ripartito. Contatta il tuo fornitore di hosting.",
       } satisfies Record<BackupProblem, string>,
       copyProblem: {
         unreachable:
@@ -740,6 +748,14 @@ export const it = {
           "Questo backup contiene viste, trigger o procedure del database che appartengono a un utente del database eliminato dopo il backup. Ricrea quell'utente con lo stesso nome nella scheda Database e riprova; se non sai quale sia, contatta il tuo fornitore di hosting.",
         address_not_updated:
           "Non è stato possibile reimpostare l'indirizzo del sito: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+        panel_dump_failed:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_tool_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_not_started:
+          "I file e i database del sito sono tornati, ma il sito non è ripartito. Contatta il tuo fornitore di hosting.",
       } satisfies Record<BackupProblem, string>,
       restore: {
         button: "Ripristina",
@@ -1095,7 +1111,26 @@ export const it = {
       title: "Backup",
       subtitle: "Dove e quando salvare i backup notturni dei siti.",
       keyWarning:
-        "La chiave che cifra i backup è il file /etc/hosting-panel/backup.key su questo server. Copiala subito in un posto sicuro fuori dal server: se il server va perso senza questa chiave, nessun backup potrà più essere letto, da nessuno.",
+        "La chiave che cifra i backup è il file /etc/hosting-panel/backup.key su questo server. Copiala subito in un posto sicuro fuori dal server: se il server va perso senza questa chiave, nessun backup potrà più essere letto, da nessuno. Anche la copia del pannello è cifrata con questa chiave: senza di essa il pannello non può essere riportato su un nuovo server. La copia del pannello contiene anche la chiave di tutte le password salvate: chi ha questo file e l'accesso allo storage può leggerle, quindi tieni il file segreto come una password.",
+      panel: {
+        never: "Copia del pannello (account, siti e impostazioni): non ancora fatta. Viene fatta ogni notte dopo i backup dei siti.",
+        made: 'Copia del pannello (account, siti e impostazioni): fatta il {date}. Se questo server va perso, la sezione "Il server è perso" del README spiega come riportare il pannello con questa copia.',
+        failed: "Copia del pannello (account, siti e impostazioni): l'ultimo tentativo ({date}) non è riuscito.",
+      },
+      panelProblem: {
+        interrupted:
+          "La copia si è interrotta perché l'executor si è riavviato; viene rifatta da sola la notte successiva e, se si interrompe di nuovo, controlla journalctl -u hp-docker-executor.",
+        other:
+          "Qualcosa non ha funzionato durante la copia; viene rifatta da sola la notte successiva e, se non riesce di nuovo, usa «Prova la connessione» in questa pagina e controlla journalctl -u hp-docker-executor.",
+        repository_locked:
+          "Lo storage era bloccato da un altro backup ancora in corso; la copia viene rifatta da sola la notte successiva e, se non riesce di nuovo, controlla journalctl -u hp-docker-executor.",
+        timeout:
+          "La copia ha superato il tempo massimo ed è stata fermata; viene rifatta da sola la notte successiva e, se non riesce di nuovo, controlla la velocità verso lo storage con «Prova la connessione» in questa pagina.",
+        files_unreadable:
+          "La copia non è riuscita a leggere il file del database del pannello; viene rifatta da sola la notte successiva e, se non riesce di nuovo, controlla lo spazio libero su disco e journalctl -u hp-docker-executor.",
+        no_space:
+          "Durante la copia sul server è finito lo spazio libero su disco; viene rifatta da sola la notte successiva, quindi libera spazio sul disco prima di allora (df -h).",
+      },
       state: {
         notAvailable:
           "I backup non sono disponibili su questo tipo di installazione: servono un server installato con l'installer Linux (systemd).",
@@ -1197,6 +1232,14 @@ export const it = {
           "Il backup contiene viste, trigger o routine il cui utente del database non esiste più; il sito non è stato toccato. Ricrea l'utente con lo stesso nome e ripeti il ripristino.",
         address_not_updated:
           "Il ripristino è riuscito, ma l'impostazione dell'indirizzo del sito non è riuscita: i link potrebbero puntare a un vecchio indirizzo. Controlla i log dell'executor (journalctl -u hp-docker-executor) e reimposta il dominio principale del sito.",
+        panel_dump_failed:
+          "La copia del database del pannello non è riuscita. Controlla che PostgreSQL sia attivo (systemctl status postgresql) e i log dell'API (journalctl -u hp-api); la copia viene ritentata la notte successiva.",
+        panel_dump_tool_missing:
+          "La copia del pannello non ha potuto avviare pg_dump. Controlla che il pacchetto postgresql-18 sia installato (apt install postgresql-18); la copia viene ritentata la notte successiva.",
+        panel_dump_missing:
+          "La copia del pannello non ha potuto leggere il file del database. Controlla lo spazio libero su disco e journalctl -u hp-docker-executor; la copia viene ritentata la notte successiva.",
+        site_not_started:
+          "File e database sono tornati, ma il sito non è partito. Controlla i log dell'executor (journalctl -u hp-docker-executor) e riprova il ripristino.",
       } satisfies Record<BackupProblem, string>,
       removeButton: "Rimuovi destinazione",
       removeTitle: "Rimuovere la destinazione dei backup?",
@@ -1207,6 +1250,7 @@ export const it = {
       removed: "Destinazione rimossa.",
       sitesTitle: "Stato per sito",
       sitesEmpty: "Nessun sito.",
+      sitesTotal: "Ultimi backup di tutti i siti insieme: {size}.",
       sitesLoadFailed: "Non riusciamo a caricare lo stato dei siti. Ricarica la pagina.",
       columns: {
         site: "Sito",
@@ -1215,6 +1259,7 @@ export const it = {
         lastAttempt: "Ultimo tentativo",
         state: "Stato",
         action: "Azioni",
+        size: "Dimensione ultimo backup",
       },
       siteState: {
         never: "Mai",
@@ -1224,6 +1269,23 @@ export const it = {
       },
       runNow: "Fai un backup",
       retry: "Riprova",
+      restore: {
+        button: "Ripristina",
+        title: "Ripristinare il sito dal backup del {date}?",
+        body: "Ogni file e ogni database di questo sito torna com'era il {date}. Tutto ciò che è cambiato da allora va perso per sempre. Se di questo sito non resta nulla sul server, il pannello lo ricrea da questo backup.",
+        unavailable: "Se il sito è online, verso la fine i visitatori vedono per qualche secondo che è temporaneamente non disponibile.",
+        lostDatabases: "Un database eliminato da allora torna senza i suoi utenti: il cliente ridà gli accessi dalla scheda Database.",
+        backupFirst: 'Se il sito è ancora su questo server e vuoi conservarlo com\'è ora, annulla e usa prima "Fai un backup".',
+        typeName: "Per confermare, scrivi il nome del sito {name}",
+        cancel: "Annulla",
+        confirm: "Ripristina questo backup",
+        starting: "Avvio\u2026",
+        wrongName: "Il nome non corrisponde a questo sito. Inseriscilo esattamente come è indicato.",
+        noCopy: "Questo sito non ha più un backup riuscito da ripristinare. Ricarica la pagina.",
+        running: "Ripristino del backup del {date} in corso\u2026",
+        done: "Ripristinato al backup del {date}.",
+        failed: "Il ripristino del backup del {date} non è riuscito.",
+      },
       errors: {
         notConfigured: "Prima configura e salva una destinazione.",
         notReady: "Il sito non è ancora pronto: riprova quando la configurazione è finita.",

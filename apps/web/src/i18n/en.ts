@@ -685,6 +685,14 @@ export const en: Messages = {
           "This backup holds database views, triggers or procedures that belong to a database user deleted after the backup was made. Create that user again with the same name in the Databases tab, then try again; if you don't know which one, contact your hosting provider.",
         address_not_updated:
           "The site's address couldn't be set again: links and the login may point to an old address. Contact your hosting provider.",
+        panel_dump_failed:
+          "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
+        panel_dump_tool_missing:
+          "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
+        panel_dump_missing:
+          "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
+        site_not_started:
+          "Your site's files and databases are back, but the site could not be started. Contact your hosting provider.",
       },
       copyProblem: {
         unreachable:
@@ -726,6 +734,14 @@ export const en: Messages = {
           "This backup holds database views, triggers or procedures that belong to a database user deleted after the backup was made. Create that user again with the same name in the Databases tab, then try again; if you don't know which one, contact your hosting provider.",
         address_not_updated:
           "The site's address couldn't be set again: links and the login may point to an old address. Contact your hosting provider.",
+        panel_dump_failed:
+          "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
+        panel_dump_tool_missing:
+          "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
+        panel_dump_missing:
+          "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
+        site_not_started:
+          "Your site's files and databases are back, but the site could not be started. Contact your hosting provider.",
       } satisfies Record<BackupProblem, string>,
       restore: {
         button: "Restore",
@@ -1081,7 +1097,26 @@ export const en: Messages = {
       title: "Backups",
       subtitle: "Where and when to store the sites' nightly backups.",
       keyWarning:
-        "The key that encrypts backups is the file /etc/hosting-panel/backup.key on this server. Copy it somewhere safe off this server now: if the server is lost without this key, no backup can ever be read again, by anyone.",
+        "The key that encrypts backups is the file /etc/hosting-panel/backup.key on this server. Copy it somewhere safe off this server now: if the server is lost without this key, no backup can ever be read again, by anyone. The panel's own copy is encrypted with the same key: without it, the panel cannot be brought back on a new server either. The panel's copy also holds the key of all stored passwords: whoever has this key file and access to the storage can read them, so keep the file as secret as a password.",
+      panel: {
+        never: "Copy of the panel (accounts, sites and settings): not made yet. It is made every night after the sites' backups.",
+        made: 'Copy of the panel (accounts, sites and settings): made {date}. If this server is lost, the README section "The server is lost" explains how to bring the panel back with it.',
+        failed: "Copy of the panel (accounts, sites and settings): the last attempt ({date}) failed.",
+      },
+      panelProblem: {
+        interrupted:
+          "The copy stopped because the executor restarted; it is made again by itself next night, and if it stops again, check journalctl -u hp-docker-executor.",
+        other:
+          'Something went wrong while making the copy; it is made again by itself next night, and if it fails again, run "Test the connection" on this page and check journalctl -u hp-docker-executor.',
+        repository_locked:
+          "The storage was locked by another backup still running; the copy is made again by itself next night, and if it fails again, check journalctl -u hp-docker-executor.",
+        timeout:
+          'The copy went over the time limit and was stopped; it is made again by itself next night, and if it fails again, check the speed to the storage with "Test the connection" on this page.',
+        files_unreadable:
+          "The copy could not read the panel's database file; it is made again by itself next night, and if it fails again, check free disk space and journalctl -u hp-docker-executor.",
+        no_space:
+          "The server ran out of free disk space while making the copy; it is made again by itself next night, so free up disk space before then (df -h).",
+      },
       state: {
         notAvailable:
           "Backups are not available on this kind of install: they need a server installed with the Linux (systemd) installer.",
@@ -1181,6 +1216,14 @@ export const en: Messages = {
           "The backup holds views, triggers or routines whose database user no longer exists; the site was not touched. Create the user again with the same name, then restore again.",
         address_not_updated:
           "The restore succeeded, but setting the site's address failed: links may point to an old address. Check the executor logs (journalctl -u hp-docker-executor) and set the site's primary domain again.",
+        panel_dump_failed:
+          "Copying the panel's own database failed. Check that PostgreSQL is running (systemctl status postgresql) and the API logs (journalctl -u hp-api); the copy is tried again next night.",
+        panel_dump_tool_missing:
+          "The panel's copy could not start pg_dump. Check that the postgresql-18 package is installed (apt install postgresql-18); the copy is tried again next night.",
+        panel_dump_missing:
+          "The panel's copy could not read its database file. Check free disk space and journalctl -u hp-docker-executor; the copy is tried again next night.",
+        site_not_started:
+          "The files and databases are back, but the site could not be started. Check the executor logs (journalctl -u hp-docker-executor) and try the restore again.",
       },
       removeButton: "Remove destination",
       removeTitle: "Remove the backup destination?",
@@ -1191,6 +1234,7 @@ export const en: Messages = {
       removed: "Destination removed.",
       sitesTitle: "Status per site",
       sitesEmpty: "No sites.",
+      sitesTotal: "Newest backups of all sites together: {size}.",
       sitesLoadFailed: "We can't load the sites' status. Reload the page.",
       columns: {
         site: "Site",
@@ -1199,6 +1243,7 @@ export const en: Messages = {
         lastAttempt: "Last attempt",
         state: "Status",
         action: "Actions",
+        size: "Newest backup size",
       },
       siteState: {
         never: "Never",
@@ -1208,6 +1253,23 @@ export const en: Messages = {
       },
       runNow: "Back up",
       retry: "Retry",
+      restore: {
+        button: "Restore",
+        title: "Restore the site from its backup of {date}?",
+        body: "Every file and every database of this site goes back to how it was on {date}. Everything changed since then is lost for good. If nothing of the site is left on this server, the panel creates it again from this backup.",
+        unavailable: "If the site is online, near the end visitors see for a few seconds that it is temporarily unavailable.",
+        lostDatabases: "A database deleted since then comes back without its users: the customer gives access again in the Databases tab.",
+        backupFirst: 'If the site is still on this server and you want to keep it as it is now, cancel and use "Back up" first.',
+        typeName: "To confirm, type the site name {name}",
+        cancel: "Cancel",
+        confirm: "Restore this backup",
+        starting: "Starting\u2026",
+        wrongName: "The name doesn't match this site. Enter it exactly as shown.",
+        noCopy: "This site has no successful backup to restore any more. Reload the page.",
+        running: "Restoring the backup of {date}\u2026",
+        done: "Restored to the backup of {date}.",
+        failed: "The restore of the backup of {date} failed.",
+      },
       errors: {
         notConfigured: "Set up and save a destination first.",
         notReady: "The site isn't ready yet: try again when its setup has finished.",

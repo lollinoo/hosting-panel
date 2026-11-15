@@ -6,6 +6,7 @@ import {
   DEFAULT_BACKUP_HOUR_UTC,
   DEFAULT_BACKUP_RETENTION_DAYS,
   type AdminSiteBackupStatusDto,
+  type BackupLastRestoreDto,
   type BackupProblem,
   type BackupSettingsDto,
   type BackupSettingsInput,
@@ -13,6 +14,7 @@ import {
   type BackupTestResultDto,
 } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { RestoreBackupDialog } from "@/components/customer/restore-backup-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +38,7 @@ import {
 } from "@/components/ui/table";
 import { errorMessage, format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
+import { formatSize } from "@/lib/file-browser";
 
 const BASE = "/api/admin/backups";
 const EMPTY_CELL = "\u2014";
@@ -234,6 +237,33 @@ export function backupApiErrorText(
   return errorMessage(m, code);
 }
 
+/** Text under a site's badge for its last restore, or null. */
+export function adminRestoreText(
+  t: Messages["admin"]["backups"],
+  r: BackupLastRestoreDto | null,
+  locale: string,
+): string | null {
+  if (!r) return null;
+  const date = formatDateTime(r.backupStartedAt, locale);
+  if (r.status === "running") return format(t.restore.running, { date });
+  if (r.status === "succeeded") return r.problem ? backupProblemText(t, r.problem) : format(t.restore.done, { date });
+  return `${format(t.restore.failed, { date })} ${backupProblemText(t, r.problem)}`;
+}
+
+/** Maps an administrator restore error to a text with a next step. */
+export function adminRestoreErrorText(m: Messages, status: number, json: unknown): string {
+  const details = (json as { error?: { details?: unknown } } | null)?.error?.details;
+  const fields = Array.isArray(details) ? details.map((d) => (d as ApiErrorDetail | null)?.field) : [];
+  if (fields.includes("confirmName")) return m.admin.backups.restore.wrongName;
+  if (fields.includes("backupId")) return m.admin.backups.restore.noCopy;
+  return backupApiErrorText(m, status, json, "sites");
+}
+
+/** True while a backup or a restore of the site runs. */
+function isSiteBusy(row: AdminSiteBackupStatusDto): boolean {
+  return row.lastStatus === "running" || row.lastRestore?.status === "running";
+}
+
 /** Polls the admin sites backup list via non-overlapping setTimeout calls while any site is running. */
 export function startBackupSitesPolling(opts: {
   load: () => Promise<PollLoadResult>;
@@ -267,7 +297,7 @@ export function startBackupSitesPolling(opts: {
         return;
       }
       opts.onSites(result.sites);
-      if (result.sites.some((row) => row.lastStatus === "running")) {
+      if (result.sites.some(isSiteBusy)) {
         schedule();
       } else {
         stopped = true;
@@ -310,6 +340,9 @@ function emptySettingsFrom(current: BackupSettingsDto): BackupSettingsDto {
     lastNightlyRunOn: null,
     lastTest: null,
     updatedAt: null,
+    // Clearing deletes the settings row (panel line) and the recorded copies (their total).
+    lastPanelBackup: null,
+    newestBackupsTotalBytes: 0,
   };
 }
 
@@ -398,6 +431,7 @@ export function BackupSettings({
   const [testError, setTestError] = useState<string | null>(null);
   const [sitesError, setSitesError] = useState<string | null>(null);
   const [startingSiteId, setStartingSiteId] = useState<string | null>(null);
+  const [restoreRow, setRestoreRow] = useState<AdminSiteBackupStatusDto | null>(null);
   const sitesSeq = useRef(0);
 
   const refreshSites = useCallback(async () => {
@@ -420,7 +454,7 @@ export function BackupSettings({
   }, [m, t.sitesLoadFailed]);
 
   const anyRunning =
-    data.available && (sites?.some((row) => row.lastStatus === "running") ?? false);
+    data.available && (sites?.some(isSiteBusy) ?? false);
 
   useEffect(() => {
     if (!anyRunning) return;
@@ -634,6 +668,33 @@ export function BackupSettings({
     }
   }
 
+  async function handleConfirmRestore(confirmName: string) {
+    const row = restoreRow;
+    if (!row?.lastSuccessAt) return null;
+    try {
+      const { res, json } = await callApi(
+        "POST",
+        `${BASE}/sites/${encodeURIComponent(row.siteId)}/restore`,
+        { backupId: row.lastSuccessBackupId ?? undefined, confirmName },
+        { "Idempotency-Key": crypto.randomUUID() },
+      );
+      if (!res.ok) return adminRestoreErrorText(m, res.status, json);
+      const lastRestore: BackupLastRestoreDto = {
+        backupId: row.lastSuccessBackupId ?? "",
+        backupStartedAt: row.lastSuccessAt,
+        status: "running",
+        finishedAt: null,
+        problem: null,
+      };
+      setRestoreRow(null);
+      setSites((prev) => prev?.map((r) => (r.siteId === row.siteId ? { ...r, lastRestore } : r)) ?? prev);
+      void refreshSites();
+      return null;
+    } catch {
+      return m.errors.generic;
+    }
+  }
+
   const fieldErrorNode = (key: BackupFieldKey) => {
     const msgKey = fieldErrors[key];
     if (!msgKey) return null;
@@ -684,6 +745,29 @@ export function BackupSettings({
     );
   };
 
+  const renderPanelLine = () => {
+    if (!data.available || !data.configured) return null;
+    const line = data.lastPanelBackup;
+    if (line?.status === "failed") {
+      const panelProblem = t.panelProblem as Partial<Record<BackupProblem, string>>;
+      return (
+        <Alert variant="destructive" role="alert">
+          <AlertDescription className="space-y-1">
+            <p>{format(t.panel.failed, { date: formatDateTime(line.at, locale) })}</p>
+            <p>{panelProblem[line.problem ?? "other"] ?? backupProblemText(t, line.problem)}</p>
+          </AlertDescription>
+        </Alert>
+      );
+    }
+    return (
+      <Alert role="status">
+        <AlertDescription>
+          {line ? format(t.panel.made, { date: formatDateTime(line.at, locale) }) : t.panel.never}
+        </AlertDescription>
+      </Alert>
+    );
+  };
+
   const targetChanged = isBackupTargetChanged(data, draft);
 
   return (
@@ -693,6 +777,7 @@ export function BackupSettings({
       </Alert>
 
       {renderStateBanner()}
+      {renderPanelLine()}
 
       {data.available && (
         <>
@@ -901,32 +986,32 @@ export function BackupSettings({
                 <p className="text-sm text-muted-foreground">{t.testSaveFirst}</p>
               ) : (
                 <>
-                  <p className="text-sm text-muted-foreground">{t.testHelp}</p>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy !== null}
-                    onClick={handleRunTest}
-                  >
-                    {busy === "test" ? t.testing : t.testButton}
-                  </Button>
-                  {testResult && (
-                    <Alert
-                      variant={testResult.outcome === "ok" ? "default" : "destructive"}
-                      role={testResult.outcome === "ok" ? "status" : "alert"}
+                    <p className="text-sm text-muted-foreground">{t.testHelp}</p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy !== null}
+                      onClick={handleRunTest}
                     >
-                      <AlertDescription>
-                        {testResult.outcome === "ok"
-                          ? t.outcome.ok
-                          : backupProblemText(t, testResult.problem)}
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                  {testError && (
-                    <Alert variant="destructive" role="alert">
-                      <AlertDescription>{testError}</AlertDescription>
-                    </Alert>
-                  )}
+                      {busy === "test" ? t.testing : t.testButton}
+                    </Button>
+                    {testResult && (
+                      <Alert
+                        variant={testResult.outcome === "ok" ? "default" : "destructive"}
+                        role={testResult.outcome === "ok" ? "status" : "alert"}
+                      >
+                        <AlertDescription>
+                          {testResult.outcome === "ok"
+                            ? t.outcome.ok
+                            : backupProblemText(t, testResult.problem)}
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                    {testError && (
+                      <Alert variant="destructive" role="alert">
+                        <AlertDescription>{testError}</AlertDescription>
+                      </Alert>
+                    )}
                 </>
               )}
             </CardContent>
@@ -951,12 +1036,17 @@ export function BackupSettings({
               ) : sites.length === 0 ? (
                 <p className="text-sm text-muted-foreground">{t.sitesEmpty}</p>
               ) : (
+                <>
+                <p className="text-sm text-muted-foreground">
+                  {format(t.sitesTotal, { size: formatSize(data.newestBackupsTotalBytes, locale) })}
+                </p>
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>{t.columns.site}</TableHead>
                       <TableHead>{t.columns.owner}</TableHead>
                       <TableHead>{t.columns.lastSuccess}</TableHead>
+                      <TableHead>{t.columns.size}</TableHead>
                       <TableHead>{t.columns.lastAttempt}</TableHead>
                       <TableHead>{t.columns.state}</TableHead>
                       <TableHead>{t.columns.action}</TableHead>
@@ -965,7 +1055,8 @@ export function BackupSettings({
                   <TableBody>
                     {sites.map((row) => {
                       const stateKey = row.lastStatus ?? "never";
-                      const isRowRunning = row.lastStatus === "running";
+                      const rowBusy = isSiteBusy(row);
+                      const restoreText = adminRestoreText(t, row.lastRestore, locale);
                       return (
                         <TableRow key={row.siteId}>
                           <TableCell className="font-medium">{row.siteName}</TableCell>
@@ -974,6 +1065,11 @@ export function BackupSettings({
                             {row.lastSuccessAt
                               ? formatDateTime(row.lastSuccessAt, locale)
                               : EMPTY_CELL}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap">
+                            {row.lastSuccessSizeBytes === null
+                              ? EMPTY_CELL
+                              : formatSize(row.lastSuccessSizeBytes, locale)}
                           </TableCell>
                           <TableCell className="whitespace-nowrap">
                             {row.lastAttemptAt
@@ -989,31 +1085,65 @@ export function BackupSettings({
                                 {backupProblemText(t, row.problem)}
                               </p>
                             )}
+                            {restoreText && (
+                              <p
+                                role="status"
+                                className={`mt-1 text-xs ${row.lastRestore?.problem ? "text-destructive" : "text-muted-foreground"}`}
+                              >
+                                {restoreText}
+                              </p>
+                            )}
                           </TableCell>
                           <TableCell>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={
-                                !data.configured ||
-                                isRowRunning ||
-                                busy !== null ||
-                                startingSiteId !== null
-                              }
-                              onClick={() => handleRunSiteBackup(row.siteId)}
-                            >
-                              {row.lastStatus === "failed" ? t.retry : t.runNow}
-                            </Button>
+                            <div className="flex flex-wrap gap-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  !data.configured ||
+                                  rowBusy ||
+                                  busy !== null ||
+                                  startingSiteId !== null
+                                }
+                                onClick={() => handleRunSiteBackup(row.siteId)}
+                              >
+                                {row.lastStatus === "failed" ? t.retry : t.runNow}
+                              </Button>
+                              {row.lastSuccessAt !== null && (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  aria-label={`${t.restore.button} ${row.siteName}`}
+                                  disabled={!data.configured || rowBusy || busy !== null}
+                                  onClick={() => setRestoreRow(row)}
+                                >
+                                  {t.restore.button}
+                                </Button>
+                              )}
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
                     })}
                   </TableBody>
                 </Table>
+                </>
               )}
             </CardContent>
           </Card>
+
+          <RestoreBackupDialog
+            backup={restoreRow?.lastSuccessAt ? { id: restoreRow.siteId, startedAt: restoreRow.lastSuccessAt } : null}
+            siteName={restoreRow?.siteName ?? ""}
+            open={restoreRow !== null}
+            onOpenChange={(open) => {
+              if (!open) setRestoreRow(null);
+            }}
+            onConfirm={handleConfirmRestore}
+            texts={t.restore}
+          />
 
           <Dialog
             open={confirmingChange}

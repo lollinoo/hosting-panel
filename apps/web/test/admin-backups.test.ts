@@ -39,13 +39,17 @@ import AdminBackupsPage from "@/app/admin/backups/page";
 import { DELETE, GET, PATCH } from "@/app/api/admin/backups/route";
 import { GET as listSites } from "@/app/api/admin/backups/sites/route";
 import { POST as runSiteBackup } from "@/app/api/admin/backups/sites/[siteId]/run/route";
+import { POST as restoreSite } from "@/app/api/admin/backups/sites/[siteId]/restore/route";
 import { POST as testConnection } from "@/app/api/admin/backups/test/route";
 import {
   BackupSettings,
   ConfirmTargetChangeBody,
   RemoveBackupTargetBody,
+  adminRestoreErrorText,
+  adminRestoreText,
   backupApiErrorText,
   backupProblemText,
+  formatDateTime,
   formatLocalHour,
   formatNightlyDate,
   formatUtcHour,
@@ -55,7 +59,9 @@ import {
   type BackupFieldKey,
   type BackupFormDraft,
 } from "@/components/admin/backup-settings";
+import { RestoreBackupForm } from "@/components/customer/restore-backup-dialog";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
+import { formatDate, formatSize } from "@/lib/file-browser";
 import { Dialog } from "@/components/ui/dialog";
 
 const wrap = (m: Messages, child: React.ReactElement) =>
@@ -91,6 +97,8 @@ const makeSettings = (over: Partial<BackupSettingsDto> = {}): BackupSettingsDto 
   lastNightlyRunOn: "2026-11-14",
   lastTest: { outcome: "ok", problem: null, at: "2026-11-14T10:00:00Z" },
   updatedAt: "2026-11-14T09:00:00Z",
+  lastPanelBackup: null,
+  newestBackupsTotalBytes: 0,
   ...over,
 });
 
@@ -104,6 +112,9 @@ const makeSiteRow = (over: Partial<AdminSiteBackupStatusDto> = {}): AdminSiteBac
   lastStatus: "succeeded",
   problem: null,
   runningOperationId: null,
+  lastSuccessBackupId: null,
+  lastSuccessSizeBytes: null,
+  lastRestore: null,
   ...over,
 });
 
@@ -620,5 +631,201 @@ describe("validation, problem catalog, confirmations and sidebar (g, h, i, j)", 
     await vi.advanceTimersByTimeAsync(20_000);
     expect(loadStop).toHaveBeenCalledTimes(1);
     expect(onError).not.toHaveBeenCalled();
+  });
+});
+
+describe("panel copy line, storage figures and the administrator's restore (C1)", () => {
+  const render = (m: Messages, initial: BackupSettingsDto, sites: AdminSiteBackupStatusDto[] | null = []) =>
+    decodeHtml(renderToStaticMarkup(wrap(m, createElement(BackupSettings, { csrfToken: "csrf", initial, sites }))));
+  const at = "2026-11-15T01:30:00Z";
+
+  beforeEach(() => {
+    fetchUpstream.mockReset();
+    getSessionFromRequest.mockReset();
+    getSessionFromRequest.mockResolvedValue({ accessToken: "tok", csrfToken: "csrf" });
+  });
+
+  it("BFF restore route forwards the body as it is with the Idempotency-Key, and refuses bad requests before upstream", async () => {
+    fetchUpstream.mockResolvedValue({ ok: true, status: 202, data: { data: { operationId: "op_1" } } });
+    const body = { backupId: `bkp_${"a".repeat(32)}`, confirmName: "Hotel Bella Vista" };
+    const res = await restoreSite(req("POST", { "Idempotency-Key": "idem-r" }, body), siteCtx("site_1"));
+    expect(res.status).toBe(202);
+    const [path, opts] = fetchUpstream.mock.calls[0]!;
+    expect([path, opts.method, opts.timeoutMs, opts.idempotencyKey]).toEqual([
+      "v1/admin/backups/sites/site_1/restore",
+      "POST",
+      30_000,
+      "idem-r",
+    ]);
+    expect(opts.body).toEqual(body);
+
+    fetchUpstream.mockClear();
+    expect((await restoreSite(req("POST", {}, body), siteCtx("site_1"))).status).toBe(400);
+    expect((await restoreSite(req("POST", { "Idempotency-Key": "k" }, body), siteCtx("../x"))).status).toBe(400);
+    for (const headers of [{ "X-CSRF-Token": "wrong" }, { Origin: "https://evil.example" }] as Record<string, string>[]) {
+      expect((await restoreSite(req("POST", { ...headers, "Idempotency-Key": "k" }, body), siteCtx("s1"))).status).toBe(403);
+    }
+    expect(fetchUpstream).not.toHaveBeenCalled();
+
+    fetchUpstream.mockResolvedValueOnce({ ok: false, status: 409, error: { error: { code: "RESOURCE_LOCKED" } } });
+    expect((await restoreSite(req("POST", { "Idempotency-Key": "k" }, body), siteCtx("s1"))).status).toBe(409);
+  });
+
+  it("panel copy line: never, made, failed with the problem; hidden when not available or not configured", () => {
+    for (const m of [en, itMsgs]) {
+      const t = m.admin.backups;
+      const locale = m === en ? "en" : "it";
+      expect(render(m, makeSettings({ lastPanelBackup: null }))).toContain(t.panel.never);
+      expect(render(m, makeSettings({ lastPanelBackup: { at, status: "succeeded", problem: null } }))).toContain(
+        format(t.panel.made, { date: formatDateTime(at, locale) }),
+      );
+      const failed = render(m, makeSettings({ lastPanelBackup: { at, status: "failed", problem: "panel_dump_failed" } }));
+      expect(failed).toContain(format(t.panel.failed, { date: formatDateTime(at, locale) }));
+      expect(failed).toContain(t.problem.panel_dump_failed);
+      expect(t.keyWarning).toContain("/etc/hosting-panel/backup.key");
+
+      const madeLine = { at, status: "succeeded" as const, problem: null };
+      for (const hidden of [
+        makeSettings({ available: false, lastPanelBackup: madeLine }),
+        makeSettings({ configured: false, lastPanelBackup: madeLine }),
+        makeSettings({ configured: false, lastPanelBackup: null }),
+      ]) {
+        const html = render(m, hidden);
+        expect(html).not.toContain(t.panel.never);
+        expect(html).not.toContain(format(t.panel.made, { date: formatDateTime(at, locale) }));
+      }
+    }
+    expect(en.admin.backups.keyWarning).toMatch(/panel's own copy/);
+    expect(itMsgs.admin.backups.keyWarning).toMatch(/copia del pannello/);
+  });
+
+  it("figures: size column per site (dash without a copy) and the total above the table", () => {
+    const sites = [
+      makeSiteRow({ siteId: "s1", siteName: "Alpha", lastSuccessSizeBytes: 5 * 1024 * 1024 }),
+      makeSiteRow({ siteId: "s2", siteName: "Beta", lastSuccessAt: null, lastSuccessSizeBytes: null, lastStatus: null }),
+    ];
+    for (const m of [en, itMsgs]) {
+      const locale = m === en ? "en" : "it";
+      const html = render(m, makeSettings({ newestBackupsTotalBytes: 5 * 1024 * 1024 }), sites);
+      expect(html).toContain(m.admin.backups.columns.size);
+      expect(html).toContain(formatSize(5 * 1024 * 1024, locale));
+      expect(html).toContain(format(m.admin.backups.sitesTotal, { size: formatSize(5 * 1024 * 1024, locale) }));
+      expect(html.split("\u2014").length).toBeGreaterThan(1);
+    }
+  });
+
+  it("restore button only for a site with a succeeded copy, named with the site, disabled while the site is busy", () => {
+    const t = en.admin.backups;
+    const html = render(en, makeSettings(), [
+      makeSiteRow({ siteId: "s1", siteName: "Alpha", lastSuccessBackupId: `bkp_${"1".repeat(32)}` }),
+      makeSiteRow({ siteId: "s2", siteName: "Beta", lastSuccessAt: null, lastStatus: null }),
+    ]);
+    expect(html).toContain(`aria-label="${t.restore.button} Alpha"`);
+    expect(html).not.toContain(`aria-label="${t.restore.button} Beta"`);
+
+    const busy = render(en, makeSettings(), [
+      makeSiteRow({
+        siteName: "Alpha",
+        lastRestore: { backupId: "bkp_1", backupStartedAt: at, status: "running", finishedAt: null, problem: null },
+      }),
+    ]);
+    expect(busy).toMatch(new RegExp(`<button[^>]*disabled=""[^>]*aria-label="${t.restore.button} Alpha"|<button[^>]*aria-label="${t.restore.button} Alpha"[^>]*disabled=""`));
+    expect(busy).toContain(format(t.restore.running, { date: formatDateTime(at, "en") }));
+  });
+
+  it("restore outcome under the badge: running, done, done with a problem, failed with the problem", () => {
+    for (const m of [en, itMsgs]) {
+      const t = m.admin.backups;
+      const locale = m === en ? "en" : "it";
+      const date = formatDateTime(at, locale);
+      const r = { backupId: "bkp_1", backupStartedAt: at, finishedAt: null };
+      expect(adminRestoreText(t, null, locale)).toBeNull();
+      expect(adminRestoreText(t, { ...r, status: "running", problem: null }, locale)).toBe(format(t.restore.running, { date }));
+      expect(adminRestoreText(t, { ...r, status: "succeeded", problem: null }, locale)).toBe(format(t.restore.done, { date }));
+      expect(adminRestoreText(t, { ...r, status: "succeeded", problem: "site_not_started" }, locale)).toBe(
+        t.problem.site_not_started,
+      );
+      expect(adminRestoreText(t, { ...r, status: "failed", problem: "no_space" }, locale)).toBe(
+        `${format(t.restore.failed, { date })} ${t.problem.no_space}`,
+      );
+    }
+  });
+
+  it("each answer of the restore route has its own text with a next step", () => {
+    for (const m of [en, itMsgs]) {
+      const t = m.admin.backups;
+      const err = (code: string, details?: unknown) => ({ error: { code, details } });
+      expect(adminRestoreErrorText(m, 400, err("VALIDATION_ERROR", [{ field: "confirmName" }]))).toBe(t.restore.wrongName);
+      expect(
+        adminRestoreErrorText(m, 400, err("VALIDATION_ERROR", [{ field: "backupId", message: "no_succeeded_backup" }])),
+      ).toBe(t.restore.noCopy);
+      expect(adminRestoreErrorText(m, 409, err("RESOURCE_LOCKED"))).toBe(m.errors.RESOURCE_LOCKED);
+      expect(adminRestoreErrorText(m, 422, err("NOT_SUPPORTED"))).toBe(t.state.notAvailable);
+      expect(adminRestoreErrorText(m, 404, err("NOT_FOUND"))).toBe(m.errors.NOT_FOUND);
+      expect(adminRestoreErrorText(m, 500, null)).toBe(m.errors.generic);
+    }
+  });
+
+  it("the shared dialog shows the administrator's texts when given", () => {
+    for (const m of [en, itMsgs]) {
+      const t = m.admin.backups.restore;
+      const html = decodeHtml(
+        renderToStaticMarkup(
+          wrap(
+            m,
+            createElement(
+              Dialog,
+              { open: true },
+              createElement(RestoreBackupForm, {
+                backup: { id: "s1", startedAt: at },
+                siteName: "Alpha",
+                texts: t,
+                onConfirm: async () => null,
+                onCancel: () => {},
+              }),
+            ),
+          ),
+        ),
+      );
+      const date = formatDate(at, m === en ? "en" : "it");
+      expect(html).toContain(format(t.title, { date }));
+      expect(html).toContain(format(t.body, { date }));
+      expect(html).toContain(t.confirm);
+      expect(html).not.toContain(format(m.site.backups.restore.body, { date }));
+    }
+  });
+
+  it("keeps polling while a restore is running and stops once it settled", async () => {
+    vi.useFakeTimers();
+    try {
+      const restoring = makeSiteRow({
+        lastRestore: { backupId: "bkp_1", backupStartedAt: at, status: "running", finishedAt: null, problem: null },
+      });
+      const restored = makeSiteRow({
+        lastRestore: { backupId: "bkp_1", backupStartedAt: at, status: "succeeded", finishedAt: at, problem: null },
+      });
+      const load = vi
+        .fn()
+        .mockResolvedValueOnce({ kind: "ok", sites: [restoring] })
+        .mockResolvedValueOnce({ kind: "ok", sites: [restored] });
+      startBackupSitesPolling({ load, onSites: vi.fn(), onError: vi.fn() });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(load).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(load).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("every new administrator text avoids the forbidden engine words", () => {
+    for (const m of [en, itMsgs]) {
+      const t = m.admin.backups;
+      const texts = [...Object.values(t.panel), ...Object.values(t.restore), t.sitesTotal, t.columns.size];
+      for (const text of texts) {
+        expect(text).not.toMatch(/docker|container|image|network|volume|revision|\bjob\b|restic|\bS3\b|snapshot|bucket|repository/i);
+      }
+    }
   });
 });

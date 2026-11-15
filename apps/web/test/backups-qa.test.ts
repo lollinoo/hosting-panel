@@ -551,8 +551,8 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
     );
   });
 
-  it("defines all 22 BACKUP_PROBLEMS in IT/EN for admin and customer and never repeats key names as customer copy", () => {
-    expect(BACKUP_PROBLEMS).toHaveLength(22);
+  it("defines all 26 BACKUP_PROBLEMS in IT/EN for admin and customer and never repeats key names as customer copy", () => {
+    expect(BACKUP_PROBLEMS).toHaveLength(26);
 
     for (const problem of BACKUP_PROBLEMS) {
       for (const [localeName, catalog] of [

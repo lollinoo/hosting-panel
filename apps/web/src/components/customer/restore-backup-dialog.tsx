@@ -8,12 +8,18 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { format } from "@/i18n";
+import { format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { formatDate } from "@/lib/file-browser";
 
 /** Resolves to null on success (202 started) or to an inline error message to display. */
 export type ConfirmRestoreBackup = (confirmName: string) => Promise<string | null>;
+
+/** Texts the dialog shows; the customer's catalog block is the default. */
+export type RestoreDialogTexts = Pick<
+  Messages["site"]["backups"]["restore"],
+  "title" | "body" | "unavailable" | "lostDatabases" | "backupFirst" | "typeName" | "cancel" | "starting" | "confirm"
+>;
 
 /**
  * Checks whether the typed confirmation matches the site's exact name.
@@ -35,6 +41,7 @@ export function RestoreBackupForm({
   onCancel,
   cancelButtonRef,
   onBusyChange,
+  texts,
 }: {
   backup: Pick<SiteBackupDto, "id" | "startedAt">;
   siteName: string;
@@ -42,8 +49,10 @@ export function RestoreBackupForm({
   onCancel: () => void;
   cancelButtonRef?: RefObject<HTMLButtonElement | null>;
   onBusyChange?: (busy: boolean) => void;
+  texts?: RestoreDialogTexts;
 }) {
-  const t = useMessages().site.backups.restore;
+  const customer = useMessages().site.backups.restore;
+  const t = texts ?? customer;
   const locale = useLocale();
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
@@ -150,12 +159,14 @@ export function RestoreBackupDialog({
   open,
   onOpenChange,
   onConfirm,
+  texts,
 }: {
   backup: Pick<SiteBackupDto, "id" | "startedAt"> | null;
   siteName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: ConfirmRestoreBackup;
+  texts?: RestoreDialogTexts;
 }) {
   const busyRef = useRef(false);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
@@ -177,6 +188,7 @@ export function RestoreBackupDialog({
             backup={backup}
             siteName={siteName}
             onConfirm={onConfirm}
+            texts={texts}
             onCancel={() => onOpenChange(false)}
             cancelButtonRef={cancelButtonRef}
             onBusyChange={(busy) => {
