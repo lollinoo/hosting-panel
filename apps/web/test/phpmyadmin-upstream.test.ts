@@ -45,22 +45,28 @@ describe("fetchPhpMyAdminUpstream", () => {
 
   it("sets no timeout of any kind on the HTTP request or socket", async () => {
     const requestSpy = vi.spyOn(http, "request");
+    let serverRes!: http.ServerResponse;
     const srv = await startHttpTestServer((_req, res) => {
+      serverRes = res;
       res.writeHead(200, { "Content-Type": "text/plain" });
-      res.end("ok");
+      res.write("ok");
     });
     cleanups.push(srv.close);
 
     const res = await fetchPhpMyAdminUpstream(`${srv.url}/ping`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
 
     expect(requestSpy).toHaveBeenCalledTimes(1);
     const reqOpts = requestSpy.mock.calls[0]?.[1] as http.RequestOptions | undefined;
     expect(reqOpts?.timeout).toBeUndefined();
     const clientReq = requestSpy.mock.results[0]?.value as http.ClientRequest | undefined;
-    const seenSocketTimeout = clientReq?.socket?.timeout;
-    expect(seenSocketTimeout).toBeUndefined();
+    expect(clientReq).toBeDefined();
+    expect(clientReq!.socket).toBeDefined();
+    expect(clientReq!.socket).not.toBeNull();
+    expect(clientReq!.socket!.timeout).toBeUndefined();
+
+    serverRes.end();
+    expect(await res.text()).toBe("ok");
   });
 
   it("forwards method, headers, exact content-length, and streams request body without buffering", async () => {
@@ -349,7 +355,7 @@ describe("fetchPhpMyAdminUpstream", () => {
     expect(connectionsSeen).toBe(1);
   });
 
-  it("delivers early 200 response in full when upstream stops reading a 10 MB upload", async () => {
+  it("delivers early 200 response in full when upstream stops reading a 64 MB streamed upload", async () => {
     const expectedText = "phpMyAdmin: file too large (early answer)";
     const upstreamSrv = await startHttpTestServer((req, res) => {
       let received = 0;
@@ -371,7 +377,7 @@ describe("fetchPhpMyAdminUpstream", () => {
     const frontSrv = await startFrontProxyServer(upstreamSrv.url);
     cleanups.push(frontSrv.close);
 
-    const result = await uploadChunked10Mb(`${frontSrv.url}/import`);
+    const result = await uploadChunked(frontSrv.url + "/import", 64 * 1024 * 1024);
     expect(result.status).toBe(200);
     expect(result.body).toBe(expectedText);
   });
@@ -478,9 +484,12 @@ function startFrontProxyServer(upstreamBaseUrl: string): Promise<TestServerHandl
   });
 }
 
-// Uploads 10 MiB asynchronously in 64 KiB chunks and collects the HTTP status and body.
+// Uploads totalBytes asynchronously in 64 KiB chunks without holding the payload in memory.
 function uploadChunked10Mb(targetUrl: string): Promise<{ status: number; body: string }> {
-  const totalBytes = 10 * 1024 * 1024;
+  return uploadChunked(targetUrl, 10 * 1024 * 1024);
+}
+
+function uploadChunked(targetUrl: string, totalBytes: number): Promise<{ status: number; body: string }> {
   const chunkSize = 64 * 1024;
   const chunk = Buffer.alloc(chunkSize, 0x78);
 
