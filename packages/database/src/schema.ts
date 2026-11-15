@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  date,
   foreignKey,
   index,
   integer,
@@ -15,6 +16,9 @@ import {
 import { sql } from "drizzle-orm";
 import type {
   AuditActorType,
+  BackupKind,
+  BackupProblem,
+  BackupStatus,
   CertProblem,
   CertStatus,
   DnsStatus,
@@ -690,3 +694,42 @@ export const mailRelaySettings = pgTable("mail_relay_settings", {
   updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const backupSettings = pgTable("backup_settings", {
+  id: text("id").primaryKey(),
+  endpoint: text("endpoint").notNull(),
+  region: text("region").notNull(),
+  bucket: text("bucket").notNull(),
+  prefix: text("prefix").notNull().default(""),
+  accessKeyId: text("access_key_id").notNull(),
+  secretAccessKeyCiphertextBase64: text("secret_access_key_ciphertext_base64").notNull(),
+  secretAccessKeyIvBase64: text("secret_access_key_iv_base64").notNull(),
+  secretAccessKeyAuthTagBase64: text("secret_access_key_auth_tag_base64").notNull(),
+  secretAccessKeyKeyVersion: text("secret_access_key_key_version").notNull().default("v1"),
+  scheduleHourUtc: integer("schedule_hour_utc").notNull().default(2),
+  retentionDays: integer("retention_days").notNull().default(14),
+  lastNightlyRunOn: date("last_nightly_run_on", { mode: "string" }),
+  nightlyRunStartedAt: timestamp("nightly_run_started_at", { withTimezone: true }),
+  lastTestAt: timestamp("last_test_at", { withTimezone: true }),
+  lastTestOutcome: text("last_test_outcome").$type<"ok" | "failed">(),
+  lastTestProblem: text("last_test_problem").$type<BackupProblem>(),
+  updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const siteBackups = pgTable(
+  "site_backups",
+  {
+    id: text("id").primaryKey(),
+    siteId: text("site_id").notNull(),
+    kind: text("kind").$type<BackupKind>().notNull(),
+    status: text("status").$type<BackupStatus>().notNull(),
+    operationId: text("operation_id").unique(),
+    snapshotId: text("snapshot_id"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    problem: text("problem").$type<BackupProblem>(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [index("idx_site_backups_site_started").on(t.siteId, t.startedAt)],
+);

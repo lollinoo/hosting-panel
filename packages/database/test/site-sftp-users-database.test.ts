@@ -98,6 +98,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
     expect(recorded.map((r) => r.filename)).toEqual([
       ...pre0008Files,
       "0008_site_sftp_users.sql",
+      "0009_backups.sql",
     ]);
 
     const after0008 = await db().execute(
