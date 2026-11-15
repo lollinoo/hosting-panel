@@ -51,7 +51,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Web File Manager dei Siti** | ✅ **Operativo** | Helper isolato per sito, chunk 512 KiB, zip/unzip asincroni (`ADR-0019`, `AC-F2-10`) |
 | **Accesso SFTP per Sito (Chroot)** | ✅ **Operativo** | `sftpAvailable: true` su `linux-systemd`, contenitore `hp_sftp` porta TCP `2222` (`ADR-0020`, `AC-F2-10`) |
 | **Database per Sito & phpMyAdmin** | ✅ **Operativo** | `phpMyAdminAvailable: true` su `linux-systemd`, `hp_mariadb` + `hp_phpmyadmin` su `127.0.0.1` (`ADR-0021`, `AC-F2-10`) |
-| **Backup Incrementali S3 di Produzione** | ❌ **Chiuso (`false`)** | `productionBackupRuntimeAvailable: false` (`HCP-SPEC-005`, `AC-F2-10`) |
+| **Backup dei Siti (S3)** | ✅ **Attivo su linux-systemd** | `productionBackupRuntimeAvailable: true` (`ADR-0022`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
 ---
@@ -126,7 +126,7 @@ Gli script `dev:*` attivano esplicitamente `ENABLE_DEV_OIDC=true` e `HP_SEED_DEM
 ---
 
 ### Opzione B: Modalità VPS Linux Dedicated (`Ubuntu 24.04` / `Ubuntu 26.04` / `Debian 12` / `Debian 13`)
-Per predisporre un nodo Linux dedicato con utenti isolati (`hp-web`, `hp-api`, `hp-executor`, `hp-agent`), gruppo `hp-ipc`, chiavi `/etc/hosting-panel/{ipc.key,secrets-master.key}` e unit `systemd` blindate:
+Per predisporre un nodo Linux dedicato con utenti isolati (`hp-web`, `hp-api`, `hp-executor`, `hp-agent`), gruppo `hp-ipc`, chiavi `/etc/hosting-panel/{ipc.key,secrets-master.key,mariadb-root.key,backup.key}` e unit `systemd` blindate:
 
 ```bash
 sudo bash infra/linux/bootstrap-dedicated.sh
@@ -154,7 +154,7 @@ Flag di `install.sh`: `--hostname`, `--admin-email`, `--admin-name`, `--acme-ema
 
 1. **DNS**: creare un record A `<hostname>` verso l'IP del server. Finché il DNS non punta al server il pannello è raggiungibile su `https://<ip-server>` con certificato autofirmato; su `https://<hostname>` arriva il certificato Let's Encrypt appena il DNS è propagato. Per server di prova usare `--acme-staging` (certificati di staging, non attendibili dai browser).
 2. **Enrolment TOTP**: al passo 11 l'installer stampa **una sola volta** il segreto TOTP e l'URI `otpauth` dell'amministratore: registrarli subito in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori).
-3. **Backup**: salvare `/etc/hosting-panel` (chiavi e segreti, file `api.env`, `web.env`, `executor.env` con permessi `0400` root). Senza queste chiavi i segreti cifrati non sono recuperabili.
+3. **Backup delle chiavi**: salvare subito fuori dal server `/etc/hosting-panel` — in particolare `/etc/hosting-panel/backup.key` (cifra i backup dei siti; se va persa, nessun backup potrà più essere letto), `secrets-master.key`, `ipc.key`, `mariadb-root.key` e i file `api.env`, `web.env`, `executor.env` (`0400` root). Senza queste chiavi i segreti cifrati e i backup dei siti non sono recuperabili.
 4. **Salute**: `/health/live` e `/health/ready`.
 
 ### Siti WordPress
@@ -207,6 +207,14 @@ Dettagli e limiti: [ADR 0020](docs/architecture/adr/0020-site-sftp.md).
 Su runtime `linux-systemd` (`phpMyAdminAvailable: true`), i clienti con permesso `site.databases.manage` gestiscono database aggiuntivi (fino a `10` per sito) e utenti database aggiuntivi (fino a `10` per sito, con grant per singolo database) nella scheda **Database** del sito: lo stato è letto direttamente da `hp_mariadb` senza tabelle speculari sul pannello, le password temporanee (`24` caratteri) sono mostrate una sola volta e solo l'hash MariaDB `*<40 hex>` attraversa l'IPC verso l'executor, senza mai riavviare MariaDB né i container WordPress (`CP-01`). Il pulsante **Apri phpMyAdmin** crea un account di sign-on temporaneo limitato ai database del sito, rilascia il cookie cifrato `hp_pma` e apre `/phpmyadmin/<siteId>/` tramite il forwarder autenticato del pannello (al massimo `2` richieste simultanee per sito con coda da `30 s`, così un sito non blocca gli altri) verso il singolo contenitore di piattaforma `hp_phpmyadmin` (`512 MiB`, `4` worker) in ascolto solo su `127.0.0.1` (`HP_PHPMYADMIN_PORT`, predefinita `8306`, stesso valore in `executor.env` e `web.env`; configurazione in `/var/lib/hosting-panel/phpmyadmin`). Il forwarder invia le richieste verso phpMyAdmin tramite il client `node:http` dedicato (`phpmyadmin-upstream.ts`), privo di timeout propri (a differenza dei `300 s` di `fetch` di Node), così operazioni da oltre `5` minuti non liberano prematuramente il posto del sito e dopo `310 s` mostrano la pagina `503` di attesa (*"phpMyAdmin sta ancora lavorando"*) finché la richiesta reale termina. Riaprire phpMyAdmin dalla scheda **Database** interrompe eventuali operazioni lente rimaste attive su quel sito.
 
 Dettagli e limiti: [ADR 0021](docs/architecture/adr/0021-site-databases.md).
+
+### Backup dei Siti
+
+Su runtime `linux-systemd` (`productionBackupRuntimeAvailable: true`), il pannello esegue e conserva backup cifrati dei siti WordPress su storage compatibile S3 tramite contenitore effimero `restic/restic:0.19.1` gestito da `hp-docker-executor`. Gli amministratori configurano la destinazione S3 (endpoint, regione, bucket, prefisso e credenziali), eseguono il test di connessione e impostano la pianificazione notturna in **UTC** (predefinita `02:00 UTC`, eseguita un sito dopo l'altro) e la conservazione automatica (`1–365` giorni, predefinita `14` giorni; i backup manuali conservati sono al massimo `3` per sito e l'ultimo backup valido di un sito esistente non viene mai eliminato dalla rotazione). I clienti con permesso `site.backups.manage` consultano la cronologia e avviano backup manuali dalla scheda **Backup** del sito. Ogni archivio include i file del sito e un dump logico per ciascun database MariaDB del sito senza riavviare i contenitori (`CP-01`), ed è cifrato con la chiave di installazione `/etc/hosting-panel/backup.key` (`0440 root:hp-executor`), creata una sola volta al bootstrap e mai sovrascritta dagli aggiornamenti.
+
+**Limite attuale (M3a):** questa versione esegue e conserva i backup; il ripristino e il download dal pannello arrivano con la milestone successiva (**M3b**). Fino ad allora, un ripristino si esegue manualmente con `restic` e il file chiave `/etc/hosting-panel/backup.key` salvato fuori dal server.
+
+Dettagli, deviazioni e limiti completi: [ADR 0022](docs/architecture/adr/0022-site-backups.md).
 
 #### Aggiornamento
 
@@ -268,6 +276,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0021`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin).
+- [Registro delle ADR (`ADR 0001..0022`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

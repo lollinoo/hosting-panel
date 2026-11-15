@@ -67,7 +67,7 @@ Restano tassativamente fuori perimetro e marcati `false` in `PlatformCapabilitie
 - **Quote disco per volumi Shared (`ADR-011`)**: `ADR-011` rimane esplicitamente in stato `OPEN — prima di Shared` (`HCP-SPEC-007`).
 - **Emissione/rinnovo certificati ACME/TLS automatici (`acmeTlsRuntimeAvailable: false`)**: disciplinati in `HCP-SPEC-005` (in Fase 2 l'ingress Traefik opera in HTTP / TLS statico locale per validare il routing per dominio e `CP-01`).
 - **Server SFTP chroot e file manager (`sftpAvailable: false`)**: disciplinati in `HCP-SPEC-005`.
-- **Backup/restore incrementali S3 di produzione e provisioner DB multi-utente (`productionBackupRuntimeAvailable: false`)**: disciplinati in `HCP-SPEC-005`.
+- **Backup incrementali S3 per sito (`productionBackupRuntimeAvailable`)**: attivi quando `runtimeBackend` è `linux-systemd` (`false` sui backend non di produzione); il restore guidato e il provisioner DB multi-utente restano nelle rispettive estensioni `M3`/`M2`.
 - **Management Hub multi-host remoto attivo**: disciplinato in `HCP-SPEC-008` (`ADR-008`).
 
 ---
@@ -300,7 +300,7 @@ La migrazione `0002` **NON modifica né elimina** vincoli di `0001_phase1_docker
    - `sharedHostingEnabled`: `z.literal(false)`
    - `acmeTlsRuntimeAvailable`: `z.literal(false)`
    - `sftpAvailable`: `z.literal(false)`
-   - `productionBackupRuntimeAvailable`: `z.literal(false)`
+   - `productionBackupRuntimeAvailable`: `boolean`
 2. **Console Customer (`/o/[orgSlug]/*`)**:
    - Gestione metadati `SecretRefs` cifrati (`write-only` input, elenco chiavi senza valori).
    - Pulsanti operativi `Deploy`, `Riavvia`, `Arresta` su dettaglio sito/servizio con gestione `202 Accepted`, banner di stato operazione in corso e polling automatico della `OperationTimeline`.

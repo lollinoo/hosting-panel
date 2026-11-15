@@ -123,6 +123,12 @@ describe("per-service env files and wrappers", () => {
     for (const s of ["/run/hosting-panel/mail-relay", "/var/lib/hosting-panel/site-mail"]) expect(r.stdout).toContain(s);
   });
 
+  it.skipIf(!hasHost)("bootstrap dry-run provisions the backup encryption key", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    for (const s of ["/etc/hosting-panel/backup.key", "0440 root:hp-executor"]) expect(r.stdout).toContain(s);
+  });
+
   it("wrappers never put DATABASE_URL in argv", () => {
     for (const w of ["hp-accounts", "hp-break-glass"]) {
       const src = read(`infra/linux/${w}`);
@@ -302,5 +308,84 @@ describe("release workflow and docs", () => {
     );
     const envExample = read(".env.example");
     expect(envExample).toContain("HP_PHPMYADMIN_PORT=8306");
+  });
+
+  it("m3a backups docs are consistent", () => {
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/admin/backups:",
+      "/v1/admin/backups/test:",
+      "/v1/admin/backups/sites:",
+      "/v1/admin/backups/sites/{siteId}/run:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/backups:",
+      "BackupProblem",
+      "BackupSettingsInput",
+      "BackupTestResult",
+      "BackupSettings",
+      "SiteBackup",
+      "SiteBackups",
+      "AdminSiteBackupStatus",
+      "SiteBackupAccepted",
+      "site.backups.create",
+      "site.backups.prune",
+    ]) {
+      expect(api).toContain(s);
+    }
+    expect(api).not.toMatch(
+      /productionBackupRuntimeAvailable:\s*\n\s*type:\s*boolean\s*\n\s*(?:const:\s*false|enum:\s*\[false\])/,
+    );
+  });
+
+  it("m3 site backups docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of [
+      "Backup dei Siti",
+      "productionBackupRuntimeAvailable: true",
+      "ADR-0022",
+      "docs/architecture/adr/0022-site-backups.md",
+      "backup.key",
+    ]) {
+      expect(readme).toContain(s);
+    }
+    expect(readme).not.toContain("productionBackupRuntimeAvailable: false");
+    expect(readme).not.toContain("HCP-SPEC-005");
+
+    const adr = read("docs/architecture/adr/0022-site-backups.md");
+    for (const s of [
+      "ADR 0022",
+      "restic/restic:0.19.1",
+      "/etc/hosting-panel/backup.key",
+      "site.backups.manage",
+      "productionBackupRuntimeAvailable",
+      "CP-01",
+      "0009_backups.sql",
+    ]) {
+      expect(adr).toContain(s);
+    }
+
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain('BACKUP_KEY_PATH="/etc/hosting-panel/backup.key"');
+    expect(bootstrap).toContain('chown root:hp-executor "${BACKUP_KEY_PATH}"');
+
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/admin/backups:",
+      "/v1/admin/backups/test:",
+      "/v1/admin/backups/sites:",
+      "/v1/admin/backups/sites/{siteId}/run:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/backups:",
+      "BackupProblem",
+      "BackupSettingsInput",
+      "BackupTestResult",
+      "BackupSettings",
+      "SiteBackup",
+      "SiteBackups",
+      "AdminSiteBackupStatus",
+      "SiteBackupAccepted",
+      "site.backups.create",
+      "site.backups.prune",
+    ]) {
+      expect(api).toContain(s);
+    }
   });
 });
