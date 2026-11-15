@@ -342,6 +342,48 @@ describe("set_env_keys", () => {
   });
 });
 
+describe("panel_has_admin", () => {
+  const PW = "0123456789abcdef".repeat(4);
+  const run = (psqlRc: number) => {
+    const d = tmp();
+    const bin = join(d, "bin");
+    mkdirSync(bin);
+    const log = '"$(basename "$0") $*" >> "$D/calls.log"; env >> "$D/env.log"; [[ -n "${PGPASSWORD+x}" ]] && echo "$PGPASSWORD" >> "$D/pgpw.log"';
+    writeFileSync(join(bin, "psql"), `#!/usr/bin/env bash\necho ${log}\n((${psqlRc} == 0)) || { echo 'relation does not exist' >&2; exit ${psqlRc}; }\necho 1\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "runuser"), `#!/usr/bin/env bash\necho ${log}\nexit 1\n`, { mode: 0o755 });
+    const env = join(d, "api.env");
+    writeFileSync(env, `NODE_ENV=production\nDATABASE_URL=postgresql://hosting_panel:${PW}@127.0.0.1:5432/hosting_panel\n`);
+    for (const f of ["calls.log", "env.log", "pgpw.log"]) writeFileSync(join(d, f), "");
+    const r = spawnSync("bash", ["-c", `source "${SCRIPT}"; set -euo pipefail; has="$(panel_has_admin "${env}")"; echo "got:$has"`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, D: d }
+    });
+    const file = (n: string) => readFileSync(join(d, n), "utf8");
+    return { code: r.status, out: r.stdout + r.stderr, calls: file("calls.log"), env: file("env.log"), pgpw: file("pgpw.log") };
+  };
+
+  it("asks public.users as hosting_panel over 127.0.0.1, the password only in that child's environment", () => {
+    const r = run(0);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("got:1");
+    expect(r.calls).toBe(
+      "psql -X -qtA -h 127.0.0.1 -U hosting_panel -d hosting_panel -c select 1 from public.users where platform_role = 'infrastructure_admin' limit 1\n"
+    );
+    expect(r.pgpw).toBe(`${PW}\n`);
+    expect(r.calls + r.out).not.toContain(PW);
+  });
+
+  it("a failed query means no administrator, as before", () => {
+    const r = run(2);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("got:\n");
+  });
+
+  it("the installer never opens the panel database as the superuser", () => {
+    expect(readFileSync(SCRIPT, "utf8")).not.toMatch(/runuser -u postgres[^\n]*(\\\n[^\n]*)?-d hosting_panel/);
+  });
+});
+
 it("reads the apt candidate in the C locale (a localized apt prints 'Candidato:')", () => {
   expect(readFileSync(SCRIPT, "utf8")).toMatch(/LC_ALL=C apt-cache policy "\$5" \| awk '\/Candidate:\//);
 });

@@ -75,6 +75,17 @@ describe("listReleaseViolations", () => {
     }
   });
 
+  it("requires the panel restore script, its wrapper, its SQL file and the fetch command", () => {
+    for (const p of [
+      "infra/linux/hp-restore-panel",
+      "infra/linux/restore-panel.sh",
+      "infra/linux/hp-restore-panel.sql",
+      "apps/docker-executor/dist/cli/panel-fetch.js",
+    ]) {
+      expect(REQUIRED_RELEASE_PATHS).toContain(p);
+    }
+  });
+
   it("accepts a complete minimal tree", async () => {
     expect(await listReleaseViolations(completeTree())).toEqual([]);
   });

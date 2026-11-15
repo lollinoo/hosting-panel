@@ -26,6 +26,7 @@ const INGRESS_DIR = path.join(RUNTIME_DIR, "ingress");
 const SFTP_STATE_DIR = path.join(RUNTIME_DIR, "sftp");
 const PMA_CONFIG_DIR = path.join(RUNTIME_DIR, "phpmyadmin");
 const BACKUP_WORK_DIR = path.join(RUNTIME_DIR, "backups");
+const PANEL_DUMP_DIR = path.join(RUNTIME_DIR, "panel-dump");
 
 const IPC_KEY_FILE = path.join(RUNTIME_DIR, "ipc.key");
 const MASTER_KEY_FILE = path.join(RUNTIME_DIR, "secrets-master.key");
@@ -131,6 +132,8 @@ async function main() {
   await chmod(PMA_CONFIG_DIR, 0o755);
   await mkdir(BACKUP_WORK_DIR, { recursive: true, mode: 0o700 });
   await chmod(BACKUP_WORK_DIR, 0o700);
+await mkdir(PANEL_DUMP_DIR, { recursive: true, mode: 0o700 });
+await chmod(PANEL_DUMP_DIR, 0o700);
 
   const ingressStaticDir = path.join(INGRESS_DIR, "static");
   const ingressDynamicDir = path.join(INGRESS_DIR, "dynamic");
@@ -191,6 +194,7 @@ async function main() {
     `export HP_JWT_SIGNING_KEY_FILE="${JWT_KEY_FILE}"`,
     `export HP_BACKUP_KEY_FILE="${BACKUP_KEY_FILE}"`,
     `export HP_BACKUP_WORK_DIR="${BACKUP_WORK_DIR}"`,
+    `export HP_PANEL_DUMP_DIR="${PANEL_DUMP_DIR}"`,
     `export ENABLE_DEV_OIDC="true"`,
     `export HP_SEED_DEMO="true"`,
     `export HP_EXECUTOR_SOCKET_PATH="${EXECUTOR_SOCK}"`,
@@ -219,6 +223,7 @@ async function main() {
     HP_JWT_SIGNING_KEY_FILE: JWT_KEY_FILE,
     HP_BACKUP_KEY_FILE: BACKUP_KEY_FILE,
     HP_BACKUP_WORK_DIR: BACKUP_WORK_DIR,
+    HP_PANEL_DUMP_DIR: PANEL_DUMP_DIR,
     // Dev launcher only: explicit opt-in to dev OIDC and the demo dataset.
     ENABLE_DEV_OIDC: "true",
     HP_SEED_DEMO: "true",

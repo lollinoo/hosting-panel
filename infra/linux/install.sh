@@ -100,6 +100,13 @@ set_env_keys() {
 
 pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
+# The panel database may hold a restored copy: ask it as hosting_panel, never as a superuser.
+panel_has_admin() { # <api.env>: prints 1 when an administrator exists; a failed query means none
+  [[ "$(env_value "$1" DATABASE_URL)" =~ ^postgresql://hosting_panel:([A-Za-z0-9._~-]+)@127\.0\.0\.1:5432/hosting_panel$ ]] || return 0
+  PGPASSWORD="${BASH_REMATCH[1]}" psql -X -qtA -h 127.0.0.1 -U hosting_panel -d hosting_panel \
+    -c "select 1 from public.users where platform_role = 'infrastructure_admin' limit 1" 2>/dev/null || true
+}
+
 ufw_active() { command -v ufw >/dev/null 2>&1 && LC_ALL=C ufw status 2>/dev/null | grep -q '^Status: active'; }
 docker0_ipv4() { { ip -4 -o addr show docker0 2>/dev/null || true; } | awk '{split($4, a, "/"); print a[1]; exit}'; }
 
@@ -562,8 +569,7 @@ SQL
   else
     if ((admin_done == 0)); then
       local has_admin
-      has_admin="$(cd / && runuser -u postgres -- psql -X -qtA -d hosting_panel \
-        -c "select 1 from users where platform_role = 'infrastructure_admin' limit 1" 2>/dev/null || true)"
+      has_admin="$(panel_has_admin "${api_env}")"
       [[ "${has_admin}" == 1 ]] && admin_done=1
     fi
     if ((admin_done)); then

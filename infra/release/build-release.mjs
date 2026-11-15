@@ -33,7 +33,11 @@ export const REQUIRED_RELEASE_PATHS = [
   "infra/linux/nftables-dedicated.conf",
   "infra/linux/hp-accounts",
   "infra/linux/hp-break-glass",
-  "infra/linux/hp-update"
+  "infra/linux/hp-update",
+  "infra/linux/hp-restore-panel",
+  "infra/linux/restore-panel.sh",
+  "infra/linux/hp-restore-panel.sql",
+  "apps/docker-executor/dist/cli/panel-fetch.js"
 ];
 
 function forbidden(rel) {
