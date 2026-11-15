@@ -714,6 +714,9 @@ export const backupSettings = pgTable("backup_settings", {
   lastTestAt: timestamp("last_test_at", { withTimezone: true }),
   lastTestOutcome: text("last_test_outcome").$type<"ok" | "failed">(),
   lastTestProblem: text("last_test_problem").$type<BackupProblem>(),
+  lastPanelBackupAt: timestamp("last_panel_backup_at", { withTimezone: true }),
+  lastPanelBackupStatus: text("last_panel_backup_status").$type<"succeeded" | "failed">(),
+  lastPanelBackupProblem: text("last_panel_backup_problem").$type<BackupProblem>(),
   updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });

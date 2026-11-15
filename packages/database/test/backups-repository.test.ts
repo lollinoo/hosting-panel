@@ -29,9 +29,11 @@ import {
   markSiteRestoreRunning,
   operations,
   organizations,
+  backupSettings,
   permissions,
   platformInstallations,
   recordBackupTest,
+  recordPanelBackupOutcome,
   rolePermissions,
   settleSiteArchive,
   settleSiteBackup,
@@ -39,6 +41,7 @@ import {
   sites,
   sql,
   startNightlyRun,
+  sumNewestBackupSizes,
   upsertBackupSettings,
   users,
   type DatabaseClient,
@@ -161,6 +164,9 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       lastTestAt: null,
       lastTestOutcome: null,
       lastTestProblem: null,
+      lastPanelBackupAt: null,
+      lastPanelBackupStatus: null,
+      lastPanelBackupProblem: null,
     });
     expect(pub).not.toHaveProperty("secretAccessKey");
     expect(pub).not.toHaveProperty("secretAccessKeyCiphertextBase64");
@@ -1029,6 +1035,84 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
         archiveReadyUntil: null,
         archiveProblem: null,
       });
+    } finally {
+      await deleteAllSiteBackups(db());
+    }
+  });
+
+  it("0011: records the panel copy outcome, sums newest succeeded sizes, and lists admin figures and last restore", async () => {
+    const at = new Date("2026-11-15T03:00:00.000Z");
+    await upsertBackupSettings(db(), KEY, {
+      endpoint: "https://s3.example.com",
+      region: "eu-central-1",
+      bucket: "panel-backups",
+      prefix: "prod",
+      accessKeyId: "AKIA1234",
+      secretAccessKey: SECRET_1,
+      scheduleHourUtc: 3,
+      retentionDays: 14,
+      updatedByUserId: "usr_bkp_admin",
+    });
+    await recordPanelBackupOutcome(db(), { at, status: "failed", problem: "panel_dump_failed" });
+    const [row] = await db().select().from(backupSettings);
+    expect(row).toMatchObject({
+      lastPanelBackupAt: at,
+      lastPanelBackupStatus: "failed",
+      lastPanelBackupProblem: "panel_dump_failed",
+    });
+    await recordPanelBackupOutcome(db(), { at, status: "succeeded", problem: null });
+    const [row2] = await db().select().from(backupSettings);
+    expect(row2).toMatchObject({ lastPanelBackupStatus: "succeeded", lastPanelBackupProblem: null });
+    expect(await getBackupSettingsPublic(db())).toMatchObject({
+      lastPanelBackupAt: at,
+      lastPanelBackupStatus: "succeeded",
+      lastPanelBackupProblem: null,
+    });
+
+    expect(await sumNewestBackupSizes(db())).toBe(0);
+    const ok = async (siteId: string, opId: string, startedAt: string, size: number) => {
+      const b = await insertSiteBackup(db(), {
+        siteId,
+        kind: "manual",
+        status: "running",
+        operationId: opId,
+        startedAt: new Date(startedAt),
+      });
+      await settleSiteBackup(db(), opId, { status: "succeeded", snapshotId: "d".repeat(64), sizeBytes: size });
+      return b.id;
+    };
+    try {
+      await ok(liveSiteId, "op_0011_a", "2026-11-13T02:00:00.000Z", 100);
+      const newest = await ok(liveSiteId, "op_0011_b", "2026-11-14T02:00:00.000Z", 300);
+      // A newer failed attempt does not change the newest succeeded copy.
+      await insertSiteBackup(db(), {
+        siteId: liveSiteId,
+        kind: "nightly",
+        status: "failed",
+        operationId: null,
+        problem: "site_busy",
+        startedAt: new Date("2026-11-15T02:00:00.000Z"),
+      });
+      // Copies of a deleted site are not counted.
+      await ok(deletedSiteId, "op_0011_orphan", "2026-11-14T02:00:00.000Z", 5000);
+      expect(await sumNewestBackupSizes(db())).toBe(300);
+
+      await markSiteRestoreRunning(db(), newest, "op_0011_rst");
+      let live = (await listAdminBackupStatus(db())).find((r) => r.siteId === liveSiteId);
+      expect(live).toMatchObject({
+        lastSuccessBackupId: newest,
+        lastSuccessSizeBytes: 300,
+        lastRestore: { backupId: newest, status: "running", finishedAt: null, problem: null },
+      });
+      await settleSiteRestore(db(), "op_0011_rst", { status: "failed", problem: "other" });
+      live = (await listAdminBackupStatus(db())).find((r) => r.siteId === liveSiteId);
+      expect(live?.lastRestore).toMatchObject({
+        backupId: newest,
+        backupStartedAt: "2026-11-14T02:00:00.000Z",
+        status: "failed",
+        problem: "other",
+      });
+      expect(live?.lastRestore?.finishedAt).toBeTruthy();
     } finally {
       await deleteAllSiteBackups(db());
     }

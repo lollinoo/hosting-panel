@@ -57,6 +57,9 @@ export interface BackupSettingsRow {
   lastTestAt: Date | null;
   lastTestOutcome: "ok" | "failed" | null;
   lastTestProblem: BackupProblem | null;
+  lastPanelBackupAt: Date | null;
+  lastPanelBackupStatus: "succeeded" | "failed" | null;
+  lastPanelBackupProblem: BackupProblem | null;
   updatedAt: Date;
 }
 
@@ -125,6 +128,9 @@ export async function getBackupSettingsPublic(
       lastTestAt: backupSettings.lastTestAt,
       lastTestOutcome: backupSettings.lastTestOutcome,
       lastTestProblem: backupSettings.lastTestProblem,
+      lastPanelBackupAt: backupSettings.lastPanelBackupAt,
+      lastPanelBackupStatus: backupSettings.lastPanelBackupStatus,
+      lastPanelBackupProblem: backupSettings.lastPanelBackupProblem,
       updatedAt: backupSettings.updatedAt,
     })
     .from(backupSettings)
@@ -616,6 +622,32 @@ export async function clearSiteArchive(
     .where(and(eq(siteBackups.id, backupId), eq(siteBackups.archiveOperationId, operationId)));
 }
 
+/** Stores the outcome of the latest nightly panel copy on the settings row. */
+export async function recordPanelBackupOutcome(
+  db: DatabaseExecutor,
+  r: { at: Date; status: "succeeded" | "failed"; problem: BackupProblem | null },
+): Promise<void> {
+  await db
+    .update(backupSettings)
+    .set({ lastPanelBackupAt: r.at, lastPanelBackupStatus: r.status, lastPanelBackupProblem: r.problem })
+    .where(eq(backupSettings.id, SINGLETON_ID));
+}
+
+/** Sums the size of each existing site's newest succeeded backup. */
+export async function sumNewestBackupSizes(db: DatabaseExecutor): Promise<number> {
+  const newest = db
+    .selectDistinctOn([siteBackups.siteId], { siteId: siteBackups.siteId, sizeBytes: siteBackups.sizeBytes })
+    .from(siteBackups)
+    .where(eq(siteBackups.status, "succeeded"))
+    .orderBy(siteBackups.siteId, desc(siteBackups.startedAt), desc(siteBackups.id))
+    .as("newest_success");
+  const [row] = await db
+    .select({ total: sql<string>`COALESCE(SUM(${newest.sizeBytes}), 0)::bigint` })
+    .from(newest)
+    .innerJoin(sites, eq(sites.id, newest.siteId));
+  return Number(row?.total ?? 0);
+}
+
 /** When a customer may start another heavy backup action on the site; null = allowed now. */
 export async function heavyActionRetryAt(
   db: DatabaseExecutor,
@@ -663,6 +695,8 @@ export async function listAdminBackupStatus(
   const latestSuccess = db
     .selectDistinctOn([siteBackups.siteId], {
       siteId: siteBackups.siteId,
+      id: siteBackups.id,
+      sizeBytes: siteBackups.sizeBytes,
       startedAt: siteBackups.startedAt,
       finishedAt: siteBackups.finishedAt,
     })
@@ -681,6 +715,33 @@ export async function listAdminBackupStatus(
     .orderBy(siteBackups.siteId, desc(siteBackups.startedAt), desc(siteBackups.id))
     .as("latest_running");
 
+  // Same pick as the customer's tab: a running restore first, else the newest finished one.
+  const latestRestore = db
+    .selectDistinctOn([siteBackups.siteId], {
+      siteId: siteBackups.siteId,
+      id: siteBackups.id,
+      startedAt: siteBackups.startedAt,
+      restoreStatus: siteBackups.restoreStatus,
+      restoredAt: siteBackups.restoredAt,
+      restoreProblem: siteBackups.restoreProblem,
+    })
+    .from(siteBackups)
+    .where(
+      or(
+        eq(siteBackups.restoreStatus, "running"),
+        and(
+          inArray(siteBackups.restoreStatus, ["succeeded", "failed"]),
+          sql`${siteBackups.restoredAt} IS NOT NULL`,
+        ),
+      ),
+    )
+    .orderBy(
+      siteBackups.siteId,
+      desc(sql`${siteBackups.restoreStatus} = 'running'`),
+      desc(siteBackups.restoredAt),
+    )
+    .as("latest_restore");
+
   const rows = await db
     .select({
       siteId: sites.id,
@@ -689,6 +750,13 @@ export async function listAdminBackupStatus(
       organizationName: organizations.name,
       lastSuccessStartedAt: latestSuccess.startedAt,
       lastSuccessFinishedAt: latestSuccess.finishedAt,
+      lastSuccessBackupId: latestSuccess.id,
+      lastSuccessSizeBytes: latestSuccess.sizeBytes,
+      restoreBackupId: latestRestore.id,
+      restoreBackupStartedAt: latestRestore.startedAt,
+      restoreStatus: latestRestore.restoreStatus,
+      restoredAt: latestRestore.restoredAt,
+      restoreProblem: latestRestore.restoreProblem,
       lastAttemptAt: latestAttempt.startedAt,
       lastStatus: latestAttempt.status,
       problem: latestAttempt.problem,
@@ -699,6 +767,7 @@ export async function listAdminBackupStatus(
     .leftJoin(latestAttempt, eq(sites.id, latestAttempt.siteId))
     .leftJoin(latestSuccess, eq(sites.id, latestSuccess.siteId))
     .leftJoin(latestRunning, eq(sites.id, latestRunning.siteId))
+    .leftJoin(latestRestore, eq(sites.id, latestRestore.siteId))
     .orderBy(asc(organizations.name), asc(sites.name), asc(sites.id));
 
   return rows.map((row) => {
@@ -713,6 +782,18 @@ export async function listAdminBackupStatus(
       lastStatus: row.lastStatus ?? null,
       problem: row.problem ?? null,
       runningOperationId: row.runningOperationId ?? null,
+      lastSuccessBackupId: row.lastSuccessBackupId ?? null,
+      lastSuccessSizeBytes: row.lastSuccessSizeBytes ?? null,
+      lastRestore:
+        row.restoreBackupId && row.restoreBackupStartedAt && row.restoreStatus
+          ? {
+              backupId: row.restoreBackupId,
+              backupStartedAt: row.restoreBackupStartedAt.toISOString(),
+              status: row.restoreStatus,
+              finishedAt: row.restoredAt ? row.restoredAt.toISOString() : null,
+              problem: row.restoreStatus === "running" ? null : (row.restoreProblem ?? null),
+            }
+          : null,
     };
   });
 }

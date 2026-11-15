@@ -23,6 +23,7 @@ import {
   resolveDecryptedSecretRefs,
   schemaMigrations,
   seedPhase1Dataset,
+  sql,
   serviceInstances,
   stackRevisions,
   transitionOperation,
@@ -51,6 +52,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
       "0010_backup_restore.sql",
+      "0011_panel_backup.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -72,6 +74,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
       "0010_backup_restore.sql",
+      "0011_panel_backup.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -89,10 +92,26 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
       "0010_backup_restore.sql",
+      "0011_panel_backup.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
     expect(secondRows.map((r) => r.appliedAt.getTime())).toEqual(firstTimestamps);
+  });
+
+  it("1b. 0011 adds the panel copy outcome columns and refuses an unknown status", async () => {
+    const cols = await client.db.execute(
+      sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'backup_settings' AND column_name LIKE 'last_panel_backup%' ORDER BY column_name`,
+    );
+    expect(cols.rows.map((r) => (r as { column_name: string }).column_name)).toEqual([
+      "last_panel_backup_at",
+      "last_panel_backup_problem",
+      "last_panel_backup_status",
+    ]);
+    const check = await client.db.execute(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'backup_settings'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%last_panel_backup_status%'`,
+    );
+    expect(String((check.rows[0] as { def: string }).def)).toMatch(/succeeded.*failed/);
   });
 
   it("2. encrypts and decrypts secrets with AES-256-GCM + tenant/site/key AAD binding (AC-F2-05)", () => {
