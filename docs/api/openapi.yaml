@@ -3879,6 +3879,63 @@ paths:
           description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/backups/sites/{siteId}/restore:
+    post:
+      tags: [Admin Backups]
+      operationId: adminRestoreSiteBackup
+      summary: Put back a site's named or newest succeeded copy, also where nothing of the site exists (server administrator only, 202 Accepted)
+      description: |
+        Steps, in order: `provision_database` (always; creates the site database and its user if missing), `restore`,
+        `start_site` (only when the site is not running; never reinstalls), `update_address`, `sftp`.
+        A step that is not needed is `skipped`. Audited as `admin.site.backups.restore.requested`
+        and `admin.site.backups.restore.finished`. The customers' limit on heavy actions does not apply.
+        A replay with the same `Idempotency-Key` and no `backupId` answers the first operation.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminRestoreBackupInput"
+      responses:
+        "202":
+          description: Accepted; restore queued via transactional outbox
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupAccepted"
+                  links:
+                    type: object
+                    properties:
+                      operation:
+                        type: string
+        "400":
+          description: >-
+            No succeeded copy, or an unknown or not succeeded `backupId` (`VALIDATION_ERROR`,
+            `details: [{field: backupId, message: no_succeeded_backup}]`); wrong name (`VALIDATION_ERROR`,
+            `details: [{field: confirmName}]`); backup target not configured (`VALIDATION_ERROR`, message
+            `not_configured`); invalid body; or missing/invalid `Idempotency-Key`
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by another operation (`RESOURCE_LOCKED`), or reused `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
   /v1/organizations/{orgId}/managed-sites/{siteId}/backups:
     get:
       tags: [Managed Sites]
@@ -5286,8 +5343,12 @@ components:
         - switch_undone
         - undo_incomplete
         - definer_missing
+        - panel_dump_missing
         - site_busy
         - address_not_updated
+        - panel_dump_failed
+        - panel_dump_tool_missing
+        - site_not_started
 
     BackupSettingsInput:
       type: object
@@ -5354,6 +5415,8 @@ components:
         - retentionDays
         - lastNightlyRunOn
         - lastTest
+        - lastPanelBackup
+        - newestBackupsTotalBytes
         - updatedAt
       properties:
         available:
@@ -5398,9 +5461,31 @@ components:
             at:
               type: string
               format: date-time
+        lastPanelBackup:
+          $ref: "#/components/schemas/PanelBackupLine"
+          nullable: true
+        newestBackupsTotalBytes:
+          type: integer
+          minimum: 0
+          description: Sum of the sizes of each site's newest succeeded copy
         updatedAt:
           type: string
           format: date-time
+          nullable: true
+
+    PanelBackupLine:
+      type: object
+      additionalProperties: false
+      required: [at, status, problem]
+      properties:
+        at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [succeeded, failed]
+        problem:
+          $ref: "#/components/schemas/BackupProblem"
           nullable: true
 
     RestoreBackupInput:
@@ -5408,6 +5493,19 @@ components:
       additionalProperties: false
       required: [confirmName]
       properties:
+        confirmName:
+          type: string
+          maxLength: 255
+
+    AdminRestoreBackupInput:
+      type: object
+      additionalProperties: false
+      required: [confirmName]
+      properties:
+        backupId:
+          type: string
+          pattern: "^bkp_[0-9a-f]{32}$"
+          description: The copy to put back; when absent, the newest succeeded copy of the site
         confirmName:
           type: string
           maxLength: 255
@@ -5528,6 +5626,9 @@ components:
         - lastStatus
         - problem
         - runningOperationId
+        - lastSuccessBackupId
+        - lastSuccessSizeBytes
+        - lastRestore
       properties:
         siteId:
           type: string
@@ -5554,6 +5655,16 @@ components:
           nullable: true
         runningOperationId:
           type: string
+          nullable: true
+        lastSuccessBackupId:
+          type: string
+          nullable: true
+        lastSuccessSizeBytes:
+          type: integer
+          minimum: 0
+          nullable: true
+        lastRestore:
+          $ref: "#/components/schemas/BackupLastRestore"
           nullable: true
 
     SiteBackupAccepted:
@@ -6431,6 +6542,7 @@ components:
             - site.backups.prune
             - site.backups.restore
             - site.backups.download
+            - panel.backups.create
             - host.maintenance
             - host.security
             - host.allocate

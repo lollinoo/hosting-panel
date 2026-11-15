@@ -212,9 +212,36 @@ Dettagli e limiti: [ADR 0021](docs/architecture/adr/0021-site-databases.md).
 
 Su runtime `linux-systemd` (`productionBackupRuntimeAvailable: true`), il pannello esegue e conserva backup cifrati dei siti WordPress su storage compatibile S3 tramite contenitore effimero `restic/restic:0.19.1` gestito da `hp-docker-executor`. Gli amministratori configurano la destinazione S3 (endpoint, regione, bucket, prefisso e credenziali), eseguono il test di connessione e impostano la pianificazione notturna in **UTC** (predefinita `02:00 UTC`, eseguita un sito dopo l'altro) e la conservazione automatica (`1–365` giorni, predefinita `14` giorni; i backup manuali conservati sono al massimo `3` per sito e l'ultimo backup valido di un sito esistente non viene mai eliminato dalla rotazione). I clienti con permesso `site.backups.manage` consultano la cronologia e gestiscono backup manuali, ripristini e download dalla scheda **Backup** del sito. Ogni archivio include i file del sito e un dump logico per ciascun database MariaDB del sito senza riavviare i contenitori (`CP-01`), ed è cifrato con la chiave di installazione `/etc/hosting-panel/backup.key` (`0440 root:hp-executor`), creata una sola volta al bootstrap e mai sovrascritta dagli aggiornamenti. Dalla scheda **Backup** il cliente può ripristinare l'intero sito sul posto (mai singoli file o un singolo database) dietro conferma esplicita del nome del sito e pagina di manutenzione automatica con annullamento in caso di errore. Può inoltre preparare e scaricare una copia decifrata in un unico archivio ZIP (al massimo uno per sito, conservato `60` minuti nella cartella protetta `/var/lib/hosting-panel/backups`; creazione manuale, ripristino e preparazione download condividono il limite di `6` azioni pesanti l'ora per sito).
 
-**Limite attuale (M3b → M3c):** ripristino e download per singolo sito sono disponibili nella scheda **Backup**; restano invece per la milestone successiva (**M3c**) il backup del database PostgreSQL del pannello, il ripristino amministrativo di siti eliminati e la procedura guidata di recupero su un nuovo server (fino ad allora è comunque indispensabile conservare fuori dal server una copia di `/etc/hosting-panel/backup.key`).
+**Copia del pannello:** ogni notte, dopo i backup dei siti, il pannello salva nello stesso bucket (`<percorso>/panel`) una copia cifrata del proprio database (account, siti, impostazioni) e della chiave `secrets-master.key`; **Amministrazione › Backup** mostra quando è stata fatta l'ultima, la dimensione dell'ultimo backup di ogni sito e il totale, e permette di ripristinare un sito anche quando sul server non ne resta nulla.
 
 Dettagli, deviazioni e limiti completi: [ADR 0022](docs/architecture/adr/0022-site-backups.md).
+
+#### Il server è perso: riportare il pannello su un nuovo server
+
+Serve: la copia di `/etc/hosting-panel/backup.key` tenuta fuori dal server, i dati del bucket (endpoint, regione, bucket, percorso) e le sue chiavi di accesso.
+
+1. Spegni il vecchio server, se è ancora acceso: due server che scrivono nello stesso percorso del bucket si rovinano le copie a vicenda.
+2. Installa il pannello sul nuovo server con `install.sh` (stessa versione del vecchio server o più recente).
+3. Rimetti la chiave salvata:
+   ```bash
+   sudo install -m 0440 -o root -g hp-executor backup.key /etc/hosting-panel/backup.key
+   ```
+4. Riporta il pannello. Lo script chiede le due chiavi S3 (il segreto senza mostrarlo): non scriverle sulla riga di comando, finirebbero nella cronologia della shell. Prima di cambiare qualcosa mostra la data della copia trovata e chiede `y/N`; `--yes` salta la domanda (per un uso senza terminale, dove altrimenti la risposta è no).
+   ```bash
+   sudo hp-restore-panel --endpoint https://s3.example.com --region us-east-1 --bucket <bucket> --prefix <percorso>
+   ```
+5. Accedi con l'account amministratore del vecchio server: gli account creati da `install.sh` sul nuovo server non esistono più e tutte le sessioni vanno rifatte.
+6. Punta i domini dei siti all'indirizzo del nuovo server.
+7. In **Amministrazione › Backup** usa **Ripristina** su ogni sito: il pannello ricrea database, file e sito dall'ultimo backup riuscito.
+
+Codici di uscita: `0` pannello riportato, `1` un passo è fallito (il messaggio dice cosa fare; rilanciarlo è sicuro), `2` rifiutato (argomenti errati, non root, `backup.key` mancante, server con siti già presenti, copia fatta da una versione più recente: aggiorna prima con `hp-update --version <v>`; oppure la domanda non è stata confermata con `y`).
+
+Cosa sapere prima:
+- La copia del pannello è quella dell'ultima notte: quanto creato o cambiato dopo (siti, account, impostazioni) non torna.
+- Viene presa sempre la copia del pannello più recente.
+- Un sito che era fermo torna avviato dopo **Ripristina**.
+- Gli utenti database aggiuntivi tornano senza password: reimpostala dalla scheda **Database**.
+- Mentre lo script carica la copia il pannello resta fermo e non mostra l'avanzamento; su copie grandi può volerci qualche minuto.
 
 #### Aggiornamento
 

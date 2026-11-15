@@ -136,6 +136,17 @@ describe("per-service env files and wrappers", () => {
       expect(src).toContain("/usr/bin/node /opt/hosting-panel/current/");
       expect(src).not.toMatch(/node\s[^\n]*"\$DATABASE_URL"/);
     }
+    const restore = read("infra/linux/hp-restore-panel");
+    expect(restore).toContain('exec bash /opt/hosting-panel/current/infra/linux/restore-panel.sh "$@"');
+    expect(restore).not.toContain("DATABASE_URL");
+  });
+
+  it.skipIf(!hasHost)("bootstrap dry-run creates the panel copy directory and the restore wrapper", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    for (const s of ["/var/lib/hosting-panel/panel-dump (2770 root:hp-ipc)", "/usr/local/sbin/hp-restore-panel (0750 root:root)"]) {
+      expect(r.stdout).toContain(s);
+    }
   });
 
   it("wrapper parses DATABASE_URL safely and keeps it out of argv", () => {
@@ -421,6 +432,12 @@ describe("release workflow and docs", () => {
       "address_not_updated",
       "undo_incomplete",
       "QUOTA_EXCEEDED",
+      "/v1/admin/backups/sites/{siteId}/restore:",
+      "AdminRestoreBackupInput",
+      "PanelBackupLine",
+      "panel.backups.create",
+      "panel_dump_failed",
+      "site_not_started",
     ]) {
       expect(api).toContain(s);
     }
@@ -440,5 +457,29 @@ describe("release workflow and docs", () => {
 
     const readme = read("README.md");
     expect(readme).not.toContain("arrivano con la milestone successiva (**M3b**)");
+  });
+
+  it("m3c panel copy docs are consistent", () => {
+    const dumpDir = "/var/lib/hosting-panel/panel-dump";
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(`install -d -m 2770 -o root -g hp-ipc ${dumpDir}\nchmod 2770 ${dumpDir}\n`);
+    expect(bootstrap).toContain(
+      'install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-restore-panel" /usr/local/sbin/hp-restore-panel\n',
+    );
+    for (const unit of ["hp-api", "hp-docker-executor"]) {
+      expect(read(`infra/systemd/${unit}.service`)).toContain(`Environment=HP_PANEL_DUMP_DIR=${dumpDir}\n`);
+    }
+    expect(read("infra/systemd/hp-api.service")).toContain(`ReadWritePaths=/run/hosting-panel ${dumpDir}\n`);
+    expect(read("infra/linux/run-dev-docker.mjs")).toContain("HP_PANEL_DUMP_DIR");
+
+    const adr = read("docs/architecture/adr/0022-site-backups.md");
+    for (const s of ["APPROVATO — M3a, M3b, M3c", "0011_panel_backup.sql", "hp-restore-panel", "panel_dump_tool_missing"]) {
+      expect(adr).toContain(s);
+    }
+    expect(adr).not.toContain("(arriva in **M3c**)");
+
+    const readme = read("README.md");
+    expect(readme).toContain("hp-restore-panel --endpoint");
+    expect(readme).not.toContain("Limite attuale (M3b → M3c)");
   });
 });

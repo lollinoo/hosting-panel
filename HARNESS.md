@@ -6,6 +6,7 @@
   - Never retain or reintroduce any external third-party orchestrator adapter, legacy POC artifact, or unapproved environment variable.
   - Never add unverified external dependencies outside the approved allowlist in `.agents/brain/state.md`.
   - Never allow `/apps/api` or `/apps/web` to access `/var/run/docker.sock` (`InaccessiblePaths=/var/run/docker.sock`); Docker Engine socket access is strictly confined to the isolated `hp-docker-executor` daemon (`ADR-010`, `AC-F2-01`).
+  - `apps/api` never starts an external program, with one exception: `apps/api/src/backups/panel-dump.ts` runs `/usr/lib/postgresql/18/bin/pg_dump` through `execFile` (static absolute path, no shell, credentials only in the environment of that child; `ADR-022` §6; guarded by test 1 of `apps/api/test/phase2-api.integration.test.ts`).
   - Never mount `/var/run/docker.sock` inside the Data Plane ingress proxy (`hp_ingress_proxy` / Traefik v3 uses read-only Dynamic File Provider only — `ADR-014`, `TH-02`, `AC-F2-03`).
   - Never invoke `sh -c`, shell command interpolation, or unapproved OS binaries in `hp-host-agent` (`execFile` on static absolute paths and closed enums only — `AC-F2-04`).
   - Never expose raw Docker container/network/volume IDs, socket paths, host filesystem paths, ciphertexts, or plaintext secrets in public DTOs, `StackRevision` specs, `outbox_events`, `Config.Env`, or logs (`F1-008`, `F1-012`, `ADR-015`, `AC-F2-05`).

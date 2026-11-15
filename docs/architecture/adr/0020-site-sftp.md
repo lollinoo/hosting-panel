@@ -33,6 +33,6 @@ I file dei siti WordPress risiedono nei volumi nominati Docker `hp_vol_<serviceI
 
 ## 5. Conformità alle regole architetturali
 
-- **Socket Docker esclusivo dell'executor:** solo `apps/docker-executor` tocca `/var/run/docker.sock` dietro IPC UDS firmato HMAC; `sftp-platform.ts` costruisce solo payload e gestisce i file in `/var/lib/hosting-panel/sftp`, mentre API e BFF non toccano mai Docker né `child_process`.
+- **Socket Docker esclusivo dell'executor:** solo `apps/docker-executor` tocca `/var/run/docker.sock` dietro IPC UDS firmato HMAC; `sftp-platform.ts` costruisce solo payload e gestisce i file in `/var/lib/hosting-panel/sftp`, mentre API e BFF non toccano mai Docker né `child_process` (unica eccezione da M3c: `pg_dump` lanciato dall'API per la copia del pannello, vedi ADR 0022 §6).
 - **Invariante `CP-01`:** ogni operazione SFTP e ogni eventuale ricreazione riguardano esclusivamente `hp_sftp`; nessun container WordPress o `hp_mariadb` viene riavviato, riconfigurato o raggiunto via `docker exec`.
 - **Nessun segreto in log, env o DTO:** `temporaryPassword` compare una sola volta nella risposta di creazione o reset, non è persistita e non viene mai loggata; `passwordHash` (`$6$`) resta escluso dai DTO pubblici (`SiteSftpDto`, `SiteSftpUserDto`; `FORBIDDEN_PUBLIC_DTO_KEYS` blocca `password` e `passwordHash`), dai log IPC (`apps/docker-executor/src/server.ts` non registra body o hash) e dai dettagli audit (`site.sftp.user.create`, `site.sftp.user.password_reset`, `site.sftp.user.delete` registrano solo `{ userId, username }`).
