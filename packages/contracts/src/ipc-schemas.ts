@@ -647,3 +647,143 @@ export const SITE_DATABASES_RESULT_SCHEMAS = {
 export type SiteDatabasesResultByOp = {
   [K in SiteDatabasesOp]: z.infer<(typeof SITE_DATABASES_RESULT_SCHEMAS)[K]>;
 };
+
+export const BACKUP_FAILURE_CLASSES = [
+  "unreachable",
+  "tls_failed",
+  "wrong_region",
+  "auth_failed",
+  "bucket_missing",
+  "write_denied",
+  "wrong_key",
+  "key_file_missing",
+  "tool_unavailable",
+  "no_space",
+  "database_dump_failed",
+  "files_unreadable",
+  "repository_locked",
+  "timeout",
+  "interrupted",
+  "other",
+] as const;
+
+export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
+
+export const BACKUP_JOB_STATES = ["running", "succeeded", "failed", "unknown"] as const;
+export type BackupJobState = (typeof BACKUP_JOB_STATES)[number];
+
+export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-forget)?$/;
+const BackupPathIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
+// Exclude backtick because AWS credentials INI wraps values in backticks to preserve '#' and ';'.
+const BackupKeySchema = z.string().regex(/^(?!.*`)[\x21-\x7e]{1,256}$/);
+const LOOPBACK_HOST =
+  /^(?:(?:.+\.)?localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|\[::ffff:(?:7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)\])$/i;
+
+export const BackupTargetSchema = z
+  .object({
+    endpoint: z
+      .string()
+      .max(255)
+      .regex(
+        /^https?:\/\/(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/,
+      )
+      .refine((v) => {
+        try {
+          const u = new URL(v);
+          const port = u.port === "" ? 1 : Number(u.port);
+          return !LOOPBACK_HOST.test(u.hostname) && port >= 1 && port <= 65535;
+        } catch {
+          // Node WHATWG URL rejects out-of-range ports and invalid IPv6 literals by throwing.
+          return false;
+        }
+      }),
+    region: z.string().regex(/^[a-z0-9-]{1,64}$/),
+    bucket: z.string().regex(/^(?!.*\.\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/),
+    prefix: z
+      .string()
+      .max(255)
+      .regex(/^(?:[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}){0,7})?$/),
+    accessKeyId: BackupKeySchema,
+    secretAccessKey: BackupKeySchema,
+  })
+  .strict();
+
+export type BackupTarget = z.infer<typeof BackupTargetSchema>;
+
+export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      action: z.literal("test"),
+      target: BackupTargetSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("start"),
+      jobId: z.string().regex(/^op_[0-9a-f]{32}$/),
+      siteId: BackupPathIdSchema,
+      serviceInstanceId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("status"),
+      jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("forget"),
+      jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+      siteId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      snapshotIds: z.array(z.string().regex(/^[0-9a-f]{64}$/)).min(1).max(100),
+    })
+    .strict(),
+]);
+
+const BackupCountSchema = z.number().int().nonnegative();
+
+export const BackupTestResultSchema = z
+  .object({
+    outcome: z.enum(["ok", "failed"]),
+    problem: z.enum(BACKUP_FAILURE_CLASSES).nullable(),
+  })
+  .strict();
+
+export type BackupTestResult = z.infer<typeof BackupTestResultSchema>;
+
+export const BackupJobStatusSchema = z
+  .object({
+    jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+    state: z.enum(BACKUP_JOB_STATES),
+    failure: z.enum(BACKUP_FAILURE_CLASSES).nullable(),
+    snapshot: z
+      .object({
+        snapshotId: z.string().regex(/^[0-9a-f]{64}$/),
+        bytesAdded: BackupCountSchema,
+        totalBytes: BackupCountSchema,
+        fileCount: BackupCountSchema,
+        durationMs: BackupCountSchema,
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+
+export type BackupJobStatus = z.infer<typeof BackupJobStatusSchema>;
+
+export type BackupsIpcRequest = z.infer<typeof BackupsIpcRequestSchema>;
+export type BackupsAction = BackupsIpcRequest["action"];
+
+export const BACKUPS_RESULT_SCHEMAS = {
+  test: BackupTestResultSchema,
+  start: BackupJobStatusSchema,
+  status: BackupJobStatusSchema,
+  forget: BackupJobStatusSchema,
+} as const satisfies { [K in BackupsAction]: z.ZodType };
+
+export type BackupsResultByAction = {
+  [K in BackupsAction]: z.infer<(typeof BACKUPS_RESULT_SCHEMAS)[K]>;
+};

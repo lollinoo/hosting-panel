@@ -1,4 +1,7 @@
 import type {
+  BackupsAction,
+  BackupsIpcRequest,
+  BackupsResultByAction,
   OperationStatus,
   SftpAccessApplyRequest,
   SftpApplyResult,
@@ -22,6 +25,8 @@ export type SiteDatabasesResult<O extends SiteDatabasesOp = SiteDatabasesOp> = S
 export type SiteFileEntry = SiteFileEntryDto;
 export type SiteFilesRequest = SiteFilesIpcRequest;
 export type SiteFilesResult<O extends SiteFilesOp = SiteFilesOp> = SiteFilesResultByOp[O];
+export type BackupsRequest = BackupsIpcRequest;
+export type BackupsResult<A extends BackupsAction = BackupsAction> = BackupsResultByAction[A];
 
 export interface DockerExecutionResult {
   readonly operationId: string;
@@ -57,6 +62,7 @@ export interface DockerExecutorPort {
   /** Full desired state; an empty list removes hp_sftp (host keys stay). */
   applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult>;
   getSftpStatus(): Promise<SftpStatusReport>;
+  backups<R extends BackupsIpcRequest>(req: R): Promise<BackupsResultByAction[R["action"]]>;
 }
 
 export interface SiteRoutesRequest {

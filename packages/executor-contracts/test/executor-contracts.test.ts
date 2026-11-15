@@ -6,6 +6,7 @@ import {
   Phase1DisabledDockerExecutor,
   ServiceInstanceActionIpcRequestSchema,
   createApprovedServiceSpec,
+  type BackupsRequest,
   type SiteDatabasesRequest,
 } from "../src/index.js";
 
@@ -329,6 +330,36 @@ describe("Phase1DisabledDockerExecutor siteDatabases", () => {
 
     for (const req of refusedOps) {
       await expect(executor.siteDatabases(req)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    }
+  });
+
+  it("refuses backups calls across all four actions", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const jobId = `op_${"a".repeat(32)}`;
+    const snapshotId = "b".repeat(64);
+    const target = {
+      endpoint: "https://s3.example.com",
+      region: "us-east-1",
+      bucket: "panel-backups",
+      prefix: "sites",
+      accessKeyId: "AKIAEXAMPLE123",
+      secretAccessKey: "super-secret-value-123",
+    };
+    const requests: BackupsRequest[] = [
+      { action: "test", target },
+      { action: "start", siteId: "site_1", serviceInstanceId: "svc_1", jobId, target },
+      { action: "status", jobId },
+      {
+        action: "forget",
+        siteId: "site_1",
+        jobId: `${jobId}-forget`,
+        snapshotIds: [snapshotId],
+        target,
+      },
+    ];
+
+    for (const req of requests) {
+      await expect(executor.backups(req)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
     }
   });
 });

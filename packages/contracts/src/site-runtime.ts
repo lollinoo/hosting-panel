@@ -15,6 +15,8 @@ export const DEFAULT_SFTP_PORT = 2222 as const;
 // Update: docker buildx imagetools inspect phpmyadmin:5.2.3-apache
 export const PHPMYADMIN_IMAGE =
   "phpmyadmin@sha256:e4b3eb5305cd42d21512bb55def2bab52625d56df927ad4ee1864a9354c84d40" as const;
+export const RESTIC_IMAGE =
+  "restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510" as const;
 export const DEFAULT_PHPMYADMIN_PORT = 8306 as const;
 export const PHPMYADMIN_UPLOAD_LIMIT_MB = 32 as const;
 export const resolveWordpressImage = (php: PhpVersion): string => `wordpress:7.1.4-php${php}-apache`;

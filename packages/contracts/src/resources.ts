@@ -232,6 +232,11 @@ export function isPhpMyAdminAvailable(runtimeBackend: RuntimeBackend): boolean {
   return runtimeBackend === "linux-systemd";
 }
 
+/** Site backups run only on the Linux systemd backend. */
+export function isBackupAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -242,7 +247,7 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   acmeTlsRuntimeAvailable: z.boolean(),
   sftpAvailable: z.boolean(),
   phpMyAdminAvailable: z.boolean(),
-  productionBackupRuntimeAvailable: z.literal(false),
+  productionBackupRuntimeAvailable: z.boolean(),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
 
@@ -284,7 +289,7 @@ export function createPlatformCapabilities(
       acmeTlsRuntimeAvailable: options.runtimeBackend === "linux-systemd",
       sftpAvailable: isSftpAvailable(options.runtimeBackend),
       phpMyAdminAvailable: isPhpMyAdminAvailable(options.runtimeBackend),
-      productionBackupRuntimeAvailable: false,
+      productionBackupRuntimeAvailable: isBackupAvailable(options.runtimeBackend),
     }),
   );
 }
@@ -297,7 +302,7 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   acmeTlsRuntimeAvailable: z.boolean(),
   sftpAvailable: z.boolean(),
   phpMyAdminAvailable: z.boolean(),
-  productionBackupRuntimeAvailable: z.literal(false),
+  productionBackupRuntimeAvailable: z.boolean(),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;
 

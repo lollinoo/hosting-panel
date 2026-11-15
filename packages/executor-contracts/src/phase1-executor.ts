@@ -5,6 +5,8 @@ import type {
 } from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import type {
+  BackupsRequest,
+  BackupsResult,
   DockerExecutionResult,
   DockerExecutorPort,
   ServiceLogLine,
@@ -95,6 +97,10 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async getSftpStatus(): Promise<SftpStatusReport> {
+    return this.refuse();
+  }
+
+  async backups<R extends BackupsRequest>(_req: R): Promise<BackupsResult<R["action"]>> {
     return this.refuse();
   }
 

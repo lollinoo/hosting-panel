@@ -10,3 +10,4 @@ export * from "./mail-relay.js";
 export * from "./site-files.js";
 export * from "./site-sftp.js";
 export * from "./site-databases.js";
+export * from "./backups.js";
