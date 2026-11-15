@@ -21,7 +21,7 @@ import { GET as listDomains, POST as addDomain } from "@/app/api/bff/orgs/[orgId
 import { DELETE as removeDomain } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/route";
 import { POST as setPrimary } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/primary/route";
 import { POST as checkNow } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/check/route";
-import { SITE_TABS } from "@/components/customer/site-tabs";
+import { SITE_TABS, SiteTabs } from "@/components/customer/site-tabs";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 import { DomainsPanel, domainView } from "@/components/customer/domains-panel";
 import { domainErrorText } from "@/lib/domain-view";
@@ -204,8 +204,25 @@ describe("domains UI", () => {
   });
 
   it("site tabs include domains, files, and database between overview and logs, backups after database", () => {
-    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "files", "database", "backups", "logs"]);
-    expect(SITE_TABS[1]!.href("s1")).toBe("/sites/s1/domains");
+    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "wordpress", "domains", "files", "database", "backups", "logs"]);
+    expect(SITE_TABS[2]!.href("s1")).toBe("/sites/s1/domains");
+  });
+
+  it("the WordPress tab shows only when the site runs WordPress, second after overview", () => {
+    const links = (html: string) => [...html.matchAll(/href="([^"]+)"/g)].map((x) => x[1]);
+    const plain = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1" })));
+    expect(plain).not.toContain("WordPress");
+    expect(links(plain)).not.toContain("/sites/s1/wordpress");
+    const wp = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1", wordpress: true })));
+    expect(links(wp).slice(0, 3)).toEqual(["/sites/s1", "/sites/s1/wordpress", "/sites/s1/domains"]);
+    expect(wp).toContain(">WordPress<");
+  });
+
+  it("both catalogs name the WordPress tab and the before-update copy", () => {
+    expect(en.site.tabs.wordpress).toBe("WordPress");
+    expect(itMsgs.site.tabs.wordpress).toBe("WordPress");
+    expect(en.site.backups.kind.pre_update).toBe("Before an update");
+    expect(itMsgs.site.backups.kind.pre_update).toBe("Prima di un aggiornamento");
   });
 
   it("port 80 hint says the administrator was alerted", () => {

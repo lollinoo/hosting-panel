@@ -15,7 +15,7 @@ export const getCustomerContext = cache(async () => {
   if (session.user.isServerAdmin || session.activeConsole === "admin") redirect("/admin/hosts");
   const me = await fetchServerMe();
   const orgId = me?.memberships[0]?.organizationId ?? null;
-  return { session, orgId, loadError: me === null };
+  return { session, orgId, loadError: me === null, capabilities: me?.platformCapabilities ?? null };
 });
 
 /** null = the list could not be loaded. */

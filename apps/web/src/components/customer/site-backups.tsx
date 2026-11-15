@@ -197,7 +197,7 @@ export function restoreBanner(
   };
 }
 
-function resolveQuotaRetryIso(rawDetails: unknown[], retryAfter: string | null | undefined, now: Date): string {
+export function resolveQuotaRetryIso(rawDetails: unknown[], retryAfter: string | null | undefined, now: Date): string {
   for (const detail of rawDetails) {
     if (
       isPlainRecord(detail) &&

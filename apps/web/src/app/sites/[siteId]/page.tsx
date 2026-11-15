@@ -1,7 +1,14 @@
-import type { OperationDto, OperationKind, OperationStatus } from "@hosting-panel/contracts";
+import {
+  isWordpressSite,
+  type OperationDto,
+  type OperationKind,
+  type OperationStatus,
+  type SiteWordpressDto,
+} from "@hosting-panel/contracts";
 import { format, getMessages, type Messages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { fetchServerOrgOperations } from "@/lib/server-api";
+import { fetchServerOrgOperations, serverGet } from "@/lib/server-api";
+import { pendingWordpressUpdates, wordpressOverviewKey } from "@/lib/site-wordpress";
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SiteProgress } from "@/components/customer/site-progress";
@@ -18,6 +25,7 @@ const ACTIVITY: Partial<Record<OperationKind, keyof Messages["site"]["activity"]
   "service.restart": "restart",
   "service.stop": "stop",
   "site.domains": "domains",
+  "site.wordpress.update": "wordpressUpdate",
 };
 
 const outcome = (s: OperationStatus) =>
@@ -25,7 +33,7 @@ const outcome = (s: OperationStatus) =>
 
 export default async function SiteOverviewPage({ params }: { params: Promise<{ siteId: string }> }) {
   const { siteId } = await params;
-  const { orgId, session } = await getCustomerContext();
+  const { orgId, session, capabilities } = await getCustomerContext();
   const result = await getSite(orgId, siteId);
   if (!result.ok || !orgId) return null; // the layout shows the 404 or the load error
   const site = result.data;
@@ -45,6 +53,21 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
   const showProgress = site.phpVersion !== null && showSetupProgress(site.status, provision?.status);
   const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const { labelKey } = toSiteStatusView(site.status, site.driftSummary);
+  const showWordpress = isWordpressSite(site) && capabilities?.wordpressToolsAvailable === true;
+  const wpRes = showWordpress
+    ? await serverGet<SiteWordpressDto>(
+        `v1/organizations/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(site.id)}/wordpress`,
+        { timeoutMs: 20_000 },
+      )
+    : null;
+  const wp = wpRes?.ok ? wpRes.data : null;
+  const wpKey = wordpressOverviewKey(wp);
+  const wpText =
+    wpKey === "wordpressUpToDate" && wp?.state
+      ? format(m.site.overview.wordpressUpToDate, { date: when.format(new Date(wp.state.checkedAt)) })
+      : wpKey === "wordpressCount" && wp?.state
+        ? format(m.site.overview.wordpressCount, { count: pendingWordpressUpdates(wp.state) })
+        : m.site.overview[wpKey];
 
   return (
     <div className="grid gap-6 md:grid-cols-2">
@@ -103,6 +126,22 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
         </CardContent>
       </Card>
 
+      {showWordpress && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">{m.site.overview.wordpressTitle}</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <CardDescription role={wpKey === "wordpressLoadFailed" ? "alert" : undefined}>{wpText}</CardDescription>
+            <Link
+              href={`/sites/${site.id}/wordpress`}
+              className="mt-3 inline-block text-sm font-medium text-primary underline-offset-4 hover:underline"
+            >
+              {m.site.overview.wordpressLink}
+            </Link>
+          </CardContent>
+        </Card>
+      )}
       <Card className="md:col-span-2">
         <CardHeader>
           <CardTitle className="text-base">{m.site.overview.activityTitle}</CardTitle>

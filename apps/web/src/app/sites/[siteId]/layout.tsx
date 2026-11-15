@@ -1,3 +1,4 @@
+import { isWordpressSite } from "@hosting-panel/contracts";
 import { notFound } from "next/navigation";
 import { getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
@@ -17,7 +18,7 @@ export default async function SiteLayout({
   params: Promise<{ siteId: string }>;
 }) {
   const { siteId } = await params;
-  const { orgId, loadError } = await getCustomerContext();
+  const { orgId, loadError, capabilities } = await getCustomerContext();
   if (loadError) return null; // the sites layout already shows the load error
   const result = await getSite(orgId, siteId);
   const m = getMessages(await getRequestLocale());
@@ -66,7 +67,7 @@ export default async function SiteLayout({
           </a>
         )}
       </div>
-      <SiteTabs siteId={site.id} />
+      <SiteTabs siteId={site.id} wordpress={isWordpressSite(site) && capabilities?.wordpressToolsAvailable === true} />
       {children}
     </div>
   );

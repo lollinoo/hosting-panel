@@ -107,6 +107,7 @@ export const it = {
     tabsLabel: "Sezioni del sito",
     tabs: {
       overview: "Panoramica",
+      wordpress: "WordPress",
       domains: "Indirizzi web",
       files: "File",
       database: "Database",
@@ -135,6 +136,15 @@ export const it = {
       activityTitle: "Attività recenti",
       noActivity: "Ancora nessuna attività.",
       activityLoadError: "Non siamo riusciti a caricare le attività recenti. Ricarica la pagina per riprovare.",
+      wordpressTitle: "Aggiornamenti di WordPress",
+      wordpressNotChecked: "Non ancora controllato.",
+      wordpressRunning: "È in corso un aggiornamento.",
+      wordpressUnknown: "Non siamo riusciti a raggiungere wordpress.org, quindi non sappiamo se esistono aggiornamenti.",
+      wordpressProblem: "Non siamo riusciti a leggere il sito. Apri WordPress per vedere il motivo.",
+      wordpressUpToDate: "Tutto aggiornato (controllo del {date}).",
+      wordpressCount: "Aggiornamenti disponibili: {count}",
+      wordpressLoadFailed: "Non siamo riusciti a caricare i dettagli di WordPress. Ricarica la pagina per riprovare.",
+      wordpressLink: "Apri WordPress",
     },
     domainStatus: {
       pending: "In collegamento",
@@ -147,6 +157,7 @@ export const it = {
       deploy: "Aggiornamento del sito",
       restart: "Riavvio del sito",
       stop: "Arresto del sito",
+      wordpressUpdate: "Aggiornamento di WordPress",
       done: "{action} completato",
       failed: "{action} non riuscito",
       running: "{action} in corso",
@@ -649,7 +660,7 @@ export const it = {
         expires: "Disponibile fino al",
         actions: "Azioni",
       },
-      kind: { nightly: "Notturno", manual: "Fatto a mano" },
+      kind: { nightly: "Notturno", manual: "Fatto a mano", pre_update: "Prima di un aggiornamento" },
       status: { running: "In corso", succeeded: "Completato", failed: "Non riuscito" },
       keptLatest: "Finché non ne riesce uno più recente",
       problem: {
@@ -802,11 +813,171 @@ export const it = {
         uncertain:
           "Non abbiamo potuto confermare l'avvio del backup. Attendi un minuto e ricarica questa pagina prima di riprovare.",
         tooMany:
-          "Per questo sito sono già stati avviati 6 tra backup, ripristini e download nell'ultima ora. Puoi avviarne un altro alle {time}.",
+          "Per questo sito sono già stati avviati 6 tra backup, ripristini, download e aggiornamenti di WordPress nell'ultima ora. Puoi avviarne un altro alle {time}.",
         uncertainAction:
           "Non abbiamo potuto confermare che la richiesta sia arrivata. Attendi un minuto e ricarica questa pagina prima di riprovare.",
         stillWorking:
           "Ci vuole più tempo del solito e prosegue da solo. Ricarica questa pagina più tardi per vedere il risultato.",
+      },
+    },
+    wordpress: {
+      title: "WordPress",
+      notAvailable: "Gli strumenti per WordPress non sono disponibili su questo server. Chiedi al tuo amministratore.",
+      loadFailed: "Non siamo riusciti a caricare i dettagli di WordPress. Ricarica la pagina tra poco.",
+      header: {
+        version: "WordPress {version}",
+        versionUnknown: "Versione di WordPress non nota",
+        checkedAt: "Ultimo controllo: {date}",
+        notChecked: "Non ancora controllato",
+        checkNow: "Controlla ora",
+        checking: "Controllo in corso…",
+      },
+      notices: {
+        notCheckedYet:
+          "Non abbiamo ancora controllato questo sito. Premi «Controlla ora» per vedere le versioni e gli aggiornamenti disponibili.",
+        checking: "Stiamo controllando gli aggiornamenti di WordPress, dei plugin e dei temi…",
+        updatesUnknown:
+          "Non siamo riusciti a raggiungere wordpress.org, quindi non sappiamo se esistono aggiornamenti. Le versioni qui sotto sono quelle installate. Premi «Controlla ora» più tardi.",
+        upToDate: "È tutto aggiornato.",
+        checkFailed: "Il controllo non è terminato. Premi «Controlla ora» per riprovare.",
+        slow: "Ci vuole più tempo del solito. Prosegue da solo: ricarica la pagina più tardi per vedere il risultato.",
+      },
+      problem: {
+        configBroken:
+          "Il file delle impostazioni di WordPress (wp-config.php) non si carica, quindi non siamo riusciti a leggere il sito. Correggi il file nella scheda File o ripristina una copia da Backup, poi premi «Controlla ora».",
+        databaseUnreachable:
+          "Il database del sito non risponde, quindi non siamo riusciti a leggere il sito. Controlla la scheda Database, poi premi «Controlla ora».",
+        notInstalled:
+          "Non abbiamo trovato WordPress nei file del sito. Se l'hai spostato o rimosso, ripristina una copia da Backup, poi premi «Controlla ora».",
+        other: "Questa volta non siamo riusciti a leggere il sito. Premi «Controlla ora» per riprovare.",
+      },
+      tables: {
+        core: "WordPress",
+        plugins: "Plugin",
+        themes: "Temi",
+        name: "Nome",
+        status: "Stato",
+        installed: "Installata",
+        available: "Nuova versione",
+        actions: "Azioni",
+        current: "Aggiornato",
+        unknown: "Non nota",
+        emptyPlugins: "Nessun plugin installato.",
+        emptyThemes: "Nessun tema installato.",
+        update: "Aggiorna",
+        updateLabel: "Aggiorna {name} alla versione {version}",
+        updateAll: "Aggiorna tutto ({count})",
+      },
+      status: {
+        active: "Attivo",
+        inactive: "Non attivo",
+        activeNetwork: "Attivo su tutti i siti",
+        mustUse: "Sempre attivo",
+        dropin: "Drop-in",
+        parent: "Tema genitore",
+      },
+      admins: {
+        title: "Amministratori",
+        login: "Nome utente",
+        empty: "Nessun amministratore trovato.",
+        reset: "Reimposta password",
+        resetLabel: "Reimposta la password di {login}",
+      },
+      update: {
+        titleOne: "Aggiornare {name}?",
+        titleCore: "Aggiornare WordPress?",
+        titleAll: "Aggiornare tutto?",
+        bodyOne: "{name} passa dalla versione {from} alla {to}.",
+        bodyAll: "Verranno installati {count} aggiornamenti: prima WordPress, poi i plugin, poi i temi.",
+        downtime: "Durante l'aggiornamento il sito potrebbe non essere raggiungibile per qualche istante.",
+        backupTaken: "Prima viene fatta una copia del sito. Se qualcosa va storto, puoi ripristinarla dalla scheda Backup.",
+        backupNone:
+          "I backup non sono configurati su questo server, quindi prima non verrà fatta nessuna copia del sito. Se qualcosa va storto, non ci sarà una copia da ripristinare.",
+        noAutoRestore: "Il pannello non annulla mai da solo un aggiornamento.",
+        confirm: "Aggiorna",
+        confirmAll: "Aggiorna tutto",
+        cancel: "Annulla",
+        starting: "Avvio in corso…",
+      },
+      progress: {
+        title: "Aggiornamento in corso",
+        backup: "Copia del sito in corso",
+        backupSkipped: "Nessuna copia: i backup non sono configurati su questo server",
+        update: "Installazione degli aggiornamenti",
+        settle: "Chiusura e nuova lettura delle versioni",
+        inspect: "Controllo degli aggiornamenti",
+      },
+      step: {
+        done: "completato",
+        running: "in corso",
+        waiting: "in attesa",
+        skipped: "saltato",
+        failed: "non riuscito",
+      },
+      outcome: {
+        title: "Ultimo aggiornamento",
+        finishedAt: "Terminato il {date}",
+        succeeded: "Aggiornamento terminato: tutto ciò che hai chiesto è stato aggiornato.",
+        nothingToDo: "Non c'era niente da aggiornare.",
+        orgUnreachable: "Non siamo riusciti a raggiungere wordpress.org, quindi non è stato aggiornato niente. Riprova più tardi.",
+        configBroken:
+          "Il file delle impostazioni di WordPress (wp-config.php) non si carica, quindi non è stato aggiornato niente. Correggilo nella scheda File, poi riprova.",
+        databaseUnreachable:
+          "Il database del sito non rispondeva, quindi non è stato aggiornato niente. Controlla la scheda Database, poi riprova.",
+        notInstalled: "Non abbiamo trovato WordPress nei file del sito, quindi non è stato aggiornato niente.",
+        backupFailed:
+          "La copia del sito prima dell'aggiornamento non è riuscita, quindi non è stato aggiornato niente. Riprova più tardi; se succede ancora, chiedi al tuo amministratore.",
+        itemsFailed: "Alcuni elementi non sono stati aggiornati: vedi l'elenco qui sotto. Controlla che il sito funzioni ancora.",
+        itemUnknown:
+          "Questo plugin o tema non è più presente sul sito. Non è stato modificato nulla. Premi «Controlla ora» per vedere l'elenco aggiornato.",
+        interrupted: "L'aggiornamento è stato interrotto prima di qualsiasi modifica. Riprova.",
+        outcomeUnknown:
+          "Non sappiamo come è terminato l'aggiornamento. Controlla le versioni qui sotto e che il sito funzioni ancora.",
+        failed: "L'aggiornamento non è riuscito. Controlla le versioni qui sotto, poi riprova.",
+        backupTaken: "Nella scheda Backup c'è una copia di poco prima dell'aggiornamento, se devi tornare indietro.",
+        backupSkipped: "Prima non è stata fatta nessuna copia, perché i backup non sono configurati su questo server.",
+        item: "Elemento",
+        before: "Prima",
+        after: "Dopo",
+        result: "Esito",
+        updated: "Aggiornato",
+        notUpdated: "Non aggiornato",
+        type: { core: "WordPress", plugin: "Plugin", theme: "Tema" },
+      },
+      reset: {
+        title: "Reimpostare la password di {login}?",
+        body: "La password attuale smette subito di funzionare e {login} viene disconnesso da WordPress su tutti i dispositivi.",
+        once: "La nuova password viene mostrata una sola volta.",
+        confirm: "Reimposta password",
+        cancel: "Annulla",
+        resetting: "Reimpostazione in corso…",
+        doneTitle: "Password reimpostata",
+        done: "Fatto",
+        created: {
+          tempFor: "Password per {name}:",
+          copy: "Copia",
+          copied: "Copiata",
+          copyUnavailable: "Qui non è possibile copiare. Seleziona la password e copiala a mano.",
+          tempNote: "Consegnala alla persona che usa questo account. Potrà sceglierne una nuova in WordPress, alla voce Profilo.",
+          tempOnce: "La mostriamo una sola volta: copiala ora. Se la perdi, reimposta di nuovo la password.",
+        },
+        failed: {
+          configBroken:
+            "La password non è stata cambiata: il file delle impostazioni di WordPress (wp-config.php) non si carica. Correggilo nella scheda File, poi riprova.",
+          databaseUnreachable:
+            "La password non è stata cambiata: il database del sito non risponde. Controlla la scheda Database, poi riprova.",
+          notInstalled: "La password non è stata cambiata: non abbiamo trovato WordPress nei file del sito.",
+          unknown:
+            "Non siamo riusciti a confermare se la password è cambiata. Se la vecchia password non funziona più, reimpostala di nuovo.",
+        },
+      },
+      errors: {
+        notReady: "Il sito è in fase di preparazione o modifica. Riprova quando è pronto.",
+        itemUnknown: "Questo elemento non è più presente sul sito. Premi «Controlla ora» per vedere l'elenco aggiornato.",
+        adminUnknown:
+          "Questa persona non è più un amministratore del sito. Premi «Controlla ora» per vedere l'elenco aggiornato.",
+        uncertain: "Non siamo riusciti a confermare l'avvio. Aspetta un minuto e ricarica la pagina prima di riprovare.",
+        suspended: "Il tuo account è sospeso: non è possibile controllare o modificare WordPress. Contatta il tuo fornitore di hosting.",
       },
     },
   },

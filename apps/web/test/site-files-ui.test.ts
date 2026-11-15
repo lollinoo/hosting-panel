@@ -437,8 +437,8 @@ describe("uploadFile", () => {
 describe("Files tab navigation and catalog", () => {
   it("places files tab right after domains with href /sites/:id/files", () => {
     const keys = SITE_TABS.map((t) => t.key);
-    expect(keys).toEqual(["overview", "domains", "files", "database", "backups", "logs"]);
-    expect(SITE_TABS[2]!.href("s1")).toBe("/sites/s1/files");
+    expect(keys).toEqual(["overview", "wordpress", "domains", "files", "database", "backups", "logs"]);
+    expect(SITE_TABS[3]!.href("s1")).toBe("/sites/s1/files");
   });
 
   it("includes site.files.sftpLink and site.files.sftp in both catalogs while keeping file manager hints SFTP-free", () => {

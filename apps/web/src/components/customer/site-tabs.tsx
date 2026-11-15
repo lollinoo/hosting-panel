@@ -8,8 +8,12 @@ import { LAST_SITE_COOKIE } from "@/app/sites/landing";
 import { cn } from "@/lib/utils";
 
 // Later steps append tabs here.
-export const SITE_TABS: { key: "overview" | "domains" | "files" | "database" | "backups" | "logs"; href: (siteId: string) => string }[] = [
+export const SITE_TABS: {
+  key: "overview" | "wordpress" | "domains" | "files" | "database" | "backups" | "logs";
+  href: (siteId: string) => string;
+}[] = [
   { key: "overview", href: (siteId) => `/sites/${siteId}` },
+  { key: "wordpress", href: (siteId) => `/sites/${siteId}/wordpress` },
   { key: "domains", href: (siteId) => `/sites/${siteId}/domains` },
   { key: "files", href: (siteId) => `/sites/${siteId}/files` },
   { key: "database", href: (siteId) => `/sites/${siteId}/database` },
@@ -18,7 +22,8 @@ export const SITE_TABS: { key: "overview" | "domains" | "files" | "database" | "
 ];
 
 // Route tabs are page links, so they are a nav with aria-current rather than an ARIA tablist.
-export function SiteTabs({ siteId }: { siteId: string }) {
+// The WordPress tab shows only for WordPress sites on a server that has the tools.
+export function SiteTabs({ siteId, wordpress = false }: { siteId: string; wordpress?: boolean }) {
   const m = useMessages();
   const pathname = usePathname();
 
@@ -30,7 +35,7 @@ export function SiteTabs({ siteId }: { siteId: string }) {
   return (
     <nav aria-label={m.site.tabsLabel} className="border-b">
       <ul className="-mb-px flex gap-6">
-        {SITE_TABS.map((tab, i) => {
+        {SITE_TABS.filter((tab) => wordpress || tab.key !== "wordpress").map((tab, i) => {
           const href = tab.href(siteId);
           const active = pathname === href || (i > 0 && pathname.startsWith(`${href}/`));
           return (
