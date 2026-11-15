@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import {
   BACKUP_FAILURE_CLASSES,
   BACKUPS_RESULT_SCHEMAS,
@@ -1227,5 +1228,209 @@ describe("SimulatedBackups M3b restore and archive actions", () => {
     ]) {
       expect(serialized).not.toContain(forbidden);
     }
+  });
+});
+
+// Sentinel only: 64 lowercase hex digits, never a real key.
+const SENTINEL_MASTER_KEY = `9b${"c7".repeat(31)}`;
+
+describe("SimulatedBackups M3c site state, restore that creates the files, panel copy", () => {
+  const restoreReq = (jobId: string, snapshotId: string, createVolume?: true) => ({
+    action: "restore" as const,
+    jobId,
+    siteId: "site_m3c",
+    serviceInstanceId: "svc_site_m3c",
+    target: VALID_TARGET,
+    snapshotId,
+    ...(createVolume ? { createVolume } : {}),
+  });
+  const panelReq = (jobId: string) => ({
+    action: "panelStart" as const,
+    jobId,
+    target: VALID_TARGET,
+    masterKey: SENTINEL_MASTER_KEY,
+    retentionDays: 14,
+  });
+  const stateOf = (sim: SimulatedBackups) =>
+    sim.handle({ action: "siteState", siteId: "site_m3c", serviceInstanceId: "svc_site_m3c" });
+
+  it("answers siteState {true, true} by default and every combination set by setSiteState", async () => {
+    const sim = new SimulatedBackups();
+    const first = await stateOf(sim);
+    expect(first).toEqual({ filesVolume: true, container: true });
+    expect(() => BACKUPS_RESULT_SCHEMAS.siteState.parse(first)).not.toThrow();
+
+    for (const filesVolume of [true, false]) {
+      for (const container of [true, false]) {
+        sim.setSiteState("svc_site_m3c", { filesVolume, container });
+        expect(await stateOf(sim)).toEqual({ filesVolume, container });
+        // Another service instance keeps the default.
+        expect(
+          await sim.handle({ action: "siteState", siteId: "site_x", serviceInstanceId: "svc_x" }),
+        ).toEqual({ filesVolume: true, container: true });
+      }
+    }
+  });
+
+  it("restores as before when the files volume exists, with or without createVolume", async () => {
+    const sim = new SimulatedBackups();
+    const snap = await createSiteSnapshot(sim, JOB_1, "site_m3c");
+    sim.setSiteState("svc_site_m3c", { filesVolume: true, container: false });
+
+    await sim.handle(restoreReq(JOB_2, snap));
+    expect((await sim.handle({ action: "status", jobId: JOB_2 })).state).toBe("succeeded");
+    await sim.handle(restoreReq(JOB_3, snap, true));
+    expect((await sim.handle({ action: "status", jobId: JOB_3 })).state).toBe("succeeded");
+    expect(await stateOf(sim)).toEqual({ filesVolume: true, container: false });
+  });
+
+  it("fails a restore with restore_prepare_failed when the files volume is missing and createVolume is absent", async () => {
+    const sim = new SimulatedBackups();
+    const snap = await createSiteSnapshot(sim, JOB_1, "site_m3c");
+    sim.setSiteState("svc_site_m3c", { filesVolume: false, container: false });
+
+    await sim.handle(restoreReq(JOB_2, snap));
+    expect(await sim.handle({ action: "status", jobId: JOB_2 })).toEqual({
+      jobId: JOB_2,
+      state: "failed",
+      failure: "restore_prepare_failed",
+      snapshot: null,
+    });
+    expect(await stateOf(sim)).toEqual({ filesVolume: false, container: false });
+  });
+
+  it("creates the files volume on a successful restore with createVolume and keeps it only on success or undo_incomplete", async () => {
+    const sim = new SimulatedBackups();
+    const snap = await createSiteSnapshot(sim, JOB_1, "site_m3c");
+    sim.setSiteState("svc_site_m3c", { filesVolume: false, container: true });
+
+    // A plain failure leaves the volume missing.
+    sim.failNext("switch_undone");
+    await sim.handle(restoreReq(JOB_2, snap, true));
+    expect((await sim.handle({ action: "status", jobId: JOB_2 })).failure).toBe(
+      "switch_undone",
+    );
+    expect(await stateOf(sim)).toEqual({ filesVolume: false, container: true });
+
+    // A held job leaves the volume missing until it settles.
+    sim.holdJobs();
+    await sim.handle(restoreReq(JOB_3, snap, true));
+    expect((await sim.handle({ action: "status", jobId: JOB_3 })).state).toBe("running");
+    expect(await stateOf(sim)).toEqual({ filesVolume: false, container: true });
+    sim.finishHeld();
+    expect((await sim.handle({ action: "status", jobId: JOB_3 })).state).toBe("succeeded");
+    expect(await stateOf(sim)).toEqual({ filesVolume: true, container: true });
+
+    // undo_incomplete keeps what the job created.
+    sim.setSiteState("svc_site_m3c", { filesVolume: false, container: false });
+    sim.failNext("undo_incomplete");
+    await sim.handle(restoreReq(JOB_4, snap, true));
+    expect((await sim.handle({ action: "status", jobId: JOB_4 })).failure).toBe("undo_incomplete");
+    expect(await stateOf(sim)).toEqual({ filesVolume: true, container: false });
+  });
+
+  it("runs a panel copy on lane panel:db with hold, fail, repeat, lock, restart and panelJobIds()", async () => {
+    const sim = new SimulatedBackups();
+    expect(sim.panelJobIds()).toEqual([]);
+
+    const started = await sim.handle(panelReq(JOB_1));
+    expect(started).toEqual({ jobId: JOB_1, state: "running", failure: null, snapshot: null });
+    expect(() => BACKUPS_RESULT_SCHEMAS.panelStart.parse(started)).not.toThrow();
+    const done = await sim.handle({ action: "status", jobId: JOB_1 });
+    expect(() => BackupJobStatusSchema.parse(done)).not.toThrow();
+    expect(done.state).toBe("succeeded");
+    expect(done.snapshot?.snapshotId).toMatch(/^[0-9a-f]{64}$/);
+    // Same id again answers the job and starts nothing.
+    expect(await sim.handle(panelReq(JOB_1))).toEqual(done);
+    expect(sim.panelJobIds()).toEqual([JOB_1]);
+
+    // failNext applies to the next panel copy.
+    sim.failNext("panel_dump_missing");
+    await sim.handle(panelReq(JOB_2));
+    expect(await sim.handle({ action: "status", jobId: JOB_2 })).toEqual({
+      jobId: JOB_2,
+      state: "failed",
+      failure: "panel_dump_missing",
+      snapshot: null,
+    });
+
+    // Held: a second panel copy is locked, a site job still runs, a third job hits the limit.
+    sim.holdJobs();
+    await sim.handle(panelReq(JOB_3));
+    expect((await sim.handle({ action: "status", jobId: JOB_3 })).state).toBe("running");
+    const locked = await sim.handle(panelReq(JOB_4)).catch((e: unknown) => e);
+    expect(locked).toBeInstanceOf(ExecutorCodedError);
+    expect((locked as ExecutorCodedError).code).toBe("RESOURCE_LOCKED");
+    await sim.handle({
+      action: "start",
+      jobId: JOB_5,
+      siteId: "site_m3c",
+      serviceInstanceId: "svc_site_m3c",
+      target: VALID_TARGET,
+    });
+    const full = await sim
+      .handle({
+        action: "start",
+        jobId: JOB_6,
+        siteId: "site_other",
+        serviceInstanceId: "svc_other",
+        target: VALID_TARGET,
+      })
+      .catch((e: unknown) => e);
+    expect((full as ExecutorCodedError).code).toBe("RESOURCE_LOCKED");
+    sim.finishHeld();
+    expect((await sim.handle({ action: "status", jobId: JOB_3 })).state).toBe("succeeded");
+    // Panel snapshots are not site snapshots.
+    expect(sim.snapshots("site_m3c")).toHaveLength(1);
+    expect(sim.snapshots("panel:db")).toEqual([]);
+
+    // After a restart a panel job is unknown, held or not.
+    sim.holdJobs();
+    await sim.handle(panelReq(JOB_4));
+    sim.simulateRestart();
+    sim.holdJobs(false);
+    for (const jobId of [JOB_1, JOB_4]) {
+      expect(await sim.handle({ action: "status", jobId })).toEqual({
+        jobId,
+        state: "unknown",
+        failure: null,
+        snapshot: null,
+      });
+    }
+    expect(sim.panelJobIds()).toEqual([JOB_1, JOB_2, JOB_3, JOB_4]);
+  });
+
+  it("never keeps the master key: not in answers, panelJobIds(), errors or inspected state", async () => {
+    const sim = new SimulatedBackups();
+    const seen: unknown[] = [];
+    sim.holdJobs();
+    seen.push(await sim.handle(panelReq(JOB_1)));
+    seen.push(await sim.handle(panelReq(JOB_1)));
+    seen.push(await sim.handle(panelReq(JOB_2)).catch((e: unknown) => e));
+    seen.push(
+      await sim
+        .handle({ ...panelReq(JOB_3), masterKey: `${SENTINEL_MASTER_KEY.slice(0, 63)}G` })
+        .catch((e: unknown) => e),
+    );
+    seen.push(
+      await sim
+        .handle({ ...panelReq(JOB_3), extra: SENTINEL_MASTER_KEY } as unknown as BackupsIpcRequest)
+        .catch((e: unknown) => e),
+    );
+    seen.push(await sim.handle({ action: "status", jobId: JOB_1 }));
+    sim.finishHeld();
+    seen.push(await sim.handle({ action: "status", jobId: JOB_1 }));
+    seen.push(sim.panelJobIds());
+
+    const probe = SENTINEL_MASTER_KEY.slice(0, 63);
+    const rendered = seen
+      .map((v) =>
+        v instanceof Error
+          ? `${v.message} ${String(v.stack)} ${inspect(v, { depth: null, showHidden: true })}`
+          : JSON.stringify(v),
+      )
+      .join("\n");
+    expect(rendered).not.toContain(probe);
+    expect(inspect(sim, { depth: null, showHidden: true })).not.toContain(probe);
   });
 });

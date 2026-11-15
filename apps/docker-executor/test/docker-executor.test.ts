@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type DockerContainerInspectPayload,
   BACKUPS_TEST_TIMEOUT_MS,
+  BackupRunner,
   BACKUPS_TIMEOUT_MS,
   DEFAULT_BACKUP_KEY_FILE,
   DEFAULT_BACKUP_WORK_DIR,
@@ -2216,6 +2217,9 @@ describe("backups shared base and IPC", () => {
       if (req.action === "status") {
         return { jobId: req.jobId, state: "succeeded", failure: null, snapshot: null } as never;
       }
+      if (req.action === "siteState") {
+        return { filesVolume: false, container: false } as never;
+      }
       return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
     });
 
@@ -2404,6 +2408,24 @@ describe("backups shared base and IPC", () => {
     await expect(
       adapter.backups({ action: "readArchive", jobId: jobPrepare, offset: 0, length: 16 }),
     ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+  });
+
+  it("hands the panel-fetch stop signal on to the runner", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-adapter-fetch-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const spy = vi
+      .spyOn(BackupRunner.prototype, "fetchPanelCopy")
+      .mockResolvedValue({ ok: false, problem: "other" });
+    cleanupTasks.push(async () => spy.mockRestore());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: path.join(tmp, "docker.sock"),
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    const target = { endpoint: "https://s3.example.test" } as unknown as Parameters<typeof adapter.fetchPanelCopy>[0];
+    const signal = new AbortController().signal;
+    await adapter.fetchPanelCopy(target, path.join(tmp, "dump"), signal);
+    expect(spy).toHaveBeenCalledWith(target, path.join(tmp, "dump"), signal);
   });
 
   it("bootstrapDockerExecutorDaemon reads HP_BACKUP_WORK_DIR and runs cleanupOrphanJobs -> settleRestores -> emptyArchives before listening, surviving settle failures", async () => {

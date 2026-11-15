@@ -20,6 +20,7 @@ import {
   MAIL_RELAY_IMAGE,
   type BackupsIpcRequest,
   type BackupsResultByAction,
+  type BackupTarget,
   type MailFailureDto,
   type MailRelayApplyRequest,
   type MailTestResult,
@@ -61,6 +62,8 @@ import {
   DEFAULT_BACKUP_KEY_FILE,
   DEFAULT_BACKUP_NETWORK_NAME,
   DEFAULT_BACKUP_WORK_DIR,
+  DEFAULT_PANEL_DUMP_DIR,
+  type PanelFetchResult,
 } from "./backup-runner.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
@@ -1052,6 +1055,7 @@ export interface DockerEngineSocketAdapterOptions {
   readonly phpMyAdminConfigDir?: string;
   readonly backupKeyFile?: string;
   readonly backupWorkDir?: string;
+  readonly panelDumpDir?: string;
   readonly backupNetworkName?: string;
   readonly sharedDbNetworkName?: string;
 }
@@ -1228,6 +1232,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       backupNetworkName: this.backupNetworkName,
       executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
       backupWorkDir: path.resolve(options?.backupWorkDir ?? DEFAULT_BACKUP_WORK_DIR),
+      panelDumpDir: path.resolve(options?.panelDumpDir ?? DEFAULT_PANEL_DUMP_DIR),
     });
   }
 
@@ -2045,6 +2050,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     req: R,
   ): Promise<BackupsResultByAction[R["action"]]> {
     return this.backupRunner.run(req);
+  }
+
+  /** Fetches the newest panel copy into `panelDumpDir` (used by the panel-fetch CLI). */
+  public fetchPanelCopy(target: BackupTarget, panelDumpDir: string, signal?: AbortSignal): Promise<PanelFetchResult> {
+    return this.backupRunner.fetchPanelCopy(target, panelDumpDir, signal);
   }
 
   /** Settles non-ended restore notes left behind by an interrupted executor before accepting IPC traffic. */

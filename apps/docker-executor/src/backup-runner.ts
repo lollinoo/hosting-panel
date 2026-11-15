@@ -12,6 +12,7 @@ import {
   resolveWordpressImage,
   type BackupFailureClass,
   type BackupJobStatus,
+  type BackupSiteState,
   type BackupsIpcRequest,
   type BackupsResultByAction,
   type BackupTarget,
@@ -57,6 +58,7 @@ import {
   buildRestoreFetchContainerPayload,
   buildRestoreFilesContainerPayload,
   buildRestoreFinishContainerPayload,
+  buildRestoreOwnContainerPayload,
   buildRestorePrepareContainerPayload,
   buildRestoreSwitchContainerPayload,
   buildRestoreUndoDbContainerPayload,
@@ -71,6 +73,21 @@ import {
   type RestoreNote,
 } from "./restore-jobs.js";
 import { purgeServiceSecrets, writeServiceSecrets } from "./docker-engine-adapter.js";
+import {
+  PANEL_DUMP_MAGIC,
+  PANEL_FETCH_EXIT_NO_COPY,
+  PANEL_FETCH_EXIT_NO_SPACE,
+  PANEL_KEY_FILE_PATTERN,
+  PANEL_LANE,
+  PANEL_MASTER_KEY_SECRET,
+  PANEL_RESTORE_DUMP_NAME,
+  PANEL_RESTORE_KEY_NAME,
+  buildPanelDropContainerPayload,
+  buildPanelFetchContainerPayload,
+  buildPanelKeepContainerPayload,
+  buildPanelRepoContainerPayload,
+  buildPanelUploadContainerPayload,
+} from "./panel-jobs.js";
 import { demuxDockerLogStream } from "./docker-logs.js";
 import { probeS3, S3_PROBE_BUDGET_MS } from "./s3-probe.js";
 import { DEFAULT_SHARED_DB_DATA_DIR } from "./shared-database.js";
@@ -84,6 +101,7 @@ import {
 export const DEFAULT_BACKUP_KEY_FILE = "/etc/hosting-panel/backup.key" as const;
 export const DEFAULT_BACKUP_NETWORK_NAME = "hp_backup_net" as const;
 export const DEFAULT_BACKUP_WORK_DIR = "/var/lib/hosting-panel/backups" as const;
+export const DEFAULT_PANEL_DUMP_DIR = "/var/lib/hosting-panel/panel-dump" as const;
 
 export type DockerRequest = (
   method: string,
@@ -106,6 +124,7 @@ export interface BackupRunnerDeps {
   readonly backupNetworkName: string;
   readonly executorUser: string;
   readonly backupWorkDir?: string;
+  readonly panelDumpDir?: string;
   readonly sharedDbDataDir?: string;
   readonly statfs?: (targetPath: string) => Promise<{
     readonly bavail: number | bigint;
@@ -120,6 +139,24 @@ type ForgetBackupRequest = Extract<BackupsIpcRequest, { action: "forget" }>;
 type TestBackupRequest = Extract<BackupsIpcRequest, { action: "test" }>;
 type RestoreBackupRequest = Extract<BackupsIpcRequest, { action: "restore" }>;
 type ArchiveBackupRequest = Extract<BackupsIpcRequest, { action: "archive" }>;
+type PanelStartRequest = Extract<BackupsIpcRequest, { action: "panelStart" }>;
+type SiteStateRequest = Extract<BackupsIpcRequest, { action: "siteState" }>;
+
+export type PanelFetchProblem = BackupFailureClass | "no_copy" | "refused";
+export type PanelFetchResult =
+  | { readonly ok: true; readonly snapshotId: string; readonly time: string }
+  | { readonly ok: false; readonly problem: PanelFetchProblem };
+
+/** Identity of the dump file: any change between the check and the upload fails the job. */
+interface PanelDumpIdentity {
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly size: bigint;
+  readonly mtimeNs: bigint;
+}
+
+const PANEL_KEY_BYTES = 64n;
+const PANEL_FETCH_SNAP_LINE = /^HP_SNAP ([0-9a-f]{64}) (\S+)$/m;
 
 interface JobRecord {
   status: BackupJobStatus;
@@ -179,6 +216,7 @@ export class BackupRunner {
   private readonly restoresDir: string;
   private readonly archivesDir: string;
   private readonly sharedDbDataDir: string;
+  private readonly panelDumpDir: string;
   private readonly jobs = new Map<string, JobRecord>();
   private readonly activeSiteIds = new Set<string>();
   private readonly activeArchiveJobIds = new Set<string>();
@@ -197,6 +235,7 @@ export class BackupRunner {
     this.restoresDir = path.join(this.backupWorkDir, "restores");
     this.archivesDir = path.join(this.backupWorkDir, "archives");
     this.sharedDbDataDir = path.resolve(deps.sharedDbDataDir ?? DEFAULT_SHARED_DB_DATA_DIR);
+    this.panelDumpDir = path.resolve(deps.panelDumpDir ?? DEFAULT_PANEL_DUMP_DIR);
   }
 
   private nowMs(): number {
@@ -396,7 +435,11 @@ export class BackupRunner {
     spec: BackupContainerSpec,
     createdRefs: string[],
     timeoutMs: number,
-    options?: { readonly captureStdout?: boolean; readonly captureStderr?: boolean },
+    options?: {
+      readonly captureStdout?: boolean;
+      readonly captureStderr?: boolean;
+      readonly signal?: AbortSignal;
+    },
   ): Promise<ContainerOutcome> {
     const containerName = spec.containerName;
     let createRes: Awaited<ReturnType<DockerRequest>>;
@@ -450,6 +493,9 @@ export class BackupRunner {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), waitMs);
+      // An abort (the fetch CLI stopped) ends the wait the same way as the timeout.
+      if (options?.signal?.aborted) resolve("timeout");
+      options?.signal?.addEventListener("abort", () => resolve("timeout"), { once: true });
     });
 
     try {
@@ -1170,12 +1216,12 @@ export class BackupRunner {
     return assertContainedPath(this.restoresDir, path.join(this.restoresDir, `${jobId}.json`));
   }
 
-  private async writeEndedRestoreNote(
+  private endedRestoreNote(
     meta: { readonly jobId: string; readonly siteId: string; readonly serviceInstanceId: string },
     state: "succeeded" | "failed",
     failure: BackupFailureClass | null,
-  ): Promise<void> {
-    await writeRestoreNote(this.restoresDir, {
+  ): RestoreNote {
+    return {
       v: 1,
       jobId: meta.jobId,
       siteId: meta.siteId,
@@ -1184,7 +1230,54 @@ export class BackupRunner {
       state,
       failure,
       endedAt: new Date(this.nowMs()).toISOString(),
+    };
+  }
+
+  /** True when the note is now ended or gone: a failed write deletes it, so a stale note never outlives the job (R124), then retries once in the freed room (R125). */
+  private async writeEndedRestoreNote(ended: RestoreNote): Promise<boolean> {
+    const log = (event: string) => (err: unknown) => {
+      this.logRunnerError(event, {
+        jobId: ended.jobId,
+        code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+      });
+      return false;
+    };
+    if (await writeRestoreNote(this.restoresDir, ended).then(() => true, log("restore_note_write_failed"))) return true;
+    const removed = await unlink(this.notePathForJob(ended.jobId)).then(
+      () => true,
+      (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT" || log("restore_note_remove_failed")(err),
+    );
+    if (removed) await writeRestoreNote(this.restoresDir, ended).catch(log("restore_note_write_failed"));
+    return removed;
+  }
+
+  /** Creates the missing site files volume and gives it to www-data; false when either step fails. */
+  private async createSiteVolume(req: RestoreBackupRequest, createdRefs: string[]): Promise<boolean> {
+    const res = await this.callDocker("POST", "/volumes/create", {
+      Name: getManagedVolumeName(req.serviceInstanceId, "html"),
+      Labels: {
+        "io.hostingpanel.managed": "true",
+        "io.hostingpanel.site_id": req.siteId,
+        "io.hostingpanel.service_instance_id": req.serviceInstanceId,
+      },
     });
+    if (res.statusCode !== 201 && res.statusCode !== 200) return false;
+    const own = await this.tryRunContainer(
+      buildRestoreOwnContainerPayload(req),
+      createdRefs,
+      BACKUP_RESTORE_PREPARE_TIMEOUT_MS,
+    );
+    return own.kind === "exited" && own.exitCode === 0;
+  }
+
+  /** Removes the site files volume this restore created; a failure leaves it empty (R122: no retry). */
+  private async removeCreatedVolume(ended: RestoreNote): Promise<void> {
+    const volume = getManagedVolumeName(ended.serviceInstanceId, "html");
+    const res = await this.deps
+      .request("DELETE", `/volumes/${encodeURIComponent(volume)}`)
+      .catch(() => null);
+    if (res !== null && (res.statusCode === 204 || res.statusCode === 404)) return;
+    this.logRunnerError("restore_created_volume_remove_failed", { jobId: ended.jobId });
   }
 
   private async readStatusFromNote(jobId: string): Promise<BackupJobStatus | null> {
@@ -1295,6 +1388,7 @@ export class BackupRunner {
     const secretInstanceIds: string[] = [];
     let stagingVolumeName: string | null = null;
     let noteCreated = false;
+    let createdVolume = false;
     let keepOnUndoIncomplete = false;
     let leaveNoteSwitched = false;
     let finalState: "succeeded" | "failed" = "failed";
@@ -1355,7 +1449,22 @@ export class BackupRunner {
         "GET",
         `/volumes/${encodeURIComponent(siteVolume)}`,
       );
-      if (siteVolRes.statusCode !== 200) {
+      if (siteVolRes.statusCode === 404 && req.createVolume) {
+        // The flag goes on disk before the volume exists, so a crash never leaves an unknown volume.
+        await writeRestoreNote(this.restoresDir, {
+          v: 1,
+          jobId: req.jobId,
+          siteId: req.siteId,
+          serviceInstanceId: req.serviceInstanceId,
+          stage: "prepare",
+          createdVolume: true,
+        });
+        createdVolume = true;
+        if (!(await this.createSiteVolume(req, createdRefs))) {
+          setOutcome("failed", "restore_prepare_failed");
+          return;
+        }
+      } else if (siteVolRes.statusCode !== 200) {
         setOutcome("failed", "restore_prepare_failed");
         return;
       }
@@ -1482,6 +1591,7 @@ export class BackupRunner {
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
         stage: "switch",
+        ...(createdVolume ? { createdVolume: true as const } : {}),
       });
 
       const switchSpec = buildRestoreSwitchContainerPayload({
@@ -1548,6 +1658,7 @@ export class BackupRunner {
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
         stage: "switched",
+        ...(createdVolume ? { createdVolume: true as const } : {}),
       });
 
       const finishSpec = buildRestoreFinishContainerPayload({
@@ -1586,19 +1697,21 @@ export class BackupRunner {
         setOutcome("failed", "restore_prepare_failed");
       }
     } finally {
-      if (noteCreated && !leaveNoteSwitched) {
-        await this.writeEndedRestoreNote(req, finalState, finalFailure).catch((err: unknown) => {
-          this.logRunnerError("restore_note_write_failed", {
-            jobId: req.jobId,
-            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
-          });
-        });
-      }
+      const removeCreated =
+        createdVolume &&
+        finalState === "failed" &&
+        // Cast: TypeScript narrows the variable to its initial value inside `finally`.
+        (finalFailure as BackupJobStatus["failure"]) !== "undo_incomplete" &&
+        !keepOnUndoIncomplete;
+      const ended = this.endedRestoreNote(req, finalState, finalFailure);
+      const noteSettled = noteCreated && !leaveNoteSwitched ? await this.writeEndedRestoreNote(ended) : true;
       await this.cleanupContainersAndSecrets(
         createdRefs,
         keepOnUndoIncomplete ? null : stagingVolumeName,
         secretInstanceIds,
       );
+      // Only after the job's containers are gone, so the volume is no longer in use.
+      if (removeCreated && noteSettled) await this.removeCreatedVolume(ended);
       this.activeSiteIds.delete(req.siteId);
       this.activeJobCount = Math.max(0, this.activeJobCount - 1);
       this.settleEntry(entry, finalState, finalFailure, null);
@@ -1717,19 +1830,19 @@ export class BackupRunner {
         finalFailure = "undo_incomplete";
       }
     } finally {
-      if (!leaveNoteSwitched) {
-        await this.writeEndedRestoreNote(note, finalState, finalFailure).catch((err: unknown) => {
-          this.logRunnerError("restore_note_write_failed", {
-            jobId: note.jobId,
-            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
-          });
-        });
-      }
+      const removeCreated =
+        note.createdVolume === true &&
+        finalState === "failed" &&
+        finalFailure !== "undo_incomplete" &&
+        !keepVolume;
+      const ended = this.endedRestoreNote(note, finalState, finalFailure);
+      const noteSettled = leaveNoteSwitched || (await this.writeEndedRestoreNote(ended));
       await this.cleanupContainersAndSecrets(
         createdRefs,
         keepVolume ? null : stagingVolumeName,
         secretInstanceIds,
       );
+      if (removeCreated && noteSettled) await this.removeCreatedVolume(ended);
       this.settlingJobIds.delete(note.jobId);
       const pending = (this.siteSettlePendingCount.get(note.siteId) ?? 1) - 1;
       if (pending <= 0) {
@@ -1780,7 +1893,8 @@ export class BackupRunner {
       return { jobId, state: "unknown", failure: null, snapshot: null };
     }
     if (!note) {
-      return { jobId, state: "unknown", failure: null, snapshot: null };
+      // R125: a job whose ended note could not be written still tells its result while in memory.
+      return existing ? cloneJobStatus(existing.status) : { jobId, state: "unknown", failure: null, snapshot: null };
     }
     if (note.stage === "ended") {
       const status: BackupJobStatus = {
@@ -2109,6 +2223,12 @@ export class BackupRunner {
         return this.startBackgroundJob(request.siteId, request.jobId, (entry) =>
           this.runForgetJob(request, entry),
         ) as BackupsResultByAction[R["action"]];
+      case "panelStart":
+        return this.startBackgroundJob(PANEL_LANE, request.jobId, (entry) =>
+          this.runPanelJob(request, entry),
+        ) as BackupsResultByAction[R["action"]];
+      case "siteState":
+        return (await this.readSiteState(request)) as BackupsResultByAction[R["action"]];
       case "restore": {
         this.evictJobs();
         if (!this.jobs.has(request.jobId)) {
@@ -2150,6 +2270,320 @@ export class BackupRunner {
           failure: null,
           snapshot: null,
         }) as BackupsResultByAction[R["action"]];
+      }
+    }
+  }
+
+  /** Read-only: does the site's files volume exist, and is there a site container (not a job)? */
+  private async readSiteState(req: SiteStateRequest): Promise<BackupSiteState> {
+    const volume = getManagedVolumeName(req.serviceInstanceId, "html");
+    const volRes = await this.callDocker("GET", `/volumes/${encodeURIComponent(volume)}`);
+    if (volRes.statusCode !== 200 && volRes.statusCode !== 404) {
+      throw new ExecutorCodedError("Docker volume inspect failed", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    const filters = JSON.stringify({
+      label: [
+        "io.hostingpanel.managed=true",
+        `io.hostingpanel.site_id=${req.siteId}`,
+        `io.hostingpanel.service_instance_id=${req.serviceInstanceId}`,
+      ],
+    });
+    const listRes = await this.callDocker(
+      "GET",
+      `/containers/json?all=true&filters=${encodeURIComponent(filters)}`,
+    );
+    let list: unknown;
+    try {
+      list = listRes.statusCode === 200 ? JSON.parse(listRes.body.toString("utf8")) : null;
+    } catch {
+      list = null;
+    }
+    if (!Array.isArray(list)) {
+      throw new ExecutorCodedError("Docker container list failed", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    const container = list.some((item: unknown) => {
+      if (typeof item !== "object" || item === null) return false;
+      const labels = (item as { Labels?: unknown }).Labels;
+      return (
+        typeof labels !== "object" ||
+        labels === null ||
+        (labels as Record<string, unknown>)["io.hostingpanel.role"] === undefined
+      );
+    });
+    return { filesVolume: volRes.statusCode === 200, container };
+  }
+
+  /** Checks the panel dump without following links: a regular file starting with PGDMP. */
+  private async inspectPanelDump(
+    jobId: string,
+  ): Promise<{ dumpPath: string; dirGid: number; identity: PanelDumpIdentity } | null> {
+    const dumpPath = path.join(this.panelDumpDir, `${jobId}.dump`);
+    try {
+      const dir = await lstat(this.panelDumpDir);
+      if (!dir.isDirectory() || dir.gid === 0) return null;
+      // O_NONBLOCK so a FIFO planted at the path cannot hang the job.
+      const fh = await open(
+        dumpPath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+      try {
+        const st = await fh.stat({ bigint: true });
+        if (!st.isFile() || st.size < BigInt(PANEL_DUMP_MAGIC.length)) return null;
+        const head = Buffer.alloc(PANEL_DUMP_MAGIC.length);
+        await fh.read(head, 0, head.length, 0);
+        if (head.toString("latin1") !== PANEL_DUMP_MAGIC) return null;
+        return {
+          dumpPath,
+          dirGid: dir.gid,
+          identity: { dev: st.dev, ino: st.ino, size: st.size, mtimeNs: st.mtimeNs },
+        };
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  /** True when the dump file is still the one inspected before the upload. */
+  private async panelDumpUnchanged(dumpPath: string, before: PanelDumpIdentity): Promise<boolean> {
+    try {
+      const st = await lstat(dumpPath, { bigint: true });
+      return (
+        st.isFile() &&
+        st.dev === before.dev &&
+        st.ino === before.ino &&
+        st.size === before.size &&
+        st.mtimeNs === before.mtimeNs
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Uploads the panel dump and the master key to `<prefix>/panel`, then applies retention. */
+  private async runPanelJob(req: PanelStartRequest, entry: JobRecord): Promise<void> {
+    const createdRefs: string[] = [];
+    const secretIds: string[] = [];
+    let finalState: "succeeded" | "failed" = "failed";
+    let finalFailure: BackupJobStatus["failure"] = "other";
+    let finalSnapshot: BackupJobStatus["snapshot"] = null;
+    const fail = (failure: BackupJobStatus["failure"]): void => {
+      finalState = "failed";
+      finalFailure = failure;
+    };
+
+    try {
+      const backupKey = await this.readBackupKey();
+      if (backupKey === null) return fail("key_file_missing");
+      const dump = await this.inspectPanelDump(req.jobId);
+      if (dump === null) return fail("panel_dump_missing");
+      const probe = await probeS3(req.target, {
+        fetch: this.deps.fetch,
+        now: () => new Date(this.nowMs()),
+      });
+      if (probe.problem !== null) return fail(probe.problem);
+      if ((await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok") return fail("tool_unavailable");
+      await this.deps.ensureBackupNetwork();
+
+      const restic = {
+        target: req.target,
+        backupNetworkName: this.deps.backupNetworkName,
+        ...(await this.writeResticSecrets(`job_bk_pn_${req.jobId}`, req.target, backupKey, secretIds)),
+      };
+      const masterKeyId = `job_bk_mk_${req.jobId}`;
+      secretIds.push(masterKeyId);
+      await writeServiceSecrets(this.deps.secretsRootDir, masterKeyId, {
+        [PANEL_MASTER_KEY_SECRET]: req.masterKey,
+      });
+      const masterKeyPath = path.resolve(
+        this.deps.secretsRootDir,
+        masterKeyId,
+        PANEL_MASTER_KEY_SECRET,
+      );
+
+      const repo = await this.runContainer(
+        buildPanelRepoContainerPayload({ ...restic, jobId: req.jobId }),
+        createdRefs,
+        BACKUP_REPO_STEP_TIMEOUT_MS,
+        { captureStderr: true },
+      );
+      if (repo.kind === "not_found") return fail("tool_unavailable");
+      const repoProblem = classifyResticExitCode(repo.exitCode, repo.stderr);
+      if (repoProblem !== null) return fail(repoProblem);
+
+      const upload = await this.runContainer(
+        buildPanelUploadContainerPayload({
+          ...restic,
+          jobId: req.jobId,
+          executorUser: this.deps.executorUser,
+          dumpPath: dump.dumpPath,
+          masterKeyPath,
+          dirGid: dump.dirGid,
+        }),
+        createdRefs,
+        BACKUP_UPLOAD_TIMEOUT_MS,
+        { captureStdout: true, captureStderr: true },
+      );
+      if (upload.kind === "not_found") return fail("tool_unavailable");
+      if (upload.exitCode !== 0 && upload.exitCode !== 3) {
+        return fail(classifyResticExitCode(upload.exitCode, upload.stderr) ?? "other");
+      }
+
+      const summary = parseResticSummary(upload.stdout);
+      const complete =
+        upload.exitCode === 0 &&
+        summary !== null &&
+        summary.fileCount === 2 &&
+        BigInt(summary.totalBytes) === dump.identity.size + PANEL_KEY_BYTES &&
+        (await this.panelDumpUnchanged(dump.dumpPath, dump.identity));
+      if (!complete) {
+        if (summary !== null) {
+          // Best effort: a snapshot that does not hold this exact dump must not stay as the newest copy.
+          await this.tryRunContainer(
+            buildPanelDropContainerPayload({ ...restic, jobId: req.jobId, snapshotId: summary.snapshotId }),
+            createdRefs,
+            BACKUP_REPO_STEP_TIMEOUT_MS,
+          );
+        }
+        return fail(upload.exitCode === 0 && summary === null ? "other" : "panel_dump_missing");
+      }
+
+      finalState = "succeeded";
+      finalFailure = null;
+      finalSnapshot = summary;
+      const keep = await this.tryRunContainer(
+        buildPanelKeepContainerPayload({ ...restic, jobId: req.jobId, retentionDays: req.retentionDays }),
+        createdRefs,
+        BACKUP_FORGET_TIMEOUT_MS,
+      );
+      if (keep.kind !== "exited" || keep.exitCode !== 0) {
+        this.logRunnerError("panel_keep_failed", { jobId: req.jobId });
+      }
+    } catch {
+      if (finalState !== "succeeded") fail("other");
+    } finally {
+      await this.cleanupContainersAndSecrets(createdRefs, null, secretIds);
+      this.activeSiteIds.delete(PANEL_LANE);
+      this.activeJobCount = Math.max(0, this.activeJobCount - 1);
+      this.settleEntry(entry, finalState, finalFailure, finalSnapshot);
+    }
+  }
+
+  /** Reads the start of a hand-over file without following links; null when unreadable. */
+  private async readPanelCopyHead(filePath: string, bytes: number): Promise<Buffer | null> {
+    try {
+      const fh = await open(
+        filePath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+      );
+      try {
+        if (!(await fh.stat()).isFile()) return null;
+        const buf = Buffer.alloc(bytes);
+        const { bytesRead } = await fh.read(buf, 0, bytes, 0);
+        return buf.subarray(0, bytesRead);
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  /** Writes the newest panel copy (dump and master key) into `panelDumpDir` for a panel restore. */
+  public async fetchPanelCopy(
+    target: BackupTarget,
+    panelDumpDir: string,
+    signal?: AbortSignal,
+  ): Promise<PanelFetchResult> {
+    const outDir = path.resolve(panelDumpDir);
+    const createdRefs: string[] = [];
+    const secretIds: string[] = [];
+    let touched = false;
+    let result: PanelFetchResult = { ok: false, problem: "other" };
+    try {
+      const dir = await lstat(outDir).catch(() => null);
+      if (dir === null || !dir.isDirectory() || dir.gid === 0) {
+        return (result = { ok: false, problem: "refused" });
+      }
+      const backupKey = await this.readBackupKey();
+      if (backupKey === null) return (result = { ok: false, problem: "key_file_missing" });
+      // R124: these steps write nothing, so a stop ends them at once (the catch below) with nothing to clean.
+      const stopped = new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+      });
+      stopped.catch(() => undefined);
+      const untilStopped = <T>(step: Promise<T>): Promise<T> => Promise.race([step, stopped]);
+      signal?.throwIfAborted();
+      const probe = await untilStopped(
+        probeS3(target, { fetch: this.deps.fetch, now: () => new Date(this.nowMs()) }),
+      );
+      if (probe.problem !== null) return (result = { ok: false, problem: probe.problem });
+      if ((await untilStopped(this.tryEnsureImage(RESTIC_IMAGE))) !== "ok") {
+        return (result = { ok: false, problem: "tool_unavailable" });
+      }
+      await untilStopped(this.deps.ensureBackupNetwork());
+      signal?.throwIfAborted();
+
+      const fetchId = randomBytes(16).toString("hex");
+      const secrets = await this.writeResticSecrets(`job_bk_pf_${fetchId}`, target, backupKey, secretIds);
+      touched = true;
+      const outcome = await this.runContainer(
+        buildPanelFetchContainerPayload({
+          target,
+          backupNetworkName: this.deps.backupNetworkName,
+          ...secrets,
+          fetchId,
+          executorUser: this.deps.executorUser,
+          outDir,
+          dirGid: dir.gid,
+        }),
+        createdRefs,
+        BACKUP_RESTORE_FETCH_TIMEOUT_MS,
+        { captureStdout: true, captureStderr: true, signal },
+      );
+      if (outcome.kind === "not_found") return (result = { ok: false, problem: "tool_unavailable" });
+      if (outcome.exitCode === PANEL_FETCH_EXIT_NO_COPY || outcome.exitCode === 10) {
+        return (result = { ok: false, problem: "no_copy" });
+      }
+      if (outcome.exitCode === PANEL_FETCH_EXIT_NO_SPACE) {
+        return (result = { ok: false, problem: "no_space" });
+      }
+      if (outcome.exitCode !== 0) {
+        return (result = {
+          ok: false,
+          problem: classifyResticExitCode(outcome.exitCode, outcome.stderr) ?? "other",
+        });
+      }
+
+      const snap = PANEL_FETCH_SNAP_LINE.exec(outcome.stdout);
+      const ms = snap ? Date.parse(snap[2]!) : Number.NaN;
+      const dumpHead = await this.readPanelCopyHead(path.join(outDir, PANEL_RESTORE_DUMP_NAME), 5);
+      const keyHead = await this.readPanelCopyHead(path.join(outDir, PANEL_RESTORE_KEY_NAME), 65);
+      if (
+        snap === null ||
+        !Number.isFinite(ms) ||
+        dumpHead?.toString("latin1") !== PANEL_DUMP_MAGIC ||
+        keyHead === null ||
+        !PANEL_KEY_FILE_PATTERN.test(keyHead.toString("latin1"))
+      ) {
+        return (result = { ok: false, problem: "other" });
+      }
+      return (result = { ok: true, snapshotId: snap[1]!, time: new Date(ms).toISOString() });
+    } catch {
+      return (result = { ok: false, problem: "other" });
+    } finally {
+      // Container first: one whose kill failed could still write a file deleted before it (R124).
+      await this.cleanupContainersAndSecrets(createdRefs, null, secretIds);
+      if (touched && (!result.ok || signal?.aborted)) {
+        for (const name of [
+          PANEL_RESTORE_DUMP_NAME,
+          PANEL_RESTORE_KEY_NAME,
+          `.${PANEL_RESTORE_DUMP_NAME}.part`,
+          `.${PANEL_RESTORE_KEY_NAME}.part`,
+        ]) {
+          await unlink(path.join(outDir, name)).catch(() => undefined);
+        }
       }
     }
   }

@@ -736,3 +736,47 @@ describe("restore-jobs E5 crash notes", () => {
     await expect(readRestoreNote(restoresDir, OTHER_JOB_ID)).rejects.toThrow();
   });
 });
+
+describe("restore createVolume helpers", () => {
+  const JOB = `op_${"4".repeat(32)}`;
+
+  it("builds the _rs_own chown container: restic image, root, no network, only CHOWN and FOWNER", async () => {
+    const { buildRestoreOwnContainerPayload, RESTORE_OWN_SCRIPT } = await import("../src/restore-jobs.js");
+    const spec = buildRestoreOwnContainerPayload({ jobId: JOB, siteId: "site1", serviceInstanceId: "svc_site1" });
+    expect(spec.containerName).toBe(`hp_bk_${JOB}_rs_own`);
+    expect(RESTORE_OWN_SCRIPT).toBe("chown 33:33 /v && chmod 0755 /v");
+    expect(spec.payload).toMatchObject({
+      Image: RESTIC_IMAGE,
+      User: "0:0",
+      Entrypoint: ["/bin/sh", "-c", RESTORE_OWN_SCRIPT],
+      Env: [],
+      Labels: {
+        "io.hostingpanel.managed": "true",
+        "io.hostingpanel.site_id": "site1",
+        "io.hostingpanel.job_id": JOB,
+      },
+      HostConfig: {
+        NetworkMode: "none",
+        Binds: ["hp_vol_svc_site1_html:/v"],
+        CapDrop: ["ALL"],
+        CapAdd: ["CHOWN", "FOWNER"],
+        Privileged: false,
+        ReadonlyRootfs: true,
+      },
+    });
+    expect(() =>
+      buildRestoreOwnContainerPayload({ jobId: "op_bad", siteId: "site1", serviceInstanceId: "svc_site1" }),
+    ).toThrow();
+    expect(() =>
+      buildRestoreOwnContainerPayload({ jobId: JOB, siteId: "site1", serviceInstanceId: "../x" }),
+    ).toThrow();
+  });
+
+  it("the restore note accepts createdVolume: true only", async () => {
+    const { RestoreNoteSchema } = await import("../src/restore-jobs.js");
+    const base = { v: 1, jobId: JOB, siteId: "site1", serviceInstanceId: "svc_site1", stage: "prepare" };
+    expect(RestoreNoteSchema.safeParse({ ...base, createdVolume: true }).success).toBe(true);
+    expect(RestoreNoteSchema.safeParse({ ...base, createdVolume: false }).success).toBe(false);
+    expect(RestoreNoteSchema.safeParse(base).success).toBe(true);
+  });
+});

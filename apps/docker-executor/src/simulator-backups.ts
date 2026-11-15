@@ -3,12 +3,15 @@ import {
   BackupsIpcRequestSchema,
   type BackupFailureClass,
   type BackupJobStatus,
+  type BackupSiteState,
   type BackupsIpcRequest,
   type BackupsResultByAction,
 } from "@hosting-panel/contracts";
 import { ExecutorCodedError } from "./traefik-config.js";
 
 const MAX_RUNNING_JOBS = 2;
+// Site ids never contain ":", so the panel lane never collides with a site.
+const PANEL_LANE = "panel:db";
 const SIM_ARCHIVE_SIZE_BYTES = 1_048_577;
 const SIM_ARCHIVE_TTL_MS = 60 * 60 * 1000;
 const EMPTY_ZIP_EOCD = Buffer.from([
@@ -19,9 +22,11 @@ type SimJobSnapshot = NonNullable<BackupJobStatus["snapshot"]>;
 type SimJobArchive = NonNullable<BackupJobStatus["archive"]>;
 
 interface SimBackupJob {
-  readonly action: "start" | "forget" | "restore" | "archive";
+  readonly action: "start" | "forget" | "restore" | "archive" | "panelStart";
   readonly jobId: string;
   readonly siteId: string;
+  // Service instance whose files volume this restore creates, if any.
+  readonly createsVolumeFor: string | null;
   readonly snapshotIdsToForget: readonly string[];
   readonly plannedFailure: BackupFailureClass | null;
   state: "running" | "succeeded" | "failed";
@@ -95,6 +100,8 @@ export class SimulatedBackups {
   private readonly readyArchives = new Map<string, string>();
   private readonly archiveBySite = new Map<string, string>();
   private readonly pendingFailures: BackupFailureClass[] = [];
+  private readonly siteStates = new Map<string, BackupSiteState>();
+  private readonly panelJobs: string[] = [];
   private held = false;
   private testInFlight = false;
 
@@ -138,10 +145,27 @@ export class SimulatedBackups {
           snapshotIdsToForget: req.snapshotIds,
         }) as BackupsResultByAction[R["action"]];
 
-      case "restore":
+      case "panelStart": {
+        // The master key is dropped here: only the job id reaches the simulator's state.
+        const known = this.jobs.has(req.jobId);
+        const status = this.enqueueJob("panelStart", req.jobId, PANEL_LANE);
+        if (!known) {
+          this.panelJobs.push(req.jobId);
+        }
+        return status as BackupsResultByAction[R["action"]];
+      }
+
+      case "siteState":
+        return { ...this.siteStateOf(req.serviceInstanceId) } as BackupsResultByAction[R["action"]];
+
+      case "restore": {
+        const volumeMissing = !this.siteStateOf(req.serviceInstanceId).filesVolume;
         return this.enqueueJob("restore", req.jobId, req.siteId, {
           requiredSnapshotId: req.snapshotId,
+          failure: volumeMissing && !req.createVolume ? "restore_prepare_failed" : undefined,
+          createsVolumeFor: volumeMissing && req.createVolume ? req.serviceInstanceId : null,
         }) as BackupsResultByAction[R["action"]];
+      }
 
       case "archive":
         return this.enqueueJob("archive", req.jobId, req.siteId, {
@@ -217,9 +241,24 @@ export class SimulatedBackups {
     this.archiveBySite.clear();
   }
 
+  /** Sets what siteState answers for a service instance. */
+  public setSiteState(serviceInstanceId: string, state: BackupSiteState): void {
+    this.siteStates.set(serviceInstanceId, { ...state });
+  }
+
+  /** Lists the job ids of every accepted panelStart, in order. */
+  public panelJobIds(): readonly string[] {
+    return [...this.panelJobs];
+  }
+
   /** Lists snapshot ids currently recorded for a site. */
   public snapshots(siteId: string): readonly string[] {
     return [...(this.snapshotsBySite.get(siteId) ?? [])];
+  }
+
+  /** Returns the site state of a service instance, {true, true} unless set. */
+  private siteStateOf(serviceInstanceId: string): BackupSiteState {
+    return this.siteStates.get(serviceInstanceId) ?? { filesVolume: true, container: true };
   }
 
   /** Checks whether a snapshot id exists in the site's recorded snapshot list. */
@@ -248,7 +287,12 @@ export class SimulatedBackups {
     action: SimBackupJob["action"],
     jobId: string,
     siteId: string,
-    options: { snapshotIdsToForget?: readonly string[]; requiredSnapshotId?: string } = {},
+    options: {
+      snapshotIdsToForget?: readonly string[];
+      requiredSnapshotId?: string;
+      failure?: BackupFailureClass | undefined;
+      createsVolumeFor?: string | null;
+    } = {},
   ): BackupJobStatus {
     const existing = this.jobs.get(jobId);
     if (existing) {
@@ -258,7 +302,8 @@ export class SimulatedBackups {
     if (action === "archive") {
       this.removeSiteArchive(siteId);
     }
-    const queuedFailure = this.pendingFailures.shift() ?? null;
+    // A forced failure leaves failNext queued for the next job.
+    const queuedFailure = options.failure ?? this.pendingFailures.shift() ?? null;
     const missingSnapshot =
       options.requiredSnapshotId !== undefined &&
       !this.hasSnapshot(siteId, options.requiredSnapshotId);
@@ -266,6 +311,7 @@ export class SimulatedBackups {
       action,
       jobId,
       siteId,
+      createsVolumeFor: options.createsVolumeFor ?? null,
       snapshotIdsToForget: options.snapshotIdsToForget ? [...options.snapshotIdsToForget] : [],
       plannedFailure: queuedFailure ?? (missingSnapshot ? "other" : null),
       state: "running",
@@ -345,10 +391,25 @@ export class SimulatedBackups {
   }
 
   private settleJob(job: SimBackupJob): void {
+    // The real runner keeps a volume it created on success and on undo_incomplete only.
+    if (
+      job.createsVolumeFor !== null &&
+      (job.plannedFailure === null || job.plannedFailure === "undo_incomplete")
+    ) {
+      const state = this.siteStateOf(job.createsVolumeFor);
+      this.siteStates.set(job.createsVolumeFor, { ...state, filesVolume: true });
+    }
     if (job.plannedFailure !== null) {
       job.state = "failed";
       job.failure = job.plannedFailure;
       job.snapshot = null;
+      job.archive = null;
+      return;
+    }
+    if (job.action === "panelStart") {
+      job.state = "succeeded";
+      job.failure = null;
+      job.snapshot = createSimulatedSnapshot();
       job.archive = null;
       return;
     }

@@ -7,6 +7,7 @@ import {
   BACKUP_FAILURE_CLASSES,
   BACKUP_JOB_STATES,
   DEFAULT_PHP_VERSION,
+  RESTIC_IMAGE,
   SHARED_MARIADB_IMAGE,
   resolveWordpressImage,
   siteDatabasePrefix,
@@ -569,6 +570,8 @@ export const RestoreNoteSchema = z
     state: z.enum(BACKUP_JOB_STATES).optional(),
     failure: z.enum(BACKUP_FAILURE_CLASSES).nullable().optional(),
     endedAt: z.string().datetime().optional(),
+    // Set before this job creates the site files volume; it is removed again only while this flag is on.
+    createdVolume: z.literal(true).optional(),
   })
   .strict()
   .superRefine((note, ctx) => {
@@ -863,6 +866,36 @@ export function buildRestoreUndoDbContainerPayload(input: {
     suffix: "rs_undo_db",
     ...input,
   });
+}
+
+export const RESTORE_OWN_SCRIPT = "chown 33:33 /v && chmod 0755 /v" as const;
+
+/** Builds the `_rs_own` container giving a newly created site files volume to www-data (33:33). */
+export function buildRestoreOwnContainerPayload(input: {
+  readonly jobId: string;
+  readonly siteId: string;
+  readonly serviceInstanceId: string;
+}): BackupContainerSpec & {
+  readonly payload: { readonly HostConfig: { readonly CapAdd: readonly string[] } };
+} {
+  const { jobId } = assertRestoreJobId(input.jobId);
+  const siteId = assertSafeIdentifier(input.siteId, "siteId");
+  const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
+  const siteVolume = getManagedVolumeName(serviceInstanceId, "html");
+  return {
+    containerName: `hp_bk_${jobId}_rs_own`,
+    payload: {
+      Image: RESTIC_IMAGE,
+      Entrypoint: ["/bin/sh", "-c", RESTORE_OWN_SCRIPT],
+      User: "0:0",
+      Env: [],
+      Labels: buildJobLabels(siteId, jobId),
+      HostConfig: {
+        ...buildBackupHostConfig("none", [`${siteVolume}:/v`]),
+        CapAdd: ["CHOWN", "FOWNER"],
+      },
+    },
+  };
 }
 
 /** Builds the restic `_zip` archive container spec streaming a backup snapshot into a zip on the host archive dir. */

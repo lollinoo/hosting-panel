@@ -35,6 +35,8 @@ const JOB_1 = `op_${"a".repeat(32)}`;
 const JOB_2 = `op_${"b".repeat(32)}`;
 const FORGET_1 = `${JOB_1}-forget`;
 const SNAP_DUMMY = "c".repeat(64);
+// Sentinel only: 64 lowercase hex digits, never a real key.
+const SENTINEL_MASTER_KEY = `5e${"d1".repeat(31)}`;
 
 const VALID_TARGET = {
   endpoint: "https://s3.example.com:9000",
@@ -723,6 +725,104 @@ describe("Backups over signed loopback IPC (127.0.0.1:0) and simulator", () => {
     expect(combinedHttp).not.toContain(SENTINEL_SPACE_SECRET);
     expect(combinedLogs).not.toContain(SENTINEL_SECRET);
     expect(combinedLogs).not.toContain(SENTINEL_SPACE_SECRET);
+  });
+
+  it("round-trips siteState, panelStart and restore with createVolume, refuses a bad master key, and never leaks it", async () => {
+    const { simulator, client, rawPost } = await createLoopbackHarness();
+    const backupsSpy = vi.spyOn(simulator, "backups");
+    const capturedLogs: string[] = [];
+    const capture = (...args: unknown[]): boolean => {
+      capturedLogs.push(args.map(String).join(" "));
+      return true;
+    };
+    const spies = [
+      vi.spyOn(console, "log").mockImplementation(capture),
+      vi.spyOn(console, "error").mockImplementation(capture),
+      vi.spyOn(console, "warn").mockImplementation(capture),
+      vi.spyOn(console, "info").mockImplementation(capture),
+      vi.spyOn(console, "debug").mockImplementation(capture),
+      vi.spyOn(process.stdout, "write").mockImplementation(capture),
+      vi.spyOn(process.stderr, "write").mockImplementation(capture),
+    ];
+    const panelStart = {
+      action: "panelStart",
+      jobId: JOB_1,
+      target: VALID_TARGET,
+      masterKey: SENTINEL_MASTER_KEY,
+      retentionDays: 14,
+    } as const;
+    const httpBodies: string[] = [];
+    try {
+      const raw = await rawPost("/v1/backups", panelStart);
+      httpBodies.push(raw.text);
+      expect(raw.status).toBe(200);
+
+      const panelDone = await client.backups(panelStart);
+      httpBodies.push(JSON.stringify(panelDone));
+      expect(BACKUPS_RESULT_SCHEMAS.panelStart.parse(panelDone).jobId).toBe(JOB_1);
+      const panelStatus = await client.backups({ action: "status", jobId: JOB_1 });
+      httpBodies.push(JSON.stringify(panelStatus));
+      expect(panelStatus.state).toBe("succeeded");
+      expect(panelStatus.snapshot?.snapshotId).toMatch(/^[0-9a-f]{64}$/);
+      expect(simulator.backupState.panelJobIds()).toEqual([JOB_1]);
+
+      // A site with no files volume and no container: restore creates the volume.
+      await client.backups({
+        action: "start",
+        jobId: JOB_2,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+      });
+      const snapshotId = (await client.backups({ action: "status", jobId: JOB_2 })).snapshot!
+        .snapshotId;
+      simulator.backupState.setSiteState("svc_a", { filesVolume: false, container: false });
+      const before = await client.backups({
+        action: "siteState",
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+      });
+      expect(BACKUPS_RESULT_SCHEMAS.siteState.parse(before)).toEqual({
+        filesVolume: false,
+        container: false,
+      });
+      const JOB_3 = `op_${"e".repeat(32)}`;
+      const restore = await client.backups({
+        action: "restore",
+        jobId: JOB_3,
+        siteId: "site_a",
+        serviceInstanceId: "svc_a",
+        target: VALID_TARGET,
+        snapshotId,
+        createVolume: true,
+      });
+      expect(BACKUPS_RESULT_SCHEMAS.restore.parse(restore).state).toBe("running");
+      expect(backupsSpy).toHaveBeenLastCalledWith(expect.objectContaining({ createVolume: true }));
+      expect((await client.backups({ action: "settle", jobId: JOB_3 })).state).toBe("succeeded");
+      expect(
+        await client.backups({ action: "siteState", siteId: "site_a", serviceInstanceId: "svc_a" }),
+      ).toEqual({ filesVolume: true, container: false });
+      const callsBeforeRefusal = backupsSpy.mock.calls.length;
+
+      const refused = await rawPost("/v1/backups", {
+        ...panelStart,
+        jobId: JOB_2,
+        masterKey: `${SENTINEL_MASTER_KEY.slice(0, 63)}A`,
+      });
+      httpBodies.push(refused.text);
+      expect(refused.status).toBe(400);
+      expect((JSON.parse(refused.text) as { error: { code: string } }).error.code).toBe(
+        "VALIDATION_ERROR",
+      );
+      expect(backupsSpy).toHaveBeenCalledTimes(callsBeforeRefusal);
+    } finally {
+      for (const spy of spies) {
+        spy.mockRestore();
+      }
+    }
+    const leakProbe = SENTINEL_MASTER_KEY.slice(0, 63);
+    expect(httpBodies.join("\n")).not.toContain(leakProbe);
+    expect(capturedLogs.join("\n")).not.toContain(leakProbe);
   });
 
   it("answers NOT_SUPPORTED from Phase1DisabledDockerExecutor over loopback IPC", async () => {

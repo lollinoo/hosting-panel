@@ -43,6 +43,19 @@ import {
 } from "../src/index.js";
 import { RESTORE_EXIT_INVALID_OBJECT_NAME, writeRestoreNote } from "../src/restore-jobs.js";
 
+// R124: lets a test fail chosen note writes the way a full disk does.
+const noteWrites = vi.hoisted(() => ({ fail: null as ((note: { stage: string }) => boolean) | null }));
+vi.mock("../src/restore-jobs.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../src/restore-jobs.js")>();
+  return {
+    ...mod,
+    writeRestoreNote: (dir: string, note: Parameters<typeof mod.writeRestoreNote>[1]) =>
+      noteWrites.fail?.(note)
+        ? Promise.reject(Object.assign(new Error("no space"), { code: "ENOSPC" }))
+        : mod.writeRestoreNote(dir, note),
+  };
+});
+
 const ACCESS_KEY_SENTINEL = "HP_SENTINEL_RS_ACCESS_991";
 const SECRET_KEY_SENTINEL = "HP_SENTINEL_RS_SECRET_882";
 const BACKUP_KEY_SENTINEL = "cafe1234".repeat(8);
@@ -60,6 +73,7 @@ const VALID_TARGET: BackupTarget = {
 
 const cleanupTasks: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
+  noteWrites.fail = null;
   vi.restoreAllMocks();
   vi.useRealTimers();
   for (const task of cleanupTasks.splice(0).reverse()) {
@@ -88,6 +102,7 @@ function makeOkFetch(): typeof globalThis.fetch {
 }
 
 type RestoreStageSuffix =
+  | "rs_own"
   | "rs_fetch"
   | "rs_prepare"
   | "rs_switch"
@@ -119,6 +134,7 @@ function suffixForName(name: string): RestoreStageSuffix {
   for (const suffix of [
     "rs_undo_files",
     "rs_undo_db",
+    "rs_own",
     "rs_fetch",
     "rs_prepare",
     "rs_switch",
@@ -346,7 +362,11 @@ function createRestoreDockerHarness(opts?: {
     throw new Error(`Unexpected Docker API call: ${method} ${reqPath}`);
   };
 
-  const assertCp01AndNoLeaks = (extraStrings: readonly string[] = []): void => {
+  // ownVolumes: site volumes this job created itself, the only non-`hp_bk_` volumes it may create or remove.
+  const assertCp01AndNoLeaks = (
+    extraStrings: readonly string[] = [],
+    ownVolumes: readonly string[] = [],
+  ): void => {
     for (const call of requests) {
       const serialized = JSON.stringify({ path: call.path, body: call.body });
       for (const secret of [
@@ -387,7 +407,7 @@ function createRestoreDockerHarness(opts?: {
           call.method === "POST"
             ? (call.body as { Name?: string })?.Name ?? ""
             : decodeURIComponent(call.path.slice("/volumes/".length).split("?")[0]!);
-        expect(volName.startsWith("hp_bk_")).toBe(true);
+        expect(volName.startsWith("hp_bk_") || ownVolumes.includes(volName)).toBe(true);
       }
     }
 
@@ -1811,5 +1831,275 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
       database: validDb,
     });
     expect(JSON.stringify(records)).not.toContain("should_never_be_logged");
+  });
+});
+
+describe("BackupRunner restore with createVolume", () => {
+  const NEW_VOL = "hp_vol_svc_new_html";
+  const newSiteReq = (jobId: string): BackupsIpcRequest => ({
+    ...(restoreReq(jobId, "site9", "svc_new") as Extract<BackupsIpcRequest, { action: "restore" }>),
+    createVolume: true,
+  });
+  const readNote = async (restoresDir: string, jobId: string) =>
+    JSON.parse(await readFile(path.join(restoresDir, `${jobId}.json`), "utf8")) as Record<string, unknown>;
+
+  it("flags the note first, creates the volume with site labels, gives it to 33:33 and keeps it on success", async () => {
+    let noteAtCreate: Record<string, unknown> | null = null;
+    const ctx = await setupRestoreRunner({
+      harnessOpts: {
+        onVolumeCreate: async (name) => {
+          if (name === NEW_VOL) noteAtCreate = await readNote(ctx.restoresDir, j);
+        },
+      },
+    });
+    const j = jobHex(201);
+    await ctx.runner.run(newSiteReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ state: "succeeded", failure: null });
+    expect(noteAtCreate).toMatchObject({ stage: "prepare", createdVolume: true });
+    const create = ctx.harness.requests.find(
+      (r) => r.method === "POST" && r.path === "/volumes/create" && (r.body as { Name: string }).Name === NEW_VOL,
+    );
+    expect(create?.body).toEqual({
+      Name: NEW_VOL,
+      Labels: {
+        "io.hostingpanel.managed": "true",
+        "io.hostingpanel.site_id": "site9",
+        "io.hostingpanel.service_instance_id": "svc_new",
+      },
+    });
+    const own = ctx.harness.containerPayloads.get(`hp_bk_${j}_rs_own`) as {
+      User: string;
+      HostConfig: { CapAdd: string[]; Binds: string[]; NetworkMode: string };
+    };
+    expect(own).toMatchObject({ User: "0:0", HostConfig: { CapAdd: ["CHOWN", "FOWNER"], NetworkMode: "none" } });
+    expect(own.HostConfig.Binds).toEqual([`${NEW_VOL}:/v`]);
+    expect(ctx.harness.createdSequence.indexOf(`hp_bk_${j}_rs_own`)).toBeLessThan(
+      ctx.harness.createdSequence.indexOf(`hp_bk_${j}_rs_fetch`),
+    );
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+    expect(ctx.harness.deletedVolumes).not.toContain(NEW_VOL);
+    expect(await readNote(ctx.restoresDir, j)).not.toHaveProperty("createdVolume");
+    ctx.harness.assertCp01AndNoLeaks([], [NEW_VOL]);
+  });
+
+  it.each([
+    ["the fetch fails", { stages: { rs_fetch: { waitExitCode: 1 } } }, null],
+    ["the chown fails", { stages: { rs_own: { waitExitCode: 1 } } }, "restore_prepare_failed"],
+    ["the switch is undone", { stages: { rs_files: { waitExitCode: 1 } } }, null],
+  ] as const)("removes the volume it created when %s, after its containers are gone", async (_l, harnessOpts, failure) => {
+    const ctx = await setupRestoreRunner({ harnessOpts });
+    const j = jobHex(202);
+    await ctx.runner.run(newSiteReq(j));
+    const status = await waitForSettled(ctx.runner, j);
+    expect(status.state).toBe("failed");
+    if (failure) expect(status.failure).toBe(failure);
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(false);
+    const volDelete = ctx.harness.events.indexOf(`volume:delete:${NEW_VOL}`);
+    const lastContainerDelete = ctx.harness.events.map((e) => e.startsWith("container:delete:")).lastIndexOf(true);
+    expect(volDelete).toBeGreaterThan(lastContainerDelete);
+    expect(await readNote(ctx.restoresDir, j)).not.toHaveProperty("createdVolume");
+    ctx.harness.assertCp01AndNoLeaks([], [NEW_VOL]);
+  });
+
+  it("fails restore_prepare_failed when the volume create throws, and cleans the name up", async () => {
+    const ctx = await setupRestoreRunner({
+      harnessOpts: {
+        onVolumeCreate: (name) => {
+          if (name === NEW_VOL) throw new Error("engine reset");
+        },
+      },
+    });
+    const j = jobHex(203);
+    await ctx.runner.run(newSiteReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "restore_prepare_failed" });
+    expect(ctx.harness.createdSequence.some((n) => n.endsWith("_rs_own") || n.endsWith("_rs_fetch"))).toBe(false);
+    expect(ctx.harness.deletedVolumes).toContain(NEW_VOL);
+  });
+
+  it("keeps the volume after undo_incomplete", async () => {
+    const ctx = await setupRestoreRunner({
+      harnessOpts: { stages: { rs_files: { waitExitCode: 1 }, rs_undo_db: { waitExitCode: 1 } } },
+    });
+    const j = jobHex(204);
+    await ctx.runner.run(newSiteReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "undo_incomplete" });
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+    expect(ctx.harness.deletedVolumes).not.toContain(NEW_VOL);
+  });
+
+  it("uses an existing volume unchanged and never removes it", async () => {
+    const ctx = await setupRestoreRunner({
+      harnessOpts: {
+        siteVolumes: [NEW_VOL],
+        stages: { rs_fetch: { waitExitCode: 1 } },
+      },
+    });
+    const j = jobHex(205);
+    await ctx.runner.run(newSiteReq(j));
+    expect((await waitForSettled(ctx.runner, j)).state).toBe("failed");
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+    expect(ctx.harness.createdSequence).not.toContain(`hp_bk_${j}_rs_own`);
+    expect(ctx.harness.requests.some((r) => (r.body as { Name?: string } | undefined)?.Name === NEW_VOL)).toBe(false);
+    expect(ctx.harness.deletedVolumes).not.toContain(NEW_VOL);
+    ctx.harness.assertCp01AndNoLeaks();
+  });
+
+  it("still fails restore_prepare_failed on a missing volume without the flag", async () => {
+    const ctx = await setupRestoreRunner();
+    const j = jobHex(206);
+    await ctx.runner.run(restoreReq(j, "site9", "svc_new"));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "restore_prepare_failed" });
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(false);
+    expect(ctx.harness.deletedVolumes).not.toContain(NEW_VOL);
+  });
+
+  it("logs only the job id when removal fails; settle at start leaves the volume and a later restore uses it (R122)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ctx = await setupRestoreRunner({
+      harnessOpts: { stages: { rs_fetch: { waitExitCode: 1 } }, failDeleteVolumeNames: new Set([NEW_VOL]) },
+    });
+    const j = jobHex(207);
+    await ctx.runner.run(newSiteReq(j));
+    expect((await waitForSettled(ctx.runner, j)).state).toBe("failed");
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+    expect(await readNote(ctx.restoresDir, j)).toMatchObject({ stage: "ended", state: "failed" });
+    const records = errSpy.mock.calls.map((a) => JSON.parse(String(a[0])) as Record<string, unknown>);
+    const rec = records.find((r) => r.event === "restore_created_volume_remove_failed");
+    expect(rec).toBeDefined();
+    expect(Object.keys(rec!).sort()).toEqual(["component", "event", "jobId", "timestamp"]);
+
+    const again = await setupRestoreRunner({
+      tmpDir: ctx.tmpDir,
+      keyContent: null,
+      dbRootContent: null,
+      harnessOpts: { siteVolumes: [NEW_VOL] },
+    });
+    await again.runner.settleRestores();
+    // A later restore may have filled the volume since the note ended: never delete it here.
+    expect(again.harness.requests.some((r) => r.method === "DELETE" && r.path.startsWith("/volumes/"))).toBe(false);
+    expect(again.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+    expect(await again.runner.run({ action: "status", jobId: j })).toMatchObject({ state: "failed" });
+    const j2 = jobHex(210);
+    await again.runner.run(restoreReq(j2, "site9", "svc_new"));
+    expect(await waitForSettled(again.runner, j2)).toMatchObject({ state: "succeeded", failure: null });
+    expect(again.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+    expect(again.harness.deletedVolumes).not.toContain(NEW_VOL);
+    again.harness.assertCp01AndNoLeaks();
+  });
+
+  it("deletes the note when its ended write fails, so a later start never removes a refilled volume (R124)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ctx = await setupRestoreRunner({ harnessOpts: { stages: { rs_fetch: { waitExitCode: 1 } } } });
+    const j = jobHex(211);
+    noteWrites.fail = (note) => note.stage === "ended";
+    await ctx.runner.run(newSiteReq(j));
+    expect((await waitForSettled(ctx.runner, j)).state).toBe("failed");
+    noteWrites.fail = null;
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(false);
+    expect(ctx.harness.deletedVolumes).toContain(NEW_VOL);
+    await expect(readNote(ctx.restoresDir, j)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const second = await setupRestoreRunner({ tmpDir: ctx.tmpDir, keyContent: null, dbRootContent: null });
+    const j2 = jobHex(212);
+    await second.runner.run(newSiteReq(j2));
+    expect(await waitForSettled(second.runner, j2)).toMatchObject({ state: "succeeded", failure: null });
+    expect(second.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+
+    const again = await setupRestoreRunner({
+      tmpDir: ctx.tmpDir,
+      keyContent: null,
+      dbRootContent: null,
+      harnessOpts: { siteVolumes: [NEW_VOL] },
+    });
+    await again.runner.settleRestores();
+    expect(again.harness.requests.some((r) => r.method === "DELETE" && r.path.startsWith("/volumes/"))).toBe(false);
+    expect(again.harness.liveVolumes.has(NEW_VOL)).toBe(true);
+  });
+
+  it("settle of an interrupted note deletes the note when its ended write fails, and still removes the volume (R124)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "hp-restore-cv-"));
+    cleanupTasks.push(() => rm(tmpDir, { recursive: true, force: true }));
+    const restoresDir = path.join(tmpDir, "backup-work", "restores");
+    const j = jobHex(213);
+    await writeRestoreNote(restoresDir, {
+      v: 1, jobId: j, siteId: "site9", serviceInstanceId: "svc_new", stage: "prepare", createdVolume: true,
+    });
+    const ctx = await setupRestoreRunner({ tmpDir, harnessOpts: { siteVolumes: [NEW_VOL] } });
+    noteWrites.fail = (note) => note.stage === "ended";
+    await ctx.runner.settleRestores();
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "interrupted" });
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(false);
+    await expect(readNote(restoresDir, j)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("settle answers undo_incomplete from memory when every ended write fails (R125)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ctx = await setupRestoreRunner({
+      harnessOpts: { stages: { rs_files: { waitExitCode: 1 }, rs_undo_files: { waitExitCode: 1 } } },
+    });
+    const j = jobHex(214);
+    noteWrites.fail = (note) => note.stage === "ended";
+    await ctx.runner.run(restoreReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "undo_incomplete" });
+    await expect(readNote(ctx.restoresDir, j)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await ctx.runner.run({ action: "settle", jobId: j })).toEqual({
+      jobId: j, state: "failed", failure: "undo_incomplete", snapshot: null,
+    });
+  });
+
+  it("settle answers succeeded from memory when every ended write fails (R125)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ctx = await setupRestoreRunner();
+    const j = jobHex(215);
+    noteWrites.fail = (note) => note.stage === "ended";
+    await ctx.runner.run(restoreReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ state: "succeeded" });
+    await expect(readNote(ctx.restoresDir, j)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await ctx.runner.run({ action: "settle", jobId: j })).toEqual({
+      jobId: j, state: "succeeded", failure: null, snapshot: null,
+    });
+  });
+
+  it("writes the ended note once more after the delete, so the result outlives a restart (R125)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ctx = await setupRestoreRunner({
+      harnessOpts: { stages: { rs_files: { waitExitCode: 1 }, rs_undo_files: { waitExitCode: 1 } } },
+    });
+    const j = jobHex(216);
+    let endedWrites = 0;
+    noteWrites.fail = (note) => note.stage === "ended" && endedWrites++ === 0;
+    await ctx.runner.run(restoreReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "undo_incomplete" });
+    noteWrites.fail = null;
+    expect(endedWrites).toBe(2);
+    expect(await readNote(ctx.restoresDir, j)).toMatchObject({ stage: "ended", state: "failed", failure: "undo_incomplete" });
+
+    const again = await setupRestoreRunner({ tmpDir: ctx.tmpDir, keyContent: null, dbRootContent: null });
+    expect(await again.runner.run({ action: "settle", jobId: j })).toEqual({
+      jobId: j, state: "failed", failure: "undo_incomplete", snapshot: null,
+    });
+  });
+
+  it("settle removes the created volume of an interrupted job, and only when the note is flagged", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "hp-restore-cv-"));
+    cleanupTasks.push(() => rm(tmpDir, { recursive: true, force: true }));
+    const restoresDir = path.join(tmpDir, "backup-work", "restores");
+    const jFlag = jobHex(208);
+    const jPlain = jobHex(209);
+    await writeRestoreNote(restoresDir, {
+      v: 1, jobId: jFlag, siteId: "site9", serviceInstanceId: "svc_new", stage: "prepare", createdVolume: true,
+    });
+    await writeRestoreNote(restoresDir, {
+      v: 1, jobId: jPlain, siteId: "site8", serviceInstanceId: "svc_old", stage: "prepare",
+    });
+    const ctx = await setupRestoreRunner({ tmpDir, harnessOpts: { siteVolumes: [NEW_VOL, "hp_vol_svc_old_html"] } });
+    await ctx.runner.settleRestores();
+    expect(await waitForSettled(ctx.runner, jFlag)).toMatchObject({ failure: "interrupted" });
+    expect(await waitForSettled(ctx.runner, jPlain)).toMatchObject({ failure: "interrupted" });
+    expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(false);
+    expect(ctx.harness.liveVolumes.has("hp_vol_svc_old_html")).toBe(true);
+    expect(await readNote(restoresDir, jFlag)).not.toHaveProperty("createdVolume");
+    ctx.harness.assertCp01AndNoLeaks([], [NEW_VOL]);
   });
 });
