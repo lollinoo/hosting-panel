@@ -3943,10 +3943,195 @@ paths:
           description: Site not found or belongs to another organization (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by another operation (`RESOURCE_LOCKED`), or reused `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`)
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by
+            another operation (`RESOURCE_LOCKED`), reused `Idempotency-Key`
+            (`IDEMPOTENCY_CONFLICT`), or hourly customer limit of 6 heavy backup actions per
+            site reached (`QUOTA_EXCEEDED`, `details[].field: retryAt`, `Retry-After` header)
+          $ref: "#/components/responses/QuotaConflictErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/backups/{backupId}/restore:
+    post:
+      tags: [Managed Sites]
+      operationId: restoreSiteBackup
+      summary: Restore a WordPress site in place from a succeeded backup (`site.backups.manage`, 202 Accepted)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/BackupIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreBackupInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, links]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupAccepted"
+                  links:
+                    type: object
+                    required: [operation]
+                    properties:
+                      operation:
+                        type: string
+        "400":
+          description: >-
+            Confirmation `confirmName` does not match site name (`VALIDATION_ERROR`),
+            backup target not configured (`VALIDATION_ERROR`, message `not_configured`),
+            or missing/invalid `Idempotency-Key`
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or succeeded backup not found, or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by
+            another operation (`RESOURCE_LOCKED`), reused `Idempotency-Key` for another
+            target or payload (`IDEMPOTENCY_CONFLICT`), or hourly customer limit of 6 heavy
+            backup actions per site reached (`QUOTA_EXCEEDED`, `details[].field: retryAt`,
+            `Retry-After` header)
+          $ref: "#/components/responses/QuotaConflictErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/backups/{backupId}/download:
+    post:
+      tags: [Managed Sites]
+      operationId: prepareSiteBackupDownload
+      summary: Prepare a decrypted single-zip download archive for a succeeded backup (`site.backups.manage`, 202 Accepted)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/BackupIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "202":
+          description: Accepted (or already preparing/ready); follow the returned operation URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, links]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupAccepted"
+                  links:
+                    type: object
+                    required: [operation]
+                    properties:
+                      operation:
+                        type: string
+        "400":
+          description: Backup target not configured (`VALIDATION_ERROR`, message `not_configured`) or missing/invalid `Idempotency-Key`
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site or succeeded backup not found, or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by
+            another operation (`RESOURCE_LOCKED`), reused `Idempotency-Key` for another
+            target or payload (`IDEMPOTENCY_CONFLICT`), or hourly customer limit of 6 heavy
+            backup actions per site reached (`QUOTA_EXCEEDED`, `details[].field: retryAt`,
+            `Retry-After` header)
+          $ref: "#/components/responses/QuotaConflictErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [Managed Sites]
+      operationId: readSiteBackupArchiveChunk
+      summary: Read a base64 chunk of a prepared backup download zip archive (`site.backups.manage`)
+      description: >-
+        Streams chunks up to 512 KiB (524,288 raw bytes) from the prepared archive stored under
+        the executor backup work directory. Prepared archives expire after 60 minutes.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/BackupIdParam"
+        - in: query
+          name: offset
+          required: false
+          description: Zero-based byte offset to start reading from
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 9007199254740991
+            default: 0
+        - in: query
+          name: length
+          required: false
+          description: Maximum raw bytes to read (at most 524,288 bytes / 512 KiB before base64)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 524288
+            default: 524288
+      responses:
+        "200":
+          description: Base64-encoded backup archive chunk with resolved download filename
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupArchiveChunk"
+        "400":
+          description: Invalid `offset` or `length` query parameter (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site or succeeded backup not found, belongs to another organization (`NOT_FOUND`),
+            or prepared archive missing/expired (`NOT_FOUND`, reason `archive_gone`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Prepared archive is still being created (`RESOURCE_LOCKED`, reason `archive_preparing`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: Executor IPC call timed out without confirming archive read (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor or backup archive read temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
           $ref: "#/components/responses/ErrorResponse"
 
 
@@ -3962,6 +4147,11 @@ components:
       description: Unique correlation request ID
       schema:
         type: string
+    RetryAfter:
+      description: Seconds to wait before retrying after reaching a per-site rate limit (`QUOTA_EXCEEDED`)
+      schema:
+        type: integer
+        minimum: 1
 
   parameters:
     OrgIdParam:
@@ -3979,6 +4169,12 @@ components:
     SiteIdParam:
       in: path
       name: siteId
+      required: true
+      schema:
+        type: string
+    BackupIdParam:
+      in: path
+      name: backupId
       required: true
       schema:
         type: string
@@ -4039,6 +4235,17 @@ components:
       headers:
         X-Request-ID:
           $ref: "#/components/headers/XRequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ApiErrorEnvelope"
+    QuotaConflictErrorResponse:
+      description: Standard normalized RFC-style error envelope with `Retry-After` header for hourly heavy-action limit (`QUOTA_EXCEEDED`)
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/XRequestId"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
       content:
         application/json:
           schema:
@@ -5075,7 +5282,12 @@ components:
         - timeout
         - interrupted
         - other
+        - restore_prepare_failed
+        - switch_undone
+        - undo_incomplete
+        - definer_missing
         - site_busy
+        - address_not_updated
 
     BackupSettingsInput:
       type: object
@@ -5191,9 +5403,53 @@ components:
           format: date-time
           nullable: true
 
+    RestoreBackupInput:
+      type: object
+      additionalProperties: false
+      required: [confirmName]
+      properties:
+        confirmName:
+          type: string
+          maxLength: 255
+
+    BackupArchive:
+      type: object
+      required: [status, readyUntil, problem]
+      properties:
+        status:
+          type: string
+          enum: [preparing, ready, failed]
+        readyUntil:
+          type: string
+          format: date-time
+          nullable: true
+        problem:
+          $ref: "#/components/schemas/BackupProblem"
+          nullable: true
+
+    BackupLastRestore:
+      type: object
+      required: [backupId, backupStartedAt, status, finishedAt, problem]
+      properties:
+        backupId:
+          type: string
+        backupStartedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [running, succeeded, failed]
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        problem:
+          $ref: "#/components/schemas/BackupProblem"
+          nullable: true
+
     SiteBackup:
       type: object
-      required: [id, kind, status, startedAt, finishedAt, sizeBytes, problem]
+      required: [id, kind, status, startedAt, finishedAt, sizeBytes, problem, archive]
       properties:
         id:
           type: string
@@ -5216,10 +5472,13 @@ components:
         problem:
           $ref: "#/components/schemas/BackupProblem"
           nullable: true
+        archive:
+          $ref: "#/components/schemas/BackupArchive"
+          nullable: true
 
     SiteBackups:
       type: object
-      required: [available, configured, retentionDays, manualKept, runningOperationId, backups]
+      required: [available, configured, retentionDays, manualKept, runningOperationId, lastRestore, backups]
       properties:
         available:
           type: boolean
@@ -5233,10 +5492,29 @@ components:
         runningOperationId:
           type: string
           nullable: true
+        lastRestore:
+          $ref: "#/components/schemas/BackupLastRestore"
+          nullable: true
         backups:
           type: array
           items:
             $ref: "#/components/schemas/SiteBackup"
+
+    BackupArchiveChunk:
+      type: object
+      additionalProperties: false
+      required: [dataBase64, size, eof, fileName]
+      properties:
+        dataBase64:
+          type: string
+        size:
+          type: integer
+          minimum: 0
+        eof:
+          type: boolean
+        fileName:
+          type: string
+          pattern: "^[A-Za-z0-9._-]{1,120}\\.zip$"
 
     AdminSiteBackupStatus:
       type: object
@@ -6151,6 +6429,8 @@ components:
             - site.files.extract
             - site.backups.create
             - site.backups.prune
+            - site.backups.restore
+            - site.backups.download
             - host.maintenance
             - host.security
             - host.allocate

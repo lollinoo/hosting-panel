@@ -6,6 +6,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { MAIL_RELAY_IMAGE } from "@hosting-panel/contracts";
 
 const root = resolve(__dirname, "../../..");
+const hasHost = existsSync("/sys/fs/cgroup/cgroup.controllers") && spawnSync("bash", ["-c", "command -v docker"]).status === 0;
 const dir = mkdtempSync(join(tmpdir(), "hp-os-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -93,7 +94,6 @@ describe("per-service env files and wrappers", () => {
     expect(web).toMatch(/^After=.*docker\.service/m);
   });
 
-  const hasHost = existsSync("/sys/fs/cgroup/cgroup.controllers") && spawnSync("bash", ["-c", "command -v docker"]).status === 0;
   it.skipIf(!hasHost)("bootstrap dry-run lists the three env files with 0400", () => {
     const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
     expect(r.status).toBe(0);
@@ -387,5 +387,58 @@ describe("release workflow and docs", () => {
     ]) {
       expect(api).toContain(s);
     }
+  });
+
+  it("m3b restore and download docs are consistent", () => {
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(
+      "install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/backups\n",
+    );
+    if (hasHost) {
+      const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], {
+        cwd: root,
+        encoding: "utf8",
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain("/var/lib/hosting-panel/backups");
+    }
+
+    expect(read("infra/systemd/hp-docker-executor.service")).toContain(
+      "ReadWritePaths=/var/lib/hosting-panel",
+    );
+    expect(read("infra/linux/run-dev-docker.mjs")).toContain("HP_BACKUP_WORK_DIR");
+
+    const api = read("docs/api/openapi.yaml");
+    for (const s of [
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/backups/{backupId}/restore:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/backups/{backupId}/download:",
+      "RestoreBackupInput",
+      "BackupArchive",
+      "BackupLastRestore",
+      "BackupArchiveChunk",
+      "site.backups.restore",
+      "site.backups.download",
+      "address_not_updated",
+      "undo_incomplete",
+      "QUOTA_EXCEEDED",
+    ]) {
+      expect(api).toContain(s);
+    }
+
+    const getDownloadBlock = api.slice(
+      api.indexOf("operationId: readSiteBackupArchiveChunk"),
+      api.indexOf("\ncomponents:"),
+    );
+    for (const statusCode of ['"422":', '"502":', '"503":']) {
+      expect(getDownloadBlock).toContain(statusCode);
+    }
+
+    const adr = read("docs/architecture/adr/0022-site-backups.md");
+    expect(adr).toContain("0010_backup_restore.sql");
+    expect(adr).toContain("APPROVATO — M3a, M3b");
+    expect(adr).not.toContain("presa in carico di un repository esistente");
+
+    const readme = read("README.md");
+    expect(readme).not.toContain("arrivano con la milestone successiva (**M3b**)");
   });
 });
