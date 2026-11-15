@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AdminSiteBackupStatusDto,
-  BackupKind,
-  BackupProblem,
-  BackupStatus,
+import {
+  HEAVY_ACTIONS_PER_HOUR,
+  HEAVY_ACTION_WINDOW_MS,
+  HEAVY_BACKUP_OPERATION_KINDS,
+  type AdminSiteBackupStatusDto,
+  type BackupKind,
+  type BackupProblem,
+  type BackupStatus,
 } from "@hosting-panel/contracts";
 import {
   and,
   asc,
   desc,
   eq,
+  gt,
   gte,
   inArray,
   isNull,
@@ -21,7 +25,7 @@ import {
   sql,
 } from "drizzle-orm";
 import type { DatabaseExecutor } from "./client.js";
-import { backupSettings, organizations, siteBackups, sites } from "./schema.js";
+import { backupSettings, operations, organizations, siteBackups, sites, users } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
 
 const SINGLETON_ID = "default";
@@ -67,7 +71,38 @@ export interface SiteBackupRow {
   problem: BackupProblem | null;
   startedAt: Date;
   finishedAt: Date | null;
+  siteUrl: string | null;
+  restoreOperationId: string | null;
+  restoreStatus: "running" | "succeeded" | "failed" | null;
+  restoreProblem: BackupProblem | null;
+  restoredAt: Date | null;
+  archiveOperationId: string | null;
+  archiveStatus: "preparing" | "ready" | "failed" | null;
+  archiveProblem: BackupProblem | null;
+  archiveReadyUntil: Date | null;
 }
+
+const SITE_BACKUP_SELECT = {
+  id: siteBackups.id,
+  siteId: siteBackups.siteId,
+  kind: siteBackups.kind,
+  status: siteBackups.status,
+  operationId: siteBackups.operationId,
+  snapshotId: siteBackups.snapshotId,
+  sizeBytes: siteBackups.sizeBytes,
+  problem: siteBackups.problem,
+  startedAt: siteBackups.startedAt,
+  finishedAt: siteBackups.finishedAt,
+  siteUrl: siteBackups.siteUrl,
+  restoreOperationId: siteBackups.restoreOperationId,
+  restoreStatus: siteBackups.restoreStatus,
+  restoreProblem: siteBackups.restoreProblem,
+  restoredAt: siteBackups.restoredAt,
+  archiveOperationId: siteBackups.archiveOperationId,
+  archiveStatus: siteBackups.archiveStatus,
+  archiveProblem: siteBackups.archiveProblem,
+  archiveReadyUntil: siteBackups.archiveReadyUntil,
+};
 
 function generateBackupId(): string {
   return `bkp_${randomUUID().replace(/-/g, "")}`;
@@ -404,6 +439,7 @@ export async function insertSiteBackup(
     status: "running" | "failed";
     operationId: string | null;
     problem?: BackupProblem | null;
+    siteUrl?: string | null;
     startedAt?: Date;
     finishedAt?: Date | null;
   },
@@ -420,6 +456,7 @@ export async function insertSiteBackup(
     status: row.status,
     operationId: row.operationId,
     problem: row.problem ?? null,
+    siteUrl: row.siteUrl ?? null,
     startedAt,
     finishedAt,
   });
@@ -456,21 +493,156 @@ export async function listSiteBackups(
   siteId: string,
 ): Promise<SiteBackupRow[]> {
   return db
-    .select({
-      id: siteBackups.id,
-      siteId: siteBackups.siteId,
-      kind: siteBackups.kind,
-      status: siteBackups.status,
-      operationId: siteBackups.operationId,
-      snapshotId: siteBackups.snapshotId,
-      sizeBytes: siteBackups.sizeBytes,
-      problem: siteBackups.problem,
-      startedAt: siteBackups.startedAt,
-      finishedAt: siteBackups.finishedAt,
-    })
+    .select(SITE_BACKUP_SELECT)
     .from(siteBackups)
     .where(eq(siteBackups.siteId, siteId))
     .orderBy(desc(siteBackups.startedAt), desc(siteBackups.id));
+}
+
+/** Returns one backup row scoped to siteId, or null when absent or on another site. */
+export async function getSiteBackup(
+  db: DatabaseExecutor,
+  siteId: string,
+  backupId: string,
+): Promise<SiteBackupRow | null> {
+  const rows = await db
+    .select(SITE_BACKUP_SELECT)
+    .from(siteBackups)
+    .where(and(eq(siteBackups.id, backupId), eq(siteBackups.siteId, siteId)))
+    .limit(1);
+
+  return rows[0] ?? null;
+}
+
+/** Marks a backup row as running a restore operation and clears any prior restore outcome. */
+export async function markSiteRestoreRunning(
+  db: DatabaseExecutor,
+  backupId: string,
+  operationId: string,
+): Promise<void> {
+  await db
+    .update(siteBackups)
+    .set({
+      restoreOperationId: operationId,
+      restoreStatus: "running",
+      restoreProblem: null,
+      restoredAt: null,
+    })
+    .where(eq(siteBackups.id, backupId));
+}
+
+/** Settles a running restore row matching operationId to succeeded or failed. */
+export async function settleSiteRestore(
+  db: DatabaseExecutor,
+  operationId: string,
+  r: { status: "succeeded" | "failed"; problem: BackupProblem | null },
+): Promise<void> {
+  await db
+    .update(siteBackups)
+    .set({
+      restoreStatus: r.status,
+      restoreProblem: r.problem,
+      restoredAt: new Date(),
+    })
+    .where(
+      and(
+        eq(siteBackups.restoreOperationId, operationId),
+        eq(siteBackups.restoreStatus, "running"),
+      ),
+    );
+}
+
+/** Clears prior archive states on the same site and marks backupId as preparing an archive. */
+export async function markSiteArchivePreparing(
+  db: DatabaseExecutor,
+  siteId: string,
+  backupId: string,
+  operationId: string,
+): Promise<void> {
+  await db
+    .update(siteBackups)
+    .set({
+      archiveStatus: null,
+      archiveReadyUntil: null,
+      archiveProblem: null,
+    })
+    .where(and(eq(siteBackups.siteId, siteId), ne(siteBackups.id, backupId)));
+
+  await db
+    .update(siteBackups)
+    .set({
+      archiveOperationId: operationId,
+      archiveStatus: "preparing",
+      archiveProblem: null,
+      archiveReadyUntil: null,
+    })
+    .where(eq(siteBackups.id, backupId));
+}
+
+/** Settles a preparing archive row matching operationId to ready or failed. */
+export async function settleSiteArchive(
+  db: DatabaseExecutor,
+  operationId: string,
+  r: { status: "ready" | "failed"; readyUntil: Date | null; problem: BackupProblem | null },
+): Promise<void> {
+  await db
+    .update(siteBackups)
+    .set({
+      archiveStatus: r.status,
+      archiveReadyUntil: r.readyUntil,
+      archiveProblem: r.problem,
+    })
+    .where(
+      and(
+        eq(siteBackups.archiveOperationId, operationId),
+        eq(siteBackups.archiveStatus, "preparing"),
+      ),
+    );
+}
+
+/** Clears archive status fields on a backup row when its archive operation matches. */
+export async function clearSiteArchive(
+  db: DatabaseExecutor,
+  backupId: string,
+  operationId: string,
+): Promise<void> {
+  await db
+    .update(siteBackups)
+    .set({
+      archiveStatus: null,
+      archiveReadyUntil: null,
+      archiveProblem: null,
+    })
+    .where(and(eq(siteBackups.id, backupId), eq(siteBackups.archiveOperationId, operationId)));
+}
+
+/** When a customer may start another heavy backup action on the site; null = allowed now. */
+export async function heavyActionRetryAt(
+  db: DatabaseExecutor,
+  siteId: string,
+  now: Date,
+  excludeOperationId: string,
+): Promise<Date | null> {
+  const rows = await db
+    .select({ submittedAt: operations.submittedAt })
+    .from(operations)
+    .innerJoin(users, eq(users.id, operations.requestedByUserId))
+    .where(
+      and(
+        eq(operations.resourceType, "site"),
+        eq(operations.resourceId, siteId),
+        inArray(operations.kind, [...HEAVY_BACKUP_OPERATION_KINDS]),
+        isNull(users.platformRole),
+        gt(operations.submittedAt, new Date(now.getTime() - HEAVY_ACTION_WINDOW_MS)),
+        ne(operations.id, excludeOperationId),
+      ),
+    )
+    .orderBy(desc(operations.submittedAt))
+    .limit(HEAVY_ACTIONS_PER_HOUR);
+
+  return rows.length < HEAVY_ACTIONS_PER_HOUR
+    ? null
+    : new Date(rows[HEAVY_ACTIONS_PER_HOUR - 1]!.submittedAt.getTime() + HEAVY_ACTION_WINDOW_MS);
 }
 
 /** Lists per-site backup status across all active sites for the platform admin overview. */

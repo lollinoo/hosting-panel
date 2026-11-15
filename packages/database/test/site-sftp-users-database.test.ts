@@ -99,6 +99,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       ...pre0008Files,
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
+      "0010_backup_restore.sql",
     ]);
 
     const after0008 = await db().execute(

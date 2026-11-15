@@ -525,6 +525,7 @@ export const operations = pgTable(
   (t) => [
     index("idx_operations_org_status").on(t.organizationId, t.status),
     index("idx_operations_lock_key").on(t.lockKey),
+    index("idx_operations_resource_submitted").on(t.resourceId, t.submittedAt),
   ],
 );
 
@@ -730,6 +731,15 @@ export const siteBackups = pgTable(
     problem: text("problem").$type<BackupProblem>(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
+    siteUrl: text("site_url"),
+    restoreOperationId: text("restore_operation_id"),
+    restoreStatus: text("restore_status").$type<"running" | "succeeded" | "failed">(),
+    restoreProblem: text("restore_problem").$type<BackupProblem>(),
+    restoredAt: timestamp("restored_at", { withTimezone: true }),
+    archiveOperationId: text("archive_operation_id"),
+    archiveStatus: text("archive_status").$type<"preparing" | "ready" | "failed">(),
+    archiveProblem: text("archive_problem").$type<BackupProblem>(),
+    archiveReadyUntil: timestamp("archive_ready_until", { withTimezone: true }),
   },
   (t) => [index("idx_site_backups_site_started").on(t.siteId, t.startedAt)],
 );

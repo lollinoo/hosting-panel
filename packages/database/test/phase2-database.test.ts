@@ -50,6 +50,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0007_mail_relay.sql",
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
+      "0010_backup_restore.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -70,6 +71,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0007_mail_relay.sql",
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
+      "0010_backup_restore.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -86,6 +88,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0007_mail_relay.sql",
       "0008_site_sftp_users.sql",
       "0009_backups.sql",
+      "0010_backup_restore.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);

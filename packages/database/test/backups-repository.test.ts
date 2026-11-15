@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
+import { HEAVY_ACTION_WINDOW_MS } from "@hosting-panel/contracts";
 import {
   BACKUP_SECRET_AAD,
+  clearSiteArchive,
   countNightlyRunResults,
   createDatabaseClient,
   createSiteTransactional,
@@ -14,6 +16,8 @@ import {
   finishNightlyRun,
   getBackupSettingsPublic,
   getBackupTarget,
+  getSiteBackup,
+  heavyActionRetryAt,
   hostAllocations,
   hosts,
   insertSiteBackup,
@@ -21,12 +25,17 @@ import {
   listOrphanSiteIdsWithBackupsBefore,
   listSiteBackups,
   lockNightlyRunState,
+  markSiteArchivePreparing,
+  markSiteRestoreRunning,
+  operations,
   organizations,
   permissions,
   platformInstallations,
   recordBackupTest,
   rolePermissions,
+  settleSiteArchive,
   settleSiteBackup,
+  settleSiteRestore,
   sites,
   sql,
   startNightlyRun,
@@ -664,5 +673,364 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       .where(eq(rolePermissions.permissionKey, "site.backups.manage"));
     const grantedRoleIds = rows.map((r) => r.roleId).sort();
     expect(grantedRoleIds).toEqual(["role_customer_owner", "role_hosting_admin"]);
+  });
+
+  it("tracks siteUrl, restore lifecycle, archive lifecycle, and site-scoped backup lookup (0010)", async () => {
+    const otherSite = await createSiteTransactional(db(), {
+      organizationId: orgId,
+      hostAllocationId: "alloc_bkp",
+      name: "Other Site",
+      slug: "other-bkp-site",
+      phpVersion: "8.4",
+    });
+    const otherSiteId = otherSite.site.id;
+
+    try {
+      const b1 = await insertSiteBackup(db(), {
+        siteId: liveSiteId,
+        kind: "manual",
+        status: "running",
+        operationId: "op_0010_b1",
+        siteUrl: "https://live.example.com",
+        startedAt: new Date("2026-11-15T01:00:00.000Z"),
+      });
+      await settleSiteBackup(db(), "op_0010_b1", {
+        status: "succeeded",
+        snapshotId: "a".repeat(64),
+        sizeBytes: 2048,
+      });
+
+      const b2 = await insertSiteBackup(db(), {
+        siteId: liveSiteId,
+        kind: "nightly",
+        status: "running",
+        operationId: "op_0010_b2",
+        startedAt: new Date("2026-11-15T02:00:00.000Z"),
+      });
+      await settleSiteBackup(db(), "op_0010_b2", {
+        status: "succeeded",
+        snapshotId: "b".repeat(64),
+        sizeBytes: 4096,
+      });
+
+      const bOther = await insertSiteBackup(db(), {
+        siteId: otherSiteId,
+        kind: "manual",
+        status: "running",
+        operationId: "op_0010_other",
+        startedAt: new Date("2026-11-15T03:00:00.000Z"),
+      });
+      await settleSiteBackup(db(), "op_0010_other", {
+        status: "succeeded",
+        snapshotId: "c".repeat(64),
+        sizeBytes: 1024,
+      });
+
+      // getSiteBackup scopes by siteId and returns all 9 new fields.
+      expect(await getSiteBackup(db(), otherSiteId, b1.id)).toBeNull();
+      expect(await getSiteBackup(db(), liveSiteId, "bkp_missing")).toBeNull();
+      const fetchedB1 = await getSiteBackup(db(), liveSiteId, b1.id);
+      expect(fetchedB1).toMatchObject({
+        id: b1.id,
+        siteId: liveSiteId,
+        siteUrl: "https://live.example.com",
+        restoreOperationId: null,
+        restoreStatus: null,
+        restoreProblem: null,
+        restoredAt: null,
+        archiveOperationId: null,
+        archiveStatus: null,
+        archiveProblem: null,
+        archiveReadyUntil: null,
+      });
+
+      const listed = await listSiteBackups(db(), liveSiteId);
+      expect(listed).toHaveLength(2);
+      expect(listed[1]?.siteUrl).toBe("https://live.example.com");
+      expect(listed[0]?.siteUrl).toBeNull();
+
+      // Restore lifecycle: markSiteRestoreRunning and settleSiteRestore only change matching running row.
+      await markSiteRestoreRunning(db(), b1.id, "op_rst_1");
+      expect(await getSiteBackup(db(), liveSiteId, b1.id)).toMatchObject({
+        restoreOperationId: "op_rst_1",
+        restoreStatus: "running",
+        restoreProblem: null,
+        restoredAt: null,
+      });
+
+      // Mismatched operationId must not settle b1.
+      await settleSiteRestore(db(), "op_rst_wrong", {
+        status: "failed",
+        problem: "switch_undone",
+      });
+      expect((await getSiteBackup(db(), liveSiteId, b1.id))?.restoreStatus).toBe("running");
+
+      await settleSiteRestore(db(), "op_rst_1", {
+        status: "succeeded",
+        problem: "address_not_updated",
+      });
+      const settledRestore = await getSiteBackup(db(), liveSiteId, b1.id);
+      expect(settledRestore).toMatchObject({
+        restoreOperationId: "op_rst_1",
+        restoreStatus: "succeeded",
+        restoreProblem: "address_not_updated",
+      });
+      expect(settledRestore?.restoredAt).toBeInstanceOf(Date);
+
+      // Re-settling after it is no longer running is a no-op.
+      await settleSiteRestore(db(), "op_rst_1", {
+        status: "failed",
+        problem: "undo_incomplete",
+      });
+      expect(await getSiteBackup(db(), liveSiteId, b1.id)).toMatchObject({
+        restoreStatus: "succeeded",
+        restoreProblem: "address_not_updated",
+      });
+
+      // Re-running clears restoreProblem and restoredAt.
+      await markSiteRestoreRunning(db(), b1.id, "op_rst_2");
+      expect(await getSiteBackup(db(), liveSiteId, b1.id)).toMatchObject({
+        restoreOperationId: "op_rst_2",
+        restoreStatus: "running",
+        restoreProblem: null,
+        restoredAt: null,
+      });
+
+      // Archive lifecycle: prepare on b1 then otherSite, then b2 clears only same site's other rows.
+      const readyUntil1 = new Date("2026-11-15T04:00:00.000Z");
+      await markSiteArchivePreparing(db(), liveSiteId, b1.id, "op_arc_1");
+      await markSiteArchivePreparing(db(), otherSiteId, bOther.id, "op_arc_other");
+      await settleSiteArchive(db(), "op_arc_other", {
+        status: "ready",
+        readyUntil: readyUntil1,
+        problem: null,
+      });
+
+      // Mismatched opId must not settle b1.
+      await settleSiteArchive(db(), "op_arc_wrong", {
+        status: "failed",
+        readyUntil: null,
+        problem: "timeout",
+      });
+      expect((await getSiteBackup(db(), liveSiteId, b1.id))?.archiveStatus).toBe("preparing");
+
+      await settleSiteArchive(db(), "op_arc_1", {
+        status: "ready",
+        readyUntil: readyUntil1,
+        problem: null,
+      });
+      expect(await getSiteBackup(db(), liveSiteId, b1.id)).toMatchObject({
+        archiveOperationId: "op_arc_1",
+        archiveStatus: "ready",
+        archiveReadyUntil: readyUntil1,
+        archiveProblem: null,
+      });
+
+      // Re-settling when no longer preparing is a no-op.
+      await settleSiteArchive(db(), "op_arc_1", {
+        status: "failed",
+        readyUntil: null,
+        problem: "no_space",
+      });
+      expect((await getSiteBackup(db(), liveSiteId, b1.id))?.archiveStatus).toBe("ready");
+
+      // Preparing b2 clears b1's archive state (keeping archiveOperationId) and leaves otherSite untouched.
+      await markSiteArchivePreparing(db(), liveSiteId, b2.id, "op_arc_2");
+      expect(await getSiteBackup(db(), liveSiteId, b1.id)).toMatchObject({
+        archiveOperationId: "op_arc_1",
+        archiveStatus: null,
+        archiveReadyUntil: null,
+        archiveProblem: null,
+      });
+      expect(await getSiteBackup(db(), liveSiteId, b2.id)).toMatchObject({
+        archiveOperationId: "op_arc_2",
+        archiveStatus: "preparing",
+        archiveReadyUntil: null,
+        archiveProblem: null,
+      });
+      expect(await getSiteBackup(db(), otherSiteId, bOther.id)).toMatchObject({
+        archiveOperationId: "op_arc_other",
+        archiveStatus: "ready",
+        archiveReadyUntil: readyUntil1,
+        archiveProblem: null,
+      });
+
+      // clearSiteArchive clears archive state of the targeted backup only.
+      await settleSiteArchive(db(), "op_arc_2", {
+        status: "failed",
+        readyUntil: null,
+        problem: "no_space",
+      });
+      await clearSiteArchive(db(), b2.id, "op_arc_2");
+      expect(await getSiteBackup(db(), liveSiteId, b2.id)).toMatchObject({
+        archiveStatus: null,
+        archiveReadyUntil: null,
+        archiveProblem: null,
+      });
+      expect((await getSiteBackup(db(), otherSiteId, bOther.id))?.archiveStatus).toBe("ready");
+    } finally {
+      await deleteAllSiteBackups(db());
+      await db().delete(sites).where(eq(sites.id, otherSiteId));
+    }
+  });
+
+  it("computes heavyActionRetryAt from non-admin customer actions inside the 60-minute window", async () => {
+    const otherSite = await createSiteTransactional(db(), {
+      organizationId: orgId,
+      hostAllocationId: "alloc_bkp",
+      name: "Quota Other Site",
+      slug: "quota-other-site",
+      phpVersion: "8.4",
+    });
+    const otherSiteId = otherSite.site.id;
+
+    await db().insert(users).values({
+      id: "usr_bkp_platform_admin",
+      email: "bkp-platform-admin@example.com",
+      name: "Platform Admin",
+      passwordHash: "hash",
+      platformRole: "infrastructure_admin",
+    });
+
+    const tBase = new Date("2026-11-15T10:00:00.000Z");
+    const tNow = new Date(tBase.getTime() + 20 * 60_000);
+    const oldestCountedAt = new Date(tBase.getTime() + 1_000);
+
+    try {
+      const insertOp = async (
+        id: string,
+        opts: {
+          siteId?: string;
+          kind?: "site.backups.create" | "site.backups.restore" | "site.backups.download" | "site.backups.prune" | "site.deploy";
+          userId?: string | null;
+          submittedAt: Date;
+        },
+      ) => {
+        await db()
+          .insert(operations)
+          .values({
+            id,
+            organizationId: orgId,
+            kind: opts.kind ?? "site.backups.create",
+            status: "succeeded",
+            resourceType: "site",
+            resourceId: opts.siteId ?? liveSiteId,
+            requestedByUserId: opts.userId === undefined ? "usr_bkp_admin" : opts.userId,
+            submittedAt: opts.submittedAt,
+          });
+      };
+
+      // Insert 5 counted customer heavy actions inside the window.
+      await insertOp("op_ha_1", { kind: "site.backups.create", submittedAt: oldestCountedAt });
+      await insertOp("op_ha_2", { kind: "site.backups.restore", submittedAt: new Date(tBase.getTime() + 2_000) });
+      await insertOp("op_ha_3", { kind: "site.backups.download", submittedAt: new Date(tBase.getTime() + 3_000) });
+      await insertOp("op_ha_4", { kind: "site.backups.create", submittedAt: new Date(tBase.getTime() + 4_000) });
+      await insertOp("op_ha_5", { kind: "site.backups.restore", submittedAt: new Date(tBase.getTime() + 5_000) });
+
+      // Excluded actions that must NOT count toward the 6-action limit:
+      // 1) At or older than window boundary (now - HEAVY_ACTION_WINDOW_MS)
+      await insertOp("op_ha_old_boundary", {
+        submittedAt: new Date(tNow.getTime() - HEAVY_ACTION_WINDOW_MS),
+      });
+      await insertOp("op_ha_old", {
+        submittedAt: new Date(tNow.getTime() - HEAVY_ACTION_WINDOW_MS - 1_000),
+      });
+      // 2) Platform administrator action
+      await insertOp("op_ha_admin", {
+        userId: "usr_bkp_platform_admin",
+        submittedAt: new Date(tBase.getTime() + 6_000),
+      });
+      // 3) Nightly / system action (null requestedByUserId)
+      await insertOp("op_ha_nightly", {
+        userId: null,
+        submittedAt: new Date(tBase.getTime() + 7_000),
+      });
+      // 4) Another site
+      await insertOp("op_ha_other_site", {
+        siteId: otherSiteId,
+        submittedAt: new Date(tBase.getTime() + 8_000),
+      });
+      // 5) Non-heavy kinds
+      await insertOp("op_ha_prune", {
+        kind: "site.backups.prune",
+        submittedAt: new Date(tBase.getTime() + 9_000),
+      });
+      await insertOp("op_ha_deploy", {
+        kind: "site.deploy",
+        submittedAt: new Date(tBase.getTime() + 10_000),
+      });
+      // 6) Excluded current operation id
+      await insertOp("op_ha_current", {
+        kind: "site.backups.download",
+        submittedAt: tNow,
+      });
+
+      // Only 5 counted actions -> allowed (null).
+      expect(await heavyActionRetryAt(db(), liveSiteId, tNow, "op_ha_current")).toBeNull();
+
+      // Add a 6th counted customer heavy action -> refused until oldestCountedAt leaves the window.
+      await insertOp("op_ha_6", {
+        kind: "site.backups.download",
+        submittedAt: new Date(tBase.getTime() + 11_000),
+      });
+
+      const expectedRetryAt = new Date(oldestCountedAt.getTime() + HEAVY_ACTION_WINDOW_MS);
+      expect(await heavyActionRetryAt(db(), liveSiteId, tNow, "op_ha_current")).toEqual(
+        expectedRetryAt,
+      );
+
+      // At the exact instant the oldest counted action leaves the window, 5 remain -> allowed.
+      expect(await heavyActionRetryAt(db(), liveSiteId, expectedRetryAt, "op_ha_current")).toBeNull();
+    } finally {
+      await db().delete(operations);
+      await db().delete(sites).where(eq(sites.id, otherSiteId));
+      await db().delete(users).where(eq(users.id, "usr_bkp_platform_admin"));
+    }
+  });
+
+  it("R96: clearSiteArchive clears only when archiveOperationId matches, leaving a newer preparation intact", async () => {
+    const { id: b1Id } = await insertSiteBackup(db(), {
+      siteId: liveSiteId,
+      kind: "manual",
+      status: "running",
+      operationId: "op_r96_bak",
+    });
+
+    try {
+      await settleSiteBackup(db(), "op_r96_bak", {
+        status: "succeeded",
+        snapshotId: "c".repeat(64),
+        sizeBytes: 1024,
+        problem: null,
+      });
+
+      await markSiteArchivePreparing(db(), liveSiteId, b1Id, "op_arc_old");
+      await settleSiteArchive(db(), "op_arc_old", {
+        status: "ready",
+        readyUntil: new Date("2026-11-15T05:00:00.000Z"),
+        problem: null,
+      });
+      await markSiteArchivePreparing(db(), liveSiteId, b1Id, "op_arc_new");
+
+      // Stale clear from the older archive operation must leave the newer preparation intact.
+      await clearSiteArchive(db(), b1Id, "op_arc_old");
+      expect(await getSiteBackup(db(), liveSiteId, b1Id)).toMatchObject({
+        archiveOperationId: "op_arc_new",
+        archiveStatus: "preparing",
+        archiveReadyUntil: null,
+        archiveProblem: null,
+      });
+
+      // Clear with the matching operation id clears the archive fields.
+      await clearSiteArchive(db(), b1Id, "op_arc_new");
+      expect(await getSiteBackup(db(), liveSiteId, b1Id)).toMatchObject({
+        archiveOperationId: "op_arc_new",
+        archiveStatus: null,
+        archiveReadyUntil: null,
+        archiveProblem: null,
+      });
+    } finally {
+      await deleteAllSiteBackups(db());
+    }
   });
 });
