@@ -18,6 +18,9 @@ export const BACKUP_PROBLEMS = [
   ...BACKUP_FAILURE_CLASSES,
   "site_busy",
   "address_not_updated",
+  "panel_dump_failed",
+  "panel_dump_tool_missing",
+  "site_not_started",
 ] as const;
 export const BackupProblemSchema = z.enum(BACKUP_PROBLEMS);
 export type BackupProblem = z.infer<typeof BackupProblemSchema>;
@@ -91,6 +94,15 @@ export const BackupTestResultDtoSchema = z.object({
 });
 export type BackupTestResultDto = z.infer<typeof BackupTestResultDtoSchema>;
 
+export const PanelBackupLineSchema = z
+  .object({
+    at: z.string().datetime({ offset: true }),
+    status: z.enum(["succeeded", "failed"]),
+    problem: BackupProblemSchema.nullable(),
+  })
+  .strict();
+export type PanelBackupLine = z.infer<typeof PanelBackupLineSchema>;
+
 export const BackupSettingsDtoSchema = z.object({
   available: z.boolean(),
   configured: z.boolean(),
@@ -105,6 +117,8 @@ export const BackupSettingsDtoSchema = z.object({
   lastNightlyRunOn: z.string().nullable(),
   lastTest: BackupTestResultDtoSchema.extend({ at: z.string() }).nullable(),
   updatedAt: z.string().nullable(),
+  lastPanelBackup: PanelBackupLineSchema.nullable(),
+  newestBackupsTotalBytes: z.number().int().nonnegative(),
 });
 export type BackupSettingsDto = z.infer<typeof BackupSettingsDtoSchema>;
 
@@ -114,6 +128,17 @@ export const RestoreBackupInputSchema = z
   })
   .strict();
 export type RestoreBackupInput = z.infer<typeof RestoreBackupInputSchema>;
+
+export const AdminRestoreBackupInputSchema = z
+  .object({
+    backupId: z
+      .string()
+      .regex(/^bkp_[0-9a-f]{32}$/)
+      .optional(),
+    confirmName: z.string().max(255),
+  })
+  .strict();
+export type AdminRestoreBackupInput = z.infer<typeof AdminRestoreBackupInputSchema>;
 
 export const BackupArchiveDtoSchema = z.object({
   status: z.enum(["preparing", "ready", "failed"]),
@@ -180,6 +205,9 @@ export const AdminSiteBackupStatusDtoSchema = z.object({
   lastStatus: z.enum(BACKUP_STATUSES).nullable(),
   problem: BackupProblemSchema.nullable(),
   runningOperationId: z.string().nullable(),
+  lastSuccessBackupId: z.string().nullable(),
+  lastSuccessSizeBytes: z.number().int().nonnegative().nullable(),
+  lastRestore: BackupLastRestoreDtoSchema.nullable(),
 });
 export type AdminSiteBackupStatusDto = z.infer<typeof AdminSiteBackupStatusDtoSchema>;
 

@@ -441,6 +441,12 @@ describe("@hosting-panel/contracts — Security Guards & Redaction", () => {
 
     expect(redactSensitiveString("Bearer super-secret-jwt-token")).toBe("Bearer [REDACTED]");
   });
+
+  it("treats a nested masterKey as a plaintext secret (R113)", () => {
+    const payload = { job: { masterKey: "ab".repeat(32), jobId: "op_1" } };
+    expect(redactSensitiveValue(payload).job).toEqual({ masterKey: "[REDACTED]", jobId: "op_1" });
+    expect(findPlaintextSecretKeys(payload)).toEqual(["job.masterKey"]);
+  });
 });
 
 describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
@@ -453,6 +459,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(OPERATION_KINDS).toContain("site.backups.prune");
     expect(OPERATION_KINDS).toContain("site.backups.restore");
     expect(OPERATION_KINDS).toContain("site.backups.download");
+    expect(OPERATION_KINDS).toContain("panel.backups.create");
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,

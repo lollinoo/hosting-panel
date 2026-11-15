@@ -669,6 +669,7 @@ export const BACKUP_FAILURE_CLASSES = [
   "switch_undone",
   "undo_incomplete",
   "definer_missing",
+  "panel_dump_missing",
 ] as const;
 
 export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
@@ -755,6 +756,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       serviceInstanceId: BackupPathIdSchema,
       target: BackupTargetSchema,
       snapshotId: BackupSnapshotIdSchema,
+      createVolume: z.literal(true).optional(),
     })
     .strict(),
   z
@@ -784,6 +786,22 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
     .object({
       action: z.literal("settle"),
       jobId: BackupOpJobIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("panelStart"),
+      jobId: BackupOpJobIdSchema,
+      target: BackupTargetSchema,
+      masterKey: z.string().regex(/^[0-9a-f]{64}$/),
+      retentionDays: z.number().int().min(1).max(365),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("siteState"),
+      siteId: BackupPathIdSchema,
+      serviceInstanceId: BackupPathIdSchema,
     })
     .strict(),
 ]);
@@ -838,6 +856,11 @@ export const BackupArchiveChunkSchema = z
 
 export type BackupArchiveChunk = z.infer<typeof BackupArchiveChunkSchema>;
 
+export const BackupSiteStateSchema = z
+  .object({ filesVolume: z.boolean(), container: z.boolean() })
+  .strict();
+export type BackupSiteState = z.infer<typeof BackupSiteStateSchema>;
+
 export type BackupsIpcRequest = z.infer<typeof BackupsIpcRequestSchema>;
 export type BackupsAction = BackupsIpcRequest["action"];
 
@@ -851,6 +874,8 @@ export const BACKUPS_RESULT_SCHEMAS = {
   readArchive: BackupArchiveChunkSchema,
   discardArchive: z.object({ discarded: z.boolean() }).strict(),
   settle: BackupJobStatusSchema,
+  panelStart: BackupJobStatusSchema,
+  siteState: BackupSiteStateSchema,
 } as const satisfies { [K in BackupsAction]: z.ZodType };
 
 export type BackupsResultByAction = {

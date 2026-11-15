@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AdminRestoreBackupInputSchema,
   AdminSiteBackupStatusDtoSchema,
   BACKUP_FAILURE_CLASSES,
   BACKUP_JOB_ID_PATTERN,
@@ -20,6 +21,7 @@ import {
   BackupRegionSchema,
   BackupSettingsDtoSchema,
   BackupSettingsInputSchema,
+  BackupSiteStateSchema,
   BackupTargetSchema,
   BackupTestResultDtoSchema,
   BackupTestResultSchema,
@@ -30,6 +32,7 @@ import {
   HEAVY_ACTION_WINDOW_MS,
   HEAVY_BACKUP_OPERATION_KINDS,
   MANUAL_BACKUPS_KEPT,
+  PanelBackupLineSchema,
   RESTIC_IMAGE,
   RestoreBackupInputSchema,
   SITE_FILE_CHUNK_BYTES,
@@ -82,8 +85,9 @@ describe("backups IPC schemas and constants", () => {
       "switch_undone",
       "undo_incomplete",
       "definer_missing",
+      "panel_dump_missing",
     ]);
-    expect(BACKUP_FAILURE_CLASSES).toHaveLength(20);
+    expect(BACKUP_FAILURE_CLASSES).toHaveLength(21);
     expect(BACKUP_JOB_STATES).toEqual(["running", "succeeded", "failed", "unknown"]);
     expect(BACKUP_JOB_ID_PATTERN.test(VALID_JOB_ID)).toBe(true);
     expect(BACKUP_JOB_ID_PATTERN.test(FORGET_JOB_ID)).toBe(true);
@@ -470,13 +474,17 @@ describe("backups IPC schemas and constants", () => {
 });
 
 describe("backups public contracts (R55, R56)", () => {
-  it("BACKUP_PROBLEMS has 22 distinct names matching BACKUP_FAILURE_CLASSES plus site_busy and address_not_updated", () => {
-    expect(BACKUP_PROBLEMS).toHaveLength(22);
-    expect(new Set(BACKUP_PROBLEMS).size).toBe(22);
+  it("BACKUP_PROBLEMS has 26 distinct names: BACKUP_FAILURE_CLASSES plus five API problems", () => {
+    expect(BACKUP_PROBLEMS).toHaveLength(26);
+    expect(new Set(BACKUP_PROBLEMS).size).toBe(26);
+    expect(BACKUP_FAILURE_CLASSES.at(-1)).toBe("panel_dump_missing");
     expect(BACKUP_PROBLEMS).toEqual([
       ...BACKUP_FAILURE_CLASSES,
       "site_busy",
       "address_not_updated",
+      "panel_dump_failed",
+      "panel_dump_tool_missing",
+      "site_not_started",
     ]);
     for (const p of BACKUP_PROBLEMS) {
       expect(BackupProblemSchema.safeParse(p).success).toBe(true);
@@ -648,6 +656,8 @@ describe("backups public contracts (R55, R56)", () => {
         lastNightlyRunOn: "2026-11-15",
         lastTest: { outcome: "ok", problem: null, at: "2026-11-15T02:00:00.000Z" },
         updatedAt: "2026-11-15T01:00:00.000Z",
+        lastPanelBackup: null,
+        newestBackupsTotalBytes: 0,
       }).success,
     ).toBe(true);
     expect(
@@ -717,6 +727,9 @@ describe("backups public contracts (R55, R56)", () => {
         lastStatus: null,
         problem: null,
         runningOperationId: null,
+        lastSuccessBackupId: null,
+        lastSuccessSizeBytes: null,
+        lastRestore: null,
       }).success,
     ).toBe(true);
     expect(
@@ -796,5 +809,130 @@ describe("backups public contracts (R55, R56)", () => {
     expect(backupArchiveFileName("Shop", new Date("2026-11-15T23:30:00-05:00"))).toBe(
       "Shop-backup-2026-11-16-0430.zip",
     );
+  });
+});
+
+describe("M3c panel copy and admin restore contracts", () => {
+  const MASTER_KEY = "ab".repeat(32);
+  const PANEL_START = {
+    action: "panelStart",
+    jobId: VALID_JOB_ID,
+    target: VALID_TARGET,
+    masterKey: MASTER_KEY,
+    retentionDays: 14,
+  };
+  const ok = (body: unknown) => BackupsIpcRequestSchema.safeParse(body).success;
+
+  it("panelStart accepts one valid request and refuses malformed ones", () => {
+    expect(ok(PANEL_START)).toBe(true);
+    expect(ok({ ...PANEL_START, extra: 1 })).toBe(false);
+    expect(ok({ ...PANEL_START, jobId: `${VALID_JOB_ID}-forget` })).toBe(false);
+    expect(ok({ ...PANEL_START, masterKey: `A${MASTER_KEY.slice(1)}` })).toBe(false);
+    expect(ok({ ...PANEL_START, masterKey: MASTER_KEY.slice(1) })).toBe(false);
+    expect(ok({ ...PANEL_START, masterKey: `${MASTER_KEY}a` })).toBe(false);
+    for (const retentionDays of [0, 366, 1.5]) {
+      expect(ok({ ...PANEL_START, retentionDays })).toBe(false);
+    }
+    expect(
+      ok({ ...PANEL_START, target: { ...VALID_TARGET, endpoint: "http://127.0.0.1:9000" } }),
+    ).toBe(false);
+    expect(BACKUPS_RESULT_SCHEMAS.panelStart).toBe(BackupJobStatusSchema);
+  });
+
+  it("siteState and its result are strict", () => {
+    const req = { action: "siteState", siteId: "site_a", serviceInstanceId: "svc_a" };
+    expect(ok(req)).toBe(true);
+    expect(ok({ ...req, extra: true })).toBe(false);
+    expect(ok({ action: "siteState", siteId: "site_a" })).toBe(false);
+    expect(BACKUPS_RESULT_SCHEMAS.siteState).toBe(BackupSiteStateSchema);
+    expect(BackupSiteStateSchema.safeParse({ filesVolume: true, container: false }).success).toBe(
+      true,
+    );
+    expect(
+      BackupSiteStateSchema.safeParse({ filesVolume: true, container: false, id: "x" }).success,
+    ).toBe(false);
+  });
+
+  it("restore accepts createVolume true and refuses false", () => {
+    const restore = {
+      action: "restore",
+      jobId: VALID_JOB_ID,
+      siteId: "site_a",
+      serviceInstanceId: "svc_a",
+      target: VALID_TARGET,
+      snapshotId: SNAPSHOT_ID,
+    };
+    expect(ok(restore)).toBe(true);
+    expect(ok({ ...restore, createVolume: true })).toBe(true);
+    expect(ok({ ...restore, createVolume: false })).toBe(false);
+  });
+
+  it("AdminRestoreBackupInputSchema takes an optional backupId and a bounded confirmName", () => {
+    const parse = (body: unknown) => AdminRestoreBackupInputSchema.safeParse(body).success;
+    const backupId = `bkp_${"0".repeat(32)}`;
+    expect(parse({ confirmName: "Main Site" })).toBe(true);
+    expect(parse({ backupId, confirmName: "Main Site" })).toBe(true);
+    expect(parse({ backupId, confirmName: "Main Site", force: true })).toBe(false);
+    expect(parse({ backupId: "bkp_123", confirmName: "Main Site" })).toBe(false);
+    expect(parse({ confirmName: "x".repeat(256) })).toBe(false);
+  });
+
+  it("settings and per-site DTOs carry the panel line and the storage figures", () => {
+    const settings = {
+      available: true,
+      configured: true,
+      endpoint: null,
+      region: null,
+      bucket: null,
+      prefix: "",
+      accessKeyId: null,
+      secretAccessKeySet: false,
+      scheduleHourUtc: 2,
+      retentionDays: 14,
+      lastNightlyRunOn: null,
+      lastTest: null,
+      updatedAt: null,
+    };
+    const line = { at: "2026-11-15T02:30:00.000Z", status: "failed", problem: "panel_dump_failed" };
+    expect(PanelBackupLineSchema.safeParse(line).success).toBe(true);
+    expect(PanelBackupLineSchema.safeParse({ ...line, extra: 1 }).success).toBe(false);
+    const settingsOk = (patch: object) =>
+      BackupSettingsDtoSchema.safeParse({ ...settings, ...patch }).success;
+    expect(settingsOk({ lastPanelBackup: line, newestBackupsTotalBytes: 1024 })).toBe(true);
+    expect(settingsOk({ lastPanelBackup: null, newestBackupsTotalBytes: 0 })).toBe(true);
+    expect(settingsOk({ lastPanelBackup: null, newestBackupsTotalBytes: -1 })).toBe(false);
+
+    const site = {
+      siteId: "site_01",
+      siteName: "Main Site",
+      organizationId: "org_01",
+      organizationName: "Acme",
+      lastSuccessAt: null,
+      lastAttemptAt: null,
+      lastStatus: null,
+      problem: null,
+      runningOperationId: null,
+    };
+    const siteOk = (patch: object) =>
+      AdminSiteBackupStatusDtoSchema.safeParse({ ...site, ...patch }).success;
+    expect(
+      siteOk({
+        lastSuccessBackupId: `bkp_${"1".repeat(32)}`,
+        lastSuccessSizeBytes: 2048,
+        lastRestore: {
+          backupId: `bkp_${"1".repeat(32)}`,
+          backupStartedAt: "2026-11-15T02:00:00.000Z",
+          status: "succeeded",
+          finishedAt: "2026-11-15T02:10:00.000Z",
+          problem: null,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      siteOk({ lastSuccessBackupId: null, lastSuccessSizeBytes: null, lastRestore: null }),
+    ).toBe(true);
+    expect(
+      siteOk({ lastSuccessBackupId: null, lastSuccessSizeBytes: -1, lastRestore: null }),
+    ).toBe(false);
   });
 });

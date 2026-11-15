@@ -131,7 +131,7 @@ export function findUnsafeDockerInputFields(value: unknown): string[] {
 }
 
 const PLAINTEXT_SECRET_KEY_PATTERN =
-  /^(password|secret|apiKey|privateKey|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
+  /^(password|secret|masterKey|apiKey|privateKey|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
 
 export function findPlaintextSecretKeys(value: unknown): string[] {
   const violations: string[] = [];
