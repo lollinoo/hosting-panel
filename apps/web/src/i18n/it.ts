@@ -1,3 +1,5 @@
+import type { BackupProblem } from "@hosting-panel/contracts";
+
 export const it = {
   common: {
     save: "Salva",
@@ -108,6 +110,7 @@ export const it = {
       domains: "Indirizzi web",
       files: "File",
       database: "Database",
+      backups: "Backup",
       logs: "Log",
     },
     status: {
@@ -233,7 +236,7 @@ export const it = {
     },
     delete: {
       title: "Eliminare questo sito?",
-      body: "Stai per eliminare definitivamente {name}: tutti i suoi file, il suo database e la configurazione del suo indirizzo web. L'operazione non si può annullare. I backup arriveranno in un prossimo aggiornamento, quindi scarica prima tutto ciò che ti serve.",
+      body: "Stai per eliminare definitivamente {name}: tutti i suoi file, il suo database e la configurazione del suo indirizzo web. L'operazione non si può annullare. Anche i backup di questo sito non saranno più disponibili, quindi scarica prima tutto ciò che ti serve.",
       typeName: "Scrivi {name} per confermare",
       cancel: "Annulla",
       confirm: "Elimina il sito",
@@ -622,9 +625,88 @@ export const it = {
           "Il tuo account è sospeso: non è possibile gestire i database. Contatta il tuo fornitore di hosting.",
       },
     },
+    backups: {
+      title: "Backup",
+      subtitle:
+        "Ogni notte salviamo una copia dei file e dei database del tuo sito in uno spazio esterno a questo server. Ogni copia resta disponibile per {days} giorni.",
+      empty:
+        "Non ci sono ancora backup di questo sito. Il primo verrà fatto stanotte, oppure puoi farne uno adesso.",
+      notAvailable:
+        "Su questo server i backup non sono disponibili. Se ti servono, contatta il tuo fornitore di hosting.",
+      notSetUp:
+        "I backup non sono ancora attivi su questo server: l'amministratore deve prima indicare dove salvarli. Contatta il tuo fornitore di hosting.",
+      loadFailed:
+        "Non riusciamo a caricare i backup in questo momento. Attendi un minuto e ricarica la pagina.",
+      backupNow: "Fai un backup adesso",
+      backupNowHint:
+        "Teniamo gli ultimi {kept} backup fatti a mano: quando uno nuovo riesce, il più vecchio fatto a mano viene eliminato.",
+      running: "Backup in corso\u2026 Il sito resta online e puoi lasciare questa pagina.",
+      columns: {
+        date: "Data",
+        kind: "Tipo",
+        size: "Dimensione",
+        status: "Stato",
+        expires: "Disponibile fino al",
+      },
+      kind: { nightly: "Notturno", manual: "Fatto a mano" },
+      status: { running: "In corso", succeeded: "Completato", failed: "Non riuscito" },
+      keptLatest: "Finché non ne riesce uno più recente",
+      problem: {
+        unreachable:
+          "Lo spazio dove salviamo i backup non è raggiungibile. Riprova più tardi; se continua, contatta il tuo fornitore di hosting.",
+        tls_failed:
+          "La connessione sicura con lo spazio dei backup non è riuscita. Contatta il tuo fornitore di hosting.",
+        wrong_region:
+          "Lo spazio dei backup non è impostato correttamente. Contatta il tuo fornitore di hosting.",
+        auth_failed:
+          "Lo spazio dei backup ha rifiutato l'accesso. Contatta il tuo fornitore di hosting.",
+        bucket_missing:
+          "Lo spazio dei backup non esiste più. Contatta il tuo fornitore di hosting.",
+        write_denied:
+          "Non abbiamo il permesso di scrivere nello spazio dei backup. Contatta il tuo fornitore di hosting.",
+        wrong_key:
+          "Lo spazio dei backup contiene copie protette da un'altra chiave. Contatta il tuo fornitore di hosting.",
+        key_file_missing:
+          "Sul server manca la chiave che protegge i backup. Contatta il tuo fornitore di hosting.",
+        tool_unavailable:
+          "Il server non è riuscito ad avviare il backup. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
+        no_space:
+          "Sul server non c'è abbastanza spazio libero per preparare il backup. Contatta il tuo fornitore di hosting.",
+        database_dump_failed:
+          "Non siamo riusciti a copiare i database del sito. Riprova tra qualche minuto; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        files_unreadable:
+          "Alcuni file del sito non si possono leggere, quindi il backup non è completo. Controlla i permessi nella scheda File oppure contatta il tuo fornitore di hosting.",
+        repository_locked:
+          "Era già in corso un altro backup di questo sito. Riprova tra qualche minuto.",
+        timeout:
+          "Il backup ha impiegato troppo tempo ed è stato fermato. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        interrupted:
+          "Il backup si è interrotto perché il server si è riavviato. Fanne uno nuovo con «Fai un backup adesso».",
+        other:
+          "Il backup non è riuscito. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+      } satisfies Record<BackupProblem, string>,
+      errors: {
+        notReady: "Il sito non è ancora pronto: riprova quando la sua configurazione è finita.",
+        ORGANIZATION_SUSPENDED:
+          "Il tuo account è sospeso: non è possibile fare backup. Contatta il tuo fornitore di hosting.",
+        stillRunning:
+          "Il backup sta richiedendo più tempo del solito e continua da solo. Il sito resta online; ricarica questa pagina più tardi per vedere il risultato.",
+        uncertain:
+          "Non abbiamo potuto confermare l'avvio del backup. Attendi un minuto e ricarica questa pagina prima di riprovare.",
+      },
+    },
   },
   admin: {
-    nav: { label: "Amministrazione", server: "Server", sites: "Siti", users: "Utenti", mail: "Email", audit: "Registro attività" },
+    nav: {
+      label: "Amministrazione",
+      server: "Server",
+      sites: "Siti",
+      users: "Utenti",
+      mail: "Email",
+      backups: "Backup",
+      audit: "Registro attività",
+    },
     hosts: {
       title: "Server",
       subtitle: "Server dedicati registrati e relativo stato.",
@@ -910,6 +992,134 @@ export const it = {
         credentials_missing: "Il pannello non ha ancora passato la password al servizio di posta. Attendi un minuto; se persiste, salva di nuovo le impostazioni.",
         rejected: "Il fornitore ha rifiutato questo messaggio. Leggi il dettaglio, poi controlla il destinatario o il dominio mittente con il fornitore.",
         other: "Qualcosa è andato storto durante l'invio. Leggi il dettaglio; se si ripete, contatta il tuo fornitore di posta.",
+      },
+    },
+    backups: {
+      title: "Backup",
+      subtitle: "Dove e quando salvare i backup notturni dei siti.",
+      keyWarning:
+        "La chiave che cifra i backup è il file /etc/hosting-panel/backup.key su questo server. Copiala subito in un posto sicuro fuori dal server: se il server va perso senza questa chiave, nessun backup potrà più essere letto, da nessuno.",
+      state: {
+        notAvailable:
+          "I backup non sono disponibili su questo tipo di installazione: servono un server installato con l'installer Linux (systemd).",
+        neverSetUp:
+          "Nessuna destinazione configurata: i backup non vengono fatti. Inserisci i dati del bucket S3 e salva.",
+        working:
+          "Destinazione configurata. I backup notturni partono alle {utc} UTC ({local} nel tuo fuso orario). Ultimo giro notturno: {date}.",
+        nightlyNever: "non ancora partito",
+        lastTestFailed: "L'ultima prova della connessione ({when}) non è riuscita:",
+      },
+      endpoint: "Endpoint S3",
+      endpointHint:
+        "Ad esempio https://s3.eu-central-1.amazonaws.com. Con http:// i backup restano cifrati, ma il traffico verso lo storage non è protetto: usalo solo in una rete privata.",
+      region: "Regione",
+      regionHint: "Per molti storage compatibili S3 va bene «us-east-1».",
+      bucket: "Bucket",
+      prefix: "Percorso nel bucket (facoltativo)",
+      prefixHint: "Ad esempio «pannello/server1». Lascia vuoto per usare la radice del bucket.",
+      accessKeyId: "Access key ID",
+      secretAccessKey: "Secret access key",
+      secretKeep: "Lascia vuoto per mantenere quella salvata",
+      secretIs: "Secret access key salvata: {state}",
+      secretSet: "sì",
+      secretNotSet: "no",
+      hour: "Ora del backup notturno",
+      hourOption: "{utc} UTC ({local} nel tuo fuso orario)",
+      retention: "Giorni di conservazione",
+      retentionHint: "Da 1 a 365. Il backup riuscito più recente di ogni sito viene sempre tenuto.",
+      changeWarning:
+        "Cambiando endpoint, bucket o percorso il pannello dimentica i backup registrati finora e i clienti non li vedranno più. Nel bucket non viene cancellato nulla.",
+      save: "Salva",
+      saving: "Salvataggio\u2026",
+      saved: "Impostazioni salvate.",
+      field: {
+        endpoint_invalid:
+          "Inserisci un indirizzo http:// o https:// senza percorso, ad esempio https://s3.example.com. Non si può usare un indirizzo di questo stesso server (localhost).",
+        region_invalid: "Usa solo lettere minuscole, numeri e trattini (massimo 64).",
+        bucket_invalid:
+          "Inserisci un nome del bucket di 3-63 caratteri: lettere minuscole, numeri, punti e trattini, senza due punti consecutivi.",
+        prefix_invalid:
+          "Percorso non valido: segmenti di lettere, numeri, punti, trattini e trattini bassi separati da /.",
+        access_key_id_invalid:
+          "Copia di nuovo l'access key ID dalla console del fornitore di storage, senza spazi prima o dopo.",
+        secret_access_key_invalid:
+          "Copia di nuovo la secret access key dalla console del fornitore di storage, senza spazi prima o dopo.",
+        secret_access_key_required: "Inserisci la secret access key.",
+        schedule_hour_invalid: "Scegli un'ora tra 0 e 23.",
+        retention_days_invalid: "Inserisci un numero di giorni tra 1 e 365.",
+      },
+      testTitle: "Prova la connessione",
+      testHelp:
+        "Prova la destinazione salvata: scrive e cancella un piccolo file nel percorso indicato. Può richiedere fino a 30 secondi.",
+      testButton: "Prova la connessione",
+      testing: "Prova in corso\u2026",
+      testSaveFirst: "Salva le impostazioni prima di provarle.",
+      testAmbiguous: "Non sappiamo come è finita la prova. Ricarica la pagina e riprova.",
+      outcome: { ok: "Funziona: il pannello può scrivere e cancellare nel bucket." },
+      problem: {
+        unreachable:
+          "Impossibile raggiungere l'endpoint. Controlla l'indirizzo e che il server possa uscire verso quella porta.",
+        tls_failed:
+          "La connessione HTTPS all'endpoint non è riuscita: il certificato non è valido per quell'indirizzo. Controlla l'endpoint.",
+        wrong_region:
+          "Lo storage ha rifiutato la regione. Correggi la regione e salva di nuovo.",
+        auth_failed:
+          "Le chiavi di accesso sono state rifiutate. Controlla access key ID e secret access key.",
+        bucket_missing:
+          "Il bucket non esiste. Crealo nello storage oppure correggi il nome.",
+        write_denied:
+          "Le chiavi funzionano ma non possono scrivere o cancellare in quel percorso. Dai loro i permessi di scrittura e cancellazione.",
+        wrong_key:
+          "In questo percorso ci sono backup cifrati con un'altra chiave (un altro server o un backup.key diverso). Usa un altro percorso, oppure rimetti in /etc/hosting-panel/backup.key la chiave originale.",
+        key_file_missing:
+          "Manca /etc/hosting-panel/backup.key. Rimetti la copia che hai salvato, oppure esegui hp-update per crearne una nuova (i backup fatti con la vecchia chiave non saranno leggibili).",
+        tool_unavailable:
+          "Il server non è riuscito ad avviare lo strumento di backup. Controlla la connessione a Internet del server e i log dell'executor (journalctl -u hp-docker-executor).",
+        no_space:
+          "Sul server non c'è abbastanza spazio libero per preparare i backup. Libera spazio sul disco e riprova.",
+        database_dump_failed:
+          "La copia dei database del sito non è riuscita. Controlla che MariaDB sia attivo e riprova.",
+        files_unreadable:
+          "Alcuni file del sito non sono leggibili dal backup. Controlla i permessi nella scheda File del sito e riprova.",
+        repository_locked:
+          "Un altro backup di questo sito era in corso. Riprova tra qualche minuto.",
+        timeout:
+          "Il backup ha superato il tempo massimo ed è stato fermato. Controlla la velocità verso lo storage e riprova.",
+        interrupted:
+          "Il backup si è interrotto perché l'executor si è riavviato. Usa «Riprova».",
+        other:
+          "Qualcosa non ha funzionato. Riprova; se si ripete controlla i log dell'executor (journalctl -u hp-docker-executor).",
+        site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+      } satisfies Record<BackupProblem, string>,
+      removeButton: "Rimuovi destinazione",
+      removeTitle: "Rimuovere la destinazione dei backup?",
+      removeConfirm:
+        "Nel bucket non viene cancellato nulla. I backup notturni si fermano e il pannello dimentica i backup registrati: i clienti non li vedranno più.",
+      removeCancel: "Annulla",
+      removeAction: "Rimuovi",
+      removed: "Destinazione rimossa.",
+      sitesTitle: "Stato per sito",
+      sitesEmpty: "Nessun sito.",
+      sitesLoadFailed: "Non riusciamo a caricare lo stato dei siti. Ricarica la pagina.",
+      columns: {
+        site: "Sito",
+        owner: "Cliente",
+        lastSuccess: "Ultimo riuscito",
+        lastAttempt: "Ultimo tentativo",
+        state: "Stato",
+        action: "Azioni",
+      },
+      siteState: {
+        never: "Mai",
+        running: "In corso\u2026",
+        succeeded: "Riuscito",
+        failed: "Non riuscito",
+      },
+      runNow: "Fai un backup",
+      retry: "Riprova",
+      errors: {
+        notConfigured: "Prima configura e salva una destinazione.",
+        notReady: "Il sito non è ancora pronto: riprova quando la configurazione è finita.",
       },
     },
     users: {

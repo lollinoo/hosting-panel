@@ -108,6 +108,7 @@ export const en: Messages = {
       domains: "Web addresses",
       files: "Files",
       database: "Database",
+      backups: "Backups",
       logs: "Logs",
     },
     status: {
@@ -233,7 +234,7 @@ export const en: Messages = {
     },
     delete: {
       title: "Delete this site?",
-      body: "This will permanently delete {name}: all its files, its database and its web address setup. This cannot be undone. Backups arrive in a later update, so download anything you need first.",
+      body: "This will permanently delete {name}: all its files, its database and its web address setup. This cannot be undone. This site's backups will no longer be available either, so download anything you need first.",
       typeName: "Type {name} to confirm",
       cancel: "Cancel",
       confirm: "Delete site",
@@ -615,9 +616,85 @@ export const en: Messages = {
           "Your account is suspended, so databases cannot be managed. Contact your hosting provider.",
       },
     },
+    backups: {
+      title: "Backups",
+      subtitle:
+        "Every night we save a copy of your site's files and databases to storage outside this server. Each copy stays available for {days} days.",
+      empty:
+        "There are no backups of this site yet. The first one runs tonight, or you can make one now.",
+      notAvailable:
+        "Backups are not available on this server. If you need them, contact your hosting provider.",
+      notSetUp:
+        "Backups are not active on this server yet: the administrator must first choose where to store them. Contact your hosting provider.",
+      loadFailed: "We can't load your backups right now. Wait a minute and reload the page.",
+      backupNow: "Back up now",
+      backupNowHint:
+        "We keep the last {kept} backups made by hand: when a new one succeeds, the oldest one made by hand is deleted.",
+      running: "Backup in progress\u2026 Your site stays online and you can leave this page.",
+      columns: {
+        date: "Date",
+        kind: "Type",
+        size: "Size",
+        status: "Status",
+        expires: "Available until",
+      },
+      kind: { nightly: "Nightly", manual: "Made by hand" },
+      status: { running: "In progress", succeeded: "Completed", failed: "Failed" },
+      keptLatest: "Until a newer one succeeds",
+      problem: {
+        unreachable:
+          "The storage we save backups to can't be reached. Try again later; if it continues, contact your hosting provider.",
+        tls_failed:
+          "The secure connection to the backup storage failed. Contact your hosting provider.",
+        wrong_region:
+          "The backup storage is not set up correctly. Contact your hosting provider.",
+        auth_failed: "The backup storage refused access. Contact your hosting provider.",
+        bucket_missing: "The backup storage no longer exists. Contact your hosting provider.",
+        write_denied:
+          "We are not allowed to write to the backup storage. Contact your hosting provider.",
+        wrong_key:
+          "The backup storage holds copies protected by a different key. Contact your hosting provider.",
+        key_file_missing:
+          "The key that protects backups is missing on the server. Contact your hosting provider.",
+        tool_unavailable:
+          "The server couldn't start the backup. Try again in a few minutes; if it continues, contact your hosting provider.",
+        no_space:
+          "The server doesn't have enough free space to prepare the backup. Contact your hosting provider.",
+        database_dump_failed:
+          "We couldn't copy the site's databases. Try again in a few minutes; if it happens again, contact your hosting provider.",
+        files_unreadable:
+          "Some of the site's files can't be read, so the backup is incomplete. Check permissions in the Files tab or contact your hosting provider.",
+        repository_locked:
+          "Another backup of this site was already running. Try again in a few minutes.",
+        timeout:
+          "The backup took too long and was stopped. Try again later; if it happens again, contact your hosting provider.",
+        interrupted:
+          'The backup stopped because the server restarted. Make a new one with "Back up now".',
+        other:
+          "The backup failed. Try again; if it happens again, contact your hosting provider.",
+        site_busy: "The site was finishing another change. Try again in a few minutes.",
+      },
+      errors: {
+        notReady: "The site isn't ready yet: try again when its setup has finished.",
+        ORGANIZATION_SUSPENDED:
+          "Your account is suspended: backups can't be made. Contact your hosting provider.",
+        stillRunning:
+          "The backup is taking longer than usual and continues on its own. Your site stays online; reload this page later to see the result.",
+        uncertain:
+          "We couldn't confirm that the backup started. Wait a minute and reload this page before trying again.",
+      },
+    },
   },
   admin: {
-    nav: { label: "Administration", server: "Server", sites: "Sites", users: "Users", mail: "Email", audit: "Activity log" },
+    nav: {
+      label: "Administration",
+      server: "Server",
+      sites: "Sites",
+      users: "Users",
+      mail: "Email",
+      backups: "Backups",
+      audit: "Activity log",
+    },
     hosts: {
       title: "Server",
       subtitle: "Registered dedicated servers and their status.",
@@ -903,6 +980,132 @@ export const en: Messages = {
         credentials_missing: "The panel has not passed the password to the email service yet. Wait a minute; if it lasts, save the settings again.",
         rejected: "The provider rejected this message. Read the detail, then check the recipient or the sender domain with your provider.",
         other: "Something went wrong while sending. Read the detail; if it repeats, contact your email provider.",
+      },
+    },
+    backups: {
+      title: "Backups",
+      subtitle: "Where and when to store the sites' nightly backups.",
+      keyWarning:
+        "The key that encrypts backups is the file /etc/hosting-panel/backup.key on this server. Copy it somewhere safe off this server now: if the server is lost without this key, no backup can ever be read again, by anyone.",
+      state: {
+        notAvailable:
+          "Backups are not available on this kind of install: they need a server installed with the Linux (systemd) installer.",
+        neverSetUp:
+          "No destination set: no backups are being made. Enter the S3 bucket details and save.",
+        working:
+          "Destination set. Nightly backups start at {utc} UTC ({local} in your time zone). Last nightly run: {date}.",
+        nightlyNever: "not run yet",
+        lastTestFailed: "The last connection test ({when}) failed:",
+      },
+      endpoint: "S3 endpoint",
+      endpointHint:
+        "For example https://s3.eu-central-1.amazonaws.com. With http:// backups stay encrypted, but traffic to the storage is not protected: use it only on a private network.",
+      region: "Region",
+      regionHint: 'For many S3-compatible storages "us-east-1" is fine.',
+      bucket: "Bucket",
+      prefix: "Path in the bucket (optional)",
+      prefixHint: 'For example "panel/server1". Leave empty to use the bucket root.',
+      accessKeyId: "Access key ID",
+      secretAccessKey: "Secret access key",
+      secretKeep: "Leave empty to keep the saved one",
+      secretIs: "Secret access key saved: {state}",
+      secretSet: "yes",
+      secretNotSet: "no",
+      hour: "Nightly backup time",
+      hourOption: "{utc} UTC ({local} in your time zone)",
+      retention: "Days to keep",
+      retentionHint: "From 1 to 365. The newest successful backup of each site is always kept.",
+      changeWarning:
+        "Changing the endpoint, bucket or path makes the panel forget the backups recorded so far, and customers will no longer see them. Nothing is deleted from the bucket.",
+      save: "Save",
+      saving: "Saving\u2026",
+      saved: "Settings saved.",
+      field: {
+        endpoint_invalid:
+          "Enter an http:// or https:// address without a path, for example https://s3.example.com. An address on this same server (localhost) can't be used.",
+        region_invalid: "Use only lowercase letters, digits and dashes (64 at most).",
+        bucket_invalid:
+          "Enter a bucket name of 3-63 characters: lowercase letters, digits, dots and dashes, without two consecutive dots.",
+        prefix_invalid:
+          "Invalid path: segments of letters, digits, dots, dashes and underscores separated by /.",
+        access_key_id_invalid:
+          "Copy the access key ID again from the storage provider's console, without spaces before or after.",
+        secret_access_key_invalid:
+          "Copy the secret access key again from the storage provider's console, without spaces before or after.",
+        secret_access_key_required: "Enter the secret access key.",
+        schedule_hour_invalid: "Choose an hour from 0 to 23.",
+        retention_days_invalid: "Enter a number of days from 1 to 365.",
+      },
+      testTitle: "Test the connection",
+      testHelp:
+        "Tests the saved destination: writes and deletes a small file under the path. It can take up to 30 seconds.",
+      testButton: "Test the connection",
+      testing: "Testing\u2026",
+      testSaveFirst: "Save the settings before testing them.",
+      testAmbiguous: "We don't know how the test ended. Reload the page and try again.",
+      outcome: { ok: "Works: the panel can write and delete in the bucket." },
+      problem: {
+        unreachable:
+          "The endpoint can't be reached. Check the address and that the server can connect out to that port.",
+        tls_failed:
+          "The HTTPS connection to the endpoint failed: the certificate is not valid for that address. Check the endpoint.",
+        wrong_region: "The storage refused the region. Fix the region and save again.",
+        auth_failed:
+          "The access keys were refused. Check the access key ID and secret access key.",
+        bucket_missing:
+          "The bucket does not exist. Create it in the storage or fix the name.",
+        write_denied:
+          "The keys work but cannot write or delete under that path. Give them write and delete permission.",
+        wrong_key:
+          "This path holds backups encrypted with a different key (another server or a different backup.key). Use another path, or put the original key back in /etc/hosting-panel/backup.key.",
+        key_file_missing:
+          "/etc/hosting-panel/backup.key is missing. Put back the copy you saved, or run hp-update to create a new one (backups made with the old key will not be readable).",
+        tool_unavailable:
+          "The server couldn't start the backup tool. Check the server's Internet connection and the executor logs (journalctl -u hp-docker-executor).",
+        no_space:
+          "The server doesn't have enough free space to prepare backups. Free up disk space and try again.",
+        database_dump_failed:
+          "Copying the site's databases failed. Check that MariaDB is running and try again.",
+        files_unreadable:
+          "Some of the site's files can't be read by the backup. Check permissions in the site's Files tab and try again.",
+        repository_locked:
+          "Another backup of this site was running. Try again in a few minutes.",
+        timeout:
+          "The backup went over the time limit and was stopped. Check the speed to the storage and try again.",
+        interrupted: 'The backup stopped because the executor restarted. Use "Retry".',
+        other:
+          "Something went wrong. Try again; if it repeats, check the executor logs (journalctl -u hp-docker-executor).",
+        site_busy: "The site was finishing another change. Try again in a few minutes.",
+      },
+      removeButton: "Remove destination",
+      removeTitle: "Remove the backup destination?",
+      removeConfirm:
+        "Nothing is deleted from the bucket. Nightly backups stop and the panel forgets the recorded backups: customers will no longer see them.",
+      removeCancel: "Cancel",
+      removeAction: "Remove",
+      removed: "Destination removed.",
+      sitesTitle: "Status per site",
+      sitesEmpty: "No sites.",
+      sitesLoadFailed: "We can't load the sites' status. Reload the page.",
+      columns: {
+        site: "Site",
+        owner: "Customer",
+        lastSuccess: "Last success",
+        lastAttempt: "Last attempt",
+        state: "Status",
+        action: "Actions",
+      },
+      siteState: {
+        never: "Never",
+        running: "Running\u2026",
+        succeeded: "Succeeded",
+        failed: "Failed",
+      },
+      runNow: "Back up",
+      retry: "Retry",
+      errors: {
+        notConfigured: "Set up and save a destination first.",
+        notReady: "The site isn't ready yet: try again when its setup has finished.",
       },
     },
     users: {

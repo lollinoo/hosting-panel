@@ -8,11 +8,12 @@ import { LAST_SITE_COOKIE } from "@/app/sites/landing";
 import { cn } from "@/lib/utils";
 
 // Later steps append tabs here.
-export const SITE_TABS: { key: "overview" | "domains" | "files" | "database" | "logs"; href: (siteId: string) => string }[] = [
+export const SITE_TABS: { key: "overview" | "domains" | "files" | "database" | "backups" | "logs"; href: (siteId: string) => string }[] = [
   { key: "overview", href: (siteId) => `/sites/${siteId}` },
   { key: "domains", href: (siteId) => `/sites/${siteId}/domains` },
   { key: "files", href: (siteId) => `/sites/${siteId}/files` },
   { key: "database", href: (siteId) => `/sites/${siteId}/database` },
+  { key: "backups", href: (siteId) => `/sites/${siteId}/backups` },
   { key: "logs", href: (siteId) => `/sites/${siteId}/logs` },
 ];
 

@@ -83,8 +83,8 @@ describe("site databases UI", () => {
     vi.restoreAllMocks();
   });
 
-  it("places database tab between files and logs", () => {
-    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "files", "database", "logs"]);
+  it("places database tab between files and backups", () => {
+    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "files", "database", "backups", "logs"]);
     const dbTab = SITE_TABS.find((t) => t.key === "database");
     expect(dbTab?.href("site-42")).toBe("/sites/site-42/database");
   });

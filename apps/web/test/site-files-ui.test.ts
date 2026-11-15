@@ -437,7 +437,7 @@ describe("uploadFile", () => {
 describe("Files tab navigation and catalog", () => {
   it("places files tab right after domains with href /sites/:id/files", () => {
     const keys = SITE_TABS.map((t) => t.key);
-    expect(keys).toEqual(["overview", "domains", "files", "database", "logs"]);
+    expect(keys).toEqual(["overview", "domains", "files", "database", "backups", "logs"]);
     expect(SITE_TABS[2]!.href("s1")).toBe("/sites/s1/files");
   });
 

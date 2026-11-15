@@ -21,6 +21,8 @@ import type {
   HostDaemonHeartbeatDto,
   RuntimeBackend,
   MailRelaySettingsDto,
+  BackupSettingsDto,
+  AdminSiteBackupStatusDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -159,4 +161,14 @@ export async function fetchServerSiteDomains(orgId: string, siteId: string): Pro
 
 export async function fetchServerAdminMailRelay(): Promise<MailRelaySettingsDto | null> {
   return orNull(await serverGet<MailRelaySettingsDto>("v1/admin/mail-relay"));
+}
+
+/** Loads the administrator's backup destination and schedule settings, or null on request failure. */
+export async function fetchServerAdminBackups(): Promise<BackupSettingsDto | null> {
+  return orNull(await serverGet<BackupSettingsDto>("v1/admin/backups", { timeoutMs: 20_000 }));
+}
+
+/** Loads per-site backup status rows for the administrator table, or null on request failure. */
+export async function fetchServerAdminBackupSites(): Promise<AdminSiteBackupStatusDto[] | null> {
+  return orNull(await serverGet<AdminSiteBackupStatusDto[]>("v1/admin/backups/sites", { timeoutMs: 20_000 }));
 }
