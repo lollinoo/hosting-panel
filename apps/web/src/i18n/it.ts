@@ -647,6 +647,7 @@ export const it = {
         size: "Dimensione",
         status: "Stato",
         expires: "Disponibile fino al",
+        actions: "Azioni",
       },
       kind: { nightly: "Notturno", manual: "Fatto a mano" },
       status: { running: "In corso", succeeded: "Completato", failed: "Non riuscito" },
@@ -667,7 +668,7 @@ export const it = {
         wrong_key:
           "Lo spazio dei backup contiene copie protette da un'altra chiave. Contatta il tuo fornitore di hosting.",
         key_file_missing:
-          "Sul server manca la chiave che protegge i backup. Contatta il tuo fornitore di hosting.",
+          "Sul server la chiave che protegge i backup manca o non è valida. Contatta il tuo fornitore di hosting.",
         tool_unavailable:
           "Il server non è riuscito ad avviare il backup. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
         no_space:
@@ -685,7 +686,97 @@ export const it = {
         other:
           "Il backup non è riuscito. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
         site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+        restore_prepare_failed:
+          "Non è stato possibile preparare il backup per il ripristino, quindi non è cambiato nulla. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        switch_undone:
+          "L'ultimo passaggio del ripristino non è stato completato, quindi tutto è stato rimesso com'era. Può succedere quando il sito è molto occupato: riprova tra qualche minuto.",
+        undo_incomplete:
+          "Il ripristino si è fermato a metà e non è stato possibile annullarlo da solo, quindi il sito non è disponibile per i visitatori. Ripristina di nuovo un backup per ripararlo; se non funziona nemmeno così, contatta il tuo fornitore di hosting.",
+        definer_missing:
+          "Questo backup contiene viste, trigger o procedure del database che appartengono a un utente del database eliminato dopo il backup. Ricrea quell'utente con lo stesso nome nella scheda Database e riprova; se non sai quale sia, contatta il tuo fornitore di hosting.",
+        address_not_updated:
+          "Non è stato possibile reimpostare l'indirizzo del sito: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
       } satisfies Record<BackupProblem, string>,
+      copyProblem: {
+        unreachable:
+          "Lo spazio dove sono salvati i backup non è raggiungibile. Riprova più tardi; se continua, contatta il tuo fornitore di hosting.",
+        tls_failed:
+          "La connessione sicura con lo spazio dei backup non è riuscita. Contatta il tuo fornitore di hosting.",
+        wrong_region:
+          "Lo spazio dei backup non è impostato correttamente. Contatta il tuo fornitore di hosting.",
+        auth_failed:
+          "Lo spazio dei backup ha rifiutato l'accesso. Contatta il tuo fornitore di hosting.",
+        bucket_missing:
+          "Lo spazio dei backup non esiste più. Contatta il tuo fornitore di hosting.",
+        write_denied:
+          "Non abbiamo il permesso di usare lo spazio dei backup. Contatta il tuo fornitore di hosting.",
+        wrong_key:
+          "Questo backup è protetto da un'altra chiave e non si può leggere. Contatta il tuo fornitore di hosting.",
+        key_file_missing:
+          "Sul server la chiave che protegge i backup manca o non è valida. Contatta il tuo fornitore di hosting.",
+        tool_unavailable:
+          "Il server non è riuscito ad avviare l'operazione. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
+        no_space:
+          "Sul server non c'è abbastanza spazio libero per farlo. Contatta il tuo fornitore di hosting.",
+        database_dump_failed:
+          "Non siamo riusciti a leggere o scrivere i database del sito. Riprova tra qualche minuto; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        files_unreadable:
+          "Alcuni file del sito non si sono potuti leggere o scrivere. Controlla i permessi nella scheda File oppure contatta il tuo fornitore di hosting.",
+        repository_locked:
+          "Era in corso un altro backup di questo sito. Riprova tra qualche minuto.",
+        timeout:
+          "Ci è voluto troppo tempo ed è stato fermato. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        interrupted: "Si è interrotto perché il server si è riavviato. Riprova.",
+        other:
+          "Qualcosa non ha funzionato. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+        restore_prepare_failed:
+          "Non è stato possibile preparare il backup per il ripristino, quindi non è cambiato nulla. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        switch_undone:
+          "L'ultimo passaggio del ripristino non è stato completato, quindi tutto è stato rimesso com'era. Può succedere quando il sito è molto occupato: riprova tra qualche minuto.",
+        undo_incomplete:
+          "Il ripristino si è fermato a metà e non è stato possibile annullarlo da solo, quindi il sito non è disponibile per i visitatori. Ripristina di nuovo un backup per ripararlo; se non funziona nemmeno così, contatta il tuo fornitore di hosting.",
+        definer_missing:
+          "Questo backup contiene viste, trigger o procedure del database che appartengono a un utente del database eliminato dopo il backup. Ricrea quell'utente con lo stesso nome nella scheda Database e riprova; se non sai quale sia, contatta il tuo fornitore di hosting.",
+        address_not_updated:
+          "Non è stato possibile reimpostare l'indirizzo del sito: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+      } satisfies Record<BackupProblem, string>,
+      restore: {
+        button: "Ripristina",
+        title: "Ripristinare il backup del {date}?",
+        body: "Tutti i file e tutti i database di questo sito tornano com'erano il {date}. Tutto ciò che è cambiato da allora (contenuti, ordini, commenti, file caricati o modificati) va perso per sempre e non si può recuperare.",
+        unavailable:
+          "Verso la fine, per qualche secondo, i visitatori vedono un messaggio che il sito è temporaneamente non disponibile.",
+        lostDatabases:
+          "Un database eliminato nel frattempo torna senza i suoi utenti: ridai l'accesso dalla scheda Database.",
+        backupFirst:
+          "Per conservare una copia del sito com'è adesso, annulla e usa prima «Fai un backup adesso».",
+        typeName: "Per confermare, scrivi il nome del sito {name}",
+        cancel: "Annulla",
+        confirm: "Ripristina questo backup",
+        starting: "Avvio\u2026",
+        wrongName: "Il nome non corrisponde a questo sito. Scrivilo esattamente come è indicato.",
+        running:
+          "Ripristino del backup del {date} in corso\u2026 Può richiedere diversi minuti; verso la fine il sito non è disponibile per qualche secondo. Puoi lasciare questa pagina.",
+        done: "Il sito è stato ripristinato al backup del {date}.",
+        doneAddressNotSet:
+          "Il sito è stato ripristinato al backup del {date}, ma non siamo riusciti a reimpostarne l'indirizzo: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+        failed: "Il ripristino non è avvenuto e il sito è esattamente com'era.",
+      },
+      download: {
+        prepare: "Prepara il download",
+        preparing: "In preparazione\u2026 Puoi lasciare questa pagina.",
+        fetch: "Scarica",
+        readyUntil: "Pronto fino alle {time}",
+        warning:
+          "Questo file contiene tutti i file del sito e i suoi database, comprese le loro password. Conservalo in un posto sicuro e non condividerlo.",
+        onlyOne:
+          "Per ogni sito si tiene un solo download: prepararne un altro elimina quello pronto.",
+        gone: "Questo download non è più disponibile. Preparalo di nuovo.",
+        failed: "Non è stato possibile preparare il download.",
+        fetchFailed:
+          "Il download non è partito. Attendi un minuto e riprova; se succede di nuovo, preparalo di nuovo.",
+      },
       errors: {
         notReady: "Il sito non è ancora pronto: riprova quando la sua configurazione è finita.",
         ORGANIZATION_SUSPENDED:
@@ -694,6 +785,12 @@ export const it = {
           "Il backup sta richiedendo più tempo del solito e continua da solo. Il sito resta online; ricarica questa pagina più tardi per vedere il risultato.",
         uncertain:
           "Non abbiamo potuto confermare l'avvio del backup. Attendi un minuto e ricarica questa pagina prima di riprovare.",
+        tooMany:
+          "Per questo sito sono già stati avviati 6 tra backup, ripristini e download nell'ultima ora. Puoi avviarne un altro alle {time}.",
+        uncertainAction:
+          "Non abbiamo potuto confermare che la richiesta sia arrivata. Attendi un minuto e ricarica questa pagina prima di riprovare.",
+        stillWorking:
+          "Ci vuole più tempo del solito e prosegue da solo. Ricarica questa pagina più tardi per vedere il risultato.",
       },
     },
   },
@@ -1072,7 +1169,7 @@ export const it = {
         wrong_key:
           "In questo percorso ci sono backup cifrati con un'altra chiave (un altro server o un backup.key diverso). Usa un altro percorso, oppure rimetti in /etc/hosting-panel/backup.key la chiave originale.",
         key_file_missing:
-          "Manca /etc/hosting-panel/backup.key. Rimetti la copia che hai salvato, oppure esegui hp-update per crearne una nuova (i backup fatti con la vecchia chiave non saranno leggibili).",
+          "/etc/hosting-panel/backup.key manca o non è valido. Rimetti la copia che hai salvato fuori dal server. Solo se non ne esiste nessuna copia: elimina il file ed esegui hp-update per crearne uno nuovo (i backup fatti con la vecchia chiave non saranno leggibili).",
         tool_unavailable:
           "Il server non è riuscito ad avviare lo strumento di backup. Controlla la connessione a Internet del server e i log dell'executor (journalctl -u hp-docker-executor).",
         no_space:
@@ -1090,6 +1187,16 @@ export const it = {
         other:
           "Qualcosa non ha funzionato. Riprova; se si ripete controlla i log dell'executor (journalctl -u hp-docker-executor).",
         site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+        restore_prepare_failed:
+          "Un ripristino non è riuscito a preparare la copia del sito; il sito non è stato toccato. Riprova il ripristino; se fallisce ancora, controlla i log dell'executor (journalctl -u hp-docker-executor).",
+        switch_undone:
+          "Un ripristino non ha completato l'ultimo passaggio e ha rimesso il sito com'era. Di solito una query lunga teneva occupato il database: riprova più tardi.",
+        undo_incomplete:
+          "Un ripristino si è fermato a metà e anche il suo annullamento non è riuscito: il sito risponde «temporaneamente non disponibile» finché un ripristino di questo sito non riesce. Il cliente può avviarne uno dalla scheda Backup del sito; ciò che il tentativo fallito ha lasciato viene rimosso dal primo ripristino riuscito. Se non riesce nemmeno quello, controlla journalctl -u hp-docker-executor.",
+        definer_missing:
+          "Il backup contiene viste, trigger o routine il cui utente del database non esiste più; il sito non è stato toccato. Ricrea l'utente con lo stesso nome e ripeti il ripristino.",
+        address_not_updated:
+          "Il ripristino è riuscito, ma l'impostazione dell'indirizzo del sito non è riuscita: i link potrebbero puntare a un vecchio indirizzo. Controlla i log dell'executor (journalctl -u hp-docker-executor) e reimposta il dominio principale del sito.",
       } satisfies Record<BackupProblem, string>,
       removeButton: "Rimuovi destinazione",
       removeTitle: "Rimuovere la destinazione dei backup?",

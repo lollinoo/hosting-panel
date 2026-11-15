@@ -1,3 +1,4 @@
+import type { BackupProblem } from "@hosting-panel/contracts";
 import type { Messages } from "./index";
 
 export const en: Messages = {
@@ -637,6 +638,7 @@ export const en: Messages = {
         size: "Size",
         status: "Status",
         expires: "Available until",
+        actions: "Actions",
       },
       kind: { nightly: "Nightly", manual: "Made by hand" },
       status: { running: "In progress", succeeded: "Completed", failed: "Failed" },
@@ -655,7 +657,7 @@ export const en: Messages = {
         wrong_key:
           "The backup storage holds copies protected by a different key. Contact your hosting provider.",
         key_file_missing:
-          "The key that protects backups is missing on the server. Contact your hosting provider.",
+          "The key that protects backups is missing or not valid on the server. Contact your hosting provider.",
         tool_unavailable:
           "The server couldn't start the backup. Try again in a few minutes; if it continues, contact your hosting provider.",
         no_space:
@@ -673,6 +675,93 @@ export const en: Messages = {
         other:
           "The backup failed. Try again; if it happens again, contact your hosting provider.",
         site_busy: "The site was finishing another change. Try again in a few minutes.",
+        restore_prepare_failed:
+          "The backup couldn't be made ready for the restore, so nothing was changed. Try again; if it happens again, contact your hosting provider.",
+        switch_undone:
+          "The last step of the restore couldn't be completed, so everything was put back as it was. This can happen while the site is very busy: try again in a few minutes.",
+        undo_incomplete:
+          "The restore stopped halfway and couldn't be undone by itself, so the site is not available to visitors. Restore a backup again to repair it; if that doesn't work either, contact your hosting provider.",
+        definer_missing:
+          "This backup holds database views, triggers or procedures that belong to a database user deleted after the backup was made. Create that user again with the same name in the Databases tab, then try again; if you don't know which one, contact your hosting provider.",
+        address_not_updated:
+          "The site's address couldn't be set again: links and the login may point to an old address. Contact your hosting provider.",
+      },
+      copyProblem: {
+        unreachable:
+          "The storage where backups are kept can't be reached. Try again later; if it continues, contact your hosting provider.",
+        tls_failed:
+          "The secure connection to the backup storage failed. Contact your hosting provider.",
+        wrong_region:
+          "The backup storage is not set up correctly. Contact your hosting provider.",
+        auth_failed: "The backup storage refused access. Contact your hosting provider.",
+        bucket_missing: "The backup storage no longer exists. Contact your hosting provider.",
+        write_denied:
+          "We are not allowed to use the backup storage. Contact your hosting provider.",
+        wrong_key:
+          "This backup is protected by a different key and can't be read. Contact your hosting provider.",
+        key_file_missing:
+          "The key that protects backups is missing or not valid on the server. Contact your hosting provider.",
+        tool_unavailable:
+          "The server couldn't start the work. Try again in a few minutes; if it continues, contact your hosting provider.",
+        no_space:
+          "The server doesn't have enough free space for this. Contact your hosting provider.",
+        database_dump_failed:
+          "We couldn't read or write the site's databases. Try again in a few minutes; if it happens again, contact your hosting provider.",
+        files_unreadable:
+          "Some of the site's files couldn't be read or written. Check permissions in the Files tab or contact your hosting provider.",
+        repository_locked:
+          "Another backup of this site was running. Try again in a few minutes.",
+        timeout:
+          "It took too long and was stopped. Try again later; if it happens again, contact your hosting provider.",
+        interrupted: "It stopped because the server restarted. Try again.",
+        other: "Something went wrong. Try again; if it happens again, contact your hosting provider.",
+        site_busy: "The site was finishing another change. Try again in a few minutes.",
+        restore_prepare_failed:
+          "The backup couldn't be made ready for the restore, so nothing was changed. Try again; if it happens again, contact your hosting provider.",
+        switch_undone:
+          "The last step of the restore couldn't be completed, so everything was put back as it was. This can happen while the site is very busy: try again in a few minutes.",
+        undo_incomplete:
+          "The restore stopped halfway and couldn't be undone by itself, so the site is not available to visitors. Restore a backup again to repair it; if that doesn't work either, contact your hosting provider.",
+        definer_missing:
+          "This backup holds database views, triggers or procedures that belong to a database user deleted after the backup was made. Create that user again with the same name in the Databases tab, then try again; if you don't know which one, contact your hosting provider.",
+        address_not_updated:
+          "The site's address couldn't be set again: links and the login may point to an old address. Contact your hosting provider.",
+      } satisfies Record<BackupProblem, string>,
+      restore: {
+        button: "Restore",
+        title: "Restore the backup of {date}?",
+        body: "Every file and every database of this site goes back to how it was on {date}. Everything changed since then (content, orders, comments, uploaded or edited files) is lost for good and cannot be brought back.",
+        unavailable:
+          "Near the end, for a few seconds, visitors see a message that the site is temporarily unavailable.",
+        lostDatabases:
+          "A database deleted since then comes back without its users: give access again in the Databases tab.",
+        backupFirst:
+          'To keep a copy of the site as it is now, cancel and use "Back up now" first.',
+        typeName: "To confirm, type the site name {name}",
+        cancel: "Cancel",
+        confirm: "Restore this backup",
+        starting: "Starting\u2026",
+        wrongName: "The name doesn't match this site. Type it exactly as shown.",
+        running:
+          "Restoring the backup of {date}\u2026 It can take several minutes; near the end the site is unavailable for a few seconds. You can leave this page.",
+        done: "Your site was restored to the backup of {date}.",
+        doneAddressNotSet:
+          "Your site was restored to the backup of {date}, but we couldn't set its address again: links and the login may point to an old address. Contact your hosting provider.",
+        failed: "The restore didn't happen and your site is exactly as it was.",
+      },
+      download: {
+        prepare: "Prepare download",
+        preparing: "Being prepared\u2026 You can leave this page.",
+        fetch: "Download",
+        readyUntil: "Ready until {time}",
+        warning:
+          "This file holds all of the site's files and its databases, including their passwords. Keep it somewhere safe and don't share it.",
+        onlyOne:
+          "Only one download is kept per site: preparing another one removes the one that is ready.",
+        gone: "This download is no longer available. Prepare it again.",
+        failed: "The download couldn't be prepared.",
+        fetchFailed:
+          "The download couldn't start. Wait a minute and try again; if it happens again, prepare it again.",
       },
       errors: {
         notReady: "The site isn't ready yet: try again when its setup has finished.",
@@ -682,6 +771,12 @@ export const en: Messages = {
           "The backup is taking longer than usual and continues on its own. Your site stays online; reload this page later to see the result.",
         uncertain:
           "We couldn't confirm that the backup started. Wait a minute and reload this page before trying again.",
+        tooMany:
+          "This site already had 6 backups, restores or downloads started in the last hour. You can start another one at {time}.",
+        uncertainAction:
+          "We couldn't confirm that the request was received. Wait a minute and reload this page before trying again.",
+        stillWorking:
+          "This is taking longer than usual and continues on its own. Reload this page later to see the result.",
       },
     },
   },
@@ -1059,7 +1154,7 @@ export const en: Messages = {
         wrong_key:
           "This path holds backups encrypted with a different key (another server or a different backup.key). Use another path, or put the original key back in /etc/hosting-panel/backup.key.",
         key_file_missing:
-          "/etc/hosting-panel/backup.key is missing. Put back the copy you saved, or run hp-update to create a new one (backups made with the old key will not be readable).",
+          "/etc/hosting-panel/backup.key is missing or not valid. Put back the copy you saved off the server. Only if no copy exists: delete the file and run hp-update to create a new one (backups made with the old key will not be readable).",
         tool_unavailable:
           "The server couldn't start the backup tool. Check the server's Internet connection and the executor logs (journalctl -u hp-docker-executor).",
         no_space:
@@ -1076,6 +1171,16 @@ export const en: Messages = {
         other:
           "Something went wrong. Try again; if it repeats, check the executor logs (journalctl -u hp-docker-executor).",
         site_busy: "The site was finishing another change. Try again in a few minutes.",
+        restore_prepare_failed:
+          "A restore could not prepare its copy of the site; the site was not touched. Try the restore again; if it fails again, check the executor logs (journalctl -u hp-docker-executor).",
+        switch_undone:
+          "A restore could not complete its last step and put the site back as it was. Usually a long query was holding the database: try again later.",
+        undo_incomplete:
+          'A restore stopped halfway and undoing it failed too: the site answers "temporarily unavailable" until a restore of this site succeeds. The customer can start one from the site\'s Backups tab; what the failed attempt left behind is removed by the next restore that succeeds. If that restore fails too, check journalctl -u hp-docker-executor.',
+        definer_missing:
+          "The backup holds views, triggers or routines whose database user no longer exists; the site was not touched. Create the user again with the same name, then restore again.",
+        address_not_updated:
+          "The restore succeeded, but setting the site's address failed: links may point to an old address. Check the executor logs (journalctl -u hp-docker-executor) and set the site's primary domain again.",
       },
       removeButton: "Remove destination",
       removeTitle: "Remove the backup destination?",

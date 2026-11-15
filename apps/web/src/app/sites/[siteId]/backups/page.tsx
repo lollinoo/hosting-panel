@@ -9,13 +9,26 @@ import { getRequestLocale } from "@/i18n/server";
 import { serverGet } from "@/lib/server-api";
 
 // Render the customer site Backups tab by loading site ownership and backup state server-side.
-export async function SiteBackupsPage({ params }: { params: Promise<{ siteId: string }> }) {
-  const { siteId } = await params;
-  const [{ orgId, session, loadError }, locale] = await Promise.all([
+export async function SiteBackupsPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ siteId: string }>;
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const [{ siteId }, resolvedSearch, { orgId, session, loadError }, locale] = await Promise.all([
+    params,
+    searchParams ?? Promise.resolve({} as Record<string, string | string[] | undefined>),
     getCustomerContext(),
     getRequestLocale(),
   ]);
   const m = getMessages(locale);
+
+  const rawDownload = Array.isArray(resolvedSearch.download)
+    ? resolvedSearch.download[0]
+    : resolvedSearch.download;
+  const initialDownloadError =
+    rawDownload === "gone" ? "gone" : rawDownload === "failed" ? "failed" : null;
 
   const siteRes = await getSite(orgId, siteId);
   if (!siteRes.ok) {
@@ -67,6 +80,8 @@ export async function SiteBackupsPage({ params }: { params: Promise<{ siteId: st
         basePath={basePath}
         initial={backupsRes.data}
         csrfToken={session.csrfToken}
+        siteName={siteRes.data.name}
+        initialDownloadError={initialDownloadError}
       />
     </div>
   );
