@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { SHARED_MARIADB_IMAGE, resolveWordpressCliImage } from "@hosting-panel/contracts";
+import { SHARED_MARIADB_IMAGE, resolveWordpressCliImage, siteDatabasePrefix } from "@hosting-panel/contracts";
 import type { SiteJobRequest } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { readJobStdout } from "../src/docker-logs.js";
@@ -19,8 +19,11 @@ import {
 } from "../src/index.js";
 import {
   DB_DROP_SCRIPT,
+  DB_IMPORT_LOAD_SCRIPT,
+  DB_IMPORT_SCRIPT,
   DEFAULT_SITE_JOB_TIMEOUT_MS,
   SITE_JOB_SPECS,
+  WORDPRESS_IMPORT_FINALIZE_SCRIPT,
   WORDPRESS_INSPECT_SCRIPT,
   WORDPRESS_INSTALL_SCRIPT,
   WORDPRESS_RESET_PASSWORD_SCRIPT,
@@ -104,7 +107,7 @@ function dbJob(kind: "db.provision" | "db.drop", overrides?: Partial<SiteJobRequ
 describe("wordpress.set-url", () => {
   it("set-url passes URLs only as env", () => {
     const payload = buildSiteJobContainerPayload(setUrl(), ctx);
-    expect(payload.Entrypoint?.[2]).toBe(WORDPRESS_SET_URL_SCRIPT);
+    expect(payload.Entrypoint?.at(-1)).toBe(WORDPRESS_SET_URL_SCRIPT);
     expect(payload.Env).toContain("HP_SITE_URL=https://hotel.it");
     expect(payload.Env).toContain("HP_PREVIOUS_URL=http://hotel.it");
   });
@@ -139,15 +142,15 @@ describe("wordpress.set-url", () => {
     const log = path.join(dir, "calls.log");
     await writeFile(
       path.join(dir, "wp"),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${log}"\n[ "$1 $2" = "config has" ] && exit "${"$"}{WP_SHIM_EXIT:-0}"\nexit 0\n`,
+      `#!/bin/sh\n[ "$1" = eval ] && set -- rewrite "$HP_RW_FROM" "$HP_RW_TO" "$(printf '%s' "$*" | tr '\\n' ' ')"\nprintf '%s\\n' "$*" >> "${log}"\n[ "$1 $2" = "config has" ] && exit "${"$"}{WP_SHIM_EXIT:-0}"\n[ "$1" = rewrite ] && exit "${"$"}{WP_RW_EXIT:-0}"\nexit 0\n`,
       { mode: 0o755 },
     );
-    const run = async (site: string, prev: string, shimExit = "0") => {
+    const run = async (site: string, prev: string, shimExit = "0", rwExit = "0") => {
       await writeFile(log, "");
       let code = 0;
       try {
         execFileSync("sh", ["-c", WORDPRESS_SET_URL_SCRIPT], {
-          env: { PATH: `${dir}:/usr/bin:/bin`, HP_SITE_URL: site, HP_PREVIOUS_URL: prev, WP_SHIM_EXIT: shimExit },
+          env: { PATH: `${dir}:/usr/bin:/bin`, HP_SITE_URL: site, HP_PREVIOUS_URL: prev, WP_SHIM_EXIT: shimExit, WP_RW_EXIT: rwExit },
           stdio: "pipe",
         });
       } catch (e) {
@@ -157,28 +160,57 @@ describe("wordpress.set-url", () => {
       return { code, calls };
     };
 
-    const refused = await run("https://hotel.it", "http://hotel.it", "1");
+    const refused = await run("https://wp-a.example.test", "http://wp-a.example.test", "1");
     expect(refused.code).toBe(20);
     expect(refused.calls).toHaveLength(1);
 
-    const same = await run("https://hotel.it", "https://hotel.it");
+    const same = await run("https://wp-a.example.test", "https://wp-a.example.test");
     expect(same.code).toBe(0);
     expect(same.calls.filter((c) => c.startsWith("option update"))).toHaveLength(2);
-    expect(same.calls.some((c) => c.startsWith("search-replace"))).toBe(false);
+    expect(same.calls.some((c) => c.startsWith("rewrite"))).toBe(false);
 
-    const moved = await run("https://hotel.it", "http://hotel.it");
+    // Same host, other scheme: one pass over the rows that hold the old host, one transaction that any failed query rolls back.
+    const moved = await run("https://wp-a.example.test", "http://wp-a.example.test");
     expect(moved.code).toBe(0);
-    const pairs = moved.calls.filter((c) => c.startsWith("search-replace")).map((c) => c.split(" ").slice(1, 3));
-    expect(moved.calls.filter((c) => c.startsWith("search-replace")).every((c) => c.includes(" --precise"))).toBe(
-      true,
+    const rewrites = (calls: string[]) => calls.filter((c) => c.startsWith("rewrite"));
+    expect(rewrites(moved.calls)).toHaveLength(1);
+    const [pass] = rewrites(moved.calls);
+    expect(pass).toContain(" LIKE BINARY ?");
+    expect(pass).not.toContain("search-replace");
+    expect(pass).toContain("} catch (Throwable $e) { exit(1); }");
+    expect(pass).not.toContain("precise");
+    const pairs = (calls: string[]) => rewrites(calls).map((c) => c.split(" ").slice(1, 3));
+    const edge = String.raw`(?![A-Za-z0-9\x80-\xff-]|\.[A-Za-z0-9\x80-\xff-]|:[0-9]|@)`;
+    expect(pairs(moved.calls)).toEqual([[String.raw`https?:(\\?/)\1wp-a\.example\.test` + edge, "https:${1}${1}wp-a.example.test"]]);
+
+    // Another host, with a port: the dots are escaped, the port kept.
+    const other = await run("http://wp-a.example.test", "http://old.example.test:8080");
+    expect(other.code).toBe(0);
+    expect(pairs(other.calls)).toEqual([[String.raw`https?:(\\?/)\1old\.example\.test:8080` + edge, "http:${1}${1}wp-a.example.test"]]);
+
+    // R164.1: the pattern as PCRE reads it (bytes, no u flag), applied the way SearchReplacer's preg_replace does.
+    const plain = await run("http://wp-a.example.test", "http://old.example.test");
+    expect(pairs(plain.calls)).toHaveLength(1);
+    const [from = "", to = ""] = pairs(plain.calls)[0] ?? [];
+    const apply = (v: string) =>
+      Buffer.from(Buffer.from(v, "utf8").toString("latin1").replace(new RegExp(from, "g"), to.replaceAll("${1}", "$1")), "latin1").toString("utf8");
+    const O = "http://old.example.test";
+    const N = "http://wp-a.example.test";
+    for (const tail of ["", ".", "/x", '"', "'", "<", ")", "?p=1", "#top", " and", "\n", ". Next"]) {
+      expect(apply(`See ${O}${tail}`)).toBe(`See ${N}${tail}`);
+    }
+    expect(apply(String.raw`{"u":"http:\/\/old.example.test\/x","v":"http:\/\/old.example.test"}`)).toBe(
+      String.raw`{"u":"http:\/\/wp-a.example.test\/x","v":"http:\/\/wp-a.example.test"}`,
     );
-    expect(pairs).toEqual([
-      ["http://hotel.it/", "https://hotel.it/"],
-      ['http://hotel.it"', 'https://hotel.it"'],
-      ["http://hotel.it'", "https://hotel.it'"],
-      ["http:\\/\\/hotel.it\\/", "https:\\/\\/hotel.it\\/"],
-      ['http:\\/\\/hotel.it"', 'https:\\/\\/hotel.it"'],
-    ]);
+    expect(apply("https://old.example.test/s")).toBe(`${N}/s`);
+    for (const kept of [".test.example/x", ".test-b.example/x", ".testing.example", ".test:8080/x", ".test@other.example/", ".testé", ".test9"]) {
+      expect(apply(`http://old.example${kept}`)).toBe(`http://old.example${kept}`);
+    }
+    expect(apply(String.raw`http:/\/old.example.test`)).toBe(String.raw`http:/\/old.example.test`);
+
+    const failed = await run("http://wp-a.example.test", "http://old.example.test", "0", "1");
+    expect(failed.code).toBe(26);
+    expect(rewrites(failed.calls)).toHaveLength(1);
   });
 });
 
@@ -425,6 +457,9 @@ const SCRIPTS: Record<SiteJobRequest["kind"], string> = {
   "wordpress.update": WORDPRESS_UPDATE_SCRIPT,
   "wordpress.settle": WORDPRESS_SETTLE_SCRIPT,
   "wordpress.reset-password": WORDPRESS_RESET_PASSWORD_SCRIPT,
+  "db.import": DB_IMPORT_SCRIPT,
+  "db.import-load": DB_IMPORT_LOAD_SCRIPT,
+  "wordpress.import-finalize": WORDPRESS_IMPORT_FINALIZE_SCRIPT,
 };
 
 /** Positions of $HP_ / ${HP_ outside double quotes (single quotes and escapes respected). */
@@ -502,6 +537,9 @@ describe("WordPress tools kinds", () => {
       ...NEW_KINDS.map((k) => wpJob(k)),
       wpJob("wordpress.update", { params: { phpVersion: "8.4", target: "plugin:a.b_c-d" } }),
       wpJob("wordpress.reset-password", { params: { phpVersion: "8.4", userId: "9999999999" } }),
+      importJob("db.import"),
+      importJob("db.import-load"),
+      importJob("wordpress.import-finalize"),
     ];
     for (const req of reqs) {
       const payload = buildSiteJobContainerPayload(req, {
@@ -517,7 +555,7 @@ describe("WordPress tools kinds", () => {
         expect(payload, req.kind).not.toHaveProperty("Cmd");
         expect(payload.HostConfig.Init, req.kind).toBe(true);
       }
-      if ((NEW_KINDS as readonly string[]).includes(req.kind)) {
+      if (SITE_JOB_SPECS[req.kind].timeoutMs !== undefined) {
         expect(command).toEqual([
           "timeout",
           "-s",
@@ -589,6 +627,7 @@ describe("WordPress tools kinds", () => {
       "wordpress.update",
     ]);
     expect(Object.keys(SITE_JOB_SPECS).filter((k) => SITE_JOB_SPECS[k as NewKind].result !== undefined).sort()).toEqual([
+      "db.import-load",
       "wordpress.inspect",
       "wordpress.update",
     ]);
@@ -596,9 +635,10 @@ describe("WordPress tools kinds", () => {
     expect(siteJobTimeoutMs("wordpress.update")).toBe(240_000);
     expect(siteJobTimeoutMs("wordpress.settle")).toBe(60_000);
     expect(siteJobTimeoutMs("wordpress.reset-password")).toBe(60_000);
-    for (const kind of ["db.provision", "db.drop", "wordpress.install", "wordpress.set-url"] as const) {
+    for (const kind of ["db.provision", "db.drop", "wordpress.install"] as const) {
       expect(siteJobTimeoutMs(kind)).toBe(DEFAULT_SITE_JOB_TIMEOUT_MS);
     }
+    expect(siteJobTimeoutMs("wordpress.set-url")).toBe(360_000);
   });
 
   it("bounds the log of every site job", () => {
@@ -608,6 +648,226 @@ describe("WordPress tools kinds", () => {
         Config: { "max-size": "1m", "max-file": "1" },
       });
     }
+  });
+});
+
+const IMPORT_ID = "0123456789abcdef0123456789abcdef";
+const IMPORT_PW = "b".repeat(64);
+type ImportKind = "db.import" | "db.import-load" | "wordpress.import-finalize";
+
+function importJob(kind: ImportKind, overrides?: Partial<SiteJobRequest>): SiteJobRequest {
+  const params: Record<ImportKind, Record<string, string>> = {
+    "db.import": { step: "switch", importId: IMPORT_ID },
+    "db.import-load": { importId: IMPORT_ID },
+    "wordpress.import-finalize": {
+      phpVersion: "8.4",
+      tablePrefix: "wp_",
+      siteUrl: "http://wp-a.example.test",
+      previousUrl: "http://old.example.test",
+    },
+  };
+  return {
+    jobId: "job_import_1",
+    kind,
+    siteId: "site_a",
+    organizationId: "org_a",
+    ...(kind === "db.import" ? {} : { serviceInstanceId: "svc_a" }),
+    params: params[kind],
+    ...(kind === "db.import-load" ? { resolvedSecrets: { HP_IMPORT_DB_PASSWORD: IMPORT_PW } } : {}),
+    ...overrides,
+  };
+}
+
+describe("import kinds", () => {
+  const expectInvalid = (req: SiteJobRequest) =>
+    expect(() => buildSiteJobContainerPayload(req, ctx)).toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
+  const withSecretFiles = (req: SiteJobRequest) => ({
+    ...ctx,
+    secretBinds: Object.keys(req.resolvedSecrets ?? {}).map((n) => `/tmp/hp-secrets/${n}:/run/secrets/${n}:ro`),
+    secretFileEnv: Object.keys(req.resolvedSecrets ?? {}).map((n) => `${n}_FILE=/run/secrets/${n}`),
+  });
+
+  it("payload per kind: image, user, network, mounts, own limit", () => {
+    const root = "/etc/hosting-panel/mariadb-root.key:/run/secrets/mariadb-root:ro";
+    const prepare = importJob("db.import", {
+      params: { step: "prepare", importId: IMPORT_ID },
+      resolvedSecrets: { HP_IMPORT_DB_PASSWORD: IMPORT_PW },
+    });
+    const db = buildSiteJobContainerPayload(prepare, withSecretFiles(prepare));
+    expect(db).toMatchObject({ Image: SHARED_MARIADB_IMAGE, User: "990:990" });
+    expect(db.HostConfig.NetworkMode).toBe(SHARED_DB_NETWORK_NAME);
+    expect(db.HostConfig.Binds).toEqual([root, "/tmp/hp-secrets/HP_IMPORT_DB_PASSWORD:/run/secrets/HP_IMPORT_DB_PASSWORD:ro"]);
+    expect(db.Cmd).toEqual(["timeout", "-s", "KILL", "305", "sh", "-c", DB_IMPORT_SCRIPT]);
+    expect(db).not.toHaveProperty("Entrypoint");
+    expect(db.Env).toEqual(
+      expect.arrayContaining([`HP_PREFIX=${siteDatabasePrefix("site_a")}`, "HP_LOCK_S=5", "HP_STEP=prepare", `HP_IMPORT_ID=${IMPORT_ID}`]),
+    );
+
+    const load = buildSiteJobContainerPayload(importJob("db.import-load"), withSecretFiles(importJob("db.import-load")));
+    expect(load).toMatchObject({ Image: SHARED_MARIADB_IMAGE, User: "33:33" });
+    expect(load.HostConfig.NetworkMode).toBe(SHARED_DB_NETWORK_NAME);
+    expect(load.HostConfig.Binds).toEqual([
+      "hp_vol_svc_a_html:/var/www/html:ro",
+      "/tmp/hp-secrets/HP_IMPORT_DB_PASSWORD:/run/secrets/HP_IMPORT_DB_PASSWORD:ro",
+    ]);
+    expect(JSON.stringify(load)).not.toContain("mariadb-root");
+    expect(load.Env.some((e) => e.startsWith("HP_PREFIX=") || e.startsWith("HP_LOCK_S="))).toBe(false);
+    expect(load.Cmd).toEqual(["timeout", "-s", "KILL", "1505", "sh", "-c", DB_IMPORT_LOAD_SCRIPT]);
+    expect(load.HostConfig).not.toHaveProperty("Init");
+    expectInvalid(importJob("db.import-load", { serviceInstanceId: undefined }));
+
+    const fin = buildSiteJobContainerPayload(importJob("wordpress.import-finalize"), ctx);
+    expect(fin).toMatchObject({ Image: resolveWordpressCliImage("8.4"), User: "33:33", WorkingDir: "/var/www/html" });
+    expect(fin.HostConfig).toMatchObject({ Init: true, NetworkMode: "hp_site_site_a_net", Binds: ["hp_vol_svc_a_html:/var/www/html"] });
+    expect(fin).not.toHaveProperty("Cmd");
+    expect(fin.Entrypoint).toEqual(["timeout", "-s", "KILL", "1205", "sh", "-c", WORDPRESS_IMPORT_FINALIZE_SCRIPT]);
+    expect(fin.Env).toEqual(
+      expect.arrayContaining(["HP_TABLE_PREFIX=wp_", "HP_SITE_URL=http://wp-a.example.test", "HP_PREVIOUS_URL=http://old.example.test"]),
+    );
+    expect(buildSiteJobContainerPayload(setUrl(), ctx).Entrypoint?.slice(0, 4)).toEqual(["timeout", "-s", "KILL", "365"]);
+  });
+
+  it("refuses a bad step, id, prefix, address or secret before anything is started", () => {
+    for (const step of ["", "drop", "PREPARE", "switch;"]) expectInvalid(importJob("db.import", { params: { step, importId: IMPORT_ID } }));
+    for (const importId of ["", "0".repeat(31), "0".repeat(33), IMPORT_ID.toUpperCase(), `${"0".repeat(31)}g`, `../${"0".repeat(29)}`]) {
+      expectInvalid(importJob("db.import", { params: { step: "undo", importId } }));
+      expectInvalid(importJob("db.import-load", { params: { importId } }));
+    }
+    expectInvalid(importJob("db.import", { params: { step: "switch", importId: IMPORT_ID, prefix: "wp_0123456789ab" } }));
+    expectInvalid(importJob("db.import", { resolvedSecrets: { HP_IMPORT_DB_PASSWORD: "B".repeat(64) } }));
+    expectInvalid(importJob("db.import", { resolvedSecrets: { HP_DB_PASSWORD: DB_PW } }));
+    const fin = importJob("wordpress.import-finalize").params;
+    expectInvalid(importJob("wordpress.import-finalize", { params: { ...fin, prefix: "wp_" } }));
+    for (const tablePrefix of ["wp_;", "", "wp-", "x".repeat(33), "wp_\n"]) {
+      expectInvalid(importJob("wordpress.import-finalize", { params: { ...fin, tablePrefix } }));
+    }
+    for (const previousUrl of ["http://old.example.test/blog", "http://Old.example.test", "old.example.test", "http://old.example.test/", `http://${"a".repeat(300)}.test`]) {
+      expectInvalid(importJob("wordpress.import-finalize", { params: { ...fin, previousUrl } }));
+    }
+    expect(() => buildSiteJobContainerPayload(importJob("wordpress.import-finalize", { params: { ...fin, previousUrl: "https://old.example.test:8443" } }), ctx)).not.toThrow();
+    expectInvalid(importJob("wordpress.import-finalize", { params: { ...fin, siteUrl: "http://wp-a.example.test:8080" } }));
+    expectInvalid(importJob("wordpress.import-finalize", { serviceInstanceId: undefined }));
+    expectInvalid(importJob("wordpress.import-finalize", { resolvedSecrets: { HP_IMPORT_DB_PASSWORD: IMPORT_PW } }));
+    expectInvalid(importJob("db.import-load", { resolvedSecrets: {} }));
+    for (const pw of ["b".repeat(63), "B".repeat(64), `${"b".repeat(63)}g`, `${"b".repeat(63)}\n`]) {
+      expectInvalid(importJob("db.import-load", { resolvedSecrets: { HP_IMPORT_DB_PASSWORD: pw } }));
+    }
+    for (const kind of ["db.import", "db.import-load"] as const) {
+      const req = importJob(kind, { resolvedSecrets: { HP_IMPORT_DB_PASSWORD: IMPORT_PW } });
+      const payload = buildSiteJobContainerPayload(req, withSecretFiles(req));
+      expect(JSON.stringify([payload.Env, payload.Cmd])).not.toContain(IMPORT_PW);
+    }
+  });
+
+  it("the load's answer is accepted only as one line that passes its schema", () => {
+    const line = (v: unknown) => `${JSON.stringify(v)}\n`;
+    const good = { prefix: "wp_", oldUrl: "http://old.example.test", tables: 12 };
+    expect(parseWordpressJobResult("db.import-load", line(good))).toEqual(good);
+    expect(parseWordpressJobResult("db.import-load", '{"line":631,"errorNumber":1044}\n')).toEqual({ line: 631, errorNumber: 1044 });
+    expect(parseWordpressJobResult("db.import-load", '{"line":0,"errorNumber":null}\n')).toEqual({ line: 0, errorNumber: null });
+    for (const bad of [
+      line({ ...good, extra: 1 }),
+      line(good) + line(good),
+      line({ ...good, prefix: "a;b" }),
+      line({ ...good, tables: 1001 }),
+      line({ ...good, oldUrl: "http://old.example.test/x" }),
+      line({ line: -1, errorNumber: 1044 }),
+      line({ line: 1, errorNumber: 0 }),
+      "",
+    ]) {
+      expect(parseWordpressJobResult("db.import-load", bad)).toBeUndefined();
+    }
+    for (const kind of ["db.import", "wordpress.import-finalize", "wordpress.set-url"] as const) {
+      expect(parseWordpressJobResult(kind, line(good))).toBeUndefined();
+    }
+  });
+
+  it("static checks of the import scripts and the repaired set-url", () => {
+    for (const flag of ["--sandbox", "--local-infile=0", "--binary-mode"]) expect(DB_IMPORT_LOAD_SCRIPT).toContain(flag);
+    for (const script of [DB_IMPORT_LOAD_SCRIPT, DB_IMPORT_SCRIPT]) expect(script).not.toContain("--force");
+    expect(DB_IMPORT_LOAD_SCRIPT).not.toContain("mariadb-root");
+    expect(DB_IMPORT_LOAD_SCRIPT).not.toContain("user=root");
+    expect(DB_IMPORT_SCRIPT).not.toContain("/var/www/html");
+    expect(DB_IMPORT_SCRIPT).not.toContain(".htpanel-import");
+    // R153: the root job checks the names itself before any rename.
+    const sw = DB_IMPORT_SCRIPT.slice(DB_IMPORT_SCRIPT.indexOf("\nswitch)"), DB_IMPORT_SCRIPT.indexOf("\nundo)"));
+    expect(sw.indexOf('o=$(objs "$S"); [ "$o" = 0 ] || exit 84')).toBeGreaterThan(0);
+    expect(sw.indexOf("live_ok")).toBeGreaterThan(0);
+    expect(sw.indexOf("exit 84")).toBeLessThan(sw.indexOf("RENAME TABLE"));
+    const undo = DB_IMPORT_SCRIPT.slice(DB_IMPORT_SCRIPT.indexOf("\nundo)"), DB_IMPORT_SCRIPT.indexOf("\nfinish)"));
+    expect(undo.indexOf('d=$(objs "$D"); a=$(objs "$A"); [ "$d" = 0 ] && [ "$a" = 0 ] || exit 92')).toBeGreaterThan(0);
+    expect(undo.indexOf("exit 92")).toBeLessThan(undo.indexOf("RENAME TABLE"));
+    expect(WORDPRESS_SET_URL_SCRIPT).not.toContain("search-replace \"");
+    for (const script of [WORDPRESS_SET_URL_SCRIPT, WORDPRESS_IMPORT_FINALIZE_SCRIPT]) {
+      expect(script).toContain('h=$(printf \'%s\' "${HP_PREVIOUS_URL#*://}" | sed \'s/[.]/\\\\./g\')');
+      expect(script).not.toContain("search-replace");
+      expect(script).not.toContain("run_command");
+      // R165.1: strict reporting comes first; only rows holding the old host are read; guid kept; base tables only; any failure is 26.
+      const php = script.slice(script.indexOf("wp eval --skip-plugins --skip-themes '") + 38, script.indexOf("' || exit 26"));
+      expect(php.trimStart()).toMatch(/^mysqli_report\(MYSQLI_REPORT_ERROR \| MYSQLI_REPORT_STRICT\);\s+try \{/);
+      expect(php).toContain('array_map(fn($x) => $n($x) . " LIKE BINARY ?", $c)');
+      expect(php).toContain('array_fill(0, count($c), "%" . addcslashes($h, "\\\\%_") . "%")');
+      expect(php).toContain('array("guid", "user_pass")');
+      expect(php).toContain('array("all-tables-with-prefix" => true, "base-tables-only" => true)');
+      expect(php).toContain('new WP_CLI\\SearchReplacer(getenv("HP_RW_FROM"), getenv("HP_RW_TO"), true, true, "", chr(1))');
+      expect(php).toContain("$n = fn($s) => chr(96) . str_replace(chr(96), chr(96) . chr(96), $s) . chr(96);");
+      // R166.1: the batch carrying LIMIT 500 reads only the key columns; each row is then read alone by its key.
+      expect(php).not.toContain("array_merge($k, $c)");
+      expect(php).toContain('$sel = "SELECT " . implode(", ", array_map($n, $k)) . " FROM " . $n($t) . " WHERE ("');
+      expect(php).toContain("$rows = $db->execute_query($sel . $w . ");
+      expect(php).toContain('$one = "SELECT " . implode(", ", array_map($n, $c)) . " FROM " . $n($t) . " WHERE " . $kw;');
+      expect(php).toContain("$row = $db->execute_query($one, array_values($key))->fetch_assoc();");
+      // R166.2: each column's limit comes from DESCRIBE (characters for varchar, bytes for the text types); a longer value is not written.
+      expect(php).toContain(
+        '$m[$f["Field"]] = preg_match("/char[(]([0-9]+)[)]/", $f["Type"], $g) ? array(1, (int) $g[1]) : array(0, array("tinytext" => 255, "text" => 65535, "mediumtext" => 16777215)[$f["Type"]] ?? PHP_INT_MAX);',
+      );
+      expect(php).toContain('&& ($m[$x][0] ? mb_strlen($v, "UTF-8") : strlen($v)) <= $m[$x][1]) $set[$x] = $v;');
+      expect(php).not.toMatch(/sql_mode/i);
+      // R166.3: after the commit the session is handed back as WordPress had it, still inside the try.
+      expect(php.trimEnd()).toMatch(/\$db->commit\(\);\s+mysqli_report\(MYSQLI_REPORT_OFF\);\s+\$db->autocommit\(true\);\s+\} catch \(Throwable \$e\) \{ exit\(1\); \}$/);
+    }
+    for (const script of [DB_IMPORT_SCRIPT, DB_IMPORT_LOAD_SCRIPT, WORDPRESS_SET_URL_SCRIPT, WORDPRESS_IMPORT_FINALIZE_SCRIPT]) {
+      expect(() => execFileSync("sh", ["-n", "-c", script], { stdio: "pipe" })).not.toThrow();
+    }
+  });
+
+  it("finalize script, run with a recording wp shim", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hp-wp-shim-"));
+    cleanupTasks.push(() => rm(dir, { recursive: true, force: true }));
+    const log = path.join(dir, "calls.log");
+    await writeFile(
+      path.join(dir, "wp"),
+      `#!/bin/sh\n[ "$1" = eval ] && set -- rewrite "$HP_RW_FROM" "$HP_RW_TO"\nprintf '%s\\n' "$*" >> "${log}"\n[ "$1 $2" = "core is-installed" ] && exit "${"$"}{WP_INSTALLED_EXIT:-0}"\n[ "$1 $2" = "option get" ] && printf '%s\\n' "$HP_SITE_URL"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    const run = async (prev: string, installedExit = "0") => {
+      await writeFile(log, "");
+      let code = 0;
+      try {
+        execFileSync("sh", ["-c", WORDPRESS_IMPORT_FINALIZE_SCRIPT], {
+          env: { PATH: `${dir}:/usr/bin:/bin`, HP_TABLE_PREFIX: "wpx_", HP_SITE_URL: "http://wp-a.example.test", HP_PREVIOUS_URL: prev, WP_INSTALLED_EXIT: installedExit },
+          stdio: "pipe",
+        });
+      } catch (e) {
+        code = (e as { status: number }).status;
+      }
+      return { code, calls: (await readFile(log, "utf8")).split("\n").filter(Boolean) };
+    };
+    const ok = await run("http://old.example.test");
+    expect(ok.code).toBe(0);
+    expect(ok.calls.slice(0, 3)).toEqual([
+      "config has HP_MANAGED --type=constant",
+      "config set table_prefix wpx_ --type=variable",
+      "core is-installed --skip-plugins --skip-themes",
+    ]);
+    expect(ok.calls.filter((c) => c.startsWith("rewrite"))).toHaveLength(1);
+    expect(ok.calls.at(-1)).toBe("option get home --skip-plugins --skip-themes");
+    const same = await run("http://wp-a.example.test");
+    expect(same.code).toBe(0);
+    expect(same.calls.some((c) => c.startsWith("rewrite"))).toBe(false);
+    const broken = await run("http://old.example.test", "1");
+    expect(broken.code).toBe(25);
+    expect(broken.calls.some((c) => c.startsWith("option update"))).toBe(false);
   });
 });
 
@@ -767,6 +1027,45 @@ describe("DockerEngineSocketAdapter.runSiteJob", () => {
     addRunningMariadb();
     await expect(adapter.runSiteJob(dbJob("db.drop"))).resolves.toMatchObject({ exitCode: 124 });
     expect(mockDaemon.requestedPaths.some((p) => /\/containers\/[^/]+\/kill/.test(p))).toBe(true);
+  });
+
+  it("waits a kind's own limit, 240 s for the rest, and an explicit jobTimeoutMs caps both", async () => {
+    const real = globalThis.setTimeout;
+    const delays: number[] = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      return real(fn, ms === 1_500_000 || ms === DEFAULT_SITE_JOB_TIMEOUT_MS ? 20 : ms);
+    }) as typeof setTimeout);
+    cleanupTasks.push(async () => vi.restoreAllMocks());
+    const load: SiteJobRequest = {
+      jobId: "job_load_1",
+      kind: "db.import-load",
+      siteId: "site_a",
+      organizationId: "org_a",
+      serviceInstanceId: "svc_a",
+      params: { importId: "0123456789abcdef0123456789abcdef" },
+      resolvedSecrets: { HP_IMPORT_DB_PASSWORD: "b".repeat(64) },
+    };
+    const run = async (req: SiteJobRequest, jobTimeoutMs?: number) => {
+      const { adapter, addRunningMariadb } = await setup({
+        waitStatusCode: "hang",
+        ...(jobTimeoutMs !== undefined ? { jobTimeoutMs } : {}),
+      });
+      addRunningMariadb();
+      delays.length = 0;
+      await expect(adapter.runSiteJob(req)).resolves.toMatchObject({ exitCode: 124 });
+      return [...delays];
+    };
+    const own = await run(load);
+    expect(own).toContain(1_500_000);
+    expect(own).not.toContain(DEFAULT_SITE_JOB_TIMEOUT_MS);
+    expect(await run(dbJob("db.drop"))).toContain(DEFAULT_SITE_JOB_TIMEOUT_MS);
+    for (const req of [load, dbJob("db.drop")]) {
+      const capped = await run(req, 50);
+      expect(capped, req.kind).toContain(50);
+      expect(capped, req.kind).not.toContain(1_500_000);
+      expect(capped, req.kind).not.toContain(DEFAULT_SITE_JOB_TIMEOUT_MS);
+    }
   });
 
   it("db jobs fail fast when the shared database is not running", async () => {

@@ -7,6 +7,7 @@ import {
   type BackupsResultByAction,
   type CertProblem,
   type MailRelayApplyRequest,
+  type WordpressImportLoadResult,
   type WordpressStateResult,
   type WordpressUpdateResult,
 } from "@hosting-panel/contracts";
@@ -131,6 +132,9 @@ function buildDeterministicSimRef(prefix: string, seed: string): string {
   const hex = createHash("sha256").update(`${prefix}:${seed}:${randomUUID()}`).digest("hex");
   return hex;
 }
+
+/** What every simulated db.import-load answers. */
+export const SIMULATED_IMPORT_LOAD_RESULT: WordpressImportLoadResult = { prefix: "wp_", oldUrl: "http://old.example.test", tables: 12 };
 
 /** The state every simulated WordPress site starts with. */
 export const SIMULATED_WORDPRESS_STATE: WordpressStateResult = {
@@ -374,8 +378,9 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     };
   }
 
-  /** The effect and stdout of inspect, update and reset on the site's stored state. */
+  /** The effect and stdout of inspect, update and reset on the site's stored state, and the import load's answer. */
   private simulateWordpressJob(req: SiteJobRequest): { exitCode?: number; stdout?: string } {
+    if (req.kind === "db.import-load") return { stdout: `${JSON.stringify(SIMULATED_IMPORT_LOAD_RESULT)}\n` };
     if (req.kind !== "wordpress.inspect" && req.kind !== "wordpress.update" && req.kind !== "wordpress.reset-password") {
       return {};
     }

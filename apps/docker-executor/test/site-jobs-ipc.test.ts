@@ -12,7 +12,7 @@ import {
   SignedDockerExecutorIpcClient,
 } from "../src/index.js";
 import { SITE_JOB_TIMEOUT_MS } from "../src/client.js";
-import { SIMULATED_WORDPRESS_STATE } from "../src/simulator-adapter.js";
+import { SIMULATED_IMPORT_LOAD_RESULT, SIMULATED_WORDPRESS_STATE } from "../src/simulator-adapter.js";
 
 const HMAC_SECRET = "0123456789abcdef0123456789abcdef-site-jobs-ipc-key";
 const SIGNING_KEY: IpcSigningKey = { keyId: "hmac-v1", algorithm: "hmac-sha256", secret: HMAC_SECRET };
@@ -94,5 +94,79 @@ describe("WordPress site jobs over IPC", () => {
     await client.runSiteJob(job("wordpress.settle")).catch(() => undefined);
     expect(WORDPRESS_RESET_CLIENT_WAIT_MS).toBe(75_000);
     expect(timeouts).toEqual([75_000, SITE_JOB_TIMEOUT_MS, 510_000]);
+  });
+});
+
+// QA (cycle 8): the import kinds over signed IPC.
+describe("import job kinds over IPC", () => {
+  const ID = "0123456789abcdef0123456789abcdef";
+  const SECRET = { HP_IMPORT_DB_PASSWORD: "7a".repeat(32) };
+  const load = (): SiteJobRequest => ({ jobId: "job_qa_load", kind: "db.import-load", siteId: "site_a", organizationId: "org_a", serviceInstanceId: "svc_a", params: { importId: ID }, resolvedSecrets: SECRET });
+  const dbImport = (step: string): SiteJobRequest => ({
+    jobId: `job_qa_${step}`,
+    kind: "db.import",
+    siteId: "site_a",
+    organizationId: "org_a",
+    params: { step, importId: ID },
+    ...(step === "prepare" ? { resolvedSecrets: SECRET } : {}),
+  });
+  const finalize = (): SiteJobRequest => ({
+    jobId: "job_qa_fin",
+    kind: "wordpress.import-finalize",
+    siteId: "site_a",
+    organizationId: "org_a",
+    serviceInstanceId: "svc_a",
+    params: { phpVersion: "8.4", tablePrefix: "wp_", siteUrl: "http://wp-a.example.test", previousUrl: "http://old.example.test" },
+  });
+
+  it("the three kinds and every step arrive intact on the far side and their answer survives the envelope", async () => {
+    const { simulator, client } = await setup();
+    const reqs = [...["prepare", "switch", "undo", "finish"].map(dbImport), load(), finalize()];
+    for (const r of reqs) {
+      const res = await client.runSiteJob(r);
+      expect(res, r.jobId).toEqual({ jobId: r.jobId, exitCode: 0, outputTail: "", ...(r.kind === "db.import-load" ? { result: SIMULATED_IMPORT_LOAD_RESULT } : {}) });
+    }
+    // What the executor received is what the caller sent, secret included, and nothing else.
+    expect(simulator.jobs).toEqual(reqs);
+
+    simulator.failNextJob("db.import-load", 61, "ERROR 1044 at line 631", '{"line":631,"errorNumber":1044}\n');
+    expect(await client.runSiteJob(load())).toEqual({ jobId: "job_qa_load", exitCode: 61, outputTail: "ERROR 1044 at line 631", result: { line: 631, errorNumber: 1044 } });
+  });
+
+  it("the client drops a forged load answer that came through the envelope", async () => {
+    const { simulator, client } = await setup();
+    for (const result of [
+      SIMULATED_WORDPRESS_STATE,
+      { ...SIMULATED_IMPORT_LOAD_RESULT, extra: 1 },
+      { ...SIMULATED_IMPORT_LOAD_RESULT, prefix: "a;b" },
+      { ...SIMULATED_IMPORT_LOAD_RESULT, oldUrl: "http://old.example.test/x" },
+      { line: -1, errorNumber: 1044 },
+      { line: 1, errorNumber: 0 },
+      "{\"line\":1,\"errorNumber\":1044}",
+    ]) {
+      vi.spyOn(simulator, "runSiteJob").mockResolvedValueOnce({ jobId: "job_qa_load", exitCode: 0, outputTail: "", result } as unknown as SiteJobResult);
+      expect(await client.runSiteJob(load()), JSON.stringify(result).slice(0, 40)).toEqual({ jobId: "job_qa_load", exitCode: 0, outputTail: "" });
+    }
+    // A finalize never carries an answer, even a well-formed load answer.
+    vi.spyOn(simulator, "runSiteJob").mockResolvedValueOnce({ jobId: "job_qa_fin", exitCode: 0, outputTail: "", result: SIMULATED_IMPORT_LOAD_RESULT } as unknown as SiteJobResult);
+    expect(await client.runSiteJob(finalize())).toEqual({ jobId: "job_qa_fin", exitCode: 0, outputTail: "" });
+  });
+
+  it("a kind outside the list and a params key outside the kind's list are refused on the server side", async () => {
+    const { simulator, client } = await setup();
+    const spy = vi.spyOn(simulator, "runSiteJob");
+    await expect(client.runSiteJob({ ...dbImport("switch"), kind: "db.import-cleanup" as SiteJobRequest["kind"] })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    // The kind is refused by the IPC schema before the executor is even called.
+    expect(spy).not.toHaveBeenCalled();
+    for (const r of [
+      { ...dbImport("switch"), params: { step: "switch", importId: ID, prefix: "wp_0123456789ab" } },
+      { ...load(), params: { importId: ID, image: "alpine:3" } },
+      { ...finalize(), params: { ...finalize().params, prefix: "wp_" } },
+    ] as SiteJobRequest[]) {
+      await expect(client.runSiteJob(r), JSON.stringify(r.params)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    }
+    expect(simulator.jobs).toEqual([]);
+    // The control: the same client gets a good request through.
+    await expect(client.runSiteJob(dbImport("switch"))).resolves.toMatchObject({ exitCode: 0 });
   });
 });

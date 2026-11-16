@@ -118,7 +118,6 @@ import {
   buildSharedDatabaseContainerPayload,
 } from "./shared-database.js";
 import {
-  DEFAULT_SITE_JOB_TIMEOUT_MS,
   SITE_JOB_ROLE,
   SITE_JOB_SPECS,
   WORDPRESS_RESULT_MAX_BYTES,
@@ -1099,7 +1098,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly sharedDbAdminSubnet: string;
   private readonly executorUid: number | undefined;
   private sharedDbEnsureInFlight: Promise<SharedDatabaseEnsureResult> | null = null;
-  private readonly jobTimeoutMs: number;
+  private readonly jobTimeoutMs: number | undefined;
   /** `siteId:kind` of the site jobs running now. */
   private readonly runningSiteJobs = new Set<string>();
   private readonly mailRelaySecretDir: string;
@@ -1154,7 +1153,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     );
     this.sharedDbAdminSubnet = options?.sharedDbAdminSubnet ?? DEFAULT_SHARED_DB_ADMIN_SUBNET;
     this.executorUid = options?.executorUid ?? process.getuid?.();
-    this.jobTimeoutMs = options?.jobTimeoutMs ?? DEFAULT_SITE_JOB_TIMEOUT_MS;
+    this.jobTimeoutMs = options?.jobTimeoutMs;
     this.mailRelaySecretDir = path.resolve(
       options?.mailRelaySecretDir ?? DEFAULT_MAIL_RELAY_SECRET_DIR,
     );
@@ -1925,7 +1924,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
-  /** Worst case: pull 240 s + wait 240 s + ~20 s of create, logs and remove, inside the client's 510 s. */
+  /** Worst case: pull 240 s + the kind's wait (240 s, or its own limit) + ~20 s of create, logs and remove, inside the client's wait (510 s, or limit + 300 s). */
   public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
     assertValidSiteJobRequest(req); // jobId, ids, params and secrets, before anything touches Docker
     const lockKey = `${req.siteId}:${req.kind}`;
@@ -2015,7 +2014,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         );
       }
 
-      const exitCode = await this.waitForSiteJob(id, Math.min(siteJobTimeoutMs(req.kind), this.jobTimeoutMs));
+      const exitCode = await this.waitForSiteJob(id, Math.min(siteJobTimeoutMs(req.kind), this.jobTimeoutMs ?? Infinity));
       // A kind with a result keeps stdout for it alone; the tail then comes from stderr.
       const logsRes = await this.dockerClient.request(
         "GET",
