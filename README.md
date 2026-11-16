@@ -292,9 +292,32 @@ Dal pannello (**Amministrazione › Utenti**):
 
 - **Altri amministratori.** Un amministratore crea un altro amministratore con nome ed email. Il pannello mostra **una sola volta** la password temporanea e la chiave del secondo fattore (TOTP): chi crea l'account le vede e le consegna. Al primo accesso il nuovo amministratore deve cambiare la password. Un amministratore può disattivare e riattivare gli altri, non se stesso; il pannello rifiuta di disattivare l'ultimo amministratore attivo. La password e il TOTP di un amministratore si reimpostano ancora **solo** con i comandi qui sopra, sul server.
 - **Password dimenticata (cliente).** Dalla pagina di accesso, «Password dimenticata?» chiede l'email e invia un link per scegliere una nuova password. Il link vale **30 minuti** e **una volta**; dopo il cambio ogni sessione aperta si chiude, mentre il secondo fattore resta com'era. La pagina risponde allo stesso modo per ogni indirizzo, quindi non dice se un account esiste. Al massimo 3 richieste all'ora per account e 20 all'ora in tutto. Serve l'**email in uscita configurata** (vedi sopra); senza, nessuna mail parte e il cliente deve chiedere all'amministratore. Un amministratore non riceve mai questa mail.
-- **Accesso di assistenza.** Dalla pagina **Siti**, «Apri la vista di assistenza» apre i siti del cliente nella sua stessa vista, per **60 minuti**, con un segno in cima alle pagine dei siti che dice di chi sono i siti e fino a che ora (non compare in phpMyAdmin, su una pagina di errore imprevisto né su un indirizzo che non corrisponde a nessuna pagina); «Esci» chiude la visita. L'amministratore può fare tutto ciò che il cliente fa sui propri siti, ma non tocca i membri né le impostazioni del cliente. Apertura e uscita sono registrate nell'audit (`admin.support_access.open`, `admin.support_access.close`); ogni azione fatta durante la visita è registrata come al solito, con l'amministratore come autore.
+- **Accesso di assistenza.** Dalla pagina **Siti**, «Apri la vista di assistenza» apre i siti del cliente nella sua stessa vista, per **60 minuti**, con un segno in cima alle pagine dei siti che dice di chi sono i siti e fino a che ora (non compare in phpMyAdmin, su una pagina di errore imprevisto, su un indirizzo che non corrisponde a nessuna pagina, né quando il pannello non riesce a leggere l'account durante la visita: lì compare solo l'errore di caricamento, senza dati del cliente); «Esci» chiude la visita. L'amministratore può fare tutto ciò che il cliente fa sui propri siti, ma non tocca i membri né le impostazioni del cliente. Apertura e uscita sono registrate nell'audit (`admin.support_access.open`, `admin.support_access.close`); ogni azione fatta durante la visita è registrata come al solito, con l'amministratore come autore.
 
 Dettagli e limiti: [ADR 0025](docs/architecture/adr/0025-people-and-access.md).
+
+#### Stato, avvisi e log
+
+**Amministrazione › Stato** dice cosa funziona ora su questo server. La pagina si calcola a ogni apertura: per un nuovo controllo si ricarica.
+
+- **Avvisi**: i problemi aperti, prima i critici. Ogni avviso dice cosa fare, spesso con il comando da usare sul server. Un avviso sparisce da solo quando il problema finisce; non c'è uno storico degli avvisi.
+- **Parti del pannello**: API, pannello web, database del pannello, esecutore, agente host, Docker Engine e i cinque container del pannello (`hp_ingress_proxy`, `hp_mariadb`, `hp_phpmyadmin`, `hp_sftp`, `hp_mail_relay`). Stati: Funziona, Degradato, Non funziona, Non in uso (un container che il pannello non usa ancora, per esempio phpMyAdmin prima del primo accesso), Sconosciuto. L'esecutore e l'agente host risultano «Non funziona» se non inviano segnali da 5 minuti. I container sono controllati ogni 15 secondi.
+- **Container dei siti**: per ogni sito, come dovrebbe essere e com'è, la differenza dalla configurazione voluta e i riavvii. Un dato più vecchio di 5 minuti è segnato come «non rilevato di recente».
+- **Dischi**: lo spazio usato dei dischi che contengono `/var/lib/hosting-panel`, `/var/lib/docker`, `/var/lib/postgresql` e `/`. Dal 90% c'è un avviso critico.
+
+In cima a ogni pagina di **Amministrazione** una riga dice quanti avvisi sono aperti e il livello più alto, con il link a **Stato**; senza avvisi la riga non c'è. La riga si aggiorna a ogni cambio di pagina. Se gli avvisi non si possono caricare, la riga lo dice: in quel caso la pagina non sa se va tutto bene.
+
+**Amministrazione › Log** mostra le ultime righe (100, 200 o 500) dei cinque container del pannello e del container di ogni sito. Nelle righe di phpMyAdmin la parte dopo `?` degli indirizzi è nascosta. Leggere il log di un sito è registrato nel **Registro attività** (`admin.site.logs.read`); leggere quello di un container del pannello no. I log dei quattro servizi del pannello non sono in questa pagina; sul server:
+
+```bash
+journalctl -u hp-api -u hp-web -u hp-docker-executor -u hp-host-agent
+```
+
+I container dei siti e `hp_mariadb` tengono al massimo 3 file di log da 10 MB. Un container creato prima di questa versione non ha questo limite finché non viene ricreato: quello di un sito al suo prossimo deploy, `hp_mariadb` solo se manca o cambia la sua configurazione.
+
+**Amministrazione › Registro attività** mostra chi ha fatto cosa, dal più recente. Si filtra per organizzazione, azione e date (**Dal** incluso, **Al** escluso, nel fuso orario del browser) e si legge a pagine; dopo 100 pagine si restringono le date.
+
+Dettagli e limiti: [ADR 0026](docs/architecture/adr/0026-health-alerts-and-logs.md).
 
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 
