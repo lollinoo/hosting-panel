@@ -268,6 +268,16 @@ describe("release workflow and docs", () => {
       "wordpressToolsAvailable",
       "site.wordpress.update",
       "pre_update",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import/files:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import/files/{slot}:",
+      "/v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import/files/{slot}/pick:",
+      "SiteWordpressImportDto:",
+      "SiteWordpressLastImportDto:",
+      "site.wordpress.import",
+      "import_running",
+      "files_incomplete",
+      "undo_incomplete",
     ]) {
       expect(api).toContain(s);
     }

@@ -375,3 +375,181 @@ Measured in the three runs:
 - A large site (many plugins, a big database).
 - A real customer's plugins.
 - A server with the product installed.
+
+## Part 8 — WordPress import
+
+**Run:** 2026-11-16 (cycle 8, milestone M4b-1) on branch `feat/step-3-6-site-tools-and-admin`, Docker Engine `29.9.2`, Node `v26.13.1`. The images were already on the host and the check pulled nothing (`pullMissingImages: false`): `wordpress:cli-2.12.0-php8.4`, `wordpress:7.1.4-php8.4-apache` and `mariadb:12.3.3` (`12.3.3-MariaDB-ubu2404`). WordPress `7.1.4`.
+
+**Command:** `timeout 1800 node infra/linux/accept-m4-import.mjs`, against the built `apps/docker-executor/dist`, `packages/contracts/dist` and `packages/executor-contracts/dist`. The check drives the files helper's `import.*` operations through `DockerEngineSocketAdapter.siteFiles` and the jobs `db.import`, `db.import-load`, `wordpress.import-finalize` and `wordpress.set-url` through `runSiteJob`. Each answer is checked against its contracts schema (`SITE_FILES_RESULT_SCHEMAS`, `WordpressImportLoadResultSchema`).
+
+**Result (fix-up 3, after R166):** all 13 steps passed, exit `0`: `13/13 passed in 128.8 s` (2026-11-16, ended 05:55:04 CET). The executor was built after the line `fix3-files: program done`. The goal holds: a sample WordPress export imported into a fresh site answers `GET /` with `200` and `<title>Imported Title`.
+
+**Earlier results:** fix-up 2 (after R165) passed 13 of 13 twice (`129.8 s`, `127.3 s`). QA, before fix-up 1, passed 12 of 13 steps in both runs (`129.1 s` each, exit `1`). Both failed `imported-site-answers-with-its-title` because the old five-pair address rewrite left two values behind (defect below). Fix-up 1 passed 13 of 13 twice (`127.4 s` each) with a rewrite that R165 then replaced (see the measurements below).
+
+The check makes two throw-away sites the product's way: `deployService` with the site mail set-up, `db.provision`, then `wordpress.install`. The source site is at `http://old.example.test`, titled "Imported Title", with table prefix `old_`. The target is at `http://wp-a.example.test`, titled "Test site". Both use the mail address `admin@example.test`. The source holds a post and a serialized option that both carry its address. It also holds a post whose sentence ends with the address and which names the different host `http://old.example.test.example/x` (`Visit http://old.example.test. Not http://old.example.test.example/x.`), an administrator whose `user_url` is exactly the address, and a table named `` old_hp_o`d; d `` (a backtick, a `;` and a space) with two rows, `plain` and `http://old.example.test/odd`. Its export is a `mariadb-dump` and a zip made with PHP's ZipArchive. The zip has one top folder and a top-level `__MACOSX`, and it also holds:
+- a foreign `wp-config.php` with other credentials, which leaves a marker if it runs;
+- `wp-content/object-cache.php`, which answers `500`;
+- `wp-content/mu-plugins/mark.php`, a marker;
+- a nested `wp-content/uploads/.htaccess`.
+
+The source site is removed once its export exists.
+
+The product's database jobs look for the container `hp_mariadb` and join the network `hp_mariadb_net`, and `deployService` attaches `hp_mariadb` and `hp_mail_relay` to each new site network. The check never creates or touches those names. A wrapper around the adapter's Docker client sends those requests elsewhere:
+- the look-up of `hp_mariadb`, its attach to the site network (with the alias `hp-mariadb`) and the `NetworkMode` of every database job go to the check's own MariaDB container and network (44 requests per run);
+- the attach of `hp_mail_relay`, which does not exist on this host, is answered `404` without reaching the engine; the product reads `404` as "not created yet";
+- any other request that names `hp_mariadb` stops the run.
+
+The check's own MariaDB container is built from the product's `buildSharedDatabaseContainerPayload`, with restart `no`, its own `/24` network and the root key in a `0400` file. Every name the check gives starts with `hp_swarmtest_m4imp_<hex>`. Objects the product names itself keep the product prefixes (`job_`, `hp_site_`, `hp_edge_`, `hp_vol_`, `hp_files_`) and carry `hp_swarmtest_m4imp_<hex>` inside the name. No host port is published; each site is reached at its address on its edge network. Secrets reach containers only as files in the check's temporary folder or on stdin, never on a command line. Everything is removed by exact name in `finally` and on `SIGINT`/`SIGTERM`, containers with their anonymous volumes. No prune command is run, and nothing needs the internet.
+
+| # | Step | Result | What it proves |
+|---|------|--------|----------------|
+| 1 | `source-site-and-its-export` | PASS | A site with prefix `old_` at the old address, a 104 118-byte dump and a 37 MB zip of 4 261 entries with the four planted entries and `__MACOSX`. |
+| 2 | `staging-is-never-served` | PASS | The archive goes up in full and the dump in chunks. While the dump is half-written, 12 requests to the staging folder all answer `403`: the archive, the dump, the staging `.htaccess`, the folder itself and the `.part` file. The same holds with a hostile root `.htaccess` in place (`Options +Indexes`, `Require all granted` for every file, a rewrite of `/peek` to the archive); that file is removed afterwards. `import.stat` shows both slots `complete` with their sizes and `remains: false`. `import.take` moves a site file into the dump slot (104 118 bytes). It refuses `../../../etc/hostname` (`invalid_path`) and a link to a file outside the site (`is_a_directory`), and the slot stays as it was. |
+| 3 | `import-in-the-ruled-order` | PASS | The jobs run in the ruled order: `import.unpack` (4 261 entries; `leftOut` names `wp-config.php`, `.htaccess`, `wp-content/mu-plugins` and `wp-content/object-cache.php`), `db.import` prepare, `db.import-load`, `import.switch` (49 moves), `db.import` switch, `wordpress.import-finalize`, `import.finish`, `db.import` finish. Every job exits `0`. The load answers `{"prefix":"old_","oldUrl":"http://old.example.test","tables":13}` (the odd-named table included). |
+| 4 | `gate-holds-through-the-switch` | PASS | At each of three points (after `import.switch`, after `db.import` switch, and after finalize but before `import.finish`), `/`, `/wp-admin/install.php` and `/wp-login.php` were each asked 10 times, 200 ms apart. All 30 answers at each point were `403`, never a `200` and never a WordPress page. The `503` of the `wp-config.php` gate never showed, because the `.htaccess` gate answers first. After `import.finish`, `GET /` answered `200` after 0.33 s and 0.34 s with no `503` before it. |
+| 5 | `imported-site-answers-with-its-title` | PASS | `GET /` answers `200` with `<title>Imported Title`. A `wp search-replace --regex` dry run outside `guid`, using the product's own boundary (read from the exported `WORDPRESS_SET_URL_SCRIPT`), finds `0` of `http://old.example.test`. `old_users.user_url` reads `http://wp-a.example.test`. The sample post reads `Visit http://wp-a.example.test. Not http://old.example.test.example/x.`: the sentence end was rewritten and the other host was left byte for byte. The serialized option still unserializes, now holding the new address. The table `` old_hp_o`d; d `` came through the switch and reads `plain http://wp-a.example.test/odd`: its value with the old address was rewritten. `wp-config.php` starts with `<?php`, has no gate, has `HP_MANAGED` and the panel's database name and password, and holds none of the export's credentials. No marker file exists. `object-cache.php` and the foreign must-use plugin are absent. The nested `.htaccess` is back under its own name. Every file belongs to uid `33`, except the root-owned mount point `wp-content/mu-plugins`. The panel block is in the root `.htaccess`. `.htpanel-import` is gone, and no `hp_is_`/`hp_ia_`/`hp_im_` schema or `hp_iu_` account is left. The mail plug-in is unchanged. (The plain dry run of the bare host `old.example.test`, which is only reported, finds the one planted `old.example.test.example`.) |
+| 6 | `address-job-still-works` | PASS | `user_url` and the sample post are set back to the old address, then `wordpress.set-url` (old → new) exits `0` on the imported `old_` tables. `user_url` reads `http://wp-a.example.test`, the post reads `Visit http://wp-a.example.test. Not http://old.example.test.example/x.`, and `GET /` answers `200`. A second `wordpress.set-url` with the same addresses exits `0` and the `CHECKSUM TABLE … EXTENDED` of every table is unchanged. |
+| 7 | `refused-exports-change-nothing` | PASS | Each refused export gives its exact exit code (results below). After the undo pair (`db.import` undo, then `import.undo`), the files, the `CHECKSUM TABLE … EXTENDED` of every table, the schema list and `GET /` (`200`, own title) are the same as before. |
+| 8 | `refused-archives-change-nothing` | PASS | Each archive is refused with its reason (below), the site is unchanged and no archive entry is outside `.htpanel-import`. |
+| 9 | `undo-after-the-switch` | PASS | A full import ran up to and including `db.import` switch; the live schema then held the export (`home` was the old address). The site's own database account then made a trigger on the imported `old_posts`: `db.import` undo answered `92`, nothing was renamed (the marker table still reads `after`, `home` is still the old address), and the account dropped its trigger. The undo pair answered `0` and `{complete:true}`, twice. Each time the files, tables, schemas and `200` with the site's own title were the same as before. The table `` old_hp_o`d; d `` is back and reads `plain http://wp-a.example.test/odd`. The site's own database account reads its rows, an insert of a child row with no parent still fails with `1452`, and no staging or aside schema and no staging account is left. |
+| 10 | `killed-in-the-middle-of-the-swap` | PASS | A half-done swap was built by hand as `33:33`, the same way `import.switch` builds it: the saved files, both gates, a plan of 51 entries (26 out), then only the first 38 moves. `import.undo` answers `{complete:true}` and the files and tables are equal. With all moves done and one moved-out entry deleted from the aside folder, so it is missing on both sides, `import.undo` answers `{complete:false}`. The gate, the saved files and the plan are unchanged, and the work folder is kept. Once the entry is put back, `import.undo` answers `{complete:true}`. |
+| 11 | `an-unfinished-import-is-left-alone` | PASS | With a work folder that holds a plan, `import.stat` answers `remains: true`. `import.discard` empties both slots and leaves that folder's listing unchanged. `import.unpack` with the same id is refused `staging_unsafe`. |
+| 12 | `no-secret-in-any-tail` | PASS | The scan covers 48 jobs and 17 secrets: the root key, both site database passwords, both administrator passwords and 12 staging secrets. No 8-character window of any secret appears in any job tail, in either stream of the raw log (read before the adapter removes the container), or in the `Env`, `Cmd`, `Entrypoint` or `Labels` of the job container. The container is inspected while it runs, for each of the six kinds used. A self-check first plants a window and must find it. |
+| 13 | `nothing-left` | PASS | 113 containers, 5 networks and 2 volumes were removed by exact name. `docker ps -a`, `docker volume ls` and `docker network ls` filtered on the run's name are empty, the volume list equals the one before the run and the temporary folder is gone. |
+
+**Defect found by QA (step 5, fixed in fix-up 1):** after `wordpress.import-finalize` the old address was still in `old_users.user_url` (exactly `http://old.example.test`) and in WordPress's Privacy Policy draft (`Our website address is: http://old.example.test.</p>`). The dry run found `2` where `0` is expected. The cause: `ADDRESS_REWRITE` in `apps/docker-executor/src/site-jobs.ts` rewrote the origin only before `/`, `"` or `'` (and their escaped forms).
+
+**The fix (R163, R164.1, R165):** `ADDRESS_REWRITE` in `apps/docker-executor/src/site-jobs.ts` is one pass, the same text for `wordpress.set-url` and `wordpress.import-finalize`. The script builds the pattern from the checked `HP_PREVIOUS_URL`, with its dots escaped: `https?:(\\?/)\1<host>(?![A-Za-z0-9\x80-\xff-]|\.[A-Za-z0-9\x80-\xff-]|:[0-9]|@)`, replaced with `<new scheme>:${1}${1}<new host>`.
+- It covers both schemes and both slash forms, plain and JSON-escaped, through the back-reference.
+- The origin is kept where the next byte continues the host: a letter, a digit, `-`, a byte 0x80–0xff, a `.` followed by one of those, `:` and a digit, or `@`. It is replaced everywhere else, including at the end of the value.
+
+**Way B, built in fix-up 2 (R165.1):** the pass is our own loop inside one `wp eval --skip-plugins --skip-themes`, and it never calls `search-replace`.
+- It reads only the base tables of the site's prefix (`wp_get_table_names` with `all-tables-with-prefix` and `base-tables-only`), so views are left alone.
+- From each table it reads the text columns (`text` or `varchar` in the type), except `guid` and `user_pass`. `user_pass` is the column wp-cli itself always skips. A table without a primary key is skipped.
+- It finds only rows where one of those columns holds the old host (`LIKE BINARY`, with `%`, `_` and `\` escaped), 500 at a time, in primary-key order. Composite keys page with the expanded `OR` form. Since fix-up 3 (R166.1) this batch query reads only the primary-key columns; each row is then read on its own by its key, so PHP holds one row, not 500.
+- Each value goes through wp-cli's own `WP_CLI\SearchReplacer` in regex mode, with the pattern and replacement above (delimiter `chr(1)`, objects recursed, as `search-replace --regex` does). So serialized values are rebuilt with their lengths.
+- A row is written back (`UPDATE … WHERE <primary key>`) only when a value changed. Since fix-up 3 (R166.2) a new value longer than its column's limit is not written and keeps its old value, as wp-cli's `$wpdb->update` did; the other columns of that row are still written. The limit comes from `DESCRIBE`: characters for `varchar(N)`, bytes for `tinytext` (255), `text` (65 535) and `mediumtext` (16 777 215); `longtext` has none. The session's SQL mode is not changed. Names are quoted with their backticks doubled. All values travel as parameters (`execute_query`), never inside the SQL.
+- `mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT)` is the first statement. Then autocommit goes off, and the work runs inside a `try`/`catch (Throwable)` that exits `1`. The shell turns that into exit `26` with nothing committed and no SQL or value in the tail. Since fix-up 3 (R166.3), right after the commit and still inside the `try`, `mysqli_report(MYSQLI_REPORT_OFF)` and autocommit on hand the session back as WordPress had it before the shutdown hooks of the site's must-use plugins run.
+
+**Why way B:** R165 asked for a pass that touches only the rows that hold the old host. On the sparse sample, way A (the earlier `wp search-replace --regex` text) took `312.8 s`, 30 times the ten-pass text, because it reads and runs the regex on every row. Way B took `2.05 s` there and was also the fastest on the dense sample (table below).
+
+**Fix-up 3 (R166), defect first, in a throw-away lab (`hp_swarmtest_fix3_*`, internal network, no host port, removed by exact name; each text run as the product's job runs it, as `33:33` with `512m`; the new text is the constant taken from the built `dist`; peak memory is the job container's `memory.peak`):**
+- **Memory (R166.1).** Inside `wp eval`, wp-cli sets PHP's `memory_limit` to `-1` (`php -r` alone answers `128M`), so the bound is the job's 512 MB, not PHP's limit. 600 `postmeta` rows of about 452 KB did not break the fix-up 2 text (exit `0`, `8.1 s`, peak 519 MB, just under the limit). With rows of about 994 KB, the old address many times in each value, plain and with escaped slashes, the fix-up 2 text was killed by the container limit (`Killed`, exit `26`, `4.8 s`, peak 537 MB). All 600 rows still held the old address while `home`/`siteurl` were already new; every retry ends the same way. The new text: exit `0`, `15.7 s`, peak 68 MB, no old address left (both forms rewritten); on the 452 KB rows `7.4 s`, peak 68 MB.
+- **Too-long value (R166.2).** A `varchar(30)` of exactly 30 characters (`http://old.example.test/abcdef`) and a `tinytext` of 255 bytes, each beside a column with room. With the fix-up 2 text they came out cut short (`http://wp-a.example.test/abcde`, 255 bytes) with exit `0`. With the new text both keep their old value, the column beside each is rewritten, exit `0`. A `varchar(30)` value of 29 characters with five `é` (35 bytes) becomes 30 characters and is written: the limit counts characters.
+- **Shutdown hook (R166.3).** A must-use plugin adds a `shutdown` action. (a) `$wpdb->query("SELECT * FROM hp_no_such_table")`: with the fix-up 2 text the job exited `26` (`PHP Fatal error: Uncaught mysqli_sql_exception`) after a rewrite that had committed. (b) `update_option` of a marker: with the fix-up 2 text the write inside the pass was lost (a plain `wp eval` writes it). Both defects showed, so both statements are built; with the new text (a) exits `0` and (b) writes the marker.
+- **All cases of fix-up 2 (`cases.sh`) on the new text:** the same results as listed below (26 values after runs 1, 2 and 3; second run `Handler_update` +0 and checksums equal; odd-named table, table without key, composite key, broken view, `guid`, serialized arrays; the refused write `26`, 67-byte tail, checksums equal, 18 cases still old).
+
+**Lab measurements (fix-up 2: a separate throw-away lab on the same images, `hp_swarmtest_fix2_*`, internal network, removed by exact name; each script text is run as the product's job runs it, as `33:33` with `512m`; way B is the constant taken from the built `dist`):**
+
+| Sample | Ten-pass text | Way A | Way B (fix-up 2) | Fix-up 3 text |
+|---|---|---|---|---|
+| Sparse: 100 000 posts, 1 % with the old address; 1 000 000 postmeta rows without it | `10.5 s` | `312.8 s` (exit `0`, under the `600 s` cap) | `2.05 s`; second run `1.87 s` | `2.61 s`; second run `1.71 s`; peak 63 MB |
+| Dense: 100 000 posts and 100 000 postmeta rows, the old address in every row | `72.6 s` | `166.7 s` and `166.1 s` | `35.8 s`; a rerun after the killed run `35.1 s`; `35.7 s` in fix-up 3's lab | `66.8 s` twice; peak 63 MB |
+
+The dense ten-pass and way A figures come from fix-up 1's lab, run on the same sample and images, and were not measured again. Every way B and fix-up 3 figure is under its gate (`120 s` sparse, `240 s` dense). The extra read per matching row costs the dense sample about `31 s` for 200 000 matching rows (fix-up 3 lab, same sample: `35.7 s` → `66.8 s`).
+
+- **Correctness:** `cases.sh` holds 26 values, each read back byte for byte after every run.
+  - Replaced: the exact value; before `.`, `/`, `"`, `'`, `<`, `)`, `?`, `#`, a space, a line end and `. `; `http:\/\/…\/x` and the end of a JSON string; a serialized array as the whole string and inside a longer one; the `https` form. `user_url` and `post_content` were rewritten too.
+  - Kept: `.test.example/x`, `.test-b.example/x`, `.testing.example`, `:8080/x`, `@other.example/`, `é` after the address, the same inside a serialized value, and `guid`.
+  - All 26 were right after run 1 (old → `http://wp-a.example.test`), run 2 (the same again) and run 3 (scheme alone, → `https://wp-a.example.test`). The serialized options still unserialize as arrays.
+- **New cases in fix-up 2:**
+  - The table `` wp_o`d; d `` (a backtick, a `;` and a space) with rows `plain` and `http://old.example.test/odd` reads `plain http://wp-a.example.test/odd`.
+  - A table without a primary key that holds the old address is skipped, and the job still exits `0`.
+  - A table with a composite primary key `(INT, VARCHAR)` and 1 200 rows, which is three batches, is fully rewritten.
+  - A view over a dropped table, which cannot be read, stays a view, is not touched, and the job exits `0`.
+- **Second run:** the server's `Handler_update` counter did not move, and the `CHECKSUM TABLE` of every table was unchanged.
+- **A refused write** (a trigger that raises `SIGNAL` on a `wp_options` row): exit `26`. The tail is 67 bytes, only wp-cli's two `Success: Updated` lines for `home` and `siteurl`, with no trace, SQL or value. Every table, the composite one included, has the same checksum as before (`home` and `siteurl` were set back first), and the 18 cases the pass would change still hold the old address.
+- **Killed run (fix-up 2 text, not run again):** the dense pass was killed (`SIGKILL`, exit `137`) after `18.2 s`, with 104 338 rows changed inside the open transaction. Afterwards all 100 000 posts and 100 000 postmeta rows still held the old address, `home`/`siteurl` held the new one (they are set before the pass), and no transaction was left open. A rerun took `35.1 s`, exited `0` and left no old address.
+- **Exported `WORDPRESS_IMPORT_FINALIZE_SCRIPT`:** it holds the same `ADDRESS_REWRITE` text (pinned by `site-jobs.test.ts`). The lab did not run it; the real-Docker check above did (steps 3, 5 and 9).
+
+**Breaks shown on purpose and restored:**
+- With the old five-pair text, step 5 failed (the QA runs above).
+- With `LIKE BINARY ?` replaced by `IS NOT NULL OR ? IS NULL` (every row read), the unit tests failed 2 of 48 in `site-jobs.test.ts`.
+- With the old way A text, the same 2 pinned tests failed.
+- The guard in `site-jobs-import.test.ts` ("every query is read into a variable first…") was tried with four lines put into the load script, one at a time: `[ "$(marker)" = after ] || exit 97`, `live_ok || exit 85`, `if live_ok; then :; fi`, `! q 'SELECT 1'` and `for x in $(marker); do :; done` (a bare `$(marker)`, which the earlier form of the guard missed). The guard test failed for each (1 of 20); for the first two the stand-in run of the load script failed too (2 of 20). To pass the guard, seven lines of `DB_IMPORT_LOAD_SCRIPT` now read their value into a variable before the `[ ]` test (exit codes `50`–`55` unchanged).
+- Fix-up 3: with a text column put back into the batch query (`array_merge($k, $c)`), `site-jobs.test.ts` failed 1 of 48; the R166 pins also failed 1 of 48 on the fix-up 2 text.
+- With `names` back in place of `objs` in the undo, the unit tests failed 3 of 68 and this script failed `undo-after-the-switch`: the undo answered `1` (MariaDB refused the RENAME) instead of `92`, and two later steps failed after the half-undone import. `nothing-left` still passed.
+
+**Refused exports (step 7, the same in both runs).** The target was the imported site at `http://wp-a.example.test`, with `old_` tables, after `wordpress.set-url`, plus a parent/child table pair with a foreign key.
+
+| Case | Exit | Answer |
+|------|------|--------|
+| export cut mid-statement | `60` | `{"line":187,"errorNumber":1064}` |
+| export cut at a statement boundary | `53` | |
+| cut gzip | `51` | |
+| two databases (`old_` and `two_` in one dump) | `55` | |
+| `USE` of another schema | `61` | `{"line":1,"errorNumber":1044}` |
+| `GRANT` | `61` | `{"line":638,"errorNumber":1045}` |
+| `DEFINER` view | `61` | `{"line":638,"errorNumber":1142}`, the line of the view statement |
+| `DATA DIRECTORY` | `57` | |
+| `old_blogs` | `56` | |
+| symlinked slot | `50` | |
+
+**Refused archives (step 8, the same in both runs):**
+
+| Case | Refused | Reason |
+|------|---------|--------|
+| not a zip | at upload | `not_a_zip` |
+| a zip without WordPress | at unpack | `archive_not_wordpress` |
+| a `..` entry | at unpack | `archive_unsafe` |
+| a symlink entry | at unpack | `archive_unsafe` |
+| 200 001 empty entries (16.7 MiB) | at unpack, in 2.3 s | `archive_limit` |
+
+**How each key step can fail:**
+- Step 2: a `2xx` on any staged path, on the `.part` of the half-written dump or on `/peek` under the hostile `.htaccess` fails the step. So does a slot that `import.stat` does not show as `complete` with the exact size, a take that leaves the file in place, or a take from outside the site that is not refused.
+- Step 4: any `200`, or any body that names `wp-content`, `wp-includes`, `wp-admin` or WordPress, at any of the 90 probes fails the step. So does more than 2 s of `503`, or any other status, before the first `200` after `import.finish`.
+- Step 7: the exit code must be the exact one per case, and `60`/`61` must carry a `{line, errorNumber}` answer. One changed row anywhere (`CHECKSUM TABLE … EXTENDED`), one changed file size, inode, time or owner, an extra schema, or a page that is not `200` with the site's title fails the step.
+- Step 9: the check first proves the swap happened (`home` is the old address in the live schema). A trigger from the site's account that does not give `92`, or a rename despite it (marker not `after`), fails the step. Any difference after either undo pair, a site account that cannot read its rows, a child insert that succeeds, or a leftover `hp_is_`/`hp_ia_`/`hp_im_` schema or `hp_iu_` account fails the step.
+- Step 12: a window of any secret in a tail, in a raw log or in the inspected `Env`/`Cmd`/`Entrypoint`/`Labels` fails the step, and so does a job kind that was never inspected while running.
+
+**Measured in the fix-up 3 run:**
+- **Whole run:** `128.8 s`.
+- **Peak disk use:** `436 MiB` (the free space of `/`, sampled every second). `df -h /` showed `8.8G` free before and after the run.
+- **Per kind** (min–max seconds):
+
+| Kind | Count per run | Seconds |
+|---|---|---|
+| `db.provision` | 2 | `0.57–0.63` |
+| `wordpress.install` | 3 | `2.75–2.94` |
+| `db.import` | 28 | `0.56–1.29` |
+| `db.import-load` | 12 | `0.46–1.93` |
+| `wordpress.import-finalize` | 1 | `1.80` |
+| `wordpress.set-url` | 2 | `1.23` |
+
+- **Files helper:**
+
+| Operation | Count per run | Seconds |
+|---|---|---|
+| `import.put` | 196 | `0.06–0.33` |
+| `import.unpack` | 9 | `0.06–0.74`; the full 4 261-entry export takes about `0.7` |
+| `import.switch` | 2 | `0.08` |
+| `import.undo` | 15 | `0.06–0.20` |
+| `import.finish` | 1 | `0.21` |
+
+**Clean-up proof:** after the run `docker ps -a`, `docker volume ls` and `docker network ls` filtered on `hp_swarmtest` printed nothing (step 13 also checks the temporary folder).
+
+**Covered by automated tests, not by this run:**
+- The answer `earlier_import_unfinished` (R155) and the API's steps, recovery and audit: `apps/api/test/site-wordpress-import.integration.test.ts` ("busy: files_incomplete, and earlier_import_unfinished while the simulator holds a plan (R155)"), `apps/api/test/site-wordpress-import.service.test.ts`, `apps/api/test/site-wordpress-import-applier.test.ts` and `apps/api/test/site-wordpress-import.qa.test.ts`.
+- The job payload per kind and step, the parameter and secret checks, and the static checks of the import scripts: `apps/docker-executor/test/site-jobs-import.test.ts` (this file also checks that a secret planted in `Env`, `Cmd` or a label is caught).
+- Tails without secrets, and the secrets purged when a job fails: `apps/docker-executor/test/site-jobs.test.ts`. The same file checks the one-pass rewrite and its boundary on the pattern as PCRE reads it (bytes), and pins way B's text: the `LIKE BINARY` filter, the skipped columns, the base tables of the prefix, the replacer call, the doubled backticks, strict reporting first, the session handed back after the commit and the `catch` last, and no `search-replace`. Since fix-up 3 it also pins the key-only batch query, the read of one row by its key and the column limits taken from `DESCRIBE`.
+- A failed query in `db.import` and `db.import-load` (exit `1`, never `54`/`56`/`59`), and the undo's `92` for an object in live or aside before any rename, with a stand-in `mariadb`: `apps/docker-executor/test/site-jobs-import.test.ts` ("the database scripts against a stand-in mariadb").
+- The files program's import operations with real PHP and ZipArchive: `apps/docker-executor/test/site-files-program.test.ts`. This covers:
+  - `import.put` and `import.take`;
+  - forged plan lines;
+  - a switch cut after `k` moves;
+  - a gate changed in place;
+  - the ceilings, which apply only to the import.
+- The contracts: `packages/contracts/test/site-wordpress-import.test.ts` and `packages/contracts/test/site-files-ipc-schemas.test.ts`.
+
+**Not covered:**
+- An import killed in the middle of the address rewrite in this script: the lab killed the pass alone (above), not a whole import.
+- A value the replacer cannot handle (for example a serialized object it cannot rebuild): `SearchReplacer` returns it unchanged or skips it, so it is not an exit `26`, and PHP may print a warning about it to the tail. The same was true of way A. Not measured.
+- Multisite.
+- One single value of tens of megabytes: it still needs a few times its size in PHP memory and can end the pass at the job's 512 MB, as with wp-cli (R166.5). Not measured.
+- A `char(N)` column: the column filter reads only `text` and `varchar` types, so such a column is not rewritten at all (unchanged since fix-up 2).
+- A trigger in the aside schema in this script (the unit test covers it).
+- Archives and exports near the 4 GiB limits.
+- Other WordPress or PHP versions.
+- A real customer site.
+- A server with the product installed: the run used its own database and network in place of `hp_mariadb`/`hp_mariadb_net`, and there was no mail relay.
+- The API and the page: this run drives the executor directly.
