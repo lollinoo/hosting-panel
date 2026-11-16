@@ -307,6 +307,73 @@ paths:
         "423":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/auth/password-reset/request:
+    post:
+      tags: [Auth]
+      operationId: requestPasswordReset
+      summary: Ask for a password-reset email (customer accounts only)
+      description: >-
+        Needs no session. Always `202` with an empty body, whatever the address: an unknown address,
+        a disabled account, a server administrator, a mail relay that is not configured or a reached
+        limit all get the same answer, and the mail work starts only after the answer. At most 3
+        requests per account and 20 over all accounts per hour. The email holds a link to
+        `https://<panel host name>/reset-password#<token>`; the token is valid for 30 minutes.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+      responses:
+        "202":
+          description: Accepted (the same for every address)
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/auth/password-reset/confirm:
+    post:
+      tags: [Auth]
+      operationId: confirmPasswordReset
+      summary: Set a new password with the token from the email
+      description: >-
+        Needs no session. The token works once and for 30 minutes. A token that is unknown, used or
+        expired gets `PASSWORD_RESET_INVALID` (400). A password the policy refuses gets
+        `VALIDATION_ERROR` (400) and does not use the token up. On success every session of the
+        account ends and two-factor authentication stays as it was. The count of wrong passwords goes
+        back to zero and a lock is lifted, unless the count of two-factor attempts has reached five:
+        that count adds wrong codes and, while the account is locked, every attempt that carries a
+        code, whatever its password. Then the lock stays until it runs out (at most 15 minutes) and
+        that count is not changed. So someone who knows only the email address can keep a customer
+        with two-factor authentication locked out for up to 15 minutes after a reset.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                newPassword:
+                  type: string
+                  maxLength: 1024
+      responses:
+        "204":
+          description: Password changed
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/me/password:
     post:
       tags: [Account]
@@ -506,11 +573,71 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/administrators:
+    post:
+      tags: [Admin Users]
+      operationId: createAdministrator
+      summary: Create another server administrator (audited as admin.administrator.create)
+      description: >-
+        The temporary password and the TOTP enrolment data are returned once and stored nowhere in
+        clear; the new administrator must change the password at first login. An email already in
+        use gets `VALIDATION_ERROR` (400).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, name]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        "201":
+          description: Administrator created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [userId, email, temporaryPassword, totpSecretBase32, otpauthUri]
+                    properties:
+                      userId:
+                        type: string
+                      email:
+                        type: string
+                        format: email
+                      temporaryPassword:
+                        type: string
+                      totpSecretBase32:
+                        type: string
+                      otpauthUri:
+                        type: string
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/users/{userId}:
     patch:
       tags: [Admin Users]
       operationId: updateAdminUserStatus
       summary: Enable or disable an account (disabling revokes its sessions)
+      description: >-
+        The target may be a customer or another server administrator; disabling yourself is refused.
+        A change that would leave no active server administrator gets `LAST_ADMINISTRATOR_PROTECTED`
+        (409).
       parameters:
         - in: path
           name: userId
@@ -542,6 +669,8 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/users/{userId}/reset-password:
@@ -3596,6 +3725,53 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/sites/{siteId}/support-access:
+    post:
+      tags: [Admin Sites]
+      operationId: adminOpenSupportAccess
+      summary: Open a support visit on the organization that owns the site
+      description: >-
+        Server administrators only. Takes no body. Ends any earlier visit of the caller, then
+        grants a fixed set of site, service and operation permissions on the owner organization
+        for 60 minutes. Audited as admin.support_access.open (and admin.support_access.close
+        for each visit it ends) in the organization concerned. A visit that ends by time writes
+        no audit row; the open row carries its end time.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "201":
+          description: Visit open
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SupportAccessDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/support-access:
+    delete:
+      tags: [Admin Sites]
+      operationId: adminCloseSupportAccess
+      summary: Leave the current support visit
+      description: >-
+        Server administrators only. Ends every visit of the caller; one admin.support_access.close
+        audit row per visit that was still active. Answers 204 also when no visit was open.
+      responses:
+        "204":
+          description: No visit open any more
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/mail-relay:
     get:
       tags: [Admin Mail]
@@ -4819,6 +4995,7 @@ components:
             - ACCOUNT_LOCKED
             - TOTP_INVALID
             - ACCOUNT_SETUP_INCOMPLETE
+            - PASSWORD_RESET_INVALID
             - PERMISSION_DENIED
             - HOST_POLICY_DENIED
             - ORGANIZATION_SUSPENDED
@@ -4832,6 +5009,7 @@ components:
             - DOMAIN_CONFLICT
             - ALREADY_EXISTS
             - LAST_OWNER_PROTECTED
+            - LAST_ADMINISTRATOR_PROTECTED
             - NOT_SUPPORTED
             - OPERATION_INTERRUPTED
             - OPERATION_AMBIGUOUS
@@ -5043,6 +5221,19 @@ components:
           type: string
           enum: [active, suspended, archived]
 
+    SupportAccessDto:
+      type: object
+      required: [organizationId, organizationName, expiresAt]
+      properties:
+        organizationId:
+          type: string
+        organizationName:
+          type: string
+          minLength: 1
+        expiresAt:
+          type: string
+          format: date-time
+
     MeDto:
       type: object
       required: [user, globalRoles, hostingAdminOrgIds, memberships, platformCapabilities]
@@ -5072,6 +5263,8 @@ components:
             $ref: "#/components/schemas/MeMembershipDto"
         platformCapabilities:
           $ref: "#/components/schemas/PlatformCapabilitiesDto"
+        supportAccess:
+          $ref: "#/components/schemas/SupportAccessDto"
 
     HostDto:
       type: object
