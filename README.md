@@ -189,6 +189,7 @@ I siti inviano email attraverso un relay Postfix del pannello che inoltra a un f
 - **Coda**: se il fornitore non risponde i messaggi restano in coda fino a 5 giorni. Dopo un riavvio del server con il pannello fermo i messaggi restano in coda e vengono consegnati (coda svuotata) quando il pannello torna e riapplica la password.
 - **Aggiornamento alla 0.5.0**: ogni sito in esecuzione viene **riavviato una volta** (pochi secondi ciascuno); i siti fermi sono aggiornati dopo il successivo avvio.
 - **Plugin SMTP del sito**: se un sito ha un proprio plugin SMTP, quello ha la precedenza.
+- **Email del pannello**: anche la mail di reimpostazione della password del cliente parte da `noreply@<dominio mittente>` attraverso questo relay. Il pannello sa solo che il relay l'ha presa in coda, non che è stata consegnata.
 
 Dettagli e limiti: [ADR 0018](docs/architecture/adr/0018-outgoing-mail-relay.md).
 
@@ -287,6 +288,14 @@ sudo hp-accounts reset-totp --email <email>
 
 `hp-accounts` supporta anche `setup` e `create-admin`; `sudo hp-break-glass ...` è la CLI break-glass (richiede `--user-id` oppure `--email`). Entrambi i wrapper sono in `/usr/local/sbin`, girano come `hp-api` e leggono `DATABASE_URL` da `/etc/hosting-panel/api.env`.
 
+Dal pannello (**Amministrazione › Utenti**):
+
+- **Altri amministratori.** Un amministratore crea un altro amministratore con nome ed email. Il pannello mostra **una sola volta** la password temporanea e la chiave del secondo fattore (TOTP): chi crea l'account le vede e le consegna. Al primo accesso il nuovo amministratore deve cambiare la password. Un amministratore può disattivare e riattivare gli altri, non se stesso; il pannello rifiuta di disattivare l'ultimo amministratore attivo. La password e il TOTP di un amministratore si reimpostano ancora **solo** con i comandi qui sopra, sul server.
+- **Password dimenticata (cliente).** Dalla pagina di accesso, «Password dimenticata?» chiede l'email e invia un link per scegliere una nuova password. Il link vale **30 minuti** e **una volta**; dopo il cambio ogni sessione aperta si chiude, mentre il secondo fattore resta com'era. La pagina risponde allo stesso modo per ogni indirizzo, quindi non dice se un account esiste. Al massimo 3 richieste all'ora per account e 20 all'ora in tutto. Serve l'**email in uscita configurata** (vedi sopra); senza, nessuna mail parte e il cliente deve chiedere all'amministratore. Un amministratore non riceve mai questa mail.
+- **Accesso di assistenza.** Dalla pagina **Siti**, «Apri la vista di assistenza» apre i siti del cliente nella sua stessa vista, per **60 minuti**, con un segno in cima alle pagine dei siti che dice di chi sono i siti e fino a che ora (non compare in phpMyAdmin, su una pagina di errore imprevisto né su un indirizzo che non corrisponde a nessuna pagina); «Esci» chiude la visita. L'amministratore può fare tutto ciò che il cliente fa sui propri siti, ma non tocca i membri né le impostazioni del cliente. Apertura e uscita sono registrate nell'audit (`admin.support_access.open`, `admin.support_access.close`); ogni azione fatta durante la visita è registrata come al solito, con l'amministratore come autore.
+
+Dettagli e limiti: [ADR 0025](docs/architecture/adr/0025-people-and-access.md).
+
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 
 ```bash
@@ -328,6 +337,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0024`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress).
+- [Registro delle ADR (`ADR 0001..0025`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress, `ADR-0025` amministratori, password per email e accesso di assistenza).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

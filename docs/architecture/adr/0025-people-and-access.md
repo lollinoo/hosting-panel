@@ -1,0 +1,134 @@
+# ADR 0025 — Persone e Accessi (M5a): Altri Amministratori, Password Reimpostata per Email e Accesso di Assistenza
+
+- **Stato:** `APPROVATO — M5a`
+- **Data:** 2026-11-16
+- **Riferimento:** spec `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md` (§2, §4 riga «Utenti» e primo paragrafo sull'accesso di assistenza, §5 «Recupero password»), `ADR-0018`, `ADR-0023`; regole `R178`, `R179`
+- **Migrazioni:** `0014_password_reset_tokens.sql` (additiva: tabella `password_reset_tokens`)
+
+## 1. Contesto
+
+Fino a M4 l'amministratore del server poteva gestire dal pannello un solo altro account: quello del cliente. Altri amministratori si creavano solo da riga di comando, sul server, con `hp-accounts create-admin`. Un cliente che dimenticava la password doveva chiedere all'amministratore. E l'amministratore non poteva entrare nei siti del cliente per aiutarlo: la vista del cliente rispondeva `404`.
+
+M5a, la prima delle quattro parti di M5, aggiunge tre cose:
+
+1. l'amministratore crea, disattiva e riattiva altri amministratori dal pannello, e il server tiene sempre almeno un amministratore attivo;
+2. il cliente che ha dimenticato la password riceve per email un link per sceglierne una nuova;
+3. l'amministratore apre un sito del cliente nella **vista di assistenza** per un'ora: la stessa vista del cliente, con un segno in cima a ogni pagina. Apertura e uscita sono registrate nell'audit.
+
+Salute, avvisi, log, filtri della pagina Audit, riavvio, terminale, firewall e aggiornamenti sono M5b–M5d.
+
+## 2. Decisioni
+
+### 2.1 Amministratori dal pannello
+
+- **Creare.** `POST /v1/admin/administrators` con `{email, name}`. Il server usa lo stesso codice della riga di comando (`insertServerAdmin`, estratto da `createServerAdmin` in `apps/api/src/cli/accounts.ts`). Crea una password temporanea e la chiave TOTP (la chiave del secondo fattore, quello del codice a 6 cifre), segna «cambio password obbligatorio» e risponde `201` **una sola volta** con `temporaryPassword`, `totpSecretBase32` e `otpauthUri`. Nel database restano solo l'hash della password e la chiave cifrata; nella riga di audit solo l'email. Un'email già usata riceve `400 VALIDATION_ERROR`, come nella riga di comando.
+- **Disattivare e riattivare.** La route spedita `PATCH /v1/admin/users/:userId` (`status`) accetta già un amministratore come bersaglio. Disattivare se stessi resta rifiutato (`403`). Disattivare chiude tutte le sessioni del bersaglio (comportamento spedito).
+- **Cosa resta sulla riga di comando.** La password e il TOTP di un amministratore non si reimpostano dal pannello né per email: si usano `hp-accounts reset-password`, `hp-accounts reset-totp` e, per un secondo fattore perso, break-glass via SSH (spec §5). La pagina Utenti lo scrive sulla riga dell'amministratore invece di mostrare pulsanti che non funzionano.
+- **Primo accesso del nuovo amministratore:** password temporanea, poi codice TOTP, poi la pagina del cambio password.
+
+### 2.2 L'ultimo amministratore è protetto
+
+Dentro la `PATCH`, in una transazione, il server blocca le righe di tutti gli amministratori (`SELECT … FOR UPDATE`, in ordine di id) e solo dopo decide. Se la modifica lasciasse il server senza un amministratore attivo, risponde `409 LAST_ADMINISTRATOR_PROTECTED` e non cambia nulla. Il blocco serve per due amministratori che si disattivano a vicenda nello stesso istante: il secondo rilegge le righe dopo che il primo ha finito, quindi non possono riuscire entrambi. Chi perde riceve `409`, oppure `401` se nel frattempo il proprio account è già stato disattivato.
+
+### 2.3 Password reimpostata per email
+
+- **Solo il cliente.** Solo un account cliente attivo (senza ruolo di piattaforma) riceve la mail. Per un amministratore, un account disattivato o un indirizzo sconosciuto non si salva e non si invia nulla.
+- **Due route senza sessione.**
+  - `POST /v1/auth/password-reset/request` `{email}` risponde **sempre** `202` con lo stesso corpo vuoto: indirizzo sconosciuto, account disattivato, amministratore, relay non configurato, limite raggiunto. Il lavoro (cercare l'account, creare il link, consegnare la mail) parte **dopo** la risposta, quindi neanche il tempo di risposta dice se l'account esiste.
+  - `POST /v1/auth/password-reset/confirm` `{token, newPassword}` risponde `204`. Un token sconosciuto, già usato o scaduto riceve un unico rifiuto, `400 PASSWORD_RESET_INVALID`. Una password che la regola spedita rifiuta (`assertPasswordPolicy`) riceve `400 VALIDATION_ERROR` e **non** consuma il token.
+- **Il token.** `32` byte casuali da `node:crypto`, in base64url. Nel database (`password_reset_tokens`) c'è solo il suo hash SHA-256. Vale **30 minuti** e **una volta**: la conferma lo segna usato con un solo aggiornamento condizionato, quindi due conferme insieme non vincono entrambe. Una nuova richiesta rende inutilizzabili i token precedenti non usati dello stesso account.
+- **I limiti**, contati dalla tabella stessa: al massimo **3** richieste per account e **20** in tutto per ora. Oltre il limite: lo stesso `202`, nulla salvato, nulla inviato. Inoltre il servizio tiene al massimo **32** richieste in attesa di lavoro; una richiesta che arriva oltre viene lasciata cadere, risponde `202` come le altre e non scrive righe di log (`R179 §2.2`).
+- **Il link.** `https://<hosts.hostname>/reset-password#<token>`. Il nome viene dalla riga `hosts` che l'installatore scrive (lo stesso nome che legge l'avviso del certificato del pannello), mai da un valore della richiesta (`Host`, `Origin`, `X-Forwarded-*`). Senza quella riga non si invia nulla. Il token sta nel **frammento** (la parte dopo `#`): il browser non lo manda a nessun server, quindi non finisce in un log; la pagina lo legge e lo invia nel corpo della conferma.
+- **La mail.** L'API non invia mail e non avvia programmi. Chiede all'executor, con la nuova chiamata `sendPanelMail` accanto a `sendTestMail`, di consegnare il messaggio al relay del pannello (`ADR-0018`). La richiesta è `{kind: "password_reset", to, from, locale, link}`: `kind` è un elenco chiuso di uno; `from` è `noreply@<dominio mittente>` come per la mail di prova; il `link` deve essere un URL `https:` di caratteri stampabili, lungo al massimo `512`. Oggetto e testo sono costanti dell'executor, una per lingua (`apps/docker-executor/src/panel-mail.ts`); l'unica parte variabile è il link. La lingua è quella salvata nell'account (italiano finché il cliente non la cambia). La risposta `queued` dice che il relay ha preso il messaggio, non che è stato consegnato. L'executor non scrive in nessun log né l'indirizzo né il link.
+- **Cosa fa la conferma.** Imposta la nuova password con le stesse funzioni del cambio password dell'account, toglie «cambio password obbligatorio», azzera il conto delle password sbagliate e toglie il blocco, a meno che il conto dei tentativi con il codice TOTP sia arrivato a cinque (`passwordResetLockFields` in `apps/api/src/auth/attempt-limits.ts`): allora il blocco resta fino alla sua scadenza, al massimo 15 minuti, e quel conto non cambia. Quel conto somma i codici sbagliati e, con l'account bloccato, ogni tentativo che porta un codice, qualunque sia la password: sotto un blocco il login conta il tentativo prima di controllare la password, così il blocco non dice mai se la password era giusta. La regola esiste perché chi legge la casella di posta ma non ha il secondo fattore non deve guadagnare altri tentativi sul codice a ogni reimpostazione. Ne segue un caso: chi conosce solo l'indirizzo di un cliente con il secondo fattore può mandare cinque password sbagliate e poi altri cinque tentativi con un codice qualsiasi; dopo la reimpostazione il cliente, con la password nuova e il codice giusto, riceve ancora «account bloccato» finché il blocco non scade. Lo accettiamo: quella persona potrebbe comunque bloccare di nuovo l'account subito dopo qualsiasi reimpostazione, e chi ha la casella di posta non ha mai più di cinque tentativi sul codice per blocco. La conferma chiude **tutte** le sessioni dell'account e non tocca il TOTP: un cliente con il secondo fattore lo usa anche al login successivo. Tutto in una transazione: se l'account nel frattempo è stato disattivato o è diventato amministratore, la conferma riceve `PASSWORD_RESET_INVALID` e il token resta non usato.
+
+### 2.4 Accesso di assistenza
+
+- **Una concessione per visita.** Si usano così come sono la tabella spedita `support_access_grants` e il ramo spedito del motore dei permessi (`packages/authz/src/policy-engine.ts`). Le route dei siti del cliente non cambiano e non sono copiate sotto `/v1/admin`.
+- **Aprire.** `POST /v1/admin/sites/:siteId/support-access` (solo amministratori, nessun corpo) trova l'organizzazione che possiede il sito e scrive una concessione: operatore e approvatore sono chi chiama, la ragione è un testo fisso, la durata è **60 minuti**. Risponde `201` con `{organizationId, organizationName, expiresAt}`. Una visita alla volta per amministratore: aprirne una nuova chiude la precedente, con la sua riga di chiusura. Un sito senza proprietario apre la visita sull'organizzazione della piattaforma (`org_platform_ops`). Un sito che non esiste risponde `404`.
+- **Uscire.** `DELETE /v1/admin/support-access` chiude ogni visita di chi chiama e risponde `204`, anche quando non c'era nessuna visita.
+- **Cosa permette.** Esattamente `14` chiavi di permesso, in una sola costante (`SUPPORT_ACCESS_PERMISSIONS`): `site.read`, `site.create`, `site.update`, `site.delete`, `site.files.read`, `site.files.write`, `site.sftp.manage`, `site.databases.manage`, `site.backups.manage`, `service.deploy`, `service.restart`, `service.stop`, `service.logs.read`, `operation.read`. Sono quelle che chiedono le pagine della vista del cliente. Nessuna chiave di membri, impostazioni dell'organizzazione, quote, host o piattaforma. Un test fissa l'elenco esatto, fallisce quando un controller dei siti chiede una chiave che manca, e verifica che non contenga chiavi delle famiglie `organization.*`, `quota.*`, `host.*`, `allocation.*`, `template.*`, `audit.*`, `platform.*`. L'elenco non dà poteri nuovi: l'amministratore crea ed elimina già siti dall'area di amministrazione.
+- **Uso pieno, non sola lettura.** Ogni azione della vista funziona, anche quelle che mostrano un segreto una volta (spec §4, riga «Siti»). Ogni modifica è registrata come oggi, con l'amministratore come autore.
+- **Senza visita non cambia nulla.** Un amministratore senza visita, o con una visita chiusa, riceve `404` sulle route dei siti del cliente, senza riga di audit. Con una visita scaduta riceve `403 PERMISSION_DENIED` con una riga di rifiuto (la ragione `SUPPORT_ACCESS_GRANT_EXPIRED` sta solo nell'audit). Il cliente di un'altra organizzazione riceve sempre `404`. I token break-glass non cambiano.
+- **Come lo sa il pannello web.** La risposta di `GET /v1/me` ha un campo **facoltativo** `supportAccess: {organizationId, organizationName, expiresAt}`, presente solo per un amministratore con una visita aperta e non scaduta. Il pannello web mostra la vista del cliente all'amministratore solo quando il campo c'è; altrimenti lo rimanda a `/admin/sites` con una frase. Su ogni pagina della vista sotto `/sites`, compresa la pagina «non trovato» di quell'area (`apps/web/src/app/sites/not-found.tsx`), un segno dice di chi è il sito, fino a che ora dura la visita, e offre «Esci». Il segno manca in tre casi: su una pagina d'errore inatteso (il pannello web non ha una pagina d'errore propria, quindi Next.js ne mostra una sua, fuori dalla cornice della vista); su un indirizzo sotto `/sites` che non corrisponde a nessuna pagina (per esempio una scheda scritta male), dove Next.js mostra la pagina «non trovato» della radice (`apps/web/src/app/not-found.tsx`), senza segno e senza «Esci»; e sulle pagine di phpMyAdmin, che il pannello inoltra così come sono.
+
+### 2.5 Audit
+
+| Evento | Quando | Autore | Dettagli |
+|---|---|---|---|
+| `admin.administrator.create` | un amministratore crea un altro amministratore | l'amministratore | solo l'email |
+| `auth.password_reset.requested` | è stato creato un token (mai per un indirizzo sconosciuto) | sistema, senza id | come è finita la consegna: `queued`, `failed` o `not_sent` |
+| `auth.password_reset.completed` | una conferma riuscita | il cliente | nessuno |
+| `admin.support_access.open` | apertura di una visita, nella stessa transazione della concessione | l'amministratore | organizzazione del cliente, il sito come bersaglio, l'ora di fine |
+| `admin.support_access.close` | uscita, o apertura di una nuova visita mentre una è aperta | l'amministratore | organizzazione del cliente |
+
+La disattivazione e la riattivazione scrivono l'evento già spedito della `PATCH`. Nessuna riga di audit, riga di log, riga di outbox o messaggio di errore contiene una password, una password temporanea, una chiave TOTP, un token, il suo hash o il link.
+
+## 3. Alternative scartate
+
+- **Un codice QR per la chiave TOTP del nuovo amministratore:** serve una nuova dipendenza npm. La finestra mostra il link `otpauth://` e la chiave a gruppi di 4, come la pagina dell'account.
+- **Il token nella query string (`?token=`):** finirebbe nei log del proxy e nell'intestazione `Referer`. Il frammento non lascia il browser.
+- **Una vista di assistenza separata, o le route del cliente copiate sotto `/v1/admin`:** due copie dello stesso codice da tenere uguali. La concessione a tempo riusa la vista e le route del cliente, e il motore dei permessi decide ogni chiamata.
+
+## 4. Limiti accettati
+
+1. **Chi crea un amministratore vede una volta la sua password temporanea e la sua chiave TOTP.** Le può copiare prima di consegnarle; è lo stesso di oggi con `hp-accounts create-admin` via SSH. I testi della finestra lo dicono.
+   - *Cosa deve fare il nuovo amministratore:* cambiare la password al primo accesso (il pannello lo obbliga); se non si fida di chi l'ha creato, chiedere un nuovo TOTP con `hp-accounts reset-totp`.
+2. **«Cambio password obbligatorio» lo fa rispettare solo il pannello web** (comportamento spedito, anche per i clienti). Chi ha la password temporanea e il codice TOTP può chiamare l'API direttamente prima di cambiarla. Non cambia in M5a; è nell'elenco di M6.
+3. **Nessun limite per indirizzo IP sulla richiesta di reimpostazione.** L'API vede solo l'indirizzo locale del pannello web, non quello del visitatore. Ci sono solo i limiti per account (3/h) e quello di tutto il server (20/h).
+4. **Il limite di 20 mail all'ora si può esaurire.** Chi conosce sette indirizzi di clienti può usarlo tutto (3 richieste ciascuno); in quell'ora nessun altro riceve la mail. Allo stesso modo, oltre `32` richieste in attesa le successive cadono senza traccia.
+   - *Cosa deve fare il cliente:* se la mail non arriva in pochi minuti, chiedere all'amministratore del server, che può ancora reimpostare la password dal pannello.
+5. **«In coda» non è «consegnata».** `queued` dice solo che il relay ha preso il messaggio. Un rifiuto del fornitore o del server di destinazione non si vede nel pannello.
+6. **Una richiesta ancora in attesa quando l'API si ferma bruscamente va persa.** Uno spegnimento ordinato aspetta il lavoro in corso. Il cliente può chiedere di nuovo.
+7. **Il link usa il nome del server scritto all'installazione** (`hosts.hostname`). Se il nome pubblico del pannello cambia dopo, il link punta al nome vecchio (lo stesso vale per l'avviso del certificato).
+8. **La visita copre tutta l'organizzazione, non solo il sito da cui è stata aperta.** La tabella non ha una colonna del sito. Con un solo cliente per server, l'amministratore raggiunge per 60 minuti tutti i siti di quel cliente.
+9. **La fine di una visita per tempo non scrive una riga di audit.** La riga di apertura porta l'ora di fine; chi legge l'audit la calcola da lì.
+10. **Chi apre la visita è anche chi la approva.** Su un server con un solo cliente l'amministratore è l'autorità che approva; nessun secondo amministratore e nessun cliente deve dire sì.
+11. **Le azioni fatte durante una visita non hanno un segno proprio nell'audit** (`R179 §2.3`). Le righe sono scritte in cinque o più punti che non sanno della visita. Una visita si ricostruisce dalle righe di apertura e chiusura e da ogni riga il cui autore è un amministratore e la cui organizzazione è quella del cliente. Candidato per M6.
+12. **Una visita su un'organizzazione sospesa si apre e può cambiare le cose** (`R179 §2.5`). L'assistenza serve proprio quando qualcosa non va.
+13. **Il limite delle azioni pesanti vale anche per l'amministratore in visita** (`R179 §2.6`): quando il cliente ha usato le `6` azioni dell'ora per un sito, l'amministratore viene rifiutato. Le route di backup dell'area di amministrazione non hanno questo limite.
+14. **Il cliente può leggere l'id dell'amministratore** in un'operazione che l'amministratore ha avviato (`requestedByUserId`): un id opaco, mai nome o email (`R179 §2.6`).
+15. **Il segno «amministratore» nel cookie della sessione è fissato al login.** M5a non promuove e non degrada nessuno, e l'API decide ogni chiamata: un segno vecchio sceglie solo il ramo sbagliato di una pagina.
+16. **Una visita che scade a pagina aperta:** le chiamate fatte dalla pagina mostrano il testo di `PERMISSION_DENIED` finché la pagina non si ricarica; il caricamento successivo riporta a `/admin/sites` con una frase.
+    - *Una visita che si chiude a pagina aperta* è un altro caso: l'amministratore ha premuto «Esci» in un'altra scheda del browser, oppure ha aperto una visita su un sito di un'altra organizzazione, che chiude la prima. Allora l'API risponde `404` a ogni chiamata della pagina, e la pagina mostra il suo testo per `NOT_FOUND` (per esempio «Questo file o cartella non c'è più» nella scheda File, «Non abbiamo trovato quello che cerchi» dove non c'è un testo proprio), come se il sito o quello che si cercava non ci fosse più. Riprovare non serve. Il caricamento successivo di una pagina riporta a `/admin/sites` con la stessa frase. Una visita aperta su un altro sito dello stesso cliente copre la stessa organizzazione (limite 8), quindi la pagina aperta continua a funzionare.
+17. **Il cookie `hp_last_site` resta nel browser dell'amministratore** dopo la visita. Non apre nulla: il pannello web rimanda l'amministratore senza visita prima di leggerlo.
+18. **Non provato in questo ciclo** (`R179 §4`):
+    - la mail attraverso l'immagine reale del relay: la provano un piccolo server SMTP locale in un test e il simulatore dell'executor da un capo all'altro;
+    - il blocco delle righe dell'ultimo amministratore su un PostgreSQL reale: PGlite, il database dei test, esegue una transazione alla volta, quindi i test provano il risultato, non il blocco;
+    - per la stessa ragione, l'ordine dei blocchi della conferma (prima la riga dell'utente, poi il token, come nella richiesta) e il blocco della riga dell'amministratore quando apre una visita: sono dedotti da come si comporta PostgreSQL e provati solo su PGlite;
+    - i due moduli pubblici (password dimenticata e nuova password) con un vero lettore di schermo: nessuno li ha ascoltati;
+    - il clic su «Esci» e il clic che apre la vista di assistenza: nessun test;
+    - nessuno ha aperto una pagina in un browser: i test del pannello web leggono l'HTML generato sul server.
+
+**Non in questa milestone:** l'elenco delle sessioni, promuovere o degradare un account, eliminare un utente, invitare altri utenti del cliente, mail diverse da quella di reimpostazione, la reimpostazione per email della password di un amministratore.
+
+## 5. Modello di fiducia
+
+- **Le route di reimpostazione sono aperte**, come il login: chiunque può chiamarle. Le proteggono il `202` uguale per ogni indirizzo, il lavoro fatto dopo la risposta, i limiti contati dalla tabella e un token che vale una volta, per 30 minuti, ed è salvato solo come hash.
+- **Il token** esce dal server solo dentro la mail. Nel database c'è solo il suo hash; nessun log, audit, outbox o errore lo contiene. Nel browser sta nel frammento, che la pagina toglie dalla barra degli indirizzi appena lo legge.
+- **L'origine del link** viene solo dalla configurazione del server, mai dalla richiesta: chi chiama non può far puntare il link a un suo sito.
+- **L'executor** riceve per la mail solo un tipo chiuso, due indirizzi validati, una lingua e un link controllato; oggetto e testo sono suoi.
+- **La visita** dà a un amministratore, per 60 minuti, solo le chiavi dei siti del cliente. Il motore dei permessi controlla ogni chiamata e confronta le chiavi come stringhe esatte. Senza una visita aperta l'amministratore non vede che i siti del cliente esistono (`404`).
+- **L'ultimo amministratore** è protetto dentro la transazione che cambia lo stato, non da un controllo fatto prima.
+
+## 6. Conformità alle regole architetturali
+
+- **Socket Docker solo nell'executor:** l'API non invia mail e non avvia programmi; la mail passa dall'IPC firmato.
+- **`CP-01`:** nulla di M5a ferma, riavvia o ricrea un sito o il relay.
+- **Isolamento e audit:** senza visita le route del cliente rispondono `404` all'amministratore; ogni route dell'amministratore risponde `403` con una riga di audit a un cliente; ogni modifica scrive un evento senza segreti.
+- **Nessun permesso nuovo, nessuna dipendenza npm nuova** (l'elenco delle dipendenze ammesse non cambia); due nuovi codici di errore: `LAST_ADMINISTRATOR_PROTECTED` (`409`) e `PASSWORD_RESET_INVALID` (`400`).
+- **Testi:** ogni frase in italiano e inglese. Le pagine di reimpostazione e la mail dicono cosa è successo e cosa fare, e non dicono mai se un account esiste. Il segno della visita sta nella vista del cliente e non usa parole tecniche vietate.
+
+## 7. Verifica
+
+- **Test automatici di questo ciclo:**
+  - ogni route dell'amministratore risponde a un cliente `403` con una riga di audit: `apps/api/test/admin-route-guard.integration.test.ts` (percorre le route del router dell'applicazione, con un minimo di `40`, così una route nuova non può essere dimenticata);
+  - una richiesta di reimpostazione non dice mai se un account esiste, un link funziona una volta e scade, un amministratore non si reimposta mai per email: `apps/api/test/password-reset.integration.test.ts` e `apps/api/test/accounts-m5a.qa.test.ts`;
+  - una visita si apre e si chiude con una riga di audit, e senza visita l'amministratore riceve `404`: `apps/api/test/support-access.integration.test.ts` e `apps/api/test/support-access-tenancy.integration.test.ts`;
+  - le `14` chiavi esatte della visita, nessuna delle famiglie escluse, e ogni chiave che un controller dei siti chiede: `apps/api/test/support-access-permissions.test.ts`;
+  - creare, disattivare e riattivare amministratori e il `409` dell'ultimo amministratore: `apps/api/test/admin-users.integration.test.ts`; le due disattivazioni a vicenda nello stesso momento: `apps/api/test/accounts-m5a.qa.test.ts`;
+  - limiti, uso unico e scadenza dei token nel database: `packages/database/test/password-reset-repository.test.ts`;
+  - testi della mail, link come unica parte variabile, nessun indirizzo né link nel log: `apps/docker-executor/test/panel-mail.test.ts`;
+  - contratti e codici di errore: `packages/contracts/test/contracts.test.ts`; migrazione: `packages/database/test/{phase2-database,site-sftp-users-database}.test.ts`;
+  - pannello web (finestra dell'amministratore, pagine di reimpostazione, vista di assistenza): `apps/web/test/admin-administrators.test.ts`, `apps/web/test/password-reset.test.ts`, `apps/web/test/support-view.test.ts` e `apps/web/test/m5a-web-qa.test.ts`.
+- **Nessun collaudo su Docker reale per M5a** (cfr. `§4.18`). L'esito dei test è in `docs/security/step-6-acceptance-report.md`.
