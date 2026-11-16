@@ -341,6 +341,13 @@ export const MeMembershipDtoSchema = z.object({
 });
 export type MeMembershipDto = z.infer<typeof MeMembershipDtoSchema>;
 
+export const SupportAccessDtoSchema = z.object({
+  organizationId: EntityIdSchema,
+  organizationName: z.string().min(1),
+  expiresAt: IsoDateTimeSchema,
+});
+export type SupportAccessDto = z.infer<typeof SupportAccessDtoSchema>;
+
 export const MeDtoSchema = z.object({
   user: z.object({
     id: EntityIdSchema,
@@ -355,6 +362,7 @@ export const MeDtoSchema = z.object({
   hostingAdminOrgIds: z.array(EntityIdSchema),
   memberships: z.array(MeMembershipDtoSchema),
   platformCapabilities: PlatformCapabilitiesDtoSchema,
+  supportAccess: SupportAccessDtoSchema.optional(),
 });
 export type MeDto = z.infer<typeof MeDtoSchema>;
 
@@ -819,3 +827,29 @@ export const CreateCustomerAccountInputSchema = z.object({
   ownerName: z.string().trim().min(1).max(120),
 });
 export type CreateCustomerAccountInput = z.infer<typeof CreateCustomerAccountInputSchema>;
+
+export const CreateAdministratorInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+  name: z.string().trim().min(1).max(200),
+});
+export type CreateAdministratorInput = z.infer<typeof CreateAdministratorInputSchema>;
+
+export const CreateAdministratorResultDtoSchema = z.object({
+  userId: EntityIdSchema,
+  email: z.string().email(),
+  temporaryPassword: z.string().min(12),
+  totpSecretBase32: z.string().min(16),
+  otpauthUri: z.string().startsWith("otpauth://"),
+});
+export type CreateAdministratorResultDto = z.infer<typeof CreateAdministratorResultDtoSchema>;
+
+export const PasswordResetRequestInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+});
+export type PasswordResetRequestInput = z.infer<typeof PasswordResetRequestInputSchema>;
+
+export const PasswordResetConfirmInputSchema = z.object({
+  token: z.string().min(1).max(128),
+  newPassword: z.string().max(1024),
+});
+export type PasswordResetConfirmInput = z.infer<typeof PasswordResetConfirmInputSchema>;

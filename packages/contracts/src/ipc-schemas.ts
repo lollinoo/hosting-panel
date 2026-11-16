@@ -384,6 +384,25 @@ export type MailRelayStatusReport = z.infer<typeof MailRelayStatusReportWireSche
 export const MailTestIpcRequestSchema = z.object({ to: z.string().email(), from: z.string().email() });
 export const MailTestIpcResponseSchema = MailTestResultDtoSchema;
 
+export const PANEL_MAIL_KINDS = ["password_reset"] as const;
+export const PanelMailIpcRequestSchema = z
+  .object({
+    kind: z.enum(PANEL_MAIL_KINDS),
+    to: z.string().email().max(254),
+    from: z.string().email().max(254),
+    locale: z.enum(["it", "en"]),
+    // Printable ASCII only: no space, CR or LF can reach the mail body.
+    link: z
+      .string()
+      .max(512)
+      .regex(/^https:\/\/[\x21-\x7e]+$/)
+      .refine((u) => URL.canParse(u) && new URL(u).protocol === "https:"),
+  })
+  .strict();
+export const PanelMailIpcResponseSchema = z.object({ outcome: z.enum(["queued", "failed"]) });
+export type PanelMailRequest = z.infer<typeof PanelMailIpcRequestSchema>;
+export type PanelMailResult = z.infer<typeof PanelMailIpcResponseSchema>;
+
 export const SITE_FILES_LIST_MAX = 5_000;
 export const SITE_FILES_MAX_FILE_BYTES = 2_147_483_648;
 

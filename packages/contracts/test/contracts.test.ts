@@ -14,6 +14,8 @@ import {
   OPERATION_KINDS,
   OPERATION_STATUSES,
   OperationDtoSchema,
+  PANEL_MAIL_KINDS,
+  PanelMailIpcRequestSchema,
   OrganizationCapabilitiesDtoSchema,
   PERMISSION_KEYS,
   PRESET_ROLE_NAMES,
@@ -211,6 +213,8 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "ACCOUNT_LOCKED",
       "TOTP_INVALID",
       "ACCOUNT_SETUP_INCOMPLETE",
+      "LAST_ADMINISTRATOR_PROTECTED",
+      "PASSWORD_RESET_INVALID",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -220,6 +224,8 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     }
     expect(ERROR_CODE_HTTP_STATUS.OPERATION_INTERRUPTED).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.ACCOUNT_LOCKED).toBe(423);
+    expect(ERROR_CODE_HTTP_STATUS.LAST_ADMINISTRATOR_PROTECTED).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.PASSWORD_RESET_INVALID).toBe(400);
   });
 
   it("maps status codes accurately", () => {
@@ -964,5 +970,31 @@ describe("@hosting-panel/contracts — WordPress tools DTOs", () => {
     expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: pw }).success).toBe(true);
     expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: pw, password: pw }).success).toBe(false);
     expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: "short" }).success).toBe(false);
+  });
+});
+
+describe("@hosting-panel/contracts — Panel mail IPC", () => {
+  const valid = {
+    kind: "password_reset",
+    to: "customer@example.test",
+    from: "panel@example.test",
+    locale: "it",
+    link: `https://panel.example.test/reset-password#${"A1b2-_".repeat(7)}x`,
+  };
+
+  it("accepts a reset link of 43 url-safe characters", () => {
+    expect(PANEL_MAIL_KINDS).toEqual(["password_reset"]);
+    expect(PanelMailIpcRequestSchema.parse(valid)).toEqual(valid);
+  });
+
+  it.each([
+    ["an http link", { link: "http://panel.example.test/reset-password#abc" }],
+    ["a link with a space", { link: "https://panel.example.test/reset password#abc" }],
+    ["a link with a line break", { link: "https://panel.example.test/reset-password#abc\nBcc: x@example.test" }],
+    ["an unknown kind", { kind: "welcome" }],
+    ["an unknown locale", { locale: "de" }],
+    ["an extra key", { subject: "Hello" }],
+  ])("refuses %s", (_name, patch) => {
+    expect(PanelMailIpcRequestSchema.safeParse({ ...valid, ...patch }).success).toBe(false);
   });
 });
