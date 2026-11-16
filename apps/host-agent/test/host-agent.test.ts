@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  HostTelemetryWireSchema,
   findForbiddenPublicDtoKeys,
   generateEd25519IpcKeyPair,
   signIpcRequest,
@@ -703,6 +704,62 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         availableBytes: 8192000n * 1024n,
         usedBytes: 8192000n * 1024n,
       });
+    });
+  });
+
+  describe("D8: disk figures by filesystem", () => {
+    it("groups places on one filesystem into one row, skips a missing place, and sends no path", async () => {
+      const panelDir = await createShortTempDir();
+      const dockerDir = join(panelDir, "docker");
+      await mkdir(dockerDir);
+      const missingDir = join(panelDir, "missing");
+      const adapter = new LinuxSystemHostAdapter({
+        cpuSampleDelayMs: 15,
+        storagePath: panelDir,
+        diskPaths: { panel_data: panelDir, docker_data: dockerDir, database_data: missingDir, root: "/" },
+      });
+
+      const telemetry = await adapter.getHostTelemetry("host_disks");
+      const sameAsRoot = (await stat(panelDir)).dev === (await stat("/")).dev;
+      expect(telemetry!.disks!.map((d) => d.paths)).toEqual(
+        sameAsRoot
+          ? [["panel_data", "docker_data", "root"]]
+          : [["panel_data", "docker_data"], ["root"]],
+      );
+      for (const disk of telemetry!.disks!) {
+        expect(BigInt(disk.totalBytes)).toBeGreaterThan(0n);
+        expect(BigInt(disk.usedBytes)).toBeLessThanOrEqual(BigInt(disk.totalBytes));
+      }
+      expect(HostTelemetryWireSchema.parse(telemetry)).toEqual(telemetry);
+      const serialised = JSON.stringify(telemetry);
+      for (const folder of [panelDir, dockerDir, missingDir, os.tmpdir()]) {
+        expect(serialised).not.toContain(folder);
+      }
+    });
+
+    it("still answers when no place can be measured", async () => {
+      const missingDir = join(await createShortTempDir(), "missing");
+      const adapter = new LinuxSystemHostAdapter({
+        cpuSampleDelayMs: 15,
+        diskPaths: { panel_data: missingDir, docker_data: missingDir, database_data: missingDir, root: missingDir },
+      });
+      const telemetry = await adapter.getHostTelemetry("host_disks_none");
+      expect(telemetry!.disks).toEqual([]);
+    });
+
+    it("simulator sends one default row with all four places, overridable", async () => {
+      const sim = new InMemoryHostSimulatorAdapter();
+      expect((await sim.getHostTelemetry("host_sim"))!.disks).toEqual([
+        {
+          paths: ["panel_data", "docker_data", "database_data", "root"],
+          usedBytes: "10737418240",
+          totalBytes: "107374182400",
+        },
+      ]);
+      const full = [{ paths: ["root" as const], usedBytes: "95", totalBytes: "100" }];
+      expect((await new InMemoryHostSimulatorAdapter({ defaultTelemetry: { disks: full } }).getHostTelemetry("host_sim"))!.disks).toEqual(full);
+      sim.setTelemetryOverride("host_sim", { disks: full });
+      expect((await sim.getHostTelemetry("host_sim"))!.disks).toEqual(full);
     });
   });
 

@@ -1,3 +1,4 @@
+import type { HostDiskPath } from "@hosting-panel/contracts";
 import type { ApprovedHostMaintenanceCommand } from "./maintenance.js";
 import type { ApprovedHostSecurityCommand } from "./security.js";
 
@@ -28,6 +29,13 @@ export interface HostTelemetry {
   readonly kernelVersion?: string;
   readonly dockerEngineReachable?: boolean;
   readonly collectedAt: string;
+  readonly disks?: readonly HostDisk[];
+}
+
+export interface HostDisk {
+  readonly paths: readonly HostDiskPath[];
+  readonly usedBytes: string;
+  readonly totalBytes: string;
 }
 
 export interface HostAgentPort {

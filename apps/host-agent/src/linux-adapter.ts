@@ -6,10 +6,12 @@ import os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import {
+  HOST_DISK_PATHS,
   HostAgentHealthResponseSchema,
   HostTelemetryWireSchema,
   redactSensitiveValue,
   type HostAgentHealthResponse,
+  type HostDiskPath,
 } from "@hosting-panel/contracts";
 import {
   createApprovedHostMaintenanceCommand,
@@ -17,6 +19,7 @@ import {
   type ApprovedHostMaintenanceCommand,
   type ApprovedHostSecurityCommand,
   type HostAgentPort,
+  type HostDisk,
   type HostMaintenanceResult,
   type HostSecurityResult,
   type HostTelemetry,
@@ -222,9 +225,26 @@ function isMissingCapNetAdminError(err: unknown): boolean {
   return /operation not permitted|permission denied|cache initialization failed/i.test(combined);
 }
 
+// Shipped formula: used = total - bavail*bsize, so reserved blocks count as used.
+function statfsUsage(fsStats: { bsize: number; blocks: number; bavail: number }): {
+  readonly totalBytes: bigint;
+  readonly availableBytes: bigint;
+  readonly usedBytes: bigint;
+} {
+  const bsize = BigInt(Math.max(1, Number(fsStats.bsize)));
+  const blocks = BigInt(Math.max(0, Number(fsStats.blocks)));
+  const bavail = BigInt(Math.max(0, Number(fsStats.bavail)));
+  const clampedAvail = bavail > blocks ? blocks : bavail;
+  const totalBytes = blocks * bsize;
+  const availableBytes = clampedAvail * bsize;
+  const usedBytes = totalBytes >= availableBytes ? totalBytes - availableBytes : 0n;
+  return { totalBytes, availableBytes, usedBytes };
+}
+
 export interface LinuxSystemHostAdapterOptions {
   readonly storagePath?: string;
   readonly fallbackStoragePath?: string;
+  readonly diskPaths?: Partial<Record<HostDiskPath, string>>;
   readonly runtimeDirPath?: string;
   readonly dockerSocketPath?: string;
   readonly procStatPath?: string;
@@ -243,6 +263,7 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
 
   private readonly storagePath: string;
   private readonly fallbackStoragePath: string;
+  private readonly diskPaths: Record<HostDiskPath, string>;
   private readonly runtimeDirPath: string;
   private readonly dockerSocketPath: string;
   private readonly procStatPath: string;
@@ -259,6 +280,13 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
   public constructor(options?: LinuxSystemHostAdapterOptions) {
     this.storagePath = options?.storagePath ?? "/var/lib/hosting-panel";
     this.fallbackStoragePath = options?.fallbackStoragePath ?? "/";
+    this.diskPaths = {
+      panel_data: this.storagePath,
+      docker_data: "/var/lib/docker",
+      database_data: "/var/lib/postgresql",
+      root: "/",
+      ...options?.diskPaths,
+    };
     this.runtimeDirPath = options?.runtimeDirPath ?? "/run/hosting-panel";
     this.dockerSocketPath = options?.dockerSocketPath ?? "/var/run/docker.sock";
     this.procStatPath = options?.procStatPath ?? "/proc/stat";
@@ -359,20 +387,32 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
       fsStats = await statfs(targetPath);
     }
 
-    const bsize = BigInt(Math.max(1, Number(fsStats.bsize)));
-    const blocks = BigInt(Math.max(0, Number(fsStats.blocks)));
-    const bavail = BigInt(Math.max(0, Number(fsStats.bavail)));
-    const clampedAvail = bavail > blocks ? blocks : bavail;
-    const totalBytes = blocks * bsize;
-    const availableBytes = clampedAvail * bsize;
-    const usedBytes = totalBytes >= availableBytes ? totalBytes - availableBytes : 0n;
+    return { ...statfsUsage(fsStats), resolvedTargetPath: targetPath };
+  }
 
-    return {
-      totalBytes,
-      availableBytes,
-      usedBytes,
-      resolvedTargetPath: targetPath,
-    };
+  // One row per filesystem, in order of first appearance; a place that cannot be read is skipped.
+  private async readDisks(): Promise<HostDisk[]> {
+    const rows: { dev: number; paths: HostDiskPath[]; usedBytes: string; totalBytes: string }[] = [];
+    for (const name of HOST_DISK_PATHS) {
+      try {
+        const { dev } = await stat(this.diskPaths[name]);
+        const row = rows.find((r) => r.dev === dev);
+        if (row) {
+          row.paths.push(name);
+          continue;
+        }
+        const usage = statfsUsage(await statfs(this.diskPaths[name]));
+        rows.push({
+          dev,
+          paths: [name],
+          usedBytes: usage.usedBytes.toString(),
+          totalBytes: usage.totalBytes.toString(),
+        });
+      } catch {
+        // Missing or unreadable place: no row.
+      }
+    }
+    return rows.map(({ paths, usedBytes, totalBytes }) => ({ paths, usedBytes, totalBytes }));
   }
 
   private async isDockerSocketPresent(): Promise<boolean> {
@@ -415,11 +455,12 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
       throw new Error("hostId must not be empty");
     }
 
-    const [cpuUsagePercent, memory, storage, dockerEngineReachable] = await Promise.all([
+    const [cpuUsagePercent, memory, storage, dockerEngineReachable, disks] = await Promise.all([
       this.sampleCpuUsagePercent(),
       this.readMemoryUsage(),
       this.readStorageUsage(),
       this.isDockerSocketPresent(),
+      this.readDisks(),
     ]);
 
     const wire = HostTelemetryWireSchema.parse({
@@ -433,6 +474,7 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
       kernelVersion: os.release(),
       dockerEngineReachable,
       collectedAt: new Date().toISOString(),
+      disks,
     });
 
     return wire;

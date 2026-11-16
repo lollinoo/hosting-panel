@@ -11,6 +11,7 @@ import {
   type ApprovedHostMaintenanceCommand,
   type ApprovedHostSecurityCommand,
   type HostAgentPort,
+  type HostDisk,
   type HostMaintenanceResult,
   type HostSecurityResult,
   type HostTelemetry,
@@ -20,6 +21,10 @@ import {
   DEDICATED_NFTABLES_RULESET_SHA256,
   verifyStaticNftablesRuleset,
 } from "./nftables-baseline.js";
+
+const DEFAULT_DISKS: readonly HostDisk[] = [
+  { paths: ["panel_data", "docker_data", "database_data", "root"], usedBytes: "10737418240", totalBytes: "107374182400" },
+];
 
 export interface InMemoryHostSimulatorOptions {
   readonly defaultTelemetry?: Partial<Omit<HostTelemetry, "hostId" | "collectedAt">>;
@@ -103,6 +108,7 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
         dockerEngineReachable:
           custom?.dockerEngineReachable ?? this.defaultTelemetry.dockerEngineReachable ?? true,
         collectedAt: custom?.collectedAt ?? this.nowProvider().toISOString(),
+        disks: custom?.disks ?? this.defaultTelemetry.disks ?? DEFAULT_DISKS,
       });
     }
 
@@ -117,6 +123,7 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
       kernelVersion: this.defaultTelemetry.kernelVersion ?? "6.8.0-simulator",
       dockerEngineReachable: this.defaultTelemetry.dockerEngineReachable ?? true,
       collectedAt: this.nowProvider().toISOString(),
+      disks: this.defaultTelemetry.disks ?? DEFAULT_DISKS,
     });
   }
 
