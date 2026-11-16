@@ -1077,6 +1077,48 @@ export async function transitionOperation(
   });
 }
 
+export type OperationOutcome =
+  | { readonly status: "succeeded" }
+  | { readonly status: "failed"; readonly errorCode: ErrorCode; readonly errorMessage: string };
+
+/** Settles an operation in one transaction: row locked, caller's writes, end state. False when missing or already ended. */
+export async function settleOperation(
+  db: HostingPanelDatabase,
+  operationId: string,
+  outcome: OperationOutcome,
+  write?: (tx: HostingPanelDatabase) => Promise<void>,
+): Promise<boolean> {
+  try {
+    return await db.transaction(async (tx) => {
+      const t = tx as unknown as HostingPanelDatabase;
+      const [row] = await tx
+        .select({ status: operations.status })
+        .from(operations)
+        .where(eq(operations.id, operationId))
+        .for("update");
+      if (!row || isTerminalOperationStatus(row.status)) return false;
+      if (outcome.status === "failed" && !canTransitionOperation(row.status, "failed")) return false;
+      await write?.(t);
+      if (outcome.status === "succeeded") {
+        if (row.status !== "reconciling") await transitionOperation(t, operationId, "reconciling");
+        await transitionOperation(t, operationId, "succeeded", { errorCode: null, errorMessage: null });
+      } else {
+        await transitionOperation(t, operationId, "failed", {
+          errorCode: outcome.errorCode,
+          errorMessage: outcome.errorMessage,
+        });
+      }
+      return true;
+    });
+  } catch (err) {
+    // The work is done and only its record failed: recovery reads what was recorded (R104).
+    if (outcome.status === "succeeded" && typeof err === "object" && err !== null) {
+      Object.assign(err, { ambiguousOutcome: true });
+    }
+    throw err;
+  }
+}
+
 export interface ClaimPendingOutboxFilter {
   readonly includeKinds?: readonly OperationKind[];
   readonly excludeKinds?: readonly OperationKind[];

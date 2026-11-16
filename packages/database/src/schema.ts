@@ -26,7 +26,7 @@ import type {
   ErrorCode,
   GrantEffect,
   HostAllocationStatus,
-  HostDaemonComponent,
+  HeartbeatRowComponent,
   HostDaemonStatus,
   HostStatus,
   HostingMode,
@@ -537,6 +537,7 @@ export const operations = pgTable(
     index("idx_operations_org_status").on(t.organizationId, t.status),
     index("idx_operations_lock_key").on(t.lockKey),
     index("idx_operations_resource_submitted").on(t.resourceId, t.submittedAt),
+    index("idx_operations_org_submitted").on(t.organizationId, t.submittedAt),
   ],
 );
 
@@ -614,7 +615,7 @@ export const hostAgentHeartbeats = pgTable(
     hostId: text("host_id")
       .notNull()
       .references(() => hosts.id, { onDelete: "cascade" }),
-    component: text("component").$type<HostDaemonComponent>().notNull(),
+    component: text("component").$type<HeartbeatRowComponent>().notNull(),
     status: text("status").$type<HostDaemonStatus>().notNull(),
     version: text("version").notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
@@ -644,7 +645,10 @@ export const auditEvents = pgTable(
     details: jsonb("details").notNull().default({}),
     timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_audit_events_org_timestamp").on(t.organizationId, t.timestamp)],
+  (t) => [
+    index("idx_audit_events_org_timestamp").on(t.organizationId, t.timestamp),
+    index("idx_audit_events_timestamp_id").on(t.timestamp, t.id),
+  ],
 );
 
 export const siteDatabases = pgTable(

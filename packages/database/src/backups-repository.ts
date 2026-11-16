@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   HEAVY_ACTIONS_PER_HOUR,
+  HEAVY_ACTIONS_PER_HOUR_PER_ORGANIZATION,
   HEAVY_ACTION_WINDOW_MS,
   HEAVY_BACKUP_OPERATION_KINDS,
   type AdminSiteBackupStatusDto,
@@ -648,21 +649,25 @@ export async function sumNewestBackupSizes(db: DatabaseExecutor): Promise<number
   return Number(row?.total ?? 0);
 }
 
-/** When a customer may start another heavy backup action on the site; null = allowed now. */
+export type HeavyActionScope = { readonly siteId: string } | { readonly organizationId: string };
+
+/** When a customer may start another heavy action in the scope; null = allowed now. */
 export async function heavyActionRetryAt(
   db: DatabaseExecutor,
-  siteId: string,
+  scope: HeavyActionScope,
   now: Date,
   excludeOperationId: string,
 ): Promise<Date | null> {
+  const limit = "siteId" in scope ? HEAVY_ACTIONS_PER_HOUR : HEAVY_ACTIONS_PER_HOUR_PER_ORGANIZATION;
   const rows = await db
     .select({ submittedAt: operations.submittedAt })
     .from(operations)
     .innerJoin(users, eq(users.id, operations.requestedByUserId))
     .where(
       and(
-        eq(operations.resourceType, "site"),
-        eq(operations.resourceId, siteId),
+        "siteId" in scope
+          ? and(eq(operations.resourceType, "site"), eq(operations.resourceId, scope.siteId))
+          : eq(operations.organizationId, scope.organizationId),
         inArray(operations.kind, [...HEAVY_BACKUP_OPERATION_KINDS]),
         isNull(users.platformRole),
         gt(operations.submittedAt, new Date(now.getTime() - HEAVY_ACTION_WINDOW_MS)),
@@ -670,11 +675,9 @@ export async function heavyActionRetryAt(
       ),
     )
     .orderBy(desc(operations.submittedAt))
-    .limit(HEAVY_ACTIONS_PER_HOUR);
+    .limit(limit);
 
-  return rows.length < HEAVY_ACTIONS_PER_HOUR
-    ? null
-    : new Date(rows[HEAVY_ACTIONS_PER_HOUR - 1]!.submittedAt.getTime() + HEAVY_ACTION_WINDOW_MS);
+  return rows.length < limit ? null : new Date(rows[limit - 1]!.submittedAt.getTime() + HEAVY_ACTION_WINDOW_MS);
 }
 
 /** Lists per-site backup status across all active sites for the platform admin overview. */

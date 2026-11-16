@@ -972,7 +972,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       });
 
       // Only 5 counted actions -> allowed (null).
-      expect(await heavyActionRetryAt(db(), liveSiteId, tNow, "op_ha_current")).toBeNull();
+      expect(await heavyActionRetryAt(db(), { siteId: liveSiteId }, tNow, "op_ha_current")).toBeNull();
 
       // Add a 6th counted customer heavy action -> refused until oldestCountedAt leaves the window.
       await insertOp("op_ha_6", {
@@ -981,16 +981,88 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       });
 
       const expectedRetryAt = new Date(oldestCountedAt.getTime() + HEAVY_ACTION_WINDOW_MS);
-      expect(await heavyActionRetryAt(db(), liveSiteId, tNow, "op_ha_current")).toEqual(
+      expect(await heavyActionRetryAt(db(), { siteId: liveSiteId }, tNow, "op_ha_current")).toEqual(
         expectedRetryAt,
       );
 
       // At the exact instant the oldest counted action leaves the window, 5 remain -> allowed.
-      expect(await heavyActionRetryAt(db(), liveSiteId, expectedRetryAt, "op_ha_current")).toBeNull();
+      expect(await heavyActionRetryAt(db(), { siteId: liveSiteId }, expectedRetryAt, "op_ha_current")).toBeNull();
     } finally {
       await db().delete(operations);
       await db().delete(sites).where(eq(sites.id, otherSiteId));
       await db().delete(users).where(eq(users.id, "usr_bkp_platform_admin"));
+    }
+  });
+
+  it("organisation scope refuses the 25th heavy action across sites and ignores platform users", async () => {
+    const siteIds = [liveSiteId];
+    for (const n of [1, 2, 3, 4]) {
+      const created = await createSiteTransactional(db(), {
+        organizationId: orgId,
+        hostAllocationId: "alloc_bkp",
+        name: `Org Quota Site ${n}`,
+        slug: `org-quota-site-${n}`,
+        phpVersion: "8.4",
+      });
+      siteIds.push(created.site.id);
+    }
+    await db().insert(users).values({
+      id: "usr_bkp_org_platform",
+      email: "bkp-org-platform@example.test",
+      name: "Platform Admin",
+      passwordHash: "hash",
+      platformRole: "infrastructure_admin",
+    });
+    await db().insert(organizations).values({
+      id: "org_bkp_other",
+      platformInstallationId: "pin_bkp",
+      name: "Other Org",
+      slug: "other-org",
+    });
+
+    const tNow = new Date("2026-11-15T12:00:00.000Z");
+    const at = (s: number) => new Date(tNow.getTime() - HEAVY_ACTION_WINDOW_MS + s * 1_000);
+    const insertOp = (id: string, i: number, extra: { userId?: string; organizationId?: string; resourceId?: string } = {}) =>
+      db()
+        .insert(operations)
+        .values({
+          id,
+          organizationId: extra.organizationId ?? orgId,
+          kind: "site.backups.create",
+          status: "succeeded",
+          resourceType: "site",
+          resourceId: extra.resourceId ?? siteIds[i % siteIds.length]!,
+          requestedByUserId: extra.userId ?? "usr_bkp_admin",
+          submittedAt: at(10 + i),
+        });
+
+    try {
+      // 23 customer actions spread over five sites: no site reaches its own 6.
+      for (let i = 0; i < 23; i++) await insertOp(`op_org_${i}`, i);
+      // Neither a platform user's actions nor another organisation's are counted.
+      for (let i = 0; i < 5; i++) await insertOp(`op_org_platform_${i}`, i, { userId: "usr_bkp_org_platform" });
+      await insertOp("op_org_elsewhere", 0, { organizationId: "org_bkp_other", resourceId: "site_bkp_elsewhere" });
+      await insertOp("op_org_current", 0);
+
+      for (const siteId of siteIds) {
+        expect(await heavyActionRetryAt(db(), { siteId }, tNow, "op_org_current")).toBeNull();
+      }
+      // The current one is the 24th: allowed.
+      expect(await heavyActionRetryAt(db(), { organizationId: orgId }, tNow, "op_org_current")).toBeNull();
+
+      // One more makes the current one the 25th: refused until the oldest leaves the window.
+      await insertOp("op_org_23", 23);
+      for (const siteId of siteIds) {
+        expect(await heavyActionRetryAt(db(), { siteId }, tNow, "op_org_current")).toBeNull();
+      }
+      expect(await heavyActionRetryAt(db(), { organizationId: orgId }, tNow, "op_org_current")).toEqual(
+        new Date(at(10).getTime() + HEAVY_ACTION_WINDOW_MS),
+      );
+    } finally {
+      await db().delete(operations);
+      for (const siteId of siteIds.slice(1)) await db().delete(sites).where(eq(sites.id, siteId));
+      await db().delete(users).where(eq(users.id, "usr_bkp_org_platform"));
+      await db().delete(organizations).where(eq(organizations.id, "org_bkp_other"));
     }
   });
 

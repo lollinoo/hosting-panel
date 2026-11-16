@@ -19,7 +19,9 @@ import {
   saveSiteWordpressLastImport,
   listEncryptedSecretsMetadata,
   listHostAgentHeartbeats,
+  listUnsettledOperations,
   markExpiredOperationsUnknownTransactional,
+  operations,
   outboxEvents,
   recordObservedStateReconciliationTransactional,
   resolveDecryptedSecretRefs,
@@ -30,6 +32,7 @@ import {
   sql,
   serviceInstances,
   siteBackups,
+  inArray,
   sites,
   stackRevisions,
   transitionOperation,
@@ -62,6 +65,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0012_wordpress_tools.sql",
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
+      "0015_operations_audit_indexes.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -87,6 +91,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0012_wordpress_tools.sql",
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
+      "0015_operations_audit_indexes.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -108,6 +113,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0012_wordpress_tools.sql",
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
+      "0015_operations_audit_indexes.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
@@ -738,5 +744,116 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       await completeOutboxEvent(client.db, enq.outbox!.id);
       await transitionOperation(client.db, enq.operation.id, "cancelled");
     }
+  });
+
+  it("8. hides the panel_containers and panel_certificate rows from the heartbeat list", async () => {
+    for (const component of ["panel_containers", "panel_certificate"] as const) {
+      await upsertHostAgentHeartbeat(client.db, {
+        hostId: DEMO_IDS.hosts.acme,
+        component,
+        status: "online",
+        version: "1",
+        telemetrySnapshot: {},
+      });
+    }
+    const daemons = ["docker_executor", "host_agent"];
+    for (const rows of [
+      await listHostAgentHeartbeats(client.db, DEMO_IDS.hosts.acme),
+      await listHostAgentHeartbeats(client.db),
+    ]) {
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((row) => daemons.includes(row.component))).toBe(true);
+    }
+  });
+
+  it("9. sets notRunningSince at the first observation that is not running, keeps it, drops it at running", async () => {
+    const first = new Date("2026-11-16T10:00:00.000Z");
+    const record = (observedStatus: string, observedAt: Date) =>
+      recordObservedStateReconciliationTransactional(client.db, {
+        serviceInstanceId: DEMO_IDS.services.acmeBlogWp,
+        observedStatus,
+        rawState: { restartCount: 2 },
+        observedAt,
+      });
+    const stopped = await record("stopped", first);
+    expect(stopped.observedState.rawState).toEqual({ restartCount: 2, notRunningSince: first.toISOString() });
+    const degraded = await record("degraded", new Date(first.getTime() + 60_000));
+    expect(degraded.observedState.rawState).toEqual({ restartCount: 2, notRunningSince: first.toISOString() });
+    const running = await record("running", new Date(first.getTime() + 120_000));
+    expect(running.observedState.rawState).toEqual({ restartCount: 2 });
+  });
+
+  it("10. remembers a restart count rise for two minutes of look time, forgets it on a lower count", async () => {
+    const t0 = new Date("2026-11-16T10:00:00.000Z");
+    const record = (restartCount: number, seconds: number) =>
+      recordObservedStateReconciliationTransactional(client.db, {
+        serviceInstanceId: DEMO_IDS.services.acmeBlogWp,
+        observedStatus: "running",
+        rawState: { restartCount },
+        observedAt: new Date(t0.getTime() + seconds * 1000),
+      });
+    await record(0, 0);
+    const rise = new Date(t0.getTime() + 15_000).toISOString();
+    expect((await record(1, 15)).observedState.rawState).toEqual({ restartCount: 1, notRunningSince: rise, lastRestartAt: rise });
+    expect((await record(1, 134)).observedState.rawState).toEqual({ restartCount: 1, notRunningSince: rise, lastRestartAt: rise });
+    expect((await record(1, 135)).observedState.rawState).toEqual({ restartCount: 1 });
+    await record(2, 150);
+    expect((await record(0, 165)).observedState.rawState).toEqual({ restartCount: 0 });
+  });
+
+  const makeOperation = async (patch: Partial<typeof operations.$inferInsert>) => {
+    const enq = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.deploy",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeShop,
+    });
+    await client.db.update(operations).set(patch).where(eq(operations.id, enq.operation.id));
+    return enq.operation.id;
+  };
+  const statusesOf = async (ids: string[]) =>
+    Object.fromEntries(
+      (await client.db.select({ id: operations.id, status: operations.status }).from(operations).where(inArray(operations.id, ids)))
+        .map((row) => [row.id, row.status]),
+    );
+
+  it("10. sweeps reconciling with an expired or a null lease to unknown and leaves a live lease alone", async () => {
+    const now = new Date();
+    const expired = await makeOperation({ status: "reconciling", leaseExpiresAt: new Date(now.getTime() - 1_000) });
+    const nullLease = await makeOperation({ status: "reconciling", leaseExpiresAt: null });
+    const live = await makeOperation({ status: "reconciling", leaseExpiresAt: new Date(now.getTime() + 60_000) });
+    await markExpiredOperationsUnknownTransactional(client.db, now);
+    expect(await statusesOf([expired, nullLease, live])).toEqual({
+      [expired]: "unknown",
+      [nullLease]: "unknown",
+      [live]: "reconciling",
+    });
+  });
+
+  it("11. lists unknown operations after 15 minutes and stuck ones 5 minutes after the lease, with the site name", async () => {
+    const now = new Date();
+    const ago = (ms: number) => new Date(now.getTime() - ms);
+    const unknownOld = await makeOperation({ status: "unknown", updatedAt: ago(15 * 60_000 + 1_000) });
+    const unknownNew = await makeOperation({ status: "unknown", updatedAt: ago(14 * 60_000) });
+    const stuckLease = await makeOperation({ status: "processing", leaseExpiresAt: ago(5 * 60_000 + 1_000), updatedAt: ago(20 * 60_000) });
+    const liveLease = await makeOperation({ status: "processing", leaseExpiresAt: ago(4 * 60_000), updatedAt: ago(20 * 60_000) });
+    const stuckNoLease = await makeOperation({ status: "reconciling", leaseExpiresAt: null, updatedAt: ago(6 * 60_000) });
+    const [site] = await client.db.select({ name: sites.name }).from(sites).where(eq(sites.id, DEMO_IDS.sites.acmeShop));
+    const mine = [unknownOld, unknownNew, stuckLease, liveLease, stuckNoLease];
+    const rows = (await listUnsettledOperations(client.db, now)).filter((row) => mine.includes(row.operationId));
+    const expected = (operationId: string, status: string, alert: string, since: Date) => ({
+      operationId,
+      kind: "site.deploy",
+      status,
+      alert,
+      siteId: DEMO_IDS.sites.acmeShop,
+      siteName: site!.name,
+      since,
+    });
+    expect(rows).toEqual([
+      expected(unknownOld, "unknown", "operation_unknown", ago(15 * 60_000 + 1_000)),
+      expected(stuckNoLease, "reconciling", "operation_stuck", ago(6 * 60_000)),
+      expected(stuckLease, "processing", "operation_stuck", ago(5 * 60_000 + 1_000)),
+    ]);
   });
 });
