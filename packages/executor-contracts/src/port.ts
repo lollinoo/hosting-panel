@@ -3,6 +3,8 @@ import type {
   BackupsIpcRequest,
   BackupsResultByAction,
   OperationStatus,
+  PanelContainer,
+  PanelContainerState,
   SftpAccessApplyRequest,
   SftpApplyResult,
   SftpStatusReport,
@@ -74,6 +76,16 @@ export interface DockerExecutorPort {
   applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult>;
   getSftpStatus(): Promise<SftpStatusReport>;
   backups<R extends BackupsIpcRequest>(req: R): Promise<BackupsResultByAction[R["action"]]>;
+  getPanelContainers(): Promise<readonly PanelContainerStatus[]>;
+  getPanelContainerLogs(req: { readonly component: PanelContainer; readonly tail: number }): Promise<readonly ServiceLogLine[]>;
+}
+
+export interface PanelContainerStatus {
+  readonly component: PanelContainer;
+  readonly state: PanelContainerState;
+  readonly expected: boolean;
+  readonly startedAt: string | null;
+  readonly restartCount: number;
 }
 
 export interface SiteRoutesRequest {

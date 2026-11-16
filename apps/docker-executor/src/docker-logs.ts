@@ -51,3 +51,11 @@ export function readJobStdout(body: Buffer, ceiling: number): string | null {
   }
   return Buffer.concat(parts, total).toString("utf8");
 }
+
+/** phpMyAdmin access lines carry the CSRF token and SQL in the query string (D11); Apache's `\"` stays inside it. */
+export const PHPMYADMIN_QUERY_PATTERN = /\?(?:\\.|[^\s"\\])*/g;
+
+/** Masks every query string of a phpMyAdmin log line. */
+export function maskPhpMyAdminQuery(text: string): string {
+  return text.replace(PHPMYADMIN_QUERY_PATTERN, "?[masked]");
+}

@@ -1,4 +1,5 @@
 import type {
+  PanelContainer,
   SftpAccessApplyRequest,
   SftpApplyResult,
   SftpStatusReport,
@@ -9,6 +10,7 @@ import type {
   BackupsResult,
   DockerExecutionResult,
   DockerExecutorPort,
+  PanelContainerStatus,
   ServiceLogLine,
   SiteDatabasesRequest,
   SiteDatabasesResult,
@@ -64,6 +66,14 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async getServiceLogs(_serviceInstanceId: string, _tail: number): Promise<readonly ServiceLogLine[]> {
+    return this.refuse();
+  }
+
+  async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    return this.refuse();
+  }
+
+  async getPanelContainerLogs(_req: { component: PanelContainer; tail: number }): Promise<readonly ServiceLogLine[]> {
     return this.refuse();
   }
 

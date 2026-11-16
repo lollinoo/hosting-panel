@@ -23,6 +23,8 @@ import {
   type ExecutorHealthResponse,
   type IpcSigningKey,
   type ObservedServiceStateWire,
+  type PanelContainer,
+  PanelContainersDataEnvelopeSchema,
   type ServiceInstanceActionIpcRequest,
   type ServiceLogsIpcRequest,
   type SiteJobIpcRequest,
@@ -41,6 +43,7 @@ import type {
   MailTestResult,
   PanelMailRequest,
   PanelMailResult,
+  PanelContainerStatus,
   ServiceLogLine,
   SftpAccessApplyRequest,
   SftpApplyResult,
@@ -120,6 +123,8 @@ export const SITE_DATABASES_TIMEOUT_MS = 75_000;
 export const SITE_DATABASES_SIGNON_TIMEOUT_MS = 120_000;
 export const BACKUPS_TEST_TIMEOUT_MS = 40_000;
 export const BACKUPS_TIMEOUT_MS = 30_000;
+export const PANEL_CONTAINERS_TIMEOUT_MS = 10_000;
+export const PANEL_LOGS_TIMEOUT_MS = 35_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -437,6 +442,20 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const payload: ServiceLogsIpcRequest = { serviceInstanceId, tail };
     const json = await this.sendSignedJsonRequest("POST", "/v1/services/logs", payload);
+    return ServiceLogsDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    const json = await this.sendSignedJsonRequest("GET", "/v1/panel/containers", undefined, PANEL_CONTAINERS_TIMEOUT_MS);
+    return PanelContainersDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async getPanelContainerLogs(req: {
+    readonly component: PanelContainer;
+    readonly tail: number;
+  }): Promise<readonly ServiceLogLine[]> {
+    const query = new URLSearchParams({ component: req.component, tail: String(req.tail) });
+    const json = await this.sendSignedJsonRequest("GET", `/v1/panel/logs?${query}`, undefined, PANEL_LOGS_TIMEOUT_MS);
     return ServiceLogsDataEnvelopeSchema.parse(json).data;
   }
 

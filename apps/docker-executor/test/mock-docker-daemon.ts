@@ -16,6 +16,8 @@ export interface MockDockerContainerRecord {
   running: boolean;
   status: string;
   restartCount: number;
+  startedAt?: string;
+  dead?: boolean;
   hostConfig: NonNullable<DockerContainerInspectPayload["HostConfig"]>;
   networks: Record<string, unknown>;
 }
@@ -51,6 +53,8 @@ export interface MockDockerDaemon {
   readonly failCreates: { remaining: number };
   /** The next `remaining` container starts answer 500. */
   readonly failStarts: { remaining: number };
+  /** The next `remaining` container inspects answer 500. */
+  readonly failInspects: { remaining: number };
   /** The next `remaining` container deletes answer 409 (optionally removing from containers so inspect 404s). */
   readonly deleteConflicts: { remaining: number; removeFromMap?: boolean };
   close(): Promise<void>;
@@ -62,7 +66,7 @@ export async function startMockDockerDaemon(options?: {
   readonly pullBody?: string;
   readonly logsBody?: Buffer;
   /** Like logsBody, but evaluated per request (logs that appear later). */
-  readonly logsBodyFn?: () => Buffer;
+  readonly logsBodyFn?: (ref: string) => Buffer;
   /** POST /containers/<id>/wait answers this StatusCode (default 0); "hang" never answers. */
   readonly waitStatusCode?: number | "hang";
   /** GET /exec/<id>/json answers this ExitCode (default 0). */
@@ -96,6 +100,7 @@ export async function startMockDockerDaemon(options?: {
   const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
   const failCreates = { remaining: 0 };
   const failStarts = { remaining: 0 };
+  const failInspects = { remaining: 0 };
   const deleteConflicts: { remaining: number; removeFromMap?: boolean } = { remaining: 0 };
   const pulledImages = new Set<string>();
   let seq = 1;
@@ -155,11 +160,16 @@ export async function startMockDockerDaemon(options?: {
       const logsMatch = /^\/containers\/([^/]+)\/logs$/.exec(routePath);
       if (method === "GET" && logsMatch && (options?.logsBody || options?.logsBodyFn)) {
         res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
-        res.end(options.logsBodyFn ? options.logsBodyFn() : options.logsBody);
+        res.end(options.logsBodyFn ? options.logsBodyFn(decodeURIComponent(logsMatch[1] ?? "")) : options.logsBody);
         return;
       }
 
       if (method === "GET" && logsMatch) {
+        if (!findByRef(decodeURIComponent(logsMatch[1] ?? ""))) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "No such container" }));
+          return;
+        }
         res.writeHead(200, { "Content-Type": "application/vnd.docker.raw-stream" });
         res.end();
         return;
@@ -449,6 +459,12 @@ export async function startMockDockerDaemon(options?: {
       if (method === "GET" && inspectMatch && inspectMatch[1]) {
         const ref = decodeURIComponent(inspectMatch[1]);
         const target = findByRef(ref);
+        if (failInspects.remaining > 0) {
+          failInspects.remaining -= 1;
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "boom" }));
+          return;
+        }
         if (!target) {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message: "No such container" }));
@@ -463,7 +479,8 @@ export async function startMockDockerDaemon(options?: {
             Running: target.running,
             Restarting: false,
             OOMKilled: false,
-            Dead: false,
+            Dead: target.dead === true,
+            ...(target.startedAt !== undefined ? { StartedAt: target.startedAt } : {}),
           },
           Config: {
             Image: target.image,
@@ -569,6 +586,7 @@ export async function startMockDockerDaemon(options?: {
     failRestarts,
     failCreates,
     failStarts,
+    failInspects,
     deleteConflicts,
     async close() {
       server.closeAllConnections();

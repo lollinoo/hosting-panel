@@ -276,6 +276,14 @@ describe("Phase1DisabledDockerExecutor site capabilities", () => {
     await expect(executor.getServiceLogs("svc", 10)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });
 
+  it("phase1 executor refuses the panel container calls with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    await expect(executor.getPanelContainers()).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    await expect(executor.getPanelContainerLogs({ component: "sftp", tail: 10 })).rejects.toMatchObject({
+      code: "NOT_SUPPORTED",
+    });
+  });
+
   it("phase1 executor refuses routes and certificates with NOT_SUPPORTED", async () => {
     const executor = new Phase1DisabledDockerExecutor();
     await expect(

@@ -14,6 +14,7 @@ import {
   MailRelayApplyIpcRequestSchema,
   MailRelayStatusIpcRequestSchema,
   MailTestIpcRequestSchema,
+  PanelContainerLogsIpcRequestSchema,
   PanelMailIpcRequestSchema,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
@@ -551,6 +552,30 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/v1/panel/containers") {
+        writeJson(res, 200, { data: await this.executor.getPanelContainers() });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/panel/logs") {
+        // A name given twice reaches the schema as an array, which it refuses.
+        const param = (name: string) => {
+          const all = parsedUrl.searchParams.getAll(name);
+          return all.length > 1 ? all : (all[0] ?? null);
+        };
+        const tail = param("tail");
+        const req = this.parseValue(
+          PanelContainerLogsIpcRequestSchema,
+          {
+            component: param("component"),
+            tail: Array.isArray(tail) ? tail : Number(tail),
+          },
+          "panel logs",
+        );
+        writeJson(res, 200, { data: await this.executor.getPanelContainerLogs(req) });
+        return;
+      }
+
       const observedMatch = /^\/v1\/services\/([^/]+)\/observed-state$/.exec(pathname);
       if (method === "GET" && observedMatch && observedMatch[1]) {
         const serviceInstanceId = decodeURIComponent(observedMatch[1]);
@@ -647,7 +672,11 @@ export class DockerExecutorIpcServer {
   }
 
   private parseBody<S extends z.ZodType>(schema: S, rawBody: Buffer, what: string): z.infer<S> {
-    const parsed = schema.safeParse(this.parseJsonBody(rawBody));
+    return this.parseValue(schema, this.parseJsonBody(rawBody), what);
+  }
+
+  private parseValue<S extends z.ZodType>(schema: S, value: unknown, what: string): z.infer<S> {
+    const parsed = schema.safeParse(value);
     if (!parsed.success) {
       const firstIssue = parsed.error.issues[0];
       throw new ExecutorCodedError(

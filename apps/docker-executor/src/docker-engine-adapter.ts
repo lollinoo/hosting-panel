@@ -18,12 +18,17 @@ import {
   MAIL_RELAY_ALIAS,
   MAIL_RELAY_CONTAINER_NAME,
   MAIL_RELAY_IMAGE,
+  PANEL_CONTAINER_STATES,
+  PANEL_CONTAINERS,
+  PanelContainerLogsIpcRequestSchema,
+  type PanelContainerState,
   type BackupsIpcRequest,
   type BackupsResultByAction,
   type BackupTarget,
   type MailFailureDto,
   type MailRelayApplyRequest,
   type MailTestResult,
+  type PanelContainer,
   type PanelMailRequest,
   type PanelMailResult,
   type PhpVersion,
@@ -38,6 +43,8 @@ import {
   type DockerExecutionResult,
   type DockerExecutorPort,
   type CertificateStatusReport,
+  type PanelContainerStatus,
+  type ServiceLogLine,
   type SftpAccessApplyRequest,
   type SftpApplyResult,
   type SftpStatusReport,
@@ -78,7 +85,7 @@ import {
   buildMailRelaySaslLine,
 } from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
-import { demuxDockerLogStream, readJobStdout } from "./docker-logs.js";
+import { demuxDockerLogStream, maskPhpMyAdminQuery, readJobStdout } from "./docker-logs.js";
 import {
   parsePostfixDeliveries,
   summarizeMailDeliveries,
@@ -202,6 +209,7 @@ export interface DockerContainerInspectPayload {
     readonly Restarting?: boolean;
     readonly OOMKilled?: boolean;
     readonly Dead?: boolean;
+    readonly StartedAt?: string;
     readonly ExitCode?: number;
     readonly Error?: string;
   };
@@ -238,6 +246,9 @@ export interface DockerContainerInspectPayload {
   };
 }
 
+/** json-file rotation of every long-lived panel container (R184 2.1). Not part of any config hash. */
+const ROTATED_LOG_CONFIG = { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } } as const;
+
 export interface HardenedContainerCreatePayload {
   readonly Image: string;
   readonly Env: readonly string[];
@@ -255,6 +266,7 @@ export interface HardenedContainerCreatePayload {
     readonly RestartPolicy: { readonly Name: "unless-stopped" };
     readonly NetworkMode: string;
     readonly Binds: readonly string[];
+    readonly LogConfig: typeof ROTATED_LOG_CONFIG;
     readonly PortBindings?: Readonly<
       Record<string, readonly { readonly HostIp: string; readonly HostPort: string }[]>
     >;
@@ -701,6 +713,7 @@ export function buildHardenedContainerCreatePayload(
       RestartPolicy: { Name: "unless-stopped" },
       NetworkMode: siteNetworkName,
       Binds: binds,
+      LogConfig: ROTATED_LOG_CONFIG,
       ...(Object.keys(portBindingsMap).length > 0 ? { PortBindings: portBindingsMap } : {}),
     },
     NetworkingConfig: {
@@ -1750,7 +1763,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       const createRes = await this.dockerClient.request(
         "POST",
         `/containers/create?name=${encodeURIComponent(SHARED_DB_CONTAINER_NAME)}`,
-        payload,
+        { ...payload, HostConfig: { ...payload.HostConfig, LogConfig: ROTATED_LOG_CONFIG } },
       );
       if (createRes.statusCode !== 201) {
         throw new ExecutorCodedError(
@@ -2540,11 +2553,19 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     if (!summary) {
       throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
     }
+    return this.readContainerLogs(summary.Id, tail);
+  }
+
+  /** Last lines of one container by name or id (tail clamped to 1..500); NOT_FOUND on 404. */
+  public async readContainerLogs(nameOrId: string, tail: number): Promise<ServiceLogLine[]> {
     const n = Math.min(500, Math.max(1, Math.trunc(tail) || 1));
     const res = await this.dockerClient.request(
       "GET",
-      `/containers/${summary.Id}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
+      `/containers/${encodeURIComponent(nameOrId)}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
     );
+    if (res.statusCode === 404) {
+      throw new ExecutorCodedError("Container not found", "NOT_FOUND");
+    }
     if (res.statusCode !== 200) {
       throw new ExecutorCodedError(
         `Failed to read service logs (HTTP ${String(res.statusCode)})`,
@@ -2552,6 +2573,70 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       );
     }
     return demuxDockerLogStream(res.body);
+  }
+
+  /** State of one container by name, in the closed panel words; a 404 is `missing`. */
+  public async inspectPanelContainer(
+    name: string,
+  ): Promise<{ state: PanelContainerState; startedAt: string | null; restartCount: number }> {
+    const inspect = await this.inspectContainerByNameOrId(name);
+    if (!inspect) {
+      return { state: "missing", startedAt: null, restartCount: 0 };
+    }
+    const mapped = mapContainerStateToObservedStatus(inspect.State);
+    const state = PANEL_CONTAINER_STATES.find((s) => s === mapped && s !== "missing") ?? "unknown";
+    // Docker writes 0001-01-01T00:00:00Z for a container that never started.
+    const started = Date.parse(inspect.State?.StartedAt ?? "");
+    return {
+      state,
+      startedAt: started > 0 ? new Date(started).toISOString() : null,
+      restartCount: inspect.RestartCount ?? 0,
+    };
+  }
+
+  public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    const [seen, sftpState, relaySecret] = await Promise.all([
+      Promise.all(PANEL_CONTAINERS.map((c) => this.inspectPanelContainer(this.panelContainerName(c)))),
+      readSftpState(this.sftpStateDir).catch(() => "unreadable" as const),
+      stat(path.join(this.mailRelaySecretDir, MAIL_RELAY_SASL_FILE)).then(() => true, () => false),
+    ]);
+    return PANEL_CONTAINERS.map((component, i) => {
+      const status = seen[i]!;
+      const exists = status.state !== "missing";
+      const expected = {
+        ingress_proxy: this.panel !== null || exists,
+        shared_database: true,
+        phpmyadmin: exists,
+        sftp: sftpState === "unreadable" || (sftpState?.users.length ?? 0) > 0,
+        mail_relay: relaySecret,
+      }[component];
+      return { component, ...status, expected };
+    });
+  }
+
+  public async getPanelContainerLogs(req: {
+    readonly component: PanelContainer;
+    readonly tail: number;
+  }): Promise<readonly ServiceLogLine[]> {
+    const parsed = PanelContainerLogsIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid panel logs request", "VALIDATION_ERROR");
+    }
+    const lines = await this.readContainerLogs(this.panelContainerName(parsed.data.component), parsed.data.tail);
+    return parsed.data.component === "phpmyadmin"
+      ? lines.map((line) => ({ ...line, text: maskPhpMyAdminQuery(line.text) }))
+      : lines;
+  }
+
+  /** The closed map from panel component to container name. */
+  private panelContainerName(component: PanelContainer): string {
+    return {
+      ingress_proxy: INGRESS_PROXY_CONTAINER_NAME,
+      shared_database: SHARED_DB_CONTAINER_NAME,
+      phpmyadmin: this.phpMyAdminContainerName,
+      sftp: this.sftpContainerName,
+      mail_relay: MAIL_RELAY_CONTAINER_NAME,
+    }[component];
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {

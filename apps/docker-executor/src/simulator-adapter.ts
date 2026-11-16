@@ -7,6 +7,8 @@ import {
   type BackupsResultByAction,
   type CertProblem,
   type MailRelayApplyRequest,
+  PANEL_CONTAINERS,
+  type PanelContainer,
   PanelMailIpcRequestSchema,
   type PanelMailRequest,
   type PanelMailResult,
@@ -22,6 +24,7 @@ import type {
   DockerExecutorPort,
   MailRelayStatusReport,
   MailTestResult,
+  PanelContainerStatus,
   ServiceLogLine,
   SftpAccessApplyRequest,
   SftpAccessUser,
@@ -42,6 +45,7 @@ import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
+import { maskPhpMyAdminQuery } from "./docker-logs.js";
 import {
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
@@ -205,6 +209,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly sftpApplies: SftpAccessApplyRequest[] = [];
   private failingSftpApplies = 0;
   private readonly serviceLogs = new Map<string, ServiceLogLine[]>();
+  private readonly panelContainerOverrides = new Map<PanelContainer, Partial<Omit<PanelContainerStatus, "component">>>();
+  private readonly panelContainerLogs = new Map<PanelContainer, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
@@ -363,6 +369,16 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
   public setServiceLogs(serviceInstanceId: string, lines: ServiceLogLine[]): void {
     this.serviceLogs.set(serviceInstanceId, lines);
+  }
+
+  /** Overrides fields of one panel container's status over the defaults. */
+  public setPanelContainer(component: PanelContainer, partial: Partial<Omit<PanelContainerStatus, "component">>): void {
+    this.panelContainerOverrides.set(component, { ...this.panelContainerOverrides.get(component), ...partial });
+  }
+
+  /** Sets the log lines one panel container returns. */
+  public setPanelContainerLogs(component: PanelContainer, lines: ServiceLogLine[]): void {
+    this.panelContainerLogs.set(component, lines);
   }
 
   public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
@@ -548,6 +564,38 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   ): Promise<readonly ServiceLogLine[]> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     return (this.serviceLogs.get(serviceInstanceId) ?? []).slice(-Math.max(1, tail));
+  }
+
+  public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    this.assertEngineAvailable();
+    return PANEL_CONTAINERS.map((component) => this.panelContainerStatus(component));
+  }
+
+  public async getPanelContainerLogs(req: {
+    readonly component: PanelContainer;
+    readonly tail: number;
+  }): Promise<readonly ServiceLogLine[]> {
+    this.assertEngineAvailable();
+    if (this.panelContainerStatus(req.component).state === "missing") {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    const lines = (this.panelContainerLogs.get(req.component) ?? []).slice(-Math.max(1, req.tail));
+    return req.component === "phpmyadmin" ? lines.map((line) => ({ ...line, text: maskPhpMyAdminQuery(line.text) })) : lines;
+  }
+
+  private panelContainerStatus(component: PanelContainer): PanelContainerStatus {
+    const on = (expected: boolean) => ({ state: expected ? "running" : "missing", expected }) as const;
+    const base =
+      component === "ingress_proxy"
+        ? { state: "running", expected: this.panel !== null } as const
+        : component === "shared_database"
+          ? on(true)
+          : component === "phpmyadmin"
+            ? on(false)
+            : component === "sftp"
+              ? on(this.sftpUsers.length > 0)
+              : on(this.mailRelay !== null);
+    return { component, ...base, startedAt: null, restartCount: 0, ...this.panelContainerOverrides.get(component) };
   }
 
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
