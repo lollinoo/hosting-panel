@@ -7,6 +7,7 @@ import {
   ExecutorHealthResponseSchema,
   MailRelayStatusReportWireSchema,
   MailTestIpcResponseSchema,
+  PanelMailIpcResponseSchema,
   ObservedServiceStateWireSchema,
   SftpApplyIpcResponseSchema,
   SftpStatusReportWireSchema,
@@ -38,6 +39,8 @@ import type {
   MailRelayApplyRequest,
   MailRelayStatusReport,
   MailTestResult,
+  PanelMailRequest,
+  PanelMailResult,
   ServiceLogLine,
   SftpAccessApplyRequest,
   SftpApplyResult,
@@ -362,6 +365,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       from: req.from,
     });
     return z.object({ data: MailTestIpcResponseSchema }).parse(json).data;
+  }
+
+  public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/panel", req);
+    return z.object({ data: PanelMailIpcResponseSchema }).parse(json).data;
   }
 
   public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {

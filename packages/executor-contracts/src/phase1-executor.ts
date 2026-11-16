@@ -19,7 +19,13 @@ import type {
   SiteJobResult,
 } from "./port.js";
 import type { CertificateStatusReport } from "./acme-status.js";
-import type { MailRelayApplyRequest, MailRelayStatusReport, MailTestResult } from "./mail-relay.js";
+import type {
+  MailRelayApplyRequest,
+  MailRelayStatusReport,
+  MailTestResult,
+  PanelMailRequest,
+  PanelMailResult,
+} from "./mail-relay.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
@@ -78,6 +84,10 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async sendTestMail(_req: { to: string; from: string }): Promise<MailTestResult> {
+    return this.refuse();
+  }
+
+  async sendPanelMail(_req: PanelMailRequest): Promise<PanelMailResult> {
     return this.refuse();
   }
 

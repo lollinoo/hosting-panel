@@ -14,6 +14,7 @@ import {
   MailRelayApplyIpcRequestSchema,
   MailRelayStatusIpcRequestSchema,
   MailTestIpcRequestSchema,
+  PanelMailIpcRequestSchema,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
   ServiceLogsIpcRequestSchema,
@@ -498,6 +499,12 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/mail-relay/test") {
         const req = this.parseBody(MailTestIpcRequestSchema, rawBody, "test email");
         writeJson(res, 200, { data: await this.executor.sendTestMail(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/mail-relay/panel") {
+        const req = this.parseBody(PanelMailIpcRequestSchema, rawBody, "panel email");
+        writeJson(res, 200, { data: await this.executor.sendPanelMail(req) });
         return;
       }
 

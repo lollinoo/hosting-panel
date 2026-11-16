@@ -24,6 +24,8 @@ import {
   type MailFailureDto,
   type MailRelayApplyRequest,
   type MailTestResult,
+  type PanelMailRequest,
+  type PanelMailResult,
   type PhpVersion,
   type SftpAccessUser,
   findUnsafeDockerInputFields,
@@ -83,6 +85,7 @@ import {
   type MailDelivery,
 } from "./mail-relay-status.js";
 import { submitLocalMail } from "./smtp-submit.js";
+import { deliverPanelMail } from "./panel-mail.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
@@ -1468,12 +1471,27 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
-  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+  /** The relay's bridge address, or null when it is not running. */
+  async #mailRelayIp(): Promise<string | null> {
     const relay = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
     const ip = (relay?.NetworkSettings?.Networks?.[MAIL_RELAY_NETWORK_NAME] as
       | { IPAddress?: string }
       | undefined)?.IPAddress;
-    if (relay?.State?.Running !== true || !ip) {
+    return relay?.State?.Running === true && ip ? ip : null;
+  }
+
+  public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
+    return deliverPanelMail(
+      await this.#mailRelayIp(),
+      this.mailSubmitPort,
+      this.panel?.hostname ?? "hp-mail.localdomain",
+      req,
+    );
+  }
+
+  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+    const ip = await this.#mailRelayIp();
+    if (!ip) {
       throw new ExecutorCodedError("Mail relay is not running", "MAIL_RELAY_UNAVAILABLE");
     }
     const startedMs = Date.now();

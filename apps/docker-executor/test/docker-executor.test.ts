@@ -2076,6 +2076,25 @@ describe("mail relay IPC", () => {
     });
   });
 
+  it("panel mail round-trips unchanged into the simulator and the server refuses an http link", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client, raw } = await serve(simulator);
+    const req = {
+      kind: "password_reset" as const,
+      to: "customer@example.test",
+      from: "noreply@mail.example.test",
+      locale: "it" as const,
+      link: "https://panel.example.test/reset-password#sentinel-token",
+    };
+    expect(await client.sendPanelMail(req)).toEqual({ outcome: "failed" });
+    await client.applyMailRelay(config);
+    expect(await client.sendPanelMail(req)).toEqual({ outcome: "queued" });
+    expect(simulator.panelMails).toEqual([req, req]);
+    const res = await raw("/v1/mail-relay/panel", { ...req, link: "http://panel.example.test/reset-password#x" });
+    expect(res.status).toBe(400);
+    expect(simulator.panelMails).toHaveLength(2);
+  });
+
   it("client uses 300 s for mail apply and 35 s for status and test", async () => {
     const { client } = await serve(new InMemoryDockerSimulatorAdapter());
     const timeouts: Array<number | undefined> = [];

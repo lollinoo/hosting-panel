@@ -128,6 +128,7 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
   public getMailRelayStatus: DockerExecutorPort["getMailRelayStatus"] = (req) =>
     this.sim.getMailRelayStatus(req);
   public sendTestMail: DockerExecutorPort["sendTestMail"] = (req) => this.sim.sendTestMail(req);
+  public sendPanelMail: DockerExecutorPort["sendPanelMail"] = (req) => this.sim.sendPanelMail(req);
   public siteFiles: DockerExecutorPort["siteFiles"] = (req) => this.sim.siteFiles(req);
   public applySftpAccess: DockerExecutorPort["applySftpAccess"] = (req) =>
     this.sim.applySftpAccess(req);

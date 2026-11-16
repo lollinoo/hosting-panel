@@ -303,6 +303,15 @@ describe("Phase1DisabledDockerExecutor mail", () => {
     await expect(executor.sendTestMail({ to: "a@b.it", from: "c@d.it" })).rejects.toMatchObject({
       code: "NOT_SUPPORTED",
     });
+    await expect(
+      executor.sendPanelMail({
+        kind: "password_reset",
+        to: "customer@example.test",
+        from: "panel@example.test",
+        locale: "en",
+        link: "https://panel.example.test/reset-password#sentinel",
+      }),
+    ).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });
 });
 

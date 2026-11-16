@@ -102,6 +102,7 @@ class MockDockerExecutor implements DockerExecutorPort {
   public getMailRelayStatus: DockerExecutorPort["getMailRelayStatus"] = (req) =>
     this.#base.getMailRelayStatus(req);
   public sendTestMail: DockerExecutorPort["sendTestMail"] = (req) => this.#base.sendTestMail(req);
+  public sendPanelMail: DockerExecutorPort["sendPanelMail"] = (req) => this.#base.sendPanelMail(req);
 
   public async siteFiles<R extends SiteFilesRequest>(
     req: R,

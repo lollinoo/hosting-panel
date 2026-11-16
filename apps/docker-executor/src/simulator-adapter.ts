@@ -7,6 +7,9 @@ import {
   type BackupsResultByAction,
   type CertProblem,
   type MailRelayApplyRequest,
+  PanelMailIpcRequestSchema,
+  type PanelMailRequest,
+  type PanelMailResult,
   type WordpressImportLoadResult,
   type WordpressStateResult,
   type WordpressUpdateResult,
@@ -194,6 +197,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly mailRelayApplies: Array<MailRelayApplyRequest | null> = [];
   public readonly mailDeliveries: SimulatedMailDelivery[] = [];
   public nextTestMailResult: MailTestResult = { outcome: "sent", problem: null, detail: null };
+  /** Every panel mail request in order. */
+  public readonly panelMails: PanelMailRequest[] = [];
   private failingMailApplies = 0;
   public sftpUsers: SftpAccessUser[] = [];
   /** Every SFTP apply request in order. */
@@ -318,6 +323,13 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     const result = { ...this.nextTestMailResult };
     this.mailDeliveries.push({ to: req.to, from: req.from, result });
     return result;
+  }
+
+  public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
+    const parsed = PanelMailIpcRequestSchema.safeParse(req);
+    if (!parsed.success) throw new ExecutorCodedError("Invalid panel mail", "VALIDATION_ERROR");
+    this.panelMails.push(parsed.data);
+    return { outcome: this.mailRelay ? "queued" : "failed" };
   }
 
   public failNextSftpApply(n = 1): void {
