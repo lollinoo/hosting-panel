@@ -53,6 +53,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Database per Sito & phpMyAdmin** | ✅ **Operativo** | `phpMyAdminAvailable: true` su `linux-systemd`, `hp_mariadb` + `hp_phpmyadmin` su `127.0.0.1` (`ADR-0021`, `AC-F2-10`) |
 | **Backup dei Siti (S3)** | ✅ **Attivo su linux-systemd** | `productionBackupRuntimeAvailable: true` (`ADR-0022`) |
 | **Strumenti WordPress** | ✅ **Attivo su linux-systemd** | `wordpressToolsAvailable: true`: versioni, aggiornamenti con copia preventiva, reimpostazione della password di un amministratore (`ADR-0023`) |
+| **Importazione WordPress** | ✅ **Attivo su linux-systemd** | `wordpressToolsAvailable: true`: porta su un sito WordPress del pannello i file e il database di un sito WordPress di fuori, con copia preventiva e ritorno com'era se qualcosa fallisce (`ADR-0024`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
 ---
@@ -220,6 +221,18 @@ Attivi solo su runtime `linux-systemd` (`wordpressToolsAvailable: true`). Ogni s
 
 Dettagli e limiti: [ADR 0023](docs/architecture/adr/0023-wordpress-tools.md).
 
+### Importazione WordPress
+
+Attiva solo su runtime `linux-systemd` (`wordpressToolsAvailable: true`). Nella scheda **WordPress**, la card «Importa un sito» apre una procedura guidata («Avvia un'importazione»).
+
+- **Cosa serve.** Due file del vecchio sito: uno zip con la cartella di WordPress e l'export del database (`.sql`, anche compresso con gzip), fatto con mysqldump, mariadb-dump o phpMyAdmin. Si caricano dalla pagina, che è fatta per riprendere un caricamento interrotto (scegliendo di nuovo lo stesso file), oppure si mandano via SFTP e se ne scrive il percorso. Ogni file può essere al massimo `2 GiB`.
+- **Cosa cambia.** I file e le tabelle del sito diventano quelli del vecchio sito. L'indirizzo del vecchio sito è sostituito, nei contenuti, con quello del sito del pannello. Restano del pannello l'accesso, l'indirizzo, SFTP, la connessione al database e i backup. Alcuni file del vecchio sito non entrano: `wp-config.php`, `.htaccess` (messo accanto come `.htaccess.imported`), i plugin must-use e i drop-in. La pagina li elenca alla fine.
+- **Prima e durante.** Il cliente conferma scrivendo il nome del sito. Se i backup sono configurati sul server, il pannello prende prima una copia del sito; se la copia non riesce, non si importa nulla. Per qualche minuto il sito è chiuso ai visitatori, che vedono una pagina di accesso negato, e gli altri strumenti WordPress di quel sito non sono disponibili. Si può chiudere la pagina: l'importazione continua.
+- **Se qualcosa fallisce.** Il pannello rimette il sito com'era e dice perché, con una frase che dice cosa fare. Se non riesce a rimetterlo del tutto, il sito resta chiuso e la via per tornare indietro è la copia presa prima, dalla scheda **Backup**; senza copia, solo l'amministratore del server può ripararlo. Non c'è un pulsante per annullare un'importazione finita.
+- **Cosa non si importa.** Un multisite, un sito da un indirizzo web, un backup di un altro pannello, un sito installato in una sottocartella, con «Indirizzo WordPress» e «Indirizzo sito» su domini diversi o con lettere maiuscole nel dominio. Se i due indirizzi differiscono solo per `http` e `https`, l'importazione va avanti. Un'importazione conta nel limite di `6` azioni pesanti l'ora per sito.
+
+Dettagli e limiti: [ADR 0024](docs/architecture/adr/0024-wordpress-import.md).
+
 ### Backup dei Siti
 
 Su runtime `linux-systemd` (`productionBackupRuntimeAvailable: true`), il pannello esegue e conserva backup cifrati dei siti WordPress su storage compatibile S3 tramite contenitore effimero `restic/restic:0.19.1` gestito da `hp-docker-executor`. Gli amministratori configurano la destinazione S3 (endpoint, regione, bucket, prefisso e credenziali), eseguono il test di connessione e impostano la pianificazione notturna in **UTC** (predefinita `02:00 UTC`, eseguita un sito dopo l'altro) e la conservazione automatica (`1–365` giorni, predefinita `14` giorni; i backup manuali conservati sono al massimo `3` per sito e l'ultimo backup valido di un sito esistente non viene mai eliminato dalla rotazione). I clienti con permesso `site.backups.manage` consultano la cronologia e gestiscono backup manuali, ripristini e download dalla scheda **Backup** del sito. Ogni archivio include i file del sito e un dump logico per ciascun database MariaDB del sito senza riavviare i contenitori (`CP-01`), ed è cifrato con la chiave di installazione `/etc/hosting-panel/backup.key` (`0440 root:hp-executor`), creata una sola volta al bootstrap e mai sovrascritta dagli aggiornamenti. Dalla scheda **Backup** il cliente può ripristinare l'intero sito sul posto (mai singoli file o un singolo database) dietro conferma esplicita del nome del sito e pagina di manutenzione automatica con annullamento in caso di errore. Può inoltre preparare e scaricare una copia decifrata in un unico archivio ZIP (al massimo uno per sito, conservato `60` minuti nella cartella protetta `/var/lib/hosting-panel/backups`; creazione manuale, ripristino e preparazione download condividono il limite di `6` azioni pesanti l'ora per sito).
@@ -315,6 +328,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0023`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress).
+- [Registro delle ADR (`ADR 0001..0024`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.
