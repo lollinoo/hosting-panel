@@ -1,7 +1,8 @@
-import { isWordpressSite, type SiteWordpressDto } from "@hosting-panel/contracts";
+import { isWordpressSite, SiteWordpressImportDtoSchema, type SiteWordpressDto } from "@hosting-panel/contracts";
 import { notFound } from "next/navigation";
 import { getCustomerContext, getSite } from "@/app/sites/data";
 import { SiteWordpress } from "@/components/customer/site-wordpress";
+import { WordpressImportCard } from "@/components/customer/wordpress-import-card";
 import { LoadError } from "@/components/shared/load-error";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { errorMessage, getMessages } from "@/i18n";
@@ -37,10 +38,31 @@ export default async function SiteWordpressPage({ params }: { params: Promise<{ 
     );
   }
 
-  const res = await serverGet<SiteWordpressDto>(
-    `v1/organizations/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(siteId)}/wordpress`,
-    { timeoutMs: 20_000 },
+  const sitePath = `v1/organizations/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(siteId)}`;
+  const [res, importRes] = await Promise.all([
+    serverGet<SiteWordpressDto>(`${sitePath}/wordpress`, { timeoutMs: 20_000 }),
+    serverGet<unknown>(`${sitePath}/wordpress/import`, { timeoutMs: 20_000 }),
+  ]);
+  // A failed import load only leaves the card out; the tab still works.
+  const parsedImport = importRes.ok ? SiteWordpressImportDtoSchema.safeParse(importRes.data) : null;
+  const importState = parsedImport?.success && parsedImport.data.available ? parsedImport.data : null;
+  const importBase = `/api/bff/orgs/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(siteId)}/wordpress/import`;
+  const card = importState && (
+    <WordpressImportCard
+      basePath={importBase}
+      importHref={`/sites/${encodeURIComponent(siteId)}/wordpress/import`}
+      initial={importState}
+    />
   );
+  // While an import runs only the card is shown, so the tab never checks a locked site.
+  if (importState?.runningOperation) {
+    return (
+      <div className="space-y-4">
+        <h2 className="text-lg font-medium">{t.title}</h2>
+        {card}
+      </div>
+    );
+  }
 
   if (!res.ok) {
     if (res.outcome === "notFound") notFound();
@@ -63,6 +85,7 @@ export default async function SiteWordpressPage({ params }: { params: Promise<{ 
   return (
     <div className="space-y-4">
       <h2 className="text-lg font-medium">{t.title}</h2>
+      {card}
       <SiteWordpress basePath={basePath} initial={res.data} csrfToken={session.csrfToken} />
     </div>
   );

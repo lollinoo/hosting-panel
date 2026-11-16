@@ -82,7 +82,7 @@ export function wordpressErrorText(
 }
 
 // POST JSON through the BFF; status 0 means no answer reached the browser.
-async function postJson(url: string, csrfToken: string, body: unknown, idempotent: boolean): Promise<Posted> {
+export async function postJson(url: string, csrfToken: string, body: unknown, idempotent: boolean): Promise<Posted> {
   const headers: Record<string, string> = { "content-type": "application/json", "x-csrf-token": csrfToken };
   if (idempotent) {
     headers["Idempotency-Key"] =
@@ -102,10 +102,10 @@ async function postJson(url: string, csrfToken: string, body: unknown, idempoten
 const operationId = (body: unknown) =>
   isRecord(body) && isRecord(body.data) && typeof body.data.operationId === "string" ? body.data.operationId : "pending";
 
-const stepWord = (s: OperationStepStatus) =>
+export const stepWord = (s: OperationStepStatus) =>
   s === "succeeded" ? "done" : s === "running" ? "running" : s === "skipped" ? "skipped" : s === "failed" || s === "cancelled" ? "failed" : "waiting";
 
-const STEP_ICON = { done: CheckCircle2, running: Loader2, skipped: MinusCircle, failed: XCircle, waiting: Circle } as const;
+export const STEP_ICON = { done: CheckCircle2, running: Loader2, skipped: MinusCircle, failed: XCircle, waiting: Circle } as const;
 
 /** Progress list of the running operation (exported for static-render tests). */
 export function WordpressProgress({ operation }: { operation: RunningOperation }) {

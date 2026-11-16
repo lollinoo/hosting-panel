@@ -338,7 +338,11 @@ describe("B3. the tab is there only for a WordPress site on a server with the to
 
     mockData.getCustomerContext.mockResolvedValue(context(true));
     const loaded = textOf(render((await SiteWordpressPage({ params })) as ReactElement));
-    expect(mockApi.serverGet).toHaveBeenCalledTimes(1);
+    // R169.4: the tab loads its own state and the import state for the card.
+    expect(mockApi.serverGet.mock.calls.map((c) => c[0])).toEqual([
+      "v1/organizations/org_qa1/managed-sites/site_qa1/wordpress",
+      "v1/organizations/org_qa1/managed-sites/site_qa1/wordpress/import",
+    ]);
     expect(loaded).toContain(en.site.wordpress.header.checkNow);
     expect(loaded).not.toContain(en.site.wordpress.notAvailable);
 

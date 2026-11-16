@@ -221,8 +221,8 @@ describe("domains UI", () => {
   it("both catalogs name the WordPress tab and the before-update copy", () => {
     expect(en.site.tabs.wordpress).toBe("WordPress");
     expect(itMsgs.site.tabs.wordpress).toBe("WordPress");
-    expect(en.site.backups.kind.pre_update).toBe("Before an update");
-    expect(itMsgs.site.backups.kind.pre_update).toBe("Prima di un aggiornamento");
+    expect(en.site.backups.kind.pre_update).toBe("Before an update or an import");
+    expect(itMsgs.site.backups.kind.pre_update).toBe("Prima di un aggiornamento o di un'importazione");
   });
 
   it("port 80 hint says the administrator was alerted", () => {

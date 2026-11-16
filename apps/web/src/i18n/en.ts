@@ -157,6 +157,7 @@ export const en: Messages = {
       restart: "Site restart",
       stop: "Site stop",
       wordpressUpdate: "WordPress update",
+      wordpressImport: "WordPress import",
       done: "{action} completed",
       failed: "{action} did not succeed",
       running: "{action} in progress",
@@ -651,7 +652,7 @@ export const en: Messages = {
         expires: "Available until",
         actions: "Actions",
       },
-      kind: { nightly: "Nightly", manual: "Made by hand", pre_update: "Before an update" },
+      kind: { nightly: "Nightly", manual: "Made by hand", pre_update: "Before an update or an import" },
       status: { running: "In progress", succeeded: "Completed", failed: "Failed" },
       keptLatest: "Until a newer one succeeds",
       problem: {
@@ -958,6 +959,166 @@ export const en: Messages = {
         adminUnknown: "This person is no longer an administrator of the site. Press \"Check now\" to see the current list.",
         uncertain: "We couldn't confirm that it started. Wait a minute and reload the page before trying again.",
         suspended: "Your account is suspended, so WordPress can't be checked or changed. Contact your hosting provider.",
+      },
+      import: {
+        title: "Import a WordPress site",
+        loadFailed: "The import page could not be loaded. Reload the page in a moment.",
+        filesUnknown: "The files sent for the import could not be read right now. Reload the page in a moment.",
+        backupsLink: "Go to Backups",
+        card: {
+          title: "Import a site",
+          body: "Move a WordPress site here from another host: its files (.zip) and its database export.",
+          start: "Start an import",
+          running: "An import is running. The other WordPress tools come back when it ends.",
+          follow: "Follow the import",
+          last: "Last import ({date}): {result}",
+          result: {
+            imported: "the site was imported.",
+            nothing_changed: "it stopped, nothing was changed.",
+            site_restored: "it failed, the site was put back as it was.",
+            undo_incomplete: "it failed and the site could not be fully put back.",
+          },
+        },
+        stepOf: "Step {n} of 5",
+        steps: {
+          intro: "Before you start",
+          archive: "Site files (.zip)",
+          dump: "Database export (.sql or .sql.gz)",
+          confirm: "Check and confirm",
+          run: "Import",
+        },
+        intro: {
+          body: "The import replaces this site's files and database with the ones you send. Your access, address, SFTP and backups stay as they are.",
+          what: "You need two files from the old host: a .zip of the site folder and a .sql or .sql.gz export of its database. Each file can be up to 2 GB.",
+        },
+        slot: {
+          empty: "No file yet.",
+          choose: "Choose a file",
+          partial:
+            "Part of this file was received ({received}). Choose the same file again to continue where it stopped, or another file to start over.",
+          filled: "Received: {size}.",
+          replace: "Choose another file to replace it",
+          wrongType: { archive: "Choose a .zip file.", dump: "Choose a .sql or .sql.gz file." },
+        },
+        pick: {
+          label: "Or use a file already on the site (its path from the site folder)",
+          use: "Use this file",
+          invalid: "Write a path inside the site folder, for example uploads/site.zip.",
+          notFound: "There is no file at that path. Check the name in the Files tab.",
+          notAFile: "That path is not a file: a folder or a shortcut cannot be used. Write the path of the file itself.",
+          sftpWarning:
+            "A file you place with SFTP can be downloaded by anyone who knows its address until you use it here. Using it moves it out of the site folder: it no longer appears in Files, and \"Discard files\" deletes it.",
+        },
+        discard: "Discard files",
+        discardBusy: "Wait until the file being sent has arrived, then discard the files.",
+        discardDone: "Both files were removed.",
+        confirm: {
+          replaces: "Your site's files and database will be replaced by the ones you sent.",
+          downtime: "The site is unavailable for a few minutes while it is replaced.",
+          backupTaken: "A copy of the site is taken first. You can restore it from Backups.",
+          backupNone: "No copy will be taken: backups are not set up on this server.",
+          oldestCopy:
+            "This copy counts among the three copies kept from before an update or an import, so the oldest of them may be removed.",
+          address: "The imported site's address is changed to this site's address.",
+          leftOut: "These files are not taken from the .zip; this site keeps its own: {list}.",
+          undo: "If the import fails, the site is put back as it was.",
+          typeLabel: "Type {name} to confirm",
+          typeHint: "Type the site name to enable this button.",
+          go: "Replace my site",
+          starting: "Starting…",
+          filesIncomplete: "Both files must be fully received first.",
+        },
+        progress: {
+          title: "Importing… you can leave this page; the import goes on.",
+          check: "Check the two files",
+          backup: "Take a copy of the site",
+          backupSkipped: "No copy taken: backups are not set up on this server",
+          unpack: "Unpack the site files",
+          database: "Load the database export",
+          switch: "Replace the site",
+          finish: "Clean up and check the site",
+          unsettled: "The import is being finished or put back. Look again in a few minutes.",
+          slow: "The import is still running. Reload this page later to see the result.",
+        },
+        outcome: {
+          title: "Last import",
+          finishedAt: "Ended {date}",
+          imported: "The site was imported.",
+          oldAddress: "The old address {address} was replaced with this site's address.",
+          tables: "Tables loaded: {count}.",
+          leftOut: "Kept from this site, not taken from the .zip: {list}.",
+          nothingChanged: "The import stopped. Nothing was changed: the site is as it was.",
+          siteRestored: "The import failed while replacing the site. The site is as it was before the import.",
+          undoTaken:
+            "On {date} the import failed and the site could not be fully put back as it was. To go back, restore from Backups the copy taken just before that import. If you have restored a copy since then, nothing more is needed.",
+          undoNoCopy:
+            "On {date} the import failed and the site could not be fully put back as it was. That import took no copy first: restore an earlier copy from Backups, or ask your administrator. If you have restored a copy since then, nothing more is needed.",
+          errorNumber: "Error number: {number}.",
+          backup: {
+            taken: "A copy was taken before the import; you find it in Backups.",
+            skipped: "No copy of the site was taken before this import.",
+            failed: "The copy before the import could not be taken.",
+          },
+        },
+        reasons: {
+          files_missing: "The files were no longer here. Send them again.",
+          earlier_import_unfinished:
+            "An earlier import of this site failed and left some of its pieces here. Restore a copy from Backups (this removes them), then import again.",
+          backup_failed: "The copy before the import could not be taken. Try again later.",
+          interrupted: "The import was interrupted. Try again.",
+          timed_out: "The import took too long and was stopped. Try again; if it happens again, ask your administrator.",
+          unavailable: "The server could not run the import right now. Try again in a few minutes.",
+          other: "Something went wrong. Try again; if it happens again, ask your administrator.",
+          archive_not_zip: "The site files are not a valid .zip. Create the archive again and send it.",
+          dump_not_sql: "The database export is not a .sql text file (or .sql.gz). Export it again as SQL.",
+          archive_unsafe:
+            "The .zip contains links or paths that point outside the site folder. Create it again from the site folder only.",
+          archive_limit:
+            "The .zip has too many files or is too large once unpacked. Remove backups or caches from it and try again.",
+          archive_not_wordpress:
+            "No WordPress site was found in the .zip (wp-includes and wp-admin are missing). Zip the folder that contains wp-config.php.",
+          disk_full: "There is not enough space for the import. Free some space or ask your administrator.",
+          staging_unsafe:
+            "The import could not prepare its work space among the site's files. Discard both files and send them again.",
+          dump_unsafe: "The database export could not be read safely. Discard both files and send them again.",
+          dump_too_large:
+            "The database export is too large once loaded. Clean old drafts and logs from the old site and export again.",
+          dump_incomplete: "The database export is cut short. Export it again and send the whole file.",
+          dump_statement_unsupported:
+            "The database export could not be loaded: it seems to hold a command that is not allowed (such as changing users or permissions), or the loading was cut off. Export the tables only and try again.",
+          dump_load_failed:
+            "The database export could not be loaded. The file may hold a mistake, or the loading was cut off. Export it again and retry; if it happens again, ask your administrator.",
+          dump_not_wordpress: "The database export has no WordPress tables. Export the database of the WordPress site.",
+          dump_ambiguous: "The database export holds more than one WordPress site. Export only the one you want.",
+          multisite_unsupported: "WordPress multisite installations cannot be imported.",
+          address_unsupported:
+            "The site's old address could not be taken from the export. An import needs the old site at the root of its address, not in a sub-folder, and the same domain in \"WordPress Address (URL)\" and \"Site Address (URL)\" under Settings, General. The export must be of the whole database, the site's users included. Set up the old site this way and export again.",
+          dump_objects_unsupported:
+            "The export contains stored procedures, triggers, views or events, which cannot be imported. Export the tables only.",
+          dump_names_unsupported:
+            "The export uses names for tables or databases that cannot be imported. Export only this site's tables.",
+          dump_too_many_tables:
+            "The database export holds more than 1,000 tables, more than an import can take. Export only this site's tables.",
+          site_objects_unsupported:
+            "This site's current database holds items an import cannot set aside (views, triggers, stored routines or events). Remove them, for example from the Database tab, then import again.",
+          address_rewrite_failed:
+            "The old address could not be replaced in the imported data. Try again; if it happens again, ask your administrator.",
+          site_check_failed:
+            "The imported site did not answer correctly. Check that the old site works and export again.",
+        },
+        reasonsAtLine: {
+          dump_statement_unsupported:
+            "The database export could not be loaded at line {line}: it seems to hold a command that is not allowed (such as changing users or permissions), or the loading was cut off. Export the tables only and try again.",
+          dump_load_failed:
+            "The database export could not be loaded at line {line}. The file may hold a mistake there, or the loading was cut off. Export it again and retry; if it happens again, ask your administrator.",
+        },
+        errors: {
+          importRunning: "An import of this site is already running. Wait for it to finish.",
+          uncertain: "We could not confirm that this was done. Reload the page to see where things stand before trying again.",
+          permission: "You can follow this page but not change it. Ask an account owner for permission to change the site.",
+          tooMany:
+            "This site had too many large actions (copies, restores, updates or imports) in a short time. You can start the import at {time}.",
+        },
       },
     },
   },

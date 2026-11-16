@@ -37,6 +37,7 @@ export interface QueuedUploadInput {
   file: File;
   path: string;
   overwrite: boolean;
+  resume?: { uploadId: string; offset: number };
 }
 
 /** Converts incoming files to upload items, failing >2 GiB files immediately without sending. */
@@ -64,9 +65,10 @@ export function prepareQueuedUploads(
       file: q.file,
       path: q.path,
       overwrite: q.overwrite,
-      sent: 0,
+      sent: q.resume?.offset ?? 0,
       status: "waiting",
       error: null,
+      ...(q.resume ? { resume: q.resume } : {}),
     };
   });
   return { items, startPump };
@@ -146,14 +148,27 @@ export async function drainUploadQueue(opts: {
   }
 }
 
+export type UploadFailure = { status?: number; code: string; reason?: string };
+export type UploadErrorText = (m: Messages, failure: UploadFailure) => string | null;
+
+/** Text of a failed upload: the caller's wording when it has one, else the file manager's. */
+export function uploadFailureText(m: Messages, failure: UploadFailure, errorText?: UploadErrorText): string {
+  const details = failure.reason ? [{ reason: failure.reason }] : undefined;
+  return errorText?.(m, failure) ?? fileErrorText(m, failure.code, "upload", details);
+}
+
 interface UseUploadQueueOptions {
   apiBase: string;
   csrfToken: string;
   onCsrfToken: (token: string) => void;
   onFileDone: (dir: string) => void;
+  /** When set, chunks go here as {uploadId, offset, dataBase64, final} (no path or overwrite). */
+  chunkUrl?: string;
+  /** Words a failed upload; null (or absent) keeps the file manager's text. */
+  errorText?: UploadErrorText;
 }
 
-export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone }: UseUploadQueueOptions) {
+export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone, chunkUrl, errorText }: UseUploadQueueOptions) {
   const m = useMessages();
   const [items, setItems] = useState<UploadItem[]>([]);
   const itemsRef = useRef<UploadItem[]>([]);
@@ -227,13 +242,14 @@ export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone }: 
         },
         sendItem: (nextItem, signal) => {
           const send: ChunkSender = async (chunk, s) => {
-            const res = await fetch(`${apiBase}/files/content`, {
+            const { uploadId, offset, dataBase64, final } = chunk;
+            const res = await fetch(chunkUrl ?? `${apiBase}/files/content`, {
               method: "PUT",
               headers: {
                 "Content-Type": "application/json",
                 "x-csrf-token": csrfRef.current,
               },
-              body: JSON.stringify(chunk),
+              body: JSON.stringify(chunkUrl ? { uploadId, offset, dataBase64, final } : chunk),
               signal: s,
             });
             const json = (await res.json().catch(() => null)) as {
@@ -300,7 +316,6 @@ export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone }: 
             return;
           }
 
-          const details = outcome.reason ? [{ reason: outcome.reason }] : undefined;
           updateOne(nextItem.id, (cur) => ({
             ...cur,
             status: "failed",
@@ -308,7 +323,7 @@ export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone }: 
             resume: outcome.resume,
             needsSessionRefresh: false,
             lastFailedStatus: outcome.status,
-            error: fileErrorText(messagesRef.current, outcome.code, "upload", details),
+            error: uploadFailureText(messagesRef.current, outcome, errorText),
           }));
         },
         onUnexpectedError: (nextItem) => {
@@ -324,7 +339,7 @@ export function useUploadQueue({ apiBase, csrfToken, onCsrfToken, onFileDone }: 
       abortRef.current = null;
       runningRef.current = false;
     }
-  }, [apiBase, onFileDone, updateOne]);
+  }, [apiBase, chunkUrl, errorText, onFileDone, updateOne]);
 
   const enqueue = useCallback(
     (incoming: QueuedUploadInput[]) => {

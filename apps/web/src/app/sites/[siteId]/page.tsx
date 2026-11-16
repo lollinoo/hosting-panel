@@ -26,6 +26,7 @@ const ACTIVITY: Partial<Record<OperationKind, keyof Messages["site"]["activity"]
   "service.stop": "stop",
   "site.domains": "domains",
   "site.wordpress.update": "wordpressUpdate",
+  "site.wordpress.import": "wordpressImport",
 };
 
 const outcome = (s: OperationStatus) =>

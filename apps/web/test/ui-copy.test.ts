@@ -32,6 +32,7 @@ const strip = (t: string) =>
     .replace(/^(\s*)"[a-z]+\.[a-z]+":/gm, "$1") // operation-kind keys are identifiers, not copy
     .replace(/^\s*import[^;]*;?$/gm, "");
 const sources = () => dirs.flatMap(files).map((f) => strip(fs.readFileSync(f, "utf-8")));
+const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox|relay|smtp|postfix|spf|dkim|schema)\b|HCP-SPEC|AC-F|ADR-/i;
 const copy = () => [
   ...sources(),
   ...sections.flatMap((s) => [JSON.stringify(en[s]), JSON.stringify(itMsgs[s])]),
@@ -45,8 +46,22 @@ describe("ui copy", () => {
   });
 
   it("customer surfaces avoid infrastructure jargon", () => {
-    const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox|relay|smtp|postfix|spf|dkim)\b|HCP-SPEC|AC-F|ADR-/i;
     for (const text of copy()) expect(text).not.toMatch(jargon);
+  });
+
+  it("scans the import wizard's files and catalog group, and its regex catches a planted word", () => {
+    const scanned = dirs.flatMap(files).map((f) => path.relative(src, f));
+    for (const f of [
+      "app/sites/[siteId]/wordpress/import/page.tsx",
+      "components/customer/wordpress-import.tsx",
+      "components/customer/wordpress-import-card.tsx",
+    ])
+      expect(scanned).toContain(f);
+    const all = copy().join("\n");
+    for (const l of [en, itMsgs]) expect(all).toContain(JSON.stringify(l.site.wordpress.import.reasons.staging_unsafe));
+    const planted = en.site.wordpress.import.reasons.dump_unsafe.replace("database export", "database schema");
+    expect(planted).not.toBe(en.site.wordpress.import.reasons.dump_unsafe);
+    expect(planted).toMatch(jargon);
   });
 });
 

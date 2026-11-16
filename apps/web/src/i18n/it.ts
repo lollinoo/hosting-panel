@@ -158,6 +158,7 @@ export const it = {
       restart: "Riavvio del sito",
       stop: "Arresto del sito",
       wordpressUpdate: "Aggiornamento di WordPress",
+      wordpressImport: "Importazione WordPress",
       done: "{action} completato",
       failed: "{action} non riuscito",
       running: "{action} in corso",
@@ -660,7 +661,7 @@ export const it = {
         expires: "Disponibile fino al",
         actions: "Azioni",
       },
-      kind: { nightly: "Notturno", manual: "Fatto a mano", pre_update: "Prima di un aggiornamento" },
+      kind: { nightly: "Notturno", manual: "Fatto a mano", pre_update: "Prima di un aggiornamento o di un'importazione" },
       status: { running: "In corso", succeeded: "Completato", failed: "Non riuscito" },
       keptLatest: "Finché non ne riesce uno più recente",
       problem: {
@@ -978,6 +979,171 @@ export const it = {
           "Questa persona non è più un amministratore del sito. Premi «Controlla ora» per vedere l'elenco aggiornato.",
         uncertain: "Non siamo riusciti a confermare l'avvio. Aspetta un minuto e ricarica la pagina prima di riprovare.",
         suspended: "Il tuo account è sospeso: non è possibile controllare o modificare WordPress. Contatta il tuo fornitore di hosting.",
+      },
+      import: {
+        title: "Importa un sito WordPress",
+        loadFailed: "Non è stato possibile caricare la pagina di importazione. Ricarica la pagina tra poco.",
+        filesUnknown: "Al momento non è possibile leggere i file inviati per l'importazione. Ricarica la pagina tra poco.",
+        backupsLink: "Vai a Backup",
+        card: {
+          title: "Importa un sito",
+          body: "Sposta qui un sito WordPress da un altro hosting: i suoi file (.zip) e l'esportazione del database.",
+          start: "Avvia un'importazione",
+          running: "È in corso un'importazione. Gli altri strumenti WordPress tornano disponibili al termine.",
+          follow: "Segui l'importazione",
+          last: "Ultima importazione ({date}): {result}",
+          result: {
+            imported: "il sito è stato importato.",
+            nothing_changed: "si è fermata, non è cambiato nulla.",
+            site_restored: "non è riuscita, il sito è stato riportato com'era.",
+            undo_incomplete: "non è riuscita e il sito non è stato riportato del tutto com'era.",
+          },
+        },
+        stepOf: "Passo {n} di 5",
+        steps: {
+          intro: "Prima di iniziare",
+          archive: "File del sito (.zip)",
+          dump: "Esportazione del database (.sql o .sql.gz)",
+          confirm: "Controlla e conferma",
+          run: "Importazione",
+        },
+        intro: {
+          body: "L'importazione sostituisce file e database di questo sito con quelli che invii. Accessi, indirizzo, SFTP e backup restano invariati.",
+          what: "Servono due file dal vecchio hosting: uno .zip della cartella del sito e un'esportazione .sql o .sql.gz del database. Ogni file può arrivare a 2 GB.",
+        },
+        slot: {
+          empty: "Nessun file ancora.",
+          choose: "Scegli un file",
+          partial:
+            "Una parte di questo file è stata ricevuta ({received}). Scegli di nuovo lo stesso file per riprendere da dove si è fermato, oppure un altro file per ricominciare.",
+          filled: "Ricevuto: {size}.",
+          replace: "Scegli un altro file per sostituirlo",
+          wrongType: { archive: "Scegli un file .zip.", dump: "Scegli un file .sql o .sql.gz." },
+        },
+        pick: {
+          label: "Oppure usa un file già presente sul sito (il suo percorso dalla cartella del sito)",
+          use: "Usa questo file",
+          invalid: "Scrivi un percorso dentro la cartella del sito, per esempio uploads/site.zip.",
+          notFound: "Non c'è alcun file in quel percorso. Controlla il nome nella scheda File.",
+          notAFile:
+            "Quel percorso non è un file: non si possono usare una cartella o un collegamento. Scrivi il percorso del file stesso.",
+          sftpWarning:
+            "Un file caricato con SFTP può essere scaricato da chiunque ne conosca l'indirizzo finché non lo usi qui. Usandolo viene spostato fuori dalla cartella del sito: non compare più in File e «Scarta i file» lo elimina.",
+        },
+        discard: "Scarta i file",
+        discardBusy: "Attendi che il file in invio sia arrivato, poi scarta i file.",
+        discardDone: "Entrambi i file sono stati rimossi.",
+        confirm: {
+          replaces: "File e database del sito saranno sostituiti da quelli che hai inviato.",
+          downtime: "Il sito non è disponibile per qualche minuto durante la sostituzione.",
+          backupTaken: "Prima viene salvata una copia del sito. Puoi ripristinarla da Backup.",
+          backupNone: "Non verrà salvata alcuna copia: i backup non sono configurati su questo server.",
+          oldestCopy:
+            "Questa copia rientra tra le tre copie conservate prima di un aggiornamento o di un'importazione, quindi la più vecchia potrebbe essere rimossa.",
+          address: "L'indirizzo del sito importato viene cambiato con l'indirizzo di questo sito.",
+          leftOut: "Questi file non vengono presi dallo .zip; il sito mantiene i propri: {list}.",
+          undo: "Se l'importazione non riesce, il sito viene riportato com'era.",
+          typeLabel: "Scrivi {name} per confermare",
+          typeHint: "Scrivi il nome del sito per attivare questo pulsante.",
+          go: "Sostituisci il mio sito",
+          starting: "Avvio…",
+          filesIncomplete: "Prima entrambi i file devono essere ricevuti completamente.",
+        },
+        progress: {
+          title: "Importazione in corso… puoi lasciare questa pagina, l'importazione continua.",
+          check: "Controlla i due file",
+          backup: "Salva una copia del sito",
+          backupSkipped: "Nessuna copia salvata: i backup non sono configurati su questo server",
+          unpack: "Estrai i file del sito",
+          database: "Carica l'esportazione del database",
+          switch: "Sostituisci il sito",
+          finish: "Pulisci e controlla il sito",
+          unsettled: "L'importazione è in fase di completamento o di annullamento. Ricontrolla tra qualche minuto.",
+          slow: "L'importazione è ancora in corso. Ricarica la pagina più tardi per vedere il risultato.",
+        },
+        outcome: {
+          title: "Ultima importazione",
+          finishedAt: "Terminata il {date}",
+          imported: "Il sito è stato importato.",
+          oldAddress: "Il vecchio indirizzo {address} è stato sostituito con l'indirizzo di questo sito.",
+          tables: "Tabelle caricate: {count}.",
+          leftOut: "Mantenuti da questo sito, non presi dallo .zip: {list}.",
+          nothingChanged: "L'importazione si è fermata. Non è stato cambiato nulla: il sito è com'era.",
+          siteRestored: "L'importazione non è riuscita durante la sostituzione. Il sito è com'era prima dell'importazione.",
+          undoTaken:
+            "Il {date} l'importazione non è riuscita e il sito non è stato riportato del tutto com'era. Per tornare indietro, ripristina da Backup la copia salvata subito prima di quell'importazione. Se da allora hai già ripristinato una copia, non serve altro.",
+          undoNoCopy:
+            "Il {date} l'importazione non è riuscita e il sito non è stato riportato del tutto com'era. Quell'importazione non aveva salvato una copia: ripristina una copia precedente da Backup oppure chiedi al tuo amministratore. Se da allora hai già ripristinato una copia, non serve altro.",
+          errorNumber: "Numero di errore: {number}.",
+          backup: {
+            taken: "Prima dell'importazione è stata salvata una copia; la trovi in Backup.",
+            skipped: "Prima di questa importazione non è stata salvata alcuna copia del sito.",
+            failed: "Non è stato possibile salvare la copia prima dell'importazione.",
+          },
+        },
+        reasons: {
+          files_missing: "I file non erano più presenti. Inviali di nuovo.",
+          earlier_import_unfinished:
+            "Un'importazione precedente di questo sito non è riuscita e ha lasciato qui alcuni suoi resti. Ripristina una copia da Backup (questo li rimuove), poi importa di nuovo.",
+          backup_failed:
+            "Non è stato possibile salvare la copia prima dell'importazione. Riprova più tardi.",
+          interrupted: "L'importazione è stata interrotta. Riprova.",
+          timed_out:
+            "L'importazione ha richiesto troppo tempo ed è stata fermata. Riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          unavailable: "Il server non è riuscito a eseguire l'importazione ora. Riprova tra qualche minuto.",
+          other: "Qualcosa non ha funzionato. Riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          archive_not_zip: "I file del sito non sono uno .zip valido. Crea di nuovo l'archivio e invialo.",
+          dump_not_sql: "L'esportazione del database non è un file di testo .sql (o .sql.gz). Esportala di nuovo in formato SQL.",
+          archive_unsafe:
+            "Lo .zip contiene collegamenti o percorsi che puntano fuori dalla cartella del sito. Crealo di nuovo solo dalla cartella del sito.",
+          archive_limit:
+            "Lo .zip contiene troppi file o è troppo grande una volta estratto. Rimuovi backup o cache dall'archivio e riprova.",
+          archive_not_wordpress:
+            "Nello .zip non è stato trovato un sito WordPress (mancano wp-includes e wp-admin). Comprimi la cartella che contiene wp-config.php.",
+          disk_full: "Non c'è spazio sufficiente per l'importazione. Libera spazio o chiedi al tuo amministratore.",
+          staging_unsafe:
+            "L'importazione non è riuscita a preparare il suo spazio di lavoro tra i file del sito. Scarta entrambi i file e inviali di nuovo.",
+          dump_unsafe:
+            "Non è stato possibile leggere l'esportazione del database in modo sicuro. Scarta entrambi i file e inviali di nuovo.",
+          dump_too_large:
+            "L'esportazione del database è troppo grande una volta caricata. Elimina vecchie bozze e log dal vecchio sito ed esportalo di nuovo.",
+          dump_incomplete: "L'esportazione del database è incompleta. Esportala di nuovo e invia il file intero.",
+          dump_statement_unsupported:
+            "Non è stato possibile caricare l'esportazione del database: sembra contenere un comando non consentito (come modifiche a utenti o permessi), oppure il caricamento si è interrotto. Esporta solo le tabelle e riprova.",
+          dump_load_failed:
+            "Non è stato possibile caricare l'esportazione del database. Il file potrebbe contenere un errore, oppure il caricamento si è interrotto. Esportala di nuovo e riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          dump_not_wordpress: "L'esportazione non contiene tabelle WordPress. Esporta il database del sito WordPress.",
+          dump_ambiguous: "L'esportazione contiene più di un sito WordPress. Esporta solo quello che vuoi.",
+          multisite_unsupported: "Le installazioni WordPress multisito non possono essere importate.",
+          address_unsupported:
+            "Non è stato possibile ricavare il vecchio indirizzo del sito dall'esportazione. Un'importazione richiede il vecchio sito alla radice del suo indirizzo, non in una sottocartella, e lo stesso dominio in «Indirizzo WordPress (URL)» e «Indirizzo sito (URL)» in Impostazioni, Generali. L'esportazione deve comprendere l'intero database, utenti del sito inclusi. Configura così il vecchio sito ed esporta di nuovo.",
+          dump_objects_unsupported:
+            "L'esportazione contiene procedure, trigger, viste o eventi, che non possono essere importati. Esporta solo le tabelle.",
+          dump_names_unsupported:
+            "L'esportazione usa nomi di tabelle o database che non possono essere importati. Esporta solo le tabelle di questo sito.",
+          dump_too_many_tables:
+            "L'esportazione del database contiene più di 1.000 tabelle, più di quante un'importazione possa accettarne. Esporta solo le tabelle di questo sito.",
+          site_objects_unsupported:
+            "Il database attuale di questo sito contiene elementi che un'importazione non può mettere da parte (viste, trigger, procedure o eventi). Rimuovili, per esempio dalla scheda Database, poi importa di nuovo.",
+          address_rewrite_failed:
+            "Non è stato possibile sostituire il vecchio indirizzo nei dati importati. Riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          site_check_failed:
+            "Il sito importato non ha risposto correttamente. Verifica che il vecchio sito funzioni ed esporta di nuovo.",
+        },
+        reasonsAtLine: {
+          dump_statement_unsupported:
+            "Non è stato possibile caricare l'esportazione del database alla riga {line}: sembra contenere un comando non consentito (come modifiche a utenti o permessi), oppure il caricamento si è interrotto. Esporta solo le tabelle e riprova.",
+          dump_load_failed:
+            "Non è stato possibile caricare l'esportazione del database alla riga {line}. Il file potrebbe contenere un errore in quel punto, oppure il caricamento si è interrotto. Esportala di nuovo e riprova; se succede di nuovo, chiedi al tuo amministratore.",
+        },
+        errors: {
+          importRunning: "È già in corso un'importazione di questo sito. Attendi che finisca.",
+          uncertain: "Non abbiamo potuto confermare che sia stato fatto. Ricarica la pagina per vedere a che punto è prima di riprovare.",
+          permission:
+            "Puoi seguire questa pagina ma non modificarla. Chiedi a un proprietario dell'account il permesso di modificare il sito.",
+          tooMany:
+            "Per questo sito sono state avviate troppe azioni pesanti (copie, ripristini, aggiornamenti o importazioni) in poco tempo. Puoi avviare l'importazione alle {time}.",
+        },
       },
     },
   },
