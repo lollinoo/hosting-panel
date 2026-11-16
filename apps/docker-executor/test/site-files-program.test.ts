@@ -1647,4 +1647,207 @@ describe("site files program WordPress import (real php + ZipArchive)", () => {
     expect(await exists(staging)).toBe(false);
     expect(expectOk(runPhp(script, root, { op: "import.discard" }), "import.discard")).toEqual({});
   });
+
+  /** A plan line as hp_import_read_plan keeps it (hp_import_plan_rel_ok, hp_import_skip, hp_rel_ok), else null. */
+  function followedPlanLine(line: string): [string, string] | null {
+    let e: unknown;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(e) || e.length !== 2 || (e[0] !== "O" && e[0] !== "I") || typeof e[1] !== "string") {
+      return null;
+    }
+    const rel = e[1];
+    const base = rel.slice(rel.lastIndexOf("/") + 1);
+    const ok =
+      /^(wp-content\/)?[^/]+$/.test(rel) &&
+      ![...rel].some((c) => c < " " || c === "\x7f") &&
+      base !== "." &&
+      base !== ".." &&
+      Buffer.byteLength(base) <= 255 &&
+      ![".htaccess", "wp-config.php", "wp-content", ".maintenance", "wp-content/mu-plugins"].includes(rel) &&
+      !base.startsWith(".hp_rs_") &&
+      !base.startsWith(".htpanel-");
+    return ok ? [e[0], rel] : null;
+  }
+
+  /** ADR 0024 §4.26 file steps done by hand with plain moves, as an administrator would. */
+  async function handRepair(root: string, id: string, keep?: string): Promise<void> {
+    const work = path.join(root, ".htpanel-import", id);
+    const plan = (await readFile(path.join(work, "plan"), "utf8"))
+      .split("\n")
+      .map(followedPlanLine)
+      .filter((e): e is [string, string] => e !== null);
+    const outs = new Set(plan.filter(([k]) => k === "O").map(([, r]) => r));
+    const both = new Set(plan.filter(([k, r]) => k === "I" && outs.has(r)).map(([, r]) => r));
+    // First check, before any move: a name in both trees with neither copy in the work folder stops the steps.
+    for (const rel of both) {
+      if (!(await exists(path.join(work, "aside", rel))) && !(await exists(path.join(work, "site", rel)))) {
+        throw new Error(`hand repair stops: neither copy of ${rel} is in the work folder`);
+      }
+    }
+    // The entry at <rel> goes to site/<rel>; when that place is taken, to the administrator's own folder (R175.1).
+    const putAway = async (rel: string): Promise<void> => {
+      let to = path.join(work, "site", rel);
+      if (await exists(to)) {
+        expect(keep).toBeDefined();
+        to = path.join(keep as string, rel);
+        await mkdir(path.dirname(to), { recursive: true });
+      }
+      await rename(path.join(root, rel), to);
+    };
+    for (const rel of new Set(plan.map(([, r]) => r))) {
+      const [live, aside, site] = [path.join(root, rel), path.join(work, "aside", rel), path.join(work, "site", rel)];
+      if (await exists(aside)) {
+        // Step a: a name still in aside/: what sits at its place goes to site/<rel>, then aside/<rel> goes back.
+        if (await exists(live)) {
+          await putAway(rel);
+        }
+        await rename(aside, live);
+      } else if (!outs.has(rel) && (await exists(live))) {
+        // Step b: a name only imported and still in the site goes to site/<rel>.
+        await putAway(rel);
+      } else if (outs.has(rel)) {
+        // Step c: aside/<rel> is gone: already back when the imported copy is in site/<rel> or the name is only O.
+        expect(!both.has(rel) || (await exists(site))).toBe(true);
+      }
+    }
+    // Step d: the check before the gates come off.
+    for (const [kind, rel] of plan) {
+      const live = await exists(path.join(root, rel));
+      expect(kind === "O" ? live && !(await exists(path.join(work, "aside", rel))) : outs.has(rel) || !live).toBe(true);
+    }
+    // Step e: each half starts from its saved file; without wp-config.live nothing is removed and the steps stop.
+    if (!(await exists(path.join(work, "wp-config.live")))) {
+      throw new Error("hand repair stops: wp-config.live is missing");
+    }
+    await rm(path.join(root, "wp-config.php"));
+    await rename(path.join(work, "wp-config.live"), path.join(root, "wp-config.php"));
+    const hta = path.join(root, ".htaccess");
+    if (await exists(path.join(work, "htaccess.live"))) {
+      await rm(hta);
+      await rename(path.join(work, "htaccess.live"), hta);
+    } else if (await exists(path.join(work, "htaccess.absent"))) {
+      await rm(hta);
+    } else {
+      // Neither saved file: only the gate's block comes off, in place.
+      await writeFile(hta, (await readFile(hta, "utf8")).replace(GATE_HTACCESS, ""));
+    }
+    // Step f: the work folder goes.
+    await rm(work, { recursive: true });
+  }
+
+  it.skipIf(!hasZip)("hand repair §4.26 after an undo stopped half way gives the old site back", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    const { root } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    // A file where only the old site had a name stops the undo half way.
+    await writeFile(path.join(root, "old-only.txt"), "intruder");
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+    expect(await readFile(path.join(root, "index.php"), "utf8")).toBe("<?php // old index");
+    expect(await exists(path.join(work, "aside", "index.php"))).toBe(false);
+    expect(await readFile(path.join(work, "aside", "old-only.txt"), "utf8")).toBe("old");
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+    await handRepair(root, ID_A);
+    expect(await siteSnapshot(root)).toEqual(before);
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(LIVE_CONFIG);
+    expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS);
+    expect(await exists(work)).toBe(false);
+  });
+
+  it.skipIf(!hasZip)("hand repair §4.26 right after a full switch (exit 92, no undo run) gives the old site back, htaccess.absent too", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    for (const hadHtaccess of [true, false]) {
+      const { root } = await makeLiveSite();
+      if (!hadHtaccess) {
+        await rm(path.join(root, ".htaccess"));
+      }
+      await stageArchive(root, buildTestZip(wpEntries("src/")));
+      expectOk(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "import.unpack");
+      expectOk(runPhp(script, root, { op: "import.switch", importId: ID_A }), "import.switch");
+      const work = path.join(root, ".htpanel-import", ID_A);
+      expect(await exists(path.join(work, "htaccess.absent"))).toBe(!hadHtaccess);
+      expect(await readFile(path.join(root, "index.php"), "utf8")).toBe("<?php // new index");
+      await handRepair(root, ID_A);
+      expect(await siteSnapshot(root)).toEqual(hadHtaccess ? before : before.filter((e) => !e.startsWith("F:.htaccess:")));
+      expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(LIVE_CONFIG);
+      expect(await exists(work)).toBe(false);
+    }
+  });
+
+
+  it.skipIf(!hasZip)("hand repair §4.26 stops before any move when a name in both trees has neither copy in the work folder", async () => {
+    const script = await writeProgramScript();
+    const { root, plan } = await switchedSite(script);
+    expect(plan).toContainEqual(["O", "wp-includes"]);
+    expect(plan).toContainEqual(["I", "wp-includes"]);
+    // The old wp-includes is lost from aside/; the imported one sits in the site.
+    await rm(path.join(root, ".htpanel-import", ID_A, "aside", "wp-includes"), { recursive: true });
+    const state = await listTreeSnapshot(root);
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+    expect(await listTreeSnapshot(root)).toEqual(state);
+    await expect(handRepair(root, ID_A)).rejects.toThrow("neither copy of wp-includes");
+    expect(await listTreeSnapshot(root)).toEqual(state);
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+    expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS + GATE_HTACCESS);
+  });
+
+  it.skipIf(!hasZip)("hand repair §4.26 keeps wp-config.php without wp-config.live, and only strips the .htaccess gate without its saved file", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    const { root: noConfig } = await switchedSite(script);
+    await rm(path.join(noConfig, ".htpanel-import", ID_A, "wp-config.live"));
+    await expect(handRepair(noConfig, ID_A)).rejects.toThrow("wp-config.live is missing");
+    expect(await readFile(path.join(noConfig, "wp-config.php"), "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+
+    const { root: noHtaccess } = await switchedSite(script);
+    await rm(path.join(noHtaccess, ".htpanel-import", ID_A, "htaccess.live"));
+    await handRepair(noHtaccess, ID_A);
+    expect(await siteSnapshot(noHtaccess)).toEqual(before);
+    expect(await readFile(path.join(noHtaccess, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS);
+  });
+
+  it.skipIf(!hasZip)("hand repair §4.26 moves the entry at a name whose site/<rel> is taken to the administrator's own folder", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    const { root, outer, plan } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    const rel = "wp-content/uploads";
+    expect(plan).toContainEqual(["I", rel]);
+    expect(plan).not.toContainEqual(["O", rel]);
+    // As a switch stopped by an SFTP upload at a name the archive also has: the imported copy is still in site/<rel>.
+    await rename(path.join(root, rel), path.join(work, "site", rel));
+    await mkdir(path.join(root, rel));
+    await writeFile(path.join(root, rel, "sftp.txt"), "uploaded");
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+    const keep = path.join(outer, "kept");
+    await handRepair(root, ID_A, keep);
+    expect(await siteSnapshot(root)).toEqual(before);
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(LIVE_CONFIG);
+    expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS);
+    expect(await exists(work)).toBe(false);
+    expect(await readFile(path.join(keep, rel, "sftp.txt"), "utf8")).toBe("uploaded");
+  });
+
+  it.skipIf(!hasZip)("hand repair §4.26 skips the plan lines the program skips: a planted wp-content/mu-plugins line leaves the folder in the site", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    for (const byHand of [false, true]) {
+      const { root, plan } = await switchedSite(script);
+      expect(plan.map(([, r]) => r)).not.toContain("wp-content/mu-plugins");
+      const planFile = path.join(root, ".htpanel-import", ID_A, "plan");
+      await writeFile(planFile, (await readFile(planFile, "utf8")) + '["I","wp-content/mu-plugins"]\n');
+      if (byHand) {
+        await handRepair(root, ID_A);
+      } else {
+        expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+      }
+      expect(await siteSnapshot(root)).toEqual(before);
+      expect(await readFile(path.join(root, "wp-content", "mu-plugins", "hp-mail.php"), "utf8")).toBe("// hp-mail stand-in");
+    }
+  });
 });
