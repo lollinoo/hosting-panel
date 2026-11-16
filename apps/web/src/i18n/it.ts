@@ -1116,7 +1116,7 @@ export const it = {
           dump_ambiguous: "L'esportazione contiene più di un sito WordPress. Esporta solo quello che vuoi.",
           multisite_unsupported: "Le installazioni WordPress multisito non possono essere importate.",
           address_unsupported:
-            "Non è stato possibile ricavare il vecchio indirizzo del sito dall'esportazione. Un'importazione richiede il vecchio sito alla radice del suo indirizzo, non in una sottocartella, e lo stesso dominio in «Indirizzo WordPress (URL)» e «Indirizzo sito (URL)» in Impostazioni, Generali. L'esportazione deve comprendere l'intero database, utenti del sito inclusi. Configura così il vecchio sito ed esporta di nuovo.",
+            "Non è stato possibile ricavare il vecchio indirizzo del sito dall'esportazione. Un'importazione richiede il vecchio sito alla radice del suo indirizzo, non in una sottocartella, e lo stesso dominio in «Indirizzo WordPress (URL)» e «Indirizzo sito (URL)» in Impostazioni, Generali. L'esportazione deve comprendere gli utenti del sito. Configura così il vecchio sito ed esporta di nuovo.",
           dump_objects_unsupported:
             "L'esportazione contiene procedure, trigger, viste o eventi, che non possono essere importati. Esporta solo le tabelle.",
           dump_names_unsupported:

@@ -538,8 +538,8 @@ describe("R171.6: Discard is locked while a pick or the start call is on its way
 // R173.7: address_unsupported says what an import needs.
 describe("R173.7: address_unsupported names what an import needs", () => {
   const need: Record<Locale, RegExp[]> = {
-    en: [/root/i, /sub-folder/i, /same domain/i, /"WordPress Address \(URL\)"/, /"Site Address \(URL\)"/, /Settings, General/, /export again/i, /whole database, the site's users included/i],
-    it: [/radice/i, /sottocartella/i, /stesso dominio/i, /«Indirizzo WordPress \(URL\)»/, /«Indirizzo sito \(URL\)»/, /Impostazioni, Generali/, /esporta di nuovo/i, /intero database, utenti del sito inclusi/i],
+    en: [/root/i, /sub-folder/i, /same domain/i, /"WordPress Address \(URL\)"/, /"Site Address \(URL\)"/, /Settings, General/, /export again/i, /site's users/i],
+    it: [/radice/i, /sottocartella/i, /stesso dominio/i, /«Indirizzo WordPress \(URL\)»/, /«Indirizzo sito \(URL\)»/, /Impostazioni, Generali/, /esporta di nuovo/i, /utenti del sito/i],
   };
   it.each(LOCALES)("%s", (locale) => {
     const s = CATALOG[locale].site.wordpress.import.reasons.address_unsupported;

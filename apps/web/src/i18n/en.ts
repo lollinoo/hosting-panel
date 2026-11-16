@@ -1092,7 +1092,7 @@ export const en: Messages = {
           dump_ambiguous: "The database export holds more than one WordPress site. Export only the one you want.",
           multisite_unsupported: "WordPress multisite installations cannot be imported.",
           address_unsupported:
-            "The site's old address could not be taken from the export. An import needs the old site at the root of its address, not in a sub-folder, and the same domain in \"WordPress Address (URL)\" and \"Site Address (URL)\" under Settings, General. The export must be of the whole database, the site's users included. Set up the old site this way and export again.",
+            "The site's old address could not be taken from the export. An import needs the old site at the root of its address, not in a sub-folder, and the same domain in \"WordPress Address (URL)\" and \"Site Address (URL)\" under Settings, General. The export must include the site's users. Set up the old site this way and export again.",
           dump_objects_unsupported:
             "The export contains stored procedures, triggers, views or events, which cannot be imported. Export the tables only.",
           dump_names_unsupported:
