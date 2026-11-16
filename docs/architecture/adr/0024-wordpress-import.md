@@ -48,7 +48,7 @@ Non esiste un'operazione `import.cleanup`. La pulizia prima dello scambio usa la
 Ogni fallimento in `unpack`, `database` o `switch` porta alla stessa coppia, prima il database e poi i file. Un fallimento in `check` o in `backup` finisce senza chiamate: il sito non è ancora stato toccato. Un fallimento in `finish` non annulla nulla (sotto e `§4.27`).
 
 1. `db.import{undo}`: rimette le tabelle vive dal loro posto a parte, se lo scambio è avvenuto, e rimuove schema di prova, schema a parte, segno e account.
-2. `import.undo`: rimette i file vivi, toglie il cancello e rimuove la cartella di lavoro.
+2. `import.undo`: rimette i file vivi, toglie il cancello (salvo i casi di `§4.29`) e rimuove la cartella di lavoro.
 
 Regole:
 - `import.undo` parte solo dopo che `db.import{undo}` ha risposto con uscita `0` nello stesso giro.
@@ -191,7 +191,7 @@ La route di avvio rifiuta prima di creare l'operazione, con uno di tre motivi (`
   - G2, davanti a `wp-config.php`: risponde `503` (servizio non disponibile) solo se G1 manca.
   Nel collaudo (Parte 8, passo 4) tutte le `30` risposte di ogni punto sono state `403`; il `503` non si è mai visto. Dopo che il cancello è tolto può ancora comparire `503` per poco (`§4.11`).
   `.maintenance` di WordPress non basta: la pagina di installazione lo salta.
-- **Il cancello si toglie dentro `import.finish`**, dopo che i `.htaccess` annidati hanno ripreso il loro nome, oppure dentro `import.undo` quando tutto è tornato al suo posto.
+- **Il cancello si toglie dentro `import.finish`**, dopo che i `.htaccess` annidati hanno ripreso il loro nome, oppure dentro `import.undo` quando tutto è tornato al suo posto (salvo i casi di `§4.29`).
 - **La cartella di lavoro** `.htpanel-import/` ha un proprio `.htaccess` rinforzato (`Require all denied`, più `<Files "*">`, più `<If "true">`). Ogni operazione dell'helper lo riscrive prima di fare altro.
 - **Nell'archivio:**
   - una voce di nome `.htpanel-*` è rifiutata;
