@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   stat,
   symlink,
@@ -1055,5 +1056,595 @@ describe("site files program zip operations (real php + ZipArchive)", () => {
       expectRefusal(runPhp(script, root, { op: "extract", path: zipName, to }), expectedReason);
       expect(await listTreeSnapshot(root)).toEqual(baseline);
     }
+  });
+});
+
+// The WordPress import (M4b): the eight import.* operations on the real PHP program.
+const STAGING_HTACCESS =
+  '# hosting-panel import staging: never served\nRequire all denied\n<Files "*">\nRequire all denied\n</Files>\n<If "true">\nRequire all denied\n</If>\n';
+const GATE_HTACCESS =
+  '\n# BEGIN hosting-panel import gate\n<If "true">\nRequire all denied\n</If>\n# END hosting-panel import gate\n';
+const GATE_CONFIG =
+  '<?php if (PHP_SAPI !== "cli") { header("Retry-After: 60", true, 503); exit; } /* hosting-panel import gate */ ?>\n';
+const LIVE_CONFIG = "<?php\n// panel config sentinel\ndefine('HP_MANAGED', true);\n$table_prefix = 'wp_';\n";
+const LIVE_HTACCESS = "# BEGIN panel\nRewriteEngine On\n# END panel\n";
+const DROP_INS = [
+  "advanced-cache.php",
+  "object-cache.php",
+  "db.php",
+  "db-error.php",
+  "install.php",
+  "maintenance.php",
+  "php-error.php",
+  "fatal-error-handler.php",
+  "sunrise.php",
+  "blog-deleted.php",
+  "blog-inactive.php",
+  "blog-suspended.php",
+];
+const ID_A = "a".repeat(32);
+const ID_B = "b".repeat(32);
+
+function wpEntries(prefix: string, marker = "new"): TestZipEntry[] {
+  return [
+    { name: `${prefix}index.php`, data: Buffer.from(`<?php // ${marker} index`) },
+    { name: `${prefix}wp-load.php`, data: Buffer.from(`<?php // ${marker} load`) },
+    { name: `${prefix}wp-includes/version.php`, data: Buffer.from(`<?php $wp_version = '6.9';`) },
+    { name: `${prefix}wp-content/`, data: Buffer.alloc(0) },
+    { name: `${prefix}wp-content/themes/t/style.css`, data: Buffer.from(`/* ${marker} */`) },
+    { name: `${prefix}wp-content/uploads/a.txt`, data: Buffer.from(marker) },
+  ];
+}
+
+/** A live panel site: the gate files, core, content, a drop-in, the mail plug-in, a .maintenance. */
+async function makeLiveSite(): Promise<{ root: string; outer: string }> {
+  const outer = await makeTempDir("hp-import-");
+  const root = path.join(outer, "root");
+  await mkdir(path.join(root, "wp-includes"), { recursive: true });
+  await mkdir(path.join(root, "wp-content", "mu-plugins"), { recursive: true });
+  await mkdir(path.join(root, "wp-content", "themes", "old"), { recursive: true });
+  await writeFile(path.join(root, "wp-config.php"), LIVE_CONFIG);
+  await writeFile(path.join(root, ".htaccess"), LIVE_HTACCESS);
+  await writeFile(path.join(root, ".maintenance"), "<?php $upgrading = 0;");
+  await writeFile(path.join(root, "index.php"), "<?php // old index");
+  await writeFile(path.join(root, "wp-load.php"), "<?php // old load");
+  await writeFile(path.join(root, "old-only.txt"), "old");
+  await writeFile(path.join(root, "wp-includes", "version.php"), "<?php $wp_version = '6.1';");
+  await writeFile(path.join(root, "wp-content", "object-cache.php"), "<?php // old drop-in");
+  await writeFile(path.join(root, "wp-content", "themes", "old", "style.css"), "/* old */");
+  await writeFile(path.join(root, "wp-content", "mu-plugins", "hp-mail.php"), "// hp-mail stand-in");
+  return { root, outer };
+}
+
+async function stageArchive(root: string, zip: Buffer): Promise<void> {
+  await mkdir(path.join(root, ".htpanel-import"), { recursive: true });
+  await writeFile(path.join(root, ".htpanel-import", "archive"), zip);
+}
+
+async function siteSnapshot(root: string): Promise<string[]> {
+  return (await listTreeSnapshot(root)).filter((e) => !/^[A-Z]:\.htpanel-import(?:[/:]|$)/.test(e));
+}
+
+async function exists(p: string): Promise<boolean> {
+  return lstat(p).then(
+    () => true,
+    () => false,
+  );
+}
+
+async function readPlan(root: string, id: string): Promise<Array<[string, string]>> {
+  const text = await readFile(path.join(root, ".htpanel-import", id, "plan"), "utf8");
+  return text
+    .split("\n")
+    .filter((l) => l !== "")
+    .map((l) => JSON.parse(l) as [string, string]);
+}
+
+/** Unpacks a WordPress archive with a nested .htaccess and switches it in. */
+async function switchedSite(script: string): Promise<{ root: string; outer: string; plan: Array<[string, string]> }> {
+  const site = await makeLiveSite();
+  await stageArchive(
+    site.root,
+    buildTestZip([
+      ...wpEntries("src/"),
+      { name: "src/wp-content/uploads/.htaccess", data: Buffer.from("Require all granted\n") },
+      { name: "src/wp-content/themes/t/.htaccess", data: Buffer.from("Require all granted\n") },
+    ]),
+  );
+  expectOk(runPhp(script, site.root, { op: "import.unpack", importId: ID_A }), "import.unpack");
+  const switched = expectOk(runPhp(script, site.root, { op: "import.switch", importId: ID_A }), "import.switch");
+  const plan = await readPlan(site.root, ID_A);
+  expect(switched.moved).toBe(plan.length);
+  return { ...site, plan };
+}
+
+describe("site files program WordPress import (real php + ZipArchive)", () => {
+  it.skipIf(!hasZip)("import.put checks the first bytes, a new uploadId at 0 replaces the slot, stat says partial then complete", async () => {
+    const script = await writeProgramScript();
+    const { root } = await makeLiveSite();
+    const staging = path.join(root, ".htpanel-import");
+    const put = (slot: string, uploadId: string, offset: number, data: Buffer, final: boolean) =>
+      runPhp(script, root, { op: "import.put", slot, uploadId, offset, dataBase64: data.toString("base64"), final });
+    const upA = "uploadAAAAAAAAAAAAAA";
+    const upB = "uploadBBBBBBBBBBBBBB";
+    const zip = buildTestZip(wpEntries(""));
+
+    expectRefusal(put("archive", upA, 0, Buffer.from("%PDF-1.7 not a zip"), true), "not_a_zip");
+    expectRefusal(put("dump", upA, 0, Buffer.from("CREATE TABLE x (\u0000);"), true), "dump_not_sql");
+    expect(await readFile(path.join(staging, ".htaccess"), "utf8")).toBe(STAGING_HTACCESS);
+    let state = expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(state).toEqual({
+      archive: { state: "empty", size: 0, uploadId: null },
+      dump: { state: "empty", size: 0, uploadId: null },
+      remains: false,
+    });
+
+    const gz = zlib.gzipSync(Buffer.from("INSERT INTO t VALUES (1);\n"));
+    expect(expectOk(put("dump", upA, 0, gz, true), "import.put").received).toBe(gz.length);
+    expectOk(put("archive", upA, 0, zip.subarray(0, 10), false), "import.put");
+    expectRefusal(put("archive", upB, 10, zip.subarray(10), true), "upload_mismatch");
+    state = expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(state.archive).toEqual({ state: "partial", size: 10, uploadId: upA });
+    expect(state.dump).toEqual({ state: "complete", size: gz.length, uploadId: null });
+
+    expectOk(put("archive", upB, 0, zip, true), "import.put");
+    state = expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(state.archive).toEqual({ state: "complete", size: zip.length, uploadId: null });
+    expect(await readFile(path.join(staging, "archive"))).toEqual(zip);
+    expect((await readdir(staging)).sort()).toEqual([".htaccess", "archive", "dump"]);
+
+    // A refused first chunk of a new upload leaves the slot empty (A1 order).
+    expectRefusal(put("dump", upB, 0, Buffer.from("x\u0000y"), false), "dump_not_sql");
+    state = expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(state.dump).toEqual({ state: "empty", size: 0, uploadId: null });
+    expect(state.archive.state).toBe("complete");
+  });
+
+  it.skipIf(!hasZip)("import.take moves a picked file, leaves a refused one, and refuses links, folders and protected paths", async () => {
+    const script = await writeProgramScript();
+    const { root } = await makeLiveSite();
+    const zip = buildTestZip(wpEntries(""));
+    await mkdir(path.join(root, "up"));
+    await writeFile(path.join(root, "up", "site.zip"), zip);
+    await writeFile(path.join(root, "bad.sql"), Buffer.from("x\u0000y"));
+    await writeFile(path.join(root, "notzip.txt"), "hello");
+    await symlink("up/site.zip", path.join(root, "link.zip"));
+
+    expect(expectOk(runPhp(script, root, { op: "import.take", slot: "archive", path: "up/site.zip" }), "import.take").size).toBe(zip.length);
+    expect(await exists(path.join(root, "up", "site.zip"))).toBe(false);
+    expect(await readFile(path.join(root, ".htpanel-import", "archive"))).toEqual(zip);
+
+    expectRefusal(runPhp(script, root, { op: "import.take", slot: "dump", path: "bad.sql" }), "dump_not_sql");
+    expect(await exists(path.join(root, "bad.sql"))).toBe(true);
+    expectRefusal(runPhp(script, root, { op: "import.take", slot: "archive", path: "notzip.txt" }), "not_a_zip");
+    expect(await readFile(path.join(root, "notzip.txt"), "utf8")).toBe("hello");
+    expectRefusal(runPhp(script, root, { op: "import.take", slot: "archive", path: "link.zip" }), "is_a_directory");
+    expectRefusal(runPhp(script, root, { op: "import.take", slot: "archive", path: "up" }), "is_a_directory");
+    expectRefusal(
+      runPhp(script, root, { op: "import.take", slot: "dump", path: "wp-content/mu-plugins/hp-mail.php" }),
+      "protected",
+    );
+    expectRefusal(runPhp(script, root, { op: "import.take", slot: "dump", path: "wp-config.php" }), "protected");
+    expectRefusal(runPhp(script, root, { op: "import.take", slot: "dump", path: ".htpanel-import/archive" }), "invalid_path");
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(LIVE_CONFIG);
+    const state = expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(state.archive.state).toBe("complete");
+    expect(state.dump.state).toBe("empty");
+  });
+
+  it.skipIf(!hasZip)("the staging folder is rewritten before every operation, a linked one is unlinked, and .htpanel entries are refused", async () => {
+    const script = await writeProgramScript();
+    const { root, outer } = await makeLiveSite();
+    const staging = path.join(root, ".htpanel-import");
+    await mkdir(staging);
+    await writeFile(path.join(staging, ".htaccess"), "Require all granted\n");
+    expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(await readFile(path.join(staging, ".htaccess"), "utf8")).toBe(STAGING_HTACCESS);
+    await rm(path.join(staging, ".htaccess"));
+    expectRefusal(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "files_missing");
+    expect(await readFile(path.join(staging, ".htaccess"), "utf8")).toBe(STAGING_HTACCESS);
+
+    await rm(staging, { recursive: true });
+    const elsewhere = path.join(outer, "elsewhere");
+    await mkdir(elsewhere);
+    await writeFile(path.join(elsewhere, "keep.txt"), "keep");
+    await symlink(elsewhere, staging);
+    expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat");
+    expect(await exists(staging)).toBe(false);
+    expect(await readdir(elsewhere)).toEqual(["keep.txt"]);
+    await symlink(elsewhere, staging);
+    expectOk(runPhp(script, root, { op: "import.discard" }), "import.discard");
+    expect(await exists(staging)).toBe(false);
+    expect(await readdir(elsewhere)).toEqual(["keep.txt"]);
+
+    await stageArchive(root, buildTestZip([...wpEntries("src/"), { name: "src/.htpanel-x", data: Buffer.from("x") }]));
+    expectRefusal(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "archive_unsafe");
+  });
+
+  it.skipIf(!hasZip)("import.unpack finds the root in the only folder, ignores macOS additions, leaves out the closed list and renames every .htaccess", async () => {
+    const script = await writeProgramScript();
+    const { root } = await makeLiveSite();
+    const leftOutEntries: TestZipEntry[] = [
+      { name: "src/wp-config.php", data: Buffer.from("<?php touch('MARK_CFG');") },
+      { name: "src/.htaccess", data: Buffer.from("Require all granted\n") },
+      { name: "src/.maintenance", data: Buffer.from("<?php") },
+      { name: "src/wp-content/mu-plugins/mark.php", data: Buffer.from("<?php touch('MARK_MU');") },
+      ...DROP_INS.map((d) => ({ name: `src/wp-content/${d}`, data: Buffer.from("<?php") })),
+    ];
+    await stageArchive(
+      root,
+      buildTestZip([
+        ...wpEntries("src/"),
+        ...leftOutEntries,
+        { name: "src/wp-content/uploads/.htaccess", data: Buffer.from("Require all granted\n") },
+        { name: "src/wp-content/mu-plugins/.htaccess", data: Buffer.from("x") },
+        { name: "__MACOSX/src/._index.php", data: Buffer.from("x") },
+        { name: "__MACOSX/src/.htaccess", data: Buffer.from("x") },
+        { name: ".DS_Store", data: Buffer.from("x") },
+      ]),
+    );
+    const res = expectOk(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "import.unpack");
+    expect(res.leftOut).toEqual([
+      "wp-config.php",
+      ".htaccess",
+      ".maintenance",
+      "wp-content/mu-plugins",
+      ...DROP_INS.map((d) => `wp-content/${d}`),
+    ]);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    const site = path.join(work, "site");
+    expect((await readdir(work)).sort()).toEqual(["htaccess.list", "site", "wp-config.php"]);
+    expect(await readFile(path.join(work, "wp-config.php"), "utf8")).toContain("503");
+    expect(await readFile(path.join(site, ".htaccess.imported"), "utf8")).toBe("Require all granted\n");
+    expect(await readFile(path.join(site, "wp-content", "uploads", ".htaccess.hpimport"), "utf8")).toBe("Require all granted\n");
+    expect(await readFile(path.join(work, "htaccess.list"), "utf8")).toBe("wp-content/uploads/.htaccess\n");
+    const tree = await listTreeSnapshot(site);
+    expect(tree.map((e) => e.split(":")[1]).sort()).toEqual(
+      [
+        ".htaccess.imported",
+        "index.php",
+        "wp-content",
+        "wp-content/themes",
+        "wp-content/themes/t",
+        "wp-content/themes/t/style.css",
+        "wp-content/uploads",
+        "wp-content/uploads/.htaccess.hpimport",
+        "wp-content/uploads/a.txt",
+        "wp-includes",
+        "wp-includes/version.php",
+        "wp-load.php",
+      ].sort(),
+    );
+    for (const e of tree) {
+      const rel = e.split(":")[1] ?? "";
+      expect((await stat(path.join(site, rel))).mode & 0o777).toBe(e.startsWith("D:") ? 0o755 : 0o644);
+    }
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(LIVE_CONFIG);
+
+    await stageArchive(root, buildTestZip(wpEntries("")));
+    const top = expectOk(runPhp(script, root, { op: "import.unpack", importId: ID_B }), "import.unpack");
+    expect(top.leftOut).toEqual([]);
+    expect(await readFile(path.join(root, ".htpanel-import", ID_B, "site", "index.php"), "utf8")).toBe("<?php // new index");
+    expect(await exists(path.join(work, "site"))).toBe(true);
+  });
+
+  it.skipIf(!hasZip)("import.unpack refuses what is not one WordPress or is unsafe, and replaces only its own stale folder", async () => {
+    const script = await writeProgramScript();
+    const { root } = await makeLiveSite();
+    const work = path.join(root, ".htpanel-import", ID_A);
+    const cases: Array<[TestZipEntry[], SiteFileErrorReason]> = [
+      [[...wpEntries("a/"), ...wpEntries("b/")], "archive_not_wordpress"],
+      [[...wpEntries("a/"), { name: "readme.txt", data: Buffer.from("x") }], "archive_not_wordpress"],
+      [wpEntries("").filter((e) => !e.name.endsWith("version.php")), "archive_not_wordpress"],
+      [[...wpEntries(""), { name: "wp-content/.htaccess.hpimport", data: Buffer.from("x") }], "archive_unsafe"],
+      [[...wpEntries(""), { name: "wp-content/.htaccess/", data: Buffer.alloc(0) }], "archive_unsafe"],
+      [[...wpEntries(""), { name: "../evil.php", data: Buffer.from("x") }], "archive_unsafe"],
+      [[...wpEntries(""), { name: "/abs.php", data: Buffer.from("x") }], "archive_unsafe"],
+      [[...wpEntries(""), { name: "link", data: Buffer.from("/etc/passwd"), unixMode: 0o120777 }], "archive_unsafe"],
+    ];
+    for (const [entries, reason] of cases) {
+      await stageArchive(root, buildTestZip(entries));
+      expectRefusal(runPhp(script, root, { op: "import.unpack", importId: ID_A }), reason);
+      expect(await exists(path.join(work, "site"))).toBe(false);
+    }
+    expect(await exists(path.join(root, "evil.php"))).toBe(false);
+
+    await stageArchive(root, buildTestZip(wpEntries("")));
+    await mkdir(path.join(work, "site"), { recursive: true });
+    await writeFile(path.join(work, "site", "stale.txt"), "stale");
+    await mkdir(path.join(root, ".htpanel-import", ID_B));
+    await writeFile(path.join(root, ".htpanel-import", ID_B, "other.txt"), "other");
+    expectOk(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "import.unpack");
+    expect(await exists(path.join(work, "site", "stale.txt"))).toBe(false);
+    expect(await readFile(path.join(root, ".htpanel-import", ID_B, "other.txt"), "utf8")).toBe("other");
+
+    await writeFile(path.join(work, "plan"), "");
+    expectRefusal(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "staging_unsafe");
+    expect(await exists(path.join(work, "site", "index.php"))).toBe(true);
+  });
+
+  it.skipIf(!hasZip)("the import ceilings apply only to the import: 20,001 entries pass import.unpack and still fail the plain extract", async () => {
+    const script = await writeProgramScript();
+    const { root } = await makeLiveSite();
+    const filler = Array.from({ length: 20_001 - wpEntries("").length }, (_, i) => ({ name: `wp-content/uploads/f${i}` }));
+    const zip = buildTestZip([...wpEntries(""), ...filler]);
+    await writeFile(path.join(root, "big.zip"), zip);
+    expectRefusal(runPhp(script, root, { op: "extract", path: "big.zip", to: "out" }), "archive_limit");
+    expect(await exists(path.join(root, "out"))).toBe(false);
+    await stageArchive(root, zip);
+    expect(expectOk(runPhp(script, root, { op: "import.unpack", importId: ID_A }), "import.unpack").entries).toBe(20_001);
+  });
+
+  it.skipIf(!hasZip)("import.switch writes the plan without a skipped entry, gates wp-config.php and .htaccess, and swaps the tree", async () => {
+    const script = await writeProgramScript();
+    const { root, plan } = await switchedSite(script);
+    const skipped = [".htpanel-import", ".htaccess", "wp-config.php", "wp-content", ".maintenance", "wp-content/mu-plugins"];
+    for (const [kind, rel] of plan) {
+      expect(["O", "I"]).toContain(kind);
+      expect(skipped).not.toContain(rel);
+    }
+    expect(plan.filter(([k]) => k === "O").map(([, r]) => r).sort()).toEqual(
+      ["index.php", "old-only.txt", "wp-content/object-cache.php", "wp-content/themes", "wp-includes", "wp-load.php"].sort(),
+    );
+    const config = await readFile(path.join(root, "wp-config.php"), "utf8");
+    expect(config).toBe(GATE_CONFIG + LIVE_CONFIG);
+    expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS + GATE_HTACCESS);
+    expect(await readFile(path.join(root, "index.php"), "utf8")).toBe("<?php // new index");
+    expect(await exists(path.join(root, "old-only.txt"))).toBe(false);
+    expect(await exists(path.join(root, "wp-content", "object-cache.php"))).toBe(false);
+    expect(await readFile(path.join(root, "wp-content", "mu-plugins", "hp-mail.php"), "utf8")).toBe("// hp-mail stand-in");
+    expect(await exists(path.join(root, ".maintenance"))).toBe(true);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    expect(await readFile(path.join(work, "wp-config.live"), "utf8")).toBe(LIVE_CONFIG);
+    expect(await readFile(path.join(work, "htaccess.live"), "utf8")).toBe(LIVE_HTACCESS);
+    expect(await readFile(path.join(work, "aside", "old-only.txt"), "utf8")).toBe("old");
+    expectRefusal(runPhp(script, root, { op: "import.switch", importId: ID_A }), "staging_unsafe");
+  });
+
+  it.skipIf(!hasZip)("a switch cut after k moves, then undo (twice), gives the tree before byte for byte", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    const { plan: probe } = await switchedSite(script);
+    for (const k of [0, 1, probe.length - 1, probe.length]) {
+      const { root, plan } = await switchedSite(script);
+      const work = path.join(root, ".htpanel-import", ID_A);
+      // Undo the last moves by hand so the swap looks stopped after k of them (R154).
+      for (const [kind, rel] of plan.slice(k).reverse()) {
+        const [from, to] = kind === "O" ? [path.join(root, rel), path.join(work, "aside", rel)] : [path.join(work, "site", rel), path.join(root, rel)];
+        await rename(to, from);
+      }
+      expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+      expect(await siteSnapshot(root)).toEqual(before);
+      expect(await exists(work)).toBe(false);
+      expect(await exists(path.join(root, ".htpanel-import", "archive"))).toBe(true);
+      expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+      expect(await siteSnapshot(root)).toEqual(before);
+    }
+  });
+
+  it.skipIf(!hasZip)("undo with a lost entry answers complete:false and keeps the gate, the saved files and the work folder (R152, R155)", async () => {
+    const script = await writeProgramScript();
+    const { root } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    await rm(path.join(work, "aside", "old-only.txt"));
+    for (let i = 0; i < 2; i += 1) {
+      expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+      expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+      expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS + GATE_HTACCESS);
+      expect(await readFile(path.join(work, "wp-config.live"), "utf8")).toBe(LIVE_CONFIG);
+      expect(await readFile(path.join(work, "htaccess.live"), "utf8")).toBe(LIVE_HTACCESS);
+      expect(await exists(path.join(work, "plan"))).toBe(true);
+    }
+    expect(await readFile(path.join(root, "index.php"), "utf8")).toBe("<?php // old index");
+  });
+
+  it.skipIf(!hasZip)("undo without its work folder answers complete:false while either gate still stands (R164.5.4)", async () => {
+    const script = await writeProgramScript();
+    const { root } = await switchedSite(script);
+    const cfg = path.join(root, "wp-config.php");
+    const hta = path.join(root, ".htaccess");
+    await rm(path.join(root, ".htpanel-import", ID_A), { recursive: true });
+    const undo = () => expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo");
+    expect(undo()).toEqual({ complete: false });
+    expect(await readFile(cfg, "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+    expect(await readFile(hta, "utf8")).toBe(LIVE_HTACCESS + GATE_HTACCESS);
+    await writeFile(hta, LIVE_HTACCESS);
+    expect(undo()).toEqual({ complete: false });
+    expect(await readFile(cfg, "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+    await writeFile(cfg, LIVE_CONFIG);
+    await writeFile(hta, LIVE_HTACCESS + GATE_HTACCESS);
+    expect(undo()).toEqual({ complete: false });
+    await writeFile(hta, LIVE_HTACCESS);
+    expect(undo()).toEqual({ complete: true });
+  });
+
+  it.skipIf(!hasZip)("undo answers complete:false and changes nothing when a name both trees hold is lost from aside (R164.5.4)", async () => {
+    const script = await writeProgramScript();
+    for (const rel of ["index.php", "wp-includes"]) {
+      const { root } = await switchedSite(script);
+      const work = path.join(root, ".htpanel-import", ID_A);
+      await rm(path.join(work, "aside", rel), { recursive: true });
+      const before = await listTreeSnapshot(root);
+      expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+      expect(await listTreeSnapshot(root)).toEqual(before);
+      expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+      expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS + GATE_HTACCESS);
+      expect(await readFile(path.join(work, "wp-config.live"), "utf8")).toBe(LIVE_CONFIG);
+      expect(await readFile(path.join(work, "htaccess.live"), "utf8")).toBe(LIVE_HTACCESS);
+      expect(await exists(path.join(work, "plan"))).toBe(true);
+    }
+  });
+
+  /** A full undo killed while deleting its work folder: site and aside gone, the plan and wp-config.live left (R165.2). */
+  async function undoKilledInDeletion(script: string): Promise<{ root: string; work: string }> {
+    const { root } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    const plan = await readFile(path.join(work, "plan"));
+    const savedConfig = await readFile(path.join(work, "wp-config.live"));
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+    await mkdir(work);
+    await writeFile(path.join(work, "plan"), plan);
+    await writeFile(path.join(work, "wp-config.live"), savedConfig);
+    return { root, work };
+  }
+
+  it.skipIf(!hasZip)("undo rerun after a full undo killed while deleting its work folder answers complete:true once both gates are off (R165.2)", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    const { root, work } = await undoKilledInDeletion(script);
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+    expect(await exists(work)).toBe(false);
+    expect(await siteSnapshot(root)).toEqual(before);
+  });
+
+  it.skipIf(!hasZip)("undo rerun after a killed deletion answers complete:false and changes nothing while either gate stands (R165.2)", async () => {
+    const script = await writeProgramScript();
+    const { root } = await undoKilledInDeletion(script);
+    const cfg = path.join(root, "wp-config.php");
+    const hta = path.join(root, ".htaccess");
+    for (const [config, htaccess] of [
+      [GATE_CONFIG + LIVE_CONFIG, LIVE_HTACCESS],
+      [LIVE_CONFIG, LIVE_HTACCESS + GATE_HTACCESS],
+    ] as const) {
+      await writeFile(cfg, config);
+      await writeFile(hta, htaccess);
+      const before = await listTreeSnapshot(root);
+      expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+      expect(await listTreeSnapshot(root)).toEqual(before);
+    }
+  });
+
+  /** A deletion killed inside work/site, then the open site makes wp-content/uploads (import-only) and edits wp-config.php. */
+  async function openSiteAfterKilledDeletion(script: string): Promise<{ root: string; work: string; config: string }> {
+    const { root, work } = await undoKilledInDeletion(script);
+    await mkdir(path.join(work, "site", "wp-content"), { recursive: true });
+    await mkdir(path.join(root, "wp-content", "uploads"));
+    await writeFile(path.join(root, "wp-content", "uploads", "photo.txt"), "customer upload");
+    const config = LIVE_CONFIG + "// edited by the open site\n";
+    await writeFile(path.join(root, "wp-config.php"), config);
+    return { root, work, config };
+  }
+
+  it.skipIf(!hasZip)("undo rerun with both gates off moves nothing, writes nothing and only deletes the work folder (R166.4)", async () => {
+    const script = await writeProgramScript();
+    const { root, work, config } = await openSiteAfterKilledDeletion(script);
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+    expect(await exists(work)).toBe(false);
+    expect(await readFile(path.join(root, "wp-content", "uploads", "photo.txt"), "utf8")).toBe("customer upload");
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(config);
+  });
+
+  it.skipIf(!hasZip)("undo rerun over an open site's new entry answers complete:false and moves nothing while a gate stands (R166.4)", async () => {
+    const script = await writeProgramScript();
+    const { root, config } = await openSiteAfterKilledDeletion(script);
+    await writeFile(path.join(root, "wp-config.php"), GATE_CONFIG + config);
+    const before = await listTreeSnapshot(root);
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+    expect(await listTreeSnapshot(root)).toEqual(before);
+  });
+
+  it.skipIf(!hasZip)("undo of a swap stopped before any move never pulls a live file into the work folder", async () => {
+    const script = await writeProgramScript();
+    const { root, plan } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    for (const [kind, rel] of [...plan].reverse()) {
+      const [from, to] = kind === "O" ? [path.join(root, rel), path.join(work, "aside", rel)] : [path.join(work, "site", rel), path.join(root, rel)];
+      await rename(to, from);
+    }
+    await rm(path.join(work, "site", "index.php"));
+    // Neither copy is in the work folder, so the live index.php may be the imported one (R164.5.4).
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: false });
+    expect(await readFile(path.join(root, "index.php"), "utf8")).toBe("<?php // old index");
+    expect(await exists(path.join(work, "site", "index.php"))).toBe(false);
+    expect(await exists(path.join(work, "aside", "index.php"))).toBe(false);
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(GATE_CONFIG + LIVE_CONFIG);
+  });
+
+  it.skipIf(!hasZip)("a forged plan line is skipped and moves nothing outside the site", async () => {
+    const script = await writeProgramScript();
+    const before = await siteSnapshot((await makeLiveSite()).root);
+    const { root, outer } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    await writeFile(path.join(outer, "x"), "outside");
+    await mkdir(path.join(work, "aside", "wp-content", "mu-plugins"));
+    const forged = [
+      ["I", "../x"],
+      ["O", "../x"],
+      ["O", "/etc/hostname"],
+      ["I", "wp-content/mu-plugins"],
+      ["O", "wp-content/mu-plugins"],
+      ["O", "wp-content/../../x"],
+      ["Z", "index.php"],
+    ];
+    await writeFile(
+      path.join(work, "plan"),
+      (await readFile(path.join(work, "plan"), "utf8")) + forged.map((f) => `${JSON.stringify(f)}\n`).join("") + "not json\n",
+    );
+    expect(expectOk(runPhp(script, root, { op: "import.undo", importId: ID_A }), "import.undo")).toEqual({ complete: true });
+    expect(await readFile(path.join(outer, "x"), "utf8")).toBe("outside");
+    expect(await siteSnapshot(root)).toEqual(before);
+  });
+
+  it.skipIf(!hasZip)("import.finish strips exactly the gate, puts .htaccess back, names nested files back and is a no-op the second time", async () => {
+    const script = await writeProgramScript();
+    const { root } = await switchedSite(script);
+    const work = path.join(root, ".htpanel-import", ID_A);
+    // What finalize does to the guarded file (wp config set table_prefix).
+    const edited = (await readFile(path.join(root, "wp-config.php"), "utf8")).replace("'wp_'", "'old_'");
+    await writeFile(path.join(root, "wp-config.php"), edited);
+    await rm(path.join(root, "wp-content", "themes", "t", ".htaccess.hpimport"));
+    await symlink("/etc/hostname", path.join(root, "wp-content", "themes", "t", ".htaccess.hpimport"));
+    await writeFile(path.join(work, "htaccess.list"), "wp-content/uploads/.htaccess\nwp-content/themes/t/.htaccess\n../x/.htaccess\n");
+
+    for (let i = 0; i < 2; i += 1) {
+      expect(expectOk(runPhp(script, root, { op: "import.finish", importId: ID_A }), "import.finish")).toEqual({});
+      const config = await readFile(path.join(root, "wp-config.php"), "utf8");
+      expect(config).toBe(LIVE_CONFIG.replace("'wp_'", "'old_'"));
+      expect(config.startsWith("<?php")).toBe(true);
+      expect(config).not.toContain("hosting-panel import gate");
+      expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS);
+      expect(await readFile(path.join(root, "wp-content", "uploads", ".htaccess"), "utf8")).toBe("Require all granted\n");
+      expect((await lstat(path.join(root, "wp-content", "themes", "t", ".htaccess.hpimport"))).isSymbolicLink()).toBe(true);
+      expect(await exists(path.join(root, "wp-content", "themes", "t", ".htaccess"))).toBe(false);
+      expect(await exists(path.join(root, ".htpanel-import"))).toBe(false);
+      expect(await readFile(path.join(root, "index.php"), "utf8")).toBe("<?php // new index");
+      expect(await readFile(path.join(root, "wp-content", "mu-plugins", "hp-mail.php"), "utf8")).toBe("// hp-mail stand-in");
+    }
+  });
+
+  it.skipIf(!hasZip)("import.finish leaves a gate whose bytes were changed in place and refuses", async () => {
+    const script = await writeProgramScript();
+    const { root } = await switchedSite(script);
+    const changed = (await readFile(path.join(root, "wp-config.php"), "utf8")).replace("503", "200");
+    await writeFile(path.join(root, "wp-config.php"), changed);
+    expectRefusal(runPhp(script, root, { op: "import.finish", importId: ID_A }), "staging_unsafe");
+    expect(await readFile(path.join(root, "wp-config.php"), "utf8")).toBe(changed);
+    expect(await readFile(path.join(root, ".htaccess"), "utf8")).toBe(LIVE_HTACCESS + GATE_HTACCESS);
+    expect(await exists(path.join(root, ".htpanel-import", ID_A, "plan"))).toBe(true);
+  });
+
+  it.skipIf(!hasZip)("remains: stat reports a work folder with a plan, discard keeps only that folder and answers success", async () => {
+    const script = await writeProgramScript();
+    const { root } = await makeLiveSite();
+    const staging = path.join(root, ".htpanel-import");
+    await mkdir(path.join(staging, ID_A), { recursive: true });
+    await mkdir(path.join(staging, ID_B), { recursive: true });
+    await writeFile(path.join(staging, "archive"), "PK\u0003\u0004");
+    await writeFile(path.join(staging, "dump.upload"), "uploadAAAAAAAAAAAAAA");
+    await writeFile(path.join(staging, ".htpanel-upload-uploadAAAAAAAAAAAAAA.part"), "part");
+    expect(expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat").remains).toBe(false);
+
+    await writeFile(path.join(staging, ID_A, "plan"), '["O","index.php"]\n');
+    await writeFile(path.join(staging, ID_A, "wp-config.live"), LIVE_CONFIG);
+    expect(expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat").remains).toBe(true);
+    expect(expectOk(runPhp(script, root, { op: "import.discard" }), "import.discard")).toEqual({});
+    expect((await readdir(staging)).sort()).toEqual([".htaccess", ID_A]);
+    expect((await readdir(path.join(staging, ID_A))).sort()).toEqual(["plan", "wp-config.live"]);
+    expect(expectOk(runPhp(script, root, { op: "import.stat" }), "import.stat").remains).toBe(true);
+
+    await rm(path.join(staging, ID_A, "plan"));
+    expectOk(runPhp(script, root, { op: "import.discard" }), "import.discard");
+    expect(await exists(staging)).toBe(false);
+    expect(expectOk(runPhp(script, root, { op: "import.discard" }), "import.discard")).toEqual({});
   });
 });

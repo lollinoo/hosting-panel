@@ -1277,3 +1277,87 @@ describe("SiteFilesHelpers", () => {
     expect(state.containers.has("cid_1")).toBe(false);
   }, 10_000);
 });
+
+describe("import.* operations in the helper process", () => {
+  const IMPORT_ID = "0123456789abcdef0123456789abcdef";
+  const UPLOAD = "upload_1234567890123456";
+  const importRequests = [
+    { serviceInstanceId: "svc_imp", op: "import.put", slot: "archive", uploadId: UPLOAD, offset: 0, dataBase64: "UEsDBA==", final: false },
+    { serviceInstanceId: "svc_imp", op: "import.take", slot: "dump", path: "old.sql" },
+    { serviceInstanceId: "svc_imp", op: "import.stat" },
+    { serviceInstanceId: "svc_imp", op: "import.discard" },
+    { serviceInstanceId: "svc_imp", op: "import.unpack", importId: IMPORT_ID },
+    { serviceInstanceId: "svc_imp", op: "import.switch", importId: IMPORT_ID },
+    { serviceInstanceId: "svc_imp", op: "import.undo", importId: IMPORT_ID },
+    { serviceInstanceId: "svc_imp", op: "import.finish", importId: IMPORT_ID },
+  ] as const;
+  const empty = { state: "empty", size: 0, uploadId: null };
+  const answers: Record<string, unknown> = {
+    "import.put": { received: 4 },
+    "import.take": { size: 9 },
+    "import.stat": { archive: empty, dump: empty, remains: false },
+    "import.discard": {},
+    "import.unpack": { entries: 3, leftOut: ["wp-config.php"] },
+    "import.switch": { moved: 3 },
+    "import.undo": { complete: true },
+    "import.finish": {},
+  };
+
+  async function importHelpers() {
+    const { target, state } = await createFakeHelperDocker();
+    state.volumes.set("hp_vol_svc_imp_html", { name: "hp_vol_svc_imp_html", labels: { "io.hostingpanel.site_id": "site_imp" } });
+    const helpers = new SiteFilesHelpers({ target, programDir: "/var/lib/hosting-panel/site-files" });
+    cleanupTasks.push(async () => helpers.stop());
+    return { helpers, state };
+  }
+
+  it("refuses an import.put chunk that would pass 2 GiB, as write does", () => {
+    expect(() => parseSiteFilesRequest({ ...importRequests[0], offset: SITE_FILES_MAX_FILE_BYTES })).toThrow(
+      expect.objectContaining({ code: "QUOTA_EXCEEDED", message: "too_large" }),
+    );
+  });
+
+  it("decodes RESOURCE_LOCKED with staging_unsafe and still refuses a code that does not match its reason", async () => {
+    const { helpers, state } = await importHelpers();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const unpack = importRequests[4];
+    state.execHandler = () => ({ exitCode: 0, stdout: JSON.stringify({ ok: false, code: "RESOURCE_LOCKED", reason: "staging_unsafe" }) });
+    await expect(helpers.run(unpack)).rejects.toMatchObject({ code: "RESOURCE_LOCKED", message: "staging_unsafe" });
+    for (const bad of [
+      { ok: false, code: "VALIDATION_ERROR", reason: "staging_unsafe" },
+      { ok: false, code: "RESOURCE_LOCKED", reason: "archive_not_wordpress" },
+      { ok: false, code: "RESOURCE_LOCKED", reason: "not_ready" },
+      { ok: false, code: "RESOURCE_LOCKED", reason: "undo_incomplete" },
+      { ok: true, result: { complete: false, moved: 1 } },
+    ]) {
+      state.execHandler = () => ({ exitCode: 0, stdout: JSON.stringify(bad) });
+      await expect(helpers.run(bad.ok ? importRequests[6] : unpack)).rejects.toMatchObject({ code: "INTERNAL_ERROR" });
+    }
+  });
+
+  it("gives unpack, discard, undo and finish 570 s and the other four 45 s", async () => {
+    const { helpers, state } = await importHelpers();
+    state.execHandler = (payload) => ({ exitCode: 0, stdout: JSON.stringify({ ok: true, result: answers[String(payload.op)] }) });
+    await helpers.run(importRequests[2]);
+    await new Promise((r) => setTimeout(r, 20)); // let the first fire-and-forget sweep exec pass
+    const seconds: Record<string, string | undefined> = {};
+    for (const req of importRequests) {
+      const before = state.calls.length;
+      await expect(helpers.run(req)).resolves.toEqual(answers[req.op]);
+      const exec = state.calls
+        .slice(before)
+        .find((c) => c.method === "POST" && /^\/containers\/[^/]+\/exec$/.test(c.path) && (c.body as { Cmd?: string[] }).Cmd?.[0] === "timeout");
+      seconds[req.op] = (exec?.body as { Cmd: string[] } | undefined)?.Cmd[3];
+    }
+    expect(seconds).toEqual({
+      "import.put": "43",
+      "import.take": "43",
+      "import.stat": "43",
+      "import.discard": "568",
+      "import.unpack": "568",
+      "import.switch": "43",
+      "import.undo": "568",
+      "import.finish": "568",
+    });
+  });
+});

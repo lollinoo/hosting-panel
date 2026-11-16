@@ -12,7 +12,9 @@ import {
   SftpStatusReportWireSchema,
   SITE_DATABASES_RESULT_SCHEMAS,
   SITE_FILES_RESULT_SCHEMAS,
+  SITE_JOB_LIMIT_MS,
   signIpcRequest,
+  siteJobClientWaitMs,
   WORDPRESS_RESET_CLIENT_WAIT_MS,
   type CertificateStatusIpcRequest,
   type DeployServiceIpcRequest,
@@ -101,6 +103,12 @@ export const SITE_JOB_TIMEOUT_MS = 510_000;
 export const SITE_PURGE_TIMEOUT_MS = 120_000;
 export const MAIL_RELAY_APPLY_TIMEOUT_MS = 300_000;
 export const SITE_FILES_TIMEOUT_MS = 60_000;
+
+/** Kinds with their own limit wait limit + 300 s; the rest keep the shipped waits. */
+function siteJobWaitMs(kind: SiteJobIpcRequest["kind"]): number {
+  if (Object.hasOwn(SITE_JOB_LIMIT_MS, kind)) return siteJobClientWaitMs(kind as keyof typeof SITE_JOB_LIMIT_MS);
+  return kind === "wordpress.reset-password" ? WORDPRESS_RESET_CLIENT_WAIT_MS : SITE_JOB_TIMEOUT_MS;
+}
 export const SITE_FILES_DELETE_TIMEOUT_MS = 100_000;
 export const SITE_FILES_ARCHIVE_TIMEOUT_MS = 600_000;
 export const SFTP_APPLY_TIMEOUT_MS = 120_000;
@@ -301,7 +309,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       "POST",
       "/v1/jobs/run",
       payload,
-      req.kind === "wordpress.reset-password" ? WORDPRESS_RESET_CLIENT_WAIT_MS : SITE_JOB_TIMEOUT_MS,
+      siteJobWaitMs(req.kind),
     );
     const { result, ...data } = SiteJobResultDataEnvelopeSchema.parse(json).data;
     // Checked again on this side against the kind's own schema; a result that fails is dropped (result_unreadable).
@@ -359,7 +367,12 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
     assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
     const timeoutMs =
-      req.op === "archive" || req.op === "extract"
+      req.op === "archive" ||
+      req.op === "extract" ||
+      req.op === "import.unpack" ||
+      req.op === "import.discard" ||
+      req.op === "import.undo" ||
+      req.op === "import.finish"
         ? SITE_FILES_ARCHIVE_TIMEOUT_MS
         : req.op === "delete"
           ? SITE_FILES_DELETE_TIMEOUT_MS

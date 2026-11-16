@@ -235,6 +235,8 @@ describe("backup-jobs pure builders", () => {
       JOB_ID,
       "--exclude",
       "/backup/files/.hp_rs_*",
+      "--exclude",
+      "/backup/files/.htpanel-import",
       "/backup/files",
       "/backup/databases",
     ]);
@@ -270,6 +272,8 @@ describe("backup-jobs pure builders", () => {
       JOB_ID,
       "--exclude",
       "/backup/files/.hp_rs_*",
+      "--exclude",
+      "/backup/files/.htpanel-import",
       "/backup/files",
     ]);
     expect(uploadNoDb.payload.HostConfig.Binds).toEqual([

@@ -64,6 +64,7 @@ const ALLOWED_HELPER_ERROR_CODES: ReadonlySet<ErrorCode> = new Set([
   "PERMISSION_DENIED",
   "QUOTA_EXCEEDED",
   "NOT_SUPPORTED",
+  "RESOURCE_LOCKED",
 ]);
 
 const VALID_REASON_SET: ReadonlySet<string> = new Set(SITE_FILE_ERROR_REASONS);
@@ -93,7 +94,7 @@ export function parseSiteFilesRequest(req: unknown): SiteFilesRequest {
   const data = parsed.data;
   assertSafeIdentifier(data.serviceInstanceId, "serviceInstanceId");
 
-  if (data.op === "write") {
+  if (data.op === "write" || data.op === "import.put") {
     const decodedLength = Buffer.from(data.dataBase64, "base64").length;
     if (decodedLength > SITE_FILE_CHUNK_BYTES) {
       throw new ExecutorCodedError("too_large", SITE_FILE_REASON_CODES.too_large);
@@ -223,7 +224,14 @@ function opTimeoutBudgetMs(op: SiteFilesRequest["op"], overrideMs?: number): num
   if (overrideMs !== undefined) {
     return overrideMs;
   }
-  if (op === "archive" || op === "extract") {
+  if (
+    op === "archive" ||
+    op === "extract" ||
+    op === "import.unpack" ||
+    op === "import.discard" ||
+    op === "import.undo" ||
+    op === "import.finish"
+  ) {
     return ARCHIVE_OP_TIMEOUT_MS;
   }
   if (op === "delete") {
@@ -713,6 +721,7 @@ export class SiteFilesHelpers {
         typeof rawCode === "string" &&
         ALLOWED_HELPER_ERROR_CODES.has(rawCode as ErrorCode) &&
         isSiteFileErrorReason(rawReason) &&
+        rawReason !== "not_ready" && // the API's own reason, never the helper's
         SITE_FILE_REASON_CODES[rawReason] === rawCode
       ) {
         return {

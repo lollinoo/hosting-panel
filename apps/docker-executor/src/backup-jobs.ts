@@ -418,6 +418,8 @@ export function buildBackupUploadContainerPayload(input: {
         jobId,
         "--exclude",
         "/backup/files/.hp_rs_*",
+        "--exclude",
+        "/backup/files/.htpanel-import",
         ...paths,
       ],
     }),

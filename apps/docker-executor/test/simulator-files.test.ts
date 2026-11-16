@@ -5,12 +5,15 @@ import {
   SITE_FILES_LIST_MAX,
   SITE_FILES_MAX_FILE_BYTES,
   SITE_FILES_RESULT_SCHEMAS,
+  SiteImportIdSchema,
   type SiteFileErrorReason,
+  type SiteImportOp,
 } from "@hosting-panel/contracts";
 import { createApprovedServiceSpec } from "@hosting-panel/executor-contracts";
 import { describe, expect, it } from "vitest";
 import {
   ExecutorCodedError,
+  ExecutorIpcClientError,
   InMemoryDockerSimulatorAdapter,
   SimulatedSiteFiles,
   type SimSeedEntry,
@@ -1309,6 +1312,370 @@ describe("SimulatedSiteFiles", () => {
 
       // Verify nothing was created or modified by any of the refused extracts
       expect(files.snapshot(svc)).toEqual(snapBefore);
+    });
+  });
+
+  describe("WordPress import (import.*)", () => {
+    const ID_A = "a".repeat(32);
+    const ID_B = "b".repeat(32);
+    const DUMP = Buffer.from("-- MariaDB dump\nCREATE TABLE `wp_options` (id int);\n", "utf8");
+    const b64 = (s: string): string => Buffer.from(s, "utf8").toString("base64");
+
+    // A WordPress tree under `top` ("" or "src/"), plus extra archive entries.
+    function wpZip(top = "", extra: Array<{ p: string; d?: string }> = []): Buffer {
+      return makeSimZip([
+        { p: `${top}index.php`, d: b64("<?php // imported index") },
+        { p: `${top}wp-load.php`, d: b64("<?php // load") },
+        { p: `${top}wp-includes/version.php`, d: b64("<?php $wp_version = '6.9';") },
+        { p: `${top}wp-content/themes/neutral/style.css`, d: b64("/* Theme Name: Neutral */") },
+        ...extra,
+      ]);
+    }
+
+    async function put(
+      files: SimulatedSiteFiles,
+      svc: string,
+      slot: "archive" | "dump",
+      data: Buffer,
+      chunk = data.length,
+      uploadId = UPLOAD_ID,
+    ): Promise<void> {
+      for (let offset = 0; offset < data.length; offset += chunk) {
+        const part = data.subarray(offset, offset + chunk);
+        await files.handle({
+          serviceInstanceId: svc,
+          op: "import.put",
+          slot,
+          uploadId,
+          offset,
+          dataBase64: part.toString("base64"),
+          final: offset + chunk >= data.length,
+        });
+      }
+    }
+
+    const op = <N extends "import.unpack" | "import.switch" | "import.undo" | "import.finish">(
+      svc: string,
+      name: N,
+      importId: string,
+    ) => ({ serviceInstanceId: svc, op: name, importId });
+    const stat = (files: SimulatedSiteFiles, svc: string) =>
+      files.handle({ serviceInstanceId: svc, op: "import.stat" });
+
+    async function staged(archive = wpZip()): Promise<{ files: SimulatedSiteFiles; svc: string }> {
+      const ctx = makeFiles();
+      await put(ctx.files, ctx.svc, "archive", archive);
+      await put(ctx.files, ctx.svc, "dump", DUMP);
+      return ctx;
+    }
+
+    async function switched(id = ID_A): Promise<{ files: SimulatedSiteFiles; svc: string; before: unknown }> {
+      const ctx = await staged();
+      await ctx.files.handle(op(ctx.svc, "import.unpack", id));
+      const before = ctx.files.snapshot(ctx.svc);
+      await ctx.files.handle(op(ctx.svc, "import.switch", id));
+      return { ...ctx, before };
+    }
+
+    function fileText(files: SimulatedSiteFiles, svc: string, path: string): string | undefined {
+      let node = files.snapshot(svc) as { children?: Record<string, unknown>; data?: Buffer } | undefined;
+      for (const seg of path.split("/")) {
+        node = node?.children?.[seg] as typeof node;
+      }
+      return node?.data?.toString("utf8");
+    }
+
+    it("runs the whole happy path: chunked put, stat, unpack, switch, finish", async () => {
+      const { files, svc } = makeFiles();
+      const archive = wpZip();
+      const empty = { state: "empty", size: 0, uploadId: null };
+      expect(await stat(files, svc)).toEqual({ archive: empty, dump: empty, remains: false });
+
+      await files.handle({
+        serviceInstanceId: svc, op: "import.put", slot: "archive", uploadId: UPLOAD_ID,
+        offset: 0, dataBase64: archive.subarray(0, 20).toString("base64"), final: false,
+      });
+      expect((await stat(files, svc)).archive).toEqual({ state: "partial", size: 20, uploadId: UPLOAD_ID });
+
+      await files.handle({
+        serviceInstanceId: svc, op: "import.put", slot: "archive", uploadId: UPLOAD_ID,
+        offset: 20, dataBase64: archive.subarray(20).toString("base64"), final: true,
+      });
+      await put(files, svc, "dump", DUMP, 7);
+      const full = await stat(files, svc);
+      expect(SITE_FILES_RESULT_SCHEMAS["import.stat"].parse(full)).toEqual({
+        archive: { state: "complete", size: archive.length, uploadId: null },
+        dump: { state: "complete", size: DUMP.length, uploadId: null },
+        remains: false,
+      });
+
+      const unpacked = await files.handle(op(svc, "import.unpack", ID_A));
+      expect(unpacked).toEqual({ entries: 4, leftOut: [] });
+      expect(files.importState(svc)).toEqual({ gate: false, plans: [] });
+
+      const sw = await files.handle(op(svc, "import.switch", ID_A));
+      expect(sw.moved).toBeGreaterThan(0);
+      expect(files.importState(svc)).toEqual({ gate: true, plans: [ID_A] });
+      expect((await stat(files, svc)).remains).toBe(true);
+
+      expect(await files.handle(op(svc, "import.finish", ID_A))).toEqual({});
+      expect(files.importState(svc)).toEqual({ gate: false, plans: [] });
+      expect(await stat(files, svc)).toEqual({ archive: empty, dump: empty, remains: false });
+      expect(fileText(files, svc, "index.php")).toBe("<?php // imported index");
+      expect(fileText(files, svc, "wp-load.php")).toBe("<?php // load");
+      expect(fileText(files, svc, "wp-content/themes/neutral/style.css")).toBe("/* Theme Name: Neutral */");
+      expect(fileText(files, svc, "wp-config.php")).toBe("<?php\n// Simulated WordPress configuration.\n");
+      expect(fileText(files, svc, "wp-content/mu-plugins/hp-mail.php")).toBe(
+        "<?php\n// Managed outgoing mail hook.\n",
+      );
+      const wpContent = await files.handle({ serviceInstanceId: svc, op: "list", path: "wp-content" });
+      expect(wpContent.entries.map((e) => e.name)).toEqual(["mu-plugins", "themes"]);
+
+      // Finish is repeatable.
+      expect(await files.handle(op(svc, "import.finish", ID_A))).toEqual({});
+    });
+
+    it("undo after switch gives the tree back byte for byte, takes the gate off, and repeats", async () => {
+      const { files, svc, before } = await switched();
+      expect(files.snapshot(svc)).not.toEqual(before);
+
+      expect(await files.handle(op(svc, "import.undo", ID_A))).toEqual({ complete: true });
+      expect(files.snapshot(svc)).toEqual(before);
+      expect(files.importState(svc)).toEqual({ gate: false, plans: [] });
+      expect(await files.handle(op(svc, "import.undo", ID_A))).toEqual({ complete: true });
+      expect(files.snapshot(svc)).toEqual(before);
+      // The slots survive an undo.
+      const after = await stat(files, svc);
+      expect([after.archive.state, after.dump.state, after.remains]).toEqual(["complete", "complete", false]);
+    });
+
+    it("put: a new uploadId at 0 replaces the slot, a wrong offset is upload_mismatch, first bytes are checked", async () => {
+      const { files, svc } = makeFiles();
+      const archive = wpZip();
+      await files.handle({
+        serviceInstanceId: svc, op: "import.put", slot: "archive", uploadId: UPLOAD_ID,
+        offset: 0, dataBase64: archive.subarray(0, 30).toString("base64"), final: false,
+      });
+      await expectFileRefusal(
+        () => files.handle({
+          serviceInstanceId: svc, op: "import.put", slot: "archive", uploadId: UPLOAD_ID,
+          offset: 31, dataBase64: archive.subarray(31).toString("base64"), final: true,
+        }),
+        "upload_mismatch",
+      );
+      await expectFileRefusal(
+        () => files.handle({
+          serviceInstanceId: svc, op: "import.put", slot: "archive", uploadId: UPLOAD_ID_2,
+          offset: 10, dataBase64: b64("x"), final: false,
+        }),
+        "upload_mismatch",
+      );
+      await put(files, svc, "archive", archive, 1000, UPLOAD_ID_2);
+      expect((await stat(files, svc)).archive).toEqual({ state: "complete", size: archive.length, uploadId: null });
+
+      const refusals: Array<["archive" | "dump", Buffer, SiteFileErrorReason]> = [
+        ["archive", Buffer.from("%PDF-1.7"), "not_a_zip"],
+        ["dump", Buffer.from([0x2d, 0x2d, 0x00, 0x41]), "dump_not_sql"],
+      ];
+      // As the helper: a new upload at 0 clears the slot before its first bytes are checked.
+      for (const [slot, data, reason] of refusals) {
+        await expectFileRefusal(() => put(files, svc, slot, data, data.length, UPLOAD_ID), reason);
+        expect((await stat(files, svc))[slot]).toEqual({ state: "empty", size: 0, uploadId: null });
+      }
+      await put(files, svc, "dump", Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00]));
+      expect((await stat(files, svc)).dump.state).toBe("complete");
+    });
+
+    it("take moves a site file into a slot and refuses what the helper refuses", async () => {
+      const { files, svc } = makeFiles();
+      files.seed(svc, [
+        { path: "uploads/site.zip", kind: "file", data: wpZip() },
+        { path: "uploads/notes.pdf", kind: "file", data: "%PDF-1.7" },
+        { path: "uploads/db.sql", kind: "file", data: DUMP },
+      ]);
+      expect(await files.handle({ serviceInstanceId: svc, op: "import.take", slot: "archive", path: "uploads/site.zip" }))
+        .toEqual({ size: wpZip().length });
+      expect(await files.handle({ serviceInstanceId: svc, op: "import.take", slot: "dump", path: "uploads/db.sql" }))
+        .toEqual({ size: DUMP.length });
+      const listed = await files.handle({ serviceInstanceId: svc, op: "list", path: "uploads" });
+      expect(listed.entries.map((e) => e.name)).toEqual(["notes.pdf"]);
+      expect((await stat(files, svc)).archive.state).toBe("complete");
+
+      const cases: Array<[string, SiteFileErrorReason]> = [
+        ["uploads/notes.pdf", "not_a_zip"],
+        ["uploads", "is_a_directory"],
+        ["uploads/none.zip", "not_found"],
+        ["wp-content/mu-plugins/hp-mail.php", "protected"],
+      ];
+      for (const [path, reason] of cases) {
+        const snap = files.snapshot(svc);
+        await expectFileRefusal(
+          () => files.handle({ serviceInstanceId: svc, op: "import.take", slot: "archive", path }),
+          reason,
+        );
+        expect(files.snapshot(svc)).toEqual(snap);
+      }
+    });
+
+    it("a reason from the knob fails the next call of that op and changes nothing", async () => {
+      const calls: Record<SiteImportOp, (svc: string) => Promise<unknown>> = {
+        "import.put": (svc) => put(ctx.files, svc, "dump", DUMP),
+        "import.take": (svc) =>
+          ctx.files.handle({ serviceInstanceId: svc, op: "import.take", slot: "dump", path: "dump.sql" }),
+        "import.stat": (svc) => stat(ctx.files, svc),
+        "import.discard": (svc) => ctx.files.handle({ serviceInstanceId: svc, op: "import.discard" }),
+        "import.unpack": (svc) => ctx.files.handle(op(svc, "import.unpack", ID_B)),
+        "import.switch": (svc) => ctx.files.handle(op(svc, "import.switch", ID_A)),
+        "import.undo": (svc) => ctx.files.handle(op(svc, "import.undo", ID_A)),
+        "import.finish": (svc) => ctx.files.handle(op(svc, "import.finish", ID_A)),
+      };
+      const ctx = await staged();
+      ctx.files.seed(ctx.svc, [{ path: "dump.sql", kind: "file", data: DUMP }]);
+      await ctx.files.handle(op(ctx.svc, "import.unpack", ID_A));
+      for (const name of Object.keys(calls) as SiteImportOp[]) {
+        const snap = ctx.files.snapshot(ctx.svc);
+        const view = ctx.files.importState(ctx.svc);
+        const slots = await stat(ctx.files, ctx.svc);
+        ctx.files.failNextImport(name, "disk_full");
+        await expectFileRefusal(() => calls[name](ctx.svc), "disk_full");
+        expect(ctx.files.snapshot(ctx.svc)).toEqual(snap);
+        expect(ctx.files.importState(ctx.svc)).toEqual(view);
+        expect(await stat(ctx.files, ctx.svc)).toEqual(slots);
+      }
+      // The knob is spent: the switch now runs.
+      await ctx.files.handle(op(ctx.svc, "import.switch", ID_A));
+      expect(ctx.files.importState(ctx.svc)).toEqual({ gate: true, plans: [ID_A] });
+    });
+
+    it("undo_incomplete answers complete false and keeps gate and plan; the next undo completes", async () => {
+      const { files, svc, before } = await switched();
+      const during = files.snapshot(svc);
+      files.failNextImport("import.undo", "undo_incomplete");
+      expect(await files.handle(op(svc, "import.undo", ID_A))).toEqual({ complete: false });
+      expect(files.snapshot(svc)).toEqual(during);
+      expect(files.importState(svc)).toEqual({ gate: true, plans: [ID_A] });
+      expect((await stat(files, svc)).remains).toBe(true);
+
+      expect(await files.handle(op(svc, "import.undo", ID_A))).toEqual({ complete: true });
+      expect(files.snapshot(svc)).toEqual(before);
+      expect(() => files.failNextImport("import.switch", "undo_incomplete")).toThrow();
+    });
+
+    it("timeout applies the effect and then rejects like the client's ended wait", async () => {
+      const expectTimeout = async (fn: () => Promise<unknown>): Promise<void> => {
+        const err = await fn().then(() => null, (e: unknown) => e);
+        expect(err).toBeInstanceOf(ExecutorIpcClientError);
+        expect((err as ExecutorIpcClientError).code).toBe("OPERATION_AMBIGUOUS");
+        expect((err as ExecutorIpcClientError).ambiguousOutcome).toBe(true);
+      };
+
+      const { files, svc } = await switched();
+      expect(files.importState(svc)).toEqual({ gate: true, plans: [ID_A] });
+      files.failNextImport("import.finish", "timeout");
+      await expectTimeout(() => files.handle(op(svc, "import.finish", ID_A)));
+      expect(files.importState(svc)).toEqual({ gate: false, plans: [] });
+
+      const s2 = await staged();
+      await s2.files.handle(op(s2.svc, "import.unpack", ID_A));
+      const live = s2.files.snapshot(s2.svc);
+      s2.files.failNextImport("import.switch", "timeout");
+      await expectTimeout(() => s2.files.handle(op(s2.svc, "import.switch", ID_A)));
+      expect(s2.files.importState(s2.svc)).toEqual({ gate: true, plans: [ID_A] });
+      expect((await stat(s2.files, s2.svc)).remains).toBe(true);
+      s2.files.failNextImport("import.undo", "timeout");
+      await expectTimeout(() => s2.files.handle(op(s2.svc, "import.undo", ID_A)));
+      expect(s2.files.snapshot(s2.svc)).toEqual(live);
+      expect(s2.files.importState(s2.svc)).toEqual({ gate: false, plans: [] });
+
+      const s3 = makeFiles();
+      s3.files.failNextImport("import.put", "timeout");
+      await expectTimeout(() => put(s3.files, s3.svc, "dump", DUMP));
+      expect((await stat(s3.files, s3.svc)).dump.state).toBe("complete");
+    });
+
+    it("remains of an earlier import: stat, discard and unpack (R155)", async () => {
+      const { files, svc, before } = await switched(ID_A);
+      files.failNextImport("import.undo", "undo_incomplete");
+      expect(await files.handle(op(svc, "import.undo", ID_A))).toEqual({ complete: false });
+      expect((await stat(files, svc)).remains).toBe(true);
+
+      expect(await files.handle({ serviceInstanceId: svc, op: "import.discard" })).toEqual({});
+      const empty = { state: "empty", size: 0, uploadId: null };
+      expect(await stat(files, svc)).toEqual({ archive: empty, dump: empty, remains: true });
+      expect(files.importState(svc)).toEqual({ gate: true, plans: [ID_A] });
+
+      await expectFileRefusal(() => files.handle(op(svc, "import.unpack", ID_A)), "staging_unsafe");
+      await expectFileRefusal(() => files.handle(op(svc, "import.unpack", ID_B)), "files_missing");
+      await put(files, svc, "archive", wpZip("src/"));
+      expect((await files.handle(op(svc, "import.unpack", ID_B))).entries).toBe(4);
+      expect(await files.handle({ serviceInstanceId: svc, op: "import.discard" })).toEqual({});
+      expect(files.importState(svc)).toEqual({ gate: true, plans: [ID_A] });
+
+      // A's saved files were never touched: its undo still gives the old site back.
+      expect(await files.handle(op(svc, "import.undo", ID_A))).toEqual({ complete: true });
+      expect(files.snapshot(svc)).toEqual(before);
+      expect((await stat(files, svc)).remains).toBe(false);
+    });
+
+    it("finds the WordPress root and leaves out the listed names", async () => {
+      const unpack = async (archive: Buffer) => {
+        const { files, svc } = makeFiles();
+        await put(files, svc, "archive", archive);
+        return files.handle(op(svc, "import.unpack", ID_A));
+      };
+      expect((await unpack(wpZip())).entries).toBe(4);
+      expect((await unpack(wpZip("src/"))).entries).toBe(4);
+      expect(
+        await unpack(wpZip("src/", [{ p: "__MACOSX/src/._index.php", d: b64("x") }, { p: ".DS_Store", d: b64("x") }])),
+      ).toEqual({ entries: 6, leftOut: [] });
+      await expectFileRefusal(
+        () => unpack(wpZip("src/", [{ p: "other/readme.txt", d: b64("x") }])),
+        "archive_not_wordpress",
+      );
+      await expectFileRefusal(
+        () => unpack(makeSimZip([
+          { p: "wp-load.php", d: b64("x") },
+          { p: "wp-content/" },
+        ])),
+        "archive_not_wordpress",
+      );
+      await expectFileRefusal(() => unpack(wpZip("", [{ p: "a/.htaccess.hpimport", d: b64("x") }])), "archive_unsafe");
+      await expectFileRefusal(() => unpack(Buffer.from("PK\x03\x04")), "not_a_zip");
+      const bare = makeFiles();
+      await expectFileRefusal(() => bare.files.handle(op(bare.svc, "import.unpack", ID_A)), "files_missing");
+
+      const { files, svc } = await staged(
+        wpZip("src/", [
+          { p: "__MACOSX/src/._index.php", d: b64("x") },
+          { p: "src/wp-config.php", d: b64("<?php // foreign config") },
+          { p: "src/wp-content/object-cache.php", d: b64("<?php // cache") },
+          { p: "src/.htaccess", d: b64("# imported rules") },
+        ]),
+      );
+      expect(await files.handle(op(svc, "import.unpack", ID_A))).toEqual({
+        entries: 8,
+        leftOut: ["wp-config.php", ".htaccess", "wp-content/object-cache.php"],
+      });
+      await files.handle(op(svc, "import.switch", ID_A));
+      await files.handle(op(svc, "import.finish", ID_A));
+      expect(fileText(files, svc, "wp-config.php")).toBe("<?php\n// Simulated WordPress configuration.\n");
+      expect(fileText(files, svc, "wp-content/object-cache.php")).toBeUndefined();
+      expect(fileText(files, svc, ".htaccess.imported")).toBe("# imported rules");
+      expect(fileText(files, svc, "__MACOSX/src/._index.php")).toBeUndefined();
+    });
+
+    it("an importId that is not 32 hex is refused by the schema before the simulator sees it", async () => {
+      const { files, svc } = makeFiles();
+      files.failNextImport("import.unpack", "disk_full");
+      for (const bad of ["A".repeat(32), "a".repeat(31), "a".repeat(33), "../x"]) {
+        expect(SiteImportIdSchema.safeParse(bad).success).toBe(false);
+        await expectFileRefusal(
+          () => files.handle({ serviceInstanceId: svc, op: "import.unpack", importId: bad }),
+          "invalid_path",
+        );
+      }
+      // The knob was never reached by the refused calls.
+      await expectFileRefusal(() => files.handle(op(svc, "import.unpack", ID_A)), "disk_full");
     });
   });
 });

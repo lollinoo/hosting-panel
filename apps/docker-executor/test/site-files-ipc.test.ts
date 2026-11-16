@@ -14,6 +14,7 @@ import {
   Phase1DisabledDockerExecutor,
   createApprovedServiceSpec,
   type SiteFilesRequest,
+  type SiteJobRequest,
 } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -738,5 +739,107 @@ describe("Site files through signed IPC and simulator", () => {
     expect(caught).toBeInstanceOf(ExecutorIpcClientError);
     expect((caught as ExecutorIpcClientError).code).toBe("NOT_SUPPORTED");
     expect((caught as ExecutorIpcClientError).statusCode).toBe(422);
+  });
+
+  const IMPORT_ID = "0123456789abcdef0123456789abcdef";
+  const importCalls = (svc: string): Array<{ req: SiteFilesRequest; answer: unknown }> => {
+    const empty = { state: "empty", size: 0, uploadId: null };
+    return [
+      { req: { serviceInstanceId: svc, op: "import.put", slot: "archive", uploadId: UPLOAD_ID_1, offset: 0, dataBase64: "UEsDBA==", final: true }, answer: { received: 4 } },
+      { req: { serviceInstanceId: svc, op: "import.take", slot: "dump", path: "old.sql" }, answer: { size: 9 } },
+      { req: { serviceInstanceId: svc, op: "import.stat" }, answer: { archive: empty, dump: empty, remains: false } },
+      { req: { serviceInstanceId: svc, op: "import.discard" }, answer: {} },
+      { req: { serviceInstanceId: svc, op: "import.unpack", importId: IMPORT_ID }, answer: { entries: 3, leftOut: ["wp-config.php", "wp-content/object-cache.php"] } },
+      { req: { serviceInstanceId: svc, op: "import.switch", importId: IMPORT_ID }, answer: { moved: 3 } },
+      { req: { serviceInstanceId: svc, op: "import.undo", importId: IMPORT_ID }, answer: { complete: false } },
+      { req: { serviceInstanceId: svc, op: "import.finish", importId: IMPORT_ID }, answer: {} },
+    ];
+  };
+
+  it("carries each import.* operation through the route and refuses an unknown one or a bad importId", async () => {
+    const { simulator, client, svc } = await createHarness();
+    const seen: SiteFilesRequest[] = [];
+    for (const { req, answer } of importCalls(svc)) {
+      vi.spyOn(simulator, "siteFiles").mockImplementationOnce(async (r: SiteFilesRequest) => {
+        seen.push(r);
+        return answer as never;
+      });
+      await expect(client.siteFiles(req)).resolves.toEqual(answer);
+    }
+    expect(seen).toEqual(importCalls(svc).map((c) => c.req));
+
+    vi.spyOn(simulator, "siteFiles").mockResolvedValueOnce({ complete: true, moved: 1 } as never);
+    await expect(client.siteFiles(importCalls(svc)[6]!.req)).rejects.toThrow();
+    const spy = vi.spyOn(simulator, "siteFiles");
+    spy.mockClear();
+    for (const bad of [
+      { serviceInstanceId: svc, op: "import.cleanup" },
+      { serviceInstanceId: svc, op: "import.unpack", importId: IMPORT_ID.toUpperCase() },
+      { serviceInstanceId: svc, op: "import.take", slot: "plan", path: "old.sql" },
+    ]) {
+      await expect(client.siteFiles(bad as unknown as SiteFilesRequest)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("carries the three import job kinds through the job route", async () => {
+    const { simulator, client, siteId } = await createHarness();
+    const kinds: string[] = [];
+    vi.spyOn(simulator, "runSiteJob").mockImplementation(async (r: SiteJobRequest) => {
+      kinds.push(r.kind);
+      return { jobId: r.jobId, exitCode: 0, outputTail: "" };
+    });
+    for (const [kind, params] of [
+      ["db.import", { step: "prepare", importId: IMPORT_ID }],
+      ["db.import-load", { importId: IMPORT_ID }],
+      ["wordpress.import-finalize", { phpVersion: "8.4", tablePrefix: "wpx_", siteUrl: "http://wp-a.example.test", previousUrl: "http://old.example.test" }],
+    ] as const) {
+      const res = await client.runSiteJob({ jobId: "job_imp_1", kind, siteId, organizationId: "org_1", serviceInstanceId: "svc_files_1", params });
+      expect(res).toEqual({ jobId: "job_imp_1", exitCode: 0, outputTail: "" });
+    }
+    expect(kinds).toEqual(["db.import", "db.import-load", "wordpress.import-finalize"]);
+    await expect(
+      client.runSiteJob({ jobId: "job_imp_1", kind: "db.import-switch" as never, siteId, organizationId: "org_1", params: {} }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(kinds).toHaveLength(3);
+  });
+
+  it("waits 600 s for the four long import operations and 60 s for the other four", async () => {
+    const { client, svc } = await createHarness();
+    const timeouts: Array<number | undefined> = [];
+    const request = vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    for (const { req } of importCalls(svc)) await client.siteFiles(req).catch(() => undefined);
+    request.mockRestore();
+    expect(timeouts).toEqual([60_000, 60_000, 60_000, 600_000, 600_000, 60_000, 600_000, 600_000]);
+  });
+
+  it("waits limit + 300 s for the kinds with their own limit and the shipped wait for every other kind", async () => {
+    const { client, siteId } = await createHarness();
+    const timeouts: Array<number | undefined> = [];
+    const request = vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    const kinds = [
+      "db.import",
+      "db.import-load",
+      "wordpress.import-finalize",
+      "wordpress.set-url",
+      "wordpress.reset-password",
+      "db.provision",
+      "db.drop",
+      "wordpress.install",
+      "wordpress.inspect",
+      "wordpress.update",
+      "wordpress.settle",
+    ] as const;
+    for (const kind of kinds) {
+      await client.runSiteJob({ jobId: "job_wait_1", kind, siteId, organizationId: "org_1", params: {} }).catch(() => undefined);
+    }
+    request.mockRestore();
+    expect(timeouts).toEqual([600_000, 1_800_000, 1_500_000, 660_000, 75_000, 510_000, 510_000, 510_000, 510_000, 510_000, 510_000]);
   });
 });
