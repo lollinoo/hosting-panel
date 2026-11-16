@@ -61,6 +61,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0011_panel_backup.sql",
       "0012_wordpress_tools.sql",
       "0013_wordpress_import.sql",
+      "0014_password_reset_tokens.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -85,6 +86,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0011_panel_backup.sql",
       "0012_wordpress_tools.sql",
       "0013_wordpress_import.sql",
+      "0014_password_reset_tokens.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -105,6 +107,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0011_panel_backup.sql",
       "0012_wordpress_tools.sql",
       "0013_wordpress_import.sql",
+      "0014_password_reset_tokens.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
