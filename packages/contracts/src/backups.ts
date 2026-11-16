@@ -9,6 +9,8 @@ export const DEFAULT_BACKUP_HOUR_UTC = 2;
 export const DEFAULT_BACKUP_RETENTION_DAYS = 14;
 export const HEAVY_ACTIONS_PER_HOUR = 6;
 export const HEAVY_ACTION_WINDOW_MS = 60 * 60_000;
+/** Heavy customer actions allowed per organisation in HEAVY_ACTION_WINDOW_MS. */
+export const HEAVY_ACTIONS_PER_HOUR_PER_ORGANIZATION = 24;
 export const HEAVY_BACKUP_OPERATION_KINDS = [
   "site.backups.create",
   "site.backups.restore",

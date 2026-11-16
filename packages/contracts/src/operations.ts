@@ -59,6 +59,11 @@ export const OPERATION_KINDS = [
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);
+
+/** An operation still unknown this long after its last change raises operation_unknown. */
+export const OPERATION_UNKNOWN_ALERT_AFTER_MS = 15 * 60_000;
+/** A running operation whose lease ran out this long ago raises operation_stuck. */
+export const OPERATION_STUCK_ALERT_AFTER_MS = 5 * 60_000;
 export type OperationKind = z.infer<typeof OperationKindSchema>;
 
 export const ALLOWED_OPERATION_TRANSITIONS: Readonly<

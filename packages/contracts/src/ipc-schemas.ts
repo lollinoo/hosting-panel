@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
+import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
 import {
   MYSQL_NATIVE_PASSWORD_HASH_PATTERN,
   SITE_DATABASE_CUSTOM_NAME_PATTERN,
@@ -333,6 +334,32 @@ export const HostSecurityIpcRequestSchema = z.object({
 });
 export type HostSecurityIpcRequest = z.infer<typeof HostSecurityIpcRequestSchema>;
 
+export const PANEL_CONTAINER_STATES = ["running", "stopped", "degraded", "missing", "unknown"] as const;
+export type PanelContainerState = (typeof PANEL_CONTAINER_STATES)[number];
+
+export const PanelContainerStatusWireSchema = z.object({
+  component: z.enum(PANEL_CONTAINERS),
+  state: z.enum(PANEL_CONTAINER_STATES),
+  expected: z.boolean(),
+  startedAt: z.string().datetime({ offset: true }).nullable(),
+  restartCount: z.number().int().nonnegative(),
+}).strict();
+export const PanelContainersDataEnvelopeSchema = z.object({
+  data: z.array(PanelContainerStatusWireSchema).length(PANEL_CONTAINERS.length),
+});
+
+export const PanelContainerLogsIpcRequestSchema = z.object({
+  component: z.enum(PANEL_CONTAINERS),
+  tail: z.number().int().min(1).max(500),
+}).strict();
+
+export const HostDiskWireSchema = z.object({
+  paths: z.array(z.enum(HOST_DISK_PATHS)).min(1).max(HOST_DISK_PATHS.length),
+  usedBytes: z.string().regex(/^\d+$/),
+  totalBytes: z.string().regex(/^\d+$/),
+}).strict();
+export type HostDiskWire = z.infer<typeof HostDiskWireSchema>;
+
 export const HostTelemetryWireSchema = z.object({
   hostId: z.string().min(1).max(128),
   cpuUsagePercent: z.number().min(0).max(100),
@@ -344,6 +371,7 @@ export const HostTelemetryWireSchema = z.object({
   kernelVersion: z.string().min(1).optional(),
   dockerEngineReachable: z.boolean().optional(),
   collectedAt: z.string().datetime({ offset: true }),
+  disks: z.array(HostDiskWireSchema).max(HOST_DISK_PATHS.length).optional(),
 });
 export type HostTelemetryWire = z.infer<typeof HostTelemetryWireSchema>;
 

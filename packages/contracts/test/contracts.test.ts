@@ -74,6 +74,14 @@ import {
   isTerminalOperationStatus,
   redactSensitiveString,
   redactSensitiveValue,
+  ALERT_KINDS,
+  ALERT_SEVERITY,
+  AdminAlertDtoSchema,
+  HOST_DISK_PATHS,
+  HostDiskWireSchema,
+  PANEL_COMPONENTS,
+  PANEL_CONTAINERS,
+  PanelContainerLogsIpcRequestSchema,
 } from "../src/index.js";
 
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
@@ -996,5 +1004,55 @@ describe("@hosting-panel/contracts — Panel mail IPC", () => {
     ["an extra key", { subject: "Hello" }],
   ])("refuses %s", (_name, patch) => {
     expect(PanelMailIpcRequestSchema.safeParse({ ...valid, ...patch }).success).toBe(false);
+  });
+});
+
+describe("@hosting-panel/contracts — Admin health and alerts", () => {
+  it("pins the alert kinds, panel components and panel containers in order", () => {
+    expect(ALERT_KINDS).toEqual([
+      "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
+      "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
+      "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
+    ]);
+    expect(PANEL_COMPONENTS).toEqual([
+      "api", "web", "database", "executor", "host_agent", "docker_engine",
+      "ingress_proxy", "shared_database", "phpmyadmin", "sftp", "mail_relay",
+    ]);
+    expect(PANEL_CONTAINERS).toEqual(["ingress_proxy", "shared_database", "phpmyadmin", "sftp", "mail_relay"]);
+  });
+
+  it("gives every alert kind a severity", () => {
+    expect(Object.keys(ALERT_SEVERITY).sort()).toEqual([...ALERT_KINDS].sort());
+  });
+
+  const diskAlert = {
+    kind: "disk_high",
+    severity: "critical",
+    subject: "panel_data",
+    since: null,
+    details: { paths: ["panel_data"], usedPercent: 91 },
+  };
+
+  it("accepts a disk alert and refuses an unknown kind or an extra detail key", () => {
+    expect(AdminAlertDtoSchema.safeParse(diskAlert).success).toBe(true);
+    expect(AdminAlertDtoSchema.safeParse({ ...diskAlert, kind: "disk_full" }).success).toBe(false);
+    expect(
+      AdminAlertDtoSchema.safeParse({ ...diskAlert, details: { ...diskAlert.details, path: "/var/lib/docker" } }).success,
+    ).toBe(false);
+  });
+
+  it("bounds the panel log request", () => {
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 1 }).success).toBe(true);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 500 }).success).toBe(true);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 0 }).success).toBe(false);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 501 }).success).toBe(false);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "hp_sftp", tail: 10 }).success).toBe(false);
+  });
+
+  it("names a disk only by the closed list, never by a path", () => {
+    expect(HOST_DISK_PATHS).toEqual(["panel_data", "docker_data", "database_data", "root"]);
+    const disk = { paths: ["panel_data", "root"], usedBytes: "10", totalBytes: "100" };
+    expect(HostDiskWireSchema.safeParse(disk).success).toBe(true);
+    expect(HostDiskWireSchema.safeParse({ ...disk, paths: ["/var/lib/docker"] }).success).toBe(false);
   });
 });
