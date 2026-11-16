@@ -62,7 +62,8 @@ export function validateCsrfAndOrigin(
       // Also allow forwarded host if behind proxy
       const forwardedHost = req.headers.get("x-forwarded-host");
       const host = req.headers.get("host");
-      const originHost = new URL(origin).host;
+      // An Origin that is no URL ("null" from a sandboxed frame) gives undefined, which matches no header.
+      const originHost = URL.parse(origin)?.host;
       if (originHost !== host && originHost !== forwardedHost) {
         return bffErrorResponse(
           "PERMISSION_DENIED",
