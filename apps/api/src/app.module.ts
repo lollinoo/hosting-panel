@@ -28,6 +28,7 @@ import { SiteBackupsController } from "./controllers/site-backups.controller.js"
 import { SiteFilesController } from "./controllers/site-files.controller.js";
 import { SiteSftpController } from "./controllers/site-sftp.controller.js";
 import { SiteWordpressController } from "./controllers/site-wordpress.controller.js";
+import { SiteWordpressImportController } from "./controllers/site-wordpress-import.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
@@ -43,6 +44,7 @@ import { SiteDatabasesService } from "./sites/site-databases.service.js";
 import { SiteFilesService } from "./sites/site-files.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { SiteWordpressService } from "./sites/site-wordpress.service.js";
+import { SiteWordpressImportService } from "./sites/site-wordpress-import.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -90,6 +92,7 @@ export class AppModule {
         SiteDatabasesController,
         SiteBackupsController,
         SiteWordpressController,
+        SiteWordpressImportController,
         AdminMailRelayController,
         AdminBackupsController,
       ],
@@ -130,6 +133,7 @@ export class AppModule {
         SiteBackupsService,
         SiteRestoreService,
         SiteWordpressService,
+        SiteWordpressImportService,
         BackupSettingsService,
         BackupSchedulerService,
         DriftReconcilerService,

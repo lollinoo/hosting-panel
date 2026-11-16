@@ -239,6 +239,11 @@ export class SiteWordpressApplier {
     await this.#step(op.id, "settle", ok ? "succeeded" : "failed", ok ? "Site checked after the update" : SETTLE_FAILED);
   }
 
+  /** Runs the check job for another applier (the import's finish); same answer as #inspect. */
+  public inspectFor(op: WordpressOperation, site: SiteRef, suffix: string): Promise<WordpressJobReason | null> {
+    return this.#inspect(op, site, suffix);
+  }
+
   /** Runs the check job and stores what it read; returns the failure reason or null. */
   async #inspect(op: WordpressOperation, site: SiteRef, suffix: string): Promise<WordpressJobReason | null> {
     const res = await this.#job(op, site, "wordpress.inspect", suffix, {});

@@ -92,6 +92,10 @@ const SAFE_REASON_MESSAGES: Readonly<Record<SiteFileErrorReason, string>> = {
   disk_full: "There is not enough storage space left for this site.",
   zip_unavailable: "Archive operations are temporarily unavailable.",
   not_ready: "Site files are not available until the site finishes updating.",
+  files_missing: "The files for the import are not complete. Upload them again.",
+  archive_not_wordpress: "The archive does not contain a WordPress site.",
+  staging_unsafe: "An earlier import is not finished. Restore a copy from Backups first.",
+  dump_not_sql: "The database export is not an SQL file.",
 };
 
 const SAFE_CODE_MESSAGES: Partial<Readonly<Record<ErrorCode, string>>> = {

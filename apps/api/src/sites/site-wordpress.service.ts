@@ -117,7 +117,7 @@ export class SiteWordpressService {
       };
     }
     return {
-      backupsConfigured: await this.#backupsConfigured(),
+      backupsConfigured: await this.backupsConfigured(),
       state: this.#state(stored?.state),
       runningOperation,
       lastUpdate: SiteWordpressLastUpdateDtoSchema.safeParse(stored?.lastUpdate).data ?? null,
@@ -126,7 +126,7 @@ export class SiteWordpressService {
 
   /** Queues a check of versions and updates. */
   public async refresh(site: WordpressSite, actor: SiteDatabaseActor, idempotencyKey: string): Promise<SiteWordpressAcceptedDto> {
-    this.#assertUsable(site);
+    this.assertUsable(site);
     return this.#enqueue(site, actor, idempotencyKey, "site.wordpress.inspect", async (tx, operationId) => {
       await this.#audit(tx, site, actor, "site.wordpress.refresh", { outcome: "requested", operationId });
     });
@@ -139,7 +139,7 @@ export class SiteWordpressService {
     idempotencyKey: string,
     target: SiteWordpressUpdateRequest,
   ): Promise<SiteWordpressAcceptedDto> {
-    this.#assertUsable(site);
+    this.assertUsable(site);
     if (target.scope === "plugin" || target.scope === "theme") {
       const state = await this.#storedState(site);
       const items = target.scope === "plugin" ? state?.plugins : state?.themes;
@@ -151,7 +151,7 @@ export class SiteWordpressService {
         );
       }
     }
-    const backupsConfigured = await this.#backupsConfigured();
+    const backupsConfigured = await this.backupsConfigured();
     return this.#enqueue(site, actor, idempotencyKey, "site.wordpress.update", async (tx, operationId, submittedAt) => {
       await assertHeavyActionAllowed(tx, site.id, actor, { id: operationId, submittedAt });
       if (backupsConfigured) {
@@ -164,7 +164,7 @@ export class SiteWordpressService {
 
   /** Sets a new password for one administrator; the password is answered once and stored nowhere. */
   public async resetPassword(site: WordpressSite, actor: SiteDatabaseActor, userId: string): Promise<SiteWordpressPasswordResetDto> {
-    this.#assertUsable(site);
+    this.assertUsable(site);
     const [busy] = await this.dbClient.db
       .select({ id: operations.id, status: operations.status })
       .from(operations)
@@ -222,8 +222,8 @@ export class SiteWordpressService {
     throw answer === "administrator_unknown" ? administratorUnknown() : unavailable(answer);
   }
 
-  /** Guards of the three mutating routes, in the order of the design. */
-  #assertUsable(site: WordpressSite): void {
+  /** Guards of the mutating routes (also the import's), in the order of the design. */
+  public assertUsable(site: WordpressSite): void {
     if (!isWordpressToolsAvailable(this.config.runtimeBackend) || !this.dockerExecutor.isRuntimeAvailable) {
       throw refusal("NOT_SUPPORTED", "wordpress_unavailable", "WordPress tools are not available on this server.");
     }
@@ -274,7 +274,8 @@ export class SiteWordpressService {
     return SiteWordpressStateDtoSchema.safeParse(raw).data ?? null;
   }
 
-  async #backupsConfigured(): Promise<boolean> {
+  /** Whether a copy is taken before a change. */
+  public async backupsConfigured(): Promise<boolean> {
     return isBackupAvailable(this.config.runtimeBackend) && (await getBackupSettingsPublic(this.dbClient.db)) !== null;
   }
 

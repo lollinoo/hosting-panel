@@ -1,6 +1,7 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   ERROR_CODES,
+  WORDPRESS_IMPORT_KIND,
   WORDPRESS_OPERATION_KINDS,
   canTransitionOperation,
   isTerminalOperationStatus,
@@ -59,6 +60,7 @@ import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-doma
 import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
 import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
 import { SITE_WORDPRESS_INTERRUPTED, SiteWordpressApplier } from "../sites/site-wordpress-applier.js";
+import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-applier.js";
 import { SiteProvisioner } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
@@ -78,6 +80,8 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
   "site.files.archive",
   "site.files.extract",
 ];
+// The import runs in the WordPress lane: its copy step is the update's own.
+const WORDPRESS_LANE_KINDS = [...WORDPRESS_OPERATION_KINDS, WORDPRESS_IMPORT_KIND] as const satisfies readonly OperationKind[];
 export const BACKUP_OPERATION_KINDS = [
   "site.backups.create",
   "site.backups.prune",
@@ -144,7 +148,7 @@ export class OutboxWorkerService {
       excludeKinds: [
         ...FILE_ARCHIVE_OPERATION_KINDS,
         ...BACKUP_OPERATION_KINDS,
-        ...WORDPRESS_OPERATION_KINDS,
+        ...WORDPRESS_LANE_KINDS,
       ],
     },
     activePromise: null,
@@ -164,7 +168,7 @@ export class OutboxWorkerService {
     pendingTrigger: false,
   };
   readonly #wordpressLane: OutboxLaneState = {
-    filter: { includeKinds: WORDPRESS_OPERATION_KINDS },
+    filter: { includeKinds: WORDPRESS_LANE_KINDS },
     activePromise: null,
     scheduledImmediate: null,
     pendingTrigger: false,
@@ -172,6 +176,7 @@ export class OutboxWorkerService {
 
   readonly #backupsApplier: SiteBackupsApplier;
   readonly #wordpressApplier: SiteWordpressApplier;
+  readonly #wordpressImportApplier: SiteWordpressImportApplier;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -187,6 +192,13 @@ export class OutboxWorkerService {
       siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
     this.#wordpressApplier = new SiteWordpressApplier(
       this.#backupsApplier,
+      dbClient,
+      dockerExecutor,
+      config,
+    );
+    this.#wordpressImportApplier = new SiteWordpressImportApplier(
+      this.#backupsApplier,
+      this.#wordpressApplier,
       dbClient,
       dockerExecutor,
       config,
@@ -397,6 +409,8 @@ export class OutboxWorkerService {
         await this.siteFilesApplier.apply(op, payload);
       } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
         await this.#backupsApplier.apply(op);
+      } else if (op.kind === WORDPRESS_IMPORT_KIND) {
+        await this.#wordpressImportApplier.apply(op);
       } else if ((WORDPRESS_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
         await this.#wordpressApplier.apply(op);
       } else {
@@ -889,13 +903,16 @@ export class OutboxWorkerService {
           convergedFailed += 1;
         } else if (
           (BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind) ||
-          op.kind === "site.wordpress.update"
+          op.kind === "site.wordpress.update" ||
+          op.kind === WORDPRESS_IMPORT_KIND
         ) {
-          // Backup and update recovery never replay a change; the applier settles what it can.
+          // Backup, update and import recovery never replay a change; the applier settles what it can.
           const outcome =
             op.kind === "site.wordpress.update"
               ? await this.#wordpressApplier.recover(op)
-              : await this.#backupsApplier.recover(op);
+              : op.kind === WORDPRESS_IMPORT_KIND
+                ? await this.#wordpressImportApplier.recover(op)
+                : await this.#backupsApplier.recover(op);
           if (outcome === "pending") {
             continue;
           }

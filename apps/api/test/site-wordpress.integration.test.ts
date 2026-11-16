@@ -199,7 +199,7 @@ describe("WordPress tools: the outbox lane, recovery and the routes", () => {
     await app.outboxWorker.processPendingOnce();
 
     const takers = claims.filter((c) => c.operationIds.includes(operation.id));
-    expect(takers.map((c) => c.filter)).toEqual([{ includeKinds: WORDPRESS_OPERATION_KINDS }]);
+    expect(takers.map((c) => c.filter)).toEqual([{ includeKinds: [...WORDPRESS_OPERATION_KINDS, "site.wordpress.import"] }]);
     const main = claims.find((c) => (c.filter as { excludeKinds?: string[] }).excludeKinds !== undefined);
     expect((main!.filter as { excludeKinds: string[] }).excludeKinds).toEqual(expect.arrayContaining([...WORDPRESS_OPERATION_KINDS]));
     expect(apply).toHaveBeenCalledTimes(1);
