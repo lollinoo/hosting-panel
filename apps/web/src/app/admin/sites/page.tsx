@@ -11,10 +11,10 @@ import { CreateSiteForCustomerDialog } from "@/components/admin/create-site-for-
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminSitesPage() {
+export default async function AdminSitesPage({ searchParams }: { searchParams: Promise<{ support?: string }> }) {
   const session = await getServerSession();
   if (!session) redirect("/login");
-  const [m, list] = await Promise.all([getRequestLocale().then(getMessages), fetchServerAdminSites()]);
+  const [m, list, { support }] = await Promise.all([getRequestLocale().then(getMessages), fetchServerAdminSites(), searchParams]);
   const t = m.admin.sites;
 
   return (
@@ -26,6 +26,11 @@ export default async function AdminSitesPage() {
         </div>
         {list && <CreateSiteForCustomerDialog customers={list.customers} csrfToken={session.csrfToken} />}
       </div>
+      {support === "ended" && (
+        <Alert role="status">
+          <AlertDescription>{t.support.ended}</AlertDescription>
+        </Alert>
+      )}
       {list && <CertificateAlerts alerts={list.certificateAlerts} />}
       {list ? (
         <Card>

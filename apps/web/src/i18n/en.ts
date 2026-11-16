@@ -20,6 +20,24 @@ export const en: Messages = {
     totpHint: "Enter the 6-digit code from your authenticator app.",
     verify: "Verify",
     back: "Back",
+    forgotLink: "Forgot your password?",
+    forgot: {
+      title: "Reset your password",
+      intro: "Enter the email address you sign in with. If it belongs to a customer account, we will send you a link to choose a new password.",
+      email: "Email",
+      submit: "Send the link",
+      sent: "If the address belongs to a customer account, a link is on its way. It works only once and expires after a short time.",
+      noMail: "No email within a few minutes? Check the spam folder, then ask the administrator of this server to reset your password. Administrators get no link: they reset their password on the server.",
+      badEmail: "Check the email address: it does not look complete.",
+      back: "Back to sign in",
+    },
+    reset: {
+      title: "Choose a new password",
+      submit: "Save the new password",
+      done: "Your password has been changed. Sign in with the new one.",
+      signIn: "Sign in",
+      requestNew: "Ask for a new link",
+    },
   },
   account: {
     title: "My account",
@@ -63,6 +81,11 @@ export const en: Messages = {
     yourSites: "Your sites",
     accountMenu: "Account menu",
     account: "Account",
+    support: {
+      mark: "Support view: you are seeing the sites of {name} until {time}.",
+      markUnassigned: "Support view: you are seeing the sites not assigned to any customer, until {time}.",
+      leave: "Leave",
+    },
   },
   site: {
     wpAdmin: "Open WP Admin",
@@ -1352,6 +1375,10 @@ export const en: Messages = {
       alertsNotIssued: "{host} ({site}): no certificate \u2014 {problem}",
       alertsPanelExpiring: "Panel address {host}: certificate expires on {date}",
       alertsProblem: { rate_limited: "Let's Encrypt rate limit reached", port_80_blocked: "port 80 not reachable from the internet", not_pointing: "the name reaches another server", caa_blocked: "a CAA record blocks Let's Encrypt", other: "issuance failed" },
+      support: {
+        open: "Open support view",
+        ended: "There is no open support visit. Open one from this list.",
+      },
     },
     mail: {
       title: "Outgoing email",
@@ -1603,7 +1630,7 @@ export const en: Messages = {
     },
     users: {
       title: "Users",
-      subtitle: "Platform accounts: the administrator and the customer.",
+      subtitle: "Platform accounts: the administrators and the customer.",
       create: "Create customer account",
       colName: "User",
       colRole: "Role",
@@ -1644,6 +1671,19 @@ export const en: Messages = {
       ownerEmail: "Owner email",
       createSubmit: "Create account",
       conflict: "A customer account already exists.",
+      administrators: {
+        create: "New administrator",
+        title: "New administrator",
+        hint: "The new administrator gets a temporary password and a two-factor key, shown once.",
+        name: "Name",
+        email: "Email",
+        submit: "Create administrator",
+        invalid: "Check the name and the email address: the address may already be in use.",
+        tempNote: "Share it securely; the new administrator must change it at first sign-in.",
+        totpTitle: "Two-factor key",
+        totpNote: "Before the first sign-in, the new administrator adds this key to an authenticator app. It will not be shown again.",
+        sshRepair: "A lost password or second factor of an administrator is repaired on the server command line: hp-accounts reset-password, hp-accounts reset-totp or hp-break-glass.",
+      },
     },
   },
   notFound: {
@@ -1665,6 +1705,8 @@ export const en: Messages = {
     INTERNAL_ERROR: "Something went wrong on our side. Please try again in a few minutes.",
     RESOURCE_LOCKED: "This site is finishing another change. Try again in a moment.",
     ALREADY_EXISTS: "That name is already in use. Choose another one.",
+    LAST_ADMINISTRATOR_PROTECTED: "This is the last active administrator: it cannot be disabled. Create or enable another administrator first.",
+    PASSWORD_RESET_INVALID: "This link is not valid any more: it has expired or was already used. Ask for a new one.",
     generic: "Something went wrong. Try again, and contact support if it keeps happening.",
   },
 };

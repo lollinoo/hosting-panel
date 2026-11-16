@@ -34,6 +34,16 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
     if (sent.ok) router.refresh();
   }
 
+  async function openSupport(site: AdminSiteDto) {
+    setBusy(site.id);
+    setNotice(null);
+    const res = await fetch(`/api/admin/sites/${site.id}/support-access`, { method: "POST", headers: { "X-CSRF-Token": csrfToken } }).catch(() => null);
+    if (res?.ok) return window.location.assign(`/sites/${site.id}`);
+    const body = (await res?.json().catch(() => null)) as { error?: { code?: string } } | null;
+    setBusy(null);
+    setNotice({ error: true, text: errorMessage(m, body?.error?.code ?? "") });
+  }
+
   const confirmDelete: ConfirmDelete = async (confirmName) => {
     const site = deleting!;
     const sent = await keyedSend(keys.current, csrfToken, `delete:${site.id}:${confirmName}`, "DELETE", `/api/admin/sites/${site.id}`, { confirmName });
@@ -77,6 +87,9 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
                 <div className="flex flex-wrap gap-2">
                   <Button type="button" size="sm" variant="outline" onClick={() => setMoving(s)}>
                     {t.changeOwner}
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => openSupport(s)}>
+                    {t.support.open}
                   </Button>
                   <Button asChild size="sm" variant="outline">
                     <Link href={`/admin/sites/${s.id}/domains`}>{t.domains}</Link>

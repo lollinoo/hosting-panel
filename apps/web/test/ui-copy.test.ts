@@ -7,6 +7,8 @@ import { it as itMsgs } from "@/i18n/it";
 const src = path.resolve(__dirname, "../src");
 const dirs = [
   "app/login",
+  "app/forgot-password",
+  "app/reset-password",
   "app/account",
   "app/sites",
   "components/auth",

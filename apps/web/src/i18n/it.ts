@@ -19,6 +19,24 @@ export const it = {
     totpHint: "Inserisci il codice a 6 cifre generato dalla tua app di autenticazione.",
     verify: "Verifica",
     back: "Indietro",
+    forgotLink: "Password dimenticata?",
+    forgot: {
+      title: "Reimposta la password",
+      intro: "Inserisci l'indirizzo email con cui accedi. Se appartiene a un account cliente, ti invieremo un link per scegliere una nuova password.",
+      email: "Email",
+      submit: "Invia il link",
+      sent: "Se l'indirizzo appartiene a un account cliente, il link è in arrivo. Funziona una sola volta e scade dopo poco tempo.",
+      noMail: "Nessuna email entro qualche minuto? Controlla la posta indesiderata, poi chiedi all'amministratore di questo server di reimpostare la password. Gli amministratori non ricevono alcun link: reimpostano la password direttamente sul server.",
+      badEmail: "Controlla l'indirizzo email: sembra incompleto.",
+      back: "Torna all'accesso",
+    },
+    reset: {
+      title: "Scegli una nuova password",
+      submit: "Salva la nuova password",
+      done: "La password è stata cambiata. Accedi con quella nuova.",
+      signIn: "Accedi",
+      requestNew: "Chiedi un nuovo link",
+    },
   },
   account: {
     title: "Il mio account",
@@ -64,6 +82,11 @@ export const it = {
     yourSites: "I tuoi siti",
     accountMenu: "Menu account",
     account: "Account",
+    support: {
+      mark: "Vista di assistenza: stai vedendo i siti di {name} fino alle {time}.",
+      markUnassigned: "Vista di assistenza: stai vedendo i siti non assegnati a nessun cliente, fino alle {time}.",
+      leave: "Esci",
+    },
   },
   site: {
     wpAdmin: "Apri WP Admin",
@@ -1377,6 +1400,10 @@ export const it = {
       alertsNotIssued: "{host} ({site}): nessun certificato \u2014 {problem}",
       alertsPanelExpiring: "Indirizzo del pannello {host}: il certificato scade il {date}",
       alertsProblem: { rate_limited: "limite di Let's Encrypt raggiunto", port_80_blocked: "porta 80 non raggiungibile da internet", not_pointing: "il nome raggiunge un altro server", caa_blocked: "un record CAA blocca Let's Encrypt", other: "emissione non riuscita" },
+      support: {
+        open: "Apri la vista di assistenza",
+        ended: "Non c'è nessuna visita di assistenza aperta. Aprine una da questo elenco.",
+      },
     },
     mail: {
       title: "Posta in uscita",
@@ -1630,7 +1657,7 @@ export const it = {
     },
     users: {
       title: "Utenti",
-      subtitle: "Account della piattaforma: l'amministratore e il cliente.",
+      subtitle: "Account della piattaforma: gli amministratori e il cliente.",
       create: "Crea account cliente",
       colName: "Utente",
       colRole: "Ruolo",
@@ -1671,6 +1698,19 @@ export const it = {
       ownerEmail: "Email del proprietario",
       createSubmit: "Crea account",
       conflict: "Esiste già un account cliente.",
+      administrators: {
+        create: "Nuovo amministratore",
+        title: "Nuovo amministratore",
+        hint: "Il nuovo amministratore riceve una password temporanea e una chiave per la verifica in due passaggi, mostrate una sola volta.",
+        name: "Nome",
+        email: "Email",
+        submit: "Crea amministratore",
+        invalid: "Controlla il nome e l'indirizzo email: l'indirizzo potrebbe essere già in uso.",
+        tempNote: "Condividila in modo sicuro; il nuovo amministratore dovrà cambiarla al primo accesso.",
+        totpTitle: "Chiave per la verifica in due passaggi",
+        totpNote: "Prima del primo accesso, il nuovo amministratore aggiunge questa chiave a un'app di autenticazione. Non verrà mostrata di nuovo.",
+        sshRepair: "La password o il secondo fattore persi di un amministratore si ripristinano dalla riga di comando del server: hp-accounts reset-password, hp-accounts reset-totp o hp-break-glass.",
+      },
     },
   },
   notFound: {
@@ -1693,6 +1733,8 @@ export const it = {
     INTERNAL_ERROR: "Qualcosa è andato storto da parte nostra. Riprova tra qualche minuto.",
     RESOURCE_LOCKED: "Il sito sta completando un'altra modifica. Riprova tra qualche istante.",
     ALREADY_EXISTS: "Questo nome è già in uso. Scegline un altro.",
+    LAST_ADMINISTRATOR_PROTECTED: "È l'ultimo amministratore attivo: non può essere disattivato. Prima crea o riattiva un altro amministratore.",
+    PASSWORD_RESET_INVALID: "Questo link non è più valido: è scaduto o è già stato usato. Chiedine uno nuovo.",
     generic: "Si è verificato un errore. Riprova; se il problema continua contatta l'assistenza.",
   },
 } as const;
