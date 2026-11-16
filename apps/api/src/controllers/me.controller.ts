@@ -11,6 +11,7 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
+import { currentSupportAccess } from "../auth/support-access.service.js";
 import {
   paginateItems,
   parsePaginationQuery,
@@ -47,6 +48,8 @@ export class MeController {
       role: (m.roleNames[0] ?? "customer_collaborator") as PresetRoleName,
       organizationStatus: m.organization.status,
     }));
+    const isServerAdmin = row?.platformRole === "infrastructure_admin";
+    const supportAccess = isServerAdmin ? await currentSupportAccess(this.dbClient.db, auth.principal) : undefined;
 
     return {
       data: {
@@ -57,7 +60,7 @@ export class MeController {
           locale: row?.locale ?? "it",
           totpEnabled: row?.totpEnabledAt != null,
           mustChangePassword: row?.mustChangePassword ?? false,
-          isServerAdmin: row?.platformRole === "infrastructure_admin",
+          isServerAdmin,
         },
         globalRoles: (auth.principal.globalRoles ?? []) as PresetRoleName[],
         hostingAdminOrgIds: (auth.principal.hostingAdminOrgIds ?? []) as string[],
@@ -67,6 +70,7 @@ export class MeController {
           dockerExecutorRuntimeAvailable: this.dockerExecutor.isRuntimeAvailable,
           hostAgentRuntimeAvailable: this.hostAgent.isRuntimeAvailable,
         }),
+        ...(supportAccess ? { supportAccess } : {}),
       },
     };
   }

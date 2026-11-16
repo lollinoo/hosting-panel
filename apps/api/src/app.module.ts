@@ -8,6 +8,8 @@ import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
+import { PasswordResetService } from "./auth/password-reset.service.js";
+import { SupportAccessService } from "./auth/support-access.service.js";
 import { ApiExceptionFilter } from "./common/api-exception.filter.js";
 import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
@@ -21,6 +23,7 @@ import { HostsController } from "./controllers/hosts.controller.js";
 import { ManagedSitesController } from "./controllers/managed-sites.controller.js";
 import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
+import { PasswordResetController } from "./controllers/password-reset.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
 import { SiteDomainsController } from "./controllers/site-domains.controller.js";
 import { SiteDatabasesController } from "./controllers/site-databases.controller.js";
@@ -29,6 +32,7 @@ import { SiteFilesController } from "./controllers/site-files.controller.js";
 import { SiteSftpController } from "./controllers/site-sftp.controller.js";
 import { SiteWordpressController } from "./controllers/site-wordpress.controller.js";
 import { SiteWordpressImportController } from "./controllers/site-wordpress-import.controller.js";
+import { SupportAccessController } from "./controllers/support-access.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
@@ -95,6 +99,8 @@ export class AppModule {
         SiteWordpressImportController,
         AdminMailRelayController,
         AdminBackupsController,
+        PasswordResetController,
+        SupportAccessController,
       ],
       providers: [
         {
@@ -139,6 +145,8 @@ export class AppModule {
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
+        PasswordResetService,
+        SupportAccessService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,

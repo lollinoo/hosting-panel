@@ -15,7 +15,7 @@ import {
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
-import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { DockerExecutorPort, PanelMailRequest } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import {
@@ -142,6 +142,18 @@ export class MailRelayService {
     }
     await this.#audit(this.dbClient.db, actorId, "admin.mail_relay.test", { to, outcome: result.outcome, problem: result.problem });
     return result;
+  }
+
+  /** Hands one panel mail to the relay; never throws and writes no audit row of its own. */
+  public async sendPanelMail(req: Omit<PanelMailRequest, "from">): Promise<"queued" | "failed" | "not_sent"> {
+    try {
+      const row = await getMailRelaySettingsPublic(this.dbClient.db);
+      if (row === null || fingerprint(row) !== this.#appliedFingerprint) return "not_sent";
+      const from = mailSenderAddress(row.senderDomain);
+      return (await this.#queue(() => this.executor.sendPanelMail({ ...req, from }))).outcome;
+    } catch {
+      return "failed";
+    }
   }
 
   public async customerView(): Promise<{ configured: boolean; fromAddress: string | null }> {

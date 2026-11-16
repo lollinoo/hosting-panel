@@ -1,6 +1,7 @@
-import { auditEvents, createDatabaseClient, eq, users, type DatabaseClient } from "@hosting-panel/database";
-import { findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { auditEvents, createDatabaseClient, eq, sql, users, type DatabaseClient } from "@hosting-panel/database";
+import { CreateAdministratorResultDtoSchema, findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { issueBreakGlassEmergencyToken } from "../src/cli/break-glass.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
@@ -51,6 +52,7 @@ describe("admin user management API", () => {
       databaseClient: dbClient,
       secretsMasterKey: KEY,
       runtimeBackend: "local-simulator",
+      breakglassSigningKey: "ab".repeat(32),
     });
     adminToken = (await login("admin@x.it", PW, admin.totpSecretBase32)).data.accessToken;
   });
@@ -139,5 +141,124 @@ describe("admin user management API", () => {
     expect(findForbiddenPublicDtoKeys(json)).toEqual([]);
     expect(text).not.toContain("scrypt$");
     expect(text).not.toMatch(/totpCiphertext|passwordHash/);
+  });
+
+  const createAdmin = (body: unknown, token = adminToken) => call(token, "POST", "/v1/admin/administrators", body);
+  const setStatus = (token: string, userId: string, status: string) =>
+    call(token, "PATCH", `/v1/admin/users/${userId}`, { status });
+  const statusOf = async (userId: string) =>
+    (await dbClient.db.select().from(users).where(eq(users.id, userId)))[0]!.userStatus;
+  const errorCode = async (res: Response) => ((await res.json()) as { error: { code: string } }).error.code;
+  // A second administrator with a known password, logged in.
+  async function secondAdmin() {
+    const b = await createServerAdmin(dbClient.db, KEY, { email: "second@example.test", name: "Second", password: PW });
+    return { id: b.userId, token: (await login("second@example.test", PW, b.totpSecretBase32)).data.accessToken };
+  }
+
+  it("server admin creates an administrator; the secrets are in the answer only", async () => {
+    const res = await createAdmin({ email: " New@Example.TEST ", name: "New" });
+    expect(res.status).toBe(201);
+    const data = CreateAdministratorResultDtoSchema.strict().parse(((await res.json()) as { data: unknown }).data);
+    expect(data.email).toBe("new@example.test");
+    const [row] = await dbClient.db.select().from(users).where(eq(users.id, data.userId));
+    expect(row).toMatchObject({ platformRole: "infrastructure_admin", mustChangePassword: true, userStatus: "active" });
+
+    expect((await login("new@example.test", data.temporaryPassword)).data.status).toBe("totp_required");
+    const l = await login("new@example.test", data.temporaryPassword, data.totpSecretBase32);
+    expect(l.data.mustChangePassword).toBe(true);
+    expect((await call(l.data.accessToken, "GET", "/v1/admin/users")).status).toBe(200);
+
+    const [audit] = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.administrator.create"));
+    expect(audit).toMatchObject({ actorId: adminId, targetType: "user", targetId: data.userId });
+    const { outcome, requestId, ...rest } = audit!.details as Record<string, unknown>;
+    expect({ outcome, rest }).toEqual({ outcome: "succeeded", rest: { email: "new@example.test" } });
+    expect(requestId).toEqual(expect.any(String));
+
+    const tables = await dbClient.db.execute(
+      sql`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`,
+    );
+    expect(tables.rows.length).toBeGreaterThan(10);
+    for (const t of tables.rows) {
+      const rows = JSON.stringify((await dbClient.db.execute(sql.raw(`SELECT * FROM "${String(t["table_name"])}"`))).rows);
+      expect(rows, String(t["table_name"])).not.toContain(data.temporaryPassword);
+      expect(rows, String(t["table_name"])).not.toContain(data.totpSecretBase32);
+    }
+
+    // Password and TOTP of an administrator stay on the command line.
+    expect((await call(adminToken, "POST", `/v1/admin/users/${data.userId}/reset-password`)).status).toBe(403);
+    expect((await call(adminToken, "POST", `/v1/admin/users/${data.userId}/reset-totp`)).status).toBe(403);
+  });
+
+  it("create administrator refuses a used address, a bad body and a customer", async () => {
+    const dup = await createAdmin({ email: "ADMIN@x.it", name: "Dup" });
+    expect(dup.status).toBe(400);
+    expect(await errorCode(dup)).toBe("VALIDATION_ERROR");
+    expect((await createAdmin({ email: "not-an-address", name: "Bad" })).status).toBe(400);
+    expect((await createAdmin({ email: "bad@example.test", name: " " })).status).toBe(400);
+
+    const { data } = (await (await createCustomer()).json()) as Created;
+    const token = (await login("mario@hotel.it", data.temporaryPassword)).data.accessToken;
+    const denied = await createAdmin({ email: "sneaky@example.test", name: "Sneaky" }, token);
+    expect(denied.status).toBe(403);
+    expect(await errorCode(denied)).toBe("PERMISSION_DENIED");
+    expect(await dbClient.db.select().from(users).where(eq(users.platformRole, "infrastructure_admin"))).toHaveLength(1);
+    expect(await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.administrator.create"))).toHaveLength(0);
+  });
+
+  it("disabling an administrator refuses its session and break-glass token; enabling lets it back", async () => {
+    const b = await secondAdmin();
+    const bg = await issueBreakGlassEmergencyToken({ dbClient, oidcService: app.oidc, userId: b.id, reason: "test" });
+    expect((await call(bg.token.accessToken, "GET", "/v1/me")).status).toBe(200);
+
+    expect((await setStatus(adminToken, b.id, "disabled")).status).toBe(200);
+    expect((await call(b.token, "GET", "/v1/me")).status).toBe(401);
+    expect((await call(bg.token.accessToken, "GET", "/v1/me")).status).toBe(401);
+    await expect(
+      issueBreakGlassEmergencyToken({ dbClient, oidcService: app.oidc, userId: b.id, reason: "test" }),
+    ).rejects.toMatchObject({ code: "PERMISSION_DENIED" });
+
+    const on = await setStatus(adminToken, b.id, "active");
+    expect(on.status).toBe(200);
+    expect(((await on.json()) as { data: { status: string } }).data.status).toBe("active");
+    expect((await login("second@example.test", PW)).data.status).toBe("totp_required");
+    const statuses = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.user.status"));
+    expect(statuses.map((a) => (a.details as { status: string }).status)).toEqual(["disabled", "active"]);
+  });
+
+  it("the last active administrator cannot be disabled", async () => {
+    const b = await secondAdmin();
+    const real = app.authz.authenticateRequest.bind(app.authz);
+    // The caller passes its own check, then is disabled before the change: only the target is still active.
+    vi.spyOn(app.authz, "authenticateRequest").mockImplementation(async (req) => {
+      const auth = await real(req);
+      await dbClient.db.update(users).set({ userStatus: "disabled" }).where(eq(users.id, adminId));
+      return auth;
+    });
+    const res = await setStatus(adminToken, b.id, "disabled");
+    expect(res.status).toBe(409);
+    expect(await errorCode(res)).toBe("LAST_ADMINISTRATOR_PROTECTED");
+    expect(await statusOf(b.id)).toBe("active");
+    expect((await call(b.token, "GET", "/v1/me")).status).toBe(200);
+    expect(await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.user.status"))).toHaveLength(0);
+  });
+
+  it("two administrators disabling each other at once: one wins, one gets 409", async () => {
+    const b = await secondAdmin();
+    const real = app.authz.authenticateRequest.bind(app.authz);
+    let release!: () => void;
+    const bothIn = new Promise<void>((r) => (release = r));
+    let waiting = 0;
+    // Both callers are authenticated as active before either change runs.
+    vi.spyOn(app.authz, "authenticateRequest").mockImplementation(async (req) => {
+      const auth = await real(req);
+      if (++waiting === 2) release();
+      await bothIn;
+      return auth;
+    });
+    const res = await Promise.all([setStatus(adminToken, b.id, "disabled"), setStatus(b.token, adminId, "disabled")]);
+    expect(res.map((r) => r.status).sort()).toEqual([200, 409]);
+    expect(await errorCode(res.find((r) => r.status === 409)!)).toBe("LAST_ADMINISTRATOR_PROTECTED");
+    const admins = await dbClient.db.select().from(users).where(eq(users.platformRole, "infrastructure_admin"));
+    expect(admins.filter((a) => a.userStatus === "active")).toHaveLength(1);
   });
 });
