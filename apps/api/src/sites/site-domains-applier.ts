@@ -16,6 +16,7 @@ import {
   operations,
   renewOperationLease,
   serviceInstances,
+  settleOperation,
   sites,
   transitionOperation,
   updateOperationStepTransactional,
@@ -160,12 +161,12 @@ export class SiteDomainsApplier {
           : null,
       );
 
-      await step("publish", async () => {
-        const final = buildSiteHostRoutes(rows, now, { acmeEnabled });
-        await publish(final);
-        // Every executor call is done; what is left is bookkeeping (processing cannot go straight to succeeded).
-        await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-        await db
+      const final = buildSiteHostRoutes(rows, now, { acmeEnabled });
+      await step("publish", () => publish(final));
+
+      // The routes are recorded as published only together with the operation's end.
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        await tx
           .update(sites)
           .set({
             appliedRoutes: final,
@@ -173,17 +174,15 @@ export class SiteDomainsApplier {
             updatedAt: new Date(),
           })
           .where(eq(sites.id, siteId));
-      });
-
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId,
-        action: "site.domains.applied",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id, wordpressUrl: switchUrl ? wanted : null },
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId,
+          action: "site.domains.applied",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id, wordpressUrl: switchUrl ? wanted : null },
+        });
       });
     } catch (err) {
       await this.#settleFailure(op, current, err);

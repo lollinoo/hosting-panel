@@ -22,6 +22,7 @@ import {
   renewOperationLease,
   resolveDecryptedSecretRefs,
   serviceInstances,
+  settleOperation,
   sites,
   transitionOperation,
   updateOperationStepTransactional,
@@ -234,28 +235,29 @@ export class SiteProvisioner {
           .where(eq(sites.id, siteId));
       });
 
-      // Every executor step is done; what is left is bookkeeping (processing cannot go straight to succeeded).
-      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      await step("finish", async () => {
-        const adminSecrets = await db
+      // Every executor step is done; the bookkeeping commits with the operation's end.
+      current = "finish";
+      await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+      await updateOperationStepTransactional(db, op.id, "finish", "running", STEP_RUNNING);
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        const adminSecrets = await tx
           .select({ id: encryptedSecrets.id })
           .from(encryptedSecrets)
           .where(and(eq(encryptedSecrets.siteId, siteId), eq(encryptedSecrets.secretKey, "WP_ADMIN_PASSWORD_INITIAL")));
         for (const secret of adminSecrets) {
-          await deleteEncryptedSecretTransactional(db, { organizationId, secretId: secret.id, actorId: null });
+          await deleteEncryptedSecretTransactional(tx, { organizationId, secretId: secret.id, actorId: null });
         }
-        await db.update(sites).set({ status: "ready", updatedAt: new Date() }).where(eq(sites.id, siteId));
-      });
-
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId,
-        action: "site.provision.succeeded",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id },
+        await tx.update(sites).set({ status: "ready", updatedAt: new Date() }).where(eq(sites.id, siteId));
+        await updateOperationStepTransactional(tx, op.id, "finish", "succeeded", STEP_DONE.finish);
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId,
+          action: "site.provision.succeeded",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id },
+        });
       });
     } catch (err) {
       await this.#settleFailure(op, current, err, SITE_SETUP_FAILED, "site.provision.failed");
@@ -313,21 +315,22 @@ export class SiteProvisioner {
         await this.executor.purgeSite(siteId);
       });
 
-      // Every executor step is done; what is left is bookkeeping (processing cannot go straight to succeeded).
-      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      await step("finish", async () => {
-        await db.delete(sites).where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)));
-      });
-
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId,
-        action: "site.delete.succeeded",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id },
+      // Every executor step is done; the bookkeeping commits with the operation's end.
+      current = "finish";
+      await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+      await updateOperationStepTransactional(db, op.id, "finish", "running", STEP_RUNNING);
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        await tx.delete(sites).where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)));
+        await updateOperationStepTransactional(tx, op.id, "finish", "succeeded", DELETE_STEP_DONE.finish);
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId,
+          action: "site.delete.succeeded",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id },
+        });
       });
     } catch (err) {
       await this.#settleFailure(op, current, err, SITE_DELETE_FAILED, "site.delete.failed");
@@ -405,23 +408,23 @@ export class SiteProvisioner {
         }
       });
 
-      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      // A failed setup stays degraded, so its Try again survives the owner change.
-      if ((await latestSiteOperation(db, { siteId, kind: "site.provision" }))?.status === "succeeded") {
-        await db
-          .update(sites)
-          .set({ status: "ready", updatedAt: new Date() })
-          .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
-      }
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId: to,
-        action: "admin.site.reassign.succeeded",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id, from, to },
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        // A failed setup stays degraded, so its Try again survives the owner change.
+        if ((await latestSiteOperation(tx, { siteId, kind: "site.provision" }))?.status === "succeeded") {
+          await tx
+            .update(sites)
+            .set({ status: "ready", updatedAt: new Date() })
+            .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
+        }
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId: to,
+          action: "admin.site.reassign.succeeded",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id, from, to },
+        });
       });
     } catch (err) {
       await this.#settleFailure({ ...op, organizationId: owner }, current, err, SITE_REASSIGN_FAILED, "admin.site.reassign.failed");

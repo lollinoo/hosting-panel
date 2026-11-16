@@ -3,8 +3,6 @@ import {
   BACKUP_FAILURE_CLASSES,
   DEFAULT_BACKUP_RETENTION_DAYS,
   ERROR_CODES,
-  canTransitionOperation,
-  isTerminalOperationStatus,
   type BackupJobStatus,
   type BackupProblem,
   type ErrorCode,
@@ -20,10 +18,10 @@ import {
   operationSteps,
   operations,
   renewOperationLease,
+  settleOperation,
   settleSiteBackup,
   siteBackups,
   sites,
-  transitionOperation,
   updateOperationStepTransactional,
   type DatabaseClient,
 } from "@hosting-panel/database";
@@ -540,27 +538,7 @@ export class SiteBackupsApplier {
 
   /** @internal */
   public async succeedOperation(operationId: string): Promise<void> {
-    const db = this.dbClient.db;
-    const [op] = await db
-      .select({ status: operations.status })
-      .from(operations)
-      .where(eq(operations.id, operationId))
-      .limit(1);
-
-    if (!op || isTerminalOperationStatus(op.status)) {
-      return;
-    }
-
-    // Recovered unknown ops must pass through reconciling before succeeding.
-    if (op.status !== "reconciling" && canTransitionOperation(op.status, "reconciling")) {
-      await transitionOperation(db, operationId, "reconciling", {
-        leaseDurationMs: this.leaseMs,
-      });
-    }
-    await transitionOperation(db, operationId, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    await settleOperation(this.dbClient.db, operationId, { status: "succeeded" });
   }
 
   /** @internal */
@@ -569,21 +547,7 @@ export class SiteBackupsApplier {
     errorCode: ErrorCode,
     errorMessage: string,
   ): Promise<void> {
-    const db = this.dbClient.db;
-    const [op] = await db
-      .select({ status: operations.status })
-      .from(operations)
-      .where(eq(operations.id, operationId))
-      .limit(1);
-
-    if (!op || isTerminalOperationStatus(op.status) || !canTransitionOperation(op.status, "failed")) {
-      return;
-    }
-
-    await transitionOperation(db, operationId, "failed", {
-      errorCode,
-      errorMessage,
-    });
+    await settleOperation(this.dbClient.db, operationId, { status: "failed", errorCode, errorMessage });
   }
 
   async #discardAndDeleteBackupRows(

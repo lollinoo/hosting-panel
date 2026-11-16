@@ -30,6 +30,7 @@ import {
   recordObservedStateReconciliationTransactional,
   renewOperationLease,
   serviceInstances,
+  settleOperation,
   sites,
   sql,
   stackRevisions,
@@ -536,7 +537,7 @@ export class OutboxWorkerService {
       "Runtime accepted container deployment",
     );
 
-    await transitionOperation(db, op.id, "reconciling");
+    await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: DEPLOY_LEASE_MS });
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -552,24 +553,21 @@ export class OutboxWorkerService {
       "succeeded",
       `Service state converged (${observedStatus})`,
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
-
-    await appendAuditEvent(db, {
-      actorId: null,
-      actorType: "system",
-      organizationId: op.organizationId,
-      action: "service.deploy.succeeded",
-      targetType: "service_instance",
-      targetId: spec.serviceInstanceId,
-      details: {
-        operationId: op.id,
-        siteId: spec.siteId,
-        revisionNumber,
-        specHash: spec.specHash,
-      },
+    await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+      await appendAuditEvent(tx, {
+        actorId: null,
+        actorType: "system",
+        organizationId: op.organizationId,
+        action: "service.deploy.succeeded",
+        targetType: "service_instance",
+        targetId: spec.serviceInstanceId,
+        details: {
+          operationId: op.id,
+          siteId: spec.siteId,
+          revisionNumber,
+          specHash: spec.specHash,
+        },
+      });
     });
   }
 
@@ -637,7 +635,7 @@ export class OutboxWorkerService {
       `Runtime ${kind} completed`,
     );
 
-    await transitionOperation(db, op.id, "reconciling");
+    await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: DEPLOY_LEASE_MS });
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -674,10 +672,7 @@ export class OutboxWorkerService {
       "succeeded",
       `Service state converged (${observedStatus})`,
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    await settleOperation(db, op.id, { status: "succeeded" });
   }
 
   async #executeHostMaintenance(
@@ -736,7 +731,6 @@ export class OutboxWorkerService {
       "succeeded",
       `Maintenance action '${command.action}' completed`,
     );
-    await transitionOperation(db, op.id, "reconciling");
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -745,10 +739,7 @@ export class OutboxWorkerService {
         ? redactSensitiveString(result.output.slice(0, 500))
         : "Host maintenance verified",
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    await settleOperation(db, op.id, { status: "succeeded" });
   }
 
   async #executeHostSecurity(
@@ -807,7 +798,6 @@ export class OutboxWorkerService {
       "succeeded",
       `Security policy '${command.policyRef}' completed`,
     );
-    await transitionOperation(db, op.id, "reconciling");
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -816,10 +806,7 @@ export class OutboxWorkerService {
         ? redactSensitiveString(result.output.slice(0, 500))
         : "Host security posture verified",
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    await settleOperation(db, op.id, { status: "succeeded" });
   }
 
   /**
@@ -1018,11 +1005,6 @@ export class OutboxWorkerService {
                 !obs.outOfBandModified;
 
           if (targetMatched && obs !== null) {
-            await transitionOperation(db, op.id, "reconciling", {
-              errorCode: null,
-              errorMessage: null,
-            });
-
             if (svc) {
               await recordObservedStateReconciliationTransactional(db, {
                 serviceInstanceId: svc.id,
@@ -1043,26 +1025,23 @@ export class OutboxWorkerService {
               "Verified via read-only crash recovery reconciliation (TH-08)",
             );
 
-            await transitionOperation(db, op.id, "succeeded", {
-              errorCode: null,
-              errorMessage: null,
+            await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+              await appendAuditEvent(tx, {
+                actorId: null,
+                actorType: "system",
+                organizationId: op.organizationId,
+                action: "operation.recovered.succeeded",
+                targetType: "operation",
+                targetId: op.id,
+                details: {
+                  kind: op.kind,
+                  resourceType: op.resourceType,
+                  resourceId: op.resourceId,
+                },
+              });
             });
 
             await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
-
-            await appendAuditEvent(db, {
-              actorId: null,
-              actorType: "system",
-              organizationId: op.organizationId,
-              action: "operation.recovered.succeeded",
-              targetType: "operation",
-              targetId: op.id,
-              details: {
-                kind: op.kind,
-                resourceType: op.resourceType,
-                resourceId: op.resourceId,
-              },
-            });
 
             convergedSucceeded += 1;
           } else {

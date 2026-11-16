@@ -12,6 +12,7 @@ import {
   operations,
   outboxEvents,
   renewOperationLease,
+  settleOperation,
   sites,
   transitionOperation,
   updateOperationStepTransactional,
@@ -119,13 +120,7 @@ export class SiteFilesApplier {
         isArchive ? "archived" : "extracted",
       );
       await updateOperationStepTransactional(db, op.id, stepKey, "succeeded", message);
-      await transitionOperation(db, op.id, "reconciling", {
-        leaseDurationMs: SITE_STEP_LEASE_MS,
-      });
-      await transitionOperation(db, op.id, "succeeded", {
-        errorCode: null,
-        errorMessage: null,
-      });
+      await settleOperation(db, op.id, { status: "succeeded" });
     } catch (err) {
       const mapped = mapSiteFileExecutorError(err);
       await this.#settleFailure(op.id, stepKey, mapped);

@@ -21,7 +21,9 @@ import {
   markSiteArchivePreparing,
   markSiteRestoreRunning,
   operations,
+  organizations,
   outboxEvents,
+  sites,
   sql,
   type DatabaseClient,
   type DatabaseExecutor,
@@ -152,7 +154,7 @@ export async function appendUserBackupAudit(
   });
 }
 
-/** Rejects a customer's 7th heavy backup action on a site within 60 minutes; admins bypass. */
+/** Rejects a customer's heavy action over the site's or the organisation's hourly limit; admins bypass. */
 export async function assertHeavyActionAllowed(
   tx: DatabaseExecutor,
   siteId: string,
@@ -162,14 +164,25 @@ export async function assertHeavyActionAllowed(
   if (actor.actionPrefix === "admin.site.backups") {
     return;
   }
-  const retryAt = await heavyActionRetryAt(tx, siteId, op.submittedAt, op.id);
+  // Serialises the organisation's count (R182.1: FOR UPDATE would conflict with the KEY SHARE of every insert).
+  const [org] = await tx
+    .select({ id: organizations.id })
+    .from(organizations)
+    .innerJoin(sites, eq(sites.organizationId, organizations.id))
+    .where(eq(sites.id, siteId))
+    .for("no key update", { of: organizations });
+  const siteAt = await heavyActionRetryAt(tx, { siteId }, op.submittedAt, op.id);
+  const orgAt = org ? await heavyActionRetryAt(tx, { organizationId: org.id }, op.submittedAt, op.id) : null;
+  const retryAt = siteAt && orgAt ? (siteAt >= orgAt ? siteAt : orgAt) : (siteAt ?? orgAt);
   if (!retryAt) {
     return;
   }
   const iso = retryAt.toISOString();
   throw new ControlPlaneError(
     "QUOTA_EXCEEDED",
-    `Too many backup actions on this site; try again at ${iso}`,
+    retryAt === siteAt
+      ? `Too many backup actions on this site; try again at ${iso}`
+      : `Too many backup actions in this organisation; try again at ${iso}`,
     {
       details: [{ field: "retryAt", reason: "too_many_requests", message: iso }],
       retryAfterMs: Math.max(1_000, retryAt.getTime() - op.submittedAt.getTime()),
