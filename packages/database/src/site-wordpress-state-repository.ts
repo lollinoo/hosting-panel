@@ -7,13 +7,17 @@ type SiteKey = {
   siteId: string;
 };
 
-/** Stored WordPress state and last update of one site; the API parses both with its DTO schemas. */
+/** Stored WordPress state, last update and last import of one site; the API parses each with its DTO schema. */
 export async function getSiteWordpressState(
   db: DatabaseExecutor,
   k: SiteKey,
-): Promise<{ state: unknown; lastUpdate: unknown } | null> {
+): Promise<{ state: unknown; lastUpdate: unknown; lastImport: unknown } | null> {
   const [row] = await db
-    .select({ state: siteWordpressState.state, lastUpdate: siteWordpressState.lastUpdate })
+    .select({
+      state: siteWordpressState.state,
+      lastUpdate: siteWordpressState.lastUpdate,
+      lastImport: siteWordpressState.lastImport,
+    })
     .from(siteWordpressState)
     .where(and(eq(siteWordpressState.organizationId, k.organizationId), eq(siteWordpressState.siteId, k.siteId)))
     .limit(1);
@@ -46,6 +50,21 @@ export async function saveSiteWordpressLastUpdate(
     .onConflictDoUpdate({
       target: siteWordpressState.siteId,
       set: { lastUpdate: k.lastUpdate, updatedAt: new Date() },
+      setWhere: eq(siteWordpressState.organizationId, k.organizationId),
+    });
+}
+
+/** Replaces the last import of a site, leaving its state and last update untouched. */
+export async function saveSiteWordpressLastImport(
+  db: DatabaseExecutor,
+  k: SiteKey & { lastImport: unknown },
+): Promise<void> {
+  await db
+    .insert(siteWordpressState)
+    .values({ siteId: k.siteId, organizationId: k.organizationId, lastImport: k.lastImport })
+    .onConflictDoUpdate({
+      target: siteWordpressState.siteId,
+      set: { lastImport: k.lastImport, updatedAt: new Date() },
       setWhere: eq(siteWordpressState.organizationId, k.organizationId),
     });
 }

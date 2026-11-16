@@ -16,6 +16,7 @@ import {
   failOutboxEvent,
   generateSecretsMasterKeyHex,
   getSiteWordpressState,
+  saveSiteWordpressLastImport,
   listEncryptedSecretsMetadata,
   listHostAgentHeartbeats,
   markExpiredOperationsUnknownTransactional,
@@ -59,6 +60,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0010_backup_restore.sql",
       "0011_panel_backup.sql",
       "0012_wordpress_tools.sql",
+      "0013_wordpress_import.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -82,6 +84,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0010_backup_restore.sql",
       "0011_panel_backup.sql",
       "0012_wordpress_tools.sql",
+      "0013_wordpress_import.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -101,6 +104,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0010_backup_restore.sql",
       "0011_panel_backup.sql",
       "0012_wordpress_tools.sql",
+      "0013_wordpress_import.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
@@ -135,12 +139,20 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
 
     await saveSiteWordpressState(db, { ...acme, state: { v: 1 } });
     await saveSiteWordpressState(db, { ...acme, state: { v: 2 } });
-    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: null });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: null, lastImport: null });
     await saveSiteWordpressLastUpdate(db, { ...acme, lastUpdate: { u: 1 } });
-    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: { u: 1 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: { u: 1 }, lastImport: null });
     await saveSiteWordpressState(db, { ...acme, state: { v: 3 } });
-    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 3 }, lastUpdate: { u: 1 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 3 }, lastUpdate: { u: 1 }, lastImport: null });
 
+    expect(await getSiteWordpressState(db, { ...acme, organizationId: DEMO_IDS.organizations.beta })).toBeNull();
+
+    // 0013: the last import is stored and replaced without touching state and last update.
+    await saveSiteWordpressLastImport(db, { ...acme, lastImport: { i: 1 } });
+    await saveSiteWordpressLastImport(db, { ...acme, lastImport: { i: 2 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 3 }, lastUpdate: { u: 1 }, lastImport: { i: 2 } });
+    await saveSiteWordpressLastImport(db, { ...acme, organizationId: DEMO_IDS.organizations.beta, lastImport: { i: 3 } });
+    expect((await getSiteWordpressState(db, acme))?.lastImport).toEqual({ i: 2 });
     expect(await getSiteWordpressState(db, { ...acme, organizationId: DEMO_IDS.organizations.beta })).toBeNull();
 
     await db.delete(sites).where(eq(sites.id, acme.siteId));

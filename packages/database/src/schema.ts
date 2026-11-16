@@ -754,6 +754,7 @@ export const siteWordpressState = pgTable(
     organizationId: text("organization_id").notNull(),
     state: jsonb("state").$type<unknown>(),
     lastUpdate: jsonb("last_update").$type<unknown>(),
+    lastImport: jsonb("last_import").$type<unknown>(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
