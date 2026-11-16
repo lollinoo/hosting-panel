@@ -4403,6 +4403,286 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import:
+    get:
+      tags: [Managed Sites]
+      operationId: getSiteWordpressImport
+      summary: WordPress import state of a site (`site.read`)
+      description: >-
+        Returns the two upload slots, whether an earlier import was left unfinished, the running
+        `site.wordpress.import` operation (its six steps in order) and the outcome of the last import.
+        `slots` is null (still `200`) when the site's files could not be read; `earlierImportUnfinished`
+        is then false. On a server without the WordPress tools or for a site that is not WordPress,
+        `available` is false and `slots` null. A suspended organization still reads this state.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: WordPress import state
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressImportDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.read` permission (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+    post:
+      tags: [Managed Sites]
+      operationId: startSiteWordpressImport
+      summary: Enqueue a `site.wordpress.import` of the two uploaded files (`site.update`, 202 Accepted)
+      description: >-
+        Replaces the site's files and database with the uploaded ones. Both slots must be complete.
+        When backups are configured a `pre_update` copy of the site is taken first; its row carries
+        the import's operation id. Counts toward the hourly limit of 6 heavy actions per site (a server
+        administrator's actions are not counted). A replay with the same `Idempotency-Key` answers the
+        same operation.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteWordpressImportStartRequest"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation URL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, links]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressAcceptedDto"
+                  links:
+                    type: object
+                    required: [operation]
+                    properties:
+                      operation:
+                        type: string
+        "400":
+          description: Invalid body or missing/invalid `Idempotency-Key` (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`) or an import of this
+            site is running (`RESOURCE_LOCKED`, reason `import_running`), a slot is not complete (`RESOURCE_LOCKED`, reason `files_incomplete`), an earlier
+            import was left unfinished (`RESOURCE_LOCKED`, reason `earlier_import_unfinished`; restore a
+            copy from Backups first), locked by another operation (`RESOURCE_LOCKED`), reused
+            `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`), or hourly limit of 6 heavy actions per site
+            reached (`QUOTA_EXCEEDED`, reason `too_many_requests`, `details[].field: retryAt`, `Retry-After` header)
+          $ref: "#/components/responses/QuotaConflictErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: The files call ended without a confirmed outcome (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: File operations temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import/files:
+    delete:
+      tags: [Managed Sites]
+      operationId: discardSiteWordpressImportFiles
+      summary: Discard both uploaded import files (`site.update`, 204 No Content)
+      description: >-
+        Empties both slots. The work left by an unfinished earlier import is kept, so
+        `earlierImportUnfinished` stays true; the answer is still `204`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "204":
+          description: Both slots are empty
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`) or an import of this
+            site is running (`RESOURCE_LOCKED`, reason `import_running`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: The files call ended without a confirmed outcome (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: File operations temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import/files/{slot}:
+    put:
+      tags: [Managed Sites]
+      operationId: uploadSiteWordpressImportChunk
+      summary: Upload one chunk of an import file into a slot (`site.update`)
+      description: >-
+        Chunks are addressed by `uploadId` and `offset` and are safe to resend; resume a `partial`
+        slot at `offset = size` with its `uploadId`. The chunk with `final: true` completes the slot.
+        The archive must be a zip; the dump must be SQL text or gzip.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - name: slot
+          in: path
+          required: true
+          description: "`archive` (the site files, a zip) or `dump` (the database export, `.sql` or `.sql.gz`)"
+          schema:
+            type: string
+            enum: [archive, dump]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteWordpressImportChunkRequest"
+      responses:
+        "200":
+          description: Bytes of the slot received so far
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteFileWriteResultDto"
+        "400":
+          description: >-
+            Invalid slot or body (`VALIDATION_ERROR`), the chunk does not match the upload
+            (`VALIDATION_ERROR`, reason `upload_mismatch`), the archive is not a zip (`VALIDATION_ERROR`,
+            reason `not_a_zip`) or the dump is not SQL (`VALIDATION_ERROR`, reason `dump_not_sql`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`) or an import of this
+            site is running (`RESOURCE_LOCKED`, reason `import_running`), the file is too large (`QUOTA_EXCEEDED`, reason `too_large`) or the site's
+            storage is full (`QUOTA_EXCEEDED`, reason `disk_full`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: The files call ended without a confirmed outcome (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: File operations temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/wordpress/import/files/{slot}/pick:
+    post:
+      tags: [Managed Sites]
+      operationId: pickSiteWordpressImportFile
+      summary: Use a file already in the site's files (for example uploaded by SFTP) as a slot (`site.update`)
+      description: >-
+        Moves the file at `path` into the slot, which becomes `complete`. The same zip and SQL checks
+        as an upload apply.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - name: slot
+          in: path
+          required: true
+          description: "`archive` (the site files, a zip) or `dump` (the database export, `.sql` or `.sql.gz`)"
+          schema:
+            type: string
+            enum: [archive, dump]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteWordpressImportPickRequest"
+      responses:
+        "200":
+          description: The filled slot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteWordpressImportSlotDto"
+        "400":
+          description: >-
+            Invalid slot, body or path (`VALIDATION_ERROR`, reason `invalid_path` for a path outside the
+            site's files), the path is a folder (`VALIDATION_ERROR`, reason `is_a_directory`), the archive
+            is not a zip (`VALIDATION_ERROR`, reason `not_a_zip`) or the dump is not SQL (`VALIDATION_ERROR`,
+            reason `dump_not_sql`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.update` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`), or the file is protected (`PERMISSION_DENIED`, reason `protected`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site not found or belongs to another organization (`NOT_FOUND`), or no file at `path`
+            (`NOT_FOUND`, reason `not_found`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Site deploying/maintenance (`RESOURCE_LOCKED`, reason `not_ready`) or an import of this
+            site is running (`RESOURCE_LOCKED`, reason `import_running`), the file is too large (`QUOTA_EXCEEDED`, reason `too_large`) or the site's
+            storage is full (`QUOTA_EXCEEDED`, reason `disk_full`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            WordPress tools unavailable on the active backend (`NOT_SUPPORTED`, reason
+            `wordpress_unavailable`) or the site is not a WordPress site (`NOT_SUPPORTED`, reason `not_wordpress`)
+          $ref: "#/components/responses/ErrorResponse"
+        "502":
+          description: The files call ended without a confirmed outcome (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: File operations temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -6079,6 +6359,211 @@ components:
           minLength: 24
           description: One-time temporary password; shown once and never stored by the panel
 
+    SiteWordpressImportSlotDto:
+      type: object
+      additionalProperties: false
+      required: [state, size, uploadId]
+      properties:
+        state:
+          type: string
+          enum: [empty, partial, complete]
+        size:
+          type: integer
+          minimum: 0
+          description: Bytes held; a `partial` upload resumes at `offset = size`
+        uploadId:
+          type: string
+          nullable: true
+          pattern: "^[A-Za-z0-9_-]{16,64}$"
+          description: The upload to resume, set only while the slot is `partial`
+
+    SiteWordpressLastImportDto:
+      type: object
+      additionalProperties: false
+      required: [operationId, finishedAt, outcome, reason, backup, oldAddress, leftOut, tables, line, errorNumber]
+      properties:
+        operationId:
+          type: string
+          pattern: "^op_[0-9a-f]{32}$"
+        finishedAt:
+          type: string
+          format: date-time
+        outcome:
+          type: string
+          enum: [imported, nothing_changed, site_restored, undo_incomplete]
+        reason:
+          type: string
+          nullable: true
+          description: Closed reason of a failed import (null when imported)
+          enum:
+            - files_missing
+            - earlier_import_unfinished
+            - backup_failed
+            - interrupted
+            - timed_out
+            - unavailable
+            - other
+            - archive_not_zip
+            - dump_not_sql
+            - archive_unsafe
+            - archive_limit
+            - archive_not_wordpress
+            - disk_full
+            - staging_unsafe
+            - dump_unsafe
+            - dump_too_large
+            - dump_incomplete
+            - dump_statement_unsupported
+            - dump_load_failed
+            - dump_not_wordpress
+            - dump_ambiguous
+            - multisite_unsupported
+            - address_unsupported
+            - dump_objects_unsupported
+            - dump_names_unsupported
+            - dump_too_many_tables
+            - site_objects_unsupported
+            - address_rewrite_failed
+            - site_check_failed
+        backup:
+          type: string
+          enum: [taken, skipped, failed]
+        oldAddress:
+          type: string
+          nullable: true
+          maxLength: 300
+          description: The address the imported site had before (scheme, host and optional port)
+        leftOut:
+          type: array
+          maxItems: 16
+          description: Archive entries the import never takes, each the path from the site root
+          items:
+            type: string
+            enum:
+              - wp-config.php
+              - ".htaccess"
+              - ".maintenance"
+              - wp-content/mu-plugins
+              - wp-content/advanced-cache.php
+              - wp-content/object-cache.php
+              - wp-content/db.php
+              - wp-content/db-error.php
+              - wp-content/install.php
+              - wp-content/maintenance.php
+              - wp-content/php-error.php
+              - wp-content/fatal-error-handler.php
+              - wp-content/sunrise.php
+              - wp-content/blog-deleted.php
+              - wp-content/blog-inactive.php
+              - wp-content/blog-suspended.php
+        tables:
+          type: integer
+          minimum: 0
+          nullable: true
+        line:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Line of the database export where loading stopped
+        errorNumber:
+          type: integer
+          minimum: 1
+          maximum: 99999
+          nullable: true
+          description: Database error number where loading stopped
+
+    SiteWordpressImportDto:
+      type: object
+      additionalProperties: false
+      required: [available, backupsConfigured, slots, earlierImportUnfinished, runningOperation, lastImport]
+      properties:
+        available:
+          type: boolean
+        backupsConfigured:
+          type: boolean
+        slots:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [archive, dump]
+          description: Null when the site's files could not be read
+          properties:
+            archive:
+              $ref: "#/components/schemas/SiteWordpressImportSlotDto"
+            dump:
+              $ref: "#/components/schemas/SiteWordpressImportSlotDto"
+        earlierImportUnfinished:
+          type: boolean
+          description: An earlier import was left unfinished; restore a copy from Backups before a new import
+        runningOperation:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [id, kind, status, steps]
+          properties:
+            id:
+              type: string
+            kind:
+              type: string
+              enum: [site.wordpress.import]
+            status:
+              type: string
+            steps:
+              type: array
+              maxItems: 6
+              items:
+                type: object
+                additionalProperties: false
+                required: [key, status]
+                properties:
+                  key:
+                    type: string
+                    enum: [check, backup, unpack, database, switch, finish]
+                  status:
+                    type: string
+        lastImport:
+          $ref: "#/components/schemas/SiteWordpressLastImportDto"
+          nullable: true
+
+    SiteWordpressImportChunkRequest:
+      type: object
+      additionalProperties: false
+      required: [uploadId, offset, dataBase64, final]
+      description: A chunk is at most 512 KiB (524,288 bytes) before base64.
+      properties:
+        uploadId:
+          type: string
+          minLength: 16
+          maxLength: 64
+          pattern: "^[A-Za-z0-9_-]{16,64}$"
+        offset:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+        dataBase64:
+          type: string
+          maxLength: 699052
+          pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+        final:
+          type: boolean
+
+    SiteWordpressImportPickRequest:
+      type: object
+      additionalProperties: false
+      required: [path]
+      properties:
+        path:
+          $ref: "#/components/schemas/SiteFileItemPath"
+
+    SiteWordpressImportStartRequest:
+      type: object
+      additionalProperties: false
+      required: [confirm]
+      properties:
+        confirm:
+          type: boolean
+          enum: [true]
+
     SiteBackupAccepted:
       type: object
       required: [siteId, backupId, operationId]
@@ -6956,6 +7441,7 @@ components:
             - site.backups.download
             - site.wordpress.inspect
             - site.wordpress.update
+            - site.wordpress.import
             - panel.backups.create
             - host.maintenance
             - host.security
