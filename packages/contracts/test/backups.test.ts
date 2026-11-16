@@ -499,6 +499,7 @@ describe("backups public contracts (R55, R56)", () => {
       "site.backups.restore",
       "site.backups.download",
       "site.wordpress.update",
+      "site.wordpress.import",
     ]);
     expect(BACKUP_KINDS).toEqual(["nightly", "manual", "pre_update"]);
     expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed"]);

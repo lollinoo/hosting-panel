@@ -14,6 +14,7 @@ export const HEAVY_BACKUP_OPERATION_KINDS = [
   "site.backups.restore",
   "site.backups.download",
   "site.wordpress.update",
+  "site.wordpress.import",
 ] as const satisfies readonly OperationKind[];
 
 export const BACKUP_PROBLEMS = [

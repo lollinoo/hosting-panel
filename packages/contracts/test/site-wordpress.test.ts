@@ -1,13 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  IMPORT_ORIGIN_PATTERN,
+  SITE_JOB_LIMIT_MS,
+  SiteJobIpcRequestSchema,
   WORDPRESS_ITEM_NAME_PATTERN,
   WORDPRESS_JOB_REASONS,
   WORDPRESS_RESET_CLIENT_WAIT_MS,
   WORDPRESS_RESULT_MAX_BYTES,
   WORDPRESS_UPDATE_TARGET_PATTERN,
+  WORDPRESS_TABLE_PREFIX_PATTERN,
   WORDPRESS_USER_ID_PATTERN,
+  WordpressImportLoadResultSchema,
   WordpressStateResultSchema,
   WordpressUpdateResultSchema,
+  siteJobClientWaitMs,
   wordpressJobReason,
 } from "../src/index.js";
 
@@ -112,5 +118,68 @@ describe("wordpressJobReason", () => {
     }
     expect(wordpressJobReason(1, false, true)).toBe("other");
     expect(wordpressJobReason(1, true, false)).toBe("other");
+  });
+});
+
+describe("WordPress import on the job side", () => {
+  const job = (kind: string) => ({ jobId: "job_1", kind, siteId: "site_1", organizationId: "org_1", params: {} });
+
+  it("accepts the three new kinds and still refuses an unknown one", () => {
+    for (const kind of ["db.import", "db.import-load", "wordpress.import-finalize", "wordpress.set-url"]) {
+      expect(SiteJobIpcRequestSchema.safeParse(job(kind)).success, kind).toBe(true);
+    }
+    for (const kind of ["db.import-prepare", "db.import-switch", "import", ""]) {
+      expect(SiteJobIpcRequestSchema.safeParse(job(kind)).success, kind).toBe(false);
+    }
+  });
+
+  it("checks the answer of the load", () => {
+    const ok = { prefix: "wpx_", oldUrl: "http://old.example.test", tables: 12 };
+    const failed = { line: 631, errorNumber: 1044 };
+    expect(WordpressImportLoadResultSchema.safeParse(ok).success).toBe(true);
+    expect(WordpressImportLoadResultSchema.safeParse(failed).success).toBe(true);
+    expect(WordpressImportLoadResultSchema.safeParse({ line: 0, errorNumber: null }).success).toBe(true);
+    for (const bad of [
+      { ...ok, extra: 1 },
+      { ...failed, extra: 1 },
+      { ...ok, prefix: "a;b" },
+      { ...ok, tables: 1001 },
+      { ...ok, tables: 0 },
+      { ...ok, oldUrl: "http://old.example.test/blog" },
+      { ...ok, oldUrl: "http://Old.example.test" },
+      { ...ok, oldUrl: `http://${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.${"e".repeat(60)}.test` },
+      { ...failed, errorNumber: 100000 },
+      { ...failed, errorNumber: 0 },
+      { ...failed, line: -1 },
+    ]) {
+      expect(WordpressImportLoadResultSchema.safeParse(bad).success, JSON.stringify(bad).slice(0, 80)).toBe(false);
+    }
+  });
+
+  it("pins the import patterns, the limits and the client waits", () => {
+    for (const ok of ["http://old.example.test", "https://old.example.test:8443"]) {
+      expect(IMPORT_ORIGIN_PATTERN.test(ok), ok).toBe(true);
+    }
+    for (const bad of [
+      "http://old.example.test/",
+      "http://old.example.test/blog",
+      "http://user@old.example.test",
+      "http://old example.test",
+      "http://OLD.example.test",
+      "old.example.test",
+      "ftp://old.example.test",
+    ]) {
+      expect(IMPORT_ORIGIN_PATTERN.test(bad), bad).toBe(false);
+    }
+    expect(WORDPRESS_TABLE_PREFIX_PATTERN.test("wp_")).toBe(true);
+    for (const bad of ["", "a;b", "wp-", "a".repeat(33)]) expect(WORDPRESS_TABLE_PREFIX_PATTERN.test(bad), bad).toBe(false);
+    expect(SITE_JOB_LIMIT_MS).toEqual({
+      "db.import": 300_000,
+      "db.import-load": 1_500_000,
+      "wordpress.import-finalize": 1_200_000,
+      "wordpress.set-url": 360_000,
+    });
+    expect(siteJobClientWaitMs("db.import-load")).toBe(1_800_000);
+    expect(siteJobClientWaitMs("wordpress.set-url")).toBe(660_000);
   });
 });

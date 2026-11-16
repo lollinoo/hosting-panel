@@ -55,6 +55,7 @@ export const OPERATION_KINDS = [
   "panel.backups.create",
   "site.wordpress.inspect",
   "site.wordpress.update",
+  "site.wordpress.import",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);

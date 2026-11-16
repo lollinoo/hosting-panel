@@ -14,6 +14,7 @@ import type {
   SiteFilesOp,
   SiteFilesResultByOp,
   SiteHostRoute,
+  WordpressImportLoadResult,
   WordpressStateResult,
   WordpressUpdateResult,
 } from "@hosting-panel/contracts";
@@ -90,7 +91,10 @@ export type SiteJobKind =
   | "wordpress.inspect"
   | "wordpress.update"
   | "wordpress.settle"
-  | "wordpress.reset-password";
+  | "wordpress.reset-password"
+  | "db.import"
+  | "db.import-load"
+  | "wordpress.import-finalize";
 
 export interface SiteJobRequest {
   readonly jobId: string;
@@ -107,6 +111,6 @@ export interface SiteJobResult {
   readonly exitCode: number;
   /** Last 50 lines, at most 4 KiB, redacted. */
   readonly outputTail: string;
-  /** inspect and update only, present only when it passed the schema. */
-  readonly result?: WordpressStateResult | WordpressUpdateResult;
+  /** inspect, update and import-load only, present only when it passed the schema. */
+  readonly result?: WordpressStateResult | WordpressUpdateResult | WordpressImportLoadResult;
 }

@@ -10,6 +10,7 @@ import {
   SITE_FILE_BATCH_MAX,
   SITE_FILE_CHUNK_BYTES,
   SITE_FILE_SEGMENT_MAX_BYTES,
+  SITE_IMPORT_LEFT_OUT,
   SiteFileChunkBase64Schema,
   SiteFileEntrySchema,
   SiteFileItemPathSchema,
@@ -226,6 +227,9 @@ export const SiteJobIpcRequestSchema = z.object({
     "wordpress.update",
     "wordpress.settle",
     "wordpress.reset-password",
+    "db.import",
+    "db.import-load",
+    "wordpress.import-finalize",
   ]),
   siteId: z.string().min(1).max(128),
   organizationId: z.string().min(1).max(128),
@@ -387,6 +391,10 @@ const SiteFilesServiceIdSchema = z.string().min(1).max(128);
 const SiteFileOffsetSchema = z.number().int().min(0).max(SITE_FILES_MAX_FILE_BYTES);
 const SiteFilesBatchSchema = z.array(SiteFileItemPathSchema).min(1).max(SITE_FILE_BATCH_MAX);
 
+export const SITE_IMPORT_SLOTS = ["archive", "dump"] as const;
+export const SiteImportSlotSchema = z.enum(SITE_IMPORT_SLOTS);
+export const SiteImportIdSchema = z.string().regex(/^[0-9a-f]{32}$/);
+
 export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
@@ -461,12 +469,45 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
       to: SiteFilePathSchema,
     })
     .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("import.put"),
+      slot: SiteImportSlotSchema,
+      uploadId: SiteFileUploadIdSchema,
+      offset: SiteFileOffsetSchema,
+      dataBase64: SiteFileChunkBase64Schema,
+      final: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      op: z.literal("import.take"),
+      slot: SiteImportSlotSchema,
+      path: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.stat") }).strict(),
+  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.discard") }).strict(),
+  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.unpack"), importId: SiteImportIdSchema }).strict(),
+  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.switch"), importId: SiteImportIdSchema }).strict(),
+  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.undo"), importId: SiteImportIdSchema }).strict(),
+  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.finish"), importId: SiteImportIdSchema }).strict(),
 ]);
 export type SiteFilesIpcRequest = z.infer<typeof SiteFilesIpcRequestSchema>;
 export type SiteFilesOp = SiteFilesIpcRequest["op"];
+export type SiteImportOp = Extract<SiteFilesOp, `import.${string}`>;
 
 const SiteFilesEmptyResultSchema = z.object({}).strict();
 const SiteFilesCountResultSchema = z.object({ entries: z.number().int().nonnegative() });
+const SiteImportSlotStateSchema = z
+  .object({
+    state: z.enum(["empty", "partial", "complete"]),
+    size: z.number().int().nonnegative(),
+    uploadId: SiteFileUploadIdSchema.nullable(),
+  })
+  .strict();
 // Root stat returns { name: "" }; directory entries in list always require non-empty names.
 const SiteFilesStatEntrySchema = z
   .object({
@@ -492,6 +533,17 @@ export const SITE_FILES_RESULT_SCHEMAS = {
   delete: SiteFilesEmptyResultSchema,
   archive: SiteFilesCountResultSchema,
   extract: SiteFilesCountResultSchema,
+  "import.put": z.object({ received: z.number().int().nonnegative() }),
+  "import.take": z.object({ size: z.number().int().nonnegative() }),
+  "import.stat": z.object({ archive: SiteImportSlotStateSchema, dump: SiteImportSlotStateSchema, remains: z.boolean() }),
+  "import.discard": SiteFilesEmptyResultSchema,
+  "import.unpack": z.object({
+    entries: z.number().int().nonnegative(),
+    leftOut: z.array(z.enum(SITE_IMPORT_LEFT_OUT)).max(SITE_IMPORT_LEFT_OUT.length),
+  }),
+  "import.switch": z.object({ moved: z.number().int().nonnegative() }),
+  "import.undo": z.object({ complete: z.boolean() }).strict(),
+  "import.finish": SiteFilesEmptyResultSchema,
 } as const;
 export type SiteFilesResultByOp = {
   [K in SiteFilesOp]: z.infer<(typeof SITE_FILES_RESULT_SCHEMAS)[K]>;

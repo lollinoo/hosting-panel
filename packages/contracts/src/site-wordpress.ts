@@ -188,3 +188,16 @@ export const SiteWordpressPasswordResetDtoSchema = z
   .object({ temporaryPassword: z.string().regex(/^[A-Za-z0-9]{24,}$/) })
   .strict();
 export type SiteWordpressPasswordResetDto = z.infer<typeof SiteWordpressPasswordResetDtoSchema>;
+
+/** An imported site's address: scheme, lowercase host, optional port, no path. */
+export const IMPORT_ORIGIN_PATTERN = /^https?:\/\/[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[0-9]{1,5})?$/;
+export const WORDPRESS_TABLE_PREFIX_PATTERN = /^[A-Za-z0-9_]{1,32}$/;
+export const WordpressImportLoadResultSchema = z.union([
+  z.object({ prefix: z.string().regex(WORDPRESS_TABLE_PREFIX_PATTERN), oldUrl: z.string().max(300).regex(IMPORT_ORIGIN_PATTERN), tables: z.number().int().min(1).max(1000) }).strict(),
+  z.object({ line: z.number().int().min(0), errorNumber: z.number().int().min(1).max(99999).nullable() }).strict(),
+]);
+export type WordpressImportLoadResult = z.infer<typeof WordpressImportLoadResultSchema>;
+/** Own limit of the long site jobs; each kills itself 5 s after it. */
+export const SITE_JOB_LIMIT_MS = { "db.import": 300_000, "db.import-load": 1_500_000, "wordpress.import-finalize": 1_200_000, "wordpress.set-url": 360_000 } as const;
+/** An image pull may take 240 s before the job; the API lease must be this + 60 s. */
+export const siteJobClientWaitMs = (kind: keyof typeof SITE_JOB_LIMIT_MS): number => SITE_JOB_LIMIT_MS[kind] + 300_000;
