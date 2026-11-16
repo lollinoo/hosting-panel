@@ -48,6 +48,8 @@ tags:
     description: Server administrator view over all WordPress sites, creation for a customer and ownership moves
   - name: Admin Backups
     description: Platform S3 backup target settings, connectivity tests, and per-site backup status (server administrator only)
+  - name: Admin Health
+    description: Panel health, open alerts, and site and panel logs (server administrator only)
   - name: Services
     description: Declarative service instances, immutable revisions, and async lifecycle
   - name: Operations
@@ -1240,6 +1242,12 @@ paths:
       tags: [Admin Audit]
       operationId: listAdminAudit
       summary: Query platform immutable audit events (audit.read)
+      description: >-
+        Newest first, ordered by `timestamp` then `id`, both descending. Paging is by keyset:
+        `page.nextCursor` is the `id` of the last event on the page, and the next page holds the
+        events strictly older than that event in the same order. A cursor that names no event
+        gives an empty page. There is no total count. `organizationId` and `action` are exact
+        matches after trimming. When both are given, `from` must be before `to`.
       parameters:
         - in: query
           name: organizationId
@@ -1249,11 +1257,30 @@ paths:
           name: action
           schema:
             type: string
+        - in: query
+          name: from
+          description: Earliest event time, included (ISO 8601 with an offset)
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          description: Latest event time, excluded (ISO 8601 with an offset)
+          schema:
+            type: string
+            format: date-time
         - $ref: "#/components/parameters/CursorQuery"
-        - $ref: "#/components/parameters/LimitQuery"
+        - in: query
+          name: limit
+          description: Events per page. A value outside 1–100 is refused (`VALIDATION_ERROR`), not clamped.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
       responses:
         "200":
-          description: Paginated audit events
+          description: One page of audit events
           headers:
             X-Request-ID:
               $ref: "#/components/headers/XRequestId"
@@ -1268,9 +1295,25 @@ paths:
                     items:
                       $ref: "#/components/schemas/AuditEventDto"
                   meta:
-                    $ref: "#/components/schemas/ReadMeta"
+                    type: object
+                    required: [cursor, requestId, timestamp]
+                    properties:
+                      cursor:
+                        type: string
+                        nullable: true
+                        description: The cursor this page was read from
+                      requestId:
+                        type: string
+                      timestamp:
+                        type: string
+                        format: date-time
                   page:
                     $ref: "#/components/schemas/CursorPage"
+        "400":
+          description: >-
+            `limit` not a whole number from 1 to 100, `from`/`to` not an ISO 8601 date-time
+            with an offset, or a `from` that is not before `to` (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
@@ -2505,6 +2548,11 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            Runtime disabled, the executor failed, or the site's container is gone
+            (`DOCKER_ENGINE_UNAVAILABLE`, "The logs are not available right now. Try again in a few minutes.")
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}/files:
@@ -4112,6 +4160,170 @@ paths:
         "422":
           description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/health:
+    get:
+      tags: [Admin Health]
+      operationId: getAdminHealth
+      summary: State of the panel's parts, the site containers and the disks (server administrator)
+      description: >-
+        Computed on each call from stored rows; nothing calls the executor or the host agent here.
+        `api`, `web` and `database` are always `ok` (the answer itself proves them). `executor` and
+        `host_agent` come from their heartbeat rows: no row is `unknown`/`not_reporting`, a row older
+        than five minutes or offline is `down`/`not_reporting`. `docker_engine` follows the executor's
+        row. The five panel containers come from the `panel_containers` row written by the drift
+        pass every 15 seconds; a container the panel does not need yet and that is stopped or missing
+        is `not_in_use`. With the runtime disabled the daemons and containers are
+        `unknown`/`runtime_disabled`. `disks` comes from the host agent's last snapshot; its age is
+        not checked. A site container whose observation is older than five minutes, or missing, is
+        `stale`.
+      responses:
+        "200":
+          description: The health snapshot
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminHealthDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/alerts:
+    get:
+      tags: [Admin Health]
+      operationId: listAdminAlerts
+      summary: Open alerts, worst first (server administrator)
+      description: >-
+        Computed on each call; nothing is stored, so an alert disappears as soon as its condition
+        ends. Order: `critical` before `warning`, then the order of `kind` in the enum, then `since`
+        oldest first, with a missing `since` last.
+      responses:
+        "200":
+          description: The open alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminAlertDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/logs:
+    get:
+      tags: [Admin Health]
+      operationId: getAdminSiteLogs
+      summary: Read recent log lines of any managed site (audited as admin.site.logs.read)
+      description: >-
+        A successful read writes the audit event `admin.site.logs.read` with the owner as
+        organisation and `details: {tail}`; a failed read writes none.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - in: query
+          name: tail
+          description: Lines to read, clamped to 1–500; 200 when absent or not a number
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        "200":
+          description: Log lines, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SiteLogLineDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site not found or not a managed site (`NOT_FOUND`), or the site's container is gone
+            (`NOT_FOUND`, "There is no log to show: this part is not running on this server.")
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            Runtime disabled or the executor failed
+            (`DOCKER_ENGINE_UNAVAILABLE`, "The logs are not available right now. Try again in a few minutes.")
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/logs/{component}:
+    get:
+      tags: [Admin Health]
+      operationId: getAdminPanelLogs
+      summary: Read recent log lines of one of the panel's own containers (server administrator; not audited)
+      description: >-
+        The executor maps the name to its container itself. In `phpmyadmin` lines every query
+        string is replaced with `?[masked]`.
+      parameters:
+        - in: path
+          name: component
+          required: true
+          schema:
+            type: string
+            enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+        - in: query
+          name: tail
+          description: Lines to read, clamped to 1–500; 200 when absent or not a number
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        "200":
+          description: Log lines, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SiteLogLineDto"
+        "400":
+          description: '`component` is not one of the five panel containers (`VALIDATION_ERROR`)'
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            The container does not exist (`NOT_FOUND`, "There is no log to show: this part is not
+            running on this server.")
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            Runtime disabled or the executor failed (`DOCKER_ENGINE_UNAVAILABLE`, "The logs are not
+            available right now. Try again in a few minutes.")
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/organizations/{orgId}/managed-sites/{siteId}/backups:
     get:
       tags: [Managed Sites]
@@ -7412,6 +7624,266 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    AdminHealthDto:
+      type: object
+      additionalProperties: false
+      required: [generatedAt, components, siteContainers, disks]
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+        components:
+          type: array
+          description: Exactly eleven entries, one per part, in the order of the `component` enum
+          minItems: 11
+          maxItems: 11
+          items:
+            type: object
+            additionalProperties: false
+            required: [component, state, reason, observedAt]
+            properties:
+              component:
+                type: string
+                enum: [api, web, database, executor, host_agent, docker_engine, ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+              state:
+                type: string
+                enum: [ok, degraded, down, not_in_use, unknown]
+              reason:
+                type: string
+                nullable: true
+                enum: [not_reporting, runtime_disabled, engine_unreachable, stopped, restarting, missing]
+              observedAt:
+                type: string
+                format: date-time
+                nullable: true
+        siteContainers:
+          type: array
+          description: >-
+            One entry per managed site that has a web service; a site without one (none created
+            yet) is not listed
+          items:
+            type: object
+            additionalProperties: false
+            required: [siteId, siteName, organizationName, desired, observed, driftReason, restartCount, observedAt, stale]
+            properties:
+              siteId:
+                type: string
+              siteName:
+                type: string
+              organizationName:
+                type: string
+                nullable: true
+                description: '`null` for sites held by the platform'
+              desired:
+                type: string
+                enum: [running, stopped]
+              observed:
+                type: string
+                enum: [running, stopped, degraded, missing, unknown]
+                description: >-
+                  What the last look saw. A container seen `running` whose not-running clock runs
+                  (its restart count rose less than two minutes ago) is `degraded`; one crash alone
+                  shows `degraded` for two minutes. The same value is used by `site_container_down`
+              driftReason:
+                type: string
+                nullable: true
+                enum: [out_of_band_modified, status_mismatch, revision_mismatch]
+              restartCount:
+                type: integer
+                minimum: 0
+                nullable: true
+              observedAt:
+                type: string
+                format: date-time
+                nullable: true
+              stale:
+                type: boolean
+                description: No observation, or the last one is older than five minutes
+        disks:
+          type: array
+          description: >-
+            One entry per file system; places on the same file system share an entry. A place that
+            does not exist has no entry; an agent older than M5b sends none.
+          items:
+            type: object
+            additionalProperties: false
+            required: [paths, usedBytes, totalBytes, usedPercent, observedAt]
+            properties:
+              paths:
+                type: array
+                minItems: 1
+                items:
+                  type: string
+                  enum: [panel_data, docker_data, database_data, root]
+              usedBytes:
+                type: string
+                pattern: '^\d+$'
+                description: Bytes as a decimal string; blocks reserved for root count as used
+              totalBytes:
+                type: string
+                pattern: '^\d+$'
+              usedPercent:
+                type: integer
+                minimum: 0
+                maximum: 100
+                description: Rounded down
+              observedAt:
+                type: string
+                format: date-time
+
+    AdminAlertDto:
+      type: object
+      additionalProperties: false
+      required: [severity, subject, since, kind, details]
+      description: >-
+        `critical` kinds: `disk_high`, `component_down`, `site_container_down`,
+        `restore_undo_incomplete`; every other kind is `warning`. `details` has a fixed shape per
+        `kind` (listed under `details`) and no other field.
+      properties:
+        severity:
+          type: string
+          enum: [warning, critical]
+        subject:
+          type: string
+          minLength: 1
+        since:
+          type: string
+          format: date-time
+          nullable: true
+        kind:
+          type: string
+          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
+        details:
+          type: object
+          description: >-
+            disk_high `{paths, usedPercent}`;
+            certificate_expiring `{siteId, siteName, hostname, expiresAt|null, problem|null}`;
+            certificate_not_issued `{siteId, siteName, hostname, problem|null}`;
+            panel_certificate_expiring `{hostname, expiresAt}`;
+            backup_failed `{siteId, siteName, failedAt}`;
+            panel_backup_failed `{failedAt}`;
+            backup_storage_test_failed `{testedAt}`;
+            component_down `{component, state: down|degraded, reason|null}`;
+            site_container_down `{siteId, siteName, observed}`;
+            restore_undo_incomplete `{siteId, siteName, backupId, failedAt|null}`;
+            restore_stuck `{operationId, siteId|null, siteName|null, startedAt}`;
+            operation_unknown and operation_stuck `{operationId, kind, siteId|null, siteName|null}`.
+            `problem` is one of `rate_limited`, `port_80_blocked`, `not_pointing`, `caa_blocked`,
+            `other`; `kind` inside `details` is an operation kind.
+          oneOf:
+            - title: disk_high
+              type: object
+              additionalProperties: false
+              required: [paths, usedPercent]
+              properties:
+                paths: { type: array, minItems: 1, items: { type: string, enum: [panel_data, docker_data, database_data, root] } }
+                usedPercent: { type: integer, minimum: 0, maximum: 100 }
+            - title: certificate_expiring
+              type: object
+              additionalProperties: false
+              required: [siteId, siteName, hostname, expiresAt, problem]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                hostname: { type: string }
+                expiresAt: { type: string, format: date-time, nullable: true }
+                problem: { type: string, nullable: true, enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other] }
+            - title: certificate_not_issued
+              type: object
+              additionalProperties: false
+              required: [siteId, siteName, hostname, problem]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                hostname: { type: string }
+                problem: { type: string, nullable: true, enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other] }
+            - title: panel_certificate_expiring
+              type: object
+              additionalProperties: false
+              required: [hostname, expiresAt]
+              properties:
+                hostname: { type: string }
+                expiresAt: { type: string, format: date-time }
+            - title: backup_failed
+              type: object
+              additionalProperties: false
+              required: [siteId, siteName, failedAt]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                failedAt: { type: string, format: date-time }
+            - title: panel_backup_failed
+              type: object
+              additionalProperties: false
+              required: [failedAt]
+              properties:
+                failedAt: { type: string, format: date-time }
+            - title: backup_storage_test_failed
+              type: object
+              additionalProperties: false
+              required: [testedAt]
+              properties:
+                testedAt: { type: string, format: date-time }
+            - title: component_down
+              type: object
+              additionalProperties: false
+              required: [component, state, reason]
+              properties:
+                component: { type: string, enum: [api, web, database, executor, host_agent, docker_engine, ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay] }
+                state: { type: string, enum: [down, degraded] }
+                reason: { type: string, nullable: true, enum: [not_reporting, runtime_disabled, engine_unreachable, stopped, restarting, missing] }
+            - title: site_container_down
+              type: object
+              description: >-
+                The service is wanted running, the look is fresh, the site is not deploying and not
+                in maintenance, and for at least five minutes (`SITE_CONTAINER_DOWN_GRACE_MS`) the
+                container has either not been running or been running with a restart count that
+                rose less than two minutes earlier (`SITE_RESTART_QUIET_MS`; Docker raises the
+                count when the container ends). The clock stops at the first look that sees the
+                container running with no rise in the last two minutes; a lower count (a new
+                container, a deploy, the panel's Restart) forgets the rise, and a wanted stop sets
+                the clock back to nothing. So a crash loop whose runs last less than two minutes
+                alerts after five minutes, one crash alone never alerts, and a loop whose runs last
+                longer than two minutes does not alert (Health shows it restarting for two minutes
+                after each crash). After a restore longer than five minutes the alert can show for
+                one look (up to 15 seconds). `since` is when the clock started; `observed` is the
+                site's value on Health. The way back is Restart, not Start; when `observed` is
+                `missing` Restart fails (it needs a container) and a PHP version change on the
+                site's page, a deploy, creates the container again
+              additionalProperties: false
+              required: [siteId, siteName, observed]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                observed: { type: string, enum: [running, stopped, degraded, missing, unknown] }
+            - title: restore_undo_incomplete
+              type: object
+              additionalProperties: false
+              required: [siteId, siteName, backupId, failedAt]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                backupId: { type: string }
+                failedAt: { type: string, format: date-time, nullable: true }
+            - title: restore_stuck
+              type: object
+              additionalProperties: false
+              required: [operationId, siteId, siteName, startedAt]
+              properties:
+                operationId: { type: string }
+                siteId: { type: string, nullable: true }
+                siteName: { type: string, nullable: true }
+                startedAt: { type: string, format: date-time }
+            - title: operation_unknown or operation_stuck
+              type: object
+              additionalProperties: false
+              required: [operationId, kind, siteId, siteName]
+              properties:
+                operationId: { type: string }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, site.wordpress.inspect, site.wordpress.update, site.wordpress.import] }
+                siteId: { type: string, nullable: true }
+                siteName: { type: string, nullable: true }
 
     EncryptedSecretMetadataDto:
       type: object
