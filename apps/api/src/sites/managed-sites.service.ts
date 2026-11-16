@@ -26,6 +26,7 @@ import {
   domains,
   enqueueOperationTransactional,
   eq,
+  hostAgentHeartbeats,
   hostAllocations,
   hosts,
   inArray,
@@ -484,6 +485,8 @@ export class ManagedSitesService {
     siteId: string,
     organizationId: string,
     rawTail: number,
+    // An administrator is told the container is gone; a customer only that the logs are not there now.
+    containerGoneIsNotFound = false,
   ): Promise<SiteLogLineDto[]> {
     const site = await this.#loadSite(siteId, organizationId);
     const svc = await this.#webService(site);
@@ -501,7 +504,9 @@ export class ManagedSitesService {
       return lines.map((l) => ({ at: l.at, stream: l.stream, text: l.text }));
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
-      if (code === "NOT_SUPPORTED" || code === "DOCKER_ENGINE_UNAVAILABLE")
+      // NOT_FOUND here is the site's container gone, not the site: never "does not exist".
+      if (code === "NOT_FOUND" && containerGoneIsNotFound) throw err;
+      if (code === "NOT_SUPPORTED" || code === "DOCKER_ENGINE_UNAVAILABLE" || code === "NOT_FOUND")
         throw unavailable;
       throw err;
     }
@@ -605,11 +610,12 @@ export class ManagedSitesService {
         updatedAt: site.updatedAt.toISOString(),
       })),
       customers,
-      certificateAlerts: await this.#certificateAlerts(),
+      certificateAlerts: await this.certificateAlerts(),
     };
   }
 
-  async #certificateAlerts(): Promise<CertificateAlertDto[]> {
+  /** The certificate banner: site certificates, and the panel's as the last domain pass stored it. */
+  public async certificateAlerts(): Promise<CertificateAlertDto[]> {
     const db = this.dbClient.db;
     const now = Date.now();
     const soon = (at: Date | null) => at !== null && at.getTime() < now + ALERT_WINDOW_MS;
@@ -640,17 +646,16 @@ export class ManagedSitesService {
         });
       }
     }
-    const [host] = await db.select({ hostname: hosts.hostname }).from(hosts).limit(1);
-    if (host && this.executor.isRuntimeAvailable) {
-      try {
-        const report = await this.executor.getCertificateStatus({ failuresSince: new Date(now).toISOString() });
-        const panel = report.certificates.find((c) => c.hostname === host.hostname);
-        if (panel && soon(new Date(panel.notAfter))) {
-          alerts.push({ kind: "panel_expiring", siteId: null, siteName: null, hostname: host.hostname, expiresAt: new Date(panel.notAfter).toISOString(), problem: null });
-        }
-      } catch {
-        // The executor is unavailable: the site alerts above still show.
-      }
+    const [row] = await db
+      .select({ snap: hostAgentHeartbeats.telemetrySnapshot })
+      .from(hostAgentHeartbeats)
+      .where(eq(hostAgentHeartbeats.component, "panel_certificate"))
+      .orderBy(desc(hostAgentHeartbeats.lastSeenAt))
+      .limit(1);
+    const snap = row?.snap as { hostname?: unknown; notAfter?: unknown } | undefined;
+    const notAfter = typeof snap?.notAfter === "string" ? new Date(snap.notAfter) : null;
+    if (typeof snap?.hostname === "string" && notAfter && !Number.isNaN(notAfter.getTime()) && soon(notAfter)) {
+      alerts.push({ kind: "panel_expiring", siteId: null, siteName: null, hostname: snap.hostname, expiresAt: notAfter.toISOString(), problem: null });
     }
     return alerts;
   }

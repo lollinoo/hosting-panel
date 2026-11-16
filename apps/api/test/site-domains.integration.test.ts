@@ -1112,6 +1112,7 @@ describe("site.domains operation", () => {
       await setCert("hotel.it", { certExpiresAt: later(60) });
       expect((await call("GET", "/v1/admin/sites", undefined, adminToken)).body.data.certificateAlerts).toEqual([]);
       sim.issueCertificate("panel.test", expires.toISOString());
+      await app.domainReconciler.reconcileOnce();
       expect((await call("GET", "/v1/admin/sites", undefined, adminToken)).body.data.certificateAlerts).toEqual([
         { kind: "panel_expiring", siteId: null, siteName: null, hostname: "panel.test", expiresAt: expires.toISOString(), problem: null },
       ]);

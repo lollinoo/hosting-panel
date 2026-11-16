@@ -177,6 +177,7 @@ describe("every administrator route refuses a customer before it does anything",
       name: "db_a",
       database: "db_a",
       slot: "1",
+      component: "ingress_proxy",
     };
   });
 

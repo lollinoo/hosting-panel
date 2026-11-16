@@ -17,6 +17,9 @@ import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
+import { AdminHealthController } from "./controllers/admin-health.controller.js";
+import { AdminLogsController } from "./controllers/admin-logs.controller.js";
+import { AdminHealthService } from "./health/admin-health.service.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
 import { HostsController } from "./controllers/hosts.controller.js";
@@ -101,6 +104,8 @@ export class AppModule {
         AdminBackupsController,
         PasswordResetController,
         SupportAccessController,
+        AdminHealthController,
+        AdminLogsController,
       ],
       providers: [
         {
@@ -147,6 +152,7 @@ export class AppModule {
         MailRelayService,
         PasswordResetService,
         SupportAccessService,
+        AdminHealthService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,

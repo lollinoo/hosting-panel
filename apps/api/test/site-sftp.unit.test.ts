@@ -319,6 +319,8 @@ class FakeDockerExecutor implements DockerExecutorPort {
     this.#base.getMailRelayStatus(req);
   public sendTestMail: DockerExecutorPort["sendTestMail"] = (req) => this.#base.sendTestMail(req);
   public sendPanelMail: DockerExecutorPort["sendPanelMail"] = (req) => this.#base.sendPanelMail(req);
+  public getPanelContainers: DockerExecutorPort["getPanelContainers"] = () => this.#base.getPanelContainers();
+  public getPanelContainerLogs: DockerExecutorPort["getPanelContainerLogs"] = (req) => this.#base.getPanelContainerLogs(req);
   public siteFiles: DockerExecutorPort["siteFiles"] = (req) => this.#base.siteFiles(req);
   public siteDatabases: DockerExecutorPort["siteDatabases"] = (req) =>
     this.#base.siteDatabases(req);

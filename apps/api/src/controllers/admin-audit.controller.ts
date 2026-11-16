@@ -5,16 +5,27 @@ import {
   auditEvents,
   desc,
   eq,
+  gte,
+  lt,
+  sql,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
+import { z } from "zod";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import {
-  paginateItems,
   parsePaginationQuery,
   resolveRequestId,
 } from "../common/control-plane.error.js";
 import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
+
+// from is inclusive, to exclusive; limit and cursor are read by parsePaginationQuery.
+const AdminAuditRangeSchema = z
+  .object({
+    from: z.iso.datetime({ offset: true }).optional(),
+    to: z.iso.datetime({ offset: true }).optional(),
+  })
+  .refine((r) => !r.from || !r.to || Date.parse(r.from) < Date.parse(r.to), { message: "From must be before To.", path: ["from"] });
 
 function mapAuditEventToDto(event: typeof auditEvents.$inferSelect): AuditEventDto {
   return {
@@ -51,36 +62,40 @@ export class AdminAuditController {
     const auth = await this.authzService.authenticateRequest(req);
     await this.authzService.requirePlatformPermission(auth, req, "audit.read", "audit_event");
 
-    const pagination = parsePaginationQuery(rawQuery);
+    const { cursor, limit } = parsePaginationQuery(rawQuery);
+    const { from, to } = AdminAuditRangeSchema.parse({ from: rawQuery?.["from"], to: rawQuery?.["to"] });
     const orgId = typeof rawQuery?.["organizationId"] === "string" ? rawQuery["organizationId"].trim() : undefined;
     const action = typeof rawQuery?.["action"] === "string" ? rawQuery["action"].trim() : undefined;
 
-    const conditions = [];
-    if (orgId) {
-      conditions.push(eq(auditEvents.organizationId, orgId));
-    }
-    if (action) {
-      conditions.push(eq(auditEvents.action, action));
-    }
-
+    // Keyset over (timestamp, id); the cursor row is read in SQL so its microseconds are kept.
     const rows = await this.dbClient.db
       .select()
       .from(auditEvents)
-      .where(conditions.length > 0 ? and(...conditions) : undefined)
-      .orderBy(desc(auditEvents.timestamp));
+      .where(
+        and(
+          orgId ? eq(auditEvents.organizationId, orgId) : undefined,
+          action ? eq(auditEvents.action, action) : undefined,
+          from ? gte(auditEvents.timestamp, new Date(from)) : undefined,
+          to ? lt(auditEvents.timestamp, new Date(to)) : undefined,
+          cursor
+            ? sql`(${auditEvents.timestamp}, ${auditEvents.id}) < (SELECT a.timestamp, a.id FROM audit_events a WHERE a.id = ${cursor})`
+            : undefined,
+        ),
+      )
+      .orderBy(desc(auditEvents.timestamp), desc(auditEvents.id))
+      .limit(limit + 1);
 
-    const dtoList = rows.map(mapAuditEventToDto);
-    const paginated = paginateItems(dtoList, pagination);
+    const hasMore = rows.length > limit;
+    const data = rows.slice(0, limit).map(mapAuditEventToDto);
 
     return {
-      data: paginated.data,
+      data,
       meta: {
-        total: dtoList.length,
-        cursor: pagination.cursor ?? null,
+        cursor: cursor ?? null,
         requestId: resolveRequestId(req),
         timestamp: new Date().toISOString(),
       },
-      page: paginated.page,
+      page: { nextCursor: hasMore ? data[data.length - 1]!.id : null, hasMore },
     };
   }
 }

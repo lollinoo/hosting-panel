@@ -23,8 +23,10 @@ import {
 import {
   DEMO_IDS,
   eq,
+  hostAgentHeartbeats,
   operations,
   outboxEvents,
+  sql,
   stackRevisions,
 } from "@hosting-panel/database";
 import {
@@ -1485,6 +1487,29 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       expect(telBody.data.telemetry.dockerEngineReachable).toBe(true);
     } finally {
       await f05App.close();
+    }
+  });
+
+  it("11b. Host telemetry answers 200 when the docker_executor snapshot is JSON null", async () => {
+    await app.driftReconciler.reconcileAllOnce();
+    try {
+      await app.dbClient.db.execute(
+        sql`UPDATE host_agent_heartbeats SET telemetry_snapshot = 'null'::jsonb WHERE component = 'docker_executor'`,
+      );
+      const [row] = await app.dbClient.db
+        .select({ snap: hostAgentHeartbeats.telemetrySnapshot })
+        .from(hostAgentHeartbeats)
+        .where(eq(hostAgentHeartbeats.component, "docker_executor"));
+      expect(row?.snap).toBeNull();
+      const res = await requestJson<{ data: { telemetry: HostTelemetryDto | null } }>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/telemetry`,
+        { token: tokens["usr_infra"] },
+      );
+      expect(res.status).toBe(200);
+      // A null snapshot reads as an empty one: an online executor counts as reachable.
+      expect(res.body.data.telemetry?.dockerEngineReachable).toBe(true);
+    } finally {
+      await app.driftReconciler.reconcileAllOnce();
     }
   });
 

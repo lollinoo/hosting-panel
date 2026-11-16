@@ -13,7 +13,7 @@ import {
   upsertHostAgentHeartbeat,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { DockerExecutorPort, PanelContainerStatus } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
@@ -146,6 +146,7 @@ export class DriftReconcilerService {
               memoryUsedBytes: telemetry.memoryUsedBytes,
               storageUsedBytes: telemetry.storageUsedBytes,
               dockerEngineReachable: Boolean(telemetry.dockerEngineReachable),
+              ...(telemetry.disks ? { disks: telemetry.disks } : {}),
             };
           }
         } catch {
@@ -161,6 +162,11 @@ export class DriftReconcilerService {
         });
         heartbeatsUpdated += 1;
       }
+    }
+
+    const panelHost = allHosts[0];
+    if (panelHost && this.dockerExecutor.isRuntimeAvailable && !this.#stopped) {
+      await this.#storePanelContainers(panelHost.id, executorHealth).catch(() => undefined);
     }
 
     let reconciledServices = 0;
@@ -252,6 +258,21 @@ export class DriftReconcilerService {
       newlyDriftedServices,
       heartbeatsUpdated,
     };
+  }
+
+  /** Stores the five panel containers, or that the executor could not list them. */
+  async #storePanelContainers(hostId: string, executorHealth: { readonly status: HostDaemonStatus; readonly version: string }): Promise<void> {
+    let containers: readonly PanelContainerStatus[] | null = null;
+    if (executorHealth.status === "online") {
+      containers = await this.dockerExecutor.getPanelContainers().catch(() => null);
+    }
+    await upsertHostAgentHeartbeat(this.dbClient.db, {
+      hostId,
+      component: "panel_containers",
+      status: containers ? "online" : "offline",
+      version: executorHealth.version,
+      telemetrySnapshot: containers ? { containers } : {},
+    });
   }
 
   async #probeDockerExecutorHealth(): Promise<{
