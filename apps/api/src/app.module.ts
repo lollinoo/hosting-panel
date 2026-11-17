@@ -19,6 +19,7 @@ import { AdminBackupsController } from "./controllers/admin-backups.controller.j
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
 import { AdminHealthController } from "./controllers/admin-health.controller.js";
 import { AdminLogsController } from "./controllers/admin-logs.controller.js";
+import { AdminTerminalController } from "./controllers/admin-terminal.controller.js";
 import { AdminHealthService } from "./health/admin-health.service.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
@@ -37,6 +38,7 @@ import { SiteWordpressController } from "./controllers/site-wordpress.controller
 import { SiteWordpressImportController } from "./controllers/site-wordpress-import.controller.js";
 import { SupportAccessController } from "./controllers/support-access.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
+import { AdminTerminalService } from "./terminal/admin-terminal.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
@@ -106,6 +108,7 @@ export class AppModule {
         SupportAccessController,
         AdminHealthController,
         AdminLogsController,
+        AdminTerminalController,
       ],
       providers: [
         {
@@ -153,6 +156,7 @@ export class AppModule {
         PasswordResetService,
         SupportAccessService,
         AdminHealthService,
+        AdminTerminalService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,

@@ -90,6 +90,12 @@ class MockDockerExecutor implements DockerExecutorPort {
   public sendPanelMail: DockerExecutorPort["sendPanelMail"] = (req) => this.#base.sendPanelMail(req);
   public getPanelContainers: DockerExecutorPort["getPanelContainers"] = () => this.#base.getPanelContainers();
   public getPanelContainerLogs: DockerExecutorPort["getPanelContainerLogs"] = (req) => this.#base.getPanelContainerLogs(req);
+  public openTerminal: DockerExecutorPort["openTerminal"] = (req) => this.#base.openTerminal(req);
+  public writeTerminal: DockerExecutorPort["writeTerminal"] = (req) => this.#base.writeTerminal(req);
+  public readTerminal: DockerExecutorPort["readTerminal"] = (req) => this.#base.readTerminal(req);
+  public closeTerminal: DockerExecutorPort["closeTerminal"] = (req) => this.#base.closeTerminal(req);
+  public listTerminals: DockerExecutorPort["listTerminals"] = () => this.#base.listTerminals();
+  public restartPanelContainer: DockerExecutorPort["restartPanelContainer"] = (req) => this.#base.restartPanelContainer(req);
   public siteFiles: DockerExecutorPort["siteFiles"] = (req) => this.#base.siteFiles(req);
 
   public async siteDatabases<R extends SiteDatabasesRequest>(

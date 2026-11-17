@@ -40,7 +40,7 @@ const STRUCTURED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "siteMail",
 ]);
 
-function sanitizeContainerIdentifier(serviceInstanceId: string): string {
+export function sanitizeContainerIdentifier(serviceInstanceId: string): string {
   const cleaned = serviceInstanceId.replace(/[^a-zA-Z0-9._-]/g, "_");
   return `hp_svc_${cleaned}`.slice(0, 120);
 }

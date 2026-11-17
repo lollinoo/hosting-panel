@@ -52,6 +52,7 @@ import {
   resolveRequestId,
 } from "./common/control-plane.error.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
+import { AdminTerminalService, TERMINAL_SWEEP_INTERVAL_MS } from "./terminal/admin-terminal.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "./tokens.js";
 
@@ -224,6 +225,7 @@ export interface CreateControlPlaneAppOptions {
   readonly mailRelayRetryIntervalMs?: number | null;
   readonly sftpRetryIntervalMs?: number | null;
   readonly backupScheduleIntervalMs?: number | null;
+  readonly terminalSweepIntervalMs?: number | null;
   readonly panelDump?: ControlPlaneRuntimeConfig["panelDump"];
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
@@ -532,6 +534,7 @@ export async function createControlPlaneApp(
   const mailRelay = nestApp.get(MailRelayService);
   const siteSftp = nestApp.get(SiteSftpService);
   const backupScheduler = nestApp.get(BackupSchedulerService);
+  const terminal = nestApp.get(AdminTerminalService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
@@ -547,6 +550,7 @@ export async function createControlPlaneApp(
   mailRelay.startBackgroundLoop();
   siteSftp.startBackgroundLoop();
   backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
+  terminal.startBackgroundLoop(options?.terminalSweepIntervalMs !== undefined ? options.terminalSweepIntervalMs : TERMINAL_SWEEP_INTERVAL_MS);
 
   let isClosed = false;
 
@@ -573,6 +577,7 @@ export async function createControlPlaneApp(
       }
       isClosed = true;
 
+      await terminal.stop();
       await backupScheduler.stop();
       await outboxWorker.stop();
       await driftReconciler.stop();

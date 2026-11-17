@@ -178,6 +178,8 @@ describe("every administrator route refuses a customer before it does anything",
       database: "db_a",
       slot: "1",
       component: "ingress_proxy",
+      sessionId: `term_${randomUUID().replace(/-/g, "")}`,
+      operationId: `op_${randomUUID()}`,
     };
   });
 
@@ -191,6 +193,9 @@ describe("every administrator route refuses a customer before it does anything",
     expect(guarded()).toContainEqual({ method: "POST", path: "/v1/admin/administrators" });
     expect(guarded()).toContainEqual({ method: "POST", path: "/v1/admin/sites/:siteId/support-access" });
     expect(guarded()).toContainEqual({ method: "DELETE", path: "/v1/admin/support-access" });
+    for (const path of ["/v1/admin/sites/:siteId/terminal", ...["write", "read", "close"].map((v) => `/v1/admin/terminal/:sessionId/${v}`)]) {
+      expect(guarded()).toContainEqual({ method: "POST", path });
+    }
   });
 
   it("a member and an owner get 403 PERMISSION_DENIED and exactly one denied audit row naming them, and nothing changes", async () => {
