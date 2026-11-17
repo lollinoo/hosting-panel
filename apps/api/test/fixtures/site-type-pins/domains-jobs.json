@@ -1,0 +1,103 @@
+{
+  "calls": [
+    {
+      "args": [
+        {
+          "failuresSince": "<time>"
+        }
+      ],
+      "method": "getCertificateStatus"
+    },
+    {
+      "args": [
+        {
+          "failuresSince": "<time>"
+        }
+      ],
+      "method": "getCertificateStatus"
+    },
+    {
+      "args": [
+        {
+          "failuresSince": "<time>"
+        }
+      ],
+      "method": "getCertificateStatus"
+    },
+    {
+      "args": [
+        {
+          "failuresSince": "<time>"
+        }
+      ],
+      "method": "getCertificateStatus"
+    },
+    {
+      "args": [
+        {
+          "containerName": "hp_svc_svc_<id:1>",
+          "hosts": [
+            {
+              "hostname": "wp-a.example.test",
+              "httpsRedirect": false,
+              "redirectTo": null,
+              "tls": true
+            },
+            {
+              "hostname": "www.wp-a.example.test",
+              "httpsRedirect": false,
+              "redirectTo": null,
+              "tls": true
+            }
+          ],
+          "internalPort": 80,
+          "serviceInstanceId": "svc_<id:1>",
+          "siteId": "site_<id:2>"
+        }
+      ],
+      "method": "applySiteRoutes"
+    },
+    {
+      "args": [
+        {
+          "jobId": "job_<id:3>_url",
+          "kind": "wordpress.set-url",
+          "organizationId": "org_<id:4>",
+          "params": {
+            "phpVersion": "8.3",
+            "previousUrl": "http://wp-a.example.test",
+            "siteUrl": "https://www.wp-a.example.test"
+          },
+          "serviceInstanceId": "svc_<id:1>",
+          "siteId": "site_<id:2>"
+        }
+      ],
+      "method": "runSiteJob"
+    },
+    {
+      "args": [
+        {
+          "containerName": "hp_svc_svc_<id:1>",
+          "hosts": [
+            {
+              "hostname": "wp-a.example.test",
+              "httpsRedirect": true,
+              "redirectTo": "https://www.wp-a.example.test",
+              "tls": true
+            },
+            {
+              "hostname": "www.wp-a.example.test",
+              "httpsRedirect": true,
+              "redirectTo": null,
+              "tls": true
+            }
+          ],
+          "internalPort": 80,
+          "serviceInstanceId": "svc_<id:1>",
+          "siteId": "site_<id:2>"
+        }
+      ],
+      "method": "applySiteRoutes"
+    }
+  ]
+}

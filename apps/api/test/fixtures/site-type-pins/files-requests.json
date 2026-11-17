@@ -1,0 +1,29 @@
+{
+  "calls": [
+    {
+      "args": [
+        {
+          "op": "list",
+          "path": "",
+          "serviceInstanceId": "svc_<id:1>"
+        }
+      ],
+      "method": "siteFiles"
+    },
+    {
+      "args": [
+        {
+          "dataBase64": "cGluCg==",
+          "final": true,
+          "offset": 0,
+          "op": "write",
+          "overwrite": false,
+          "path": "pin.txt",
+          "serviceInstanceId": "svc_<id:1>",
+          "uploadId": "upl_0123456789abcdef"
+        }
+      ],
+      "method": "siteFiles"
+    }
+  ]
+}

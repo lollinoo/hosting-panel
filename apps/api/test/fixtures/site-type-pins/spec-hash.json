@@ -1,0 +1,50 @@
+{
+  "afterCreate": {
+    "hashOf": {
+      "config": {
+        "exposeHttp": true,
+        "image": "wordpress:7.1.4-php8.3-apache",
+        "internalPort": 80,
+        "siteMail": true,
+        "volumeMounts": [
+          {
+            "containerPath": "/var/www/html",
+            "volumeSuffix": "html"
+          }
+        ]
+      },
+      "resourceLimits": {
+        "cpuMilli": 1000,
+        "memoryBytes": "536870912"
+      },
+      "secretRefs": {}
+    },
+    "recomputed": "758bc24348d0bb5a534f7145e2fdca0377dce0f8756a979bbf1e3e7f17a8b6e3",
+    "revisionNumber": 1,
+    "specHash": "758bc24348d0bb5a534f7145e2fdca0377dce0f8756a979bbf1e3e7f17a8b6e3"
+  },
+  "atEnd": {
+    "hashOf": {
+      "config": {
+        "exposeHttp": true,
+        "image": "wordpress:7.1.4-php8.3-apache",
+        "internalPort": 80,
+        "siteMail": true,
+        "volumeMounts": [
+          {
+            "containerPath": "/var/www/html",
+            "volumeSuffix": "html"
+          }
+        ]
+      },
+      "resourceLimits": {
+        "cpuMilli": 1000,
+        "memoryBytes": "536870912"
+      },
+      "secretRefs": {}
+    },
+    "recomputed": "758bc24348d0bb5a534f7145e2fdca0377dce0f8756a979bbf1e3e7f17a8b6e3",
+    "revisionNumber": 1,
+    "specHash": "758bc24348d0bb5a534f7145e2fdca0377dce0f8756a979bbf1e3e7f17a8b6e3"
+  }
+}
