@@ -319,6 +319,32 @@ I container dei siti e `hp_mariadb` tengono al massimo 3 file di log da 10 MB. U
 
 Dettagli e limiti: [ADR 0026](docs/architecture/adr/0026-health-alerts-and-logs.md).
 
+#### Riavviare un sito o un container del pannello
+
+In **Amministrazione › Stato** il pulsante **Riavvia** è su ogni riga dei **Container dei siti** e sulle righe dei cinque container del pannello (non su un container «Non in uso», mancante o con il runtime disattivato). Il riavvio chiede un **motivo** (obbligatorio, al massimo 500 caratteri): finisce nel **Registro attività** (`admin.site.restart`, `admin.panel_container.restart` e, alla fine, `admin.panel_container.restart.end`) perché chi legge dopo sappia perché è stato fatto; i clienti non lo vedono mai. La finestra dice cosa si interrompe, poi segue il riavvio fino alla fine (dopo 3 minuti senza risposta dice che non lo sa: ricarica la pagina).
+
+- **Un sito**: non risponde per qualche secondo; una pagina in caricamento o un upload in corso falliscono. Se il cliente aveva fermato il sito, **Riavvia lo fa ripartire** e resta attivo finché qualcuno non lo ferma (la finestra lo avvisa). Se il container del sito non c'è più, viene creato di nuovo dalla configurazione salvata dal pannello, purché la creazione del sito fosse riuscita e nessuno ne abbia chiesto la cancellazione.
+- **`hp_ingress_proxy`**: tutti i siti e il pannello non rispondono per qualche secondo; la pagina si ricollega da sola.
+- **`hp_mariadb`**: i database dei siti si fermano, di solito per meno di un minuto; un backup o un ripristino di database in corso fallisce e va rifatto.
+- **`hp_phpmyadmin`**: si ferma per qualche secondo; chi lo usa lo riapre dalla scheda **Database**.
+- **`hp_sftp`**: le connessioni SFTP aperte si chiudono; un trasferimento in corso va rifatto.
+- **`hp_mail_relay`**: la posta che un sito invia in quei secondi può fallire e non viene rinviata.
+
+Un riavvio del pannello parte circa 2 secondi dopo la richiesta e dura al massimo 35 secondi; se non riesce, la riga di **Stato** dice com'è davvero il container.
+
+**Dopo un riavvio del server** i siti ripartono da soli. Limite noto: un servizio generico (non un sito) che usa segreti non riparte dopo un riavvio del server e non si riavvia né si ridistribuisce dal pannello; la riparazione è prevista in una versione successiva.
+
+#### Terminale di un sito
+
+**Terminale** è un link sulla riga di un sito in **Amministrazione › Stato** (container in esecuzione o degradato) e in **Amministrazione › Siti** (sito pronto o degradato). Apre una shell di solo testo dentro il container del sito, come utente del web server (`33:33`, mai root), nella cartella del sito.
+
+- Serve l'**autenticazione in due passaggi** sull'account: ogni apertura chiede un **codice nuovo** dell'app; un codice già usato (anche per l'accesso) è rifiutato fino al prossimo. I codici errati si contano come quelli dell'accesso: al quinto l'account è bloccato per 15 minuti.
+- Si possono lanciare comandi riga per riga (al massimo 4096 byte per riga), fermarli con **Ctrl-C** e chiudere la shell con **Ctrl-D**. Non funzionano i programmi a schermo intero (editor, pager, `top`).
+- Una sessione per sito e quattro sul server. Una sessione finisce da sola dopo **30 minuti**, o **60 secondi** dopo che la pagina smette di leggere (scheda chiusa o in sospensione).
+- Il **Registro attività** registra chi ha aperto la sessione, su quale sito, quando, quanto è durata e come è finita (`admin.terminal.open`, `admin.terminal.close`), e ogni apertura rifiutata (`admin.terminal.denied`). Ciò che viene digitato e ciò che la shell stampa **non** è mai registrato.
+
+Dettagli e limiti: [ADR 0027](docs/architecture/adr/0027-restart-and-terminal.md).
+
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 
 ```bash

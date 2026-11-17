@@ -89,7 +89,7 @@ Source: `docs/superpowers/specs/2026-11-08-production-hosting-panel-design.md`.
 6. **DNS stays at the registrar**: the panel checks DNS, never hosts zones.
 7. **Backups**: S3 target configured by the admin.
 8. **SFTP and web file manager are mandatory**; databases with phpMyAdmin.
-9. **Container terminal only**: no host terminal in the panel.
+9. **Container terminal only**: no host terminal in the panel. Since M5c (`ADR-0027`) the terminal is a text shell in a site's container, as `33:33`, for the server administrator only: one per session, behind a fresh TOTP code at every open, recorded (who, which site, when, how long, how it ended) without what is typed or printed.
 10. **Delivery order** (steps 1–6): 1 foundation (auth, roles, i18n, shell, installer); 2 sites, domains, TLS, outgoing mail; 3 backups; 4 files, databases, site import (first go-live line is steps 1–4); 5 WordPress tools; 6 admin console completion. Each step has its own plan and passes the four sensors plus a real-server check.
 
 ## Step 2c Outgoing Mail Owner Decisions (2026-11-09)
