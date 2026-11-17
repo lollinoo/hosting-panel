@@ -363,7 +363,7 @@ describe("M5b operations acceptance", () => {
 
     it("domains: a failed settle leaves the applied routes and the applied audit absent; a good one writes both", async () => {
       const siteId = site.A3!;
-      const read = async () => (await dbClient.db.select({ r: sites.appliedRoutes, url: sites.wordpressUrl }).from(sites).where(eq(sites.id, siteId)))[0]!;
+      const read = async () => (await dbClient.db.select({ r: sites.appliedRoutes, url: sites.siteUrl }).from(sites).where(eq(sites.id, siteId)))[0]!;
       const before = await read();
       // An active certificate changes the plan to https, so a settled apply must change the stored routes.
       await dbClient.db.update(domains).set({ certStatus: "active", certExpiresAt: new Date(Date.now() + 60 * 24 * HOUR) }).where(eq(domains.siteId, siteId));

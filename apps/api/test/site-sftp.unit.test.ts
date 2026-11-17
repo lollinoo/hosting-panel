@@ -343,9 +343,12 @@ function createFakeDbClient(): DatabaseClient {
       from: () => chain,
       innerJoin: () => chain,
       where: () => chain,
+      // The service's site-type lookup awaits the chain itself: every site with an account is a WordPress site.
+      then: (resolve: (rows: unknown[]) => void) =>
+        resolve([...new Set([...repoState.users.values()].map((u) => u.siteId))].map((id) => ({ id, siteType: "wordpress" }))),
       limit: async () => {
         if (cols && "status" in cols) {
-          return repoState.siteStatus !== null ? [{ status: repoState.siteStatus }] : [];
+          return repoState.siteStatus !== null ? [{ status: repoState.siteStatus, siteType: "wordpress" }] : [];
         }
         return repoState.hostIpv4 !== null ? [{ ipv4: repoState.hostIpv4 }] : [];
       },
@@ -479,12 +482,14 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
         passwordHash: stored!.passwordHash,
         siteId: siteA.id,
         serviceInstanceId: "svc_alpha_1",
+        siteType: "wordpress",
       },
       {
         username: otherSiteCreated.user.username,
         passwordHash: repoState.users.get(otherSiteCreated.user.id)!.passwordHash,
         siteId: siteB.id,
         serviceInstanceId: "svc_beta_2",
+        siteType: "wordpress",
       },
     ]);
   });
@@ -752,6 +757,7 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
           passwordHash: repoState.users.get(uB.user.id)!.passwordHash,
           siteId: siteB.id,
           serviceInstanceId: "svc_beta_2",
+          siteType: "wordpress",
         },
       ],
     });
@@ -1088,6 +1094,7 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
           passwordHash: hashB,
           siteId: siteB.id,
           serviceInstanceId: "svc_beta_2",
+          siteType: "wordpress",
         },
       ],
     });
@@ -1103,12 +1110,14 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
           passwordHash: hashA,
           siteId: siteA.id,
           serviceInstanceId: "svc_alpha_1",
+          siteType: "wordpress",
         },
         {
           username: userB.user.username,
           passwordHash: hashB,
           siteId: siteB.id,
           serviceInstanceId: "svc_beta_2",
+          siteType: "wordpress",
         },
       ]),
     });
@@ -1183,7 +1192,7 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
     expect(repoState.users.has(seed.user.id)).toBe(false);
   });
 
-  it("sends strictly { users: [{ username, passwordHash, siteId, serviceInstanceId }] } with no extra keys", async () => {
+  it("sends strictly { users: [{ username, passwordHash, siteId, serviceInstanceId, siteType }] } with no extra keys", async () => {
     repoState.extraDesiredKeys = { organizationId: "org_alpha", extra: true };
     await service.createUser(siteA, "strict");
 
@@ -1195,6 +1204,7 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
       "passwordHash",
       "serviceInstanceId",
       "siteId",
+      "siteType",
       "username",
     ]);
     expect(SftpAccessApplyIpcRequestSchema.parse(sent)).toEqual(sent);

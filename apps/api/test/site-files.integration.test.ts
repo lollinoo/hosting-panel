@@ -1012,6 +1012,7 @@ describe("site files HTTP API integration", () => {
       slug: `no-svc-${randomUUID().slice(0, 6)}`,
       status: "ready",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
 
     const noSvcGet = await call("GET", filesBase(orgAId, noSvcSiteId, "?path="));
@@ -1787,6 +1788,7 @@ describe("site files HTTP API when runtime is disabled", () => {
       slug: "static-ready-site",
       status: "ready",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
   });
 

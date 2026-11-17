@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import {
+  SITE_TYPE_KEYS,
   MAX_SITE_DOMAINS,
   wwwPartner,
   type AddSiteDomainInput,
@@ -17,7 +18,6 @@ import {
   hosts,
   inArray,
   insertSiteDomains,
-  isNotNull,
   listSiteDomains,
   not,
   or,
@@ -210,7 +210,7 @@ export class SiteDomainsService {
       if (!row) throw notFound();
       if (row.isPrimary) return;
       // Never move an https site to a name without a working certificate: WordPress would go back to http.
-      if (site.wordpressUrl?.startsWith("https://") && !certificateUsable(row, new Date())) {
+      if (site.siteUrl?.startsWith("https://") && !certificateUsable(row, new Date())) {
         throw new ControlPlaneError(
           "VALIDATION_ERROR",
           "Wait until HTTPS is active on this address, then make it the main address.", { details: [{ message: "Wait until HTTPS is active on this address, then make it the main address.", reason: "needs_https" }] },
@@ -247,7 +247,7 @@ export class SiteDomainsService {
       .from(sites)
       .innerJoin(hostAllocations, eq(hostAllocations.id, sites.hostAllocationId))
       .innerJoin(hosts, eq(hosts.id, hostAllocations.hostId))
-      .where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId), isNotNull(sites.phpVersion)))
+      .where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
       .limit(1);
     if (!site) throw notFound();
     return site;
@@ -263,7 +263,7 @@ export class SiteDomainsService {
       const [site] = await tx
         .select()
         .from(sites)
-        .where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId), isNotNull(sites.phpVersion)))
+        .where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
         .for("update");
       if (!site) throw notFound();
       const t = tx as unknown as HostingPanelDatabase;

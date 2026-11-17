@@ -56,7 +56,7 @@ export interface BackupSiteRef {
   readonly id: string;
   readonly organizationId: string;
   readonly status: string;
-  readonly wordpressUrl?: string | null;
+  readonly siteUrl?: string | null;
 }
 
 export interface EnqueueBackupTxInput {
@@ -167,14 +167,14 @@ async function enqueueSiteBackupTx(
     };
   }
 
-  let siteUrl = site.wordpressUrl;
+  let siteUrl = site.siteUrl;
   if (siteUrl === undefined) {
     const [siteRow] = await tx
-      .select({ wordpressUrl: sites.wordpressUrl })
+      .select({ siteUrl: sites.siteUrl })
       .from(sites)
       .where(eq(sites.id, site.id))
       .limit(1);
-    siteUrl = siteRow?.wordpressUrl ?? null;
+    siteUrl = siteRow?.siteUrl ?? null;
   }
 
   const { id: backupId } = await insertSiteBackup(tx, {

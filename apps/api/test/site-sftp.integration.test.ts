@@ -488,6 +488,7 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
           passwordHash: dbRow1!.passwordHash,
           siteId: siteA1Id,
           serviceInstanceId: svcA1Id,
+          siteType: "wordpress",
         },
       ],
     });
@@ -512,12 +513,14 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
           passwordHash: dbRow1!.passwordHash,
           siteId: siteA1Id,
           serviceInstanceId: svcA1Id,
+          siteType: "wordpress",
         },
         {
           username: created2.user.username,
           passwordHash: dbRow2!.passwordHash,
           siteId: siteA1Id,
           serviceInstanceId: svcA1Id,
+          siteType: "wordpress",
         },
       ]),
     );
@@ -570,6 +573,7 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
         passwordHash: dbRow2!.passwordHash,
         siteId: siteA1Id,
         serviceInstanceId: svcA1Id,
+        siteType: "wordpress",
       },
     ]);
 
@@ -780,6 +784,7 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
           passwordHash: anchorBefore!.passwordHash,
           siteId: siteA1Id,
           serviceInstanceId: svcA1Id,
+          siteType: "wordpress",
         },
       ],
     });

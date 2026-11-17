@@ -9,16 +9,21 @@ import {
   type NestFastifyApplication,
 } from "@nestjs/platform-fastify";
 import {
+  LEGACY_SITE_TYPE,
   findForbiddenPublicDtoKeys,
   type IpcSigningKey,
   type RuntimeBackend,
 } from "@hosting-panel/contracts";
 import {
+  and,
   createDatabaseClient,
   ensurePresetRolesAndPermissions,
   ensureWordpressTemplate,
+  isNotNull,
+  isNull,
   parseSecretsMasterKey,
   seedPhase1Dataset,
+  sites,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import {
@@ -341,6 +346,8 @@ export async function createControlPlaneApp(
     await ensureWordpressTemplate(dbClient.db);
     await ensurePresetRolesAndPermissions(dbClient.db);
   }
+  // A release rolled back by hp-update writes sites with a PHP version and no type: give them the legacy one.
+  await dbClient.db.update(sites).set({ siteType: LEGACY_SITE_TYPE }).where(and(isNotNull(sites.phpVersion), isNull(sites.siteType)));
 
   const oidcIssuer =
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";

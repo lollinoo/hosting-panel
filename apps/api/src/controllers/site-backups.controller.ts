@@ -12,7 +12,7 @@ import { z } from "zod";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
 import { SiteBackupsService } from "../backups/site-backups.service.js";
 import { SiteRestoreService } from "../backups/site-restore.service.js";
-import { requireIdempotencyKey } from "../common/control-plane.error.js";
+import { ControlPlaneError, requireIdempotencyKey } from "../common/control-plane.error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 
@@ -144,6 +144,9 @@ export class SiteBackupsController {
   ): Promise<{ readonly auth: AuthenticatedRequestContext; readonly site: ManagedSiteDto }> {
     const auth = await this.authzService.authenticateRequest(req);
     const site = await this.sitesService.get(siteId, orgId);
+    if (!site.siteType) {
+      throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    }
     await this.authzService.requireOrgPermission(auth, req, {
       organizationId: orgId,
       permission: "site.backups.manage",

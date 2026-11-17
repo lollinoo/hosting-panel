@@ -223,6 +223,7 @@ describe("SiteDatabases unit tests (passwords, error mapping, name checks, servi
           slug: "db-unit-ready",
           status: "ready",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
         {
           id: deployingSiteId,
@@ -232,6 +233,7 @@ describe("SiteDatabases unit tests (passwords, error mapping, name checks, servi
           slug: "db-unit-deploying",
           status: "deploying",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
         {
           id: maintenanceSiteId,
@@ -241,6 +243,7 @@ describe("SiteDatabases unit tests (passwords, error mapping, name checks, servi
           slug: "db-unit-maint",
           status: "maintenance",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
       ])
       .onConflictDoNothing();

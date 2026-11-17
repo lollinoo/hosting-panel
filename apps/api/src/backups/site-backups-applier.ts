@@ -3,6 +3,7 @@ import {
   BACKUP_FAILURE_CLASSES,
   DEFAULT_BACKUP_RETENTION_DAYS,
   ERROR_CODES,
+  siteTypeKeyOf,
   type BackupJobStatus,
   type BackupProblem,
   type ErrorCode,
@@ -263,11 +264,13 @@ export class SiteBackupsApplier {
           id: sites.id,
           organizationId: sites.organizationId,
           status: sites.status,
+          siteType: sites.siteType,
         })
         .from(sites)
         .where(eq(sites.id, op.resourceId))
         .limit(1);
-      if (!site) {
+      const siteType = siteTypeKeyOf(site?.siteType);
+      if (!site || !siteType) {
         await settleSiteBackup(db, op.id, { status: "failed", problem: "other" });
         const err = new ControlPlaneError("NOT_FOUND", "Site not found for backup");
         await this.#failStepAndOperation(op.id, err.message, err.code, err.message);
@@ -298,6 +301,7 @@ export class SiteBackupsApplier {
         jobId: op.id,
         siteId: site.id,
         serviceInstanceId,
+        siteType,
         target,
       });
 

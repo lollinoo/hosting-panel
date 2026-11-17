@@ -3,6 +3,7 @@ import {
   ERROR_CODES,
   SITE_FILE_ERROR_REASONS,
   SITE_FILE_REASON_CODES,
+  siteTypeKeyOf,
   type ErrorCode,
   type SiteFileArchiveRequest,
   type SiteFileChunkDto,
@@ -10,6 +11,7 @@ import {
   type SiteFileExtractRequest,
   type SiteFileListDto,
   type SiteFileWriteResultDto,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -18,6 +20,7 @@ import {
   enqueueOperationTransactional,
   eq,
   serviceInstances,
+  sites,
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
@@ -27,6 +30,7 @@ import type {
   SiteFilesResult,
 } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import { SITE_TYPE_FILE_REASON_MESSAGES } from "../site-types/index.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -77,7 +81,8 @@ export interface SiteFileWriteInput {
 const SITE_FILE_REASON_SET: ReadonlySet<string> = new Set(SITE_FILE_ERROR_REASONS);
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 
-const SAFE_REASON_MESSAGES: Readonly<Record<SiteFileErrorReason, string>> = {
+// The type module supplies its own reasons; a test checks every reason has a message.
+const SAFE_REASON_MESSAGES = {
   invalid_path: "The file path is invalid.",
   not_a_directory: "The target path is not a folder.",
   is_a_directory: "The target path is a folder, not a file.",
@@ -93,10 +98,10 @@ const SAFE_REASON_MESSAGES: Readonly<Record<SiteFileErrorReason, string>> = {
   zip_unavailable: "Archive operations are temporarily unavailable.",
   not_ready: "Site files are not available until the site finishes updating.",
   files_missing: "The files for the import are not complete. Upload them again.",
-  archive_not_wordpress: "The archive does not contain a WordPress site.",
   staging_unsafe: "An earlier import is not finished. Restore a copy from Backups first.",
   dump_not_sql: "The database export is not an SQL file.",
-};
+  ...SITE_TYPE_FILE_REASON_MESSAGES,
+} as Readonly<Record<SiteFileErrorReason, string>>;
 
 const SAFE_CODE_MESSAGES: Partial<Readonly<Record<ErrorCode, string>>> = {
   VALIDATION_ERROR: "The file request is invalid.",
@@ -375,6 +380,7 @@ export class SiteFilesService {
       readonly auditDetails: Record<string, unknown>;
     },
   ): Promise<ManagedSiteAccepted> {
+    await this.#siteType(site);
     await resolveSiteFilesServiceId(
       this.dbClient.db,
       this.dockerExecutor,
@@ -408,6 +414,7 @@ export class SiteFilesService {
     site: SiteFilesSiteRef,
     buildReq: (serviceInstanceId: string) => R,
   ): Promise<SiteFilesResult<R["op"]>> {
+    const siteType = await this.#siteType(site);
     const serviceInstanceId = await resolveSiteFilesServiceId(
       this.dbClient.db,
       this.dockerExecutor,
@@ -415,10 +422,21 @@ export class SiteFilesService {
       site,
     );
     try {
-      return await this.dockerExecutor.siteFiles(buildReq(serviceInstanceId));
+      return await this.dockerExecutor.siteFiles({ ...buildReq(serviceInstanceId), siteType });
     } catch (err) {
       throw mapSiteFileExecutorError(err);
     }
+  }
+
+  /** The site's known type key; a row of no known type is not a managed site. */
+  async #siteType(site: SiteFilesSiteRef): Promise<SiteTypeKey> {
+    const [row] = await this.dbClient.db
+      .select({ siteType: sites.siteType })
+      .from(sites)
+      .where(and(eq(sites.id, site.id), eq(sites.organizationId, site.organizationId)));
+    const siteType = siteTypeKeyOf(row?.siteType);
+    if (!siteType) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    return siteType;
   }
 
   async #recordFileAudit(

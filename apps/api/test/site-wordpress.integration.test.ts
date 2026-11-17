@@ -346,11 +346,11 @@ describe("WordPress tools: the outbox lane, recovery and the routes", () => {
     };
 
     (config as { runtimeBackend: string }).runtimeBackend = "local-simulator";
-    await setSite({ phpVersion: null, status: "deploying" });
+    await setSite({ phpVersion: null, siteType: null, status: "deploying" });
     await expectAll(422, "NOT_SUPPORTED", "wordpress_unavailable");
     (config as { runtimeBackend: string }).runtimeBackend = "linux-systemd";
     await expectAll(422, "NOT_SUPPORTED", "not_wordpress");
-    await setSite({ phpVersion: "8.3" });
+    await setSite({ phpVersion: "8.3", siteType: "wordpress" });
     await expectAll(409, "RESOURCE_LOCKED", "not_ready");
     await setSite({ status: "maintenance" });
     await expectAll(409, "RESOURCE_LOCKED", "not_ready");

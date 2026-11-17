@@ -401,8 +401,8 @@ export class OutboxWorkerService {
       return "skipped";
     }
 
-    // Operations on a managed site are shown to customers: fixed friendly step texts only.
-    const siteOp = op.lockKey?.startsWith("site:") === true;
+    // Customer-visible operations (a site's or a generic service's): fixed friendly step texts only.
+    const siteOp = /^(site|svc):/.test(op.lockKey ?? "");
     if (siteOp) this.#siteOperationIds.add(op.id);
     try {
       await transitionOperation(db, op.id, "processing");

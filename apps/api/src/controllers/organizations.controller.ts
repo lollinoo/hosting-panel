@@ -17,6 +17,8 @@ import {
   filterAuthorizedResources,
 } from "@hosting-panel/authz";
 import {
+  findSiteType,
+  siteTypeKeyOf,
   CreateInvitationInputSchema,
   CreateQuotaReservationInputSchema,
   CreateServiceInstanceInputSchema,
@@ -80,11 +82,9 @@ import {
   upsertEncryptedSecretTransactional,
   users,
   type DatabaseClient,
+  type HostingPanelDatabase,
 } from "@hosting-panel/database";
-import {
-  createApprovedServiceSpec,
-  type DockerExecutorPort,
-} from "@hosting-panel/executor-contracts";
+import { type DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import {
   computeSiteAggregateSummary,
@@ -184,6 +184,7 @@ function mapSiteSummaryToDto(site: typeof sites.$inferSelect, stopped: ReadonlyS
     slug: site.slug,
     status: shownSiteStatus(site.status, stopped.has(site.id)),
     phpVersion: site.phpVersion,
+    siteType: siteTypeKeyOf(site.siteType),
     createdAt: toIsoString(site.createdAt),
     updatedAt: toIsoString(site.updatedAt),
   };
@@ -297,15 +298,15 @@ export class OrganizationsController {
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
   ) {}
 
-  /** Managed WordPress sites change only through managed-sites routes (image, PHP version, site lock). */
+  /** Managed sites change only through managed-sites routes (image, PHP version, site lock). */
   async #refuseManagedSite(siteId: string | null): Promise<void> {
     if (siteId === null) return;
     const [site] = await this.dbClient.db
-      .select({ phpVersion: sites.phpVersion })
+      .select({ siteType: sites.siteType })
       .from(sites)
       .where(eq(sites.id, siteId))
       .limit(1);
-    if (site?.phpVersion) {
+    if (findSiteType(site?.siteType)) {
       throw new ControlPlaneError("VALIDATION_ERROR", MANAGED_SITE_MESSAGE);
     }
   }
@@ -1038,6 +1039,7 @@ export class OrganizationsController {
         slug: result.site.slug,
         status: result.site.status,
         phpVersion: result.site.phpVersion,
+        siteType: siteTypeKeyOf(result.site.siteType),
         services: [],
         domains: domainList,
         driftSummary: {
@@ -1140,8 +1142,9 @@ export class OrganizationsController {
         name: site.name,
         slug: site.slug,
         // A managed site's setup/delete state lives on the row; the service aggregate cannot see a failed setup.
-        status: site.phpVersion !== null && site.status !== "ready" ? site.status : aggregateSummary.siteStatus,
+        status: siteTypeKeyOf(site.siteType) !== null && site.status !== "ready" ? site.status : aggregateSummary.siteStatus,
         phpVersion: site.phpVersion,
+        siteType: siteTypeKeyOf(site.siteType),
         services: svcs.map(mapServiceInstanceToDto),
         domains: doms.map(mapDomainToDto),
         driftSummary: aggregateSummary.driftSummary,
@@ -1419,7 +1422,6 @@ export class OrganizationsController {
     @Body() rawBody: unknown,
   ): Promise<AsyncAcceptedEnvelope> {
     const auth = await this.authzService.authenticateRequest(req);
-    const body = ServiceLifecycleInputSchema.parse(rawBody ?? {});
 
     const [svc] = await this.dbClient.db
       .select()
@@ -1431,10 +1433,12 @@ export class OrganizationsController {
       throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
     }
 
+    // Permission from the raw action: a body that fails validation must not tell a stranger more than a 404 or 403.
+    const requested = (rawBody as { action?: unknown } | null)?.action;
     const requiredPermission: PermissionKey =
-      body.action === "deploy"
+      requested === "deploy"
         ? "service.deploy"
-        : body.action === "restart"
+        : requested === "restart"
           ? "service.restart"
           : "service.stop";
 
@@ -1446,24 +1450,10 @@ export class OrganizationsController {
       resource: { id: svc.id, organizationId: svc.organizationId },
     });
     await this.#refuseManagedSite(svc.siteId);
+    const body = ServiceLifecycleInputSchema.parse(rawBody ?? {});
 
     // Preserve Phase 1 disabled runtime behavior (AC-F1-10 -> 422 NOT_SUPPORTED)
     if (!this.dockerExecutor.isRuntimeAvailable) {
-      if (body.action === "deploy") {
-        const approvedSpec = createApprovedServiceSpec({
-          serviceInstanceId: serviceId,
-          siteId: svc.siteId,
-          organizationId: orgId,
-          image: "wordpress:latest",
-          containerName: `cnt_${serviceId}`,
-        });
-        await this.dockerExecutor.deployService(approvedSpec);
-      } else if (body.action === "restart") {
-        await this.dockerExecutor.restartService(serviceId);
-      } else {
-        await this.dockerExecutor.stopService(serviceId);
-      }
-
       throw new ControlPlaneError(
         "NOT_SUPPORTED",
         "Docker executor runtime is disabled in Phase 1 (HCP-SPEC-002 §1.3)",
@@ -1481,44 +1471,53 @@ export class OrganizationsController {
           ? "service.restart"
           : "service.stop";
 
-    const enqueued = await enqueueOperationTransactional(this.dbClient.db, {
-      organizationId: orgId,
-      kind: operationKind,
-      resourceType: "service",
-      resourceId: serviceId,
-      requestedByUserId: auth.user.id,
-      idempotencyKey,
-      lockKey: `svc:${serviceId}`,
-      outboxPayload: {
-        ...(body.reason ? { reason: body.reason } : {}),
-      },
-      steps: SERVICE_OPERATION_STEPS,
-    });
-
-    if (!enqueued.idempotentReplay) {
-      const nextDesiredStatus = body.action === "stop" ? "stopped" : "running";
-      await this.dbClient.db
-        .update(serviceInstances)
-        .set({
-          desiredStatus: nextDesiredStatus,
-          updatedAt: new Date(),
-        })
-        .where(eq(serviceInstances.id, serviceId));
-
-      await this.authzService.recordAudit(auth, req, {
+    // The operation, the desired status and the audit row commit together or not at all.
+    const enqueued = await this.dbClient.db.transaction(async (tx) => {
+      const e = await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
         organizationId: orgId,
-        action: `service.lifecycle.${body.action}`,
-        targetType: "service_instance",
-        targetId: serviceId,
-        details: {
-          operationId: enqueued.operation.id,
-          action: body.action,
+        kind: operationKind,
+        resourceType: "service",
+        resourceId: serviceId,
+        requestedByUserId: auth.user.id,
+        idempotencyKey,
+        lockKey: `svc:${serviceId}`,
+        outboxPayload: {
           ...(body.reason ? { reason: body.reason } : {}),
         },
+        steps: SERVICE_OPERATION_STEPS,
       });
 
-      this.outboxWorker.triggerAsync();
-    }
+      if (!e.idempotentReplay) {
+        const nextDesiredStatus = body.action === "stop" ? "stopped" : "running";
+        await tx
+          .update(serviceInstances)
+          .set({
+            desiredStatus: nextDesiredStatus,
+            updatedAt: new Date(),
+          })
+          .where(eq(serviceInstances.id, serviceId));
+
+        await this.authzService.recordAudit(
+          auth,
+          req,
+          {
+            organizationId: orgId,
+            action: `service.lifecycle.${body.action}`,
+            targetType: "service_instance",
+            targetId: serviceId,
+            details: {
+              operationId: e.operation.id,
+              action: body.action,
+              ...(body.reason ? { reason: body.reason } : {}),
+            },
+          },
+          tx,
+        );
+      }
+      return e;
+    });
+
+    if (!enqueued.idempotentReplay) this.outboxWorker.triggerAsync();
 
     return {
       data: {

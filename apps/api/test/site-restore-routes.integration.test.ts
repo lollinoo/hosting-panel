@@ -1058,9 +1058,9 @@ describe("M3b site restore & download routes and service", () => {
     });
     expect(created.status).toBe(202);
     const createdId = created.body.data.backupId as string;
-    const [siteRow] = await dbClient.db.select({ wordpressUrl: sites.wordpressUrl }).from(sites).where(eq(sites.id, siteA1Id));
+    const [siteRow] = await dbClient.db.select({ siteUrl: sites.siteUrl }).from(sites).where(eq(sites.id, siteA1Id));
     const [bkpRow] = await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, createdId));
-    expect(bkpRow?.siteUrl).toBe(siteRow?.wordpressUrl);
+    expect(bkpRow?.siteUrl).toBe(siteRow?.siteUrl);
 
     await dbClient.db.delete(siteBackups);
     await dbClient.db.delete(operations);

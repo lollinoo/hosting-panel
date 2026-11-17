@@ -475,7 +475,7 @@ describe("site restore and download applier (M3b)", () => {
       .update(sites)
       .set({
         status: "ready",
-        wordpressUrl: "http://hotelroma-restore.it",
+        siteUrl: "http://hotelroma-restore.it",
         phpVersion: "8.4",
       })
       .where(eq(sites.id, siteA1Id));
@@ -504,7 +504,7 @@ describe("site restore and download applier (M3b)", () => {
     });
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://hotelroma-restore.it" })
+      .set({ siteUrl: "https://hotelroma-restore.it" })
       .where(eq(sites.id, siteA1Id));
 
     const { operationId } = await enqueueRestore(backupId);
@@ -601,7 +601,7 @@ describe("site restore and download applier (M3b)", () => {
     });
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://hotelroma-restore.it" })
+      .set({ siteUrl: "https://hotelroma-restore.it" })
       .where(eq(sites.id, siteA1Id));
 
     sim.failNextJob("wordpress.set-url", 1, "wp cli failed");
@@ -677,7 +677,7 @@ describe("site restore and download applier (M3b)", () => {
     });
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: null })
+      .set({ siteUrl: null })
       .where(eq(sites.id, siteA1Id));
 
     const { operationId } = await enqueueRestore(backupId);
@@ -1048,7 +1048,7 @@ describe("site restore and download applier (M3b)", () => {
     });
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://post-crash.hotelroma-restore.it" })
+      .set({ siteUrl: "https://post-crash.hotelroma-restore.it" })
       .where(eq(sites.id, siteA1Id));
 
     const { operationId } = await enqueueRestore(backupId);
@@ -1453,7 +1453,7 @@ describe("site restore and download applier (M3b)", () => {
     });
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://hotelroma-restore.it" })
+      .set({ siteUrl: "https://hotelroma-restore.it" })
       .where(eq(sites.id, siteA1Id));
 
     const { operationId } = await enqueueRestore(backupId);
@@ -1582,7 +1582,7 @@ describe("site restore and download applier (M3b)", () => {
     });
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://hotelroma-restore.it" })
+      .set({ siteUrl: "https://hotelroma-restore.it" })
       .where(eq(sites.id, siteA1Id));
     const { operationId } = await enqueueRestore(backupId);
 

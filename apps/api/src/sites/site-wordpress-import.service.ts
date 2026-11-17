@@ -159,7 +159,7 @@ export class SiteWordpressImportService {
       if (!enqueued.idempotentReplay) {
         await assertHeavyActionAllowed(tx, site.id, actor, { id, submittedAt });
         if (backupsConfigured) {
-          const [row] = await tx.select({ siteUrl: sites.wordpressUrl }).from(sites).where(eq(sites.id, site.id)).limit(1);
+          const [row] = await tx.select({ siteUrl: sites.siteUrl }).from(sites).where(eq(sites.id, site.id)).limit(1);
           await insertSiteBackup(tx, { siteId: site.id, kind: "pre_update", status: "running", operationId: id, siteUrl: row?.siteUrl ?? null });
         }
         await this.#audit(tx, site, actor, "requested", { operationId: id, backup: backupsConfigured ? "taken" : "skipped" });

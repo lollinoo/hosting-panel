@@ -27,6 +27,7 @@ import {
   supportAccessGrants,
   users,
   type DatabaseClient,
+  type DatabaseExecutor,
 } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import {
@@ -412,8 +413,9 @@ export class AuthzContextService {
       readonly targetId?: string | null;
       readonly details?: Record<string, unknown>;
     },
+    db: DatabaseExecutor = this.dbClient.db,
   ): Promise<void> {
-    await appendAuditEvent(this.dbClient.db, {
+    await appendAuditEvent(db, {
       actorId: auth?.user.id ?? null,
       actorType: "user",
       organizationId: input.organizationId ?? null,

@@ -14,6 +14,7 @@ import {
 import {
   CreateSiteDatabaseRequestSchema,
   CreateSiteDatabaseUserRequestSchema,
+  findSiteType,
   type ManagedSiteDto,
   type SiteDatabaseCreatedDto,
   type SiteDatabasePasswordResetDto,
@@ -23,6 +24,7 @@ import {
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
+import { ControlPlaneError } from "../common/control-plane.error.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 import { SiteDatabasesService } from "../sites/site-databases.service.js";
 
@@ -181,6 +183,9 @@ export class SiteDatabasesController {
   ): Promise<{ readonly auth: Auth; readonly site: ManagedSiteDto }> {
     const auth = await this.authzService.authenticateRequest(req);
     const site = await this.sitesService.get(siteId, orgId);
+    if (!findSiteType(site.siteType)?.database) {
+      throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    }
     await this.authzService.requireOrgPermission(auth, req, {
       organizationId: orgId,
       permission: "site.databases.manage",

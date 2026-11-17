@@ -282,12 +282,12 @@ describe("WordPress import: the customer's routes", () => {
       }
     };
     (config as { runtimeBackend: string }).runtimeBackend = "local-simulator";
-    await setSite({ phpVersion: null, status: "deploying" });
+    await setSite({ phpVersion: null, siteType: null, status: "deploying" });
     await expectAll(422, "NOT_SUPPORTED", "wordpress_unavailable");
     expect((await call("GET", base(), a.token)).body.data).toMatchObject({ available: false, slots: null });
     (config as { runtimeBackend: string }).runtimeBackend = "linux-systemd";
     await expectAll(422, "NOT_SUPPORTED", "not_wordpress");
-    await setSite({ phpVersion: "8.3" });
+    await setSite({ phpVersion: "8.3", siteType: "wordpress" });
     await expectAll(409, "RESOURCE_LOCKED", "not_ready");
     await setSite({ status: "ready" });
 

@@ -216,6 +216,8 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
     await ensurePresetRolesAndPermissions(dbClient.db);
     config = createRuntimeConfig();
     await seedPhase1Dataset(dbClient.db, config.secretsMasterKey);
+    // The demo seed stores no type; the suspended-org case below reads this seeded site as a WordPress site.
+    await dbClient.db.update(sites).set({ siteType: "wordpress" }).where(eq(sites.id, DEMO_IDS.sites.gammaLegacy));
 
     await dbClient.db
       .insert(sites)
@@ -228,6 +230,7 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
           slug: "files-unit-ready",
           status: "ready",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
         {
           id: deployingSiteId,
@@ -237,6 +240,7 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
           slug: "files-unit-deploying",
           status: "deploying",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
         {
           id: maintenanceSiteId,
@@ -246,6 +250,7 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
           slug: "files-unit-maint",
           status: "maintenance",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
         {
           id: noServiceSiteId,
@@ -255,6 +260,7 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
           slug: "files-unit-nosvc",
           status: "ready",
           phpVersion: "8.3",
+          siteType: "wordpress",
         },
       ])
       .onConflictDoNothing();
@@ -616,12 +622,14 @@ describe("SiteFilesService, SiteFilesApplier, OutboxWorker & Permissions (unit)"
 
       expect(executor.siteFilesSpy).toHaveBeenNthCalledWith(1, {
         serviceInstanceId: readyServiceId,
+        siteType: "wordpress",
         op: "archive",
         paths: ["wp-content"],
         to: "snap.zip",
       });
       expect(executor.siteFilesSpy).toHaveBeenNthCalledWith(2, {
         serviceInstanceId: readyServiceId,
+        siteType: "wordpress",
         op: "extract",
         path: "snap.zip",
         to: "restored",

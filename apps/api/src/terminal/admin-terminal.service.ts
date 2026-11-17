@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  SITE_TYPE_KEYS,
+  siteTypeKeyOf,
   OpenTerminalInputSchema,
   ReadTerminalInputSchema,
   TERMINAL_SESSION_ID_PATTERN,
@@ -18,7 +20,6 @@ import {
   eq,
   findTerminalSession,
   inArray,
-  isNotNull,
   listOpenTerminalSessions,
   openTerminalSession,
   operations,
@@ -79,8 +80,9 @@ export class AdminTerminalService {
   /** Opens a session on the site's container after the TOTP code. */
   public async open(auth: AuthenticatedRequestContext, req: FastifyRequest, siteId: string, body: unknown): Promise<TerminalSessionDto> {
     const db = this.dbClient.db;
-    const [site] = await db.select().from(sites).where(and(eq(sites.id, siteId), isNotNull(sites.phpVersion))).limit(1);
-    if (!site) throw notFound();
+    const [site] = await db.select().from(sites).where(and(eq(sites.id, siteId), inArray(sites.siteType, [...SITE_TYPE_KEYS]))).limit(1);
+    const siteType = siteTypeKeyOf(site?.siteType);
+    if (!site || !siteType) throw notFound();
     const [svc] = await db
       .select()
       .from(serviceInstances)
@@ -142,7 +144,7 @@ export class AdminTerminalService {
     });
     if (result !== "opened") throw refused(result);
     try {
-      const { openedAt } = await this.executor.openTerminal({ sessionId, siteId, serviceInstanceId: svc.id });
+      const { openedAt } = await this.executor.openTerminal({ sessionId, siteId, serviceInstanceId: svc.id, siteType });
       return { sessionId, siteId, containerName, openedAt, expiresAt: new Date(Date.parse(openedAt) + TERMINAL_SESSION_MAX_MS).toISOString() };
     } catch (err) {
       const code = codeOf(err);

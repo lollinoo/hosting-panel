@@ -1,5 +1,6 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  SITE_TYPE_KEYS,
   HOST_JOB_KIND,
   HOST_JOB_RESULTS,
   OPERATION_TERMINAL_STATUSES,
@@ -11,7 +12,6 @@ import {
   PanelContainerSchema,
   PanelContainerStatusWireSchema,
   SITES_BEHIND_MAX,
-  resolveWordpressImage,
   type OsPackagesDto,
   type PanelContainer,
   type PhpVersion,
@@ -27,7 +27,6 @@ import {
   eq,
   hostAgentHeartbeats,
   inArray,
-  isNotNull,
   not,
   operations,
   organizations,
@@ -53,6 +52,7 @@ import {
 import { AdminHealthService } from "../health/admin-health.service.js";
 import { assertNoSiteWork, enqueueHostJob } from "../host/host-jobs.js";
 import { MailRelayService } from "../mail/mail-relay.service.js";
+import { findApiSiteType } from "../site-types/index.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, HOST_AGENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import { PANEL_APPLY_LEASE_MS, PANEL_APPLY_STEPS } from "./panel-container-apply.js";
@@ -134,18 +134,18 @@ export class UpdatesService {
     const rows = await this.dbClient.db
       .select({
         siteId: sites.id, siteName: sites.name, organizationId: sites.organizationId, orgName: organizations.name,
-        phpVersion: sites.phpVersion, desired: serviceInstances.desiredStatus,
+        phpVersion: sites.phpVersion, siteType: sites.siteType, desired: serviceInstances.desiredStatus,
         image: sql<string | null>`${stackRevisions.declarativeConfig}->>'image'`,
       })
       .from(sites)
       .innerJoin(organizations, eq(organizations.id, sites.organizationId))
       .innerJoin(serviceInstances, and(eq(serviceInstances.siteId, sites.id), eq(serviceInstances.organizationId, sites.organizationId)))
       .innerJoin(stackRevisions, eq(stackRevisions.id, serviceInstances.currentRevisionId))
-      .where(isNotNull(sites.phpVersion))
+      .where(inArray(sites.siteType, [...SITE_TYPE_KEYS]))
       .orderBy(asc(sites.name), asc(sites.id));
     // shortcut: filtered in memory, one row per site; move to SQL if a server ever holds many thousands of sites.
     return rows
-      .filter((r) => r.image !== resolveWordpressImage(r.phpVersion as PhpVersion))
+      .filter((r) => r.image !== findApiSiteType(r.siteType)?.image(r.phpVersion as PhpVersion))
       .map((r) => ({
         siteId: r.siteId,
         siteName: r.siteName,
@@ -247,7 +247,8 @@ export class UpdatesService {
     this.#requireRuntime();
     const db = this.dbClient.db;
     const [site] = await db.select().from(sites).where(eq(sites.id, siteId)).limit(1);
-    if (!site?.phpVersion) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    const type = site ? findApiSiteType(site.siteType) : null;
+    if (!site || !type) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
     // A replay answers the first operation: the site may be current by now, and no second row is written.
     const [replay] = await db
       .select({ id: operations.id })
@@ -261,7 +262,7 @@ export class UpdatesService {
     const row = (await this.#sitesBehind()).find((s) => s.siteId === siteId);
     if (!row) throw refused("already_current", "This site already runs the pinned image.");
     if (row.stopped) throw refused("stopped", "Start the site first, then update its image.");
-    const toImage = resolveWordpressImage(site.phpVersion as PhpVersion);
+    const toImage = type.image(site.phpVersion as PhpVersion);
     // R202 2.2: the row is written in the transaction that creates the operation, only when it is new.
     const audit = (tx: HostingPanelDatabase, operationId: string) => appendAuditEvent(tx, {
       actorId: auth.user.id,

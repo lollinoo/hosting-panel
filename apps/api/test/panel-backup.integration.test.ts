@@ -238,6 +238,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
       name: "Night Site",
       slug: "night-site",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, site.id));
     try {
@@ -542,6 +543,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
           name: slug,
           slug,
           phpVersion: "8.4",
+          siteType: "wordpress",
         });
         made.push(site.id);
       }

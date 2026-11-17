@@ -1,6 +1,7 @@
 import { Inject, Injectable } from "@nestjs/common";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  SITE_TYPE_KEYS,
   ALERT_KINDS,
   AdminHealthDtoSchema,
   ALERT_SEVERITY,
@@ -32,7 +33,6 @@ import {
   gte,
   hostAgentHeartbeats,
   inArray,
-  isNotNull,
   listAdminBackupStatus,
   listUnsettledOperations,
   lte,
@@ -256,7 +256,7 @@ export class AdminHealthService {
       .innerJoin(serviceInstances, and(eq(serviceInstances.siteId, sites.id), eq(serviceInstances.organizationId, sites.organizationId)))
       .leftJoin(observedStates, eq(observedStates.serviceInstanceId, serviceInstances.id))
       .leftJoin(stackRevisions, eq(stackRevisions.id, serviceInstances.currentRevisionId))
-      .where(isNotNull(sites.phpVersion))
+      .where(inArray(sites.siteType, [...SITE_TYPE_KEYS]))
       .orderBy(asc(sites.name), asc(sites.id));
     const downSites: DownSite[] = [];
     const siteContainers = siteRows.map((s) => {

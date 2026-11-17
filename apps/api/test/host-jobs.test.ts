@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { HOST_JOB_KIND, HOST_JOB_LOCK_KEY, PLATFORM_OPS_ORG_ID } from "@hosting-panel/contracts";
+import { HOST_JOB_KIND, HOST_JOB_LOCK_KEY, PLATFORM_OPS_ORG_ID, SITE_TYPES } from "@hosting-panel/contracts";
 import {
   DEMO_IDS,
   auditEvents,
@@ -28,6 +28,7 @@ import {
   recoverHostJob,
   settleHostJob,
   SITE_WORK_BLOCKED_JOBS,
+  SITE_WORK_KINDS,
 } from "../src/host/host-jobs.js";
 import { installedPanelVersion } from "../src/updates/release-version.js";
 
@@ -158,6 +159,18 @@ describe("enqueueHostJob", () => {
     const err = await refusal(enqueueHostJob(dbClient.db, input("panel_update")));
     expect([err.code, err.details?.[0]?.reason]).toEqual(["RESOURCE_LOCKED", "site_work_running"]);
     expect(await count()).toEqual(before);
+  });
+});
+
+describe("SITE_WORK_KINDS", () => {
+  it("R206 A3: holds every heavy operation of every site type, and the same set as before", () => {
+    for (const kind of Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds)) {
+      expect(SITE_WORK_KINDS).toContain(kind);
+    }
+    expect([...SITE_WORK_KINDS].sort()).toEqual([
+      "panel.backups.create", "site.backups.create", "site.backups.download", "site.backups.prune",
+      "site.backups.restore", "site.wordpress.import", "site.wordpress.update",
+    ]);
   });
 });
 

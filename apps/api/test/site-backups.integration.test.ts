@@ -988,6 +988,7 @@ describe("site backups API and outbox execution", () => {
         name: "Disabled Site",
         slug: "disabled-site",
         status: "ready",
+        siteType: "wordpress",
       });
 
       const getRes = await httpRequest(disabledApp.baseUrl!, "GET", backupsUrl(disabledOrgId, siteId), {

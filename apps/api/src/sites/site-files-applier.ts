@@ -4,6 +4,8 @@ import {
   SiteFileExtractRequestSchema,
   canTransitionOperation,
   isTerminalOperationStatus,
+  siteTypeKeyOf,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -100,7 +102,8 @@ export class SiteFilesApplier {
         .where(and(eq(sites.id, op.resourceId), eq(sites.organizationId, op.organizationId)))
         .limit(1);
 
-      if (!site) {
+      const siteType = siteTypeKeyOf(site?.siteType);
+      if (!site || !siteType) {
         throw new ControlPlaneError("NOT_FOUND", "The managed site was not found.");
       }
 
@@ -112,8 +115,8 @@ export class SiteFilesApplier {
       );
 
       const count = isArchive
-        ? await this.#runArchive(serviceInstanceId, parseArchivePayload(eventPayload))
-        : await this.#runExtract(serviceInstanceId, parseExtractPayload(eventPayload));
+        ? await this.#runArchive(serviceInstanceId, siteType, parseArchivePayload(eventPayload))
+        : await this.#runExtract(serviceInstanceId, siteType, parseExtractPayload(eventPayload));
 
       const message = formatEntryCountMessage(
         count,
@@ -130,10 +133,12 @@ export class SiteFilesApplier {
 
   async #runArchive(
     serviceInstanceId: string,
+    siteType: SiteTypeKey,
     input: { readonly paths: readonly string[]; readonly to: string },
   ): Promise<number> {
     const result = await this.executor.siteFiles({
       serviceInstanceId,
+      siteType,
       op: "archive",
       paths: [...input.paths],
       to: input.to,
@@ -143,10 +148,12 @@ export class SiteFilesApplier {
 
   async #runExtract(
     serviceInstanceId: string,
+    siteType: SiteTypeKey,
     input: { readonly path: string; readonly to: string },
   ): Promise<number> {
     const result = await this.executor.siteFiles({
       serviceInstanceId,
+      siteType,
       op: "extract",
       path: input.path,
       to: input.to,

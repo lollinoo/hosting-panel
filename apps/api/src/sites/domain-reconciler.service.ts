@@ -1,5 +1,5 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { isTerminalOperationStatus, redactSensitiveString, type CertProblem, type DnsStatus } from "@hosting-panel/contracts";
+import { SITE_TYPE_KEYS, isTerminalOperationStatus, redactSensitiveString, type CertProblem, type DnsStatus } from "@hosting-panel/contracts";
 import {
   and,
   appendAuditEvent,
@@ -9,7 +9,6 @@ import {
   hostAllocations,
   hosts,
   inArray,
-  isNotNull,
   latestSiteOperation,
   listSiteDomains,
   sites,
@@ -110,7 +109,7 @@ export class DomainReconcilerService {
       .innerJoin(hosts, eq(hosts.id, hostAllocations.hostId))
       .where(
         and(
-          isNotNull(sites.phpVersion),
+          inArray(sites.siteType, [...SITE_TYPE_KEYS]),
           ...(onlySiteId ? [eq(sites.id, onlySiteId)] : []),
         ),
       );

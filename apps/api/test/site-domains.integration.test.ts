@@ -277,7 +277,7 @@ describe("site.domains operation", () => {
     const deployed = sim.deployedSpecs.at(-1)!.hostRoutes!;
     const s = await site(siteId);
     expect(s.appliedRoutes).toEqual(deployed);
-    expect(s.wordpressUrl).toBe("http://hotel.it");
+    expect(s.siteUrl).toBe("http://hotel.it");
     expect(s.appliedRoutesHash).toBe(
       routePlanHash(buildSiteHostRoutes(await dbClient.db.select().from(domains).where(eq(domains.siteId, siteId)), new Date()), "http://hotel.it"),
     );
@@ -313,7 +313,7 @@ describe("site.domains operation", () => {
     expect(job.params).toEqual({ phpVersion: "8.4", siteUrl: "https://hotel.it", previousUrl: "http://hotel.it" });
 
     const s = await site(siteId);
-    expect(s.wordpressUrl).toBe("https://hotel.it");
+    expect(s.siteUrl).toBe("https://hotel.it");
     expect(s.appliedRoutes).toEqual(history[1]);
     expect(s.appliedRoutesHash).toBe(routePlanHash(history[1]!, "https://hotel.it"));
     const audit = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "site.domains.applied"));
@@ -351,7 +351,7 @@ describe("site.domains operation", () => {
     const s = await site(siteId);
     expect(s.status).toBe("ready");
     expect(s.appliedRoutesHash).toBe(before.appliedRoutesHash);
-    expect(s.wordpressUrl).toBe(before.wordpressUrl);
+    expect(s.siteUrl).toBe(before.siteUrl);
     expect(routesOf(sim.routeHistory.at(-1)!)).toEqual([
       { hostname: "hotel.it", tls: true, httpsRedirect: false, redirectTo: null },
       { hostname: "www.hotel.it", tls: false, httpsRedirect: false, redirectTo: null },
@@ -368,7 +368,7 @@ describe("site.domains operation", () => {
 
   it("store briefly missing a certificate never rewrites the site to http", async () => {
     const siteId = await createAndRun();
-    await dbClient.db.update(sites).set({ wordpressUrl: "https://hotel.it" }).where(eq(sites.id, siteId));
+    await dbClient.db.update(sites).set({ siteUrl: "https://hotel.it" }).where(eq(sites.id, siteId));
     await setCert("hotel.it", { certStatus: "requested" });
     const jobs = sim.jobs.length;
 
@@ -376,7 +376,7 @@ describe("site.domains operation", () => {
     expect((await opRow(opId)).status).toBe("succeeded");
     expect(sim.jobs).toHaveLength(jobs);
     const s = await site(siteId);
-    expect(s.wordpressUrl).toBe("https://hotel.it");
+    expect(s.siteUrl).toBe("https://hotel.it");
     expect(s.appliedRoutes).toEqual([{ hostname: "hotel.it", tls: true, httpsRedirect: false, redirectTo: null }]);
   });
 
@@ -430,7 +430,7 @@ describe("site.domains operation", () => {
     const failedOp = await applyDomains(siteId);
     expect((await opRow(failedOp)).status).toBe("failed");
     const s = await site(siteId);
-    expect(s.wordpressUrl).toBe("https://hotel.it");
+    expect(s.siteUrl).toBe("https://hotel.it");
     expect(s.appliedRoutes).toEqual(transition);
     expect(s.appliedRoutesHash).toBe(routePlanHash(transition, "https://hotel.it"));
 
@@ -566,7 +566,7 @@ describe("site.domains operation", () => {
       expect(await dom("hotel.it")).toMatchObject({ certStatus: "active", certProblem: null, certAttempts: 0 });
       expect(sim.jobs.slice(jobs).map((j) => j.kind)).toEqual(["wordpress.set-url"]);
       expect(plan(siteId)).toEqual([{ ...plain, tls: true, httpsRedirect: true }]);
-      expect((await site(siteId)).wordpressUrl).toBe("https://hotel.it");
+      expect((await site(siteId)).siteUrl).toBe("https://hotel.it");
       expect(await audits("site.certificate.issued")).toHaveLength(1);
 
       await reconcile(3);
@@ -914,7 +914,7 @@ describe("site.domains operation", () => {
 
     it("main address moves only to a name with working HTTPS", async () => {
       const siteId = await createAndRun({ ...SITE, includeWww: true });
-      await dbClient.db.update(sites).set({ wordpressUrl: "https://hotel.it" }).where(eq(sites.id, siteId));
+      await dbClient.db.update(sites).set({ siteUrl: "https://hotel.it" }).where(eq(sites.id, siteId));
       await setCert("www.hotel.it", { certStatus: "requested", certRequestedAt: new Date() });
       const url = `${base(siteId)}/${(await dom("www.hotel.it")).id}/primary`;
       const refused = await call("POST", url);
@@ -922,7 +922,7 @@ describe("site.domains operation", () => {
       expect(refused.body.error.message).toBe("Wait until HTTPS is active on this address, then make it the main address.");
       expect((await dom("hotel.it")).isPrimary).toBe(true);
 
-      await dbClient.db.update(sites).set({ wordpressUrl: "http://hotel.it" }).where(eq(sites.id, siteId));
+      await dbClient.db.update(sites).set({ siteUrl: "http://hotel.it" }).where(eq(sites.id, siteId));
       expect((await call("POST", url)).status).toBe(200);
       expect((await dom("www.hotel.it")).isPrimary).toBe(true);
     });

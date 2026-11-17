@@ -54,7 +54,7 @@ import {
 import { generateDatabasePassword, type SiteDatabaseActor } from "./site-databases.service.js";
 import { SITE_WORDPRESS_INSPECT_STEPS, SITE_WORDPRESS_UPDATE_STEPS } from "./site-wordpress-applier.js";
 
-type WordpressSite = Pick<ManagedSiteDto, "id" | "organizationId" | "status" | "phpVersion">;
+type WordpressSite = Pick<ManagedSiteDto, "id" | "organizationId" | "status" | "phpVersion" | "siteType">;
 
 const STEP_ORDER = ["inspect", "backup", "update", "settle"] as const;
 
@@ -155,7 +155,7 @@ export class SiteWordpressService {
     return this.#enqueue(site, actor, idempotencyKey, "site.wordpress.update", async (tx, operationId, submittedAt) => {
       await assertHeavyActionAllowed(tx, site.id, actor, { id: operationId, submittedAt });
       if (backupsConfigured) {
-        const [row] = await tx.select({ siteUrl: sites.wordpressUrl }).from(sites).where(eq(sites.id, site.id)).limit(1);
+        const [row] = await tx.select({ siteUrl: sites.siteUrl }).from(sites).where(eq(sites.id, site.id)).limit(1);
         await insertSiteBackup(tx, { siteId: site.id, kind: "pre_update", status: "running", operationId, siteUrl: row?.siteUrl ?? null });
       }
       await this.#audit(tx, site, actor, "site.wordpress.update", { outcome: "requested", operationId, target });

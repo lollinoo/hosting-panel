@@ -499,19 +499,19 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
       .where(eq(organizations.id, orgAId));
     await dbClient.db
       .update(sites)
-      .set({ status: "ready", name: "Site Alpha", wordpressUrl: "https://alpha-restore-qa.test" })
+      .set({ status: "ready", name: "Site Alpha", siteUrl: "https://alpha-restore-qa.test" })
       .where(eq(sites.id, siteA1Id));
     await dbClient.db
       .update(sites)
       .set({
         status: "ready",
         name: "Site Alpha Two",
-        wordpressUrl: "https://alpha2-restore-qa.test",
+        siteUrl: "https://alpha2-restore-qa.test",
       })
       .where(eq(sites.id, siteA2Id));
     await dbClient.db
       .update(sites)
-      .set({ status: "ready", name: "Site Beta", wordpressUrl: "https://beta-restore-qa.test" })
+      .set({ status: "ready", name: "Site Beta", siteUrl: "https://beta-restore-qa.test" })
       .where(eq(sites.id, siteBId));
     await upsertBackupSettings(dbClient.db, KEY, {
       ...BASE_SETTINGS,
@@ -1406,14 +1406,14 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
     // Backup taken while site URL was old-alpha.test
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://old-alpha.test" })
+      .set({ siteUrl: "https://old-alpha.test" })
       .where(eq(sites.id, siteA1Id));
     const bkpOld = await createSucceededBackup(siteA1Id);
 
     // Site's current address changed to new-alpha.test
     await dbClient.db
       .update(sites)
-      .set({ wordpressUrl: "https://new-alpha.test" })
+      .set({ siteUrl: "https://new-alpha.test" })
       .where(eq(sites.id, siteA1Id));
 
     // 1. Successful restore -> runs set-url once with old -> new and jobId job_<32hex>_rurl

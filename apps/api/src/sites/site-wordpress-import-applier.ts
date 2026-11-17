@@ -439,7 +439,7 @@ export class SiteWordpressImportApplier {
   async #site(op: ImportOperation): Promise<SiteRef> {
     const db = this.dbClient.db;
     const [site] = await db
-      .select({ phpVersion: sites.phpVersion, wordpressUrl: sites.wordpressUrl })
+      .select({ phpVersion: sites.phpVersion, siteUrl: sites.siteUrl })
       .from(sites)
       .where(and(eq(sites.id, op.resourceId), eq(sites.organizationId, op.organizationId)))
       .limit(1);
@@ -449,7 +449,7 @@ export class SiteWordpressImportApplier {
       .where(and(eq(serviceInstances.siteId, op.resourceId), eq(serviceInstances.organizationId, op.organizationId)))
       .limit(1);
     const primary = site ? (await listSiteDomains(db, op.resourceId)).find((d) => d.isPrimary) : undefined;
-    const siteUrl = site?.wordpressUrl ?? (primary ? `http://${primary.hostname}` : null);
+    const siteUrl = site?.siteUrl ?? (primary ? `http://${primary.hostname}` : null);
     if (!site?.phpVersion || !svc || !siteUrl) {
       throw new ControlPlaneError("NOT_FOUND", `Managed site '${op.resourceId}' is incomplete`);
     }

@@ -6,6 +6,7 @@ import {
   isSftpAvailable,
   SFTP_USERNAME_PATTERN,
   SITE_SFTP_MAX_USERS,
+  siteTypeKeyOf,
   type SiteSftpDto,
   type SiteSftpPasswordResetDto,
   type SiteSftpUserCreatedDto,
@@ -20,6 +21,7 @@ import {
   getSiteSftpUser,
   hostAllocations,
   hosts,
+  inArray,
   insertSiteSftpUser,
   listSftpDesiredState,
   listSiteSftpUsers,
@@ -526,11 +528,11 @@ export class SiteSftpService {
 
   async #assertSiteReady(site: SiteRef): Promise<void> {
     const [current] = await this.dbClient.db
-      .select({ status: sites.status })
+      .select({ status: sites.status, siteType: sites.siteType })
       .from(sites)
       .where(and(eq(sites.id, site.id), eq(sites.organizationId, site.organizationId)))
       .limit(1);
-    if (!current) {
+    if (!current || !siteTypeKeyOf(current.siteType)) {
       throw new ControlPlaneError(
         "NOT_FOUND",
         "Requested organization or resource was not found.",
@@ -545,14 +547,28 @@ export class SiteSftpService {
     desired: readonly SftpDesiredUser[],
     precomputedFingerprint?: string,
   ): Promise<void> {
-    const result = await this.dockerExecutor.applySftpAccess({
-      users: desired.map((u) => ({
-        username: u.username,
-        passwordHash: u.passwordHash,
-        siteId: u.siteId,
-        serviceInstanceId: u.serviceInstanceId,
-      })),
+    const siteIds = [...new Set(desired.map((u) => u.siteId))];
+    const rows = siteIds.length === 0
+      ? []
+      : await this.dbClient.db
+          .select({ id: sites.id, siteType: sites.siteType })
+          .from(sites)
+          .where(inArray(sites.id, siteIds));
+    const typeOf = new Map(rows.map((r) => [r.id, siteTypeKeyOf(r.siteType)]));
+    // A site of no known type is not managed: its accounts are left out.
+    const users = desired.flatMap((u) => {
+      const siteType = typeOf.get(u.siteId);
+      return siteType
+        ? [{
+            username: u.username,
+            passwordHash: u.passwordHash,
+            siteId: u.siteId,
+            serviceInstanceId: u.serviceInstanceId,
+            siteType,
+          }]
+        : [];
     });
+    const result = await this.dockerExecutor.applySftpAccess({ users });
     if (!result || typeof result.applied !== "number" || !Number.isInteger(result.applied)) {
       throw sftpApplyUnavailableError();
     }

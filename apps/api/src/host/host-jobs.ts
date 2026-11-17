@@ -3,7 +3,7 @@ import {
   HOST_JOB_KIND,
   HOST_JOB_LOCK_KEY,
   PLATFORM_OPS_ORG_ID,
-  WORDPRESS_IMPORT_KIND,
+  SITE_TYPES,
   type ErrorCode,
   type HOST_JOB_RESULTS,
   type HostService,
@@ -44,7 +44,7 @@ export const HOST_SERVICE_JOB = {
   host_agent: "restart_hp_host_agent",
 } as const satisfies Record<HostService, HostJob>;
 export const SITE_WORK_BLOCKED_JOBS: readonly HostJob[] = ["restart_hp_docker_executor", "panel_update", "os_upgrade"];
-export const SITE_WORK_KINDS = [...BACKUP_OPERATION_KINDS, "site.wordpress.update", WORDPRESS_IMPORT_KIND] as const;
+export const SITE_WORK_KINDS = [...BACKUP_OPERATION_KINDS, ...Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds)];
 export const HOST_JOB_END_ACTION: Record<HostJob, string> = {
   restart_hp_api: "admin.host_service.restart.end",
   restart_hp_web: "admin.host_service.restart.end",

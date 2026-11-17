@@ -65,12 +65,12 @@ export function routePlanHash(hosts: readonly SiteHostRoute[], wordpressUrl: str
 export function routesPending(
   rows: readonly DomainRow[],
   now: Date,
-  site: { readonly appliedRoutesHash: string | null; readonly wordpressUrl: string | null },
+  site: { readonly appliedRoutesHash: string | null; readonly siteUrl: string | null },
   acmeEnabled = true,
 ): boolean {
   const hosts = buildSiteHostRoutes(rows, now, { acmeEnabled });
   if (site.appliedRoutesHash === null) return hosts.length > 0;
-  return routePlanHash(hosts, desiredWordpressUrl(rows, now, site.wordpressUrl, acmeEnabled)) !== site.appliedRoutesHash;
+  return routePlanHash(hosts, desiredWordpressUrl(rows, now, site.siteUrl, acmeEnabled)) !== site.appliedRoutesHash;
 }
 
 export type DnsEvaluation = Exclude<DnsStatus, "unchecked" | "lookup_failed">;

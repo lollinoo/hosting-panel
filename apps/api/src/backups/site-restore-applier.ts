@@ -1,8 +1,8 @@
 import {
-  DEFAULT_PHP_VERSION,
   type BackupJobStatus,
   type BackupProblem,
   type ErrorCode,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -26,6 +26,7 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "../runtime/service-spec.js";
 import { SITE_STEP_LEASE_MS } from "../runtime/site-provisioner.js";
+import { findApiSiteType, type ApiSiteType } from "../site-types/index.js";
 import { resolveSiteFilesServiceId } from "../sites/site-files.service.js";
 import type { ControlPlaneRuntimeConfig } from "../tokens.js";
 import {
@@ -65,10 +66,12 @@ const RESTORE_INTERRUPTED_MSG = "This restore was interrupted before it finished
 const ADDRESS_RUNNING_MSG = "Updating site address";
 const ADDRESS_DONE_MSG = "Site address updated";
 const ADDRESS_SKIPPED_MSG = "Site has no address; skipped";
+const ADDRESS_NOT_NEEDED_MSG = "The site needs no address update; skipped";
 const ADDRESS_FAILED_MSG = "Could not update the site address";
 const DB_RUNNING_MSG = "Creating the site database";
 const DB_DONE_MSG = "Site database created";
 const DB_FAILED_MSG = "Could not create the site database";
+const DB_SKIPPED_MSG = "The site has no database; skipped";
 const START_RUNNING_MSG = "Starting the site";
 const START_DONE_MSG = "Site started";
 const START_SKIPPED_MSG = "The site is already running; skipped";
@@ -88,8 +91,9 @@ interface RestoreSiteRef {
   readonly id: string;
   readonly organizationId: string;
   readonly status: string;
-  readonly wordpressUrl: string | null;
+  readonly siteUrl: string | null;
   readonly phpVersion: typeof sites.$inferSelect.phpVersion;
+  readonly type: ApiSiteType;
 }
 
 interface RestoreContext {
@@ -105,6 +109,7 @@ export class SiteRestoreApplier {
     private readonly dbClient: DatabaseClient,
     private readonly dockerExecutor: DockerExecutorPort,
     private readonly config: ControlPlaneRuntimeConfig,
+    private readonly resolveSiteType: (value: string | null | undefined) => ApiSiteType | null = findApiSiteType,
   ) {}
 
   /** Dispatches queued restore or archive download operations. */
@@ -186,6 +191,7 @@ export class SiteRestoreApplier {
         jobId: op.id,
         siteId: site.id,
         serviceInstanceId,
+        siteType: siteTypeOf(site),
         target,
         snapshotId: row.snapshotId,
         ...(createVolume ? { createVolume: true as const } : {}),
@@ -513,7 +519,7 @@ export class SiteRestoreApplier {
     const site: RestoreSiteRef | undefined =
       ctx?.site ?? (await this.#findRestoreSite(op.resourceId));
 
-    const currentUrl = site?.wordpressUrl ?? null;
+    const currentUrl = site?.siteUrl ?? null;
     if (!site || currentUrl === null || currentUrl.length === 0) {
       await this.parent.safeUpdateStep(
         op.id,
@@ -536,6 +542,11 @@ export class SiteRestoreApplier {
           )[0]?.siteUrl ?? null;
 
     const previousUrl = previousSiteUrl ?? currentUrl;
+    const job = site.type.addressJob(site, currentUrl, previousUrl);
+    if (!job) {
+      await this.parent.safeUpdateStep(op.id, "update_address", "skipped", ADDRESS_NOT_NEEDED_MSG);
+      return null;
+    }
 
     await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
     await this.parent.safeUpdateStep(op.id, "update_address", "running", ADDRESS_RUNNING_MSG);
@@ -548,15 +559,21 @@ export class SiteRestoreApplier {
 
       const urlResult = await this.dockerExecutor.runSiteJob({
         jobId: `job_${op.id.replace(/^op_/, "")}_rurl`,
-        kind: "wordpress.set-url",
+        kind: job.kind,
         siteId: site.id,
         organizationId: site.organizationId,
         serviceInstanceId,
-        params: {
-          phpVersion: site.phpVersion ?? DEFAULT_PHP_VERSION,
-          siteUrl: currentUrl,
-          previousUrl,
-        },
+        params: job.params,
+        ...(job.secrets
+          ? {
+              resolvedSecrets: await resolveDecryptedSecretRefs(db, {
+                organizationId: site.organizationId,
+                siteId: site.id,
+                secretRefs: job.secrets,
+                masterKey: this.config.secretsMasterKey,
+              }),
+            }
+          : {}),
       });
       if (urlResult.exitCode !== 0) {
         addressFailed = true;
@@ -665,8 +682,13 @@ export class SiteRestoreApplier {
         action: "siteState",
         siteId: site.id,
         serviceInstanceId,
+        siteType: siteTypeOf(site),
       });
       createVolume = !state.filesVolume;
+      if (!site.type.definition.database) {
+        await this.parent.safeUpdateStep(op.id, "provision_database", "skipped", DB_SKIPPED_MSG);
+        return createVolume;
+      }
       const [siteDb] = await listSiteDatabases(db, {
         organizationId: site.organizationId,
         siteId: site.id,
@@ -743,6 +765,7 @@ export class SiteRestoreApplier {
         action: "siteState",
         siteId: site.id,
         serviceInstanceId,
+        siteType: siteTypeOf(site),
       });
       if (state.container) {
         await this.parent.safeUpdateStep(op.id, "start_site", "skipped", START_SKIPPED_MSG);
@@ -836,12 +859,19 @@ export class SiteRestoreApplier {
         id: sites.id,
         organizationId: sites.organizationId,
         status: sites.status,
-        wordpressUrl: sites.wordpressUrl,
+        siteUrl: sites.siteUrl,
         phpVersion: sites.phpVersion,
+        siteType: sites.siteType,
       })
       .from(sites)
       .where(eq(sites.id, siteId))
       .limit(1);
-    return site;
+    // The resolver alone decides: a type it does not give back is not a managed site.
+    const type = site ? this.resolveSiteType(site.siteType) : null;
+    if (!site || !type) return undefined;
+    return { ...site, type };
   }
 }
+
+/** The key the executor gets: the resolved type's own key. */
+const siteTypeOf = (site: RestoreSiteRef): SiteTypeKey => site.type.definition.key as SiteTypeKey;
