@@ -386,7 +386,8 @@ export class AuthzContextService {
       organizationId: input.organizationId,
       action: input.action,
       targetType: input.targetType,
-      targetId: input.targetId,
+      // R202 5: a raw path value may hold U+0000, which the database refuses; the denied row must still be written.
+      targetId: input.targetId?.replaceAll("\u0000", "\uFFFD") ?? null,
       ipAddress: extractClientIp(req),
       userAgent: extractRawHeader(
         req.headers as Record<string, string | string[] | undefined>,

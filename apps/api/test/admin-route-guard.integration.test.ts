@@ -180,6 +180,8 @@ describe("every administrator route refuses a customer before it does anything",
       component: "ingress_proxy",
       sessionId: `term_${randomUUID().replace(/-/g, "")}`,
       operationId: `op_${randomUUID()}`,
+      blockId: `fwb_${randomUUID().replace(/-/g, "")}`,
+      service: "api",
     };
   });
 
@@ -195,6 +197,28 @@ describe("every administrator route refuses a customer before it does anything",
     expect(guarded()).toContainEqual({ method: "DELETE", path: "/v1/admin/support-access" });
     for (const path of ["/v1/admin/sites/:siteId/terminal", ...["write", "read", "close"].map((v) => `/v1/admin/terminal/:sessionId/${v}`)]) {
       expect(guarded()).toContainEqual({ method: "POST", path });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/updates"],
+      ["POST", "/v1/admin/updates/panel/check"],
+      ["POST", "/v1/admin/updates/panel/apply"],
+      ["POST", "/v1/admin/updates/components/:component/apply"],
+      ["POST", "/v1/admin/sites/:siteId/image-update"],
+      ["GET", "/v1/admin/os-packages"],
+      ["POST", "/v1/admin/os-packages/refresh"],
+      ["POST", "/v1/admin/os-packages/upgrade"],
+      ["POST", "/v1/admin/host-services/:service/restart"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/firewall"],
+      ["POST", "/v1/admin/firewall/ports/:name/open"],
+      ["POST", "/v1/admin/firewall/ports/:name/close"],
+      ["POST", "/v1/admin/firewall/blocks"],
+      ["DELETE", "/v1/admin/firewall/blocks/:blockId"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
     }
   });
 
@@ -219,6 +243,24 @@ describe("every administrator route refuses a customer before it does anything",
     expect(failures).toEqual([]);
     expect(await snapshot()).toEqual(before);
     expect(await dbClient.db.select({ id: users.id, status: users.userStatus, role: users.platformRole }).from(users)).toEqual(usersBefore);
+  });
+
+  it("R202 5: a path parameter holding %00 still answers a customer 403 with one denied row", async () => {
+    const before = await snapshot();
+    const failures: string[] = [];
+    for (const [method, path] of [
+      ["DELETE", "/v1/admin/firewall/blocks/fwb_sentinel%00x"],
+      ["POST", "/v1/admin/firewall/ports/http_alt%00/open"],
+      ["POST", "/v1/admin/host-services/web%00/restart"],
+    ] as const) {
+      const seen = await auditIds();
+      const res = await call(method, path, customers.member.token, { reason: "Sentinel reason for the restart" });
+      const added = await auditSince(seen);
+      const ok = res.status === 403 && added.length === 1 && (added[0]!.details as Json).outcome === "denied" && !(added[0]!.targetId ?? "").includes("\u0000");
+      if (!ok) failures.push(`${method} ${path}: ${res.status} ${res.body.error?.code ?? ""} audit+${added.length}`);
+    }
+    expect(failures).toEqual([]);
+    expect(await snapshot()).toEqual(before);
   });
 
   it("without credentials every route answers 401 except the pinned open ones", async () => {
