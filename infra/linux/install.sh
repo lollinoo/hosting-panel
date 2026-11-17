@@ -24,7 +24,7 @@ The admin password is prompted (hidden, twice, >= 12 chars). For automation only
 is read instead; never put it on a command line (shell history, ps).
 
 Exit codes: 0 ok, 1 step failed, 2 bad arguments (or archive VERSION differs from its file
-name, or the release is older than the installed one), 3 unsupported OS/architecture or no
+name, or the release is older or newer than the installed one), 3 unsupported OS/architecture or no
 docker-ce/postgresql-18 for this release or Docker older than 28, 4 checksum failure, 5 health check timeout,
 6 docker0 has no IPv4, 7 SSH is not on port 22 (use --skip-firewall).
 EOF
@@ -97,8 +97,6 @@ set_env_keys() {
   fi
   rm -f -- "${tmp}"
 }
-
-pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 
 # The panel database may hold a restored copy: ask it as hosting_panel, never as a superuser.
 panel_has_admin() { # <api.env>: prints 1 when an administrator exists; a failed query means none
@@ -255,6 +253,7 @@ main() {
   fi
 
   if ((dry_run == 0)); then
+    [[ -z "${HP_NFT_SIGN_FILE:-}" ]] || die 2 "HP_NFT_SIGN_FILE is only for --dry-run tests"
     [[ "${ROOT}" == /opt/hosting-panel ]] || die 2 "HP_INSTALL_ROOT is only for --dry-run tests"
     [[ "${EUID}" -eq 0 ]] || die 1 "Run as root (sudo), or pass --dry-run."
     [[ "${STATE_DIR}" == /etc/hosting-panel ]] || die 2 "HP_INSTALL_STATE_DIR is only for --dry-run tests"
@@ -329,13 +328,16 @@ main() {
     fi
     archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")" || die 1 "Download of release ${version} failed."
   fi
-  # An older release over a newer one would run old code on a database the newer one migrated.
+  # Older over newer would run old code on a database the newer one migrated; newer over older is
+  # an update, which hp-update does with its health check and rollback.
   local installed
   installed="$(current_version "${ROOT}")"
   if [[ "${version}" == latest ]]; then
-    plan "would refuse the latest release if it is older than the installed one (exit 2)"
+    plan "would refuse the latest release unless it is the installed one (exit 2)"
   elif [[ -n "${installed}" ]] && version_gt "${installed}" "${version}"; then
     die 2 "${version} is older than the installed ${installed}; rerun the installer with --version ${installed}, or install an older release with hp-update --allow-downgrade."
+  elif [[ -n "${installed}" && "${version}" != "${installed}" ]]; then
+    die 2 "${version} is newer than the installed ${installed}; update with sudo hp-update --version ${version} (it checks health and rolls back), or rerun the installer with --version ${installed}."
   fi
   if [[ -n "${archive}" ]]; then
     verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
@@ -346,13 +348,11 @@ main() {
 
   # ---------------------------------------------------------------- 2
   step 2 "apt prerequisites"
-  # libatomic1: the official Node 26 linux-x64 binary links against it; minimal images lack it.
-  local prereqs=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2 libatomic1 unattended-upgrades)
   if ((dry_run)); then
-    plan "apt-get install -y ${prereqs[*]}"
+    plan "apt-get install -y ${HP_OS_PACKAGES[*]}"
   else
     apt-get update -q
-    apt-get install -y -q --no-install-recommends "${prereqs[@]}"
+    apt-get install -y -q --no-install-recommends "${HP_OS_PACKAGES[@]}"
     install -d -m 0755 /etc/apt/keyrings
   fi
   if [[ -z "${ipv4}" ]]; then
@@ -474,7 +474,8 @@ main() {
   ((allow_other)) && bootstrap_args+=(--allow-other-linux)
   if ((dry_run)); then
     if ((keys_present)); then plan "skip key generation: keys already present in ${STATE_DIR}"; else plan "would generate keys in ${STATE_DIR} (ipc, secrets-master, breakglass-jwt, jwt-signing)"; fi
-    plan "would run ${ROOT}/current/infra/linux/bootstrap-dedicated.sh (users, dirs, env files only if absent, units, wrappers)"
+    plan "would run ${ROOT}/current/infra/linux/bootstrap-dedicated.sh; the plan of this release's bootstrap:"
+    bash "${SCRIPT_DIR}/bootstrap-dedicated.sh" --dry-run "${bootstrap_args[@]}" | sed 's/^/    /'
   else
     bash "${ROOT}/current/infra/linux/bootstrap-dedicated.sh" "${bootstrap_args[@]}"
   fi
@@ -538,9 +539,11 @@ SQL
 
   # ---------------------------------------------------------------- 10
   step 10 "Firewall (nftables)"
-  local nft_src="${ROOT}/current/infra/linux/nftables-dedicated.conf" nft_dst=/etc/nftables.d/hosting-panel.nft
+  local nft_src="${ROOT}/current/infra/linux/nftables-dedicated.conf" nft_dst="${HP_NFT_SIGN_FILE:-/etc/nftables.d/hosting-panel.nft}"
   local include_line="include \"${nft_dst}\""
-  if ((skip_firewall)); then
+  if ((skip_firewall)) && [[ -e "${nft_dst}" ]]; then
+    info "warning: --skip-firewall given, but ${nft_dst} is there from an earlier install: the panel still manages the firewall and its base rules stay loaded. To manage it yourself, delete ${nft_dst} and its include line in /etc/nftables.conf, then run: nft delete table inet hp_dedicated_filter"
+  elif ((skip_firewall)); then
     info "skip: --skip-firewall given; manage the firewall yourself (allow 22/80/443/2222, and 3000 from docker bridges only)"
   elif ((dry_run)); then
     plan "would apply nft -f ${nft_src}, install it as ${nft_dst}, add '${include_line}' to /etc/nftables.conf if missing, enable nftables.service"

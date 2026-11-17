@@ -137,6 +137,7 @@ if [[ ! -x "${NOLOGIN_SHELL}" && -x "/sbin/nologin" ]]; then
 fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
+  log_dry "Would install with apt-get, before anything else, those of these OS packages that are missing: ${HP_OS_PACKAGES[*]}"
   log_dry "Would ensure system group: hp-ipc"
   log_dry "Would ensure system users (${NOLOGIN_SHELL}): hp-web, hp-api (hp-ipc), hp-executor (docker,hp-ipc), hp-agent (hp-ipc), hp-mariadb (no supplementary groups)"
   log_dry "Would ensure directory /etc/hosting-panel (0750 root:hp-ipc)"
@@ -157,6 +158,12 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   done
   log_dry "Would run: systemctl daemon-reload"
   log_dry "Would run: systemctl enable --now hp-unit-restart@hp-api.path hp-unit-restart@hp-web.path hp-unit-restart@hp-docker-executor.path hp-unit-restart@hp-host-agent.path hp-panel-update.path hp-os-refresh.path hp-os-upgrade.path"
+  if [[ -r "${REPO_ROOT}/IMAGES" ]]; then
+    while IFS= read -r image; do log_dry "Image (pulled by hp-docker-executor, never by this script): ${image}"; done <"${REPO_ROOT}/IMAGES"
+  else
+    log_dry "No image list: ${REPO_ROOT}/IMAGES is missing (a source tree, not a release)"
+  fi
+  log_dry "Ports: 22, 80, 443 accepted in the input chain of the base rules; 3000 (web console) from the Docker bridges only; 80, 443 (Traefik) and 2222 (site SFTP) published by Docker on all addresses, where of the base rules only the block list filters them; ports of a generic service published by Docker on 127.0.0.1 only; 127.0.0.1:4000 (API), 127.0.0.1:5432 (PostgreSQL), 127.0.0.1:8306 (phpMyAdmin) on loopback"
   log_info "Bootstrap dry-run completed successfully."
   exit 0
 fi
@@ -164,6 +171,16 @@ fi
 # Live provisioning requires root privileges
 if [[ "${EUID}" -ne 0 ]]; then
   fail "Live provisioning requires root privileges (re-run as root or pass --dry-run)."
+fi
+
+# 5b. OS packages this version needs and an older server lacks: only the missing ones, before anything changes.
+MISSING_PACKAGES="$(missing_os_packages)"
+if [[ -n "${MISSING_PACKAGES}" ]]; then
+  log_info "Installing missing OS packages: ${MISSING_PACKAGES}"
+  # shellcheck disable=SC2086 # a list of package names
+  { DEBIAN_FRONTEND=noninteractive apt-get update -q &&
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ${MISSING_PACKAGES}; } ||
+    fail "Could not install the OS packages ${MISSING_PACKAGES}; nothing else was changed. Check the apt sources and the network, then run the update again."
 fi
 
 # 6. Provision hp-ipc group & dedicated non-root system users
@@ -208,7 +225,10 @@ ensure_system_user "hp-mariadb" ""
 # 7. Provision /etc/hosting-panel & idempotent cryptographic keys
 install -d -m 0750 -o root -g hp-ipc /etc/hosting-panel
 install -m 0640 -o root -g hp-ipc "${NFTABLES_SRC_FILE}" /etc/hosting-panel/nftables-dedicated.conf
-# The boot copy exists only where install.sh set the firewall up; an update keeps it current.
+# The boot copy exists only where install.sh set the firewall up; an update keeps it current but never loads it.
+if [[ -e /etc/nftables.d/hosting-panel.nft ]] && ! cmp -s "${NFTABLES_SRC_FILE}" /etc/nftables.d/hosting-panel.nft; then
+  log_info "The base firewall rules changed in this version and are not loaded yet: on Administration > Firewall use Apply base rules."
+fi
 if [[ -e /etc/nftables.d/hosting-panel.nft ]]; then
   install -m 0644 -o root -g root "${NFTABLES_SRC_FILE}" /etc/nftables.d/hosting-panel.nft
 fi

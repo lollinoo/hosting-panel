@@ -1,10 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+// @ts-expect-error -- plain ESM helper without type declarations
+import { writeReleaseTree } from "./test-release-tree.mjs";
+// @ts-expect-error -- plain ESM script without type declarations
+import { releaseImages } from "../release/build-release.mjs";
+import * as contracts from "../../packages/contracts/src/index.js";
+import { DEFAULT_TRAEFIK_IMAGE } from "../../apps/docker-executor/src/traefik-config.js";
 
 const SCRIPT = resolve(__dirname, "update.sh");
+const hasHost = existsSync("/sys/fs/cgroup/cgroup.controllers") && spawnSync("bash", ["-c", "command -v docker"]).status === 0;
 const RESTART = "restart hp-host-agent hp-docker-executor hp-api hp-web";
 const dirs: string[] = [];
 function tmp() {
@@ -178,14 +185,81 @@ describe("update.sh", () => {
     expect(update(["--archive", makeArchive("0.2.0")], { HP_ROOT: "" }).code).toBe(1);
   });
 
-  it("--dry-run changes nothing", () => {
+  it("--dry-run changes nothing and, without --archive, says what to pass", () => {
     const f = fixture("0.1.0");
-    const r = update(["--archive", makeArchive("0.2.0"), "--dry-run"], f.env);
+    const r = update(["--version", "0.2.0", "--dry-run"], f.env);
     expect(r.code, r.err).toBe(0);
     expect(r.out).toContain("[STEP 1/");
+    expect(r.out).toContain("pass --archive to print the new release's packages");
     expect(cur(f.root)).toBe("releases/0.1.0");
     expect(existsSync(join(f.root, "releases/0.2.0"))).toBe(false);
     expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("--dry-run --archive checks the checksum (exit 4) and the VERSION (exit 2) and needs the archive's infra (exit 1), changing nothing", () => {
+    const f = fixture("0.1.0");
+    const bad = makeArchive("0.2.0");
+    sh(`printf x >> "${bad}"`);
+    expect(update(["--archive", bad, "--dry-run"], f.env).code).toBe(4);
+    expect(update(["--archive", makeArchive("0.3.0", "0.2.0"), "--dry-run"], f.env).code).toBe(2);
+    const r = update(["--archive", makeArchive("0.2.0"), "--dry-run"], f.env);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain("Cannot read hosting-panel-0.2.0/infra");
+    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(readdirSync(join(f.root, "releases"))).toEqual(["0.1.0"]);
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it.skipIf(!hasHost)("--dry-run --archive from a layout an older version left prints what the new bootstrap adds", () => {
+    const f = fixture("0.5.0");
+    const listing = () => readdirSync(f.root, { recursive: true }).map(String).sort();
+    const before = listing();
+    const images: string[] = releaseImages(contracts, DEFAULT_TRAEFIK_IMAGE);
+    const d = tmp();
+    writeReleaseTree(join(d, "src"), "9.9.9", images);
+    const name = "hosting-panel-9.9.9-linux-x64.tar.gz";
+    sh(`cd "${d}" && tar -czf "${name}" -C src hosting-panel-9.9.9 && sha256sum "${name}" > "${name}.sha256"`);
+    const r = update(["--archive", join(d, name), "--dry-run"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("current: 0.5.0");
+    const pathUnits = ["api", "web", "docker-executor", "host-agent"].map((s) => `hp-unit-restart@hp-${s}.path`);
+    for (const s of [
+      `systemctl enable --now ${[...pathUnits, "hp-panel-update.path", "hp-os-refresh.path", "hp-os-upgrade.path"].join(" ")}`,
+      ...["hp-unit-restart@.path", "hp-unit-restart@.service", "hp-panel-update.path", "hp-panel-update.service"].map((u) => `/etc/systemd/system/${u}`),
+      ...["hp-os-refresh.path", "hp-os-refresh.service", "hp-os-upgrade.path", "hp-os-upgrade.service"].map((u) => `/etc/systemd/system/${u}`),
+      "/usr/local/sbin/hp-restore-panel",
+      "/etc/hosting-panel/backup.key",
+      ...["sftp", "phpmyadmin", "backups", "panel-dump"].map((p) => `/var/lib/hosting-panel/${p}`),
+      "/run/hosting-panel/host-jobs",
+      "unattended-upgrades",
+      "2222 (site SFTP)",
+      "127.0.0.1:8306"
+    ]) {
+      expect(r.out).toContain(s);
+    }
+    const line = (i: string) => `Image (pulled by hp-docker-executor, never by this script): ${i}`;
+    const printed = r.out.split("\n").filter((l) => l.includes("Image (pulled by")).map((l) => l.slice(l.indexOf("Image (")));
+    expect(printed).toEqual(images.map(line));
+    for (const i of [contracts.SFTP_IMAGE, contracts.PHPMYADMIN_IMAGE, contracts.RESTIC_IMAGE]) expect(r.out).toContain(line(i));
+    const pkgLine = r.out.indexOf("[DRY-RUN] Would install with apt-get, before anything else");
+    expect(pkgLine).toBeGreaterThan(-1);
+    expect(pkgLine).toBeLessThan(r.out.indexOf("[DRY-RUN] Would ensure system group: hp-ipc"));
+    expect(r.out).toContain("80, 443 (Traefik) and 2222 (site SFTP) published by Docker on all addresses, where of the base rules only the block list filters them");
+    expect([listing(), cur(f.root)]).toEqual([before, "releases/0.5.0"]);
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("the bootstrap installs missing OS packages first, flags changed rules and never runs nft", () => {
+    const boot = readFileSync(resolve(__dirname, "bootstrap-dedicated.sh"), "utf8");
+    const step = boot.indexOf('MISSING_PACKAGES="$(missing_os_packages)"');
+    expect(step).toBeGreaterThan(boot.indexOf("Live provisioning requires root privileges"));
+    expect(step).toBeLessThan(boot.indexOf("groupadd"));
+    expect(boot).toContain("; nothing else was changed.");
+    const flag = boot.indexOf("on Administration > Firewall use Apply base rules.");
+    expect(flag).toBeGreaterThan(boot.indexOf('cmp -s "${NFTABLES_SRC_FILE}" /etc/nftables.d/hosting-panel.nft'));
+    expect(flag).toBeLessThan(boot.indexOf('install -m 0644 -o root -g root "${NFTABLES_SRC_FILE}" /etc/nftables.d/hosting-panel.nft'));
+    expect(boot).not.toMatch(/^\s*(nft|sudo nft|\{?\s*nft)\s/m);
+    expect(boot).not.toMatch(/\$\(\s*nft\s|\|\|\s*nft\s|&&\s*nft\s/);
   });
 
   it("downloads into a fresh private dir, ignores a planted one, removes it afterwards", () => {
