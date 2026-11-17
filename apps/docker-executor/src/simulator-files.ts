@@ -6,28 +6,24 @@ import {
   SITE_FILE_SEGMENT_MAX_BYTES,
   SITE_FILES_LIST_MAX,
   SITE_FILES_MAX_FILE_BYTES,
-  SITE_IMPORT_LEFT_OUT,
+  LEGACY_SITE_TYPE,
   SiteFilesIpcRequestSchema,
   type SiteFileEntryDto,
   type SiteFileErrorReason,
   type SiteImportOp,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import type { SiteFilesRequest, SiteFilesResult } from "@hosting-panel/executor-contracts";
-import { ExecutorIpcClientError } from "./client.js";
+import type { SimImportOutcome, SimulatorSiteOps, SimulatorSiteType } from "./simulator-site-types.js";
 import { ExecutorCodedError } from "./traefik-config.js";
 
-const VIRTUAL_FILES_ROOT = "/var/www/html";
 const MAX_SYMLINK_HOPS = 40;
 const MAX_ARCHIVE_ENTRIES = 20_000;
 const MAX_ARCHIVE_BYTES = 1_073_741_824;
 const MAX_ARCHIVE_DEPTH = 32;
 const ARCHIVE_BOMB_THRESHOLD = 1_048_576;
 const ARCHIVE_BOMB_RATIO = 200;
-const MAX_IMPORT_ENTRIES = 200_000;
-const MAX_IMPORT_BYTES = 4_294_967_296;
-const DUMP_SNIFF_BYTES = 4096;
-const SIM_ZIP_MAGIC = Buffer.from("HPSIMZIP\n", "utf8");
-const PROTECTED_TARGETS: readonly string[] = ["wp-content/mu-plugins/hp-mail.php"];
+export const SIM_ZIP_MAGIC = Buffer.from("HPSIMZIP\n", "utf8");
 const REASON_SET: ReadonlySet<string> = new Set(SITE_FILE_ERROR_REASONS);
 
 /** Seed entry accepted by `SimulatedSiteFiles.seed()` for tests. */
@@ -52,7 +48,7 @@ export type SimSeedEntry =
       readonly mtime?: Date;
     };
 
-interface SimDir {
+export interface SimDir {
   readonly type: "dir";
   readonly children: Map<string, SimNode>;
   mtime: Date;
@@ -74,35 +70,11 @@ interface SimLink {
 
 type SimNode = SimDir | SimFile | SimLink;
 
-type ImportSlot = "archive" | "dump";
-type ImportRequest = Extract<SiteFilesRequest, { op: SiteImportOp }>;
-/** What `failNextImport` makes the next call of an `import.*` operation do. */
-export type SimImportOutcome = SiteFileErrorReason | "undo_incomplete" | "timeout";
-
-/** A slot's bytes; `uploadId` is set while the upload is partial. */
-interface SimSlot {
-  readonly data: Buffer;
-  readonly uploadId: string | null;
+/** A site's top folder, with the type whose files it holds. */
+export interface SimRoot extends SimDir {
+  readonly site: SimulatorSiteType;
 }
 
-/** The entries `import.switch` moved: live ones set aside, imported ones put in. */
-interface SimImportPlan {
-  readonly aside: SimDir;
-  readonly asideWp: SimDir;
-  readonly inRoot: readonly string[];
-  readonly inWp: readonly string[];
-}
-
-/** One import's work folder: the unpacked WordPress root and, after the switch, its plan. */
-interface SimImportWork {
-  readonly site: SimDir;
-  plan: SimImportPlan | null;
-}
-
-interface SimImportState {
-  readonly slots: Map<ImportSlot, SimSlot>;
-  readonly work: Map<string, SimImportWork>;
-}
 
 interface ResolvedParent {
   readonly dir: SimDir;
@@ -134,7 +106,7 @@ type ParsedExtractEntry =
       readonly data: Buffer;
     };
 
-function fileError(reason: SiteFileErrorReason): ExecutorCodedError {
+export function fileError(reason: SiteFileErrorReason): ExecutorCodedError {
   return new ExecutorCodedError(reason, SITE_FILE_REASON_CODES[reason]);
 }
 
@@ -142,50 +114,22 @@ function compareByteOrder(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-function isProtected(realRel: string): boolean {
+export function isProtected(root: SimRoot, realRel: string): boolean {
   if (realRel === "") {
     return true;
   }
-  return PROTECTED_TARGETS.some(
+  return root.site.protectedPaths.some(
     (target) => realRel === target || target.startsWith(`${realRel}/`),
   );
 }
 
-function makeDir(writable = true, mtime = new Date()): SimDir {
+export function makeDir(writable = true, mtime = new Date()): SimDir {
   return { type: "dir", children: new Map(), mtime, writable };
 }
 
-function makeFile(data: Buffer | string, writable = true, mtime = new Date()): SimFile {
+export function makeFile(data: Buffer | string, writable = true, mtime = new Date()): SimFile {
   const buf = Buffer.isBuffer(data) ? Buffer.from(data) : Buffer.from(data, "utf8");
   return { type: "file", data: buf, mtime, writable };
-}
-
-function createDefaultWordpressTree(): SimDir {
-  const now = new Date();
-  const root = makeDir(true, now);
-  root.children.set(
-    "index.php",
-    makeFile("<?php\n// Silence is golden.\n", true, now),
-  );
-  root.children.set(
-    "wp-config.php",
-    makeFile("<?php\n// Simulated WordPress configuration.\n", true, now),
-  );
-
-  const wpContent = makeDir(true, now);
-  wpContent.children.set("plugins", makeDir(true, now));
-  wpContent.children.set("themes", makeDir(true, now));
-  wpContent.children.set("uploads", makeDir(true, now));
-
-  const muPlugins = makeDir(false, now);
-  muPlugins.children.set(
-    "hp-mail.php",
-    makeFile("<?php\n// Managed outgoing mail hook.\n", false, now),
-  );
-  wpContent.children.set("mu-plugins", muPlugins);
-  root.children.set("wp-content", wpContent);
-
-  return root;
 }
 
 function parseRequest(rawReq: unknown): SiteFilesRequest {
@@ -196,6 +140,9 @@ function parseRequest(rawReq: unknown): SiteFilesRequest {
         ? (rawReq as Record<string, unknown>).op
         : undefined;
     for (const issue of parsed.error.issues) {
+      if (issue.path[0] === "siteType") {
+        throw new ExecutorCodedError("Unknown site type", "VALIDATION_ERROR");
+      }
       if (REASON_SET.has(issue.message)) {
         throw fileError(issue.message as SiteFileErrorReason);
       }
@@ -230,7 +177,7 @@ function parseRequest(rawReq: unknown): SiteFilesRequest {
   return req;
 }
 
-function dirAt(root: SimDir, segments: readonly string[]): SimDir {
+export function dirAt(root: SimDir, segments: readonly string[]): SimDir {
   let cur: SimNode = root;
   for (const seg of segments) {
     if (cur.type !== "dir") {
@@ -251,17 +198,18 @@ function dirAt(root: SimDir, segments: readonly string[]): SimDir {
 function applyLinkTarget(
   target: string,
   currentDirPos: readonly string[],
+  mount: string,
 ): { pos: string[]; segments: string[] } {
   if (target === "") {
     throw fileError("not_found");
   }
   if (target.startsWith("/")) {
     const collapsed = target.replace(/\/+/g, "/");
-    if (collapsed === VIRTUAL_FILES_ROOT) {
+    if (collapsed === mount) {
       return { pos: [], segments: [] };
     }
-    if (collapsed.startsWith(`${VIRTUAL_FILES_ROOT}/`)) {
-      const rest = collapsed.slice(VIRTUAL_FILES_ROOT.length + 1);
+    if (collapsed.startsWith(`${mount}/`)) {
+      const rest = collapsed.slice(mount.length + 1);
       return { pos: [], segments: rest === "" ? [] : rest.split("/") };
     }
     throw fileError("protected");
@@ -270,7 +218,7 @@ function applyLinkTarget(
 }
 
 function walkNode(
-  root: SimDir,
+  root: SimRoot,
   startSegments: readonly string[],
   segments: readonly string[],
   initialHops: number,
@@ -303,7 +251,7 @@ function walkNode(
       if (hops > MAX_SYMLINK_HOPS) {
         throw fileError("not_found");
       }
-      const expanded = applyLinkTarget(next.target, pos);
+      const expanded = applyLinkTarget(next.target, pos, root.site.def.files.mountPath);
       pos = expanded.pos;
       curDir = dirAt(root, pos);
       remaining = [...expanded.segments, ...remaining];
@@ -325,7 +273,7 @@ function walkNode(
   return { node: curDir, realSegments: pos, realRel: pos.join("/") };
 }
 
-function resolveParent(root: SimDir, relPath: string): ResolvedParent {
+export function resolveParent(root: SimRoot, relPath: string): ResolvedParent {
   const parts = relPath.split("/");
   const base = parts[parts.length - 1]!;
   const parentParts = parts.slice(0, -1);
@@ -344,7 +292,7 @@ function resolveParent(root: SimDir, relPath: string): ResolvedParent {
   };
 }
 
-function followTarget(root: SimDir, relPath: string): ResolvedTarget {
+function followTarget(root: SimRoot, relPath: string): ResolvedTarget {
   if (relPath === "") {
     return { node: root, realSegments: [], realRel: "" };
   }
@@ -354,7 +302,7 @@ function followTarget(root: SimDir, relPath: string): ResolvedTarget {
     throw fileError("not_found");
   }
   if (entry.type === "link") {
-    const expanded = applyLinkTarget(entry.target, parent.dirSegments);
+    const expanded = applyLinkTarget(entry.target, parent.dirSegments, root.site.def.files.mountPath);
     return walkNode(root, expanded.pos, expanded.segments, 1);
   }
   const realSegments = [...parent.dirSegments, parent.base];
@@ -389,17 +337,17 @@ function toEntryDto(name: string, node: SimNode, parentWritable: boolean): SiteF
   };
 }
 
-function assertDeletableSubtree(dir: SimDir, dirRel: string): void {
+function assertDeletableSubtree(root: SimRoot, dir: SimDir, dirRel: string): void {
   for (const [name, child] of dir.children) {
     const childRel = `${dirRel}/${name}`;
-    if (isProtected(childRel)) {
+    if (isProtected(root, childRel)) {
       throw fileError("protected");
     }
     if (child.type === "dir" && child.children.size > 0) {
       if (!child.writable) {
         throw fileError("protected");
       }
-      assertDeletableSubtree(child, childRel);
+      assertDeletableSubtree(root, child, childRel);
     }
   }
 }
@@ -436,7 +384,7 @@ function isValidArchiveEntryName(name: string): boolean {
   );
 }
 
-function parseSimArchive(
+export function parseSimArchive(
   data: Buffer,
   maxEntries = MAX_ARCHIVE_ENTRIES,
   maxBytes = MAX_ARCHIVE_BYTES,
@@ -550,7 +498,7 @@ function parseSimArchive(
 }
 
 /** Writes checked archive entries under `target` (no conflict checks). */
-function placeEntries(target: SimDir, entries: readonly ParsedExtractEntry[], now: Date): void {
+export function placeEntries(target: SimDir, entries: readonly ParsedExtractEntry[], now: Date): void {
   for (const entry of entries) {
     let cur = target;
     for (let i = 0; i < entry.segments.length - 1; i += 1) {
@@ -575,50 +523,6 @@ function placeEntries(target: SimDir, entries: readonly ParsedExtractEntry[], no
       cur.mtime = now;
     }
   }
-}
-
-/** Refuses a slot whose first bytes are not an archive (the simulator's zip) or an SQL export. */
-function sniffSlot(slot: ImportSlot, data: Buffer): void {
-  if (slot === "archive") {
-    if (!data.subarray(0, SIM_ZIP_MAGIC.length).equals(SIM_ZIP_MAGIC)) {
-      throw fileError("not_a_zip");
-    }
-  } else if (!(data[0] === 0x1f && data[1] === 0x8b) && data.subarray(0, DUMP_SNIFF_BYTES).includes(0)) {
-    throw fileError("dump_not_sql");
-  }
-}
-
-function isWordpressRoot(dir: SimDir): boolean {
-  const includes = dir.children.get("wp-includes");
-  return (
-    includes?.type === "dir" &&
-    includes.children.get("version.php")?.type === "file" &&
-    dir.children.get("wp-load.php")?.type === "file" &&
-    dir.children.get("wp-content")?.type === "dir"
-  );
-}
-
-/** Root names the switch never moves (the helper's skip list). */
-function keepsRootName(name: string): boolean {
-  return (
-    [".htaccess", "wp-config.php", "wp-content", ".maintenance"].includes(name) ||
-    name.startsWith(".hp_rs_") ||
-    name.startsWith(".htpanel-")
-  );
-}
-
-/** Moves the named children of `from` that `to` lacks; returns the names moved. */
-function moveNames(from: SimDir, to: SimDir, names: readonly string[]): string[] {
-  const moved: string[] = [];
-  for (const name of names) {
-    const node = from.children.get(name);
-    if (node && !to.children.has(name)) {
-      to.children.set(name, node);
-      from.children.delete(name);
-      moved.push(name);
-    }
-  }
-  return moved;
 }
 
 function snapshotNode(node: SimNode): unknown {
@@ -653,20 +557,23 @@ function snapshotNode(node: SimNode): unknown {
 }
 
 /**
- * In-memory simulation of per-service WordPress file trees for the simulator executor backend.
+ * In-memory simulation of per-service site file trees for the simulator executor backend.
  * Implements the same confinement, protected-path, upload-staging, and archive limits as the real helper.
  */
 export class SimulatedSiteFiles {
-  private readonly trees = new Map<string, SimDir>();
+  private readonly trees = new Map<string, SimRoot>();
   private readonly staging = new Map<string, Buffer>();
-  private readonly imports = new Map<string, SimImportState>();
-  private readonly importFailures = new Map<SiteImportOp, SimImportOutcome>();
+  private readonly typeOps = new Map<string, SimulatorSiteOps>();
+
+  public constructor(private readonly resolveSiteType: (key: SiteTypeKey) => SimulatorSiteType) {}
 
   /** Dispatches a validated `SiteFilesRequest` against the service's in-memory tree. */
   public async handle<R extends SiteFilesRequest>(rawReq: R): Promise<SiteFilesResult<R["op"]>> {
     const req = parseRequest(rawReq);
+    const type = this.resolveSiteType(req.siteType ?? LEGACY_SITE_TYPE);
     const root = this.trees.get(req.serviceInstanceId);
-    if (!root) {
+    // Another type's folder is another volume: this one does not exist.
+    if (!root || root.site.def.key !== type.def.key) {
       throw fileError("not_found");
     }
 
@@ -690,37 +597,55 @@ export class SimulatedSiteFiles {
       case "extract":
         return this.handleExtract(root, req.path, req.to) as SiteFilesResult<R["op"]>;
       default:
-        return this.handleImport(root, req) as SiteFilesResult<R["op"]>;
+        if (!type.ops.includes(req.op)) {
+          throw new ExecutorCodedError("Operation not available for this site type", "VALIDATION_ERROR");
+        }
+        return this.opsOf(type).handle(root, req) as SiteFilesResult<R["op"]>;
     }
   }
 
-  /** Makes the next call of `op` fail with a reason, answer an incomplete undo, or time out after its effect. */
+  /** Makes the next call of `op` of the legacy type fail, answer an incomplete undo, or time out. */
   public failNextImport(op: SiteImportOp, outcome: SimImportOutcome): void {
-    if (outcome === "undo_incomplete" && op !== "import.undo") {
-      throw new Error("undo_incomplete applies to import.undo only");
-    }
-    this.importFailures.set(op, outcome);
+    this.opsOf(this.resolveSiteType(LEGACY_SITE_TYPE)).failNextImport(op, outcome);
   }
 
-  /** Read-only view for tests: whether the import gate is on, and which imports hold a plan. */
+  /** The legacy type's pending one-shot import failures; API tests clear them by this name. */
+  public get importFailures(): Map<SiteImportOp, SimImportOutcome> {
+    return this.opsOf(this.resolveSiteType(LEGACY_SITE_TYPE)).importFailures;
+  }
+
+  /** Read-only view for tests of the legacy type's import state. */
   public importState(svc: string): { gate: boolean; plans: string[] } {
-    const work = this.imports.get(svc)?.work ?? new Map<string, SimImportWork>();
-    const plans = [...work].filter(([, w]) => w.plan !== null).map(([id]) => id).sort();
-    return { gate: plans.length > 0, plans };
+    return this.opsOf(this.resolveSiteType(LEGACY_SITE_TYPE)).importState(svc);
   }
 
-  /** Creates the miniature WordPress file tree if this service does not yet have one. */
-  public create(svc: string): void {
+  /** This simulator's state of the type's own operations, made on first use. */
+  private opsOf(type: SimulatorSiteType): SimulatorSiteOps {
+    let ops = this.typeOps.get(type.def.key);
+    if (!ops) {
+      if (!type.createOps) {
+        throw new ExecutorCodedError("Operation not available for this site type", "VALIDATION_ERROR");
+      }
+      ops = type.createOps();
+      this.typeOps.set(type.def.key, ops);
+    }
+    return ops;
+  }
+
+  /** Creates the type's seed tree if this service does not yet have one. */
+  public create(svc: string, type = this.resolveSiteType(LEGACY_SITE_TYPE)): void {
     // Preserve an existing tree on service redeploy, matching persistent Docker named volumes.
     if (!this.trees.has(svc)) {
-      this.trees.set(svc, createDefaultWordpressTree());
+      this.trees.set(svc, Object.assign(type.seed(), { site: type }));
     }
   }
 
   /** Removes the service's in-memory file tree and any pending upload staging buffers. */
   public drop(svc: string): void {
     this.trees.delete(svc);
-    this.imports.delete(svc);
+    for (const ops of this.typeOps.values()) {
+      ops.drop(svc);
+    }
     const prefix = `${svc}\0`;
     for (const key of [...this.staging.keys()]) {
       if (key.startsWith(prefix)) {
@@ -733,7 +658,7 @@ export class SimulatedSiteFiles {
   public seed(svc: string, entries: SimSeedEntry[]): void {
     let root = this.trees.get(svc);
     if (!root) {
-      root = makeDir(true);
+      root = Object.assign(makeDir(true), { site: this.resolveSiteType(LEGACY_SITE_TYPE) });
       this.trees.set(svc, root);
     }
 
@@ -752,7 +677,7 @@ export class SimulatedSiteFiles {
       }
 
       const parts = normalized.split("/");
-      let cur = root;
+      let cur: SimDir = root;
       for (const part of parts.slice(0, -1)) {
         let next = cur.children.get(part);
         if (!next) {
@@ -796,7 +721,7 @@ export class SimulatedSiteFiles {
     return root ? snapshotNode(root) : null;
   }
 
-  private handleList(root: SimDir, relPath: string): SiteFilesResult<"list"> {
+  private handleList(root: SimRoot, relPath: string): SiteFilesResult<"list"> {
     const target = followTarget(root, relPath);
     if (target.node.type !== "dir") {
       throw fileError("not_a_directory");
@@ -824,7 +749,7 @@ export class SimulatedSiteFiles {
     return { entries, truncated };
   }
 
-  private handleStat(root: SimDir, relPath: string): SiteFilesResult<"stat"> {
+  private handleStat(root: SimRoot, relPath: string): SiteFilesResult<"stat"> {
     if (relPath === "") {
       return {
         entry: {
@@ -846,7 +771,7 @@ export class SimulatedSiteFiles {
   }
 
   private handleRead(
-    root: SimDir,
+    root: SimRoot,
     relPath: string,
     offset: number,
     length: number,
@@ -870,14 +795,14 @@ export class SimulatedSiteFiles {
   }
 
   private handleWrite(
-    root: SimDir,
+    root: SimRoot,
     req: Extract<SiteFilesRequest, { op: "write" }>,
   ): SiteFilesResult<"write"> {
     const chunk = Buffer.from(req.dataBase64, "base64");
     const parent = resolveParent(root, req.path);
 
     const existing = parent.dir.children.get(parent.base);
-    if (isProtected(parent.realRel) || !parent.dir.writable) {
+    if (isProtected(root, parent.realRel) || !parent.dir.writable) {
       throw fileError("protected");
     }
     if (existing) {
@@ -918,9 +843,9 @@ export class SimulatedSiteFiles {
     return { received: nextBuf.length };
   }
 
-  private handleMkdir(root: SimDir, relPath: string): SiteFilesResult<"mkdir"> {
+  private handleMkdir(root: SimRoot, relPath: string): SiteFilesResult<"mkdir"> {
     const parent = resolveParent(root, relPath);
-    if (isProtected(parent.realRel) || !parent.dir.writable) {
+    if (isProtected(root, parent.realRel) || !parent.dir.writable) {
       throw fileError("protected");
     }
     if (parent.dir.children.has(parent.base)) {
@@ -932,18 +857,18 @@ export class SimulatedSiteFiles {
     return {};
   }
 
-  private handleMove(root: SimDir, from: string, to: string): SiteFilesResult<"move"> {
+  private handleMove(root: SimRoot, from: string, to: string): SiteFilesResult<"move"> {
     const src = resolveParent(root, from);
     const srcNode = src.dir.children.get(src.base);
     if (!srcNode) {
       throw fileError("not_found");
     }
-    if (isProtected(src.realRel) || !src.dir.writable) {
+    if (isProtected(root, src.realRel) || !src.dir.writable) {
       throw fileError("protected");
     }
 
     const dst = resolveParent(root, to);
-    if (isProtected(dst.realRel) || !dst.dir.writable) {
+    if (isProtected(root, dst.realRel) || !dst.dir.writable) {
       throw fileError("protected");
     }
     if (srcNode.type === "dir" && (dst.realRel === src.realRel || dst.realRel.startsWith(`${src.realRel}/`))) {
@@ -961,7 +886,7 @@ export class SimulatedSiteFiles {
     return {};
   }
 
-  private handleDelete(root: SimDir, paths: readonly string[]): SiteFilesResult<"delete"> {
+  private handleDelete(root: SimRoot, paths: readonly string[]): SiteFilesResult<"delete"> {
     const targets: ResolvedParent[] = [];
     for (const relPath of paths) {
       const target = resolveParent(root, relPath);
@@ -969,14 +894,14 @@ export class SimulatedSiteFiles {
       if (!node) {
         throw fileError("not_found");
       }
-      if (isProtected(target.realRel) || !target.dir.writable) {
+      if (isProtected(root, target.realRel) || !target.dir.writable) {
         throw fileError("protected");
       }
       if (node.type === "dir" && node.children.size > 0) {
         if (!node.writable) {
           throw fileError("protected");
         }
-        assertDeletableSubtree(node, target.realRel);
+        assertDeletableSubtree(root, node, target.realRel);
       }
       targets.push(target);
     }
@@ -990,12 +915,12 @@ export class SimulatedSiteFiles {
   }
 
   private handleArchive(
-    root: SimDir,
+    root: SimRoot,
     paths: readonly string[],
     to: string,
   ): SiteFilesResult<"archive"> {
     const dst = resolveParent(root, to);
-    if (isProtected(dst.realRel) || !dst.dir.writable) {
+    if (isProtected(root, dst.realRel) || !dst.dir.writable) {
       throw fileError("protected");
     }
     if (dst.dir.children.has(dst.base)) {
@@ -1064,7 +989,7 @@ export class SimulatedSiteFiles {
   }
 
   private handleExtract(
-    root: SimDir,
+    root: SimRoot,
     archivePath: string,
     to: string,
   ): SiteFilesResult<"extract"> {
@@ -1086,7 +1011,7 @@ export class SimulatedSiteFiles {
       const existing = destParent.dir.children.get(destParent.base);
       if (existing) {
         if (existing.type !== "dir") {
-          if (isProtected(destParent.realRel)) {
+          if (isProtected(root, destParent.realRel)) {
             throw fileError("protected");
           }
           throw fileError("exists");
@@ -1094,7 +1019,7 @@ export class SimulatedSiteFiles {
         destDir = existing;
         destRealRel = destParent.realRel;
       } else {
-        if (isProtected(destParent.realRel) || !destParent.dir.writable) {
+        if (isProtected(root, destParent.realRel) || !destParent.dir.writable) {
           throw fileError("protected");
         }
         destRealRel = destParent.realRel;
@@ -1113,14 +1038,14 @@ export class SimulatedSiteFiles {
             ? entry.segments.slice(0, i + 1).join("/")
             : `${destRealRel}/${entry.segments.slice(0, i + 1).join("/")}`;
         if (!curDir) {
-          if (isProtected(segRel)) {
+          if (isProtected(root, segRel)) {
             throw fileError("protected");
           }
           continue;
         }
         const existing = curDir.children.get(seg);
         if (!existing) {
-          if (!curDir.writable || isProtected(segRel)) {
+          if (!curDir.writable || isProtected(root, segRel)) {
             throw fileError("protected");
           }
           curDir = null;
@@ -1128,7 +1053,7 @@ export class SimulatedSiteFiles {
           continue;
         }
         if (existing.type !== "dir") {
-          if (isProtected(segRel)) {
+          if (isProtected(root, segRel)) {
             throw fileError("protected");
           }
           throw fileError("exists");
@@ -1139,7 +1064,7 @@ export class SimulatedSiteFiles {
       const leafName = entry.segments[entry.segments.length - 1]!;
       const leafRel = destRealRel === "" ? entry.name : `${destRealRel}/${entry.name}`;
       if (!curDir || stoppedEarly) {
-        if (isProtected(leafRel)) {
+        if (isProtected(root, leafRel)) {
           throw fileError("protected");
         }
         continue;
@@ -1147,7 +1072,7 @@ export class SimulatedSiteFiles {
 
       const existingLeaf = curDir.children.get(leafName);
       if (entry.kind === "file") {
-        if (isProtected(leafRel)) {
+        if (isProtected(root, leafRel)) {
           throw fileError("protected");
         }
         if (existingLeaf) {
@@ -1158,13 +1083,13 @@ export class SimulatedSiteFiles {
         }
       } else if (existingLeaf) {
         if (existingLeaf.type !== "dir") {
-          if (isProtected(leafRel)) {
+          if (isProtected(root, leafRel)) {
             throw fileError("protected");
           }
           throw fileError("exists");
         }
       } else {
-        if (isProtected(leafRel) || !curDir.writable) {
+        if (isProtected(root, leafRel) || !curDir.writable) {
           throw fileError("protected");
         }
       }
@@ -1180,198 +1105,5 @@ export class SimulatedSiteFiles {
 
     placeEntries(destDir!, entries, now);
     return { entries: entries.length };
-  }
-
-  private handleImport(root: SimDir, req: ImportRequest): unknown {
-    const outcome = this.importFailures.get(req.op);
-    this.importFailures.delete(req.op);
-    if (outcome !== undefined && outcome !== "timeout" && outcome !== "undo_incomplete") {
-      throw fileError(outcome);
-    }
-    let state = this.imports.get(req.serviceInstanceId);
-    if (!state) {
-      state = { slots: new Map(), work: new Map() };
-      this.imports.set(req.serviceInstanceId, state);
-    }
-    const result = outcome === "undo_incomplete" ? { complete: false } : this.applyImport(root, state, req);
-    if (outcome === "timeout") {
-      // The client's own answer when its wait ends after the request was sent.
-      throw new ExecutorIpcClientError(
-        "Timed out waiting for docker-executor IPC response after mutating command dispatch",
-        "OPERATION_AMBIGUOUS",
-        502,
-        true,
-      );
-    }
-    return result;
-  }
-
-  private applyImport(root: SimDir, s: SimImportState, req: ImportRequest): unknown {
-    switch (req.op) {
-      case "import.put":
-        return this.importPut(s, req);
-      case "import.take":
-        return this.importTake(root, s, req.slot, req.path);
-      case "import.stat": {
-        const slot = (name: ImportSlot) => {
-          const v = s.slots.get(name);
-          return v === undefined
-            ? { state: "empty", size: 0, uploadId: null }
-            : { state: v.uploadId === null ? "complete" : "partial", size: v.data.length, uploadId: v.uploadId };
-        };
-        const remains = [...s.work.values()].some((w) => w.plan !== null);
-        return { archive: slot("archive"), dump: slot("dump"), remains };
-      }
-      case "import.discard":
-        s.slots.clear();
-        for (const [id, w] of s.work) {
-          if (w.plan === null) {
-            s.work.delete(id);
-          }
-        }
-        return {};
-      case "import.unpack":
-        return this.importUnpack(s, req.importId);
-      case "import.switch":
-        return this.importSwitch(root, s, req.importId);
-      case "import.undo":
-        return this.importUndo(root, s, req.importId);
-      case "import.finish":
-        s.work.delete(req.importId);
-        s.slots.clear();
-        return {};
-    }
-  }
-
-  private importPut(s: SimImportState, req: Extract<ImportRequest, { op: "import.put" }>): SiteFilesResult<"import.put"> {
-    const chunk = Buffer.from(req.dataBase64, "base64");
-    if (req.offset === 0 && s.slots.get(req.slot)?.uploadId !== req.uploadId) {
-      s.slots.delete(req.slot);
-      sniffSlot(req.slot, chunk);
-    }
-    const cur = s.slots.get(req.slot);
-    const staged = cur?.uploadId === req.uploadId ? cur.data : undefined;
-    if (req.offset > (staged?.length ?? 0)) {
-      throw fileError("upload_mismatch");
-    }
-    const targetLen = req.final
-      ? req.offset + chunk.length
-      : Math.max(staged?.length ?? 0, req.offset + chunk.length);
-    const next = Buffer.alloc(targetLen);
-    staged?.copy(next, 0, 0, Math.min(staged.length, targetLen));
-    chunk.copy(next, req.offset);
-    s.slots.set(req.slot, { data: next, uploadId: req.final ? null : req.uploadId });
-    return { received: next.length };
-  }
-
-  private importTake(root: SimDir, s: SimImportState, slot: ImportSlot, path: string): SiteFilesResult<"import.take"> {
-    const src = resolveParent(root, path);
-    const node = src.dir.children.get(src.base);
-    if (!node || node.type === "link" || src.base.startsWith(".htpanel-")) {
-      throw fileError("not_found");
-    }
-    if (node.type === "dir") {
-      throw fileError("is_a_directory");
-    }
-    if (isProtected(src.realRel) || !src.dir.writable) {
-      throw fileError("protected");
-    }
-    if (node.data.length > SITE_FILES_MAX_FILE_BYTES) {
-      throw fileError("too_large");
-    }
-    sniffSlot(slot, node.data);
-    src.dir.children.delete(src.base);
-    src.dir.mtime = new Date();
-    s.slots.set(slot, { data: node.data, uploadId: null });
-    return { size: node.data.length };
-  }
-
-  private importUnpack(s: SimImportState, importId: string): SiteFilesResult<"import.unpack"> {
-    if (s.work.get(importId)?.plan) {
-      throw fileError("staging_unsafe");
-    }
-    s.work.delete(importId);
-    const archive = s.slots.get("archive");
-    if (!archive || archive.uploadId !== null) {
-      throw fileError("files_missing");
-    }
-    const entries = parseSimArchive(archive.data, MAX_IMPORT_ENTRIES, MAX_IMPORT_BYTES);
-    if (entries.some((e) => e.segments[e.segments.length - 1] === ".htaccess.hpimport")) {
-      throw fileError("archive_unsafe");
-    }
-    const x = makeDir();
-    placeEntries(x, entries, new Date());
-    // What macOS adds at the top is ignored, never taken (R156.2).
-    if (x.children.get("__MACOSX")?.type === "dir") {
-      x.children.delete("__MACOSX");
-    }
-    if (x.children.get(".DS_Store")?.type === "file") {
-      x.children.delete(".DS_Store");
-    }
-    let site = x;
-    if (!isWordpressRoot(x)) {
-      const only = [...x.children.values()];
-      if (only.length !== 1 || only[0]!.type !== "dir" || !isWordpressRoot(only[0]!)) {
-        throw fileError("archive_not_wordpress");
-      }
-      site = only[0]!;
-    }
-    const leftOut = SITE_IMPORT_LEFT_OUT.filter((rel) => {
-      const [first, second] = rel.split("/") as [string, string | undefined];
-      const dir = second === undefined ? site : site.children.get(first);
-      const name = second ?? first;
-      const node = dir?.type === "dir" ? dir.children.get(name) : undefined;
-      if (!node) {
-        return false;
-      }
-      (dir as SimDir).children.delete(name);
-      if (rel === ".htaccess") {
-        site.children.set(".htaccess.imported", node);
-      }
-      return true;
-    });
-    s.work.set(importId, { site, plan: null });
-    return { entries: entries.length, leftOut };
-  }
-
-  private importSwitch(root: SimDir, s: SimImportState, importId: string): SiteFilesResult<"import.switch"> {
-    const w = s.work.get(importId);
-    if (!w) {
-      throw fileError("files_missing");
-    }
-    if (w.plan) {
-      throw fileError("staging_unsafe");
-    }
-    const wp = dirAt(root, ["wp-content"]);
-    const siteWp = dirAt(w.site, ["wp-content"]);
-    const notMu = (name: string): boolean => name !== "mu-plugins";
-    const aside = makeDir();
-    const asideWp = makeDir();
-    const out =
-      moveNames(root, aside, [...root.children.keys()].filter((n) => !keepsRootName(n))).length +
-      moveNames(wp, asideWp, [...wp.children.keys()].filter(notMu)).length;
-    const inRoot = moveNames(w.site, root, [...w.site.children.keys()].filter((n) => !keepsRootName(n)));
-    const inWp = moveNames(siteWp, wp, [...siteWp.children.keys()].filter(notMu));
-    w.plan = { aside, asideWp, inRoot, inWp };
-    return { moved: out + inRoot.length + inWp.length };
-  }
-
-  private importUndo(root: SimDir, s: SimImportState, importId: string): SiteFilesResult<"import.undo"> {
-    const work = s.work.get(importId);
-    const plan = work?.plan;
-    if (work && plan) {
-      const wp = dirAt(root, ["wp-content"]);
-      const site = work.site;
-      moveNames(wp, dirAt(site, ["wp-content"]), plan.inWp);
-      moveNames(root, site, plan.inRoot);
-      moveNames(plan.asideWp, wp, [...plan.asideWp.children.keys()]);
-      moveNames(plan.aside, root, [...plan.aside.children.keys()]);
-      // Gate and plan stay until every live entry is back (R152.2).
-      if (plan.aside.children.size + plan.asideWp.children.size > 0) {
-        return { complete: false };
-      }
-    }
-    s.work.delete(importId);
-    return { complete: true };
   }
 }

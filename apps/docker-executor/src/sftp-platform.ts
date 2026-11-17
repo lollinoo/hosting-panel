@@ -15,6 +15,7 @@ import {
   type SftpAccessUser,
 } from "@hosting-panel/contracts";
 import { SHARED_DB_CONFIG_SHA256_LABEL } from "./shared-database.js";
+import type { ExecutorSiteType } from "./site-types/types.js";
 import {
   ExecutorCodedError,
   assertSafeIdentifier,
@@ -177,6 +178,7 @@ const SYSTEM_PASSWD_LINES = [
   "root:x:0:0:root:/root:/bin/false",
   "sshd:x:22:22:sshd:/var/empty:/bin/false",
 ] as const;
+// shortcut: one group line fixed at gid 33 for every type; a type with another file owner needs its own line (ADR 0029).
 const SYSTEM_GROUP_LINES = ["root:x:0:", "sshd:x:22:", "hpsftp:x:33:"] as const;
 const SYSTEM_SHADOW_LINES = ["root:*:::::::", "sshd:*:::::::"] as const;
 
@@ -215,15 +217,17 @@ function mergeRenderedLines(
   return `${result.join("\n")}\n`;
 }
 
+/** passwd, group and shadow of the users; each user owns files as its site type's owner. */
 export function renderSftpUserFiles(
   users: readonly SftpAccessUser[],
+  typeOf: (user: SftpAccessUser) => ExecutorSiteType,
   existingFiles?: Partial<SftpRenderedUserFiles>,
 ): SftpRenderedUserFiles {
   const validUsers = validateSftpUsers(users);
   const wantedPasswd = new Map<string, string>();
   const wantedShadow = new Map<string, string>();
   for (const u of validUsers) {
-    wantedPasswd.set(u.username, `${u.username}:x:33:33::/srv/sftp/${u.siteId}:/bin/false`);
+    wantedPasswd.set(u.username, `${u.username}:x:${typeOf(u).def.files.owner}::/srv/sftp/${u.siteId}:/bin/false`);
     wantedShadow.set(u.username, `${u.username}:${u.passwordHash}:::::::`);
   }
   return {
@@ -710,7 +714,8 @@ async function inspectRegularFile(
 export async function prepareSftpStatePlan(
   stateDir: string,
   executorUid: number | undefined,
-  users: readonly SftpAccessUser[] = [],
+  users: readonly SftpAccessUser[],
+  typeOf: (user: SftpAccessUser) => ExecutorSiteType,
 ): Promise<SftpStatePlan> {
   await assertSftpStateDir(stateDir, executorUid);
   const validUsers = validateSftpUsers(users);
@@ -779,7 +784,7 @@ export async function prepareSftpStatePlan(
     }
   }
 
-  const rendered = renderSftpUserFiles(validUsers, existingTexts);
+  const rendered = renderSftpUserFiles(validUsers, typeOf, existingTexts);
   const userFiles: SftpUserFileUpdate[] = [];
   let hasAppend = false;
   let hasReplace = false;
@@ -909,9 +914,10 @@ export async function commitSftpStatePlan(
 export async function ensureSftpStateFiles(
   stateDir: string,
   executorUid: number | undefined,
-  users: readonly SftpAccessUser[] = [],
+  users: readonly SftpAccessUser[],
+  typeOf: (user: SftpAccessUser) => ExecutorSiteType,
   options?: EnsureSftpStateFilesOptions,
 ): Promise<SftpStateFilesResult> {
-  const plan = await prepareSftpStatePlan(stateDir, executorUid, users);
+  const plan = await prepareSftpStatePlan(stateDir, executorUid, users, typeOf);
   return commitSftpStatePlan(plan, options);
 }

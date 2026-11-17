@@ -19,7 +19,8 @@ import {
   DEFAULT_PANEL_DUMP_DIR,
 } from "./backup-runner.js";
 import { DEFAULT_PHPMYADMIN_CONFIG_DIR } from "./phpmyadmin-platform.js";
-import { DEFAULT_SITE_FILES_DIR, ensureSiteFilesProgram } from "./site-files-program.js";
+import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
+import { ensureSiteFilesProgram } from "./site-types/index.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles } from "./site-mail.js";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,

@@ -1,11 +1,10 @@
 import { type DockerExecTarget, runDockerExec, startDockerExec } from "./docker-exec.js";
+import type { ExecutorSiteType } from "./site-types/types.js";
 import type { TerminalShell, TerminalShellSink } from "./terminal-sessions.js";
 import { ExecutorCodedError } from "./traefik-config.js";
 
 // Nothing typed or printed is logged here, and every error message is a fixed sentence.
 
-export const TERMINAL_SHELL_USER = "33:33";
-export const TERMINAL_WORKDIR = "/var/www/html";
 export const TERMINAL_CONSOLE_SIZE = [24, 80] as const;
 export const TERMINAL_KILL_TIMEOUT_MS = 10_000;
 // A stop kills the shell before the Engine reports the container stopped; the end inspect waits this long.
@@ -36,21 +35,22 @@ async function inspect(target: DockerExecTarget, containerId: string): Promise<I
   throw new ExecutorCodedError("Failed to inspect the site container", "DOCKER_ENGINE_UNAVAILABLE");
 }
 
-/** Runs the kill script as 33:33; sessionId "" kills every marked process. */
-function runKillScript(target: DockerExecTarget, containerId: string, sessionId: string) {
+/** Runs the kill script as the type's file owner; sessionId "" kills every marked process. */
+function runKillScript(target: DockerExecTarget, containerId: string, sessionId: string, t: ExecutorSiteType) {
   return runDockerExec(
     target,
-    { container: containerId, cmd: ["/bin/sh", "-c", TERMINAL_KILL_SCRIPT, "sh", sessionId], user: TERMINAL_SHELL_USER },
+    { container: containerId, cmd: ["/bin/sh", "-c", TERMINAL_KILL_SCRIPT, "sh", sessionId], user: t.def.files.owner },
     { timeoutMs: TERMINAL_KILL_TIMEOUT_MS, maxOutputBytes: 0 },
   );
 }
 
-/** Opens /bin/sh as 33:33 with a TTY in a running container; NOT_FOUND when it is missing or stopped. */
+/** Opens /bin/sh as the type's file owner in its files with a TTY; NOT_FOUND when the container is missing or stopped. */
 export async function startDockerTerminal(
   target: DockerExecTarget,
   containerId: string,
   sessionId: string,
   sink: TerminalShellSink,
+  t: ExecutorSiteType,
 ): Promise<{ readonly shell: TerminalShell; readonly containerName: string }> {
   const seen = await inspect(target, containerId);
   if (seen?.State?.Running !== true) throw new ExecutorCodedError("The site container is not running", "NOT_FOUND");
@@ -58,14 +58,14 @@ export async function startDockerTerminal(
   const { socket } = await startDockerExec(target, {
     container: containerId,
     cmd: ["/bin/sh"],
-    user: TERMINAL_SHELL_USER,
-    workingDir: TERMINAL_WORKDIR,
+    user: t.def.files.owner,
+    workingDir: t.def.files.mountPath,
     env: ["TERM=dumb", "PS1=$PWD $ ", `HP_TERMINAL_SESSION=${sessionId}`],
     tty: true,
     consoleSize: TERMINAL_CONSOLE_SIZE,
   });
   // Worked: exit 0, or the container is gone or stopped (nothing is left to kill).
-  const kill = () => runKillScript(target, containerId, sessionId).then(
+  const kill = () => runKillScript(target, containerId, sessionId, t).then(
     (done) => done.exitCode === 0,
     (err: unknown) => err instanceof ExecutorCodedError && err.code === "NOT_FOUND",
   );
@@ -100,8 +100,8 @@ export async function startDockerTerminal(
   };
 }
 
-/** At executor start: kills every marked process in running site containers that still have an exec. */
-export async function reapTerminalShells(target: DockerExecTarget): Promise<void> {
+/** At executor start: kills, as the type's file owner, every marked process in running site containers that still have an exec. */
+export async function reapTerminalShells(target: DockerExecTarget, t: ExecutorSiteType): Promise<void> {
   const filters = encodeURIComponent(JSON.stringify({ label: [SITE_LABEL] }));
   const res = await target.request("GET", `/containers/json?filters=${filters}`).catch(() => null);
   let list: Array<{ readonly Id?: unknown }> | null = null;
@@ -117,7 +117,7 @@ export async function reapTerminalShells(target: DockerExecTarget): Promise<void
     try {
       const seen = await inspect(target, Id);
       if (seen?.State?.Running !== true || !seen.ExecIDs?.length) continue;
-      const done = await runKillScript(target, Id, "");
+      const done = await runKillScript(target, Id, "", t);
       if (done.exitCode !== 0) throw new ExecutorCodedError("The terminal clean-up did not finish", "INTERNAL_ERROR");
     } catch (err) {
       failure ??= err instanceof ExecutorCodedError ? err : new ExecutorCodedError("The terminal clean-up failed", "INTERNAL_ERROR");

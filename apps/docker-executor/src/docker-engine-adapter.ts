@@ -35,6 +35,9 @@ import {
   type PanelMailResult,
   type PhpVersion,
   type SftpAccessUser,
+  type SiteTypeKey,
+  LEGACY_SITE_TYPE,
+  SITE_TYPE_KEYS,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
   type ObservedServiceStateWire,
@@ -78,6 +81,7 @@ import { reapTerminalShells, startDockerTerminal } from "./terminal-docker.js";
 import { type TerminalLimits, TerminalSessions } from "./terminal-sessions.js";
 import { SiteDatabasesRunner, mariadbRootExec } from "./site-databases.js";
 import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
+import { resolveExecutorSiteType, type ExecutorSiteType } from "./site-types/index.js";
 import {
   BackupRunner,
   DEFAULT_BACKUP_KEY_FILE,
@@ -1092,6 +1096,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly sharedDbNetworkName?: string;
   /** Shorter terminal limits (tests and the real-Docker script). */
   readonly terminalLimits?: Partial<TerminalLimits>;
+  /** Turns a request's site-type key into its definition (default: the executor's registry). */
+  readonly resolveSiteType?: (key: SiteTypeKey) => ExecutorSiteType;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1164,9 +1170,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly backupRunner: BackupRunner;
   private readonly execTarget: DockerExecTarget;
   private readonly terminals: TerminalSessions;
+  private readonly resolveSiteType: (key: SiteTypeKey) => ExecutorSiteType;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.terminals = new TerminalSessions(options?.terminalLimits);
+    this.resolveSiteType = options?.resolveSiteType ?? resolveExecutorSiteType;
     this.dockerClient = new DockerSocketHttpClient({
       socketPath: options?.dockerSocketPath ?? DEFAULT_DOCKER_SOCKET_PATH,
       apiPrefix: options?.dockerApiPrefix ?? DEFAULT_DOCKER_API_PREFIX,
@@ -1226,6 +1234,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       target: execTarget,
       programDir: path.resolve(options?.siteFilesDir ?? DEFAULT_SITE_FILES_DIR),
       ...(options?.filesHelperIdleMs !== undefined ? { idleMs: options.filesHelperIdleMs } : {}),
+      resolveSiteType: this.resolveSiteType,
     });
     this.databases = new SiteDatabasesRunner({
       runSql: mariadbRootExec(execTarget, this.sharedDbContainerName),
@@ -1252,6 +1261,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     assertSafeIdentifier(this.backupNetworkName, "backupNetworkName");
     assertSafeIdentifier(this.sharedDbNetworkName, "sharedDbNetworkName");
     this.backupRunner = new BackupRunner({
+      resolveSiteType: this.resolveSiteType,
       request: (method, endpointPath, body, opts) =>
         this.dockerClient.request(method, endpointPath, body, opts),
       ensureImage: (image) => this.ensureImageAvailable(image),
@@ -2262,6 +2272,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       throw new ExecutorCodedError("Invalid SFTP access configuration", "VALIDATION_ERROR");
     }
     const validReq = parsed.data;
+    // The edge: an absent key is the legacy type (an older API or a state file written before it).
+    const typeOf = (user: SftpAccessUser): ExecutorSiteType => this.resolveSiteType(user.siteType ?? LEGACY_SITE_TYPE);
     await assertSftpStateDir(this.sftpStateDir, this.executorUid);
 
     const checkedSites = new Map<string, SftpContainerSiteMount | null>();
@@ -2269,7 +2281,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       if (checkedSites.has(user.siteId)) {
         continue;
       }
-      const volumeName = `${this.sftpVolumePrefix}${user.serviceInstanceId}_html`;
+      const volumeName = `${this.sftpVolumePrefix}${user.serviceInstanceId}_${typeOf(user).def.files.volumeSuffix}`;
       assertSafeIdentifier(volumeName, "sftpVolume");
       const volumeRes = await this.dockerClient.request(
         "GET",
@@ -2299,7 +2311,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
     if (renderedUsers.length === 0) {
       const emptyPlan = (await hasSftpHostKey(this.sftpStateDir))
-        ? await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, [])
+        ? await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, [], typeOf)
         : null;
       const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
       if (existing) {
@@ -2313,7 +2325,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       return { applied: 0 };
     }
 
-    const plan = await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, renderedUsers);
+    const plan = await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, renderedUsers, typeOf);
     const { payload, configSha256 } = buildSftpContainerPayload({
       image: SFTP_IMAGE,
       stateDir: this.sftpStateDir,
@@ -2710,15 +2722,16 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return (await this.getPanelContainers()).find((row) => row.component === component)!;
   }
 
-  /** /bin/sh as 33:33 in the site's own container; the site label is checked, not trusted. */
+  /** /bin/sh as the type's file owner in the site's own container; the site label is checked, not trusted. */
   public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
     assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    const t = this.resolveSiteType(req.siteType ?? LEGACY_SITE_TYPE); // the edge: absent is the legacy type
     return this.terminals.open(req, async (sink) => {
       const summary = await this.findContainerSummaryByServiceId(req.serviceInstanceId);
       if (!summary || summary.Labels?.[MANAGED_DOCKER_LABELS.siteId] !== req.siteId) {
         throw new ExecutorCodedError("The site container is not running", "NOT_FOUND");
       }
-      return startDockerTerminal(this.execTarget, summary.Id, req.sessionId, sink);
+      return startDockerTerminal(this.execTarget, summary.Id, req.sessionId, sink, t);
     });
   }
 
@@ -2738,9 +2751,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return this.terminals.list();
   }
 
-  /** At start: ends the shells a previous executor left in site containers. */
-  public reapTerminalShells(): Promise<void> {
-    return reapTerminalShells(this.execTarget);
+  /** At start: ends the shells a previous executor left in site containers, as each type's file owner. */
+  public async reapTerminalShells(): Promise<void> {
+    // A site container does not carry its type, so each type's user ends the shells it owns.
+    for (const key of SITE_TYPE_KEYS) await reapTerminalShells(this.execTarget, this.resolveSiteType(key));
   }
 
   /** The image each panel container is pinned to. */

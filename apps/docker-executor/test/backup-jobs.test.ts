@@ -22,6 +22,7 @@ import {
   parseResticSummary,
   type BackupContainerCreatePayload,
 } from "../src/backup-jobs.js";
+import { WORDPRESS_EXECUTOR_SITE_TYPE } from "../src/site-types/index.js";
 
 const SECRET_SENTINEL = "sentinel-s3-secret-999";
 const ACCESS_KEY_SENTINEL = "AKIASENTINEL999";
@@ -208,6 +209,7 @@ describe("backup-jobs pure builders", () => {
     assertNoSecretsInPayload(dump.payload);
 
     const uploadWithDb = buildBackupUploadContainerPayload({
+      siteType: WORDPRESS_EXECUTOR_SITE_TYPE,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_INSTANCE_ID,
@@ -249,6 +251,7 @@ describe("backup-jobs pure builders", () => {
     assertNoSecretsInPayload(uploadWithDb.payload);
 
     const uploadNoDb = buildBackupUploadContainerPayload({
+      siteType: WORDPRESS_EXECUTOR_SITE_TYPE,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_INSTANCE_ID,

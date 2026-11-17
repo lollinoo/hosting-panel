@@ -8,8 +8,7 @@ import {
   buildResticBasePayload,
   type BackupContainerCreatePayload,
 } from "./backup-jobs.js";
-import { SITE_JOB_ROLE } from "./site-jobs.js";
-import { ExecutorCodedError } from "./traefik-config.js";
+import { ExecutorCodedError, SITE_JOB_ROLE } from "./traefik-config.js";
 
 export const PANEL_LANE = "panel:db" as const;
 export const PANEL_DUMP_MAGIC = "PGDMP" as const;

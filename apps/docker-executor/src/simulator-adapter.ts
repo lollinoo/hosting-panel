@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   DEFAULT_SFTP_PORT,
+  LEGACY_SITE_TYPE,
+  SITE_TYPE_KEYS,
   SftpAccessApplyIpcRequestSchema,
   type BackupsIpcRequest,
   type BackupsResultByAction,
@@ -13,6 +15,7 @@ import {
   PanelMailIpcRequestSchema,
   type PanelMailRequest,
   type PanelMailResult,
+  type SiteTypeKey,
   type WordpressImportLoadResult,
   type WordpressStateResult,
   type WordpressUpdateResult,
@@ -51,6 +54,7 @@ import type {
 import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
+import { resolveSimulatorSiteType, type SimulatorSiteType } from "./simulator-site-types.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
 import { maskPhpMyAdminQuery } from "./docker-logs.js";
 import { startSimulatedShell } from "./simulator-terminal.js";
@@ -117,6 +121,8 @@ export interface InMemoryDockerSimulatorAdapterOptions {
   readonly dockerEngineReachable?: boolean;
   /** Short terminal limits for tests. */
   readonly terminalLimits?: Partial<TerminalLimits>;
+  /** The simulator's type for a key; tests set their own type here. */
+  readonly resolveSiteType?: (key: SiteTypeKey) => SimulatorSiteType;
 }
 
 interface MutableSimulatedContainer {
@@ -183,7 +189,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly virtualSiteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
   private readonly siteServices = new Map<string, Set<string>>();
-  public readonly files = new SimulatedSiteFiles();
+  public readonly files: SimulatedSiteFiles;
   public readonly databases = new SimulatedSiteDatabases();
   public readonly backupState = new SimulatedBackups();
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
@@ -224,6 +230,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly panelContainerLogs = new Map<PanelContainer, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
   private readonly terminals: TerminalSessions;
+  private readonly resolveSiteType: (key: SiteTypeKey) => SimulatorSiteType;
   private readonly terminalSinks = new Map<string, TerminalShellSink>();
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
@@ -237,6 +244,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     this.panel = options?.panel ?? null;
     this.engineReachable = options?.dockerEngineReachable ?? true;
     this.terminals = new TerminalSessions(options?.terminalLimits);
+    this.resolveSiteType = options?.resolveSiteType ?? resolveSimulatorSiteType;
+    this.files = new SimulatedSiteFiles(this.resolveSiteType);
   }
 
   public setEngineReachable(reachable: boolean): void {
@@ -624,6 +633,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   /** A fake shell in a running container of that site. */
   public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
     this.assertEngineAvailable();
+    const type = this.resolveSiteType(req.siteType ?? LEGACY_SITE_TYPE);
     return this.terminals.open(req, async (sink) => {
       const container = this.containersByServiceId.get(req.serviceInstanceId);
       if (!container?.running || this.expectedByServiceId.get(req.serviceInstanceId)?.siteId !== req.siteId) {
@@ -632,7 +642,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       this.terminalSinks.set(req.sessionId, sink);
       // The sink holds the session's output: let go of it however the session ends.
       const forget = () => this.terminalSinks.delete(req.sessionId);
-      const shell = startSimulatedShell({ data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } });
+      const shell = startSimulatedShell({ data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } }, type);
       return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name.slice(1) };
     });
   }
@@ -787,8 +797,11 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       this.siteServices.set(spec.siteId, svcs);
     }
     svcs.add(spec.serviceInstanceId);
-    if (spec.volumeMounts?.some((m) => m.volumeSuffix === "html")) {
-      this.files.create(spec.serviceInstanceId);
+    const filesType = SITE_TYPE_KEYS.map((k) => this.resolveSiteType(k)).find((t) =>
+      spec.volumeMounts?.some((m) => m.volumeSuffix === t.def.files.volumeSuffix),
+    );
+    if (filesType) {
+      this.files.create(spec.serviceInstanceId, filesType);
     }
 
     const hosts: readonly SiteHostRoute[] =

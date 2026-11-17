@@ -1,20 +1,21 @@
 import path from "node:path";
 import {
-  DEFAULT_PHP_VERSION,
+  LEGACY_SITE_TYPE,
   SITE_FILE_CHUNK_BYTES,
   SITE_FILE_ERROR_REASONS,
   SITE_FILE_REASON_CODES,
   SITE_FILES_MAX_FILE_BYTES,
+  SITE_FILES_CORE_RESULTS,
   SITE_FILES_RESULT_SCHEMAS,
-  SUPPORTED_PHP_VERSIONS,
   SiteFilesIpcRequestSchema,
-  resolveWordpressImage,
   type ErrorCode,
   type SiteFileErrorReason,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import type { SiteFilesRequest, SiteFilesResult } from "@hosting-panel/executor-contracts";
 import type { z } from "zod";
 import { runDockerExec, type DockerExecResult, type DockerExecTarget } from "./docker-exec.js";
+import { resolveExecutorSiteType, type ExecutorSiteType } from "./site-types/index.js";
 import { ExecutorCodedError, assertSafeIdentifier, getManagedVolumeName } from "./traefik-config.js";
 
 export const SITE_FILES_ROLE = "site_files";
@@ -41,21 +42,16 @@ const PHP_CMD: readonly string[] = [
   "display_errors=stderr",
   "-d",
   "max_execution_time=0",
-  "/usr/local/lib/hp-files/hp-files.php",
 ];
 
 // timeout(1) returns 124 on default signal timeout and 137 (128 + SIGKILL) with -s KILL.
 const TIMEOUT_KILL_EXIT_CODES: ReadonlySet<number> = new Set([124, 137]);
 
-/** Wraps PHP_CMD in coreutils `timeout -s KILL <seconds>` slightly below the Node timer. */
-function buildPhpCmd(timeoutMs: number): readonly string[] {
+/** Wraps PHP_CMD and the type's program in coreutils `timeout -s KILL <seconds>` slightly below the Node timer. */
+function buildPhpCmd(timeoutMs: number, t: ExecutorSiteType): readonly string[] {
   const timeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1000) - 2);
-  return ["timeout", "-s", "KILL", String(timeoutSeconds), ...PHP_CMD];
+  return ["timeout", "-s", "KILL", String(timeoutSeconds), ...PHP_CMD, `/usr/local/lib/hp-files/${t.files.programFile}`];
 }
-
-const ALLOWED_WORDPRESS_IMAGES: ReadonlySet<string> = new Set(
-  SUPPORTED_PHP_VERSIONS.map(resolveWordpressImage),
-);
 
 const ALLOWED_HELPER_ERROR_CODES: ReadonlySet<ErrorCode> = new Set([
   "VALIDATION_ERROR",
@@ -94,7 +90,7 @@ export function parseSiteFilesRequest(req: unknown): SiteFilesRequest {
   const data = parsed.data;
   assertSafeIdentifier(data.serviceInstanceId, "serviceInstanceId");
 
-  if (data.op === "write" || data.op === "import.put") {
+  if ("dataBase64" in data) {
     const decodedLength = Buffer.from(data.dataBase64, "base64").length;
     if (decodedLength > SITE_FILE_CHUNK_BYTES) {
       throw new ExecutorCodedError("too_large", SITE_FILE_REASON_CODES.too_large);
@@ -130,11 +126,21 @@ function assertSafeProgramDir(programDir: string): string {
   return programDir;
 }
 
+// nocopy: Docker never copies the image's folder (and its owner) into an empty site volume.
+function siteFilesHelperBinds(svc: string, programDir: string, t: ExecutorSiteType): string[] {
+  const files = t.def.files;
+  return [
+    `${getManagedVolumeName(svc, files.volumeSuffix)}:${files.mountPath}:rw,nocopy`,
+    `${programDir}:/usr/local/lib/hp-files:ro`,
+  ];
+}
+
 export function buildSiteFilesHelperPayload(input: {
   image: string;
   serviceInstanceId: string;
   siteId: string;
   programDir: string;
+  siteType: ExecutorSiteType;
 }): Record<string, unknown> {
   const rawInput = input as Record<string, unknown>;
   if (rawInput.extraBinds !== undefined || rawInput.binds !== undefined) {
@@ -150,10 +156,8 @@ export function buildSiteFilesHelperPayload(input: {
   }
 
   const programDir = assertSafeProgramDir(input.programDir);
-  const volumeName = getManagedVolumeName(input.serviceInstanceId, "html");
-  const expectedVolumeBind = `${volumeName}:/var/www/html:rw`;
-  const expectedProgramBind = `${programDir}:/usr/local/lib/hp-files:ro`;
-  const binds = [expectedVolumeBind, expectedProgramBind];
+  const files = input.siteType.def.files;
+  const binds = siteFilesHelperBinds(input.serviceInstanceId, programDir, input.siteType);
 
   if (binds.length !== 2 || binds.some((b) => b.includes("docker.sock"))) {
     throw new ExecutorCodedError(
@@ -166,8 +170,8 @@ export function buildSiteFilesHelperPayload(input: {
     Image: input.image,
     Entrypoint: ["sleep", "infinity"],
     Cmd: [],
-    User: "33:33",
-    WorkingDir: "/var/www/html",
+    User: files.owner,
+    WorkingDir: files.mountPath,
     Env: [],
     NetworkDisabled: true,
     StopSignal: "SIGKILL",
@@ -209,6 +213,7 @@ interface ContainerInspectJson {
   readonly Config?: {
     readonly Labels?: Readonly<Record<string, string>>;
   };
+  readonly HostConfig?: { readonly Binds?: unknown };
 }
 
 interface VolumeInspectJson {
@@ -220,18 +225,11 @@ interface ContainerSummaryJson {
   readonly Image?: unknown;
 }
 
-function opTimeoutBudgetMs(op: SiteFilesRequest["op"], overrideMs?: number): number {
+function opTimeoutBudgetMs(op: SiteFilesRequest["op"], t: ExecutorSiteType, overrideMs?: number): number {
   if (overrideMs !== undefined) {
     return overrideMs;
   }
-  if (
-    op === "archive" ||
-    op === "extract" ||
-    op === "import.unpack" ||
-    op === "import.discard" ||
-    op === "import.undo" ||
-    op === "import.finish"
-  ) {
+  if (op === "archive" || op === "extract" || t.files.slowOps.includes(op)) {
     return ARCHIVE_OP_TIMEOUT_MS;
   }
   if (op === "delete") {
@@ -268,6 +266,7 @@ export class SiteFilesHelpers {
   private readonly programDir: string;
   private readonly idleMs: number;
   private readonly opTimeoutMs?: number;
+  private readonly resolveSiteType: (key: SiteTypeKey) => ExecutorSiteType;
   private readonly states = new Map<string, HelperState>();
   private readonly ensureInFlight = new Map<string, Promise<string>>();
   private readonly removeInFlight = new Map<string, Promise<void>>();
@@ -279,34 +278,41 @@ export class SiteFilesHelpers {
     programDir: string;
     idleMs?: number;
     opTimeoutMs?: number;
+    resolveSiteType?: (key: SiteTypeKey) => ExecutorSiteType;
   }) {
     this.target = deps.target;
     this.programDir = deps.programDir;
     this.idleMs = Math.max(1, deps.idleMs ?? DEFAULT_IDLE_MS);
     this.opTimeoutMs = deps.opTimeoutMs;
+    this.resolveSiteType = deps.resolveSiteType ?? resolveExecutorSiteType;
   }
 
   public async run<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
     const parsedReq = parseSiteFilesRequest(req) as R;
+    // The edge: an absent key is the legacy type (an older API); an op of another type is refused.
+    const t = this.resolveSiteType(parsedReq.siteType ?? LEGACY_SITE_TYPE);
+    if (!Object.hasOwn(SITE_FILES_CORE_RESULTS, parsedReq.op) && !t.files.ops.includes(parsedReq.op)) {
+      throw new ExecutorCodedError("Invalid site files request", "VALIDATION_ERROR");
+    }
     const svc = parsedReq.serviceInstanceId;
     const state = this.getOrCreateState(svc);
     state.active += 1;
     state.lastUsed = Date.now();
 
-    const { serviceInstanceId: _svc, ...programPayload } = parsedReq;
+    const { serviceInstanceId: _svc, siteType: _type, ...programPayload } = parsedReq;
     const stdin = Buffer.from(`${JSON.stringify(programPayload)}\n`, "utf8");
-    const timeoutMs = opTimeoutBudgetMs(parsedReq.op, this.opTimeoutMs);
+    const timeoutMs = opTimeoutBudgetMs(parsedReq.op, t, this.opTimeoutMs);
 
     try {
-      let containerRef = await this.ensure(svc);
+      let containerRef = await this.ensure(svc, t);
       let execResult: DockerExecResult;
       try {
-        execResult = await this.execPhp(containerRef, stdin, timeoutMs);
+        execResult = await this.execPhp(containerRef, stdin, timeoutMs, t);
       } catch (err) {
         if (err instanceof ExecutorCodedError && err.code === "NOT_FOUND") {
           this.clearStateContainer(svc, containerRef);
-          containerRef = await this.ensure(svc);
-          execResult = await this.execPhp(containerRef, stdin, timeoutMs);
+          containerRef = await this.ensure(svc, t);
+          execResult = await this.execPhp(containerRef, stdin, timeoutMs, t);
         } else {
           throw err;
         }
@@ -495,12 +501,12 @@ export class SiteFilesHelpers {
     await tracked;
   }
 
-  private ensure(svc: string): Promise<string> {
+  private ensure(svc: string, t: ExecutorSiteType): Promise<string> {
     const existing = this.ensureInFlight.get(svc);
     if (existing) {
       return existing;
     }
-    const pending = this.ensureOnce(svc).finally(() => {
+    const pending = this.ensureOnce(svc, t).finally(() => {
       if (this.ensureInFlight.get(svc) === pending) {
         this.ensureInFlight.delete(svc);
       }
@@ -509,7 +515,7 @@ export class SiteFilesHelpers {
     return pending;
   }
 
-  private async ensureOnce(svc: string): Promise<string> {
+  private async ensureOnce(svc: string, t: ExecutorSiteType): Promise<string> {
     const pendingRemove = this.removeInFlight.get(svc);
     if (pendingRemove) {
       await pendingRemove.catch(() => undefined);
@@ -536,7 +542,10 @@ export class SiteFilesHelpers {
           inspect.State?.Running === true &&
           inspect.State?.Dead !== true &&
           labels?.[SITE_FILES_ROLE_LABEL] === SITE_FILES_ROLE &&
-          (filesFor === undefined || filesFor === svc);
+          (filesFor === undefined || filesFor === svc) &&
+          // Docker answers the binds in the order they were sent: an older helper's differ.
+          JSON.stringify(inspect.HostConfig?.Binds) ===
+            JSON.stringify(siteFilesHelperBinds(svc, this.programDir, t));
         if (reusable) {
           const state = this.getOrCreateState(svc);
           state.containerId = id;
@@ -555,7 +564,7 @@ export class SiteFilesHelpers {
       }
 
       // Step 2: Volume must already exist; never let a container bind create it implicitly.
-      const volumeName = getManagedVolumeName(svc, "html");
+      const volumeName = getManagedVolumeName(svc, t.def.files.volumeSuffix);
       const volRes = await this.dockerRequest("GET", `/volumes/${encodeURIComponent(volumeName)}`);
       if (volRes.statusCode === 404) {
         throw new ExecutorCodedError("not_found", SITE_FILE_REASON_CODES.not_found);
@@ -571,8 +580,8 @@ export class SiteFilesHelpers {
       const vol = parseDockerPayload<VolumeInspectJson>(volRes.body, "volume inspect");
       const siteId = assertSafeIdentifier(vol.Labels?.[SITE_FILES_SITE_LABEL] ?? "", "siteId");
 
-      // Step 4: Pick an allowlisted WordPress image from the site container (or default) without pulling.
-      const image = await this.resolveHelperImage(svc);
+      // Step 4: Let the type pick its image from the site container's (or its default) without pulling.
+      const image = await this.resolveHelperImage(svc, t);
       const imgRes = await this.dockerRequest("GET", `/images/${encodeURIComponent(image)}/json`);
       if (imgRes.statusCode !== 200) {
         throw new ExecutorCodedError(
@@ -587,6 +596,7 @@ export class SiteFilesHelpers {
         serviceInstanceId: svc,
         siteId,
         programDir: this.programDir,
+        siteType: t,
       });
       const createRes = await this.dockerRequest(
         "POST",
@@ -629,7 +639,7 @@ export class SiteFilesHelpers {
 
       const state = this.getOrCreateState(svc);
       state.containerId = containerId;
-      this.fireSweep(containerId);
+      this.fireSweep(containerId, t);
       return containerId;
     }
 
@@ -639,7 +649,7 @@ export class SiteFilesHelpers {
     );
   }
 
-  private async resolveHelperImage(svc: string): Promise<string> {
+  private async resolveHelperImage(svc: string, t: ExecutorSiteType): Promise<string> {
     const filters = JSON.stringify({ label: [`${SITE_FILES_SERVICE_LABEL}=${svc}`] });
     const res = await this.dockerRequest(
       "GET",
@@ -653,29 +663,27 @@ export class SiteFilesHelpers {
     }
     const list = parseDockerPayload<ContainerSummaryJson[]>(res.body, "site container list");
     const candidate = list[0]?.Image;
-    if (typeof candidate === "string" && ALLOWED_WORDPRESS_IMAGES.has(candidate)) {
-      return candidate;
-    }
-    return resolveWordpressImage(DEFAULT_PHP_VERSION);
+    return t.files.helperImage(typeof candidate === "string" ? candidate : undefined);
   }
 
-  private fireSweep(containerId: string): void {
+  private fireSweep(containerId: string, t: ExecutorSiteType): void {
     const stdin = Buffer.from('{"op":"sweep"}\n', "utf8");
-    void this.execPhp(containerId, stdin, SWEEP_TIMEOUT_MS).catch(() => undefined);
+    void this.execPhp(containerId, stdin, SWEEP_TIMEOUT_MS, t).catch(() => undefined);
   }
 
   private execPhp(
     containerRef: string,
     stdin: Buffer,
     timeoutMs: number,
+    t: ExecutorSiteType,
   ): Promise<DockerExecResult> {
     return runDockerExec(
       this.target,
       {
         container: containerRef,
-        cmd: buildPhpCmd(timeoutMs),
-        user: "33:33",
-        workingDir: "/var/www/html",
+        cmd: buildPhpCmd(timeoutMs, t),
+        user: t.def.files.owner,
+        workingDir: t.def.files.mountPath,
         env: [],
       },
       {

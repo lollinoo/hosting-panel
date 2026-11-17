@@ -8,8 +8,8 @@ import {
   type BackupTarget,
 } from "@hosting-panel/contracts";
 import { S3_PROBE_BUDGET_MS, S3_PROBE_REQUEST_TIMEOUT_MS } from "./s3-probe.js";
-import { SITE_JOB_ROLE } from "./site-jobs.js";
-import { ExecutorCodedError, assertSafeIdentifier, getManagedVolumeName } from "./traefik-config.js";
+import type { ExecutorSiteType } from "./site-types/types.js";
+import { ExecutorCodedError, SITE_JOB_ROLE, assertSafeIdentifier, getManagedVolumeName } from "./traefik-config.js";
 
 export const BACKUP_HOSTNAME = "hosting-panel" as const;
 export const BACKUP_REPO_STEP_TIMEOUT_MS = 60_000 as const;
@@ -375,17 +375,19 @@ export function buildBackupUploadContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly serviceInstanceId: string;
+  readonly siteType: ExecutorSiteType;
   readonly target: BackupTarget;
   readonly backupNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
   readonly stagingVolumeName: string | null;
 }): BackupContainerSpec {
+  const t = input.siteType;
   const jobId = assertJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
   const region = assertRegion(input.target.region);
-  const siteVolume = getManagedVolumeName(serviceInstanceId, "html");
+  const siteVolume = getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix);
   const binds = [`${siteVolume}:/backup/files:ro`];
   const paths = ["/backup/files"];
   if (input.stagingVolumeName !== null) {
@@ -403,6 +405,7 @@ export function buildBackupUploadContainerPayload(input: {
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
+      user: t.def.files.owner,
       binds,
       cmd: [
         "-o",
@@ -418,8 +421,7 @@ export function buildBackupUploadContainerPayload(input: {
         jobId,
         "--exclude",
         "/backup/files/.hp_rs_*",
-        "--exclude",
-        "/backup/files/.htpanel-import",
+        ...t.backup.excludes.flatMap((e) => ["--exclude", `/backup/files/${e}`]),
         ...paths,
       ],
     }),

@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  type DockerExecTarget, DockerEngineSocketAdapter, MANAGED_DOCKER_LABELS, TERMINAL_KILL_SCRIPT, reapTerminalShells, startDockerTerminal,
+  type DockerExecTarget, DockerEngineSocketAdapter, MANAGED_DOCKER_LABELS, TERMINAL_KILL_SCRIPT, reapTerminalShells, startDockerTerminal, WORDPRESS_EXECUTOR_SITE_TYPE,
 } from "../src/index.js";
 import { type MockDockerContainerRecord, type MockDockerDaemon, startMockDockerDaemon } from "./mock-docker-daemon.js";
 
@@ -99,7 +99,7 @@ describe("the kill says whether it worked", () => {
   const shellOf = async (execExitCode?: number) => {
     const { adapter, mockDaemon } = await setup(execExitCode);
     const target = (adapter as unknown as { execTarget: DockerExecTarget }).execTarget;
-    const { shell } = await startDockerTerminal(target, "hp_site_a_id", SID, { data: () => undefined, exit: () => undefined });
+    const { shell } = await startDockerTerminal(target, "hp_site_a_id", SID, { data: () => undefined, exit: () => undefined }, WORDPRESS_EXECUTOR_SITE_TYPE);
     return { shell, mockDaemon };
   };
   it("true when the kill exec exits 0", async () => {
@@ -181,7 +181,7 @@ describe("reapTerminalShells", () => {
     expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
     expect(err.message).not.toContain("boom");
     expect(mockDaemon.execCalls.map((e) => e.container)).toEqual(["hp_site_a_id"]);
-    await expect(reapTerminalShells({ request: () => Promise.resolve({ statusCode: 500, body: Buffer.from("x") }), socketPath: "", apiPrefix: "" }))
+    await expect(reapTerminalShells({ request: () => Promise.resolve({ statusCode: 500, body: Buffer.from("x") }), socketPath: "", apiPrefix: "" }, WORDPRESS_EXECUTOR_SITE_TYPE))
       .rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
   });
 });

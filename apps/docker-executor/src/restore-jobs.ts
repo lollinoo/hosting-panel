@@ -6,18 +6,14 @@ import { z } from "zod";
 import {
   BACKUP_FAILURE_CLASSES,
   BACKUP_JOB_STATES,
-  DEFAULT_PHP_VERSION,
   RESTIC_IMAGE,
   SHARED_MARIADB_IMAGE,
-  resolveWordpressImage,
   siteDatabasePrefix,
   type BackupFailureClass,
   type BackupTarget,
-  type PhpVersion,
 } from "@hosting-panel/contracts";
 import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
-  BACKUP_RESTIC_USER,
   assertRegion,
   assertSafeBindPath,
   assertSafeSecretBinds,
@@ -34,6 +30,7 @@ import {
   assertSafeIdentifier,
   getManagedVolumeName,
 } from "./traefik-config.js";
+import type { ExecutorSiteType } from "./site-types/types.js";
 
 export type { BackupContainerSpec };
 
@@ -48,8 +45,6 @@ export const BACKUP_RESTORE_SETTLE_START_MS = 150_000 as const;
 export const BACKUP_ARCHIVE_TIMEOUT_MS = 7_200_000 as const;
 export const BACKUP_ARCHIVE_TTL_MS = 3_600_000 as const;
 
-export const RESTORE_CONTAINER_USER = BACKUP_RESTIC_USER;
-export const RESTORE_MAINTENANCE_FILE_CONTENT = "<?php $upgrading = time(); ?>" as const;
 export const RESTORE_JOB_ID_PATTERN = /^op_[0-9a-f]{32}$/;
 export const RESTORE_SNAPSHOT_ID_PATTERN = /^[0-9a-f]{64}$/;
 export const RESTORE_STAGES = ["prepare", "switch", "switched", "ended"] as const;
@@ -122,9 +117,12 @@ export const ARCHIVE_EXIT_CODES: Readonly<Record<number, BackupFailureClass>> = 
   [RESTORE_EXIT_TIMEOUT]: "timeout",
 };
 
-export const RESTORE_FETCH_SCRIPT = [
+/** The fetch script: the snapshot's files into the type's restore dir, the dumps into staging. */
+export function buildRestoreFetchScript(t: ExecutorSiteType): string {
+  const w = t.def.files.mountPath;
+  return [
   "set -eu",
-  "W=/var/www/html; R=/var/www/html/.hp_rs_$HP_H; S=/var/tmp/c",
+  `W=${w}; R=${w}/.hp_rs_$HP_H; S=/var/tmp/c`,
   'RO="-o s3.bucket-lookup=path"',
   // Check stats and list databases before modifying any directory so wrong keys fail cleanly.
   'stats_out=$(restic $RO -o "s3.region=$HP_REGION" stats --json --mode restore-size "$HP_SNAP")',
@@ -166,11 +164,19 @@ export const RESTORE_FETCH_SCRIPT = [
   'sort -u "$S/dbs.tmp" -o "$S/dbs.tmp"',
   'sync "$S/dbs.tmp"; mv -Tf "$S/dbs.tmp" "$S/dbs"; sync "$S"',
   'du -sk "$S/databases" | cut -f1',
-].join("\n");
+  ].join("\n");
+}
 
-export const RESTORE_DB_SCRIPT = [
+/** The database steps script of a type with a database; refused for a type without one. */
+export function buildRestoreDbScript(t: ExecutorSiteType): string {
+  const database = t.def.database;
+  const gate = t.restore.dbGate;
+  if (database === null || gate === null) {
+    throw new ExecutorCodedError("Site type has no database", "VALIDATION_ERROR");
+  }
+  return [
   "set -eu",
-  "W=/var/www/html; R=$W/.hp_rs_$HP_H; S=/var/tmp/c; D=$S/databases; U=hp_ru_$HP_H",
+  `W=${t.def.files.mountPath}; R=$W/.hp_rs_$HP_H; S=/var/tmp/c; D=$S/databases; U=hp_ru_$HP_H`,
   `case "$HP_H" in *[!0-9a-f]*) exit ${RESTORE_EXIT_INVALID_DB_NAME};; esac`,
   `[ "\${#HP_H}" -eq 32 ] || exit ${RESTORE_EXIT_INVALID_DB_NAME}`,
   `case "$HP_LOCK_S" in ""|*[!0-9]*) exit ${RESTORE_EXIT_INVALID_DB_NAME};; esac`,
@@ -185,7 +191,7 @@ export const RESTORE_DB_SCRIPT = [
   'run_m_sql() { mariadb --defaults-extra-file=/tmp/c.cnf --default-character-set=utf8mb4 --init-command="SET SESSION lock_wait_timeout=$HP_LOCK_S" -N -B --sandbox --binary-mode "$@"; }',
   'D0="mariadb-dump --defaults-extra-file=/tmp/c.cnf --default-character-set=utf8mb4 --skip-dump-date --no-data --skip-opt --skip-comments"',
   'q() { run_m -e "$1"; }',
-  `check_prefix() { echo "$HP_PREFIX" | grep -Eqx 'wp_[0-9a-f]{12}' || exit ${RESTORE_EXIT_INVALID_DB_NAME}; }`,
+  `check_prefix() { echo "$HP_PREFIX" | grep -Eqx '${database.namePrefix}_[0-9a-f]{12}' || exit ${RESTORE_EXIT_INVALID_DB_NAME}; }`,
   "validate_dbs_file() {",
   '  while IFS= read -r db || [ -n "$db" ]; do',
   `    echo "$db" | grep -Eqx "\${HP_PREFIX}(_[a-z0-9][a-z0-9_]{0,15})?" || exit ${RESTORE_EXIT_INVALID_DB_NAME}`,
@@ -330,40 +336,7 @@ export const RESTORE_DB_SCRIPT = [
   "  } | run_m",
   "}",
   'exists() { [ -n "$(q "SELECT 1 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=\'$1\'")" ]; }',
-  "record_gate() {",
-  '  if [ ! -f "$S/gate_recorded" ]; then',
-  '    rm -rf "$S/gate_kept" "$S/gate_kept.tmp"',
-  '    if [ -e "$W/.maintenance" ] || [ -L "$W/.maintenance" ]; then',
-  '      cp -aP "$W/.maintenance" "$S/gate_kept.tmp"',
-  '      [ -L "$S/gate_kept.tmp" ] || sync "$S/gate_kept.tmp"',
-  '      mv -Tf "$S/gate_kept.tmp" "$S/gate_kept"',
-  "    fi",
-  '    : > "$S/gate_recorded.tmp"; sync "$S/gate_recorded.tmp"; mv -Tf "$S/gate_recorded.tmp" "$S/gate_recorded"; sync "$S"',
-  "  fi",
-  "}",
-  "gate_on() {",
-  '  tmp_gate="$W/.maintenance.hp.$$"',
-  '  rm -rf "$tmp_gate"',
-  `  (set -C; printf '${RESTORE_MAINTENANCE_FILE_CONTENT}' > "$tmp_gate")`,
-  '  sync "$tmp_gate"; rm -rf "$W/.maintenance"; mv -Tf "$tmp_gate" "$W/.maintenance"; sync "$W"',
-  "}",
-  "restore_gate() {",
-  '  if [ -e "$S/gate_kept" ] || [ -L "$S/gate_kept" ]; then',
-  '    tmp_gate="$W/.maintenance.hp.$$"',
-  '    rm -rf "$tmp_gate"',
-  '    cp -aP "$S/gate_kept" "$tmp_gate"',
-  '    [ -L "$tmp_gate" ] || sync "$tmp_gate"',
-  '    mv -Tf "$tmp_gate" "$W/.maintenance"',
-  '    sync "$W"',
-  "  else",
-  '    rm -rf "$W/.maintenance"; sync "$W"',
-  "  fi",
-  "}",
-  "gate_off() {",
-  '  rm -rf "$W/.maintenance" 2>/dev/null || true',
-  `  [ ! -e "$W/.maintenance" ] && [ ! -L "$W/.maintenance" ] || exit ${RESTORE_EXIT_GATE_REMOVE_FAILED}`,
-  '  sync "$W" 2>/dev/null || true',
-  "}",
+  gate.functions({ gateRemoveFailed: RESTORE_EXIT_GATE_REMOVE_FAILED }),
   'case "$HP_STEP" in',
   "prepare)",
   "  check_prefix",
@@ -399,9 +372,7 @@ export const RESTORE_DB_SCRIPT = [
   '    check_obj_names "hp_rn_${HP_H}_$i" "$db"',
   "    i=$((i + 1))",
   '  done < "$S/dbs"',
-  '  if [ -e "$W/.maintenance" ] || [ -L "$W/.maintenance" ]; then',
-  `    [ -L "$W/.maintenance" ] || [ -f "$W/.maintenance" ] || exit ${RESTORE_EXIT_INVALID_DB_NAME}`,
-  "  fi",
+  gate.prepareCheck({ invalidDbName: RESTORE_EXIT_INVALID_DB_NAME }),
   "  record_gate",
   "  gate_on",
   '  q "CREATE DATABASE IF NOT EXISTS \\`$U\\`; CREATE TABLE IF NOT EXISTS \\`$U\\`.\\`before\\` (x INT)"',
@@ -488,28 +459,34 @@ export const RESTORE_DB_SCRIPT = [
   '  sync "$W" || exit ' + String(RESTORE_EXIT_FINISH_CLEANUP_FAILED) + " ;;",
   "*) exit 1 ;;",
   "esac",
-].join("\n");
+  ].join("\n");
+}
 
-export const RESTORE_FILES_SCRIPT = [
+/** The files script: plans and exchanges the type's files; a type without a gate also gets a finish step. */
+export function buildRestoreFilesScript(t: ExecutorSiteType): string {
+  const kept = t.restore.keptDirs;
+  const leaves = kept.filter((d) => !kept.some((o) => o.startsWith(`${d}/`)));
+  const both = (dirs: readonly string[]) => [...dirs.map((d) => `"$W/${d}"`), ...dirs.map((d) => `"$F/${d}"`)].join(" ");
+  const leftInPlace = t.restore.leftInPlace.includes(".hp_rs_*") ? t.restore.leftInPlace : [...t.restore.leftInPlace, ".hp_rs_*"];
+  return [
   "set -eu",
-  "W=/var/www/html; R=$W/.hp_rs_$HP_H; F=$R/c/files; P=$R/c/plan",
+  `W=${t.def.files.mountPath}; R=$W/.hp_rs_$HP_H; F=$R/c/files; P=$R/c/plan`,
   'case "$HP_H" in *[!0-9a-f]*) exit 1;; esac',
   '[ "${#HP_H}" -eq 32 ] || exit 1',
   'case "$HP_STEP" in',
   "switch)",
   `  [ ! -f "$P" ] || exit ${RESTORE_EXIT_FILES_PLAN_EXISTS}`,
-  '  for p in "$W/wp-content" "$W/wp-content/mu-plugins" "$F/wp-content" "$F/wp-content/mu-plugins"; do',
-  '    [ ! -L "$p" ] || exit 1',
-  "  done",
-  '  mkdir -p "$W/wp-content/mu-plugins" "$F/wp-content/mu-plugins"',
+  ...(kept.length === 0
+    ? []
+    : [`  for p in ${both(kept)}; do`, '    [ ! -L "$p" ] || exit 1', "  done", `  mkdir -p ${both(leaves)}`]),
   '  : > "$P.tmp"',
-  '  for d in "" wp-content/ wp-content/mu-plugins/; do',
+  `  for d in ${['""', ...kept.map((d) => `${d}/`)].join(" ")}; do`,
   '    l1=$(ls -A "$W/$d")',
   '    l2=$(ls -A "$F/$d")',
   '    { [ -z "$l1" ] || printf \'%s\\n\' "$l1"; [ -z "$l2" ] || printf \'%s\\n\' "$l2"; } | sort -u | while IFS= read -r e; do',
   '      [ -n "$e" ] || continue',
   '      case "$d$e" in',
-  "        .maintenance|.maintenance.hp*|.hp_rs_*|wp-content|wp-content/mu-plugins|wp-content/mu-plugins/hp-mail.php) continue ;;",
+  `        ${leftInPlace.join("|")}) continue ;;`,
   "      esac",
   '      if [ -e "$W/$d$e" ] || [ -L "$W/$d$e" ]; then',
   '        if [ -e "$F/$d$e" ] || [ -L "$F/$d$e" ]; then',
@@ -541,9 +518,14 @@ export const RESTORE_FILES_SCRIPT = [
   "    esac",
   "  done",
   '  rm -f "$P"; sync "$W" ;;',
+  // Without database steps nothing else removes the restore dir.
+  ...(t.restore.dbGate === null
+    ? ["finish)", `  rm -rf "$R" || exit ${RESTORE_EXIT_FINISH_CLEANUP_FAILED}`, `  sync "$W" || exit ${RESTORE_EXIT_FINISH_CLEANUP_FAILED} ;;`]
+    : []),
   "*) exit 1 ;;",
   "esac",
-].join("\n");
+  ].join("\n");
+}
 
 export const ARCHIVE_SCRIPT = [
   "set -eu",
@@ -566,6 +548,8 @@ export const RestoreNoteSchema = z
     jobId: z.string().regex(RESTORE_JOB_ID_PATTERN),
     siteId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
     serviceInstanceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/),
+    // Absent for the legacy type; a key the release does not know is refused when the note is acted on.
+    siteType: z.string().regex(/^[a-z][a-z0-9]{0,31}$/).optional(),
     stage: z.enum(RESTORE_STAGES),
     state: z.enum(BACKUP_JOB_STATES).optional(),
     failure: z.enum(BACKUP_FAILURE_CLASSES).nullable().optional(),
@@ -663,12 +647,15 @@ function buildRestoreDbStepPayload(input: {
   readonly suffix: string;
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId?: string;
   readonly stagingVolumeName?: string;
   readonly sharedDbNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
 }): BackupContainerSpec {
+  const t = input.siteType;
+  const script = buildRestoreDbScript(t);
   const { jobId, hexId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   assertDbOnlySecrets(input.secretBinds, input.secretFileEnv);
@@ -676,7 +663,7 @@ function buildRestoreDbStepPayload(input: {
   const binds: string[] = [];
   if (input.serviceInstanceId !== undefined) {
     const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
-    binds.push(`${getManagedVolumeName(serviceInstanceId, "html")}:/var/www/html`);
+    binds.push(`${getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix)}:${t.def.files.mountPath}`);
   }
   if (input.stagingVolumeName !== undefined) {
     const stagingVolume = assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName");
@@ -687,7 +674,7 @@ function buildRestoreDbStepPayload(input: {
   const env = [
     `HP_STEP=${input.step}`,
     `HP_H=${hexId}`,
-    ...(input.step !== "finish" ? [`HP_PREFIX=${siteDatabasePrefix(siteId)}`] : []),
+    ...(input.step !== "finish" ? [`HP_PREFIX=${siteDatabasePrefix(siteId, t.def.database!.namePrefix)}`] : []),
     `HP_LOCK_S=${String(BACKUP_RESTORE_LOCK_WAIT_S)}`,
     ...input.secretFileEnv,
   ];
@@ -696,8 +683,8 @@ function buildRestoreDbStepPayload(input: {
     containerName: `hp_bk_${jobId}_${input.suffix}`,
     payload: {
       Image: SHARED_MARIADB_IMAGE,
-      Cmd: ["sh", "-c", RESTORE_DB_SCRIPT],
-      User: RESTORE_CONTAINER_USER,
+      Cmd: ["sh", "-c", script],
+      User: t.def.files.owner,
       Env: env,
       Labels: buildJobLabels(siteId, jobId),
       HostConfig: buildBackupHostConfig(input.sharedDbNetworkName, binds),
@@ -706,28 +693,28 @@ function buildRestoreDbStepPayload(input: {
 }
 
 function buildRestoreFilesStepPayload(input: {
-  readonly step: "switch" | "undo";
+  readonly step: "switch" | "undo" | "finish";
   readonly suffix: string;
   readonly jobId: string;
   readonly siteId: string;
   readonly serviceInstanceId: string;
-  readonly phpVersion?: PhpVersion;
+  readonly siteType: ExecutorSiteType;
 }): BackupContainerSpec {
+  const t = input.siteType;
   const { jobId, hexId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
-  const siteVolume = getManagedVolumeName(serviceInstanceId, "html");
-  const image = resolveWordpressImage(input.phpVersion ?? DEFAULT_PHP_VERSION);
+  const siteVolume = getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix);
 
   return {
     containerName: `hp_bk_${jobId}_${input.suffix}`,
     payload: {
-      Image: image,
-      Cmd: ["sh", "-c", RESTORE_FILES_SCRIPT],
-      User: RESTORE_CONTAINER_USER,
+      Image: t.restore.filesImage,
+      Cmd: ["sh", "-c", buildRestoreFilesScript(t)],
+      User: t.def.files.owner,
       Env: [`HP_STEP=${input.step}`, `HP_H=${hexId}`],
       Labels: buildJobLabels(siteId, jobId),
-      HostConfig: buildBackupHostConfig("none", [`${siteVolume}:/var/www/html`]),
+      HostConfig: buildBackupHostConfig("none", [`${siteVolume}:${t.def.files.mountPath}`]),
     },
   };
 }
@@ -737,6 +724,7 @@ export function buildRestoreFetchContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly serviceInstanceId: string;
+  readonly siteType: ExecutorSiteType;
   readonly snapshotId: string;
   readonly target: BackupTarget;
   readonly backupNetworkName: string;
@@ -744,13 +732,14 @@ export function buildRestoreFetchContainerPayload(input: {
   readonly secretFileEnv: readonly string[];
   readonly stagingVolumeName: string;
 }): BackupContainerSpec {
+  const t = input.siteType;
   const { jobId, hexId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
   const snapshotId = assertSnapshotId(input.snapshotId);
   const region = assertRegion(input.target.region);
   const stagingVolume = assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName");
-  const siteVolume = getManagedVolumeName(serviceInstanceId, "html");
+  const siteVolume = getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix);
   assertResticOnlySecrets(input.secretBinds, input.secretFileEnv);
 
   return {
@@ -762,14 +751,15 @@ export function buildRestoreFetchContainerPayload(input: {
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
-      binds: [`${siteVolume}:/var/www/html`, `${stagingVolume}:/var/tmp`],
+      user: t.def.files.owner,
+      binds: [`${siteVolume}:${t.def.files.mountPath}`, `${stagingVolume}:/var/tmp`],
       extraEnv: [
         `HP_REGION=${region}`,
         `HP_SNAP=${snapshotId}`,
         `HP_H=${hexId}`,
         `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`,
       ],
-      entrypoint: ["/bin/sh", "-c", RESTORE_FETCH_SCRIPT],
+      entrypoint: ["/bin/sh", "-c", buildRestoreFetchScript(t)],
     }),
   };
 }
@@ -778,6 +768,7 @@ export function buildRestoreFetchContainerPayload(input: {
 export function buildRestorePrepareContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly stagingVolumeName: string;
   readonly sharedDbNetworkName: string;
   readonly secretBinds: readonly string[];
@@ -794,6 +785,7 @@ export function buildRestorePrepareContainerPayload(input: {
 export function buildRestoreSwitchContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId: string;
   readonly stagingVolumeName: string;
   readonly sharedDbNetworkName: string;
@@ -807,12 +799,12 @@ export function buildRestoreSwitchContainerPayload(input: {
   });
 }
 
-/** Builds the offline WordPress `_rs_files` container spec planning and atomically exchanging site files. */
+/** Builds the offline `_rs_files` container spec planning and atomically exchanging site files. */
 export function buildRestoreFilesContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId: string;
-  readonly phpVersion?: PhpVersion;
 }): BackupContainerSpec {
   return buildRestoreFilesStepPayload({
     step: "switch",
@@ -825,6 +817,7 @@ export function buildRestoreFilesContainerPayload(input: {
 export function buildRestoreFinishContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId: string;
   readonly sharedDbNetworkName: string;
   readonly secretBinds: readonly string[];
@@ -837,12 +830,12 @@ export function buildRestoreFinishContainerPayload(input: {
   });
 }
 
-/** Builds the offline WordPress `_rs_undo_files` container spec reversing file exchanges idempotently. */
+/** Builds the offline `_rs_undo_files` container spec reversing file exchanges idempotently. */
 export function buildRestoreUndoFilesContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId: string;
-  readonly phpVersion?: PhpVersion;
 }): BackupContainerSpec {
   return buildRestoreFilesStepPayload({
     step: "undo",
@@ -851,10 +844,28 @@ export function buildRestoreUndoFilesContainerPayload(input: {
   });
 }
 
+/** Builds the offline `_rs_finish` container spec of a type without a database gate: removes the restore dir. */
+export function buildRestoreFilesFinishContainerPayload(input: {
+  readonly jobId: string;
+  readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
+  readonly serviceInstanceId: string;
+}): BackupContainerSpec {
+  if (input.siteType.restore.dbGate !== null) {
+    throw new ExecutorCodedError("Site type finishes in its database step", "VALIDATION_ERROR");
+  }
+  return buildRestoreFilesStepPayload({
+    step: "finish",
+    suffix: "rs_finish",
+    ...input,
+  });
+}
+
 /** Builds the MariaDB `_rs_undo_db` container spec reversing database changes and restoring the prior gate state. */
 export function buildRestoreUndoDbContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId: string;
   readonly stagingVolumeName: string;
   readonly sharedDbNetworkName: string;
@@ -868,12 +879,11 @@ export function buildRestoreUndoDbContainerPayload(input: {
   });
 }
 
-export const RESTORE_OWN_SCRIPT = "chown 33:33 /v && chmod 0755 /v" as const;
-
-/** Builds the `_rs_own` container giving a newly created site files volume to www-data (33:33). */
+/** Builds the `_rs_own` container giving a newly created site files volume to the type's owner. */
 export function buildRestoreOwnContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
   readonly serviceInstanceId: string;
 }): BackupContainerSpec & {
   readonly payload: { readonly HostConfig: { readonly CapAdd: readonly string[] } };
@@ -881,12 +891,12 @@ export function buildRestoreOwnContainerPayload(input: {
   const { jobId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
-  const siteVolume = getManagedVolumeName(serviceInstanceId, "html");
+  const siteVolume = getManagedVolumeName(serviceInstanceId, input.siteType.def.files.volumeSuffix);
   return {
     containerName: `hp_bk_${jobId}_rs_own`,
     payload: {
       Image: RESTIC_IMAGE,
-      Entrypoint: ["/bin/sh", "-c", RESTORE_OWN_SCRIPT],
+      Entrypoint: ["/bin/sh", "-c", `chown ${input.siteType.def.files.owner} /v && chmod 0755 /v`],
       User: "0:0",
       Env: [],
       Labels: buildJobLabels(siteId, jobId),

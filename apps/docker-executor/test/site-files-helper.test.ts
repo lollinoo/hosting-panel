@@ -19,6 +19,7 @@ import {
   buildSiteFilesHelperPayload,
   parseSiteFilesRequest,
   siteFilesHelperName,
+  WORDPRESS_EXECUTOR_SITE_TYPE,
   type DockerExecTarget,
 } from "../src/index.js";
 
@@ -282,6 +283,7 @@ async function createFakeHelperDocker(): Promise<{
             Name: `/${c.name}`,
             State: { Running: c.running, Dead: false },
             Config: { Image: c.image, Labels: c.labels },
+            HostConfig: c.payload?.HostConfig ?? {},
           }),
         ),
       };
@@ -412,6 +414,7 @@ describe("siteFilesHelperName & buildSiteFilesHelperPayload", () => {
       serviceInstanceId: "svc_site1",
       siteId: "site_1",
       programDir: "/var/lib/hosting-panel/site-files",
+      siteType: WORDPRESS_EXECUTOR_SITE_TYPE,
     }) as {
       Image: string;
       Entrypoint: string[];
@@ -451,7 +454,7 @@ describe("siteFilesHelperName & buildSiteFilesHelperPayload", () => {
       NanoCpus: 1_000_000_000,
       RestartPolicy: { Name: "no" },
       Binds: [
-        "hp_vol_svc_site1_html:/var/www/html:rw",
+        "hp_vol_svc_site1_html:/var/www/html:rw,nocopy",
         "/var/lib/hosting-panel/site-files:/usr/local/lib/hp-files:ro",
       ],
     });
@@ -462,6 +465,7 @@ describe("siteFilesHelperName & buildSiteFilesHelperPayload", () => {
       image: "wordpress:7.1.4-php8.4-apache",
       serviceInstanceId: "svc_site1",
       siteId: "site_1",
+      siteType: WORDPRESS_EXECUTOR_SITE_TYPE,
     };
 
     for (const badDir of [
@@ -930,6 +934,49 @@ describe("SiteFilesHelpers", () => {
     expect([...state.containers.values()].filter((c) => c.name === "hp_files_svc_check")).toHaveLength(
       1,
     );
+  });
+
+  it("replaces a running helper whose binds differ (no nocopy) and reuses one with the expected binds", async () => {
+    const { target, state } = await createFakeHelperDocker();
+    state.volumes.set("hp_vol_svc_binds_html", {
+      name: "hp_vol_svc_binds_html",
+      labels: { "io.hostingpanel.site_id": "site_binds" },
+    });
+    const helpers = new SiteFilesHelpers({ target, programDir: "/var/lib/hosting-panel/site-files" });
+    cleanupTasks.push(async () => helpers.stop());
+    const seed = (id: string, volumeBind: string) =>
+      state.containers.set(id, {
+        id,
+        name: "hp_files_svc_binds",
+        running: true,
+        image: resolveWordpressImage(DEFAULT_PHP_VERSION),
+        labels: { "io.hostingpanel.role": SITE_FILES_ROLE, "io.hostingpanel.files_for": "svc_binds" },
+        payload: {
+          HostConfig: {
+            Binds: [volumeBind, "/var/lib/hosting-panel/site-files:/usr/local/lib/hp-files:ro"],
+          },
+        },
+      });
+    const creates = () => state.calls.filter((c) => c.method === "POST" && c.path.startsWith("/containers/create"));
+
+    // A helper an older executor left running, bind without nocopy: force-removed, then created.
+    seed("old_helper", "hp_vol_svc_binds_html:/var/www/html:rw");
+    await helpers.run({ serviceInstanceId: "svc_binds", op: "list", path: "" });
+    expect(state.calls.some((c) => c.method === "DELETE" && c.path.startsWith("/containers/old_helper"))).toBe(true);
+    expect(state.containers.has("old_helper")).toBe(false);
+    expect(creates()).toHaveLength(1);
+    helpers.stop();
+
+    // A helper with the expected binds is reused: no create, no removal.
+    for (const c of [...state.containers.values()]) state.containers.delete(c.id);
+    state.calls.length = 0;
+    const again = new SiteFilesHelpers({ target, programDir: "/var/lib/hosting-panel/site-files" });
+    cleanupTasks.push(async () => again.stop());
+    seed("good_helper", "hp_vol_svc_binds_html:/var/www/html:rw,nocopy");
+    await again.run({ serviceInstanceId: "svc_binds", op: "list", path: "" });
+    expect(creates()).toHaveLength(0);
+    expect(state.calls.some((c) => c.method === "DELETE")).toBe(false);
+    expect(state.containers.has("good_helper")).toBe(true);
   });
 
   it("rejects volumes with missing or unsafe site_id label using HOST_POLICY_DENIED", async () => {

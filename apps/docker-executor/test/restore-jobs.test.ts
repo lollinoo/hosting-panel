@@ -26,7 +26,6 @@ import {
   BACKUP_RESTORE_SWITCH_TIMEOUT_MS,
   BACKUP_RESTORE_UNDO_TIMEOUT_MS,
   BACKUP_ARCHIVE_TIMEOUT_MS,
-  RESTORE_DB_SCRIPT,
   RESTORE_EXIT_DB_IMPORT_FAILED,
   RESTORE_EXIT_DB_UNREACHABLE,
   RESTORE_EXIT_DEFINER_MISSING,
@@ -41,15 +40,15 @@ import {
   RESTORE_EXIT_TIMEOUT,
   RESTORE_EXIT_UNDO_SCHEMA_NOT_EMPTY,
   RESTORE_FETCH_EXIT_CODES,
-  RESTORE_FETCH_SCRIPT,
   RESTORE_FILES_EXIT_CODES,
-  RESTORE_FILES_SCRIPT,
   RESTORE_FINISH_EXIT_CODES,
-  RESTORE_MAINTENANCE_FILE_CONTENT,
   RESTORE_PREPARE_EXIT_CODES,
   RESTORE_SWITCH_EXIT_CODES,
   RESTORE_UNDO_EXIT_CODES,
   buildArchiveContainerPayload,
+  buildRestoreDbScript,
+  buildRestoreFetchScript,
+  buildRestoreFilesScript,
   buildRestoreFetchContainerPayload,
   buildRestoreFilesContainerPayload,
   buildRestoreFinishContainerPayload,
@@ -69,6 +68,12 @@ import {
   type BackupContainerSpec,
   type RestoreNote,
 } from "../src/restore-jobs.js";
+import { WORDPRESS_EXECUTOR_SITE_TYPE as WP } from "../src/site-types/index.js";
+import { RESTORE_MAINTENANCE_FILE_CONTENT } from "../src/site-types/wordpress-restore.js";
+
+const RESTORE_DB_SCRIPT = buildRestoreDbScript(WP);
+const RESTORE_FETCH_SCRIPT = buildRestoreFetchScript(WP);
+const RESTORE_FILES_SCRIPT = buildRestoreFilesScript(WP);
 
 const JOB_ID = "op_0123456789abcdef0123456789abcdef";
 const HEX_ID = "0123456789abcdef0123456789abcdef";
@@ -347,6 +352,7 @@ describe("restore-jobs strip_db_qual (R88/R91)", () => {
 describe("restore-jobs container payload builders", () => {
   it("builds hardened _rs_fetch payload with both volumes, restic image, user 33:33, and no MariaDB secret", () => {
     const spec = buildRestoreFetchContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_ID,
@@ -377,6 +383,7 @@ describe("restore-jobs container payload builders", () => {
 
   it("builds hardened _rs_prepare payload with staging volume ONLY (no site volume)", () => {
     const spec = buildRestorePrepareContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       stagingVolumeName: STAGING_VOL,
@@ -402,6 +409,7 @@ describe("restore-jobs container payload builders", () => {
 
   it("builds hardened _rs_switch, _rs_finish, and _rs_undo_db payloads with exact mounts", () => {
     const switchSpec = buildRestoreSwitchContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_ID,
@@ -423,6 +431,7 @@ describe("restore-jobs container payload builders", () => {
     assertHardenedContainer(switchSpec);
 
     const finishSpec = buildRestoreFinishContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_ID,
@@ -442,6 +451,7 @@ describe("restore-jobs container payload builders", () => {
     assertHardenedContainer(finishSpec);
 
     const undoDbSpec = buildRestoreUndoDbContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_ID,
@@ -465,6 +475,7 @@ describe("restore-jobs container payload builders", () => {
 
   it("builds hardened _rs_files and _rs_undo_files payloads with network none, no staging, no secrets", () => {
     const filesSpec = buildRestoreFilesContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_ID,
@@ -478,13 +489,13 @@ describe("restore-jobs container payload builders", () => {
     assertHardenedContainer(filesSpec);
 
     const undoFilesSpec = buildRestoreUndoFilesContainerPayload({
+      siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
       serviceInstanceId: SERVICE_ID,
-      phpVersion: "8.3",
     });
     expect(undoFilesSpec.containerName).toBe(`hp_bk_${JOB_ID}_rs_undo_files`);
-    expect(undoFilesSpec.payload.Image).toBe(resolveWordpressImage("8.3"));
+    expect(undoFilesSpec.payload.Image).toBe(resolveWordpressImage(DEFAULT_PHP_VERSION));
     expect(undoFilesSpec.payload.User).toBe("33:33");
     expect(undoFilesSpec.payload.HostConfig.NetworkMode).toBe("none");
     expect(undoFilesSpec.payload.HostConfig.Binds).toEqual([`${SITE_VOL}:/var/www/html`]);
@@ -526,6 +537,7 @@ describe("restore-jobs container payload builders", () => {
   it("rejects -forget jobIds, docker.sock binds, bad secret mounts, and mismatched step secrets", () => {
     expect(() =>
       buildRestorePrepareContainerPayload({
+        siteType: WP,
         jobId: `${JOB_ID}-forget`,
         siteId: SITE_ID,
         stagingVolumeName: STAGING_VOL,
@@ -565,6 +577,7 @@ describe("restore-jobs container payload builders", () => {
 
     expect(() =>
       buildRestorePrepareContainerPayload({
+        siteType: WP,
         jobId: JOB_ID,
         siteId: SITE_ID,
         stagingVolumeName: STAGING_VOL,
@@ -741,14 +754,13 @@ describe("restore createVolume helpers", () => {
   const JOB = `op_${"4".repeat(32)}`;
 
   it("builds the _rs_own chown container: restic image, root, no network, only CHOWN and FOWNER", async () => {
-    const { buildRestoreOwnContainerPayload, RESTORE_OWN_SCRIPT } = await import("../src/restore-jobs.js");
-    const spec = buildRestoreOwnContainerPayload({ jobId: JOB, siteId: "site1", serviceInstanceId: "svc_site1" });
+    const { buildRestoreOwnContainerPayload } = await import("../src/restore-jobs.js");
+    const spec = buildRestoreOwnContainerPayload({ siteType: WP, jobId: JOB, siteId: "site1", serviceInstanceId: "svc_site1" });
     expect(spec.containerName).toBe(`hp_bk_${JOB}_rs_own`);
-    expect(RESTORE_OWN_SCRIPT).toBe("chown 33:33 /v && chmod 0755 /v");
     expect(spec.payload).toMatchObject({
       Image: RESTIC_IMAGE,
       User: "0:0",
-      Entrypoint: ["/bin/sh", "-c", RESTORE_OWN_SCRIPT],
+      Entrypoint: ["/bin/sh", "-c", "chown 33:33 /v && chmod 0755 /v"],
       Env: [],
       Labels: {
         "io.hostingpanel.managed": "true",
@@ -765,10 +777,10 @@ describe("restore createVolume helpers", () => {
       },
     });
     expect(() =>
-      buildRestoreOwnContainerPayload({ jobId: "op_bad", siteId: "site1", serviceInstanceId: "svc_site1" }),
+      buildRestoreOwnContainerPayload({ siteType: WP, jobId: "op_bad", siteId: "site1", serviceInstanceId: "svc_site1" }),
     ).toThrow();
     expect(() =>
-      buildRestoreOwnContainerPayload({ jobId: JOB, siteId: "site1", serviceInstanceId: "../x" }),
+      buildRestoreOwnContainerPayload({ siteType: WP, jobId: JOB, siteId: "site1", serviceInstanceId: "../x" }),
     ).toThrow();
   });
 

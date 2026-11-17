@@ -31,9 +31,10 @@ import {
   assertSafeIdentifier,
   getManagedVolumeName,
   getSiteInternalNetworkName,
+  SITE_JOB_ROLE,
 } from "./traefik-config.js";
 
-export const SITE_JOB_ROLE = "site_job" as const;
+export { SITE_JOB_ROLE } from "./traefik-config.js";
 export const DEFAULT_SITE_JOB_TIMEOUT_MS = 240_000;
 // Same 5 s as BACKUP_RESTORE_LOCK_WAIT_S; not imported because restore-jobs -> backup-jobs -> site-jobs is a load-time ring.
 const IMPORT_LOCK_WAIT_S = 5;

@@ -1,9 +1,9 @@
+import type { SimulatorSiteType } from "./simulator-site-types.js";
 import type { TerminalShell, TerminalShellSink } from "./terminal-sessions.js";
 
-const PROMPT = "/var/www/html $ ";
-
 /** A fake /bin/sh for the simulator: prompt, echo, `id`, `echo`, `exit`, Ctrl-C and Ctrl-D. */
-export function startSimulatedShell(sink: TerminalShellSink): TerminalShell {
+export function startSimulatedShell(sink: TerminalShellSink, type: SimulatorSiteType): TerminalShell {
+  const PROMPT = `${type.def.files.mountPath} $ `;
   let line = "";
   let done = false;
   let lastCr = false;
@@ -15,7 +15,7 @@ export function startSimulatedShell(sink: TerminalShellSink): TerminalShell {
   const run = (cmd: string) => {
     const [name = "", ...args] = cmd.trim().split(/\s+/);
     if (name === "exit") return exit();
-    if (name === "id") out("uid=33(www-data) gid=33(www-data) groups=33(www-data)\r\n");
+    if (name === "id") out(`${type.shellId}\r\n`);
     else if (name === "echo") out(`${args.join(" ")}\r\n`);
     else if (name) out(`/bin/sh: 1: ${name}: not found\r\n`);
     out(PROMPT);

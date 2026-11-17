@@ -28,11 +28,8 @@ import {
   type SiteFilesOp,
 } from "@hosting-panel/contracts";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  DEFAULT_SITE_FILES_DIR,
-  SITE_FILES_PROGRAM,
-  ensureSiteFilesProgram,
-} from "../src/site-files-program.js";
+import { DEFAULT_SITE_FILES_DIR } from "../src/site-files-program.js";
+import { SITE_FILES_PROGRAM, ensureSiteFilesProgram } from "../src/site-types/index.js";
 
 const hasPhp = spawnSync("php", ["--version"]).status === 0;
 const hasZip =

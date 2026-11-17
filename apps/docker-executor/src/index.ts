@@ -180,11 +180,20 @@ export {
 
 export {
   DEFAULT_SITE_FILES_DIR,
-  SITE_FILES_PROGRAM,
-  ensureSiteFilesProgram,
+  buildSiteFilesProgram,
+  writeSiteFilesProgram,
 } from "./site-files-program.js";
+export {
+  EXECUTOR_SITE_TYPES,
+  SITE_FILES_PROGRAM,
+  WORDPRESS_EXECUTOR_SITE_TYPE,
+  ensureSiteFilesProgram,
+  resolveExecutorSiteType,
+  type ExecutorSiteType,
+} from "./site-types/index.js";
 
-export { SimulatedSiteFiles, type SimSeedEntry } from "./simulator-files.js";
+export { SimulatedSiteFiles, makeDir, type SimSeedEntry } from "./simulator-files.js";
+export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps } from "./simulator-site-types.js";
 
 export type { TerminalLimits } from "./terminal-sessions.js";
 
@@ -193,8 +202,6 @@ export {
   TERMINAL_END_SETTLE_MS,
   TERMINAL_KILL_SCRIPT,
   TERMINAL_KILL_TIMEOUT_MS,
-  TERMINAL_SHELL_USER,
-  TERMINAL_WORKDIR,
   reapTerminalShells,
   startDockerTerminal,
 } from "./terminal-docker.js";
@@ -301,7 +308,6 @@ export {
   BACKUP_RESTORE_SETTLE_START_MS,
   BACKUP_RESTORE_SWITCH_TIMEOUT_MS,
   BACKUP_RESTORE_UNDO_TIMEOUT_MS,
-  RESTORE_CONTAINER_USER,
   RESTORE_EXIT_DB_IMPORT_FAILED,
   RESTORE_EXIT_DB_UNREACHABLE,
   RESTORE_EXIT_DEFINER_MISSING,
@@ -318,8 +324,6 @@ export {
   RESTORE_FILES_EXIT_CODES,
   RESTORE_FINISH_EXIT_CODES,
   RESTORE_JOB_ID_PATTERN,
-  RESTORE_MAINTENANCE_FILE_CONTENT,
-  RESTORE_OWN_SCRIPT,
   RESTORE_PREPARE_EXIT_CODES,
   RESTORE_SNAPSHOT_ID_PATTERN,
   RESTORE_STAGES,
@@ -331,6 +335,7 @@ export {
   type RestoreNote,
   type RestoreStage,
 } from "./restore-jobs.js";
+export { RESTORE_MAINTENANCE_FILE_CONTENT } from "./site-types/wordpress-restore.js";
 
 export {
   S3RequestError,

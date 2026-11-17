@@ -18,6 +18,7 @@ import {
   renderSftpSshdConfig,
   renderSftpUserFiles,
   sshFingerprint,
+  WORDPRESS_EXECUTOR_SITE_TYPE,
 } from "../src/index.js";
 import {
   commitSftpStatePlan,
@@ -26,6 +27,8 @@ import {
   publicKeyLineFromOpenSshPrivateKey,
 } from "../src/sftp-platform.js";
 import { startMockDockerDaemon } from "./mock-docker-daemon.js";
+
+const WP = () => WORDPRESS_EXECUTOR_SITE_TYPE;
 
 const cleanupTasks: Array<() => Promise<unknown>> = [];
 afterEach(async () => {
@@ -326,7 +329,7 @@ describe("renderSftpUserFiles", () => {
       makeUser({ username: "s9f8e7d6c_admin", passwordHash: HASH_1, siteId: "site_b", serviceInstanceId: "svc_b" }),
     ];
 
-    const files = renderSftpUserFiles(users);
+    const files = renderSftpUserFiles(users, WP);
 
     expect(files.passwd).toBe(
       [
@@ -356,7 +359,7 @@ describe("renderSftpUserFiles", () => {
   });
 
   it("renders only system entries when user list is empty", () => {
-    const files = renderSftpUserFiles([]);
+    const files = renderSftpUserFiles([], WP);
     expect(files.passwd).toBe(
       "root:x:0:0:root:/root:/bin/false\nsshd:x:22:22:sshd:/var/empty:/bin/false\n",
     );
@@ -367,12 +370,12 @@ describe("renderSftpUserFiles", () => {
   it("rejects malformed user fields with VALIDATION_ERROR without echoing passwordHash", () => {
     const canary = "$6$canarysalt123456$" + "a".repeat(86);
     expect(() =>
-      renderSftpUserFiles([makeUser({ username: "root", passwordHash: canary })]),
+      renderSftpUserFiles([makeUser({ username: "root", passwordHash: canary })], WP),
     ).toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
 
     let caught: unknown;
     try {
-      renderSftpUserFiles([makeUser({ passwordHash: `${canary}:extra` })]);
+      renderSftpUserFiles([makeUser({ passwordHash: `${canary}:extra` })], WP);
     } catch (err) {
       caught = err;
     }
@@ -387,9 +390,9 @@ describe("renderSftpUserFiles", () => {
     const uD = makeUser({ username: "s1a2b3c4d_d", passwordHash: HASH_2, siteId: "site_d", serviceInstanceId: "svc_d" });
 
     // [A, B, C] then [A, C, D] keeps A and C lines byte-for-byte and in order with D last
-    const initialABC = renderSftpUserFiles([uA, uB, uC]);
-    const replacedACD = renderSftpUserFiles([uA, uC, uD], initialABC);
-    const freshACD = renderSftpUserFiles([uA, uC, uD]);
+    const initialABC = renderSftpUserFiles([uA, uB, uC], WP);
+    const replacedACD = renderSftpUserFiles([uA, uC, uD], WP, initialABC);
+    const freshACD = renderSftpUserFiles([uA, uC, uD], WP);
 
     expect(replacedACD).toEqual(freshACD);
     expect(replacedACD.passwd).toBe(
@@ -414,12 +417,12 @@ describe("renderSftpUserFiles", () => {
     );
 
     // Also when input order reverses [C, A, D] relative to disk [A, B, C], A and C keep disk order [A, C] with D last
-    const reorderedACD = renderSftpUserFiles([uC, uA, uD], initialABC);
+    const reorderedACD = renderSftpUserFiles([uC, uA, uD], WP, initialABC);
     expect(reorderedACD).toEqual(replacedACD);
 
     // [A, B] then [A, B, C] is the old text plus a tail
-    const initialAB = renderSftpUserFiles([uA, uB]);
-    const appendedABC = renderSftpUserFiles([uA, uB, uC], initialAB);
+    const initialAB = renderSftpUserFiles([uA, uB], WP);
+    const appendedABC = renderSftpUserFiles([uA, uB, uC], WP, initialAB);
     expect(appendedABC.passwd.startsWith(initialAB.passwd)).toBe(true);
     expect(appendedABC.passwd.slice(initialAB.passwd.length)).toBe(
       "s1a2b3c4d_c:x:33:33::/srv/sftp/site_c:/bin/false\n",
@@ -642,7 +645,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
   it("refuses a missing, symlinked, or foreign-owned state directory with HOST_POLICY_DENIED", async () => {
     const uid = process.getuid?.() ?? 1000;
     const missing = path.join(os.tmpdir(), `hp-sftp-missing-${Date.now()}`);
-    await expect(ensureSftpStateFiles(missing, uid)).rejects.toMatchObject({
+    await expect(ensureSftpStateFiles(missing, uid, [], WP)).rejects.toMatchObject({
       code: "HOST_POLICY_DENIED",
     });
 
@@ -653,19 +656,19 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     await mkdir(realDir, { mode: 0o700 });
     await symlink(realDir, linkDir);
 
-    await expect(ensureSftpStateFiles(linkDir, uid)).rejects.toMatchObject({
+    await expect(ensureSftpStateFiles(linkDir, uid, [], WP)).rejects.toMatchObject({
       code: "HOST_POLICY_DENIED",
     });
-    await expect(ensureSftpStateFiles(realDir, uid + 1)).rejects.toMatchObject({
+    await expect(ensureSftpStateFiles(realDir, uid + 1, [], WP)).rejects.toMatchObject({
       code: "HOST_POLICY_DENIED",
     });
 
     await chmod(realDir, 0o755);
-    await expect(ensureSftpStateFiles(realDir, uid)).rejects.toMatchObject({
+    await expect(ensureSftpStateFiles(realDir, uid, [], WP)).rejects.toMatchObject({
       code: "HOST_POLICY_DENIED",
     });
     await chmod(realDir, 0o700);
-    const guardResult = await ensureSftpStateFiles(realDir, uid);
+    const guardResult = await ensureSftpStateFiles(realDir, uid, [], WP);
     expect(sshFingerprint(guardResult.publicKeyLine)).toMatch(/^SHA256:[A-Za-z0-9+/]{43}$/);
     expect("fingerprint" in guardResult).toBe(false);
   });
@@ -683,7 +686,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     const user1 = makeUser({ username: "s1a2b3c4d_web", siteId: "site_a", serviceInstanceId: "svc_a" });
     const user2 = makeUser({ username: "s1a2b3c4d_ci", siteId: "site_a", serviceInstanceId: "svc_a" });
 
-    const first = await ensureSftpStateFiles(stateDir, uid, [user1, user2]);
+    const first = await ensureSftpStateFiles(stateDir, uid, [user1, user2], WP);
     expect(sshFingerprint(first.publicKeyLine)).toMatch(/^SHA256:[A-Za-z0-9+/]{43}$/);
     expect("fingerprint" in first).toBe(false);
 
@@ -703,7 +706,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     const shadowInoBefore = (await lstat(path.join(stateDir, "users", "shadow"))).ino;
 
     // Rewrite with fewer users (tests truncate + same inode)
-    const second = await ensureSftpStateFiles(stateDir, uid, [user1]);
+    const second = await ensureSftpStateFiles(stateDir, uid, [user1], WP);
     expect(second.publicKeyLine).toBe(first.publicKeyLine);
     expect(await readFile(path.join(stateDir, "etc", "ssh_host_ed25519_key"), "utf8")).toBe(keyBefore);
     expect(await readFile(path.join(stateDir, "etc", "ssh_host_ed25519_key.pub"), "utf8")).toBe(pubBefore);
@@ -726,7 +729,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     await chmod(stateDir, 0o700);
     const uid = process.getuid?.() ?? 1000;
 
-    const first = await ensureSftpStateFiles(stateDir, uid, [makeUser()]);
+    const first = await ensureSftpStateFiles(stateDir, uid, [makeUser()], WP);
     const keyPath = path.join(stateDir, "etc", "ssh_host_ed25519_key");
     const pubPath = path.join(stateDir, "etc", "ssh_host_ed25519_key.pub");
     const keyBytesBefore = await readFile(keyPath);
@@ -734,7 +737,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
 
     // 1. Delete .pub
     await rm(pubPath);
-    const afterDelete = await ensureSftpStateFiles(stateDir, uid, [makeUser()]);
+    const afterDelete = await ensureSftpStateFiles(stateDir, uid, [makeUser()], WP);
     expect(afterDelete.publicKeyLine).toBe(first.publicKeyLine);
     expect(await readFile(keyPath)).toEqual(keyBytesBefore);
     expect(await readFile(pubPath, "utf8")).toBe(pubTextBefore);
@@ -743,7 +746,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     // 2. Empty .pub
     await chmod(pubPath, 0o644);
     await writeFile(pubPath, "", "utf8");
-    const afterEmpty = await ensureSftpStateFiles(stateDir, uid, [makeUser()]);
+    const afterEmpty = await ensureSftpStateFiles(stateDir, uid, [makeUser()], WP);
     expect(afterEmpty.publicKeyLine).toBe(first.publicKeyLine);
     expect(await readFile(keyPath)).toEqual(keyBytesBefore);
     expect(await readFile(pubPath, "utf8")).toBe(pubTextBefore);
@@ -752,7 +755,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     // 3. Garbage .pub
     await chmod(pubPath, 0o644);
     await writeFile(pubPath, "garbage", "utf8");
-    const planGarbage = await prepareSftpStatePlan(stateDir, uid, [makeUser()]);
+    const planGarbage = await prepareSftpStatePlan(stateDir, uid, [makeUser()], WP);
     expect(planGarbage.etcReady).toBe(false);
     const afterGarbage = await commitSftpStatePlan(planGarbage);
     expect(afterGarbage.publicKeyLine).toBe(first.publicKeyLine);
@@ -764,7 +767,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     const otherKey = generateEd25519HostKey();
     await chmod(pubPath, 0o644);
     await writeFile(pubPath, otherKey.publicKeyLine, "utf8");
-    const planMismatch = await prepareSftpStatePlan(stateDir, uid, [makeUser()]);
+    const planMismatch = await prepareSftpStatePlan(stateDir, uid, [makeUser()], WP);
     expect(planMismatch.etcReady).toBe(false);
     const afterMismatch = await commitSftpStatePlan(planMismatch);
     expect(afterMismatch.publicKeyLine).toBe(first.publicKeyLine);
@@ -787,7 +790,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
       await chmod(keyPath, 0o644);
       await writeFile(keyPath, pem, "utf8");
       await chmod(keyPath, 0o444);
-      await expect(prepareSftpStatePlan(stateDir, uid, [makeUser()]), label).rejects.toMatchObject({
+      await expect(prepareSftpStatePlan(stateDir, uid, [makeUser()], WP), label).rejects.toMatchObject({
         code: "HOST_POLICY_DENIED",
       });
       expect(await readFile(pubPath, "utf8"), label).toBe(pubBeforeDamage);
@@ -885,7 +888,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     ]);
     expect(sftpCtr()).toBeUndefined();
 
-    const emptyFiles = renderSftpUserFiles([]);
+    const emptyFiles = renderSftpUserFiles([], WP);
     expect(await readFile(passwdPath, "utf8")).toBe(emptyFiles.passwd);
     expect(await readFile(groupPath, "utf8")).toBe(emptyFiles.group);
     expect(await readFile(shadowPath, "utf8")).toBe(emptyFiles.shadow);
@@ -906,17 +909,17 @@ describe("ensureSftpStateFiles and readSftpState", () => {
     await chmod(stateDir, 0o700);
     const uid = process.getuid?.() ?? 1000;
 
-    await ensureSftpStateFiles(stateDir, uid, [makeUser()]);
+    await ensureSftpStateFiles(stateDir, uid, [makeUser()], WP);
     const keyPath = path.join(stateDir, "etc", "ssh_host_ed25519_key");
     const damagedPem = "corrupt-key-content\n";
     await chmod(keyPath, 0o644);
     await writeFile(keyPath, damagedPem, "utf8");
     await chmod(keyPath, 0o444);
 
-    const plan = await prepareSftpStatePlan(stateDir, uid, []);
+    const plan = await prepareSftpStatePlan(stateDir, uid, [], WP);
     await commitSftpStatePlan(plan);
 
-    const emptyFiles = renderSftpUserFiles([]);
+    const emptyFiles = renderSftpUserFiles([], WP);
     expect(await readFile(path.join(stateDir, "users", "passwd"), "utf8")).toBe(emptyFiles.passwd);
     expect(await readFile(path.join(stateDir, "users", "group"), "utf8")).toBe(emptyFiles.group);
     expect(await readFile(path.join(stateDir, "users", "shadow"), "utf8")).toBe(emptyFiles.shadow);
@@ -925,7 +928,7 @@ describe("ensureSftpStateFiles and readSftpState", () => {
 
   const uOne = makeUser({ username: "s1a2b3c4d_one", passwordHash: HASH_1, siteId: "site_a", serviceInstanceId: "svc_a" });
   const uTwo = makeUser({ username: "s1a2b3c4d_two", passwordHash: HASH_2, siteId: "site_a", serviceInstanceId: "svc_a" });
-  const baseOne = renderSftpUserFiles([uOne]);
+  const baseOne = renderSftpUserFiles([uOne], WP);
 
   it.each([
     {
@@ -1006,17 +1009,17 @@ describe("ensureSftpStateFiles and readSftpState", () => {
       await chmod(stateDir, 0o700);
       const uid = process.getuid?.() ?? 1000;
 
-      await ensureSftpStateFiles(stateDir, uid, [uOne]);
+      await ensureSftpStateFiles(stateDir, uid, [uOne], WP);
       const usersDir = path.join(stateDir, "users");
       await mutate(usersDir);
 
-      const plan = await prepareSftpStatePlan(stateDir, uid, wanted);
+      const plan = await prepareSftpStatePlan(stateDir, uid, wanted, WP);
       if (expectedChangeKind !== undefined) {
         expect(plan.userChangeKind).toBe(expectedChangeKind);
       }
       await commitSftpStatePlan(plan);
 
-      const fresh = renderSftpUserFiles(wanted);
+      const fresh = renderSftpUserFiles(wanted, WP);
       expect(await readFile(path.join(usersDir, "passwd"), "utf8")).toBe(fresh.passwd);
       expect(await readFile(path.join(usersDir, "group"), "utf8")).toBe(fresh.group);
       expect(await readFile(path.join(usersDir, "shadow"), "utf8")).toBe(fresh.shadow);

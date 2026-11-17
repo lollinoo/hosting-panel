@@ -4,12 +4,11 @@ import { chmod, lstat, mkdir, open, readdir, readFile, rm, statfs, unlink } from
 import path from "node:path";
 import {
   BackupsIpcRequestSchema,
-  DEFAULT_PHP_VERSION,
+  LEGACY_SITE_TYPE,
   RESTIC_IMAGE,
   SHARED_MARIADB_IMAGE,
   SITE_DATABASE_NAME_PATTERN,
   SITE_FILE_CHUNK_BYTES,
-  resolveWordpressImage,
   type BackupFailureClass,
   type BackupJobStatus,
   type BackupSiteState,
@@ -17,6 +16,7 @@ import {
   type BackupsResultByAction,
   type BackupTarget,
   type BackupTestResult,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
@@ -57,6 +57,7 @@ import {
   buildArchiveContainerPayload,
   buildRestoreFetchContainerPayload,
   buildRestoreFilesContainerPayload,
+  buildRestoreFilesFinishContainerPayload,
   buildRestoreFinishContainerPayload,
   buildRestoreOwnContainerPayload,
   buildRestorePrepareContainerPayload,
@@ -91,6 +92,7 @@ import {
 import { demuxDockerLogStream } from "./docker-logs.js";
 import { probeS3, S3_PROBE_BUDGET_MS } from "./s3-probe.js";
 import { DEFAULT_SHARED_DB_DATA_DIR } from "./shared-database.js";
+import { resolveExecutorSiteType, type ExecutorSiteType } from "./site-types/index.js";
 import {
   ExecutorCodedError,
   assertContainedPath,
@@ -132,6 +134,7 @@ export interface BackupRunnerDeps {
   }>;
   readonly now?: () => number;
   readonly fetch?: typeof globalThis.fetch;
+  readonly resolveSiteType?: (key: SiteTypeKey) => ExecutorSiteType;
 }
 
 type StartBackupRequest = Extract<BackupsIpcRequest, { action: "start" }>;
@@ -189,6 +192,16 @@ type ContainerOutcome =
 
 type StepOutcome = ContainerOutcome | { readonly kind: "error" };
 
+interface RestoreIds {
+  readonly jobId: string;
+  readonly siteId: string;
+  readonly serviceInstanceId: string;
+}
+
+/** The note's siteType field: absent for the legacy type (R205 2.3). */
+const noteSiteType = (key: string | undefined): { readonly siteType?: string } =>
+  key === undefined || key === LEGACY_SITE_TYPE ? {} : { siteType: key };
+
 const cloneJobStatus = (status: BackupJobStatus): BackupJobStatus => {
   const cloned: BackupJobStatus = {
     jobId: status.jobId,
@@ -212,6 +225,7 @@ function toEngineError(err: unknown, fallbackMessage: string): ExecutorCodedErro
 /** Coordinates backup target tests, site backup jobs, snapshot forgets, and orphan cleanup. */
 export class BackupRunner {
   private readonly deps: BackupRunnerDeps;
+  private readonly resolveSiteType: (key: SiteTypeKey) => ExecutorSiteType;
   private readonly backupWorkDir: string;
   private readonly restoresDir: string;
   private readonly archivesDir: string;
@@ -231,6 +245,7 @@ export class BackupRunner {
 
   public constructor(deps: BackupRunnerDeps) {
     this.deps = deps;
+    this.resolveSiteType = deps.resolveSiteType ?? resolveExecutorSiteType;
     this.backupWorkDir = path.resolve(deps.backupWorkDir ?? DEFAULT_BACKUP_WORK_DIR);
     this.restoresDir = path.join(this.backupWorkDir, "restores");
     this.archivesDir = path.join(this.backupWorkDir, "archives");
@@ -719,7 +734,7 @@ export class BackupRunner {
     entry.settledAtMs = this.nowMs();
   }
 
-  private async runBackupJob(req: StartBackupRequest, entry: JobRecord): Promise<void> {
+  private async runBackupJob(req: StartBackupRequest, t: ExecutorSiteType, entry: JobRecord): Promise<void> {
     const createdRefs: string[] = [];
     let stagingVolumeName: string | null = null;
     let secretInstanceId: string | null = null;
@@ -758,7 +773,7 @@ export class BackupRunner {
       }
       await this.deps.ensureBackupNetwork();
 
-      const siteVolume = getManagedVolumeName(req.serviceInstanceId, "html");
+      const siteVolume = getManagedVolumeName(req.serviceInstanceId, t.def.files.volumeSuffix);
       const siteVolRes = await this.callDocker(
         "GET",
         `/volumes/${encodeURIComponent(siteVolume)}`,
@@ -770,7 +785,7 @@ export class BackupRunner {
 
       let databases: readonly { name: string; sizeBytes: number }[];
       try {
-        databases = await this.deps.listSiteDatabases(req.siteId);
+        databases = t.def.database === null ? [] : await this.deps.listSiteDatabases(req.siteId);
       } catch {
         setOutcome("failed", "database_dump_failed", null);
         return;
@@ -866,6 +881,7 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
+        siteType: t,
         target: req.target,
         backupNetworkName: this.deps.backupNetworkName,
         secretBinds,
@@ -1097,19 +1113,34 @@ export class BackupRunner {
     }
   }
 
+  /** The step that removes the restore dir: the database finish, or the files finish of a type without a database. */
+  private restoreFinishSpec(t: ExecutorSiteType, ids: RestoreIds, dbSecret: SecretMounts | null): BackupContainerSpec {
+    const base = { jobId: ids.jobId, siteId: ids.siteId, serviceInstanceId: ids.serviceInstanceId, siteType: t };
+    if (t.def.database === null) return buildRestoreFilesFinishContainerPayload(base);
+    if (dbSecret === null) throw new ExecutorCodedError("Database secret missing", "INTERNAL_ERROR");
+    return buildRestoreFinishContainerPayload({
+      ...base,
+      sharedDbNetworkName: this.deps.sharedDbNetworkName,
+      secretBinds: dbSecret.secretBinds,
+      secretFileEnv: dbSecret.secretFileEnv,
+    });
+  }
+
   private async runPreSwitchUndoDb(
-    input: {
-      readonly jobId: string;
-      readonly siteId: string;
-      readonly serviceInstanceId: string;
-      readonly stagingVolumeName: string;
-    },
-    dbSecret: SecretMounts,
+    t: ExecutorSiteType,
+    input: RestoreIds & { readonly stagingVolumeName: string },
+    dbSecret: SecretMounts | null,
     createdRefs: string[],
   ): Promise<void> {
+    if (t.def.database === null) {
+      await this.tryRunContainer(this.restoreFinishSpec(t, input, null), createdRefs, BACKUP_RESTORE_UNDO_TIMEOUT_MS);
+      return;
+    }
+    if (dbSecret === null) return;
     const undoDbSpec = buildRestoreUndoDbContainerPayload({
       jobId: input.jobId,
       siteId: input.siteId,
+      siteType: t,
       serviceInstanceId: input.serviceInstanceId,
       stagingVolumeName: input.stagingVolumeName,
       sharedDbNetworkName: this.deps.sharedDbNetworkName,
@@ -1120,18 +1151,15 @@ export class BackupRunner {
   }
 
   private async runSwitchUndoSequence(
-    input: {
-      readonly jobId: string;
-      readonly siteId: string;
-      readonly serviceInstanceId: string;
-      readonly stagingVolumeName: string;
-    },
-    dbSecret: SecretMounts,
+    t: ExecutorSiteType,
+    input: RestoreIds & { readonly stagingVolumeName: string },
+    dbSecret: SecretMounts | null,
     createdRefs: string[],
   ): Promise<"switch_undone" | "undo_incomplete"> {
     const undoFilesSpec = buildRestoreUndoFilesContainerPayload({
       jobId: input.jobId,
       siteId: input.siteId,
+      siteType: t,
       serviceInstanceId: input.serviceInstanceId,
     });
     const filesOutcome = await this.tryRunContainer(
@@ -1146,9 +1174,21 @@ export class BackupRunner {
       return "undo_incomplete";
     }
 
+    if (t.def.database === null) {
+      const finish = await this.tryRunContainer(
+        this.restoreFinishSpec(t, input, null),
+        createdRefs,
+        BACKUP_RESTORE_UNDO_TIMEOUT_MS,
+      );
+      return finish.kind === "exited" && classifyRestoreFinishExitCode(finish.exitCode) === null
+        ? "switch_undone"
+        : "undo_incomplete";
+    }
+    if (dbSecret === null) return "undo_incomplete";
     const undoDbSpec = buildRestoreUndoDbContainerPayload({
       jobId: input.jobId,
       siteId: input.siteId,
+      siteType: t,
       serviceInstanceId: input.serviceInstanceId,
       stagingVolumeName: input.stagingVolumeName,
       sharedDbNetworkName: this.deps.sharedDbNetworkName,
@@ -1217,7 +1257,7 @@ export class BackupRunner {
   }
 
   private endedRestoreNote(
-    meta: { readonly jobId: string; readonly siteId: string; readonly serviceInstanceId: string },
+    meta: RestoreIds & { readonly siteType?: string },
     state: "succeeded" | "failed",
     failure: BackupFailureClass | null,
   ): RestoreNote {
@@ -1226,6 +1266,7 @@ export class BackupRunner {
       jobId: meta.jobId,
       siteId: meta.siteId,
       serviceInstanceId: meta.serviceInstanceId,
+      ...noteSiteType(meta.siteType),
       stage: "ended",
       state,
       failure,
@@ -1251,10 +1292,14 @@ export class BackupRunner {
     return removed;
   }
 
-  /** Creates the missing site files volume and gives it to www-data; false when either step fails. */
-  private async createSiteVolume(req: RestoreBackupRequest, createdRefs: string[]): Promise<boolean> {
+  /** Creates the missing site files volume and gives it to the type's owner; false when either step fails. */
+  private async createSiteVolume(
+    req: RestoreBackupRequest,
+    t: ExecutorSiteType,
+    createdRefs: string[],
+  ): Promise<boolean> {
     const res = await this.callDocker("POST", "/volumes/create", {
-      Name: getManagedVolumeName(req.serviceInstanceId, "html"),
+      Name: getManagedVolumeName(req.serviceInstanceId, t.def.files.volumeSuffix),
       Labels: {
         "io.hostingpanel.managed": "true",
         "io.hostingpanel.site_id": req.siteId,
@@ -1263,7 +1308,12 @@ export class BackupRunner {
     });
     if (res.statusCode !== 201 && res.statusCode !== 200) return false;
     const own = await this.tryRunContainer(
-      buildRestoreOwnContainerPayload(req),
+      buildRestoreOwnContainerPayload({
+        jobId: req.jobId,
+        siteId: req.siteId,
+        siteType: t,
+        serviceInstanceId: req.serviceInstanceId,
+      }),
       createdRefs,
       BACKUP_RESTORE_PREPARE_TIMEOUT_MS,
     );
@@ -1271,8 +1321,8 @@ export class BackupRunner {
   }
 
   /** Removes the site files volume this restore created; a failure leaves it empty (R122: no retry). */
-  private async removeCreatedVolume(ended: RestoreNote): Promise<void> {
-    const volume = getManagedVolumeName(ended.serviceInstanceId, "html");
+  private async removeCreatedVolume(ended: RestoreNote, t: ExecutorSiteType): Promise<void> {
+    const volume = getManagedVolumeName(ended.serviceInstanceId, t.def.files.volumeSuffix);
     const res = await this.deps
       .request("DELETE", `/volumes/${encodeURIComponent(volume)}`)
       .catch(() => null);
@@ -1327,7 +1377,7 @@ export class BackupRunner {
   private async cleanupSameSiteUndoIncomplete(
     siteId: string,
     currentJobId: string,
-    dbSecret: SecretMounts,
+    dbSecret: SecretMounts | null,
   ): Promise<void> {
     const notes = await this.listRestoreNotesSafe({ logErrors: false }).catch(() => []);
     for (const note of notes) {
@@ -1342,16 +1392,9 @@ export class BackupRunner {
       }
       const cleanupRefs: string[] = [];
       try {
-        const finishSpec = buildRestoreFinishContainerPayload({
-          jobId: note.jobId,
-          siteId: note.siteId,
-          serviceInstanceId: note.serviceInstanceId,
-          sharedDbNetworkName: this.deps.sharedDbNetworkName,
-          secretBinds: dbSecret.secretBinds,
-          secretFileEnv: dbSecret.secretFileEnv,
-        });
+        const t = this.resolveSiteType((note.siteType ?? LEGACY_SITE_TYPE) as SiteTypeKey);
         const finishOutcome = await this.tryRunContainer(
-          finishSpec,
+          this.restoreFinishSpec(t, note, dbSecret),
           cleanupRefs,
           BACKUP_RESTORE_FINISH_TIMEOUT_MS,
         );
@@ -1383,7 +1426,7 @@ export class BackupRunner {
     }
   }
 
-  private async runRestoreJob(req: RestoreBackupRequest, entry: JobRecord): Promise<void> {
+  private async runRestoreJob(req: RestoreBackupRequest, t: ExecutorSiteType, entry: JobRecord): Promise<void> {
     const createdRefs: string[] = [];
     const secretInstanceIds: string[] = [];
     let stagingVolumeName: string | null = null;
@@ -1408,6 +1451,7 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
+        ...noteSiteType(t.def.key),
         stage: "prepare",
       });
       noteCreated = true;
@@ -1435,8 +1479,8 @@ export class BackupRunner {
 
       if (
         (await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok" ||
-        (await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) !== "ok" ||
-        (await this.tryEnsureImage(resolveWordpressImage(DEFAULT_PHP_VERSION))) !== "ok"
+        (t.def.database !== null && (await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) !== "ok") ||
+        (await this.tryEnsureImage(t.restore.filesImage)) !== "ok"
       ) {
         setOutcome("failed", "restore_prepare_failed");
         return;
@@ -1444,7 +1488,7 @@ export class BackupRunner {
 
       await this.deps.ensureBackupNetwork();
 
-      const siteVolume = getManagedVolumeName(req.serviceInstanceId, "html");
+      const siteVolume = getManagedVolumeName(req.serviceInstanceId, t.def.files.volumeSuffix);
       const siteVolRes = await this.callDocker(
         "GET",
         `/volumes/${encodeURIComponent(siteVolume)}`,
@@ -1456,11 +1500,12 @@ export class BackupRunner {
           jobId: req.jobId,
           siteId: req.siteId,
           serviceInstanceId: req.serviceInstanceId,
+          ...noteSiteType(t.def.key),
           stage: "prepare",
           createdVolume: true,
         });
         createdVolume = true;
-        if (!(await this.createSiteVolume(req, createdRefs))) {
+        if (!(await this.createSiteVolume(req, t, createdRefs))) {
           setOutcome("failed", "restore_prepare_failed");
           return;
         }
@@ -1469,8 +1514,10 @@ export class BackupRunner {
         return;
       }
 
-      const dbSecret = await this.writeDbSecrets(`job_bk_db_${req.jobId}`, secretInstanceIds);
-      if (dbSecret === null) {
+      // Null exactly when the type has no database.
+      const dbSecret =
+        t.def.database === null ? null : await this.writeDbSecrets(`job_bk_db_${req.jobId}`, secretInstanceIds);
+      if (t.def.database !== null && dbSecret === null) {
         setOutcome("failed", "restore_prepare_failed");
         return;
       }
@@ -1486,6 +1533,7 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
+        siteType: t,
         snapshotId: req.snapshotId,
         target: req.target,
         backupNetworkName: this.deps.backupNetworkName,
@@ -1506,6 +1554,7 @@ export class BackupRunner {
               "restore_prepare_failed")
             : "restore_prepare_failed";
         await this.runPreSwitchUndoDb(
+          t,
           {
             jobId: req.jobId,
             siteId: req.siteId,
@@ -1522,6 +1571,7 @@ export class BackupRunner {
       const dumpKiB = this.parseFetchDumpKiB(fetchOutcome.stdout);
       if (dumpKiB === null) {
         await this.runPreSwitchUndoDb(
+          t,
           {
             jobId: req.jobId,
             siteId: req.siteId,
@@ -1535,9 +1585,10 @@ export class BackupRunner {
         return;
       }
 
-      const diskCheck = await this.checkDbDiskSpace(dumpKiB);
+      const diskCheck = dbSecret === null ? "ok" : await this.checkDbDiskSpace(dumpKiB);
       if (diskCheck !== "ok") {
         await this.runPreSwitchUndoDb(
+          t,
           {
             jobId: req.jobId,
             siteId: req.siteId,
@@ -1551,38 +1602,42 @@ export class BackupRunner {
         return;
       }
 
-      const prepareSpec = buildRestorePrepareContainerPayload({
-        jobId: req.jobId,
-        siteId: req.siteId,
-        stagingVolumeName,
-        sharedDbNetworkName: this.deps.sharedDbNetworkName,
-        secretBinds: dbSecret.secretBinds,
-        secretFileEnv: dbSecret.secretFileEnv,
-      });
-      const prepareOutcome = await this.tryRunContainer(
-        prepareSpec,
-        createdRefs,
-        BACKUP_RESTORE_PREPARE_TIMEOUT_MS,
-        { captureStderr: true },
-      );
-      if (prepareOutcome.kind !== "exited" || prepareOutcome.exitCode !== 0) {
-        this.logInvalidObjectNameIfPresent(req.jobId, req.siteId, "prepare", prepareOutcome);
-        const problem =
-          prepareOutcome.kind === "exited"
-            ? (classifyRestorePrepareExitCode(prepareOutcome.exitCode) ?? "restore_prepare_failed")
-            : "restore_prepare_failed";
-        await this.runPreSwitchUndoDb(
-          {
-            jobId: req.jobId,
-            siteId: req.siteId,
-            serviceInstanceId: req.serviceInstanceId,
-            stagingVolumeName,
-          },
-          dbSecret,
+      if (dbSecret !== null) {
+        const prepareSpec = buildRestorePrepareContainerPayload({
+          jobId: req.jobId,
+          siteId: req.siteId,
+          siteType: t,
+          stagingVolumeName,
+          sharedDbNetworkName: this.deps.sharedDbNetworkName,
+          secretBinds: dbSecret.secretBinds,
+          secretFileEnv: dbSecret.secretFileEnv,
+        });
+        const prepareOutcome = await this.tryRunContainer(
+          prepareSpec,
           createdRefs,
+          BACKUP_RESTORE_PREPARE_TIMEOUT_MS,
+          { captureStderr: true },
         );
-        setOutcome("failed", problem);
-        return;
+        if (prepareOutcome.kind !== "exited" || prepareOutcome.exitCode !== 0) {
+          this.logInvalidObjectNameIfPresent(req.jobId, req.siteId, "prepare", prepareOutcome);
+          const problem =
+            prepareOutcome.kind === "exited"
+              ? (classifyRestorePrepareExitCode(prepareOutcome.exitCode) ?? "restore_prepare_failed")
+              : "restore_prepare_failed";
+          await this.runPreSwitchUndoDb(
+            t,
+            {
+              jobId: req.jobId,
+              siteId: req.siteId,
+              serviceInstanceId: req.serviceInstanceId,
+              stagingVolumeName,
+            },
+            dbSecret,
+            createdRefs,
+          );
+          setOutcome("failed", problem);
+          return;
+        }
       }
 
       await writeRestoreNote(this.restoresDir, {
@@ -1590,45 +1645,51 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
+        ...noteSiteType(t.def.key),
         stage: "switch",
         ...(createdVolume ? { createdVolume: true as const } : {}),
       });
 
-      const switchSpec = buildRestoreSwitchContainerPayload({
-        jobId: req.jobId,
-        siteId: req.siteId,
-        serviceInstanceId: req.serviceInstanceId,
-        stagingVolumeName,
-        sharedDbNetworkName: this.deps.sharedDbNetworkName,
-        secretBinds: dbSecret.secretBinds,
-        secretFileEnv: dbSecret.secretFileEnv,
-      });
-      const switchOutcome = await this.tryRunContainer(
-        switchSpec,
-        createdRefs,
-        BACKUP_RESTORE_SWITCH_TIMEOUT_MS,
-        { captureStderr: true },
-      );
-      if (switchOutcome.kind !== "exited" || switchOutcome.exitCode !== 0) {
-        this.logInvalidObjectNameIfPresent(req.jobId, req.siteId, "switch", switchOutcome);
-        const undoOutcome = await this.runSwitchUndoSequence(
-          {
-            jobId: req.jobId,
-            siteId: req.siteId,
-            serviceInstanceId: req.serviceInstanceId,
-            stagingVolumeName,
-          },
-          dbSecret,
+      if (dbSecret !== null) {
+        const switchSpec = buildRestoreSwitchContainerPayload({
+          jobId: req.jobId,
+          siteId: req.siteId,
+          siteType: t,
+          serviceInstanceId: req.serviceInstanceId,
+          stagingVolumeName,
+          sharedDbNetworkName: this.deps.sharedDbNetworkName,
+          secretBinds: dbSecret.secretBinds,
+          secretFileEnv: dbSecret.secretFileEnv,
+        });
+        const switchOutcome = await this.tryRunContainer(
+          switchSpec,
           createdRefs,
+          BACKUP_RESTORE_SWITCH_TIMEOUT_MS,
+          { captureStderr: true },
         );
-        keepOnUndoIncomplete = undoOutcome === "undo_incomplete";
-        setOutcome("failed", undoOutcome);
-        return;
+        if (switchOutcome.kind !== "exited" || switchOutcome.exitCode !== 0) {
+          this.logInvalidObjectNameIfPresent(req.jobId, req.siteId, "switch", switchOutcome);
+          const undoOutcome = await this.runSwitchUndoSequence(
+            t,
+            {
+              jobId: req.jobId,
+              siteId: req.siteId,
+              serviceInstanceId: req.serviceInstanceId,
+              stagingVolumeName,
+            },
+            dbSecret,
+            createdRefs,
+          );
+          keepOnUndoIncomplete = undoOutcome === "undo_incomplete";
+          setOutcome("failed", undoOutcome);
+          return;
+        }
       }
 
       const filesSpec = buildRestoreFilesContainerPayload({
         jobId: req.jobId,
         siteId: req.siteId,
+        siteType: t,
         serviceInstanceId: req.serviceInstanceId,
       });
       const filesOutcome = await this.tryRunContainer(
@@ -1638,6 +1699,7 @@ export class BackupRunner {
       );
       if (filesOutcome.kind !== "exited" || filesOutcome.exitCode !== 0) {
         const undoOutcome = await this.runSwitchUndoSequence(
+          t,
           {
             jobId: req.jobId,
             siteId: req.siteId,
@@ -1657,20 +1719,13 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
+        ...noteSiteType(t.def.key),
         stage: "switched",
         ...(createdVolume ? { createdVolume: true as const } : {}),
       });
 
-      const finishSpec = buildRestoreFinishContainerPayload({
-        jobId: req.jobId,
-        siteId: req.siteId,
-        serviceInstanceId: req.serviceInstanceId,
-        sharedDbNetworkName: this.deps.sharedDbNetworkName,
-        secretBinds: dbSecret.secretBinds,
-        secretFileEnv: dbSecret.secretFileEnv,
-      });
       const finishOutcome = await this.tryRunContainer(
-        finishSpec,
+        this.restoreFinishSpec(t, req, dbSecret),
         createdRefs,
         BACKUP_RESTORE_FINISH_TIMEOUT_MS,
       );
@@ -1703,7 +1758,7 @@ export class BackupRunner {
         // Cast: TypeScript narrows the variable to its initial value inside `finally`.
         (finalFailure as BackupJobStatus["failure"]) !== "undo_incomplete" &&
         !keepOnUndoIncomplete;
-      const ended = this.endedRestoreNote(req, finalState, finalFailure);
+      const ended = this.endedRestoreNote({ ...req, siteType: t.def.key }, finalState, finalFailure);
       const noteSettled = noteCreated && !leaveNoteSwitched ? await this.writeEndedRestoreNote(ended) : true;
       await this.cleanupContainersAndSecrets(
         createdRefs,
@@ -1711,7 +1766,7 @@ export class BackupRunner {
         secretInstanceIds,
       );
       // Only after the job's containers are gone, so the volume is no longer in use.
-      if (removeCreated && noteSettled) await this.removeCreatedVolume(ended);
+      if (removeCreated && noteSettled) await this.removeCreatedVolume(ended, t);
       this.activeSiteIds.delete(req.siteId);
       this.activeJobCount = Math.max(0, this.activeJobCount - 1);
       this.settleEntry(entry, finalState, finalFailure, null);
@@ -1727,16 +1782,19 @@ export class BackupRunner {
     let finalState: "succeeded" | "failed" = "failed";
     let finalFailure: BackupJobStatus["failure"] =
       note.stage === "prepare" ? "interrupted" : "undo_incomplete";
+    let t: ExecutorSiteType | null = null;
 
     try {
+      t = this.resolveSiteType((note.siteType ?? LEGACY_SITE_TYPE) as SiteTypeKey);
+      const noDb = t.def.database === null;
       if (note.stage === "prepare") {
-        if ((await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) === "ok") {
-          const dbSecret = await this.writeDbSecrets(
-            `job_bk_db_${note.jobId}`,
-            secretInstanceIds,
-          );
-          if (dbSecret) {
+        if ((await this.tryEnsureImage(noDb ? t.restore.filesImage : SHARED_MARIADB_IMAGE)) === "ok") {
+          const dbSecret = noDb
+            ? null
+            : await this.writeDbSecrets(`job_bk_db_${note.jobId}`, secretInstanceIds);
+          if (noDb || dbSecret) {
             await this.runPreSwitchUndoDb(
+              t,
               {
                 jobId: note.jobId,
                 siteId: note.siteId,
@@ -1752,17 +1810,18 @@ export class BackupRunner {
         finalFailure = "interrupted";
       } else if (note.stage === "switch") {
         const imagesReady =
-          (await this.tryEnsureImage(resolveWordpressImage(DEFAULT_PHP_VERSION))) === "ok" &&
-          (await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) === "ok";
-        const dbSecret = imagesReady
+          (await this.tryEnsureImage(t.restore.filesImage)) === "ok" &&
+          (noDb || (await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) === "ok");
+        const dbSecret = imagesReady && !noDb
           ? await this.writeDbSecrets(`job_bk_db_${note.jobId}`, secretInstanceIds)
           : null;
-        if (!dbSecret) {
+        if (!imagesReady || (!noDb && !dbSecret)) {
           keepVolume = true;
           finalState = "failed";
           finalFailure = "undo_incomplete";
         } else {
           const undoOutcome = await this.runSwitchUndoSequence(
+            t,
             {
               jobId: note.jobId,
               siteId: note.siteId,
@@ -1777,25 +1836,17 @@ export class BackupRunner {
           finalFailure = undoOutcome;
         }
       } else if (note.stage === "switched") {
-        const dbReady = (await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) === "ok";
-        const dbSecret = dbReady
+        const dbReady = (await this.tryEnsureImage(noDb ? t.restore.filesImage : SHARED_MARIADB_IMAGE)) === "ok";
+        const dbSecret = dbReady && !noDb
           ? await this.writeDbSecrets(`job_bk_db_${note.jobId}`, secretInstanceIds)
           : null;
-        if (!dbSecret) {
+        if (!dbReady || (!noDb && !dbSecret)) {
           keepVolume = true;
           finalState = "failed";
           finalFailure = "undo_incomplete";
         } else {
-          const finishSpec = buildRestoreFinishContainerPayload({
-            jobId: note.jobId,
-            siteId: note.siteId,
-            serviceInstanceId: note.serviceInstanceId,
-            sharedDbNetworkName: this.deps.sharedDbNetworkName,
-            secretBinds: dbSecret.secretBinds,
-            secretFileEnv: dbSecret.secretFileEnv,
-          });
           const finishOutcome = await this.tryRunContainer(
-            finishSpec,
+            this.restoreFinishSpec(t, note, dbSecret),
             createdRefs,
             BACKUP_RESTORE_FINISH_TIMEOUT_MS,
           );
@@ -1842,7 +1893,8 @@ export class BackupRunner {
         keepVolume ? null : stagingVolumeName,
         secretInstanceIds,
       );
-      if (removeCreated && noteSettled) await this.removeCreatedVolume(ended);
+      // An unknown type names no volume, so a created one stays.
+      if (removeCreated && noteSettled && t !== null) await this.removeCreatedVolume(ended, t);
       this.settlingJobIds.delete(note.jobId);
       const pending = (this.siteSettlePendingCount.get(note.siteId) ?? 1) - 1;
       if (pending <= 0) {
@@ -2215,10 +2267,12 @@ export class BackupRunner {
     switch (request.action) {
       case "test":
         return (await this.executeTest(request)) as BackupsResultByAction[R["action"]];
-      case "start":
+      case "start": {
+        const t = this.resolveSiteType(request.siteType ?? LEGACY_SITE_TYPE);
         return this.startBackgroundJob(request.siteId, request.jobId, (entry) =>
-          this.runBackupJob(request, entry),
+          this.runBackupJob(request, t, entry),
         ) as BackupsResultByAction[R["action"]];
+      }
       case "forget":
         return this.startBackgroundJob(request.siteId, request.jobId, (entry) =>
           this.runForgetJob(request, entry),
@@ -2228,8 +2282,12 @@ export class BackupRunner {
           this.runPanelJob(request, entry),
         ) as BackupsResultByAction[R["action"]];
       case "siteState":
-        return (await this.readSiteState(request)) as BackupsResultByAction[R["action"]];
+        return (await this.readSiteState(
+          request,
+          this.resolveSiteType(request.siteType ?? LEGACY_SITE_TYPE),
+        )) as BackupsResultByAction[R["action"]];
       case "restore": {
+        const t = this.resolveSiteType(request.siteType ?? LEGACY_SITE_TYPE);
         this.evictJobs();
         if (!this.jobs.has(request.jobId)) {
           const recovered = await this.readStatusFromNote(request.jobId);
@@ -2238,7 +2296,7 @@ export class BackupRunner {
           }
         }
         return this.startBackgroundJob(request.siteId, request.jobId, (entry) =>
-          this.runRestoreJob(request, entry),
+          this.runRestoreJob(request, t, entry),
         ) as BackupsResultByAction[R["action"]];
       }
       case "archive":
@@ -2275,8 +2333,8 @@ export class BackupRunner {
   }
 
   /** Read-only: does the site's files volume exist, and is there a site container (not a job)? */
-  private async readSiteState(req: SiteStateRequest): Promise<BackupSiteState> {
-    const volume = getManagedVolumeName(req.serviceInstanceId, "html");
+  private async readSiteState(req: SiteStateRequest, t: ExecutorSiteType): Promise<BackupSiteState> {
+    const volume = getManagedVolumeName(req.serviceInstanceId, t.def.files.volumeSuffix);
     const volRes = await this.callDocker("GET", `/volumes/${encodeURIComponent(volume)}`);
     if (volRes.statusCode !== 200 && volRes.statusCode !== 404) {
       throw new ExecutorCodedError("Docker volume inspect failed", "DOCKER_ENGINE_UNAVAILABLE");

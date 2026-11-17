@@ -18,6 +18,7 @@ import {
   SimulatedSiteFiles,
   type SimSeedEntry,
 } from "../src/index.js";
+import { resolveSimulatorSiteType } from "../src/simulator-site-types.js";
 
 const UPLOAD_ID = "upload_0123456789ab";
 const UPLOAD_ID_2 = "upload_fedcba987654";
@@ -50,7 +51,7 @@ async function expectFileRefusal(
 }
 
 function makeFiles(): { files: SimulatedSiteFiles; svc: string } {
-  const files = new SimulatedSiteFiles();
+  const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
   const svc = "svc_sim_1";
   files.create(svc);
   return { files, svc };
@@ -59,7 +60,7 @@ function makeFiles(): { files: SimulatedSiteFiles; svc: string } {
 describe("SimulatedSiteFiles", () => {
   describe("lifecycle and adapter wiring", () => {
     it("refuses all operations with NOT_FOUND / not_found before create and after drop", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_missing";
       expect(files.snapshot(svc)).toBeNull();
 
@@ -281,7 +282,7 @@ describe("SimulatedSiteFiles", () => {
 
   describe("list and stat", () => {
     it("sorts directories first then byte order, hides .htpanel-*, and truncates past 5000 entries", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_list";
       const seedEntries: SimSeedEntry[] = [
         { path: "z.txt", kind: "file", data: "1" },
@@ -330,7 +331,7 @@ describe("SimulatedSiteFiles", () => {
 
   describe("symlinks and confinement", () => {
     function seedWithLinks(): { files: SimulatedSiteFiles; svc: string } {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_links";
       files.create(svc);
       files.seed(svc, [
@@ -460,7 +461,7 @@ describe("SimulatedSiteFiles", () => {
 
   describe("read", () => {
     it("reads chunked slices, handles empty files, and rejects dirs and bad offsets", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_read";
       files.create(svc);
       files.seed(svc, [
@@ -654,7 +655,7 @@ describe("SimulatedSiteFiles", () => {
     });
 
     it("refuses upload_mismatch, existing dir/link overwrite, quota limits, and non-writable dirs", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_write_err";
       files.create(svc);
       files.seed(svc, [
@@ -828,7 +829,7 @@ describe("SimulatedSiteFiles", () => {
 
   describe("protected entries, mkdir, move, and delete", () => {
     it("refuses mkdir, write, move, and delete on protected paths and via alias links", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_prot";
       files.create(svc);
       files.seed(svc, [{ path: "wpc", kind: "link", target: "wp-content" }]);
@@ -910,7 +911,7 @@ describe("SimulatedSiteFiles", () => {
     });
 
     it("handles mkdir, move (including move_into_itself via link), and delete (including link deletion and batch atomicity)", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_ops";
       files.create(svc);
       files.seed(svc, [
@@ -1007,7 +1008,7 @@ describe("SimulatedSiteFiles", () => {
 
   describe("archive and extract (HPSIMZIP format)", () => {
     it("archives trees skipping links and .htpanel-*, and round-trips through extract", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_zip";
       files.create(svc);
       files.seed(svc, [
@@ -1172,7 +1173,7 @@ describe("SimulatedSiteFiles", () => {
     });
 
     it("refuses unsafe, symlink, oversized, invalid, conflicting, and protected extracts leaving nothing behind", async () => {
-      const files = new SimulatedSiteFiles();
+      const files = new SimulatedSiteFiles(resolveSimulatorSiteType);
       const svc = "svc_bad_zips";
       files.create(svc);
       files.seed(svc, [
