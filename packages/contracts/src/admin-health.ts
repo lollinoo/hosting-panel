@@ -27,6 +27,10 @@ export const SITE_CONTAINER_DOWN_GRACE_MS = 5 * 60_000;
 // A rise of the restart count counts as restarting this long: above Docker's longest restart wait (1 min) plus one look.
 export const SITE_RESTART_QUIET_MS = 2 * 60_000;
 export const DISK_HIGH_PERCENT = 90;
+export const RESTART_REASON_MAX_LENGTH = 500;
+export const RestartInputSchema = z.object({ reason: z.string().trim().min(1).max(RESTART_REASON_MAX_LENGTH) }).strict();
+export type RestartInput = z.infer<typeof RestartInputSchema>;
+export const PanelContainerSchema = z.enum(PANEL_CONTAINERS);
 
 const DigitsSchema = z.string().regex(/^\d+$/);
 

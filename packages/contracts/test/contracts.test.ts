@@ -223,6 +223,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "ACCOUNT_SETUP_INCOMPLETE",
       "LAST_ADMINISTRATOR_PROTECTED",
       "PASSWORD_RESET_INVALID",
+      "PANEL_CONTAINER_ABSENT",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -234,6 +235,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.ACCOUNT_LOCKED).toBe(423);
     expect(ERROR_CODE_HTTP_STATUS.LAST_ADMINISTRATOR_PROTECTED).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.PASSWORD_RESET_INVALID).toBe(400);
+    expect(ERROR_CODE_HTTP_STATUS.PANEL_CONTAINER_ABSENT).toBe(409);
   });
 
   it("maps status codes accurately", () => {
@@ -483,6 +485,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(OPERATION_KINDS).toContain("site.backups.restore");
     expect(OPERATION_KINDS).toContain("site.backups.download");
     expect(OPERATION_KINDS).toContain("panel.backups.create");
+    expect(OPERATION_KINDS).toContain("panel.container.restart");
     expect(OPERATION_KINDS).toContain("site.wordpress.inspect");
     expect(OPERATION_KINDS).toContain("site.wordpress.update");
 

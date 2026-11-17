@@ -53,6 +53,7 @@ export const OPERATION_KINDS = [
   "site.backups.restore",
   "site.backups.download",
   "panel.backups.create",
+  "panel.container.restart",
   "site.wordpress.inspect",
   "site.wordpress.update",
   "site.wordpress.import",

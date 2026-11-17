@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
 import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
+import { TERMINAL_INPUT_MAX_BYTES, TerminalSessionIdSchema, type TerminalEndReason } from "./admin-terminal.js";
 import {
   MYSQL_NATIVE_PASSWORD_HASH_PATTERN,
   SITE_DATABASE_CUSTOM_NAME_PATTERN,
@@ -352,6 +353,52 @@ export const PanelContainerLogsIpcRequestSchema = z.object({
   component: z.enum(PANEL_CONTAINERS),
   tail: z.number().int().min(1).max(500),
 }).strict();
+
+export const TERMINAL_EXECUTOR_END_REASONS = ["closed", "shell_exited", "idle", "time_limit", "container_gone"] as const satisfies readonly TerminalEndReason[];
+const TerminalEndedWireSchema = z.object({
+  reason: z.enum(TERMINAL_EXECUTOR_END_REASONS),
+  at: z.string().datetime({ offset: true }),
+}).strict();
+export const TerminalOpenIpcRequestSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  siteId: z.string().min(1).max(128),
+  serviceInstanceId: z.string().min(1).max(128),
+}).strict();
+export const TerminalOpenWireSchema = z.object({
+  containerName: z.string().min(1).max(128),
+  openedAt: z.string().datetime({ offset: true }),
+}).strict();
+export const TerminalWriteIpcRequestSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  input: z.string().min(1).refine(
+    (s) => new TextEncoder().encode(s).length <= TERMINAL_INPUT_MAX_BYTES,
+    `Input longer than ${TERMINAL_INPUT_MAX_BYTES} bytes`,
+  ),
+}).strict();
+export const TerminalReadIpcRequestSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export const TerminalReadWireSchema = z.object({
+  output: z.string(),
+  cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  dropped: z.boolean(),
+  ended: TerminalEndedWireSchema.nullable(),
+}).strict();
+export const TerminalSessionIpcRequestSchema = z.object({ sessionId: TerminalSessionIdSchema }).strict();
+export const TerminalEndedEnvelopeSchema = z.object({ data: TerminalEndedWireSchema });
+export const TerminalSessionRecordWireSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  siteId: z.string().min(1).max(128),
+  serviceInstanceId: z.string().min(1).max(128),
+  containerName: z.string().min(1).max(128),
+  openedAt: z.string().datetime({ offset: true }),
+  ended: TerminalEndedWireSchema.nullable(),
+}).strict();
+export const TerminalSessionsEnvelopeSchema = z.object({ data: z.array(TerminalSessionRecordWireSchema).max(256) });
+export const PanelContainerRestartIpcRequestSchema = z.object({ component: z.enum(PANEL_CONTAINERS) }).strict();
+export const PanelContainerRestartWireSchema = z.object({ startedAt: z.string().datetime({ offset: true }).nullable() }).strict();
+export const EmptyDataEnvelopeSchema = z.object({ data: z.null() });
 
 export const HostDiskWireSchema = z.object({
   paths: z.array(z.enum(HOST_DISK_PATHS)).min(1).max(HOST_DISK_PATHS.length),
