@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { getSessionFromRequest } from "@/lib/server-session";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
-import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
+import { bffJsonResponse } from "@/lib/bff-response";
 import { fetchUpstream } from "@/lib/upstream";
+import { readBoundedJsonBody } from "@/lib/bff-proxy";
 
 export async function POST(
   req: Request,
@@ -16,16 +17,9 @@ export async function POST(
   const guardError = validateCsrfAndOrigin(req, session);
   if (guardError) return guardError;
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return bffErrorResponse(
-      "VALIDATION_ERROR",
-      "Corpo della richiesta JSON non valido",
-      400
-    );
-  }
+  const read = await readBoundedJsonBody(req, { requireJsonBody: true });
+  if (!read.ok) return read.response;
+  const body = read.body;
 
   const rawIdempotencyKey = req.headers.get("idempotency-key")?.trim();
   const idempotencyKey =

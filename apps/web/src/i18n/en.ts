@@ -1333,7 +1333,7 @@ export const en: Messages = {
         backup_storage_test_failed: "The last test of the backup storage failed on {date}. Open Backups, check the storage settings, then use Test the connection again.",
         component_down: "{part}: {state}. {reason}. {fix}",
         site_container_down: "{site}: the site should be running, but its container is \"{observed}\". Check its log on the Logs page, then use Restart on its row under Sites' containers.",
-        restore_undo_incomplete: "{site}: a restore failed on {date} and undoing it failed too, so the site may not work. A restore of this site that succeeds repairs it: use Restore on the Backups page.",
+        restore_undo_incomplete: "{site}: a restore failed on {date} and the site was not put back, so the site may not work. A restore of this site that succeeds repairs it: use Restore on the Backups page.",
         restore_stuck: "{site}: a restore started on {date} is still not finished after 6 hours. Check the executor on the server (systemctl status hp-docker-executor), then use sudo systemctl restart hp-docker-executor: at start it brings the restore to an end, and the panel shows the result within a minute.",
         operation_unknown: 'Operation {id} ({what}) has been in an undetermined state since {date}: the panel cannot tell whether it finished. It retries by itself every few seconds; if this stays, check that the executor runs (systemctl status hp-docker-executor), then mark it failed on the server: sudo hp-break-glass unlock --operation-id {id} --reason "<why>".',
         operation_stuck: "Operation {id} ({what}) has not moved since {date}. Check that hp-api runs on the server (systemctl status hp-api), then use sudo systemctl restart hp-api: at start the panel picks it up; if it then shows here as undetermined, follow that alert.",
@@ -1459,7 +1459,7 @@ export const en: Messages = {
       base: {
         absent: "The firewall's base rules are not loaded on this server: until you apply them no port can be opened or closed and no address blocked. Applying them leaves open for incoming connections only ports 22 (SSH), 80 and 443, together with the ports opened on this page, and closes everything else incoming, except site SFTP on port 2222, which goes to a container and does not pass these rules. If SSH on this server listens on another port, do not apply them: you would lose it.",
         unmanaged: "The panel does not manage this server's firewall: the server was installed with the option that leaves the firewall to the administrator (--skip-firewall). The ports and blocks stored on this page are not in force. To hand the firewall to the panel, check that SSH listens on port 22, then run the installer again on the server, over SSH, with --version and the installed version that the Updates page shows, the other options as at installation, without --skip-firewall. The panel restarts and is away for about a minute.",
-        outdated: "The base rules loaded come from an earlier version of the panel and do not hold this page's lists. Apply them again to change ports and blocks.",
+        outdated: "The base rules loaded come from an earlier version of the panel and lack a rule this version adds. The ports opened and the addresses blocked before stay in force until you apply them again. Apply the base rules to add the rule and to change ports and blocks.",
         unregistered: "This server is not registered with the panel yet (the installer does it in its setup step), so the base rules cannot be applied from here. Log in over SSH and run sudo hp-accounts setup --name NAME --hostname NAME --ipv4 ADDRESS (this server's name and its public IPv4 address), then reload this page.",
         unreadable: "The server's firewall cannot be read now: below are the stored lists, without knowing whether they are in force. Reload the page in a minute; if it persists, type on the server, over SSH: systemctl status hp-host-agent.",
         disabled: "On this server the panel does not manage the firewall.",
@@ -1969,7 +1969,7 @@ export const en: Messages = {
         switch_undone:
           "A restore could not complete its last step and put the site back as it was. Usually a long query was holding the database: try again later.",
         undo_incomplete:
-          'A restore stopped halfway and undoing it failed too: the site answers "temporarily unavailable" until a restore of this site succeeds. The customer can start one from the site\'s Backups tab; what the failed attempt left behind is removed by the next restore that succeeds. If that restore fails too, check journalctl -u hp-docker-executor.',
+          'A restore stopped halfway and the site was not put back: until a restore of this site succeeds, the site answers "temporarily unavailable" or shows its own database connection error. The customer can start one from the site\'s Backups tab; what the failed attempt left behind is removed by the next restore that succeeds. If that restore fails too, check journalctl -u hp-docker-executor.',
         definer_missing:
           "The backup holds views, triggers or routines whose database user no longer exists; the site was not touched. Create the user again with the same name, then restore again.",
         address_not_updated:
@@ -2087,7 +2087,7 @@ export const en: Messages = {
         tempNote: "Share it securely; the new administrator must change it at first sign-in.",
         totpTitle: "Two-factor key",
         totpNote: "Before the first sign-in, the new administrator adds this key to an authenticator app. It will not be shown again.",
-        sshRepair: "A lost password or second factor of an administrator is repaired on the server command line: hp-accounts reset-password, hp-accounts reset-totp or hp-break-glass.",
+        sshRepair: "A lost password or second factor of an administrator is repaired on the server command line: hp-accounts reset-password or hp-accounts reset-totp.",
       },
     },
   },
@@ -2109,6 +2109,7 @@ export const en: Messages = {
     VALIDATION_ERROR: "Some details aren't valid. Check the highlighted fields and try again.",
     INTERNAL_ERROR: "Something went wrong on our side. Please try again in a few minutes.",
     RESOURCE_LOCKED: "This site is finishing another change. Try again in a moment.",
+    RATE_LIMITED: "Too many requests right now. Wait a minute and try again; after many changes to SFTP accounts the wait can be up to an hour.",
     ALREADY_EXISTS: "That name is already in use. Choose another one.",
     LAST_ADMINISTRATOR_PROTECTED: "This is the last active administrator: it cannot be disabled. Create or enable another administrator first.",
     PASSWORD_RESET_INVALID: "This link is not valid any more: it has expired or was already used. Ask for a new one.",

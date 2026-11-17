@@ -1,17 +1,14 @@
 import { generateCsrfToken, type SessionData } from "@/lib/session";
 import { setSessionCookie } from "@/lib/server-session";
 import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
-import { bffUpstreamResponse } from "@/lib/bff-proxy";
+import { bffUpstreamResponse, readBoundedJsonBody } from "@/lib/bff-proxy";
 import { fetchUpstream } from "@/lib/upstream";
 import type { LoginResultDto, MeDto } from "@hosting-panel/contracts";
 
 export async function POST(req: Request) {
-  let body: Record<string, unknown>;
-  try {
-    body = (await req.json()) as Record<string, unknown>;
-  } catch {
-    return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400);
-  }
+  const read = await readBoundedJsonBody(req, { requireJsonBody: true });
+  if (!read.ok) return read.response;
+  const body = read.body as Record<string, unknown>;
 
   // Forward only the credential fields; the API validates them.
   const { email, password, totpCode } = body;

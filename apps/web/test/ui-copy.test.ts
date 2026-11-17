@@ -16,7 +16,9 @@ const dirs = [
   "components/customer",
   "components/shared",
 ].map((d) => path.join(src, d));
-const sections = ["login", "account", "shell", "site", "notFound"] as const;
+// Sections only a server administrator sees, each with the pages it belongs to.
+const adminOnly: Record<string, string> = { admin: "every page under /admin (app/admin)" };
+const sections = ["common", "login", "account", "shell", "site", "notFound", "errors"] as const;
 
 function files(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];
@@ -34,7 +36,7 @@ const strip = (t: string) =>
     .replace(/^(\s*)"[a-z]+\.[a-z]+":/gm, "$1") // operation-kind keys are identifiers, not copy
     .replace(/^\s*import[^;]*;?$/gm, "");
 const sources = () => dirs.flatMap(files).map((f) => strip(fs.readFileSync(f, "utf-8")));
-const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox|relay|smtp|postfix|spf|dkim|schema)\b|HCP-SPEC|AC-F|ADR-/i;
+const jargon = /\b(container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox|relay|smtp|postfix|spf|dkim|schema|contenitore|contenitori|immagine|immagini|volumi|servizio|servizi|rete|reti|revisione|revisioni|organizzazione|organizzazioni)\b|HCP-SPEC|AC-F|ADR-/i;
 const copy = () => [
   ...sources(),
   ...sections.flatMap((s) => [JSON.stringify(en[s]), JSON.stringify(itMsgs[s])]),
@@ -64,6 +66,14 @@ describe("ui copy", () => {
     const planted = en.site.wordpress.import.reasons.dump_unsafe.replace("database export", "database schema");
     expect(planted).not.toBe(en.site.wordpress.import.reasons.dump_unsafe);
     expect(planted).toMatch(jargon);
+  });
+
+  it("reads every catalog section but the administrator's (a new section must be classified), and knows the Italian words", () => {
+    expect(Object.keys(itMsgs).sort()).toEqual(Object.keys(en).sort());
+    expect([...sections, ...Object.keys(adminOnly)].sort()).toEqual(Object.keys(en).sort());
+    for (const w of ["contenitore", "contenitori", "immagine", "immagini", "volume", "volumi"]) {
+      expect(`Il ${w} non risponde`).toMatch(jargon);
+    }
   });
 });
 

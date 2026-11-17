@@ -1358,7 +1358,7 @@ export const it = {
         backup_storage_test_failed: "L'ultima prova dello spazio di backup non è riuscita il {date}. Apri Backup, controlla le impostazioni dello spazio, poi usa di nuovo Prova la connessione.",
         component_down: "{part}: {state}. {reason}. {fix}",
         site_container_down: "{site}: il sito dovrebbe essere attivo, ma il suo container è \"{observed}\". Controlla il suo log nella pagina Log, poi usa Riavvia nella sua riga in Container dei siti.",
-        restore_undo_incomplete: "{site}: un ripristino non è riuscito il {date} e anche il suo annullamento non è riuscito, quindi il sito potrebbe non funzionare. Un ripristino del sito che riesce lo ripara: usa Ripristina nella pagina Backup.",
+        restore_undo_incomplete: "{site}: un ripristino non è riuscito il {date} e il sito non è stato rimesso com'era, quindi potrebbe non funzionare. Un ripristino del sito che riesce lo ripara: usa Ripristina nella pagina Backup.",
         restore_stuck: "{site}: un ripristino avviato il {date} non è ancora finito dopo 6 ore. Controlla l'esecutore sul server (systemctl status hp-docker-executor), poi usa sudo systemctl restart hp-docker-executor: all'avvio porta a termine il ripristino, e il pannello ne mostra l'esito entro un minuto.",
         operation_unknown: "L'operazione {id} ({what}) è in uno stato indeterminato dal {date}: il pannello non sa se è finita. Riprova da solo ogni pochi secondi; se resta, controlla che l'esecutore sia attivo (systemctl status hp-docker-executor), poi segnala l'operazione come non riuscita sul server: sudo hp-break-glass unlock --operation-id {id} --reason \"<motivo>\".",
         operation_stuck: "L'operazione {id} ({what}) è ferma dal {date}. Controlla che hp-api sia attivo sul server (systemctl status hp-api), poi usa sudo systemctl restart hp-api: all'avvio il pannello la riprende; se poi qui compare come indeterminata, segui quell'avviso.",
@@ -1484,7 +1484,7 @@ export const it = {
       base: {
         absent: "Le regole di base del firewall non sono caricate su questo server: finché non le applichi nessuna porta si apre o si chiude e nessun indirizzo si blocca. Applicandole restano aperte alle connessioni in ingresso solo le porte 22 (SSH), 80 e 443, insieme alle porte aperte in questa pagina, e tutto il resto in ingresso si chiude, tranne l'SFTP dei siti sulla porta 2222, che va a un container e non passa da queste regole. Se SSH su questo server ascolta su un'altra porta, non applicarle: lo perderesti.",
         unmanaged: "Il pannello non gestisce il firewall di questo server: il server è stato installato con l'opzione che lascia il firewall all'amministratore (--skip-firewall). Le porte e i blocchi salvati in questa pagina non sono attivi. Per affidare il firewall al pannello, controlla che SSH ascolti sulla porta 22, poi esegui di nuovo l'installazione sul server, via SSH, con --version e la versione installata che mostra la pagina Aggiornamenti, le altre opzioni come all'installazione, senza --skip-firewall. Il pannello si riavvia e resta assente per circa un minuto.",
-        outdated: "Le regole di base caricate vengono da una versione precedente del pannello e non contengono le liste di questa pagina. Applicale di nuovo per cambiare porte e blocchi.",
+        outdated: "Le regole di base caricate vengono da una versione precedente del pannello e non hanno una regola che questa versione aggiunge. Le porte aperte e gli indirizzi bloccati prima restano attivi finché non le applichi di nuovo. Applica le regole di base per aggiungere la regola e per cambiare porte e blocchi.",
         unregistered: "Questo server non è ancora registrato nel pannello (lo fa l'installazione, nel suo passo di setup), quindi da qui non si possono applicare le regole di base. Entra via SSH ed esegui sudo hp-accounts setup --name NOME --hostname NOME --ipv4 INDIRIZZO (il nome di questo server e il suo indirizzo IPv4 pubblico), poi ricarica questa pagina.",
         unreadable: "Il firewall del server non si può leggere ora: qui sotto ci sono le liste salvate, senza sapere se sono attive. Ricarica la pagina tra un minuto; se persiste, scrivi sul server, via SSH: systemctl status hp-host-agent.",
         disabled: "Su questo server il pannello non gestisce il firewall.",
@@ -1996,7 +1996,7 @@ export const it = {
         switch_undone:
           "Un ripristino non ha completato l'ultimo passaggio e ha rimesso il sito com'era. Di solito una query lunga teneva occupato il database: riprova più tardi.",
         undo_incomplete:
-          "Un ripristino si è fermato a metà e anche il suo annullamento non è riuscito: il sito risponde «temporaneamente non disponibile» finché un ripristino di questo sito non riesce. Il cliente può avviarne uno dalla scheda Backup del sito; ciò che il tentativo fallito ha lasciato viene rimosso dal primo ripristino riuscito. Se non riesce nemmeno quello, controlla journalctl -u hp-docker-executor.",
+          "Un ripristino si è fermato a metà e il sito non è stato rimesso com'era: finché un ripristino di questo sito non riesce, il sito risponde «temporaneamente non disponibile» oppure mostra il proprio errore di connessione al database. Il cliente può avviarne uno dalla scheda Backup del sito; ciò che il tentativo fallito ha lasciato viene rimosso dal primo ripristino riuscito. Se non riesce nemmeno quello, controlla journalctl -u hp-docker-executor.",
         definer_missing:
           "Il backup contiene viste, trigger o routine il cui utente del database non esiste più; il sito non è stato toccato. Ricrea l'utente con lo stesso nome e ripeti il ripristino.",
         address_not_updated:
@@ -2114,7 +2114,7 @@ export const it = {
         tempNote: "Condividila in modo sicuro; il nuovo amministratore dovrà cambiarla al primo accesso.",
         totpTitle: "Chiave per la verifica in due passaggi",
         totpNote: "Prima del primo accesso, il nuovo amministratore aggiunge questa chiave a un'app di autenticazione. Non verrà mostrata di nuovo.",
-        sshRepair: "La password o il secondo fattore persi di un amministratore si ripristinano dalla riga di comando del server: hp-accounts reset-password, hp-accounts reset-totp o hp-break-glass.",
+        sshRepair: "La password o il secondo fattore persi di un amministratore si ripristinano dalla riga di comando del server: hp-accounts reset-password o hp-accounts reset-totp.",
       },
     },
   },
@@ -2137,6 +2137,7 @@ export const it = {
     VALIDATION_ERROR: "Alcuni dati non sono validi. Controlla i campi evidenziati e riprova.",
     INTERNAL_ERROR: "Qualcosa è andato storto da parte nostra. Riprova tra qualche minuto.",
     RESOURCE_LOCKED: "Il sito sta completando un'altra modifica. Riprova tra qualche istante.",
+    RATE_LIMITED: "Troppe richieste in questo momento. Attendi un minuto e riprova; dopo molte modifiche agli account SFTP l'attesa può arrivare a un'ora.",
     ALREADY_EXISTS: "Questo nome è già in uso. Scegline un altro.",
     LAST_ADMINISTRATOR_PROTECTED: "È l'ultimo amministratore attivo: non può essere disattivato. Prima crea o riattiva un altro amministratore.",
     PASSWORD_RESET_INVALID: "Questo link non è più valido: è scaduto o è già stato usato. Chiedine uno nuovo.",

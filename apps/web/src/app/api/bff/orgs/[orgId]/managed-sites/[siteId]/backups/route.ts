@@ -6,7 +6,7 @@ import {
   isPlainObject,
 } from "@/lib/bff-files";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
-import { bffUpstreamResponse } from "@/lib/bff-proxy";
+import { bffUpstreamResponse, readBoundedText } from "@/lib/bff-proxy";
 import { bffErrorResponse } from "@/lib/bff-response";
 import { getSessionFromRequest } from "@/lib/server-session";
 import { fetchUpstream } from "@/lib/upstream";
@@ -44,8 +44,8 @@ export async function POST(req: Request, context: SiteCtx): Promise<Response> {
     }
   }
 
-  const raw = await req.text();
-  if (Buffer.byteLength(raw, "utf8") > MAX_BFF_BODY_BYTES) {
+  const raw = await readBoundedText(req, MAX_BFF_BODY_BYTES);
+  if (raw === null) {
     return bffErrorResponse("VALIDATION_ERROR", "Request body too large.", 413);
   }
 

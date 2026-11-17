@@ -154,12 +154,12 @@ describe("forgot-password form", () => {
     it(`${locale}: another status shows the error text and keeps the form`, async () => {
       fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: "RATE_LIMITED" } }), { status: 429 }));
       const state = await requestResetLink(m, "someone@example.test");
-      expect(state).toEqual({ sent: false, error: m.errors.generic });
+      expect(state).toEqual({ sent: false, error: m.errors.RATE_LIMITED });
       fetchMock.mockRejectedValueOnce(new Error("offline"));
       expect(await requestResetLink(m, "someone@example.test")).toEqual({ sent: false, error: m.errors.generic });
       const html = render(createElement(ForgotPasswordView, { ...state, email: "someone@example.test", busy: false, onEmail: () => {}, onSubmit: () => {} }), locale);
       expect(html).toContain("<input");
-      expect(html).toContain(esc(m.errors.generic));
+      expect(html).toContain(esc(m.errors.RATE_LIMITED));
       expect(html).not.toContain(esc(m.login.forgot.sent));
     });
 

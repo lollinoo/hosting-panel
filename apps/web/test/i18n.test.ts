@@ -39,6 +39,11 @@ describe("i18n", () => {
     expect(errorMessage(en, "ACCOUNT_LOCKED")).toBe(en.errors.ACCOUNT_LOCKED);
   });
 
+  it("RATE_LIMITED tells the user to wait and try again (R207 web.6)", () => {
+    expect(errorMessage(en, "RATE_LIMITED")).toBe("Too many requests right now. Wait a minute and try again; after many changes to SFTP accounts the wait can be up to an hour.");
+    expect(errorMessage(itMsgs, "RATE_LIMITED")).toBe("Troppe richieste in questo momento. Attendi un minuto e riprova; dopo molte modifiche agli account SFTP l'attesa può arrivare a un'ora.");
+  });
+
   it("RESOURCE_LOCKED says the site is busy and to try again (O6)", () => {
     expect(errorMessage(en, "RESOURCE_LOCKED")).toBe("This site is finishing another change. Try again in a moment.");
     expect(errorMessage(itMsgs, "RESOURCE_LOCKED")).toBe("Il sito sta completando un'altra modifica. Riprova tra qualche istante.");

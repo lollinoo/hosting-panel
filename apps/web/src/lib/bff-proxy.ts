@@ -12,7 +12,7 @@ export type BoundedJsonBodyResult =
   | { ok: false; response: NextResponse };
 
 // Read request text incrementally so oversized streams abort once above maxBytes.
-async function readBoundedText(req: Request, maxBytes: number): Promise<string | null> {
+export async function readBoundedText(req: Request, maxBytes: number): Promise<string | null> {
   if (!req.body || typeof req.body.getReader !== "function") {
     const raw = await req.text();
     return Buffer.byteLength(raw, "utf8") > maxBytes ? null : raw;

@@ -13,7 +13,11 @@ export function parseCookieHeader(header: string | null): Record<string, string>
   for (const part of header.split(";")) {
     const [rawKey, ...valParts] = part.trim().split("=");
     if (rawKey) {
-      result[rawKey] = decodeURIComponent(valParts.join("="));
+      try {
+        result[rawKey] = decodeURIComponent(valParts.join("="));
+      } catch {
+        // A broken % code (a foreign cookie) is skipped, so it never turns a request into a 500.
+      }
     }
   }
   return result;

@@ -1,6 +1,7 @@
 import { SiteDatabaseSignOnDtoSchema } from "@hosting-panel/contracts";
 import { z } from "zod";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
+import { readBoundedText } from "@/lib/bff-proxy";
 import { bffErrorResponse, bffJsonResponse } from "@/lib/bff-response";
 import {
   PMA_COOKIE_MAX_AGE_S,
@@ -41,8 +42,8 @@ export async function POST(req: Request, context: SiteCtx): Promise<Response> {
     }
   }
 
-  const raw = await req.text();
-  if (Buffer.byteLength(raw, "utf8") > MAX_SIGNON_BODY_BYTES) {
+  const raw = await readBoundedText(req, MAX_SIGNON_BODY_BYTES);
+  if (raw === null) {
     return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta troppo grande", 413);
   }
   if (raw.trim().length > 0) {

@@ -7,14 +7,14 @@ import {
   SITE_FILE_SEGMENT_MAX_BYTES,
 } from "@hosting-panel/contracts";
 import { validateCsrfAndOrigin, validatePathSegments } from "./bff-guard";
-import { bffUpstreamResponse } from "./bff-proxy";
+import { bffUpstreamResponse, readBoundedJsonBody } from "./bff-proxy";
 import { bffErrorResponse } from "./bff-response";
 import { getSessionFromRequest } from "./server-session";
 import { fetchUpstream } from "./upstream";
 
 export const FILE_CHUNK_BYTES = SITE_FILE_CHUNK_BYTES;
 export const MAX_CHUNK_BASE64 = SITE_FILE_CHUNK_BASE64_MAX;
-export const MAX_BFF_BODY_BYTES = 1_048_576;
+export { MAX_BFF_BODY_BYTES } from "./bff-proxy";
 
 export type SiteCtx = { params: Promise<Record<string, string>> };
 
@@ -109,24 +109,9 @@ export async function forwardSiteCall(
 
   let body: unknown;
   if (method !== "GET") {
-    const contentLengthHeader = req.headers.get("content-length");
-    if (contentLengthHeader !== null) {
-      const contentLength = Number(contentLengthHeader);
-      if (Number.isFinite(contentLength) && contentLength > MAX_BFF_BODY_BYTES) {
-        return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta troppo grande", 413);
-      }
-    }
-
-    const raw = await req.text();
-    if (Buffer.byteLength(raw, "utf8") > MAX_BFF_BODY_BYTES) {
-      return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta troppo grande", 413);
-    }
-
-    try {
-      body = raw ? JSON.parse(raw) : undefined;
-    } catch {
-      return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400);
-    }
+    const read = await readBoundedJsonBody(req);
+    if (!read.ok) return read.response;
+    body = read.body;
 
     if (opts.body && !opts.body(body)) {
       return bffErrorResponse("VALIDATION_ERROR", "Dati della richiesta non validi", 400);
