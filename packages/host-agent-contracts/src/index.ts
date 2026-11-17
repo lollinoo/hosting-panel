@@ -1,6 +1,7 @@
 export * from "./maintenance.js";
 export * from "./security.js";
 export * from "./port.js";
+export * from "./host-jobs.js";
 export * from "./phase1-host-agent.js";
 export {
   HostAgentHealthResponseSchema,
