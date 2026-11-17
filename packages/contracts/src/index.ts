@@ -15,3 +15,5 @@ export * from "./site-wordpress.js";
 export * from "./site-wordpress-import.js";
 export * from "./admin-health.js";
 export * from "./admin-terminal.js";
+export * from "./admin-firewall.js";
+export * from "./admin-host.js";

@@ -28,9 +28,22 @@ export const SITE_CONTAINER_DOWN_GRACE_MS = 5 * 60_000;
 export const SITE_RESTART_QUIET_MS = 2 * 60_000;
 export const DISK_HIGH_PERCENT = 90;
 export const RESTART_REASON_MAX_LENGTH = 500;
-export const RestartInputSchema = z.object({ reason: z.string().trim().min(1).max(RESTART_REASON_MAX_LENGTH) }).strict();
+// R201 1.3: PostgreSQL refuses U+0000 in the audit row, and trim() keeps it.
+export const RestartInputSchema = z
+  .object({ reason: z.string().trim().min(1).max(RESTART_REASON_MAX_LENGTH).refine((r) => !r.includes("\u0000"), "The reason cannot hold a NUL character.") })
+  .strict();
 export type RestartInput = z.infer<typeof RestartInputSchema>;
 export const PanelContainerSchema = z.enum(PANEL_CONTAINERS);
+export const HOST_SERVICES = ["api", "web", "executor", "host_agent"] as const;
+export const HostServiceSchema = z.enum(HOST_SERVICES);
+export type HostService = z.infer<typeof HostServiceSchema>;
+export const HostServiceStatusDtoSchema = z.object({
+  service: HostServiceSchema,
+  active: z.boolean(),
+  activeState: z.string().min(1).max(32),
+  since: IsoDateTimeSchema.nullable(),
+  restarts: z.number().int().nonnegative(),
+}).strict();
 
 const DigitsSchema = z.string().regex(/^\d+$/);
 
@@ -60,6 +73,7 @@ export const AdminHealthDtoSchema = z.object({
     usedPercent: z.number().int().min(0).max(100),
     observedAt: IsoDateTimeSchema,
   }).strict()),
+  hostServices: z.array(HostServiceStatusDtoSchema).length(HOST_SERVICES.length).nullable(),
 }).strict();
 export type AdminHealthDto = z.infer<typeof AdminHealthDtoSchema>;
 

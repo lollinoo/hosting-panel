@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
 import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
+import { FIREWALL_MAX_BLOCKS_PER_FAMILY, FIREWALL_PORT_NAMES } from "./admin-firewall.js";
 import { TERMINAL_INPUT_MAX_BYTES, TerminalSessionIdSchema, type TerminalEndReason } from "./admin-terminal.js";
 import {
   MYSQL_NATIVE_PASSWORD_HASH_PATTERN,
@@ -335,6 +336,37 @@ export const HostSecurityIpcRequestSchema = z.object({
 });
 export type HostSecurityIpcRequest = z.infer<typeof HostSecurityIpcRequestSchema>;
 
+export const IPC_HOST_JOBS = ["restart_hp_api", "restart_hp_web", "restart_hp_docker_executor", "restart_hp_host_agent", "panel_update", "os_refresh", "os_upgrade"] as const;
+export const IPC_HOST_JOURNAL_UNITS = ["hp-api", "hp-web", "hp-docker-executor", "hp-host-agent", "hp-panel-update", "hp-os-refresh", "hp-os-upgrade"] as const;
+const isoInstant = z.string().datetime();
+export const HostJobIpcRequestSchema = z.object({ job: z.enum(IPC_HOST_JOBS) }).strict();
+export const HostFirewallSetsIpcSchema = z.object({
+  openedPorts: z.array(z.number().int().min(1).max(65535)).max(FIREWALL_PORT_NAMES.length),
+  blockedV4: z.array(z.string().min(7).max(18)).max(FIREWALL_MAX_BLOCKS_PER_FAMILY),
+  blockedV6: z.array(z.string().min(2).max(43)).max(FIREWALL_MAX_BLOCKS_PER_FAMILY),
+}).strict();
+export const HostFirewallStateWireSchema = HostFirewallSetsIpcSchema.extend({
+  baseRules: z.enum(["absent", "outdated", "current", "unmanaged"]), readAt: isoInstant,
+}).strict();
+export const HostServiceStateWireSchema = z.object({
+  unit: z.enum(["hp-api", "hp-web", "hp-docker-executor", "hp-host-agent"]),
+  active: z.boolean(), activeState: z.string().regex(/^[a-z-]{1,32}$/), since: isoInstant.nullable(), restarts: z.number().int().min(0),
+}).strict();
+export const HostJournalLineWireSchema = z.object({ at: isoInstant, message: z.string().max(4096) }).strict();
+export const HostOsPackagesWireSchema = z.object({
+  packages: z.array(z.object({
+    name: z.string().regex(/^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/),
+    installedVersion: z.string().regex(/^[A-Za-z0-9.+~:-]{1,128}$/),
+    newVersion: z.string().regex(/^[A-Za-z0-9.+~:-]{1,128}$/),
+    origin: z.enum(["security", "distribution", "other"]),
+  }).strict()).max(5000),
+  rebootRequired: z.boolean(), canUpgrade: z.boolean(), listsReadAt: isoInstant.nullable(),
+}).strict();
+export const HostJobStateWireSchema = z.object({
+  job: z.enum(IPC_HOST_JOBS), state: z.enum(["never_run", "running", "succeeded", "failed"]),
+  exitStatus: z.number().int().min(0).max(255).nullable(), startedAt: isoInstant.nullable(), endedAt: isoInstant.nullable(),
+}).strict();
+
 export const PANEL_CONTAINER_STATES = ["running", "stopped", "degraded", "missing", "unknown"] as const;
 export type PanelContainerState = (typeof PANEL_CONTAINER_STATES)[number];
 
@@ -344,6 +376,7 @@ export const PanelContainerStatusWireSchema = z.object({
   expected: z.boolean(),
   startedAt: z.string().datetime({ offset: true }).nullable(),
   restartCount: z.number().int().nonnegative(),
+  imageCurrent: z.boolean().nullable().optional(),
 }).strict();
 export const PanelContainersDataEnvelopeSchema = z.object({
   data: z.array(PanelContainerStatusWireSchema).length(PANEL_CONTAINERS.length),

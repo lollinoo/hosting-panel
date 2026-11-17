@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  HostFirewallSetsIpcSchema,
+  HostFirewallStateWireSchema,
+  HostJobIpcRequestSchema,
+  HostJournalLineWireSchema,
+  IPC_HOST_JOBS,
+  PanelContainerStatusWireSchema,
+  RestartInputSchema,
   ApiErrorEnvelopeSchema,
   CreateSiteSftpUserRequestSchema,
   DEFAULT_PLATFORM_CAPABILITIES,
@@ -224,6 +231,8 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "LAST_ADMINISTRATOR_PROTECTED",
       "PASSWORD_RESET_INVALID",
       "PANEL_CONTAINER_ABSENT",
+      "FIREWALL_BASE_RULES_NOT_CURRENT",
+      "HOST_JOB_FAILED",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -236,6 +245,9 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.LAST_ADMINISTRATOR_PROTECTED).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.PASSWORD_RESET_INVALID).toBe(400);
     expect(ERROR_CODE_HTTP_STATUS.PANEL_CONTAINER_ABSENT).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.FIREWALL_BASE_RULES_NOT_CURRENT).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.HOST_JOB_FAILED).toBe(502);
+    expect(ERROR_CODES).not.toContain("UPDATE_CHECK_FAILED");
   });
 
   it("maps status codes accurately", () => {
@@ -488,6 +500,8 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(OPERATION_KINDS).toContain("panel.container.restart");
     expect(OPERATION_KINDS).toContain("site.wordpress.inspect");
     expect(OPERATION_KINDS).toContain("site.wordpress.update");
+    expect(OPERATION_KINDS).toContain("host.job");
+    expect(OPERATION_KINDS).toContain("panel.container.apply");
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,
@@ -1057,5 +1071,53 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
     const disk = { paths: ["panel_data", "root"], usedBytes: "10", totalBytes: "100" };
     expect(HostDiskWireSchema.safeParse(disk).success).toBe(true);
     expect(HostDiskWireSchema.safeParse({ ...disk, paths: ["/var/lib/docker"] }).success).toBe(false);
+  });
+});
+
+describe("@hosting-panel/contracts — M5d host agent wire", () => {
+  const v4 = (n: number) => Array.from({ length: n }, (_, i) => `192.0.${2 + (i >> 8)}.${i & 255}`);
+
+  it("bounds the firewall lists", () => {
+    const sets = { openedPorts: [8080, 8443, 9100, 10050, 6556, 5666], blockedV4: v4(500), blockedV6: ["2001:db8::/32"] };
+    expect(HostFirewallSetsIpcSchema.safeParse(sets).success).toBe(true);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, openedPorts: [...sets.openedPorts, 8081] }).success).toBe(false);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, blockedV4: v4(501) }).success).toBe(false);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, blockedV6: Array.from({ length: 501 }, (_, i) => `2001:db8::${(i + 1).toString(16)}`) }).success).toBe(false);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, extra: 1 }).success).toBe(false);
+  });
+
+  it("carries the four base rule states the agent reads, unmanaged among them (R202 1.3)", () => {
+    const state = { openedPorts: [], blockedV4: [], blockedV6: [], readAt: "2026-11-17T06:00:00.000Z" };
+    for (const baseRules of ["absent", "outdated", "current", "unmanaged"]) expect(HostFirewallStateWireSchema.safeParse({ ...state, baseRules }).success, baseRules).toBe(true);
+    expect(HostFirewallStateWireSchema.safeParse({ ...state, baseRules: "disabled" }).success).toBe(false);
+  });
+
+  it("takes one of the seven jobs and nothing else", () => {
+    expect(IPC_HOST_JOBS).toHaveLength(7);
+    for (const job of IPC_HOST_JOBS) expect(HostJobIpcRequestSchema.safeParse({ job }).success).toBe(true);
+    expect(HostJobIpcRequestSchema.safeParse({ job: "reboot" }).success).toBe(false);
+    expect(HostJobIpcRequestSchema.safeParse({ job: "os_refresh", extra: 1 }).success).toBe(false);
+  });
+
+  it("refuses a journal line over 4096 characters", () => {
+    const at = "2026-11-17T10:00:00.000Z";
+    expect(HostJournalLineWireSchema.safeParse({ at, message: "x".repeat(4096) }).success).toBe(true);
+    expect(HostJournalLineWireSchema.safeParse({ at, message: "x".repeat(4097) }).success).toBe(false);
+  });
+
+  it("parses a panel container with and without imageCurrent", () => {
+    const row = { component: "sftp", state: "running", expected: true, startedAt: null, restartCount: 0 };
+    expect(PanelContainerStatusWireSchema.safeParse(row).success).toBe(true);
+    expect(PanelContainerStatusWireSchema.safeParse({ ...row, imageCurrent: false }).success).toBe(true);
+    expect(PanelContainerStatusWireSchema.safeParse({ ...row, imageCurrent: null }).success).toBe(true);
+  });
+});
+
+describe("RestartInputSchema (R201 1.3)", () => {
+  it("refuses a reason holding U+0000 anywhere; a line break stays accepted", () => {
+    for (const reason of ["\u0000disk full", "disk\u0000full", "disk full\u0000"]) {
+      expect(RestartInputSchema.safeParse({ reason }).success).toBe(false);
+    }
+    expect(RestartInputSchema.parse({ reason: "disk full\nsee ticket" })).toEqual({ reason: "disk full\nsee ticket" });
   });
 });
