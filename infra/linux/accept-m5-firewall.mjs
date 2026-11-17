@@ -5,11 +5,13 @@
  * Loads the shipped infra/linux/nftables-dedicated.conf with a real nft inside a throw-away
  * container's own network namespace and drives the agent's built code (buildFirewallSetsProgram,
  * parseFirewallListing, validateFirewallSets from apps/host-agent/dist) against real connections
- * from a second container.
+ * from a second container. R207 host.1: the server forwards between two networks of its own, and the
+ * forward chain drops what comes in on an interface named like a bridge towards the metadata address,
+ * except DNS (addendum 2 A). Addendum 1 B: a press of Apply base rules on a table of release 0.5.0.
  *
- * Machine safety: everything is named hp_swarmtest_m5f_<hex>_{net,server,client}, made from the
- * local alpine:3 (never pulled), the server with NET_ADMIN only (never privileged, never the host
- * network), no published port, no bind mount; nft runs only through `docker exec` in the server.
+ * Machine safety: everything is named hp_swarmtest_m5f_<hex>_{net,metanet,server,client,meta}, made from
+ * the local alpine:3 (never pulled), with NET_ADMIN only (never privileged, never the host network), no
+ * published port, no bind mount; nft runs only through `docker exec` in the server.
  * Removed by exact name in `finally` and on SIGINT/SIGTERM; no other name is ever listed or touched.
  */
 
@@ -32,13 +34,25 @@ const prefix = `hp_swarmtest_m5f_${hex}`;
 const NET = `${prefix}_net`;
 const SERVER = `${prefix}_server`;
 const CLIENT = `${prefix}_client`;
-const V6_SUBNET = `2001:db8:${randomBytes(2).toString("hex")}::/64`;
+const NET2 = `${prefix}_metanet`;
+const META = `${prefix}_meta`;
+const METADATA = "169.254.169.254";
+const OUTSIDE = "192.0.2.80"; // a forwarded address the chain must not drop
+const METADATA6 = "fd00:ec2::254";
+const OUTSIDE6 = "2001:db8:ffff::80";
+// The base rules of release 0.5.0 (e627c60) are today's file without the forward chain's block.
+const OLD_RULESET_SHA256 = "80c56bc1101e13b8e858fd0cf5f26bb74684f637050656bd0ef8372284011651";
+const BRIDGE_NAME = "br-hpswarmtest"; // the server's interface on NET, renamed to match "br-*"
+// A group with no leading zero, so the subnet is written as nft lists it back.
+const group = () => (0x1000 + (randomBytes(2).readUInt16BE() % 0xefff)).toString(16);
+const V6_SUBNET = `2001:db8:${group()}::/64`;
+const V6_SUBNET2 = `2001:db8:${group()}::/64`;
 const SAFE_PORT = 8080; // http_alt, on the safe list
 const OTHER_PORT = 9999; // on no list
 const LISTEN_PORTS = [22, 80, 443, SAFE_PORT, OTHER_PORT];
 
 const containers = [];
-let networkCreated = false;
+const networks = [];
 let nftRuns = 0;
 
 /** docker with an argument list (no shell); never rejects. */
@@ -62,7 +76,7 @@ let cleanupPromise = null;
 function cleanup() {
   cleanupPromise ??= (async () => {
     for (const name of containers) await docker(["rm", "-f", "-v", name]);
-    if (networkCreated) await docker(["network", "rm", NET]);
+    for (const name of networks) await docker(["network", "rm", name]);
   })();
   return cleanupPromise;
 }
@@ -134,8 +148,11 @@ async function main() {
       v6 = net.code === 0;
       if (!v6) net = await docker(["network", "create", NET]);
       assert(net.code === 0, "network created", net.stderr.trim());
-      networkCreated = true;
-      for (const [name, extra] of [[SERVER, ["--cap-add", "NET_ADMIN"]], [CLIENT, []]]) {
+      networks.push(NET);
+      // The client adds routes through the server, so it needs NET_ADMIN too; the server forwards.
+      // keep_addr_on_down: step 16 renames the interface, and a link going down drops its IPv6 address.
+      const fwd6 = v6 ? ["--sysctl", "net.ipv6.conf.all.forwarding=1", "--sysctl", "net.ipv6.conf.all.keep_addr_on_down=1"] : [];
+      for (const [name, extra] of [[SERVER, ["--cap-add", "NET_ADMIN", "--sysctl", "net.ipv4.ip_forward=1", ...fwd6]], [CLIENT, ["--cap-add", "NET_ADMIN"]]]) {
         containers.push(name);
         const run = await docker(["run", "-d", "--pull", "never", "--network", NET, ...extra, "--name", name, IMAGE, "sleep", "3600"]);
         assert(run.code === 0, `${name} started`, run.stderr.trim());
@@ -237,6 +254,118 @@ async function main() {
       assert(JSON.stringify(parseFirewallListing(after)) === JSON.stringify(parseFirewallListing(before)), "listing unchanged", after.slice(0, 200));
       await expectPorts(ip.server4, [SAFE_PORT, 22], []);
     });
+
+    await step("14-forward-chain-listed", async () => {
+      const r = await nft(["list", "chain", "inet", "hp_dedicated_filter", "forward"]);
+      assert(r.code === 0, "nft list chain forward exits 0", r.stderr.trim());
+      for (const want of ["hook forward priority filter; policy accept;",
+        "ip daddr 169.254.0.0/16 udp dport 53 accept", "ip daddr 169.254.0.0/16 tcp dport 53 accept",
+        'iifname "docker0" ip daddr 169.254.0.0/16 drop', 'iifname "br-*" ip daddr 169.254.0.0/16 drop',
+        'iifname "docker0" ip6 daddr fd00:ec2::254 drop', 'iifname "br-*" ip6 daddr fd00:ec2::254 drop'])
+        assert(r.stdout.includes(want), want, r.stdout.trim());
+      const json = await nft(["-j", "list", "chain", "inet", "hp_dedicated_filter", "forward"]);
+      console.log(`  the forward chain item as nft lists it: ${JSON.stringify(JSON.parse(json.stdout).nftables.find((i) => i.chain)?.chain)}`);
+    });
+
+    // Addendum 1 B: an updated server still runs the 0.5.0 table; the press is the two commands it sends.
+    await step("15-press-on-a-0.5.0-table", async () => {
+      const text = await readFile(RULESET, "utf8");
+      const old = text.replace(/\n(?: {2}# [^\n]*\n)+ {2}chain forward \{\n[\s\S]*?\n {2}\}\n/, "");
+      assert(createHash("sha256").update(old).digest("hex") === OLD_RULESET_SHA256, OLD_RULESET_SHA256, "another file");
+      const stored = { openedPorts: [SAFE_PORT], blockedV4: ["192.0.2.7"], blockedV6: ["2001:db8:ffff::7"] };
+      const listedRaw = async () => {
+        const l = await nft(["-j", "list", "table", "inet", "hp_dedicated_filter"]);
+        assert(l.code === 0, "listing exits 0", l.stderr.trim());
+        return l.stdout;
+      };
+      for (const program of [old, buildFirewallSetsProgram(validateFirewallSets(stored))]) {
+        const r = await nft(["-f", "-"], program);
+        assert(r.code === 0, "0.5.0 table and its sets loaded", r.stderr.trim());
+      }
+      const before = await listedRaw();
+      const read = parseFirewallListing(before);
+      assert(read.baseRules === "outdated" && read.openedPorts.length === 0, "0.5.0 table reads outdated", JSON.stringify(read));
+      for (const el of [`${SAFE_PORT}`, "192.0.2.7", "2001:db8:ffff::7"]) assert(before.includes(el), `${el} still in the running table`, before.slice(0, 300));
+      await expectPorts(ip.server4, [SAFE_PORT], [OTHER_PORT]);
+      // First command of the press (linux-adapter.ts, apply_dedicated_nftables_22_80_443): the file.
+      const press = await nft(["-f", "/tmp/nftables-dedicated.conf"]);
+      assert(press.code === 0, "the press loads the file", press.stderr.trim());
+      const between = parseFirewallListing(await listedRaw());
+      assert(JSON.stringify(between) === JSON.stringify(sorted(empty)), "the window: current, empty sets", JSON.stringify(between));
+      await expectPorts(ip.server4, [22, 80], [SAFE_PORT]);
+      // Second command (FirewallService sync after the operation): the stored lists.
+      await apply(stored);
+      const chain = await nft(["list", "chain", "inet", "hp_dedicated_filter", "forward"]);
+      assert(chain.code === 0, "the forward chain is there after the press", chain.stderr.trim());
+      await expectPorts(ip.server4, [SAFE_PORT, 22, 80], [OTHER_PORT]);
+    });
+
+    // client -> server (forwards) -> meta, which holds the metadata address and an ordinary one.
+    await step("16-bridge-to-metadata-dropped-dns-passes", async () => {
+      const net = await docker(["network", "create", ...(v6 ? ["--ipv6", "--subnet", V6_SUBNET2] : []), NET2]);
+      assert(net.code === 0, "second network created", net.stderr.trim());
+      networks.push(NET2);
+      containers.push(META);
+      const run = await docker(["run", "-d", "--pull", "never", "--network", NET2, "--cap-add", "NET_ADMIN", "--name", META, IMAGE, "sleep", "3600"]);
+      assert(run.code === 0, `${META} started`, run.stderr.trim());
+      const conn = await docker(["network", "connect", NET2, SERVER]);
+      assert(conn.code === 0, "server joined the second network", conn.stderr.trim());
+      const on = async (name, field = "IPAddress") => (await docker(["inspect", "-f", `{{(index .NetworkSettings.Networks "${NET2}").${field}}}`, name])).stdout.trim();
+      const [server2, meta2] = [await on(SERVER), await on(META)];
+      const [server26, meta26] = v6 ? [await on(SERVER, "GlobalIPv6Address"), await on(META, "GlobalIPv6Address")] : ["", ""];
+      const ifaces = (await docker(["exec", SERVER, "ip", "-o", "-4", "addr", "show"])).stdout;
+      const netIface = ifaces.split("\n").find((l) => l.includes(` ${ip.server4}/`))?.split(/\s+/)[1] ?? "";
+      assert(server2 && meta2 && netIface, "addresses on the second network", JSON.stringify({ server2, meta2, netIface }));
+      for (const [name, args] of [
+        [META, ["ip", "addr", "add", `${METADATA}/32`, "dev", "eth0"]], [META, ["ip", "addr", "add", `${OUTSIDE}/32`, "dev", "eth0"]],
+        [META, ["ip", "route", "add", `${ip.client4}/32`, "via", server2]],
+        [SERVER, ["ip", "route", "add", `${METADATA}/32`, "via", meta2]], [SERVER, ["ip", "route", "add", `${OUTSIDE}/32`, "via", meta2]],
+        [CLIENT, ["ip", "route", "add", `${METADATA}/32`, "via", ip.server4]], [CLIENT, ["ip", "route", "add", `${OUTSIDE}/32`, "via", ip.server4]],
+        ...(v6 && server26 && meta26 ? [
+          [META, ["ip", "addr", "add", `${METADATA6}/128`, "dev", "eth0"]], [META, ["ip", "addr", "add", `${OUTSIDE6}/128`, "dev", "eth0"]],
+          [META, ["ip", "route", "add", `${ip.client6}/128`, "via", server26]],
+          [SERVER, ["ip", "route", "add", `${METADATA6}/128`, "via", meta26]], [SERVER, ["ip", "route", "add", `${OUTSIDE6}/128`, "via", meta26]],
+          [CLIENT, ["ip", "route", "add", `${METADATA6}/128`, "via", ip.server6]], [CLIENT, ["ip", "route", "add", `${OUTSIDE6}/128`, "via", ip.server6]],
+        ] : []),
+      ]) {
+        const r = await docker(["exec", name, ...args]);
+        assert(r.code === 0, `${name}: ${args.join(" ")}`, r.stderr.trim());
+      }
+      for (const args of [["-lk", "-p", "80", "-e", "true"], ["-lk", "-p", "53", "-e", "true"],
+        ...[METADATA, OUTSIDE].map((a) => ["-u", "-l", "-s", a, "-p", "53", "-e", "cat"])]) {
+        const l = await docker(["exec", "-d", META, "nc", ...args]);
+        assert(l.code === 0, `listener on the metadata side: ${args.join(" ")}`, l.stderr.trim());
+      }
+      v6 &&= Boolean(server26 && meta26);
+      // Control: the interface is not named like a bridge yet, so all answer through the server.
+      await expectPorts(METADATA, [80, 53], []);
+      await expectPorts(OUTSIDE, [80], []);
+      // A new IPv6 address answers only once duplicate address detection is over (about a second).
+      for (let i = 0; v6 && i < 5 && !(await answers(METADATA6, 80)); i += 1) await new Promise((r) => setTimeout(r, 1000));
+      if (v6) await expectPorts(METADATA6, [80], []);
+      if (v6) await expectPorts(OUTSIDE6, [80], []);
+      for (const args of [["down"], ["name", BRIDGE_NAME]]) {
+        const r = await docker(["exec", SERVER, "ip", "link", "set", "dev", netIface, ...args]);
+        assert(r.code === 0, `ip link set ${netIface} ${args.join(" ")}`, r.stderr.trim());
+      }
+      const up = await docker(["exec", SERVER, "ip", "link", "set", "dev", BRIDGE_NAME, "up"]);
+      assert(up.code === 0, `ip link set ${BRIDGE_NAME} up`, up.stderr.trim());
+      await expectPorts(OUTSIDE, [80], []);
+      await expectPorts(METADATA, [53], [80]);
+    });
+
+    // One datagram to udp 53 comes back through the bridge-named interface: control first, then the metadata address.
+    await step("17-udp-dns-passes", async () => {
+      for (const host of [OUTSIDE, METADATA]) {
+        const r = await docker(["exec", "-i", CLIENT, "nc", "-u", "-w", "2", host, "53"], "hp-dns-probe\n");
+        assert(r.stdout.includes("hp-dns-probe"), `udp ${host}:53 echoed back`, JSON.stringify(r));
+      }
+    });
+
+    await step("18-bridge-to-metadata6-dropped", async () => {
+      await expectPorts(OUTSIDE6, [80], []);
+      await expectPorts(METADATA6, [], [80]);
+    }, { needsV6: true });
   } finally {
     await cleanup();
     total += 1;

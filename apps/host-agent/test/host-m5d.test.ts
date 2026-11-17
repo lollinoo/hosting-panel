@@ -288,28 +288,37 @@ describe("apt-get -s upgrade", () => {
 });
 
 // The listing in the JSON form nft prints (libnftables-json), with invented addresses.
-function listing(sets: Array<{ name: string; type: string; elem?: unknown[] }>): string {
+// `forwardTable` is the table that holds a chain named forward (null: none), as the R207 host.1 rules add it.
+function listing(sets: Array<{ name: string; type: string; elem?: unknown[] }>, forwardTable: string | null = "hp_dedicated_filter"): string {
   return JSON.stringify({
     nftables: [
       { metainfo: { version: "1.1.6", json_schema_version: 1 } },
       { table: { family: "inet", name: "hp_dedicated_filter", handle: 3 } },
       { chain: { family: "inet", table: "hp_dedicated_filter", name: "input", handle: 2, type: "filter", hook: "input", prio: 0, policy: "drop" } },
+      ...(forwardTable ? [{ chain: { family: "inet", table: forwardTable, name: "forward", handle: 3, type: "filter", hook: "forward", prio: 0, policy: "accept" } }] : []),
       ...sets.map((s, i) => ({ set: { family: "inet", name: s.name, table: "hp_dedicated_filter", type: s.type, handle: 4 + i, ...(s.elem ? { elem: s.elem } : {}) } })),
       { rule: { family: "inet", table: "hp_dedicated_filter", chain: "input", handle: 21, expr: [] } },
     ],
   });
 }
-const CURRENT = listing([
+const CURRENT_SETS = [
   { name: "opened_tcp_ports", type: "inet_service", elem: [9100, 8080] },
   { name: "blocked_v4", type: "ipv4_addr", elem: [{ prefix: { addr: "198.51.100.0", len: 24 } }, "192.0.2.1"] },
   { name: "blocked_v6", type: "ipv6_addr", elem: ["2001:db8::2"] },
-]);
+];
+const CURRENT = listing(CURRENT_SETS);
 
 describe("parseFirewallListing", () => {
   it("reads a current table and sorts the lists as the simulator does", () => {
     expect(parseFirewallListing(CURRENT)).toEqual({
       baseRules: "current", openedPorts: [8080, 9100], blockedV4: ["192.0.2.1", "198.51.100.0/24"], blockedV6: ["2001:db8::2"],
     });
+  });
+  // R207 addendum 2 B: the old table (sets, no forward chain) still runs after an update, so Apply base rules shows.
+  it("reads the three sets without the forward chain as outdated, also when another table has one", () => {
+    const outdated = { baseRules: "outdated", openedPorts: [], blockedV4: [], blockedV6: [] };
+    expect(parseFirewallListing(listing(CURRENT_SETS, null))).toEqual(outdated);
+    expect(parseFirewallListing(listing(CURRENT_SETS, "other_filter"))).toEqual(outdated);
   });
   it("reads a set with no elem key as empty", () => {
     expect(parseFirewallListing(listing([

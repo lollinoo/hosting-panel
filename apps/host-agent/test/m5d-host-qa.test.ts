@@ -126,6 +126,7 @@ function listing(sets: HostFirewallSets): string {
   return JSON.stringify({ nftables: [
     { metainfo: { version: "1.1.6", json_schema_version: 1 } },
     { table: { family: "inet", name: "hp_dedicated_filter", handle: 3 } },
+    { chain: { family: "inet", table: "hp_dedicated_filter", name: "forward", handle: 2, type: "filter", hook: "forward", prio: 0, policy: "accept" } },
     set("opened_tcp_ports", "inet_service", [...sets.openedPorts]),
     set("blocked_v4", "ipv4_addr", sets.blockedV4.map(el)),
     set("blocked_v6", "ipv6_addr", sets.blockedV6.map(el)),
@@ -771,6 +772,10 @@ describe("P6 signed IPC on the seven M5d routes", () => {
 // ---- P7: the ruleset file -------------------------------------------------------------------------
 
 describe("P7 the dedicated ruleset", () => {
+  const METADATA_DROPS = [
+    'iifname "docker0" ip daddr 169.254.0.0/16 drop', 'iifname "br-*" ip daddr 169.254.0.0/16 drop',
+    'iifname "docker0" ip6 daddr fd00:ec2::254 drop', 'iifname "br-*" ip6 daddr fd00:ec2::254 drop',
+  ];
   const read = (): Promise<string> => readFile(join(ROOT, "infra/linux/nftables-dedicated.conf"), "utf8");
   const body = (text: string, chain: string): string[] =>
     new RegExp(`chain ${chain} \\{\\n([\\s\\S]*?)\\n  \\}`).exec(text)![1]!.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
@@ -806,12 +811,26 @@ describe("P7 the dedicated ruleset", () => {
       'iifname "docker0" tcp dport 3000 ct state new accept', 'iifname "br-*" tcp dport 3000 ct state new accept',
     ]);
     const drops = text.split("\n").map((l) => l.trim()).filter((l) => /\bdrop\b/.test(l) && !l.startsWith("type "));
-    expect(drops).toEqual(["ip saddr @blocked_v4 drop", "ip6 saddr @blocked_v6 drop", "ct state invalid drop"]);
+    expect(drops).toEqual(["ip saddr @blocked_v4 drop", "ip6 saddr @blocked_v6 drop", "ct state invalid drop", ...METADATA_DROPS]);
     expect(text).not.toMatch(/flush ruleset|include|define|\$|reject|jump|goto/);
     expect(new Set([...text.matchAll(/table (\S+ \S+)/g)].map((m) => m[1]))).toEqual(new Set([TABLE]));
     expect(text).toMatch(/set opened_tcp_ports \{\s*type inet_service\s*\}/);
     expect(text).toMatch(/set blocked_v4 \{\s*type ipv4_addr\s*flags interval\s*\}/);
     expect(text).toMatch(/set blocked_v6 \{\s*type ipv6_addr\s*flags interval\s*\}/);
+  });
+
+  // R207 host.1: a site's code never reaches the cloud metadata address; nothing else of the file moved.
+  it("the forward chain accepts by default, passes DNS and drops only bridge traffic to the metadata addresses", async () => {
+    const text = await read();
+    const forward = body(text, "forward");
+    // R207 addendum 2 A: DNS to the link-local resolver passes before the drops (policy accept, so from any interface).
+    expect(forward).toEqual([
+      "type filter hook forward priority filter; policy accept;",
+      "ip daddr 169.254.0.0/16 udp dport 53 accept", "ip daddr 169.254.0.0/16 tcp dport 53 accept", ...METADATA_DROPS,
+    ]);
+    const block = /\n(?: {2}# [^\n]*\n)+ {2}chain forward \{\n[\s\S]*?\n {2}\}\n/.exec(text)![0];
+    // The file before host.1 (pinned in cycle 14): prerouting, input, output and the sets are byte for byte the same.
+    expect(createHash("sha256").update(text.replace(block, "")).digest("hex")).toBe("80c56bc1101e13b8e858fd0cf5f26bb74684f637050656bd0ef8372284011651");
   });
 
   // A blocked address still reaches tcp 22 (accepted before the drops so the operator cannot lock out SSH),

@@ -32,7 +32,7 @@ export function buildFirewallSetsProgram(sets: HostFirewallSets): string {
 
 const SET_TYPES = { openedPorts: "inet_service", blockedV4: "ipv4_addr", blockedV6: "ipv6_addr" } as const;
 
-/** Reads `nft -j list table`: outdated without the three typed sets, refuses any other element shape. */
+/** Reads `nft -j list table`: outdated without the three typed sets or the forward chain, refuses any other element shape. */
 export function parseFirewallListing(stdout: string): Omit<HostFirewallState, "readAt"> {
   let doc: unknown;
   try {
@@ -43,10 +43,13 @@ export function parseFirewallListing(stdout: string): Omit<HostFirewallState, "r
   const items = (doc as { nftables?: unknown } | null)?.nftables;
   if (!Array.isArray(items)) throw hostToolFailed();
   const found = new Map<string, { type?: unknown; elem?: unknown }>();
-  for (const item of items as Array<{ set?: { name?: unknown; table?: unknown; type?: unknown; elem?: unknown } } | null>)
+  let forward = false;
+  for (const item of items as Array<{ set?: { name?: unknown; table?: unknown; type?: unknown; elem?: unknown }; chain?: { name?: unknown; table?: unknown } } | null>) {
     if (item?.set && item.set.table === "hp_dedicated_filter" && typeof item.set.name === "string") found.set(item.set.name, item.set);
+    if (item?.chain?.table === "hp_dedicated_filter" && item.chain.name === "forward") forward = true;
+  }
   const keys = Object.keys(SETS) as (keyof typeof SETS)[];
-  if (!keys.every((k) => found.get(SETS[k])?.type === SET_TYPES[k]))
+  if (!forward || !keys.every((k) => found.get(SETS[k])?.type === SET_TYPES[k]))
     return { baseRules: "outdated", openedPorts: [], blockedV4: [], blockedV6: [] };
   const elems = (k: keyof typeof SETS): unknown[] => {
     const elem = found.get(SETS[k])!.elem ?? [];
