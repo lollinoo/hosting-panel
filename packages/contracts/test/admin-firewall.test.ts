@@ -120,7 +120,8 @@ describe("firewall lists (D9)", () => {
   it("names the static rules of the shipped ruleset", () => {
     const file = readFileSync(new URL("../../../infra/linux/nftables-dedicated.conf", import.meta.url), "utf8");
     const ports = [...new Set(FIREWALL_STATIC_RULES.flatMap((r) => [...r.ports]))].sort((a, b) => a - b);
-    expect(tcpDports(file)).toEqual(ports);
+    // The forward chain (R207 host.1) passes DNS for sites; it opens nothing towards the server.
+    expect(tcpDports(file.replace(/chain forward \{[^}]*\}/, ""))).toEqual(ports);
     // The M5d ruleset adds a bare port and a set reference: the same numbers come out.
     const m5d = "tcp dport 22 accept\n tcp dport { 22, 80, 443 } ct state new accept\n tcp dport @opened_tcp_ports ct state new accept\n iifname \"br-*\" tcp dport 3000 ct state new accept\n";
     expect(tcpDports(m5d)).toEqual(ports);

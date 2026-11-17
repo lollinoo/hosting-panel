@@ -242,6 +242,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "PANEL_CONTAINER_ABSENT",
       "FIREWALL_BASE_RULES_NOT_CURRENT",
       "HOST_JOB_FAILED",
+      "RATE_LIMITED",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -256,6 +257,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.PANEL_CONTAINER_ABSENT).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.FIREWALL_BASE_RULES_NOT_CURRENT).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.HOST_JOB_FAILED).toBe(502);
+    expect(ERROR_CODE_HTTP_STATUS.RATE_LIMITED).toBe(429);
     expect(ERROR_CODES).not.toContain("UPDATE_CHECK_FAILED");
   });
 
@@ -282,6 +284,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(isDefaultRetryableErrorCode("VALIDATION_ERROR")).toBe(false);
     expect(isDefaultRetryableErrorCode("NOT_FOUND")).toBe(false);
     expect(isDefaultRetryableErrorCode("ALREADY_EXISTS")).toBe(false);
+    expect(isDefaultRetryableErrorCode("RATE_LIMITED")).toBe(false);
   });
 
   it("creates structured ApiErrorEnvelope", () => {

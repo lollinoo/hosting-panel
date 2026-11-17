@@ -5,6 +5,10 @@ import {
   type HostingMode,
 } from "@hosting-panel/contracts";
 
+// Ceiling on a service's limits whatever the template says; the executor checks the same two numbers.
+export const MAX_SERVICE_MEMORY_BYTES = 64n * 1024n ** 3n;
+export const MAX_SERVICE_CPU_MILLI = 64_000;
+
 export interface TemplatePolicyTarget {
   readonly id: string;
   readonly approvedForDedicated: boolean;
@@ -71,6 +75,14 @@ export function validateDeclarativeServiceInput(
       };
     }
 
+    if (resourceLimits.cpuMilli > MAX_SERVICE_CPU_MILLI) {
+      return {
+        valid: false,
+        errorCode: "VALIDATION_ERROR",
+        message: `Requested CPU ${resourceLimits.cpuMilli}m is above the ceiling of ${MAX_SERVICE_CPU_MILLI}m`,
+      };
+    }
+
     try {
       const requestedMemory = BigInt(resourceLimits.memoryBytes);
       const minMemory = BigInt(template.minMemoryBytes);
@@ -79,6 +91,13 @@ export function validateDeclarativeServiceInput(
           valid: false,
           errorCode: "VALIDATION_ERROR",
           message: `Requested memory ${resourceLimits.memoryBytes} bytes is below template minimum of ${template.minMemoryBytes} bytes`,
+        };
+      }
+      if (requestedMemory > MAX_SERVICE_MEMORY_BYTES) {
+        return {
+          valid: false,
+          errorCode: "VALIDATION_ERROR",
+          message: `Requested memory ${resourceLimits.memoryBytes} bytes is above the ceiling of ${MAX_SERVICE_MEMORY_BYTES} bytes`,
         };
       }
     } catch {
