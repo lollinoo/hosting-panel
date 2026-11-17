@@ -27,3 +27,4 @@ export * from "./site-sftp-users-repository.js";
 export * from "./backups-repository.js";
 export * from "./site-wordpress-state-repository.js";
 export * from "./password-reset-repository.js";
+export * from "./admin-terminal-repository.js";

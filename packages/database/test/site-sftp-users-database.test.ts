@@ -105,6 +105,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
     ]);
 
     const after0008 = await db().execute(

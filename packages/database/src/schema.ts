@@ -42,6 +42,7 @@ import type {
   ServiceDesiredStatus,
   SiteHostRoute,
   SiteStatus,
+  TerminalEndReason,
 } from "@hosting-panel/contracts";
 
 export const platformInstallations = pgTable("platform_installations", {
@@ -781,4 +782,20 @@ export const siteWordpressState = pgTable(
       .onUpdate("cascade")
       .onDelete("cascade"),
   ],
+);
+
+// No foreign keys: the row and its audit outlive the site and the user.
+export const adminTerminalSessions = pgTable(
+  "admin_terminal_sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    siteId: text("site_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    containerName: text("container_name").notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closeReason: text("close_reason").$type<TerminalEndReason>(),
+  },
+  (t) => [index("idx_admin_terminal_sessions_open").on(t.openedAt).where(sql`${t.closedAt} IS NULL`)],
 );
