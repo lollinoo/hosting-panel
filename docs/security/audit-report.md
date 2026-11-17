@@ -322,11 +322,11 @@ What the code review could not confirm, and where each is written:
 | DM1 | medium | ADR 0025 limit 19 said the right password and code pass a lock; from the panel's sign-in form they do not (only an API caller passes). | **repaired**: ADR 0025 limit 19 says so; see "H1". The sentence that `hp-break-glass` is a way back into the panel (withdrawn by R207 addendum 6) is gone from ADR 0025, the README and this report. |
 | DM2 | medium | Low rows of the auditors were missing from this report. | **repaired**: rows L54 to L82. |
 | DL1 | low | The README update part did not say what else changes from 0.5.0. | **repaired**: README "Dalla 0.5.0, cos'altro cambia". Test: `apps/api/test/infra-layout.test.ts`. |
-| DL2 | low | The version is still 0.5.0. | **open.** The owner's release step (see below). |
+| DL2 | low | The version is still 0.5.0. | **repaired** after the audit: the release commit raises the root version to `0.6.0` (see "The owner's release step"). |
 | DL3 | low | The layout test only looked for a sentence of this report. | **repaired**: `apps/api/test/infra-layout.test.ts` reads the tables of this report. |
 | DL4 | low | "Open high or critical findings: 0" stood above the table that proves it. | **repaired**: it stands under the table. |
 
-Documents review: 7 rows. High 1, repaired. Medium 2, repaired. Low 4: repaired 3, open 1 (DL2).
+Documents review: 7 rows. High 1, repaired. Medium 2, repaired. Low 4: repaired 4 (DL2 by the release commit, after the audit).
 
 The rows of R207 `a.8` that the lead judged low and written as a limit (addendum 6 §1 and the
 lead's ruling at the start of the documents phase), each in ADR 0025:
@@ -390,8 +390,9 @@ administrator page that lists them and did not look further).
 
 ## The owner's release step
 
-- The root version is still `0.5.0` (DL2). Before tagging the release, raise it above `0.5.0`; the
-  README update part speaks of "Dalla 0.5.0". The run's `BLOCKED.md` row 12 holds this step.
+- Done after the merge: the root version is `0.6.0` (DL2), in a commit of its own, and the README's
+  install and update examples name it. Every run in this report was made on `0.5.0`, before that
+  commit. The tag `v0.6.0` starts `.github/workflows/release.yml`, which had never run before.
 
 ## Runs of the lead
 

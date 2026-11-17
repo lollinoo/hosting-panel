@@ -1,6 +1,7 @@
 // QA (cycle 8): independent tests of the import job kinds; the engineers' own tests live in site-jobs.test.ts.
 import { execFile, execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SHARED_MARIADB_IMAGE, WORDPRESS_RESULT_MAX_BYTES, resolveWordpressCliImage, siteDatabasePrefix } from "@hosting-panel/contracts";
@@ -589,6 +590,9 @@ exit 0
     await mkdir(path.join(dir, "bin"));
     await mkdir(path.join(dir, "secrets"));
     await writeFile(path.join(dir, "bin", "mariadb"), SHIM, { mode: 0o755 });
+    // The load script reads a FIFO with tail. The tail of uutils (the default of Ubuntu 26.04) waits for ever
+    // when the writer has already closed the FIFO; such a system ships GNU tail as gnutail.
+    if (existsSync("/usr/bin/gnutail")) await symlink("/usr/bin/gnutail", path.join(dir, "bin", "tail"));
     await writeFile(path.join(dir, "secrets", "mariadb-root"), "root-sentinel");
     await writeFile(path.join(dir, "secrets", "HP_IMPORT_DB_PASSWORD"), IMPORT_PW);
     await writeFile(path.join(dir, "dump"), "CREATE TABLE wp_options (a INT);\n");

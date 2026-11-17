@@ -8,6 +8,8 @@ export default defineConfig({
   test: {
     environment: "node",
     include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "infra/**/*.test.ts"],
+    // Tests that hash passwords take 3 to 5 s here and more on a CI runner: the default of 5 s cut them.
+    testTimeout: 30_000,
   },
   resolve: {
     alias: {

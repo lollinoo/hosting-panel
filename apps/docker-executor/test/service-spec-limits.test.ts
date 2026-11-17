@@ -41,7 +41,8 @@ describe("service resource ceiling (exec.1)", () => {
       { cpuMilli: 1000, memoryBytes: "536870912" },
     ]) {
       const input = spec({ resourceLimits });
-      expect(validateExecutorServiceSpec(input)).toEqual(input);
+      // The validation stamps the spec again, so the time of approval may be a millisecond later.
+      expect(validateExecutorServiceSpec(input)).toEqual({ ...input, approvedAt: expect.any(String) });
     }
   });
 });
