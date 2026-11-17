@@ -1,0 +1,18 @@
+{
+  "method": "POST",
+  "path": "/containers/ctr_pin_site_a/exec",
+  "body": {
+    "Cmd": [
+      "/bin/sh",
+      "-c",
+      "m=\"^HP_TERMINAL_SESSION=${1:-.*}\\$\"; s=\"\"; for p in /proc/[0-9]*; do grep -qz \"$m\" \"$p/environ\" 2>/dev/null || continue; i=$(ps -o sid= -p \"${p#/proc/}\"); i=${i##* }; [ \"${i:-0}\" -gt 1 ] && s=\"$s,$i\"; kill -KILL \"${p#/proc/}\" 2>/dev/null; done; [ -z \"$s\" ] || pkill -KILL -s \"${s#,}\"; exit 0",
+      "sh",
+      ""
+    ],
+    "User": "33:33",
+    "AttachStdin": true,
+    "AttachStdout": true,
+    "AttachStderr": true,
+    "Tty": false
+  }
+}

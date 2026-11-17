@@ -1,0 +1,107 @@
+{
+  "spec": {
+    "containerName": "hp_bk_op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0_up",
+    "payload": {
+      "Image": "restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510",
+      "Cmd": [
+        "-o",
+        "s3.bucket-lookup=path",
+        "-o",
+        "s3.region=eu-central-1",
+        "backup",
+        "-q",
+        "--json",
+        "--host",
+        "hosting-panel",
+        "--tag",
+        "op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+        "--exclude",
+        "/backup/files/.hp_rs_*",
+        "--exclude",
+        "/backup/files/.htpanel-import",
+        "/backup/files",
+        "/backup/databases"
+      ],
+      "User": "33:33",
+      "Hostname": "hosting-panel",
+      "Env": [
+        "GOMAXPROCS=1",
+        "NICE=19",
+        "RESTIC_CACHE_DIR=/tmp/cache",
+        "RESTIC_REPOSITORY=s3:https://s3.example.test:9000/pin-backups/pins/site-a/sites/site_pin_a",
+        "AWS_SHARED_CREDENTIALS_FILE=/run/secrets/AWS_SHARED_CREDENTIALS",
+        "RESTIC_PASSWORD_FILE=/run/secrets/RESTIC_PASSWORD"
+      ],
+      "Labels": {
+        "io.hostingpanel.managed": "true",
+        "io.hostingpanel.role": "site_job",
+        "io.hostingpanel.site_id": "site_pin_a",
+        "io.hostingpanel.job_id": "op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+      },
+      "HostConfig": {
+        "Privileged": false,
+        "ReadonlyRootfs": true,
+        "CapDrop": [
+          "ALL"
+        ],
+        "SecurityOpt": [
+          "no-new-privileges:true"
+        ],
+        "PidsLimit": 128,
+        "NanoCpus": 1000000000,
+        "Memory": 536870912,
+        "MemorySwap": 536870912,
+        "RestartPolicy": {
+          "Name": "no"
+        },
+        "Tmpfs": {
+          "/tmp": "rw,nosuid,nodev,noexec,size=128m,mode=1777"
+        },
+        "LogConfig": {
+          "Type": "json-file",
+          "Config": {
+            "max-size": "1m",
+            "max-file": "1"
+          }
+        },
+        "NetworkMode": "hp_backup_net",
+        "Binds": [
+          "hp_vol_svc_pin_a_html:/backup/files:ro",
+          "hp_bk_op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0:/backup/databases:ro",
+          "/run/hosting-panel/secrets/job_bk_op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0/AWS_SHARED_CREDENTIALS:/run/secrets/AWS_SHARED_CREDENTIALS:ro",
+          "/run/hosting-panel/secrets/job_bk_op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0/RESTIC_PASSWORD:/run/secrets/RESTIC_PASSWORD:ro"
+        ]
+      }
+    }
+  },
+  "runnerStart": {
+    "result": {
+      "jobId": "op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+      "state": "failed",
+      "failure": "other",
+      "snapshot": null
+    },
+    "ensuredImages": [
+      "restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510"
+    ],
+    "siteVolumeCalls": [
+      {
+        "method": "GET",
+        "path": "/volumes/hp_vol_svc_pin_a_html"
+      }
+    ]
+  },
+  "runnerSiteState": {
+    "result": {
+      "filesVolume": true,
+      "container": false
+    },
+    "ensuredImages": [],
+    "siteVolumeCalls": [
+      {
+        "method": "GET",
+        "path": "/volumes/hp_vol_svc_pin_a_html"
+      }
+    ]
+  }
+}

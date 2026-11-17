@@ -1,0 +1,24 @@
+{
+  "method": "POST",
+  "path": "/containers/ctr_pin_site_a/exec",
+  "body": {
+    "Cmd": [
+      "/bin/sh"
+    ],
+    "User": "33:33",
+    "WorkingDir": "/var/www/html",
+    "Env": [
+      "TERM=dumb",
+      "PS1=$PWD $ ",
+      "HP_TERMINAL_SESSION=term_5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+    ],
+    "AttachStdin": true,
+    "AttachStdout": true,
+    "AttachStderr": true,
+    "Tty": true,
+    "ConsoleSize": [
+      24,
+      80
+    ]
+  }
+}

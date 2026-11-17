@@ -1,0 +1,73 @@
+{
+  "configSha256": "a40bb749ccd49b11ca77a1dcfd04d6958d56d628053cc643aa928309905b3d67",
+  "payload": {
+    "Image": "linuxserver/openssh-server@sha256:161e0b670b31d9539ca1718bc5943e981779331b4e1c9d32e8929d7652a1f22f",
+    "Entrypoint": [
+      "/usr/sbin/sshd.pam"
+    ],
+    "Cmd": [
+      "-D",
+      "-e",
+      "-f",
+      "/etc/hp-sftp/sshd_config"
+    ],
+    "ExposedPorts": {
+      "2222/tcp": {}
+    },
+    "Labels": {
+      "io.hostingpanel.managed": "true",
+      "io.hostingpanel.role": "sftp",
+      "io.hostingpanel.config_sha256": "a40bb749ccd49b11ca77a1dcfd04d6958d56d628053cc643aa928309905b3d67"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "CapDrop": [
+        "ALL"
+      ],
+      "CapAdd": [
+        "SETGID",
+        "SETUID",
+        "SYS_CHROOT"
+      ],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "ReadonlyRootfs": true,
+      "PidsLimit": 512,
+      "NanoCpus": 500000000,
+      "Memory": 268435456,
+      "MemorySwap": 268435456,
+      "RestartPolicy": {
+        "Name": "unless-stopped"
+      },
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      },
+      "NetworkMode": "hp_sftp_net",
+      "PortBindings": {
+        "2222/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "2222"
+          }
+        ]
+      },
+      "Binds": [
+        "/var/lib/hosting-panel/sftp/etc:/etc/hp-sftp:ro",
+        "/var/lib/hosting-panel/sftp/users/group:/etc/group:ro",
+        "/var/lib/hosting-panel/sftp/users/passwd:/etc/passwd:ro",
+        "/var/lib/hosting-panel/sftp/users/shadow:/etc/shadow:ro",
+        "hp_vol_svc_pin_a_html:/srv/sftp/site_pin_a/files:rw",
+        "hp_vol_svc_pin_b_html:/srv/sftp/site_pin_b/files:rw"
+      ]
+    }
+  },
+  "adapterVolumeLookups": [
+    "/v1.45/volumes/hp_vol_svc_pin_a_html",
+    "/v1.45/volumes/hp_vol_svc_pin_b_html"
+  ]
+}

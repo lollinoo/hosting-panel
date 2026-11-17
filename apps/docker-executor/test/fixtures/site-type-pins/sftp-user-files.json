@@ -1,0 +1,5 @@
+{
+  "passwd": "root:x:0:0:root:/root:/bin/false\nsshd:x:22:22:sshd:/var/empty:/bin/false\nspina_web:x:33:33::/srv/sftp/site_pin_a:/bin/false\nspina_ci:x:33:33::/srv/sftp/site_pin_a:/bin/false\nspinb_admin:x:33:33::/srv/sftp/site_pin_b:/bin/false\n",
+  "group": "root:x:0:\nsshd:x:22:\nhpsftp:x:33:\n",
+  "shadow": "root:*:::::::\nsshd:*:::::::\nspina_web:$6$sentinelsalt$sentinelhashonesentinelhashonesentinelhashonesentinelhashonesentinelhashonesentinelhas:::::::\nspina_ci:$6$rounds=5000$sentinelsalt$sentinelhashtwosentinelhashtwosentinelhashtwosentinelhashtwosentinelhashtwosentinelhas:::::::\nspinb_admin:$6$sentinelsalt$sentinelhashonesentinelhashonesentinelhashonesentinelhashonesentinelhashonesentinelhas:::::::\n"
+}

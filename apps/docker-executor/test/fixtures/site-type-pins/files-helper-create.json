@@ -1,0 +1,44 @@
+{
+  "Image": "wordpress:7.1.4-php8.4-apache",
+  "Entrypoint": [
+    "sleep",
+    "infinity"
+  ],
+  "Cmd": [],
+  "User": "33:33",
+  "WorkingDir": "/var/www/html",
+  "Env": [],
+  "NetworkDisabled": true,
+  "StopSignal": "SIGKILL",
+  "Labels": {
+    "io.hostingpanel.managed": "true",
+    "io.hostingpanel.role": "site_files",
+    "io.hostingpanel.site_id": "site_pin_a",
+    "io.hostingpanel.files_for": "svc_pin_a"
+  },
+  "HostConfig": {
+    "NetworkMode": "none",
+    "Privileged": false,
+    "ReadonlyRootfs": true,
+    "CapDrop": [
+      "ALL"
+    ],
+    "SecurityOpt": [
+      "no-new-privileges:true"
+    ],
+    "Tmpfs": {
+      "/tmp": "rw,noexec,nosuid,nodev,size=16m"
+    },
+    "PidsLimit": 64,
+    "Memory": 536870912,
+    "MemorySwap": 536870912,
+    "NanoCpus": 1000000000,
+    "RestartPolicy": {
+      "Name": "no"
+    },
+    "Binds": [
+      "hp_vol_svc_pin_a_html:/var/www/html:rw,nocopy",
+      "/var/lib/hosting-panel/site-files:/usr/local/lib/hp-files:ro"
+    ]
+  }
+}

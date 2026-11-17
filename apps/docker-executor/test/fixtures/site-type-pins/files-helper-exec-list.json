@@ -1,0 +1,124 @@
+[
+  {
+    "method": "GET",
+    "path": "/containers/hp_files_svc_pin_a/json"
+  },
+  {
+    "method": "GET",
+    "path": "/volumes/hp_vol_svc_pin_a_html"
+  },
+  {
+    "method": "GET",
+    "path": "/containers/json?all=true&filters=%7B%22label%22%3A%5B%22io.hostingpanel.service_instance_id%3Dsvc_pin_a%22%5D%7D"
+  },
+  {
+    "method": "GET",
+    "path": "/images/wordpress%3A7.1.4-php8.4-apache/json"
+  },
+  {
+    "method": "POST",
+    "path": "/containers/create?name=hp_files_svc_pin_a",
+    "body": {
+      "Image": "wordpress:7.1.4-php8.4-apache",
+      "Entrypoint": [
+        "sleep",
+        "infinity"
+      ],
+      "Cmd": [],
+      "User": "33:33",
+      "WorkingDir": "/var/www/html",
+      "Env": [],
+      "NetworkDisabled": true,
+      "StopSignal": "SIGKILL",
+      "Labels": {
+        "io.hostingpanel.managed": "true",
+        "io.hostingpanel.role": "site_files",
+        "io.hostingpanel.site_id": "site_pin_a",
+        "io.hostingpanel.files_for": "svc_pin_a"
+      },
+      "HostConfig": {
+        "NetworkMode": "none",
+        "Privileged": false,
+        "ReadonlyRootfs": true,
+        "CapDrop": [
+          "ALL"
+        ],
+        "SecurityOpt": [
+          "no-new-privileges:true"
+        ],
+        "Tmpfs": {
+          "/tmp": "rw,noexec,nosuid,nodev,size=16m"
+        },
+        "PidsLimit": 64,
+        "Memory": 536870912,
+        "MemorySwap": 536870912,
+        "NanoCpus": 1000000000,
+        "RestartPolicy": {
+          "Name": "no"
+        },
+        "Binds": [
+          "hp_vol_svc_pin_a_html:/var/www/html:rw,nocopy",
+          "/var/lib/hosting-panel/site-files:/usr/local/lib/hp-files:ro"
+        ]
+      }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/containers/ctr_pin_helper/start"
+  },
+  {
+    "method": "POST",
+    "path": "/containers/ctr_pin_helper/exec",
+    "body": {
+      "Cmd": [
+        "timeout",
+        "-s",
+        "KILL",
+        "28",
+        "php",
+        "-d",
+        "memory_limit=256M",
+        "-d",
+        "display_errors=stderr",
+        "-d",
+        "max_execution_time=0",
+        "/usr/local/lib/hp-files/hp-files.php"
+      ],
+      "User": "33:33",
+      "WorkingDir": "/var/www/html",
+      "Env": [],
+      "AttachStdin": true,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/containers/ctr_pin_helper/exec",
+    "body": {
+      "Cmd": [
+        "timeout",
+        "-s",
+        "KILL",
+        "43",
+        "php",
+        "-d",
+        "memory_limit=256M",
+        "-d",
+        "display_errors=stderr",
+        "-d",
+        "max_execution_time=0",
+        "/usr/local/lib/hp-files/hp-files.php"
+      ],
+      "User": "33:33",
+      "WorkingDir": "/var/www/html",
+      "Env": [],
+      "AttachStdin": true,
+      "AttachStdout": true,
+      "AttachStderr": true,
+      "Tty": false
+    }
+  }
+]
