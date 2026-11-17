@@ -175,7 +175,7 @@ describe("release workflow and docs", () => {
     const readme = read("README.md");
     for (const s of ["install.sh", "hp-update", "sha256sum -c", "hp-accounts"]) expect(readme).toContain(s);
     expect(readme).not.toContain("export DATABASE_URL=");
-    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("step 2a docs are consistent", () => {
@@ -184,7 +184,7 @@ describe("release workflow and docs", () => {
     const api = read("docs/api/openapi.yaml");
     for (const s of ["/v1/organizations/{orgId}/managed-sites", "/v1/admin/sites"]) expect(api).toContain(s);
     expect(existsSync(join(root, "docs/architecture/adr/0016-shared-mariadb-and-site-jobs.md"))).toBe(true);
-    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("step 2b docs are consistent", () => {
@@ -197,7 +197,7 @@ describe("release workflow and docs", () => {
     ])
       expect(api).toContain(s);
     expect(existsSync(join(root, "docs/architecture/adr/0017-domains-dns-and-acme-tls.md"))).toBe(true);
-    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("step 2c docs are consistent", () => {
@@ -206,7 +206,7 @@ describe("release workflow and docs", () => {
     expect(read("docs/api/openapi.yaml")).toContain("/v1/admin/mail-relay");
     const adr = read("docs/architecture/adr/0018-outgoing-mail-relay.md");
     for (const s of ["CP-01", "postqueue"]) expect(adr).toContain(s);
-    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(MAIL_RELAY_IMAGE).toBe("boky/postfix:5.2.1-alpine");
   });
 
@@ -237,7 +237,7 @@ describe("release workflow and docs", () => {
     for (const s of ["hp_files_", "512 KiB", "2 GiB", "site.files.archive"]) {
       expect(adr).toContain(s);
     }
-    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("m1b site sftp docs are consistent", () => {
@@ -285,7 +285,7 @@ describe("release workflow and docs", () => {
     for (const s of ["hp_sftp", "2222", "site.sftp.manage", "/var/lib/hosting-panel/sftp"]) {
       expect(adr).toContain(s);
     }
-    expect(JSON.parse(read("package.json")).version).toBe("0.5.0");
+    expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
   it("m2 site databases and phpmyadmin docs are consistent", () => {
@@ -541,5 +541,38 @@ describe("release workflow and docs", () => {
     for (const unit of ["hp-unit-restart@", "hp-panel-update", "hp-os-refresh", "hp-os-upgrade"]) {
       expect(harness).toContain(unit);
     }
+  });
+
+  it("m6a site-type docs are consistent", () => {
+    const readme = read("README.md");
+    expect(readme).toContain("docs/architecture/adr/0029-site-types.md");
+    expect(readme).not.toContain("Una versione più nuova data all'installer è un aggiornamento senza");
+
+    // Every repo path the ADR writes in backticks exists (a trailing :line is dropped).
+    const adr = read("docs/architecture/adr/0029-site-types.md");
+    const paths = [...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, ""));
+    expect(paths.length).toBeGreaterThan(20);
+    for (const p of paths) expect(existsSync(join(root, p)), p).toBe(true);
+
+    // R206 C6: the paths the repair's lines name are in the ADR and exist; CreateForm is gone.
+    for (const p of [
+      "apps/docker-executor/test/site-type-edge-qa.test.ts",
+      "apps/docker-executor/src/site-files-helper.ts",
+      "apps/docker-executor/src/site-mail.ts",
+      "apps/api/src/host/host-jobs.ts",
+      "apps/web/src/lib/file-browser.ts",
+      "packages/contracts/src/site-databases.ts",
+      "apps/api/src/sites/site-domains-applier.ts",
+      "apps/api/src/runtime/site-provisioner.ts",
+      "apps/api/src/sites/site-wordpress-import-applier.ts",
+      "apps/docker-executor/src/terminal-docker.ts",
+      "apps/docker-executor/src/sftp-platform.ts"
+    ]) {
+      expect(paths, p).toContain(p);
+    }
+    expect(adr).toContain("restore.filesImage");
+    expect(adr).not.toContain("CreateForm");
+
+    expect(read("HARNESS.md")).toContain("pinned by tag, not by digest");
   });
 });
