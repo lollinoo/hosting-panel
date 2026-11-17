@@ -11,7 +11,8 @@ import {
   RestoreNoteSchema,
   buildRestoreDbScript,
   buildRestoreFetchContainerPayload,
-  buildRestoreFetchScript,
+  buildRestoreFetchFilesContainerPayload,
+  buildRestoreFetchFilesScript,
   buildRestoreFilesContainerPayload,
   buildRestoreFilesFinishContainerPayload,
   buildRestoreFilesScript,
@@ -81,18 +82,12 @@ describe("backup and restore builders with a type without a database", () => {
   });
 
   it("fetch, files, undo files and own use the type's mount, owner, image and scripts", () => {
-    const fetch = buildRestoreFetchContainerPayload({
-      ...ids,
-      siteType: T,
-      snapshotId: "5a".repeat(32),
-      target: TARGET,
-      backupNetworkName: "hp_backup_net",
-      ...restic,
-      stagingVolumeName: `hp_bk_${JOB}`,
-    });
+    const fetchIn = { ...ids, siteType: T, snapshotId: "5a".repeat(32), target: TARGET, backupNetworkName: "hp_backup_net", ...restic };
+    const fetch = buildRestoreFetchFilesContainerPayload(fetchIn);
     expect(fetch.payload.User).toBe("1000:1000");
     expect(binds(fetch)).toContain(`${VOLUME}:/srv/public`);
-    expect((fetch.payload.Entrypoint as string[])[2]).toBe(buildRestoreFetchScript(T));
+    expect((fetch.payload.Entrypoint as string[])[2]).toBe(buildRestoreFetchFilesScript(T));
+    expect(binds(buildRestoreFetchContainerPayload({ ...fetchIn, stagingVolumeName: `hp_bk_${JOB}` }))).not.toContain(`${VOLUME}:/srv/public`);
 
     for (const [spec, step] of [
       [buildRestoreFilesContainerPayload({ ...ids, siteType: T }), "switch"],
@@ -125,7 +120,7 @@ describe("backup and restore builders with a type without a database", () => {
 
   it("the scripts carry only the type's words", () => {
     const files = buildRestoreFilesScript(T);
-    const fetch = buildRestoreFetchScript(T);
+    const fetch = buildRestoreFetchFilesScript(T);
     expect(files).not.toMatch(WORDPRESS_WORDS);
     expect(fetch).not.toMatch(WORDPRESS_WORDS);
     expect(files).toContain("W=/srv/public; R=$W/.hp_rs_$HP_H");
@@ -305,7 +300,7 @@ describe("BackupRunner with a type without a database", () => {
     const req: BackupsIpcRequest = { action: "restore", ...ids, target: TARGET, snapshotId: "5a".repeat(32) };
     await runner.run(req);
     expect(await settle(runner, JOB)).toMatchObject({ state: "succeeded", failure: null });
-    expect(created.map((c) => c.name.slice(JOB.length + 7))).toEqual(["rs_fetch", "rs_files", "rs_finish"]);
+    expect(created.map((c) => c.name.slice(JOB.length + 7))).toEqual(["rs_fetch", "rs_fetch_files", "rs_files", "rs_finish"]);
     expect(created.every((c) => c.body.Image !== SHARED_MARIADB_IMAGE)).toBe(true);
     expect(ensured).not.toContain(SHARED_MARIADB_IMAGE);
     expect(ensured).toContain("hp-test-static-files:1");

@@ -56,6 +56,8 @@ import {
   RESTORE_JOB_ID_PATTERN,
   buildArchiveContainerPayload,
   buildRestoreFetchContainerPayload,
+  buildRestoreFetchFilesContainerPayload,
+  buildRestoreGateContainerPayload,
   buildRestoreFilesContainerPayload,
   buildRestoreFilesFinishContainerPayload,
   buildRestoreFinishContainerPayload,
@@ -1141,13 +1143,20 @@ export class BackupRunner {
       jobId: input.jobId,
       siteId: input.siteId,
       siteType: t,
-      serviceInstanceId: input.serviceInstanceId,
       stagingVolumeName: input.stagingVolumeName,
       sharedDbNetworkName: this.deps.sharedDbNetworkName,
       secretBinds: dbSecret.secretBinds,
       secretFileEnv: dbSecret.secretFileEnv,
     });
-    await this.tryRunContainer(undoDbSpec, createdRefs, BACKUP_RESTORE_UNDO_TIMEOUT_MS);
+    const undo = await this.tryRunContainer(undoDbSpec, createdRefs, BACKUP_RESTORE_UNDO_TIMEOUT_MS);
+    if (undo.kind === "exited" && classifyRestoreUndoExitCode(undo.exitCode) === null) {
+      await this.tryRunContainer(this.restoreGateSpec(t, input, "end"), createdRefs, BACKUP_RESTORE_UNDO_TIMEOUT_MS);
+    }
+  }
+
+  /** The type's maintenance gate in its own container: the site volume only (C2). */
+  private restoreGateSpec(t: ExecutorSiteType, ids: RestoreIds, step: "on" | "undo" | "end"): BackupContainerSpec {
+    return buildRestoreGateContainerPayload({ step, jobId: ids.jobId, siteId: ids.siteId, serviceInstanceId: ids.serviceInstanceId, siteType: t });
   }
 
   private async runSwitchUndoSequence(
@@ -1185,11 +1194,12 @@ export class BackupRunner {
         : "undo_incomplete";
     }
     if (dbSecret === null) return "undo_incomplete";
+    const gateOn = await this.tryRunContainer(this.restoreGateSpec(t, input, "undo"), createdRefs, BACKUP_RESTORE_UNDO_TIMEOUT_MS);
+    if (gateOn.kind !== "exited" || gateOn.exitCode !== 0) return "undo_incomplete";
     const undoDbSpec = buildRestoreUndoDbContainerPayload({
       jobId: input.jobId,
       siteId: input.siteId,
       siteType: t,
-      serviceInstanceId: input.serviceInstanceId,
       stagingVolumeName: input.stagingVolumeName,
       sharedDbNetworkName: this.deps.sharedDbNetworkName,
       secretBinds: dbSecret.secretBinds,
@@ -1208,7 +1218,8 @@ export class BackupRunner {
     ) {
       return "undo_incomplete";
     }
-    return "switch_undone";
+    const gateEnd = await this.tryRunContainer(this.restoreGateSpec(t, input, "end"), createdRefs, BACKUP_RESTORE_UNDO_TIMEOUT_MS);
+    return gateEnd.kind === "exited" && gateEnd.exitCode === 0 ? "switch_undone" : "undo_incomplete";
   }
 
   private async listRestoreNotesSafe(opts: {
@@ -1434,6 +1445,7 @@ export class BackupRunner {
     let createdVolume = false;
     let keepOnUndoIncomplete = false;
     let leaveNoteSwitched = false;
+    let filesSwitched = false;
     let finalState: "succeeded" | "failed" = "failed";
     let finalFailure: BackupJobStatus["failure"] = "restore_prepare_failed";
     const setOutcome = (
@@ -1529,7 +1541,7 @@ export class BackupRunner {
         secretInstanceIds,
       );
 
-      const fetchSpec = buildRestoreFetchContainerPayload({
+      const fetchInput = {
         jobId: req.jobId,
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
@@ -1539,14 +1551,23 @@ export class BackupRunner {
         backupNetworkName: this.deps.backupNetworkName,
         secretBinds: resticSecret.secretBinds,
         secretFileEnv: resticSecret.secretFileEnv,
-        stagingVolumeName,
-      });
-      const fetchOutcome = await this.tryRunContainer(
-        fetchSpec,
+      };
+      // C2: the dumps (staging only) first, so that the files fetch sees the space they took on a shared disk.
+      const dumpsOutcome = await this.tryRunContainer(
+        buildRestoreFetchContainerPayload({ ...fetchInput, stagingVolumeName }),
         createdRefs,
         BACKUP_RESTORE_FETCH_TIMEOUT_MS,
         { captureStdout: true, captureStderr: true },
       );
+      const fetchOutcome =
+        dumpsOutcome.kind === "exited" && dumpsOutcome.exitCode === 0
+          ? await this.tryRunContainer(
+              buildRestoreFetchFilesContainerPayload(fetchInput),
+              createdRefs,
+              BACKUP_RESTORE_FETCH_TIMEOUT_MS,
+              { captureStderr: true },
+            )
+          : dumpsOutcome;
       if (fetchOutcome.kind !== "exited" || fetchOutcome.exitCode !== 0) {
         const problem =
           fetchOutcome.kind === "exited"
@@ -1568,7 +1589,7 @@ export class BackupRunner {
         return;
       }
 
-      const dumpKiB = this.parseFetchDumpKiB(fetchOutcome.stdout);
+      const dumpKiB = this.parseFetchDumpKiB(dumpsOutcome.kind === "exited" ? dumpsOutcome.stdout : "");
       if (dumpKiB === null) {
         await this.runPreSwitchUndoDb(
           t,
@@ -1651,22 +1672,24 @@ export class BackupRunner {
       });
 
       if (dbSecret !== null) {
+        const gateOutcome = await this.tryRunContainer(
+          this.restoreGateSpec(t, req, "on"),
+          createdRefs,
+          BACKUP_RESTORE_SWITCH_TIMEOUT_MS,
+        );
         const switchSpec = buildRestoreSwitchContainerPayload({
           jobId: req.jobId,
           siteId: req.siteId,
           siteType: t,
-          serviceInstanceId: req.serviceInstanceId,
           stagingVolumeName,
           sharedDbNetworkName: this.deps.sharedDbNetworkName,
           secretBinds: dbSecret.secretBinds,
           secretFileEnv: dbSecret.secretFileEnv,
         });
-        const switchOutcome = await this.tryRunContainer(
-          switchSpec,
-          createdRefs,
-          BACKUP_RESTORE_SWITCH_TIMEOUT_MS,
-          { captureStderr: true },
-        );
+        const switchOutcome =
+          gateOutcome.kind === "exited" && gateOutcome.exitCode === 0
+            ? await this.tryRunContainer(switchSpec, createdRefs, BACKUP_RESTORE_SWITCH_TIMEOUT_MS, { captureStderr: true })
+            : gateOutcome;
         if (switchOutcome.kind !== "exited" || switchOutcome.exitCode !== 0) {
           this.logInvalidObjectNameIfPresent(req.jobId, req.siteId, "switch", switchOutcome);
           const undoOutcome = await this.runSwitchUndoSequence(
@@ -1713,6 +1736,7 @@ export class BackupRunner {
         setOutcome("failed", undoOutcome);
         return;
       }
+      filesSwitched = true;
 
       await writeRestoreNote(this.restoresDir, {
         v: 1,
@@ -1748,8 +1772,13 @@ export class BackupRunner {
       setOutcome("succeeded", null);
       await this.cleanupSameSiteUndoIncomplete(req.siteId, req.jobId, dbSecret);
     } catch {
-      if (!leaveNoteSwitched) {
+      // H10: once the files are switched the site runs the restored content: keep everything, never "nothing changed".
+      // Cast: the outcome is set through a closure TypeScript does not follow.
+      if (!filesSwitched) {
         setOutcome("failed", "restore_prepare_failed");
+      } else if ((finalState as string) !== "succeeded") {
+        keepOnUndoIncomplete = true;
+        setOutcome("failed", "undo_incomplete");
       }
     } finally {
       const removeCreated =
@@ -1788,7 +1817,11 @@ export class BackupRunner {
       t = this.resolveSiteType((note.siteType ?? LEGACY_SITE_TYPE) as SiteTypeKey);
       const noDb = t.def.database === null;
       if (note.stage === "prepare") {
-        if ((await this.tryEnsureImage(noDb ? t.restore.filesImage : SHARED_MARIADB_IMAGE)) === "ok") {
+        // A type with a database also needs the files image: its gate step removes the restore dir.
+        if (
+          (await this.tryEnsureImage(t.restore.filesImage)) === "ok" &&
+          (noDb || (await this.tryEnsureImage(SHARED_MARIADB_IMAGE)) === "ok")
+        ) {
           const dbSecret = noDb
             ? null
             : await this.writeDbSecrets(`job_bk_db_${note.jobId}`, secretInstanceIds);

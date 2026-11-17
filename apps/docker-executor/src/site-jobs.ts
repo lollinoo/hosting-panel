@@ -59,6 +59,7 @@ mariadb --defaults-extra-file=/tmp/c.cnf <<SQL
 CREATE DATABASE IF NOT EXISTS \\\`$HP_DB_NAME\\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '$HP_DB_USER'@'%' IDENTIFIED BY '$pw';
 ALTER USER '$HP_DB_USER'@'%' IDENTIFIED BY '$pw' WITH MAX_USER_CONNECTIONS ${String(MARIADB_OWN_MAX_USER_CONNECTIONS)};
+KILL USER '$HP_DB_USER'@'%';
 GRANT ALL PRIVILEGES ON \\\`$HP_DB_NAME_ESCAPED\\\`.* TO '$HP_DB_USER'@'%';
 SQL
 `;
@@ -362,9 +363,16 @@ echo json_encode(["items" => $out], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNIC
 exit($rc === "0" && !in_array("failed", array_column($out, "status"), true) ? 0 : 32);'
 `;
 
-// Loads no site code: only removes the marker a killed update leaves behind.
+// Loads no site code: removes the marker a killed update leaves behind; given the site's database
+// password (a move, C1), writes it into wp-config.php. printf is a builtin: the secret never reaches argv.
 export const WORDPRESS_SETTLE_SCRIPT = `set -eu
 rm -f /var/www/html/.maintenance
+[ -f /run/secrets/HP_DB_PASSWORD ] || exit 0
+${DB_PASSWORD_CHECK}
+d="define( *['\\"]DB_PASSWORD['\\"] *, *['\\"][^'\\"]*['\\"] *)"
+[ "$(grep -c "$d" /var/www/html/wp-config.php)" -eq 1 ] || exit 20
+printf "s/%s/define( 'DB_PASSWORD', '%s' )/\\n" "$d" "$pw" > /tmp/hp-db.sed
+sed -i -f /tmp/hp-db.sed /var/www/html/wp-config.php
 `;
 
 // The secret is read from its file inside PHP, never from argv; WordPress checks the slashed password at login.
@@ -471,7 +479,8 @@ export const SITE_JOB_SPECS: Readonly<Record<SiteJobKind, SiteJobSpec>> = {
   "wordpress.settle": {
     params: { phpVersion: isPhpVersion },
     requiredSecrets: [],
-    optionalSecrets: [],
+    // Sent only by a move to another organisation (C1).
+    optionalSecrets: ["HP_DB_PASSWORD"],
     timeoutMs: 60_000,
   },
   "wordpress.reset-password": {

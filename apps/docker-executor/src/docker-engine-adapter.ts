@@ -101,7 +101,13 @@ import {
   buildMailRelaySaslLine,
 } from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
-import { demuxDockerLogStream, maskPhpMyAdminQuery, readJobStdout } from "./docker-logs.js";
+import {
+  LOG_READ_MAX_BYTES,
+  demuxDockerLogStream,
+  maskPhpMyAdminQuery,
+  readCappedBody,
+  readJobStdout,
+} from "./docker-logs.js";
 import {
   parsePostfixDeliveries,
   summarizeMailDeliveries,
@@ -112,6 +118,7 @@ import { deliverPanelMail } from "./panel-mail.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
+  DEFAULT_INGRESS_HTTPS_PORT,
   DEFAULT_INGRESS_ROOT_DIR,
   DEFAULT_TRAEFIK_IMAGE,
   ExecutorCodedError,
@@ -352,6 +359,22 @@ export function isServiceHttpExposed(spec: ApprovedServiceSpec): boolean {
   );
 }
 
+/** Largest limits a service may ask for, whatever the API sent (R207 exec.1). */
+export const MAX_SERVICE_MEMORY_BYTES = 64 * 1024 ** 3;
+export const MAX_SERVICE_CPU_MILLI = 64_000;
+
+/** Host ports the server itself uses: SSH, the proxy, SFTP, web, API, PostgreSQL, phpMyAdmin. */
+const RESERVED_HOST_PORTS: ReadonlySet<number> = new Set([
+  22,
+  DEFAULT_INGRESS_HTTP_PORT,
+  DEFAULT_INGRESS_HTTPS_PORT,
+  DEFAULT_SFTP_PORT,
+  3000,
+  4000,
+  5432,
+  DEFAULT_PHPMYADMIN_PORT,
+]);
+
 export function validateExecutorServiceSpec(
   input: ApprovedServiceSpec,
   reservedHosts: readonly string[] = [],
@@ -416,6 +439,14 @@ export function validateExecutorServiceSpec(
     for (const domain of input.domains) {
       assertSafeDomain(domain);
     }
+  }
+
+  const limits = input.resourceLimits;
+  if (limits && (Number(limits.memoryBytes) > MAX_SERVICE_MEMORY_BYTES || limits.cpuMilli > MAX_SERVICE_CPU_MILLI)) {
+    throw new ExecutorCodedError("Resource limits exceed the server ceiling", "VALIDATION_ERROR");
+  }
+  if (input.portBindings.some((pb) => pb.hostPort !== undefined && RESERVED_HOST_PORTS.has(pb.hostPort))) {
+    throw new ExecutorCodedError("Published host port is reserved by the server", "VALIDATION_ERROR");
   }
 
   // Refused here, before any Docker call, so a bad plan never leaves a started site without a route.
@@ -932,12 +963,13 @@ class DockerSocketHttpClient {
     method: string,
     endpointPath: string,
     jsonBody?: unknown,
-    options?: { readonly timeoutMs?: number; readonly apiPrefix?: string },
+    options?: { readonly timeoutMs?: number; readonly apiPrefix?: string; readonly maxBodyBytes?: number },
   ): Promise<DockerHttpResponse> {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    const maxBodyBytes = options?.maxBodyBytes ?? Infinity;
     if (options?.apiPrefix !== undefined) {
       // A pinned version must fail on an older engine, never fall back and drop the new fields.
-      return this.rawRequest(method, `${options.apiPrefix}${endpointPath}`, jsonBody, timeoutMs);
+      return this.rawRequest(method, `${options.apiPrefix}${endpointPath}`, jsonBody, timeoutMs, maxBodyBytes);
     }
     const primaryPrefix = this.useUnversionedFallback ? "" : this.apiPrefix;
     const response = await this.rawRequest(
@@ -945,6 +977,7 @@ class DockerSocketHttpClient {
       `${primaryPrefix}${endpointPath}`,
       jsonBody,
       timeoutMs,
+      maxBodyBytes,
     );
 
     if (
@@ -960,7 +993,7 @@ class DockerSocketHttpClient {
         text.includes("too new") ||
         text.includes("too old")
       ) {
-        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody, timeoutMs);
+        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody, timeoutMs, maxBodyBytes);
         if (fallbackResponse.statusCode < 500 && fallbackResponse.statusCode !== 404) {
           this.useUnversionedFallback = true;
           return fallbackResponse;
@@ -976,6 +1009,7 @@ class DockerSocketHttpClient {
     fullPath: string,
     jsonBody: unknown,
     timeoutMs: number,
+    maxBodyBytes: number,
   ): Promise<DockerHttpResponse> {
     const serializedBody =
       jsonBody !== undefined ? Buffer.from(JSON.stringify(jsonBody), "utf8") : undefined;
@@ -999,24 +1033,16 @@ class DockerSocketHttpClient {
           timeout: timeoutMs,
         },
         (res) => {
-          const chunks: Buffer[] = [];
-          res.on("data", (chunk: Buffer | string) => {
-            chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-          });
-          res.on("end", () => {
-            resolve({
-              statusCode: res.statusCode ?? 500,
-              body: Buffer.concat(chunks),
-            });
-          });
-          res.on("error", () => {
-            reject(
-              new ExecutorCodedError(
-                "Failed while reading response from Docker Engine",
-                "DOCKER_ENGINE_UNAVAILABLE",
+          readCappedBody(res, maxBodyBytes).then(
+            (body) => resolve({ statusCode: res.statusCode ?? 500, body }),
+            () =>
+              reject(
+                new ExecutorCodedError(
+                  "Failed while reading response from Docker Engine",
+                  "DOCKER_ENGINE_UNAVAILABLE",
+                ),
               ),
-            );
-          });
+          );
         },
       );
 
@@ -2155,6 +2181,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return this.databases.run(req);
   }
 
+  /** One pass over old site database accounts (R207 data.2); main.ts calls it once the shared database is ready. */
+  public upgradeDatabaseAccounts(): ReturnType<SiteDatabasesRunner["upgradeAccounts"]> {
+    return this.databases.upgradeAccounts();
+  }
+
   public backups<R extends BackupsIpcRequest>(
     req: R,
   ): Promise<BackupsResultByAction[R["action"]]> {
@@ -2613,6 +2644,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const res = await this.dockerClient.request(
       "GET",
       `/containers/${encodeURIComponent(nameOrId)}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
+      undefined,
+      // shortcut: past the cap the newest lines of the tail are cut, read again with a smaller tail if customers ask.
+      { maxBodyBytes: LOG_READ_MAX_BYTES },
     );
     if (res.statusCode === 404) {
       throw new ExecutorCodedError("Container not found", "NOT_FOUND");

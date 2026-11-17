@@ -311,6 +311,7 @@ describe("buildSiteJobContainerPayload", () => {
         "CREATE DATABASE IF NOT EXISTS \\`$HP_DB_NAME\\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
         "CREATE USER IF NOT EXISTS '$HP_DB_USER'@'%' IDENTIFIED BY '$pw';",
         `ALTER USER '$HP_DB_USER'@'%' IDENTIFIED BY '$pw' WITH MAX_USER_CONNECTIONS ${String(MARIADB_OWN_MAX_USER_CONNECTIONS)};`,
+        "KILL USER '$HP_DB_USER'@'%';",
         "GRANT ALL PRIVILEGES ON \\`$HP_DB_NAME_ESCAPED\\`.* TO '$HP_DB_USER'@'%';",
         "SQL",
         "",
@@ -350,10 +351,40 @@ describe("buildSiteJobContainerPayload", () => {
         "CREATE DATABASE IF NOT EXISTS `wp_0123456789ab` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
         `CREATE USER IF NOT EXISTS 'wp_0123456789ab'@'%' IDENTIFIED BY '${DB_PW}';`,
         `ALTER USER 'wp_0123456789ab'@'%' IDENTIFIED BY '${DB_PW}' WITH MAX_USER_CONNECTIONS 40;`,
+        "KILL USER 'wp_0123456789ab'@'%';",
         "GRANT ALL PRIVILEGES ON `wp\\_0123456789ab`.* TO 'wp_0123456789ab'@'%';",
         "",
       ].join("\n"),
     );
+  });
+
+  it("wordpress.settle with the site's database password rewrites only DB_PASSWORD in wp-config.php (C1)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hp-settle-"));
+    cleanupTasks.push(() => rm(dir, { recursive: true, force: true }));
+    const secret = path.join(dir, "secret");
+    const script = WORDPRESS_SETTLE_SCRIPT.replaceAll("/run/secrets/HP_DB_PASSWORD", secret)
+      .replaceAll("/var/www/html", dir)
+      .replaceAll("/tmp/hp-db.sed", path.join(dir, "db.sed"));
+    const run = () => execFileSync("sh", ["-c", script], { env: { PATH: "/usr/bin:/bin" }, stdio: "pipe" });
+    const old = "b".repeat(64);
+    const cfg = `<?php\ndefine( 'DB_NAME', 'wp_0123456789ab' );\ndefine( 'DB_PASSWORD', '${old}' );\ndefine( 'HP_MANAGED', true );\n`;
+    await writeFile(path.join(dir, "wp-config.php"), cfg);
+    await writeFile(path.join(dir, ".maintenance"), "x");
+
+    run();
+    expect(await readFile(path.join(dir, "wp-config.php"), "utf8")).toBe(cfg);
+    expect(await readdir(dir)).not.toContain(".maintenance");
+
+    await writeFile(secret, DB_PW);
+    run();
+    run();
+    expect(await readFile(path.join(dir, "wp-config.php"), "utf8")).toBe(cfg.replace(old, DB_PW));
+    expect(buildSiteJobContainerPayload(wpJob("wordpress.settle", { resolvedSecrets: { HP_DB_PASSWORD: DB_PW } }), ctx).Env).not.toContain(DB_PW);
+
+    const two = `${cfg}define( "DB_PASSWORD", "${old}" );\n`;
+    await writeFile(path.join(dir, "wp-config.php"), two);
+    expect(run).toThrow();
+    expect(await readFile(path.join(dir, "wp-config.php"), "utf8")).toBe(two);
   });
 
   it("wordpress.install script is idempotent and refuses a foreign wp-config.php", () => {
@@ -508,8 +539,12 @@ describe("WordPress tools kinds", () => {
       expectInvalid({ ...base, params: { ...base.params, image: "evil" } });
       expectInvalid({ ...base, params: { ...base.params, phpVersion: "7.4" } });
       expectInvalid({ ...base, serviceInstanceId: undefined });
-      expectInvalid({ ...base, resolvedSecrets: { ...base.resolvedSecrets, HP_DB_PASSWORD: DB_PW } });
+      // C1: settle alone carries the site's database password, to a moved site's wp-config.php.
+      if (kind !== "wordpress.settle") {
+        expectInvalid({ ...base, resolvedSecrets: { ...base.resolvedSecrets, HP_DB_PASSWORD: DB_PW } });
+      }
     }
+    expectInvalid(wpJob("wordpress.settle", { resolvedSecrets: { HP_DB_PASSWORD: "A".repeat(64) } }));
     for (const kind of ["wordpress.inspect", "wordpress.update", "wordpress.settle"] as const) {
       expectInvalid(wpJob(kind, { resolvedSecrets: { HP_ADMIN_PASSWORD: ADMIN_PW } }));
     }

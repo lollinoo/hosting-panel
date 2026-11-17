@@ -398,6 +398,13 @@ export async function bootstrapDockerExecutorDaemon(
         console.info(
           JSON.stringify({ component: "hp-docker-executor", event: "shared_database_ready" }),
         );
+        // Accounts made before the cap and the escaped grant (H4); a failure never stops startup, the next start retries.
+        try {
+          const counts = await dockerAdapter.upgradeDatabaseAccounts();
+          console.info(JSON.stringify({ component: "hp-docker-executor", event: "database_accounts_upgraded", ...counts }));
+        } catch {
+          console.error(JSON.stringify({ component: "hp-docker-executor", event: "database_accounts_upgrade_failed" }));
+        }
       } catch (err) {
         console.error(
           JSON.stringify({

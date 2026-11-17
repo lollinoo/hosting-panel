@@ -602,6 +602,10 @@ describe("Site files through signed IPC and simulator", () => {
     }
     expect(caughtOversized).toBeInstanceOf(ExecutorIpcClientError);
     expect((caughtOversized as ExecutorIpcClientError).code).toBe("VALIDATION_ERROR");
+    // The chunk schema refuses this body too; only the limit's own message proves the limit ran.
+    expect((caughtOversized as ExecutorIpcClientError).message).toContain(
+      "IPC request body exceeds maximum allowed size",
+    );
     expect(siteFilesSpy).not.toHaveBeenCalled();
   });
 

@@ -790,6 +790,10 @@ describe("panel ingress", () => {
     expect(disabled).not.toContain("certificatesResolvers");
 
     expect(buildTraefikStaticYaml({ ...panel, acmeStaging: true })).toContain("acme-staging-v02");
+    // The proxy sits on every site's edge network: its API and dashboard stay off.
+    for (const yaml of [withEmail, noEmail, disabled]) {
+      expect(yaml).toContain("api:\n  dashboard: false\n  insecure: false\n");
+    }
   });
 
   it("panel route matches hostname and server IP", () => {

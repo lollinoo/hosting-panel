@@ -50,6 +50,10 @@ import {
   buildRestoreFetchScript,
   buildRestoreFilesScript,
   buildRestoreFetchContainerPayload,
+  buildRestoreFetchFilesContainerPayload,
+  buildRestoreFetchFilesScript,
+  buildRestoreGateContainerPayload,
+  buildRestoreGateScript,
   buildRestoreFilesContainerPayload,
   buildRestoreFinishContainerPayload,
   buildRestorePrepareContainerPayload,
@@ -72,7 +76,8 @@ import { WORDPRESS_EXECUTOR_SITE_TYPE as WP } from "../src/site-types/index.js";
 import { RESTORE_MAINTENANCE_FILE_CONTENT } from "../src/site-types/wordpress-restore.js";
 
 const RESTORE_DB_SCRIPT = buildRestoreDbScript(WP);
-const RESTORE_FETCH_SCRIPT = buildRestoreFetchScript(WP);
+const RESTORE_FETCH_SCRIPT = buildRestoreFetchScript();
+const RESTORE_FETCH_FILES_SCRIPT = buildRestoreFetchFilesScript(WP);
 const RESTORE_FILES_SCRIPT = buildRestoreFilesScript(WP);
 
 const JOB_ID = "op_0123456789abcdef0123456789abcdef";
@@ -204,11 +209,14 @@ describe("restore-jobs constants and scripts", () => {
     expect(RESTORE_FILES_SCRIPT).toContain("wp-content/mu-plugins");
     expect(RESTORE_FILES_SCRIPT).not.toContain("exit 94");
 
+    // C2: the dumps go to staging, the files to the site volume, each by its own container.
     expect(RESTORE_FETCH_SCRIPT).not.toContain("exit 94");
-    expect(RESTORE_FETCH_SCRIPT).toContain("/var/www/html/.hp_rs_");
+    expect(RESTORE_FETCH_SCRIPT).not.toContain("/var/www/html");
     expect(RESTORE_FETCH_SCRIPT).toContain("/var/tmp/c");
-    expect(RESTORE_FETCH_SCRIPT).toContain(":/backup/files");
     expect(RESTORE_FETCH_SCRIPT).toContain(":/backup/databases");
+    expect(RESTORE_FETCH_FILES_SCRIPT).toContain("/var/www/html/.hp_rs_");
+    expect(RESTORE_FETCH_FILES_SCRIPT).not.toContain("/var/tmp");
+    expect(RESTORE_FETCH_FILES_SCRIPT).toContain(":/backup/files");
 
     expect(ARCHIVE_SCRIPT).toContain("restic");
     expect(ARCHIVE_SCRIPT).toContain("dump --archive zip");
@@ -243,13 +251,18 @@ describe("restore-jobs constants and scripts", () => {
     expect(RESTORE_DB_SCRIPT).not.toContain("$D0 \"$1\" $v");
 
     // R89 & R90: undo gates on $S/gate_recorded only; gate_kept preserves .maintenance atomically via cp -aP
+    // C2: the gate moved to the site-only gate container; the DB undo no longer touches the files.
+    const gate = buildRestoreGateScript(WP);
     const undoSection = RESTORE_DB_SCRIPT.slice(RESTORE_DB_SCRIPT.indexOf("undo)"), RESTORE_DB_SCRIPT.indexOf("finish)"));
     expect(undoSection).not.toContain("record_gate");
-    expect(undoSection).toContain('[ ! -f "$S/gate_recorded" ] || gate_on');
-    expect(undoSection).toContain('[ ! -f "$S/gate_recorded" ] || restore_gate');
+    expect(undoSection).not.toContain("gate_on");
+    expect(undoSection).not.toContain("restore_gate");
+    expect(gate.slice(gate.indexOf("undo)"), gate.indexOf("end)"))).toContain('[ ! -f "$S/gate_recorded" ] || gate_on');
+    expect(gate.slice(gate.indexOf("end)"))).toContain('[ ! -f "$S/gate_recorded" ] || restore_gate');
+    expect(gate).not.toContain("/var/tmp");
     expect(RESTORE_DB_SCRIPT).toContain('cp -aP "$W/.maintenance" "$S/gate_kept.tmp"');
     expect(RESTORE_DB_SCRIPT).toContain('cp -aP "$S/gate_kept" "$tmp_gate"');
-    expect(RESTORE_DB_SCRIPT).toContain('[ -L "$W/.maintenance" ] || [ -f "$W/.maintenance" ]');
+    expect(gate).toContain('[ -L "$W/.maintenance" ] || [ -f "$W/.maintenance" ]');
 
     // R91 & R92(1): prepare strips own DB qualifier outside INSERT/REPLACE and replays dumps with --sandbox --binary-mode
     expect(RESTORE_DB_SCRIPT).toContain("strip_db_qual");
@@ -350,12 +363,11 @@ describe("restore-jobs strip_db_qual (R88/R91)", () => {
 });
 
 describe("restore-jobs container payload builders", () => {
-  it("builds hardened _rs_fetch payload with both volumes, restic image, user 33:33, and no MariaDB secret", () => {
+  it("builds hardened _rs_fetch payload with the staging volume only, restic image, user 33:33, and no MariaDB secret", () => {
     const spec = buildRestoreFetchContainerPayload({
       siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
-      serviceInstanceId: SERVICE_ID,
       snapshotId: SNAPSHOT_ID,
       target: TARGET,
       backupNetworkName: BACKUP_NET,
@@ -369,15 +381,42 @@ describe("restore-jobs container payload builders", () => {
     expect(spec.payload.User).toBe("33:33");
     expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", RESTORE_FETCH_SCRIPT]);
     expect(spec.payload.HostConfig.NetworkMode).toBe(BACKUP_NET);
-    expect(spec.payload.HostConfig.Binds).toEqual([
-      `${SITE_VOL}:/var/www/html`,
-      `${STAGING_VOL}:/var/tmp`,
-      ...RESTIC_SECRET_BINDS,
-    ]);
+    expect(spec.payload.HostConfig.Binds).toEqual([`${STAGING_VOL}:/var/tmp`, ...RESTIC_SECRET_BINDS]);
     expect(spec.payload.Env).toContain(`HP_SNAP=${SNAPSHOT_ID}`);
     expect(spec.payload.Env).toContain(`HP_H=${HEX_ID}`);
     expect(spec.payload.Env).toContain(`HP_FLOOR=${BACKUP_DISK_FREE_FLOOR_BYTES}`);
     expect(spec.payload.Env).toContain("HP_REGION=eu-central-1");
+    assertHardenedContainer(spec);
+  });
+
+  it("builds hardened _rs_fetch_files payload with the site volume only (C2)", () => {
+    const spec = buildRestoreFetchFilesContainerPayload({
+      siteType: WP,
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      serviceInstanceId: SERVICE_ID,
+      snapshotId: SNAPSHOT_ID,
+      target: TARGET,
+      backupNetworkName: BACKUP_NET,
+      secretBinds: RESTIC_SECRET_BINDS,
+      secretFileEnv: RESTIC_SECRET_ENV,
+    });
+    expect(spec.containerName).toBe(`hp_bk_${JOB_ID}_rs_fetch_files`);
+    expect(spec.payload.Image).toBe(RESTIC_IMAGE);
+    expect(spec.payload.User).toBe("33:33");
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", buildRestoreFetchFilesScript(WP)]);
+    expect(spec.payload.HostConfig.Binds).toEqual([`${SITE_VOL}:/var/www/html`, ...RESTIC_SECRET_BINDS]);
+    assertHardenedContainer(spec);
+  });
+
+  it.each(["on", "undo", "end"] as const)("builds hardened _rs_gate_%s payload: site volume only, no network, no secret (C2)", (step) => {
+    const spec = buildRestoreGateContainerPayload({ step, jobId: JOB_ID, siteId: SITE_ID, siteType: WP, serviceInstanceId: SERVICE_ID });
+    expect(spec.containerName).toBe(`hp_bk_${JOB_ID}_rs_gate_${step}`);
+    expect(spec.payload.User).toBe("33:33");
+    expect(spec.payload.Cmd).toEqual(["sh", "-c", buildRestoreGateScript(WP)]);
+    expect(spec.payload.HostConfig.NetworkMode).toBe("none");
+    expect(spec.payload.HostConfig.Binds).toEqual([`${SITE_VOL}:/var/www/html`]);
+    expect(spec.payload.Env).toContain(`HP_STEP=${step}`);
     assertHardenedContainer(spec);
   });
 
@@ -412,7 +451,6 @@ describe("restore-jobs container payload builders", () => {
       siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
-      serviceInstanceId: SERVICE_ID,
       stagingVolumeName: STAGING_VOL,
       sharedDbNetworkName: SHARED_DB_NET,
       secretBinds: DB_SECRET_BINDS,
@@ -422,11 +460,7 @@ describe("restore-jobs container payload builders", () => {
     expect(switchSpec.payload.Image).toBe(SHARED_MARIADB_IMAGE);
     expect(switchSpec.payload.User).toBe("33:33");
     expect(switchSpec.payload.HostConfig.NetworkMode).toBe(SHARED_DB_NET);
-    expect(switchSpec.payload.HostConfig.Binds).toEqual([
-      `${SITE_VOL}:/var/www/html`,
-      `${STAGING_VOL}:/var/tmp`,
-      ...DB_SECRET_BINDS,
-    ]);
+    expect(switchSpec.payload.HostConfig.Binds).toEqual([`${STAGING_VOL}:/var/tmp`, ...DB_SECRET_BINDS]);
     expect(switchSpec.payload.Env).toContain("HP_STEP=switch");
     assertHardenedContainer(switchSpec);
 
@@ -454,7 +488,6 @@ describe("restore-jobs container payload builders", () => {
       siteType: WP,
       jobId: JOB_ID,
       siteId: SITE_ID,
-      serviceInstanceId: SERVICE_ID,
       stagingVolumeName: STAGING_VOL,
       sharedDbNetworkName: SHARED_DB_NET,
       secretBinds: DB_SECRET_BINDS,
@@ -464,11 +497,7 @@ describe("restore-jobs container payload builders", () => {
     expect(undoDbSpec.payload.Image).toBe(SHARED_MARIADB_IMAGE);
     expect(undoDbSpec.payload.User).toBe("33:33");
     expect(undoDbSpec.payload.HostConfig.NetworkMode).toBe(SHARED_DB_NET);
-    expect(undoDbSpec.payload.HostConfig.Binds).toEqual([
-      `${SITE_VOL}:/var/www/html`,
-      `${STAGING_VOL}:/var/tmp`,
-      ...DB_SECRET_BINDS,
-    ]);
+    expect(undoDbSpec.payload.HostConfig.Binds).toEqual([`${STAGING_VOL}:/var/tmp`, ...DB_SECRET_BINDS]);
     expect(undoDbSpec.payload.Env).toContain("HP_STEP=undo");
     assertHardenedContainer(undoDbSpec);
   });

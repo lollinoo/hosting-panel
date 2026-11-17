@@ -227,11 +227,6 @@ switch)
     check_obj_names "hp_rn_${HP_H}_$i" "$db"
     i=$((i + 1))
   done < "$S/dbs"
-  if [ -e "$W/.maintenance" ] || [ -L "$W/.maintenance" ]; then
-    [ -L "$W/.maintenance" ] || [ -f "$W/.maintenance" ] || exit 81
-  fi
-  record_gate
-  gate_on
   q "CREATE DATABASE IF NOT EXISTS \`$U\`; CREATE TABLE IF NOT EXISTS \`$U\`.\`before\` (x INT)"
   printf 'RENAME TABLE\n' > "$S/rename.sql"
   i=0
@@ -267,7 +262,6 @@ undo)
     [ -z "$u_exists" ] || exit 92
   fi
   mkdir -p -m 0700 "$S"
-  [ ! -f "$S/gate_recorded" ] || gate_on
   done_=$(q "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA='$U' AND TABLE_NAME='after'")
   if [ -f "$S/dbs" ]; then
     if [ -n "$done_" ]; then
@@ -305,9 +299,7 @@ undo)
     done < "$S/dbs"
   fi
   [ -z "$(q "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA LIKE 'hp|_ro|_${HP_H}|_%' ESCAPE '|' AND TABLE_TYPE='BASE TABLE' LIMIT 1")" ] || exit 92
-  drop_temp_schemas
-  [ ! -f "$S/gate_recorded" ] || restore_gate
-  rm -rf "$R"; sync "$W" ;;
+  drop_temp_schemas ;;
 finish)
   gate_off
   wait_db

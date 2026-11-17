@@ -18,7 +18,7 @@ import {
   type DockerExecTarget,
 } from "../src/index.js";
 import { BackupRunner, type DockerRequest } from "../src/backup-runner.js";
-import { buildRestoreFetchScript, buildRestoreFilesScript, readRestoreNote, writeRestoreNote } from "../src/restore-jobs.js";
+import { buildRestoreFetchFilesScript, buildRestoreFilesScript, readRestoreNote, writeRestoreNote } from "../src/restore-jobs.js";
 import { InMemoryDockerSimulatorAdapter } from "../src/simulator-adapter.js";
 import { makeDir } from "../src/simulator-files.js";
 import type { SimulatorSiteType } from "../src/simulator-site-types.js";
@@ -270,7 +270,7 @@ describe("D.2 every text the executor generates for the test type", () => {
   // volume, terminal execs) and site-type-seam-backups.test.ts (upload, restore builders, scripts). This joins them all.
   it("joined, holds none of the scan's words or WordPress's values", async () => {
     const texts: unknown[] = [];
-    texts.push(buildSiteFilesProgram(T), buildRestoreFilesScript(T), buildRestoreFetchScript(T));
+    texts.push(buildSiteFilesProgram(T), buildRestoreFilesScript(T), buildRestoreFetchFilesScript(T));
     texts.push(buildSiteFilesHelperPayload({ image: "hp-test-static-helper:1", serviceInstanceId: "svc_edge", siteId: "site_edge", programDir: "/srv/hp-files", siteType: T }));
     texts.push((await filesCalls(undefined, () => T)).calls.filter((c) => !c.path.startsWith("/containers/json")));
     texts.push(renderSftpUserFiles([{ username: "edgea_web", passwordHash: HASH, siteId: "site_edge", serviceInstanceId: "svc_edge" }], () => T));

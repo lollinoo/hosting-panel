@@ -752,8 +752,8 @@ describe("buildSiteDatabasesBatch (pinned SQL per op)", () => {
     expect(signOnBatch).toBe(
       [
         "SET SESSION lock_wait_timeout = 30;",
-        `CREATE USER IF NOT EXISTS '${A}'@'%' IDENTIFIED BY PASSWORD '${HASH}' WITH MAX_USER_CONNECTIONS 10;`,
-        `ALTER USER '${A}'@'%' IDENTIFIED BY PASSWORD '${HASH}' WITH MAX_USER_CONNECTIONS 10;`,
+        `CREATE USER IF NOT EXISTS '${A}'@'%' IDENTIFIED BY PASSWORD '${HASH}' WITH MAX_USER_CONNECTIONS 10 MAX_STATEMENT_TIME 300;`,
+        `ALTER USER '${A}'@'%' IDENTIFIED BY PASSWORD '${HASH}' WITH MAX_USER_CONNECTIONS 10 MAX_STATEMENT_TIME 300;`,
         `KILL USER '${A}'@'%';`,
         `REVOKE ALL PRIVILEGES ON \`${P_ESC}\\_gone\`.* FROM '${A}'@'%';`,
         `GRANT ${EXPECTED_PRIVS} ON \`${P_ESC}\`.* TO '${A}'@'%';`,

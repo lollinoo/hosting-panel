@@ -919,13 +919,21 @@ describe("SiteFilesHelpers", () => {
     ).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: "invalid_path" });
     expect(state.calls).toHaveLength(0);
 
-    // Pre-existing stopped container with matching name gets force-removed and replaced.
+    // Pre-existing stopped container with matching name and the expected binds: only Running: false replaces it.
     state.containers.set("stale_stopped", {
       id: "stale_stopped",
       name: "hp_files_svc_check",
       running: false,
       image: resolveWordpressImage(DEFAULT_PHP_VERSION),
       labels: { "io.hostingpanel.role": SITE_FILES_ROLE, "io.hostingpanel.files_for": "svc_check" },
+      payload: {
+        HostConfig: {
+          Binds: [
+            "hp_vol_svc_check_html:/var/www/html:rw,nocopy",
+            "/var/lib/hosting-panel/site-files:/usr/local/lib/hp-files:ro",
+          ],
+        },
+      },
     });
 
     const res = await helpers.run({ serviceInstanceId: "svc_check", op: "list", path: "" });

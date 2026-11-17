@@ -13,6 +13,7 @@ import {
   type SiteDatabasesResultByOp,
 } from "@hosting-panel/contracts";
 import type { SiteDatabasesRequest, SiteDatabasesResult } from "@hosting-panel/executor-contracts";
+import { ACCOUNT_UPGRADE_QUERY, planAccountUpgrade } from "./db-account-upgrade.js";
 import { runDockerExec, type DockerExecTarget } from "./docker-exec.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
@@ -38,6 +39,8 @@ const MARIADB_LOCK_WAIT_TIMEOUT_LINE = "SET SESSION lock_wait_timeout = 30;";
 /** Max concurrent connections per extra database user and per phpMyAdmin sign-on account (R40). */
 export const MARIADB_EXTRA_MAX_USER_CONNECTIONS = 5;
 export const MARIADB_SIGNON_MAX_USER_CONNECTIONS = 10;
+/** A phpMyAdmin query ends after 300 s, so it cannot hold a shared worker for ever. */
+const MARIADB_SIGNON_MAX_STATEMENT_TIME_S = 300;
 
 const MARIADB_ROOT_EXEC_CMD = [
   "sh",
@@ -479,8 +482,8 @@ export function buildSiteDatabasesBatch(
 
       const lines = [
         MARIADB_LOCK_WAIT_TIMEOUT_LINE,
-        `CREATE USER IF NOT EXISTS '${signOn}'@'%' IDENTIFIED BY PASSWORD '${parsed.passwordHash}' WITH MAX_USER_CONNECTIONS ${String(MARIADB_SIGNON_MAX_USER_CONNECTIONS)};`,
-        `ALTER USER '${signOn}'@'%' IDENTIFIED BY PASSWORD '${parsed.passwordHash}' WITH MAX_USER_CONNECTIONS ${String(MARIADB_SIGNON_MAX_USER_CONNECTIONS)};`,
+        `CREATE USER IF NOT EXISTS '${signOn}'@'%' IDENTIFIED BY PASSWORD '${parsed.passwordHash}' WITH MAX_USER_CONNECTIONS ${String(MARIADB_SIGNON_MAX_USER_CONNECTIONS)} MAX_STATEMENT_TIME ${String(MARIADB_SIGNON_MAX_STATEMENT_TIME_S)};`,
+        `ALTER USER '${signOn}'@'%' IDENTIFIED BY PASSWORD '${parsed.passwordHash}' WITH MAX_USER_CONNECTIONS ${String(MARIADB_SIGNON_MAX_USER_CONNECTIONS)} MAX_STATEMENT_TIME ${String(MARIADB_SIGNON_MAX_STATEMENT_TIME_S)};`,
         `KILL USER '${signOn}'@'%';`,
       ];
       for (const staleDb of staleSignOnDbs) {
@@ -564,6 +567,22 @@ export class SiteDatabasesRunner {
   ): Promise<SiteDatabasesResult<R["op"]>> {
     const parsed = parseSiteDatabasesRequest(req) as R;
     return this.enqueue(parsed.siteId, () => this.runQueued(parsed));
+  }
+
+  /** Caps and re-grants the site accounts of older releases, from what MariaDB says; counts only. */
+  public async upgradeAccounts(): Promise<{ capped: number; regranted: number }> {
+    const read = await this.execSql(ACCOUNT_UPGRADE_QUERY, MARIADB_STATE_TIMEOUT_MS);
+    if (read.exitCode !== 0 || read.exitUnknown || read.truncated) {
+      throw new ExecutorCodedError(MSG_SERVER_REFUSED, "INTERNAL_ERROR");
+    }
+    const plan = planAccountUpgrade(read.stdout.toString("utf8"));
+    if (plan.sql !== null) {
+      const res = await this.execSql(plan.sql, MARIADB_BATCH_TIMEOUT_MS);
+      if (res.exitCode !== 0 || res.exitUnknown || res.truncated) {
+        throw new ExecutorCodedError(MSG_SERVER_REFUSED, "INTERNAL_ERROR");
+      }
+    }
+    return { capped: plan.capped, regranted: plan.regranted };
   }
 
   private async enqueue<T>(siteId: string, fn: () => Promise<T>): Promise<T> {

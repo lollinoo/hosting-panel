@@ -117,43 +117,26 @@ export const ARCHIVE_EXIT_CODES: Readonly<Record<number, BackupFailureClass>> = 
   [RESTORE_EXIT_TIMEOUT]: "timeout",
 };
 
-/** The fetch script: the snapshot's files into the type's restore dir, the dumps into staging. */
-export function buildRestoreFetchScript(t: ExecutorSiteType): string {
-  const w = t.def.files.mountPath;
+// C2: a container of a restore never mounts the site's files volume and the staging volume together.
+
+/** The dumps fetch: the snapshot's database dumps into staging, checked and listed there (no site volume). */
+export function buildRestoreFetchScript(): string {
   return [
   "set -eu",
-  `W=${w}; R=${w}/.hp_rs_$HP_H; S=/var/tmp/c`,
+  "S=/var/tmp/c",
   'RO="-o s3.bucket-lookup=path"',
-  // Check stats and list databases before modifying any directory so wrong keys fail cleanly.
-  'stats_out=$(restic $RO -o "s3.region=$HP_REGION" stats --json --mode restore-size "$HP_SNAP")',
-  "total_need=$(printf '%s\\n' \"$stats_out\" | sed -n 's/.*\"total_size\":\\([0-9]*\\).*/\\1/p')",
-  '[ -n "$total_need" ]',
   'db_ls=$(restic $RO -o "s3.region=$HP_REGION" ls --json "$HP_SNAP" /backup/databases)',
   'dumps_need=$(printf \'%s\\n\' "$db_ls" | awk -F\'"size":\' \'/"type":"file"/{split($2,a,/[,}]/); sum+=a[1]} END{printf "%.0f\\n", sum+0}\')',
   'db_count=$(printf \'%s\\n\' "$db_ls" | awk \'/"type":"file"/{n++} END{print n+0}\')',
-  'files_need=$((total_need - dumps_need)); [ "$files_need" -ge 0 ] || files_need=$total_need',
-  'free_w=$(df -Pk "$W" | awk \'NR==2{print $4}\')',
   'free_s=$(df -Pk /var/tmp | awk \'NR==2{print $4}\')',
-  'if [ "$(stat -c %d "$W")" = "$(stat -c %d /var/tmp)" ]; then',
-  `  [ $((free_w * 1024)) -ge $((total_need + HP_FLOOR)) ] || exit ${RESTORE_EXIT_NO_SPACE}`,
-  "else",
-  `  [ $((free_w * 1024)) -ge $((files_need + HP_FLOOR)) ] || exit ${RESTORE_EXIT_NO_SPACE}`,
-  `  [ $((free_s * 1024)) -ge $((dumps_need + HP_FLOOR)) ] || exit ${RESTORE_EXIT_NO_SPACE}`,
-  "fi",
-  'rm -rf "$R"',
-  'mkdir -m 0700 "$R"',
-  "(set -C; printf 'Require all denied\\n' > \"$R/.htaccess\")",
-  'mkdir -m 0755 "$R/c" "$R/c/files"',
+  `[ $((free_s * 1024)) -ge $((dumps_need + HP_FLOOR)) ] || exit ${RESTORE_EXIT_NO_SPACE}`,
   'rm -rf "$S"',
   'mkdir -m 0700 "$S" "$S/databases"',
-  'restic $RO -o "s3.region=$HP_REGION" restore "$HP_SNAP:/backup/files" --target "$R/c/files"',
   'if [ "$db_count" -gt 0 ]; then',
   '  restic $RO -o "s3.region=$HP_REGION" restore "$HP_SNAP:/backup/databases" --target "$S/databases"',
   "fi",
   `bad_db=$(find "$S/databases" -mindepth 1 \\( ! -type f -o ! -name '*.sql' \\) | head -n 1)`,
   `[ -z "$bad_db" ] || exit ${RESTORE_EXIT_INVALID_FILENAMES}`,
-  '! find "$W" "$R/c/files" -mindepth 1 -maxdepth 3 -name \'*',
-  `*' | grep -q . || exit ${RESTORE_EXIT_INVALID_FILENAMES}`,
   ': > "$S/dbs.tmp"',
   'for f in "$S/databases"/*.sql; do',
   '  [ -e "$f" ] || [ -L "$f" ] || continue',
@@ -164,6 +147,58 @@ export function buildRestoreFetchScript(t: ExecutorSiteType): string {
   'sort -u "$S/dbs.tmp" -o "$S/dbs.tmp"',
   'sync "$S/dbs.tmp"; mv -Tf "$S/dbs.tmp" "$S/dbs"; sync "$S"',
   'du -sk "$S/databases" | cut -f1',
+  ].join("\n");
+}
+
+/** The files fetch: the snapshot's files into the type's restore dir (no staging volume); runs after the dumps fetch. */
+export function buildRestoreFetchFilesScript(t: ExecutorSiteType): string {
+  const w = t.def.files.mountPath;
+  return [
+  "set -eu",
+  `W=${w}; R=${w}/.hp_rs_$HP_H`,
+  'RO="-o s3.bucket-lookup=path"',
+  'stats_out=$(restic $RO -o "s3.region=$HP_REGION" stats --json --mode restore-size "$HP_SNAP")',
+  "total_need=$(printf '%s\\n' \"$stats_out\" | sed -n 's/.*\"total_size\":\\([0-9]*\\).*/\\1/p')",
+  '[ -n "$total_need" ]',
+  'db_ls=$(restic $RO -o "s3.region=$HP_REGION" ls --json "$HP_SNAP" /backup/databases)',
+  'dumps_need=$(printf \'%s\\n\' "$db_ls" | awk -F\'"size":\' \'/"type":"file"/{split($2,a,/[,}]/); sum+=a[1]} END{printf "%.0f\\n", sum+0}\')',
+  'files_need=$((total_need - dumps_need)); [ "$files_need" -ge 0 ] || files_need=$total_need',
+  // The dumps are already in staging: on one disk its free space counts them, on two it need not.
+  'free_w=$(df -Pk "$W" | awk \'NR==2{print $4}\')',
+  `[ $((free_w * 1024)) -ge $((files_need + HP_FLOOR)) ] || exit ${RESTORE_EXIT_NO_SPACE}`,
+  'rm -rf "$R"',
+  'mkdir -m 0700 "$R"',
+  "(set -C; printf 'Require all denied\\n' > \"$R/.htaccess\")",
+  'mkdir -m 0755 "$R/c" "$R/c/files"',
+  'restic $RO -o "s3.region=$HP_REGION" restore "$HP_SNAP:/backup/files" --target "$R/c/files"',
+  '! find "$W" "$R/c/files" -mindepth 1 -maxdepth 3 -name \'*',
+  `*' | grep -q . || exit ${RESTORE_EXIT_INVALID_FILENAMES}`,
+  ].join("\n");
+}
+
+/** The gate script: the type's maintenance gate with the site volume only; its record lives in the restore dir. */
+export function buildRestoreGateScript(t: ExecutorSiteType): string {
+  const gate = t.restore.dbGate;
+  if (gate === null) throw new ExecutorCodedError("Site type has no database", "VALIDATION_ERROR");
+  return [
+  "set -eu",
+  // S is the restore dir: the record is the site's own maintenance file, so the site may write it.
+  `W=${t.def.files.mountPath}; R=$W/.hp_rs_$HP_H; S=$R`,
+  'case "$HP_H" in *[!0-9a-f]*) exit 1;; esac',
+  '[ "${#HP_H}" -eq 32 ] || exit 1',
+  gate.functions({ gateRemoveFailed: RESTORE_EXIT_GATE_REMOVE_FAILED }),
+  'case "$HP_STEP" in',
+  "on)",
+  gate.prepareCheck({ invalidDbName: RESTORE_EXIT_INVALID_DB_NAME }),
+  "  record_gate",
+  "  gate_on ;;",
+  "undo)",
+  '  [ ! -f "$S/gate_recorded" ] || gate_on ;;',
+  "end)",
+  '  [ ! -f "$S/gate_recorded" ] || restore_gate',
+  '  rm -rf "$R"; sync "$W" ;;',
+  "*) exit 1 ;;",
+  "esac",
   ].join("\n");
 }
 
@@ -372,9 +407,6 @@ export function buildRestoreDbScript(t: ExecutorSiteType): string {
   '    check_obj_names "hp_rn_${HP_H}_$i" "$db"',
   "    i=$((i + 1))",
   '  done < "$S/dbs"',
-  gate.prepareCheck({ invalidDbName: RESTORE_EXIT_INVALID_DB_NAME }),
-  "  record_gate",
-  "  gate_on",
   '  q "CREATE DATABASE IF NOT EXISTS \\`$U\\`; CREATE TABLE IF NOT EXISTS \\`$U\\`.\\`before\\` (x INT)"',
   "  printf 'RENAME TABLE\\n' > \"$S/rename.sql\"",
   "  i=0",
@@ -410,7 +442,6 @@ export function buildRestoreDbScript(t: ExecutorSiteType): string {
   `    [ -z "$u_exists" ] || exit ${RESTORE_EXIT_UNDO_SCHEMA_NOT_EMPTY}`,
   "  fi",
   '  mkdir -p -m 0700 "$S"',
-  '  [ ! -f "$S/gate_recorded" ] || gate_on',
   '  done_=$(q "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=\'$U\' AND TABLE_NAME=\'after\'")',
   '  if [ -f "$S/dbs" ]; then',
   '    if [ -n "$done_" ]; then',
@@ -448,9 +479,7 @@ export function buildRestoreDbScript(t: ExecutorSiteType): string {
   '    done < "$S/dbs"',
   "  fi",
   `  [ -z "$(q "SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA LIKE 'hp|_ro|_\${HP_H}|_%' ESCAPE '|' AND TABLE_TYPE='BASE TABLE' LIMIT 1")" ] || exit ${RESTORE_EXIT_UNDO_SCHEMA_NOT_EMPTY}`,
-  "  drop_temp_schemas",
-  '  [ ! -f "$S/gate_recorded" ] || restore_gate',
-  '  rm -rf "$R"; sync "$W" ;;',
+  "  drop_temp_schemas ;;",
   "finish)",
   "  gate_off",
   "  wait_db",
@@ -648,28 +677,22 @@ function buildRestoreDbStepPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly siteType: ExecutorSiteType;
-  readonly serviceInstanceId?: string;
-  readonly stagingVolumeName?: string;
   readonly sharedDbNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
-}): BackupContainerSpec {
+} & ({ readonly stagingVolumeName: string } | { readonly serviceInstanceId: string })): BackupContainerSpec {
   const t = input.siteType;
   const script = buildRestoreDbScript(t);
   const { jobId, hexId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   assertDbOnlySecrets(input.secretBinds, input.secretFileEnv);
 
-  const binds: string[] = [];
-  if (input.serviceInstanceId !== undefined) {
-    const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
-    binds.push(`${getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix)}:${t.def.files.mountPath}`);
-  }
-  if (input.stagingVolumeName !== undefined) {
-    const stagingVolume = assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName");
-    binds.push(`${stagingVolume}:/var/tmp`);
-  }
-  binds.push(...input.secretBinds);
+  // C2: the staging volume, or the site volume (finish), never both.
+  const volume =
+    "stagingVolumeName" in input
+      ? `${assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName")}:/var/tmp`
+      : `${getManagedVolumeName(assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId"), t.def.files.volumeSuffix)}:${t.def.files.mountPath}`;
+  const binds = [volume, ...input.secretBinds];
 
   const env = [
     `HP_STEP=${input.step}`,
@@ -693,8 +716,9 @@ function buildRestoreDbStepPayload(input: {
 }
 
 function buildRestoreFilesStepPayload(input: {
-  readonly step: "switch" | "undo" | "finish";
+  readonly step: "switch" | "undo" | "finish" | "on" | "end";
   readonly suffix: string;
+  readonly script?: string;
   readonly jobId: string;
   readonly siteId: string;
   readonly serviceInstanceId: string;
@@ -710,7 +734,7 @@ function buildRestoreFilesStepPayload(input: {
     containerName: `hp_bk_${jobId}_${input.suffix}`,
     payload: {
       Image: t.restore.filesImage,
-      Cmd: ["sh", "-c", buildRestoreFilesScript(t)],
+      Cmd: ["sh", "-c", input.script ?? buildRestoreFilesScript(t)],
       User: t.def.files.owner,
       Env: [`HP_STEP=${input.step}`, `HP_H=${hexId}`],
       Labels: buildJobLabels(siteId, jobId),
@@ -719,8 +743,68 @@ function buildRestoreFilesStepPayload(input: {
   };
 }
 
-/** Builds the hardened restic `_rs_fetch` container spec restoring files to site volume and dumps to staging. */
+/** Builds a hardened restic fetch spec: `_rs_fetch` (dumps, staging only) or `_rs_fetch_files` (files, site volume only). */
+function buildRestoreFetchPayload(
+  input: {
+    readonly jobId: string;
+    readonly siteId: string;
+    readonly siteType: ExecutorSiteType;
+    readonly snapshotId: string;
+    readonly target: BackupTarget;
+    readonly backupNetworkName: string;
+    readonly secretBinds: readonly string[];
+    readonly secretFileEnv: readonly string[];
+  },
+  suffix: string,
+  bind: string,
+  script: string,
+): BackupContainerSpec {
+  const { jobId, hexId } = assertRestoreJobId(input.jobId);
+  const siteId = assertSafeIdentifier(input.siteId, "siteId");
+  const snapshotId = assertSnapshotId(input.snapshotId);
+  const region = assertRegion(input.target.region);
+  assertResticOnlySecrets(input.secretBinds, input.secretFileEnv);
+
+  return {
+    containerName: `hp_bk_${jobId}_${suffix}`,
+    payload: buildResticBasePayload({
+      repoKind: { kind: "site", siteId },
+      target: input.target,
+      backupNetworkName: input.backupNetworkName,
+      secretBinds: input.secretBinds,
+      secretFileEnv: input.secretFileEnv,
+      labels: buildJobLabels(siteId, jobId),
+      user: input.siteType.def.files.owner,
+      binds: [bind],
+      extraEnv: [
+        `HP_REGION=${region}`,
+        `HP_SNAP=${snapshotId}`,
+        `HP_H=${hexId}`,
+        `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`,
+      ],
+      entrypoint: ["/bin/sh", "-c", script],
+    }),
+  };
+}
+
+/** Builds the restic `_rs_fetch` spec restoring the dumps into staging; it never mounts the site volume. */
 export function buildRestoreFetchContainerPayload(input: {
+  readonly jobId: string;
+  readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
+  readonly snapshotId: string;
+  readonly target: BackupTarget;
+  readonly backupNetworkName: string;
+  readonly secretBinds: readonly string[];
+  readonly secretFileEnv: readonly string[];
+  readonly stagingVolumeName: string;
+}): BackupContainerSpec {
+  const stagingVolume = assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName");
+  return buildRestoreFetchPayload(input, "rs_fetch", `${stagingVolume}:/var/tmp`, buildRestoreFetchScript());
+}
+
+/** Builds the restic `_rs_fetch_files` spec restoring the files into the site volume; it never mounts staging. */
+export function buildRestoreFetchFilesContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly serviceInstanceId: string;
@@ -730,38 +814,22 @@ export function buildRestoreFetchContainerPayload(input: {
   readonly backupNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
-  readonly stagingVolumeName: string;
 }): BackupContainerSpec {
   const t = input.siteType;
-  const { jobId, hexId } = assertRestoreJobId(input.jobId);
-  const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
-  const snapshotId = assertSnapshotId(input.snapshotId);
-  const region = assertRegion(input.target.region);
-  const stagingVolume = assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName");
   const siteVolume = getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix);
-  assertResticOnlySecrets(input.secretBinds, input.secretFileEnv);
+  return buildRestoreFetchPayload(input, "rs_fetch_files", `${siteVolume}:${t.def.files.mountPath}`, buildRestoreFetchFilesScript(t));
+}
 
-  return {
-    containerName: `hp_bk_${jobId}_rs_fetch`,
-    payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
-      secretBinds: input.secretBinds,
-      secretFileEnv: input.secretFileEnv,
-      labels: buildJobLabels(siteId, jobId),
-      user: t.def.files.owner,
-      binds: [`${siteVolume}:${t.def.files.mountPath}`, `${stagingVolume}:/var/tmp`],
-      extraEnv: [
-        `HP_REGION=${region}`,
-        `HP_SNAP=${snapshotId}`,
-        `HP_H=${hexId}`,
-        `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`,
-      ],
-      entrypoint: ["/bin/sh", "-c", buildRestoreFetchScript(t)],
-    }),
-  };
+/** Builds an offline `_rs_gate_<step>` spec running the type's maintenance gate with the site volume only. */
+export function buildRestoreGateContainerPayload(input: {
+  readonly step: "on" | "undo" | "end";
+  readonly jobId: string;
+  readonly siteId: string;
+  readonly siteType: ExecutorSiteType;
+  readonly serviceInstanceId: string;
+}): BackupContainerSpec {
+  return buildRestoreFilesStepPayload({ ...input, suffix: `rs_gate_${input.step}`, script: buildRestoreGateScript(input.siteType) });
 }
 
 /** Builds the MariaDB `_rs_prepare` container spec importing dumps into isolated staging schemas (no site volume). */
@@ -781,12 +849,11 @@ export function buildRestorePrepareContainerPayload(input: {
   });
 }
 
-/** Builds the MariaDB `_rs_switch` container spec closing the maintenance gate and swapping prepared databases live. */
+/** Builds the MariaDB `_rs_switch` container spec swapping prepared databases live (the gate is `_rs_gate_on`). */
 export function buildRestoreSwitchContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly siteType: ExecutorSiteType;
-  readonly serviceInstanceId: string;
   readonly stagingVolumeName: string;
   readonly sharedDbNetworkName: string;
   readonly secretBinds: readonly string[];
@@ -861,12 +928,11 @@ export function buildRestoreFilesFinishContainerPayload(input: {
   });
 }
 
-/** Builds the MariaDB `_rs_undo_db` container spec reversing database changes and restoring the prior gate state. */
+/** Builds the MariaDB `_rs_undo_db` container spec reversing database changes (the gate is `_rs_gate_undo`/`_rs_gate_end`). */
 export function buildRestoreUndoDbContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly siteType: ExecutorSiteType;
-  readonly serviceInstanceId: string;
   readonly stagingVolumeName: string;
   readonly sharedDbNetworkName: string;
   readonly secretBinds: readonly string[];

@@ -104,6 +104,10 @@ function makeOkFetch(): typeof globalThis.fetch {
 type RestoreStageSuffix =
   | "rs_own"
   | "rs_fetch"
+  | "rs_fetch_files"
+  | "rs_gate_on"
+  | "rs_gate_undo"
+  | "rs_gate_end"
   | "rs_prepare"
   | "rs_switch"
   | "rs_files"
@@ -135,6 +139,10 @@ function suffixForName(name: string): RestoreStageSuffix {
     "rs_undo_files",
     "rs_undo_db",
     "rs_own",
+    "rs_fetch_files",
+    "rs_gate_on",
+    "rs_gate_undo",
+    "rs_gate_end",
     "rs_fetch",
     "rs_prepare",
     "rs_switch",
@@ -658,7 +666,9 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
 
     expect(ctx.harness.createdSequence).toEqual([
       `hp_bk_${jobId}_rs_fetch`,
+      `hp_bk_${jobId}_rs_fetch_files`,
       `hp_bk_${jobId}_rs_prepare`,
+      `hp_bk_${jobId}_rs_gate_on`,
       `hp_bk_${jobId}_rs_switch`,
       `hp_bk_${jobId}_rs_files`,
       `hp_bk_${jobId}_rs_finish`,
@@ -802,7 +812,7 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
         failure: expected,
         snapshot: null,
       });
-      expect(ctx.harness.createdSequence).toEqual([`hp_bk_${jid}_rs_fetch`, `hp_bk_${jid}_rs_undo_db`]);
+      expect(ctx.harness.createdSequence).toEqual([`hp_bk_${jid}_rs_fetch`, `hp_bk_${jid}_rs_undo_db`, `hp_bk_${jid}_rs_gate_end`]);
       expect(ctx.harness.liveVolumes.has(`hp_bk_${jid}`)).toBe(false);
     }
 
@@ -822,7 +832,12 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
       failure: "no_space",
       snapshot: null,
     });
-    expect(lowDisk.harness.createdSequence).toEqual([`hp_bk_${jDisk}_rs_fetch`, `hp_bk_${jDisk}_rs_undo_db`]);
+    expect(lowDisk.harness.createdSequence).toEqual([
+      `hp_bk_${jDisk}_rs_fetch`,
+      `hp_bk_${jDisk}_rs_fetch_files`,
+      `hp_bk_${jDisk}_rs_undo_db`,
+      `hp_bk_${jDisk}_rs_gate_end`,
+    ]);
     expect(lowDisk.harness.liveVolumes.has(`hp_bk_${jDisk}`)).toBe(false);
 
     // _rs_prepare exits: 83 -> definer_missing, 80/81/82/11 -> restore_prepare_failed, 124 -> timeout.
@@ -847,8 +862,10 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
       });
       expect(ctx.harness.createdSequence).toEqual([
         `hp_bk_${jid}_rs_fetch`,
+        `hp_bk_${jid}_rs_fetch_files`,
         `hp_bk_${jid}_rs_prepare`,
         `hp_bk_${jid}_rs_undo_db`,
+        `hp_bk_${jid}_rs_gate_end`,
       ]);
       expect(ctx.harness.liveVolumes.has(`hp_bk_${jid}`)).toBe(false);
     }
@@ -873,10 +890,14 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
       });
       expect(ctx.harness.createdSequence).toEqual([
         `hp_bk_${jid}_rs_fetch`,
+        `hp_bk_${jid}_rs_fetch_files`,
         `hp_bk_${jid}_rs_prepare`,
+        `hp_bk_${jid}_rs_gate_on`,
         ...(expectSwitchCreated ? [`hp_bk_${jid}_rs_switch`] : []),
         `hp_bk_${jid}_rs_undo_files`,
+        `hp_bk_${jid}_rs_gate_undo`,
         `hp_bk_${jid}_rs_undo_db`,
+        `hp_bk_${jid}_rs_gate_end`,
       ]);
       expect(ctx.harness.liveVolumes.has(`hp_bk_${jid}`)).toBe(false);
     }
@@ -899,11 +920,15 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
       });
       expect(ctx.harness.createdSequence).toEqual([
         `hp_bk_${jid}_rs_fetch`,
+        `hp_bk_${jid}_rs_fetch_files`,
         `hp_bk_${jid}_rs_prepare`,
+        `hp_bk_${jid}_rs_gate_on`,
         `hp_bk_${jid}_rs_switch`,
         `hp_bk_${jid}_rs_files`,
         `hp_bk_${jid}_rs_undo_files`,
+        `hp_bk_${jid}_rs_gate_undo`,
         `hp_bk_${jid}_rs_undo_db`,
+        `hp_bk_${jid}_rs_gate_end`,
       ]);
       expect(ctx.harness.liveVolumes.has(`hp_bk_${jid}`)).toBe(false);
     }
@@ -927,7 +952,9 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
     });
     expect(undoFilesFail.harness.createdSequence).toEqual([
       `hp_bk_${jUndoFiles}_rs_fetch`,
+      `hp_bk_${jUndoFiles}_rs_fetch_files`,
       `hp_bk_${jUndoFiles}_rs_prepare`,
+      `hp_bk_${jUndoFiles}_rs_gate_on`,
       `hp_bk_${jUndoFiles}_rs_switch`,
       `hp_bk_${jUndoFiles}_rs_files`,
       `hp_bk_${jUndoFiles}_rs_undo_files`,
@@ -1739,8 +1766,10 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
     });
     expect(prepCtx.harness.createdSequence).toEqual([
       `hp_bk_${jPrep}_rs_fetch`,
+      `hp_bk_${jPrep}_rs_fetch_files`,
       `hp_bk_${jPrep}_rs_prepare`,
       `hp_bk_${jPrep}_rs_undo_db`,
+      `hp_bk_${jPrep}_rs_gate_end`,
     ]);
 
     // 2. Switch failure with adversarial/invalid stderr still maps to switch_undone and sanitizes logs
@@ -1764,10 +1793,14 @@ describe("BackupRunner restore, settle, archive, and forgetSite", () => {
     });
     expect(switchCtx.harness.createdSequence).toEqual([
       `hp_bk_${jSwitch}_rs_fetch`,
+      `hp_bk_${jSwitch}_rs_fetch_files`,
       `hp_bk_${jSwitch}_rs_prepare`,
+      `hp_bk_${jSwitch}_rs_gate_on`,
       `hp_bk_${jSwitch}_rs_switch`,
       `hp_bk_${jSwitch}_rs_undo_files`,
+      `hp_bk_${jSwitch}_rs_gate_undo`,
       `hp_bk_${jSwitch}_rs_undo_db`,
+      `hp_bk_${jSwitch}_rs_gate_end`,
     ]);
 
     const loggedRecords = errSpy.mock.calls.map((args) => JSON.parse(String(args[0])) as Record<string, unknown>);
@@ -1925,6 +1958,27 @@ describe("BackupRunner restore with createVolume", () => {
     expect(await waitForSettled(ctx.runner, j)).toMatchObject({ failure: "undo_incomplete" });
     expect(ctx.harness.liveVolumes.has(NEW_VOL)).toBe(true);
     expect(ctx.harness.deletedVolumes).not.toContain(NEW_VOL);
+  });
+
+  // H10 (R207 restore.2): once the files are switched, a failed `switched` note write is undo_incomplete and keeps everything.
+  it.each([
+    ["a customer's restore", false],
+    ["an administrator's restore into a new volume", true],
+  ] as const)("a failed switched note write after the files switch is undo_incomplete and removes nothing: %s", async (_l, created) => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const ctx = await setupRestoreRunner();
+    const j = jobHex(created ? 218 : 217);
+    noteWrites.fail = (note) => note.stage === "switched";
+    await ctx.runner.run(created ? newSiteReq(j) : restoreReq(j));
+    expect(await waitForSettled(ctx.runner, j)).toMatchObject({ state: "failed", failure: "undo_incomplete" });
+    noteWrites.fail = null;
+    const siteVolume = created ? NEW_VOL : "hp_vol_svc_site1_html";
+    expect(ctx.harness.createdSequence).toContain(`hp_bk_${j}_rs_files`);
+    expect(ctx.harness.createdSequence.some((n) => n.includes("_rs_undo_"))).toBe(false);
+    expect(ctx.harness.liveVolumes.has(siteVolume)).toBe(true);
+    expect(ctx.harness.liveVolumes.has(`hp_bk_${j}`)).toBe(true);
+    expect(ctx.harness.deletedVolumes).toEqual([]);
+    expect(ctx.harness.events.some((e) => e.startsWith("volume:delete:"))).toBe(false);
   });
 
   it("uses an existing volume unchanged and never removes it", async () => {

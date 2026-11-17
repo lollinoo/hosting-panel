@@ -30,6 +30,8 @@ import {
   buildRestoreFetchScript,
   buildRestoreFilesScript,
   buildRestoreFetchContainerPayload,
+  buildRestoreFetchFilesContainerPayload,
+  buildRestoreGateContainerPayload,
   buildRestoreFilesContainerPayload,
   buildRestoreFinishContainerPayload,
   buildRestoreOwnContainerPayload,
@@ -271,7 +273,7 @@ async function backupUpload(): Promise<unknown> {
 
 /** restore-fetch.sh */
 function restoreFetchScript(): string {
-  return buildRestoreFetchScript(WORDPRESS_EXECUTOR_SITE_TYPE);
+  return buildRestoreFetchScript();
 }
 
 /** restore-db.sh */
@@ -292,26 +294,31 @@ async function restoreSteps(): Promise<unknown> {
   const t = { siteType: WORDPRESS_EXECUTOR_SITE_TYPE };
   const db = { sharedDbNetworkName: SHARED_DB_NETWORK_NAME, ...dbSecrets(`job_bk_db_${RESTORE_JOB}`) };
   const stagingVolumeName = restoreStagingVolume();
+  const site = { jobId: RESTORE_JOB, siteId: SITE_A };
+  const fetchIn = {
+    ...site,
+    ...t,
+    snapshotId: SNAPSHOT_ID,
+    target: TARGET,
+    backupNetworkName: DEFAULT_BACKUP_NETWORK_NAME,
+    ...resticSecrets(`job_bk_rs_${RESTORE_JOB}`),
+  };
   const runner = await runRunner(
     { action: "restore", ...ids, target: TARGET, snapshotId: SNAPSHOT_ID, createVolume: true },
     false,
   );
   return {
-    fetch: buildRestoreFetchContainerPayload({
-      ...ids,
-      ...t,
-      snapshotId: SNAPSHOT_ID,
-      target: TARGET,
-      backupNetworkName: DEFAULT_BACKUP_NETWORK_NAME,
-      ...resticSecrets(`job_bk_rs_${RESTORE_JOB}`),
-      stagingVolumeName,
-    }),
-    prepare: buildRestorePrepareContainerPayload({ jobId: RESTORE_JOB, siteId: SITE_A, ...t, stagingVolumeName, ...db }),
-    switch: buildRestoreSwitchContainerPayload({ ...ids, ...t, stagingVolumeName, ...db }),
+    fetch: buildRestoreFetchContainerPayload({ ...fetchIn, stagingVolumeName }),
+    fetchFiles: buildRestoreFetchFilesContainerPayload({ ...fetchIn, serviceInstanceId: SVC_A }),
+    prepare: buildRestorePrepareContainerPayload({ ...site, ...t, stagingVolumeName, ...db }),
+    gateOn: buildRestoreGateContainerPayload({ ...ids, ...t, step: "on" }),
+    switch: buildRestoreSwitchContainerPayload({ ...site, ...t, stagingVolumeName, ...db }),
     files: buildRestoreFilesContainerPayload({ ...ids, ...t }),
     finish: buildRestoreFinishContainerPayload({ ...ids, ...t, ...db }),
     undoFiles: buildRestoreUndoFilesContainerPayload({ ...ids, ...t }),
-    undoDb: buildRestoreUndoDbContainerPayload({ ...ids, ...t, stagingVolumeName, ...db }),
+    gateUndo: buildRestoreGateContainerPayload({ ...ids, ...t, step: "undo" }),
+    undoDb: buildRestoreUndoDbContainerPayload({ ...site, ...t, stagingVolumeName, ...db }),
+    gateEnd: buildRestoreGateContainerPayload({ ...ids, ...t, step: "end" }),
     runner,
   };
 }
