@@ -20,6 +20,7 @@ import {
   MAIL_RELAY_IMAGE,
   PANEL_CONTAINER_STATES,
   PANEL_CONTAINERS,
+  PINNED_PANEL_CONTAINERS,
   PanelContainerLogsIpcRequestSchema,
   PanelContainerRestartIpcRequestSchema,
   type PanelContainerState,
@@ -45,6 +46,7 @@ import {
   type DockerExecutorPort,
   type CertificateStatusReport,
   type PanelContainerStatus,
+  type PinnedPanelContainer,
   type ServiceLogLine,
   type SftpAccessApplyRequest,
   type SftpApplyResult,
@@ -2615,10 +2617,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   /** State of one container by name, in the closed panel words; a 404 is `missing`. */
   public async inspectPanelContainer(
     name: string,
-  ): Promise<{ state: PanelContainerState; startedAt: string | null; restartCount: number }> {
+    pin: string,
+  ): Promise<{ state: PanelContainerState; startedAt: string | null; restartCount: number; imageCurrent: boolean | null }> {
     const inspect = await this.inspectContainerByNameOrId(name);
     if (!inspect) {
-      return { state: "missing", startedAt: null, restartCount: 0 };
+      return { state: "missing", startedAt: null, restartCount: 0, imageCurrent: null };
     }
     const mapped = mapContainerStateToObservedStatus(inspect.State);
     const state = PANEL_CONTAINER_STATES.find((s) => s === mapped && s !== "missing") ?? "unknown";
@@ -2628,12 +2631,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       state,
       startedAt: started > 0 ? new Date(started).toISOString() : null,
       restartCount: inspect.RestartCount ?? 0,
+      imageCurrent: inspect.Config?.Image === pin,
     };
   }
 
   public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
     const [seen, sftpState, relaySecret] = await Promise.all([
-      Promise.all(PANEL_CONTAINERS.map((c) => this.inspectPanelContainer(this.panelContainerName(c)))),
+      Promise.all(PANEL_CONTAINERS.map((c) => this.inspectPanelContainer(this.panelContainerName(c), this.panelContainerPin(c)))),
       readSftpState(this.sftpStateDir).catch(() => "unreadable" as const),
       stat(path.join(this.mailRelaySecretDir, MAIL_RELAY_SASL_FILE)).then(() => true, () => false),
     ]);
@@ -2689,6 +2693,23 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return run;
   }
 
+  /** Re-ensures one existing pinned panel container through its shipped ensure, which recreates it on an image change. */
+  public async applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    if (!(PINNED_PANEL_CONTAINERS as readonly string[]).includes(component)) {
+      throw new ExecutorCodedError("Invalid panel apply request", "VALIDATION_ERROR");
+    }
+    if (!(await this.inspectContainerByNameOrId(this.panelContainerName(component)))) {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    await {
+      ingress_proxy: () => this.ensureIngressProxy(),
+      shared_database: () => this.ensureSharedDatabase(),
+      phpmyadmin: () => this.ensurePhpMyAdmin({ ifPresent: true }),
+      sftp: () => this.ensureSftpFromState(),
+    }[component]();
+    return (await this.getPanelContainers()).find((row) => row.component === component)!;
+  }
+
   /** /bin/sh as 33:33 in the site's own container; the site label is checked, not trusted. */
   public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
     assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
@@ -2720,6 +2741,17 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   /** At start: ends the shells a previous executor left in site containers. */
   public reapTerminalShells(): Promise<void> {
     return reapTerminalShells(this.execTarget);
+  }
+
+  /** The image each panel container is pinned to. */
+  private panelContainerPin(component: PanelContainer): string {
+    return {
+      ingress_proxy: this.traefikImage,
+      shared_database: SHARED_MARIADB_IMAGE,
+      phpmyadmin: PHPMYADMIN_IMAGE,
+      sftp: SFTP_IMAGE,
+      mail_relay: MAIL_RELAY_IMAGE,
+    }[component];
   }
 
   /** The closed map from panel component to container name. */

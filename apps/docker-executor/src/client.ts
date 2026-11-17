@@ -26,6 +26,7 @@ import {
   type ObservedServiceStateWire,
   type PanelContainer,
   PanelContainerRestartWireSchema,
+  PanelContainerStatusWireSchema,
   PanelContainersDataEnvelopeSchema,
   TerminalEndedEnvelopeSchema,
   TerminalOpenWireSchema,
@@ -50,6 +51,7 @@ import type {
   PanelMailRequest,
   PanelMailResult,
   PanelContainerStatus,
+  PinnedPanelContainer,
   ServiceLogLine,
   SftpAccessApplyRequest,
   SftpApplyResult,
@@ -142,6 +144,7 @@ export const TERMINAL_READ_TIMEOUT_MS = 35_000;
 export const TERMINAL_CLOSE_TIMEOUT_MS = 20_000;
 export const TERMINAL_LIST_TIMEOUT_MS = 10_000;
 export const PANEL_RESTART_TIMEOUT_MS = 35_000;
+export const PANEL_APPLY_TIMEOUT_MS = 900_000; // an image pull can take minutes
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -503,6 +506,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/panel/restart", req, PANEL_RESTART_TIMEOUT_MS);
     return z.object({ data: PanelContainerRestartWireSchema }).parse(json).data;
+  }
+
+  public async applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/panel/apply", { component }, PANEL_APPLY_TIMEOUT_MS);
+    return z.object({ data: PanelContainerStatusWireSchema }).parse(json).data;
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {

@@ -16,6 +16,8 @@ import {
   MailTestIpcRequestSchema,
   PanelContainerLogsIpcRequestSchema,
   PanelContainerRestartIpcRequestSchema,
+  PanelContainerStatusWireSchema,
+  PINNED_PANEL_CONTAINERS,
   PanelMailIpcRequestSchema,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
@@ -56,6 +58,8 @@ export const DEFAULT_EXECUTOR_VERSION = "0.2.0" as const;
 const MAX_IPC_BODY_BYTES = 1_048_576;
 const WINDOWS_NAMED_PIPE_PATTERN = /^\\\\\.\\pipe\\[a-zA-Z0-9._-]+$/;
 const EmptyObjectIpcRequestSchema = z.object({}).strict();
+// Only the closed name: no image, tag or option comes from a request.
+const PanelContainerApplyIpcRequestSchema = z.object({ component: z.enum(PINNED_PANEL_CONTAINERS) }).strict();
 
 export type IpcTransportMode = "uds" | "pipe" | "loopback-test";
 
@@ -584,6 +588,12 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/panel/restart") {
         const req = this.parseBody(PanelContainerRestartIpcRequestSchema, rawBody, "panel restart");
         writeJson(res, 200, { data: await this.executor.restartPanelContainer(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/panel/apply") {
+        const req = this.parseBody(PanelContainerApplyIpcRequestSchema, rawBody, "panel apply");
+        writeJson(res, 200, { data: PanelContainerStatusWireSchema.parse(await this.executor.applyPanelContainerPin(req.component)) });
         return;
       }
 

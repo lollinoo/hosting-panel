@@ -8,6 +8,7 @@ import {
   type CertProblem,
   type MailRelayApplyRequest,
   PANEL_CONTAINERS,
+  PINNED_PANEL_CONTAINERS,
   type PanelContainer,
   PanelMailIpcRequestSchema,
   type PanelMailRequest,
@@ -25,6 +26,7 @@ import type {
   MailRelayStatusReport,
   MailTestResult,
   PanelContainerStatus,
+  PinnedPanelContainer,
   ServiceLogLine,
   SftpAccessApplyRequest,
   SftpAccessUser,
@@ -606,6 +608,19 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     return { startedAt };
   }
 
+  /** Moves an existing pinned panel container to its pin; answers as the real one. */
+  public async applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    this.assertEngineAvailable();
+    if (!(PINNED_PANEL_CONTAINERS as readonly string[]).includes(component)) {
+      throw new ExecutorCodedError("Invalid panel apply request", "VALIDATION_ERROR");
+    }
+    if (this.panelContainerStatus(component).state === "missing") {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    this.setPanelContainer(component, { imageCurrent: true });
+    return this.panelContainerStatus(component);
+  }
+
   /** A fake shell in a running container of that site. */
   public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
     this.assertEngineAvailable();
@@ -664,7 +679,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
             : component === "sftp"
               ? on(this.sftpUsers.length > 0)
               : on(this.mailRelay !== null);
-    return { component, ...base, startedAt: null, restartCount: 0, ...this.panelContainerOverrides.get(component) };
+    const status = { component, ...base, startedAt: null, restartCount: 0, imageCurrent: true, ...this.panelContainerOverrides.get(component) };
+    return status.state === "missing" ? { ...status, imageCurrent: null } : status;
   }
 
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {

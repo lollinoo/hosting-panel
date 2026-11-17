@@ -93,11 +93,11 @@ describe("getPanelContainers", () => {
     const rows = await adapter.getPanelContainers();
     expect(rows.map((r) => r.component)).toEqual([...PANEL_CONTAINERS]);
     expect(rows).toEqual([
-      { component: "ingress_proxy", state: "missing", expected: false, startedAt: null, restartCount: 0 },
-      { component: "shared_database", state: "running", expected: true, startedAt: "2026-11-16T10:00:00.123Z", restartCount: 2 },
-      { component: "phpmyadmin", state: "missing", expected: false, startedAt: null, restartCount: 0 },
-      { component: "sftp", state: "degraded", expected: false, startedAt: null, restartCount: 0 },
-      { component: "mail_relay", state: "missing", expected: false, startedAt: null, restartCount: 0 },
+      { component: "ingress_proxy", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
+      { component: "shared_database", state: "running", expected: true, startedAt: "2026-11-16T10:00:00.123Z", restartCount: 2, imageCurrent: false },
+      { component: "phpmyadmin", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
+      { component: "sftp", state: "degraded", expected: false, startedAt: null, restartCount: 0, imageCurrent: false },
+      { component: "mail_relay", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
     ]);
     expect(JSON.stringify(rows)).not.toContain(DOCKER_ID);
 
@@ -274,15 +274,15 @@ describe("simulator", () => {
   it("defaults, overrides, engine switch, missing logs and the mask", async () => {
     const sim = new InMemoryDockerSimulatorAdapter();
     expect(await sim.getPanelContainers()).toEqual([
-      { component: "ingress_proxy", state: "running", expected: false, startedAt: null, restartCount: 0 },
-      { component: "shared_database", state: "running", expected: true, startedAt: null, restartCount: 0 },
-      { component: "phpmyadmin", state: "missing", expected: false, startedAt: null, restartCount: 0 },
-      { component: "sftp", state: "missing", expected: false, startedAt: null, restartCount: 0 },
-      { component: "mail_relay", state: "missing", expected: false, startedAt: null, restartCount: 0 },
+      { component: "ingress_proxy", state: "running", expected: false, startedAt: null, restartCount: 0, imageCurrent: true },
+      { component: "shared_database", state: "running", expected: true, startedAt: null, restartCount: 0, imageCurrent: true },
+      { component: "phpmyadmin", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
+      { component: "sftp", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
+      { component: "mail_relay", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
     ]);
     sim.setPanelContainer("phpmyadmin", { state: "stopped", expected: true, restartCount: 3 });
     expect((await sim.getPanelContainers())[2]).toEqual({
-      component: "phpmyadmin", state: "stopped", expected: true, startedAt: null, restartCount: 3,
+      component: "phpmyadmin", state: "stopped", expected: true, startedAt: null, restartCount: 3, imageCurrent: true,
     });
     sim.setPanelContainerLogs("phpmyadmin", [
       { at: null, stream: "stdout", text: "a" },

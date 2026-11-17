@@ -390,17 +390,17 @@ describe("6. the simulator", () => {
     sim.sftpUsers = [{ username: "qa_user" } as never];
     await sim.applyMailRelay({} as never);
     expect(await sim.getPanelContainers()).toEqual([
-      { component: "ingress_proxy", state: "running", expected: true, startedAt: null, restartCount: 0 },
-      { component: "shared_database", state: "running", expected: true, startedAt: null, restartCount: 0 },
-      { component: "phpmyadmin", state: "missing", expected: false, startedAt: null, restartCount: 0 },
-      { component: "sftp", state: "running", expected: true, startedAt: null, restartCount: 0 },
-      { component: "mail_relay", state: "running", expected: true, startedAt: null, restartCount: 0 },
+      { component: "ingress_proxy", state: "running", expected: true, startedAt: null, restartCount: 0, imageCurrent: true },
+      { component: "shared_database", state: "running", expected: true, startedAt: null, restartCount: 0, imageCurrent: true },
+      { component: "phpmyadmin", state: "missing", expected: false, startedAt: null, restartCount: 0, imageCurrent: null },
+      { component: "sftp", state: "running", expected: true, startedAt: null, restartCount: 0, imageCurrent: true },
+      { component: "mail_relay", state: "running", expected: true, startedAt: null, restartCount: 0, imageCurrent: true },
     ]);
     sim.setPanelContainer("shared_database", { state: "degraded", startedAt: "2026-11-16T09:00:00.000Z", restartCount: 9 });
     sim.setPanelContainer("shared_database", { expected: false });
     const rows = await sim.getPanelContainers();
     expect(rows.map((r) => r.component)).toEqual([...PANEL_CONTAINERS]);
-    expect(rows[1]).toEqual({ component: "shared_database", state: "degraded", expected: false, startedAt: "2026-11-16T09:00:00.000Z", restartCount: 9 });
+    expect(rows[1]).toEqual({ component: "shared_database", state: "degraded", expected: false, startedAt: "2026-11-16T09:00:00.000Z", restartCount: 9, imageCurrent: true });
     await expect(sim.getPanelContainerLogs({ component: "phpmyadmin", tail: 5 })).rejects.toMatchObject({ code: "NOT_FOUND" });
     sim.setPanelContainer("sftp", { state: "missing" });
     await expect(sim.getPanelContainerLogs({ component: "sftp", tail: 5 })).rejects.toMatchObject({ code: "NOT_FOUND" });
