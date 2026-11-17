@@ -1,15 +1,16 @@
 import { Controller, Get, Inject, Param, Query, Req } from "@nestjs/common";
-import { PANEL_CONTAINERS, type SiteLogLineDto } from "@hosting-panel/contracts";
+import { HOST_JOURNAL_SOURCES, LogSourceSchema, type HostJournalSource, type SiteLogLineDto } from "@hosting-panel/contracts";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import type { FastifyRequest } from "fastify";
-import { z } from "zod";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { requireServerAdmin } from "../auth/server-admin.guard.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
-import { DOCKER_EXECUTOR_TOKEN } from "../tokens.js";
+import { DOCKER_EXECUTOR_TOKEN, HOST_AGENT_TOKEN } from "../tokens.js";
 
-const PanelContainerSchema = z.enum(PANEL_CONTAINERS);
+const LOG_TEXT_MAX = 2_000; // the executor's own cut (docker-logs.ts)
+const isHostJournal = (source: string): source is HostJournalSource => (HOST_JOURNAL_SOURCES as readonly string[]).includes(source);
 
 /** The customer route's bounds: 1 to 500 lines, 200 when absent or not a number. */
 const clampTail = (raw?: string): number => {
@@ -17,8 +18,8 @@ const clampTail = (raw?: string): number => {
   return Math.min(500, Math.max(1, Number.isFinite(n) ? Math.trunc(n) : 200));
 };
 
-const unavailable = () =>
-  new ControlPlaneError("DOCKER_ENGINE_UNAVAILABLE", "The logs are not available right now. Try again in a few minutes.");
+const UNAVAILABLE_MESSAGE = "The logs are not available right now. Try again in a few minutes.";
+const unavailable = () => new ControlPlaneError("DOCKER_ENGINE_UNAVAILABLE", UNAVAILABLE_MESSAGE);
 
 /** Puts a fixed sentence in place of the executor's own text. */
 function publicLogError(err: unknown): unknown {
@@ -37,6 +38,7 @@ export class AdminLogsController {
     @Inject(AuthzContextService) private readonly authz: AuthzContextService,
     @Inject(ManagedSitesService) private readonly sitesService: ManagedSitesService,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly executor: DockerExecutorPort,
+    @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
   ) {}
 
   /** Recent log lines of any managed site; audited, because they are the customer's data. */
@@ -62,7 +64,7 @@ export class AdminLogsController {
     return { data };
   }
 
-  /** Recent log lines of one of the panel's own containers; not audited. */
+  /** Recent log lines of one of the panel's own containers or host services; not audited. */
   @Get("logs/:component")
   public async panelLogs(
     @Req() req: FastifyRequest,
@@ -70,14 +72,26 @@ export class AdminLogsController {
     @Query("tail") rawTail?: string,
   ): Promise<{ data: SiteLogLineDto[] }> {
     await requireServerAdmin(this.authz, req, null, "platform");
-    const component = PanelContainerSchema.parse(rawComponent);
+    const component = LogSourceSchema.parse(rawComponent);
     const tail = clampTail(rawTail);
+    if (isHostJournal(component)) return { data: await this.#journal(component, tail) };
     if (!this.executor.isRuntimeAvailable) throw unavailable();
     try {
       const lines = await this.executor.getPanelContainerLogs({ component, tail });
       return { data: lines.map((l) => ({ at: l.at, stream: l.stream, text: l.text })) };
     } catch (err) {
       throw publicLogError(err);
+    }
+  }
+
+  /** A host service's journal through the agent; its text stays out of errors and logs. */
+  async #journal(unit: HostJournalSource, tail: number): Promise<SiteLogLineDto[]> {
+    if (!this.hostAgent.isRuntimeAvailable) throw new ControlPlaneError("NOT_SUPPORTED", "The host agent is disabled on this server.");
+    try {
+      const lines = await this.hostAgent.readHostJournal(unit, tail);
+      return lines.map((l) => ({ at: l.at, stream: "stdout", text: l.message.slice(0, LOG_TEXT_MAX) }));
+    } catch {
+      throw new ControlPlaneError("HOST_AGENT_UNAVAILABLE", UNAVAILABLE_MESSAGE);
     }
   }
 }

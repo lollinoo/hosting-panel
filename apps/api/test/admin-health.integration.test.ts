@@ -74,6 +74,7 @@ describe("admin health and alerts", () => {
   let agent: InMemoryHostSimulatorAdapter;
   let executorCalls: string[];
   let agentCalls: string[];
+  let agentEnabled: boolean;
   let adminToken: string;
   let hostId: string;
 
@@ -111,6 +112,7 @@ describe("admin health and alerts", () => {
     const host = recorded<HostAgentPort>(opts.disabled ? new Phase1DisabledHostAgent() : agent);
     executorCalls = exec.calls;
     agentCalls = host.calls;
+    agentEnabled = !opts.disabled;
     app = await createControlPlaneApp({
       listen: true,
       host: "127.0.0.1",
@@ -136,11 +138,13 @@ describe("admin health and alerts", () => {
     await dbClient.close();
   });
 
-  /** Both answers, with no daemon call during the requests and nothing outside the closed lists. */
+  /** Both answers: no executor call; of the agent only readHostServices, during Health (R198 7.1); nothing outside the closed lists. */
   async function both(): Promise<{ health: z.infer<typeof AdminHealthDtoSchema>; alerts: z.infer<typeof AlertsSchema> }> {
     executorCalls.length = 0;
     agentCalls.length = 0;
     const h = await call("GET", "/v1/admin/health", adminToken);
+    expect(agentCalls).toEqual(agentEnabled ? ["readHostServices"] : []);
+    agentCalls.length = 0;
     const a = await call("GET", "/v1/admin/alerts", adminToken);
     expect([h.status, a.status]).toEqual([200, 200]);
     expect(executorCalls).toEqual([]);
@@ -249,6 +253,15 @@ describe("admin health and alerts", () => {
     for (const name of PANEL_COMPONENTS.slice(3)) expect(part(health, name)).toMatchObject({ state: "unknown", reason: "runtime_disabled" });
     expect(alerts).toEqual([]);
   });
+
+  it("an agent that never answers still gives Health within the 3 s bound, with hostServices null", async () => {
+    await start();
+    vi.spyOn(agent, "readHostServices").mockReturnValue(new Promise(() => undefined));
+    const began = Date.now();
+    const { health } = await both();
+    expect(Date.now() - began).toBeLessThan(5_000);
+    expect(health.hostServices).toBeNull();
+  }, 15_000);
 
   it("a heartbeat older than the threshold turns its part down and raises component_down", async () => {
     await start();

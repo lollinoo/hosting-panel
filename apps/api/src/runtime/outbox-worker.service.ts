@@ -1,6 +1,8 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   ERROR_CODES,
+  HOST_JOB_KIND,
+  PANEL_CONTAINER_APPLY_KIND,
   WORDPRESS_IMPORT_KIND,
   WORDPRESS_OPERATION_KINDS,
   canTransitionOperation,
@@ -59,6 +61,8 @@ import {
 } from "../tokens.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 import { executePanelContainerRestart, recoverPanelContainerRestart } from "../health/panel-restart.js";
+import { executePanelContainerApply, recoverPanelContainerApply } from "../updates/panel-container-apply.js";
+import { FirewallService } from "../firewall/firewall.service.js";
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
 import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
 import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
@@ -85,6 +89,9 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
 ];
 // The import runs in the WordPress lane: its copy step is the update's own.
 const WORDPRESS_LANE_KINDS = [...WORDPRESS_OPERATION_KINDS, WORDPRESS_IMPORT_KIND] as const satisfies readonly OperationKind[];
+const HOST_LANE_KINDS = [HOST_JOB_KIND, PANEL_CONTAINER_APPLY_KIND] as const satisfies readonly OperationKind[];
+// host-jobs.ts imports this file for the backup kinds, so a static import back would be an ESM cycle.
+const hostJobs = () => import("../host/host-jobs.js");
 export const BACKUP_OPERATION_KINDS = [
   "site.backups.create",
   "site.backups.prune",
@@ -144,6 +151,7 @@ function extractRestartCount(obs: unknown): number {
 @Injectable()
 export class OutboxWorkerService {
   #stopped = false;
+  readonly #stopping = new AbortController(); // tells a running host-job follow to let go (R201 1.1)
   #pollTimer: NodeJS.Timeout | null = null;
   #activeRecoveryPromise: Promise<UnknownRecoveryResult> | null = null;
   readonly #mainLane: OutboxLaneState = {
@@ -152,6 +160,7 @@ export class OutboxWorkerService {
         ...FILE_ARCHIVE_OPERATION_KINDS,
         ...BACKUP_OPERATION_KINDS,
         ...WORDPRESS_LANE_KINDS,
+        ...HOST_LANE_KINDS,
       ],
     },
     activePromise: null,
@@ -176,6 +185,13 @@ export class OutboxWorkerService {
     scheduledImmediate: null,
     pendingTrigger: false,
   };
+  // An hour-long system upgrade never holds up deploys or backups.
+  readonly #hostLane: OutboxLaneState = {
+    filter: { includeKinds: HOST_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
 
   readonly #backupsApplier: SiteBackupsApplier;
   readonly #wordpressApplier: SiteWordpressApplier;
@@ -190,6 +206,7 @@ export class OutboxWorkerService {
     @Inject(SiteDomainsApplier) private readonly siteDomainsApplier: SiteDomainsApplier,
     @Inject(SiteFilesApplier) private readonly siteFilesApplier: SiteFilesApplier,
     @Optional() @Inject(SiteBackupsApplier) siteBackupsApplier?: SiteBackupsApplier,
+    @Optional() @Inject(FirewallService) private readonly firewall?: FirewallService,
   ) {
     this.#backupsApplier =
       siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
@@ -233,12 +250,14 @@ export class OutboxWorkerService {
     this.#triggerLane(this.#fileLane);
     this.#triggerLane(this.#backupLane);
     this.#triggerLane(this.#wordpressLane);
+    this.#triggerLane(this.#hostLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
+    this.#stopping.abort();
 
-    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane]) {
+    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane, this.#hostLane]) {
       lane.pendingTrigger = false;
       if (lane.scheduledImmediate !== null) {
         clearImmediate(lane.scheduledImmediate);
@@ -256,6 +275,7 @@ export class OutboxWorkerService {
       this.#fileLane.activePromise?.catch(() => undefined),
       this.#backupLane.activePromise?.catch(() => undefined),
       this.#wordpressLane.activePromise?.catch(() => undefined),
+      this.#hostLane.activePromise?.catch(() => undefined),
       this.#activeRecoveryPromise?.catch(() => undefined),
     ]);
   }
@@ -308,6 +328,7 @@ export class OutboxWorkerService {
       this.#runLane(this.#fileLane, batchSize),
       this.#runLane(this.#backupLane, batchSize),
       this.#runLane(this.#wordpressLane, batchSize),
+      this.#runLane(this.#hostLane, batchSize),
     ]);
     return {
       claimed: results.reduce((n, r) => n + r.claimed, 0),
@@ -398,6 +419,10 @@ export class OutboxWorkerService {
         await this.#executeServiceLifecycleAction(op, op.kind);
       } else if (op.kind === "panel.container.restart") {
         await executePanelContainerRestart(db, this.dockerExecutor, op);
+      } else if (op.kind === PANEL_CONTAINER_APPLY_KIND) {
+        await executePanelContainerApply(db, this.dockerExecutor, op);
+      } else if (op.kind === HOST_JOB_KIND) {
+        await (await hostJobs()).executeHostJob(db, this.hostAgent, op, undefined, this.#stopping.signal);
       } else if (op.kind === "host.maintenance") {
         await this.#executeHostMaintenance(op, payload);
       } else if (op.kind === "host.security") {
@@ -841,6 +866,7 @@ export class OutboxWorkerService {
         ? redactSensitiveString(result.output.slice(0, 500))
         : "Host security posture verified",
     );
+    if (command.policyRef === "apply_dedicated_nftables_22_80_443") await this.firewall?.sync();
     await settleOperation(db, op.id, { status: "succeeded" });
   }
 
@@ -926,11 +952,14 @@ export class OutboxWorkerService {
         } else if (
           (BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind) ||
           op.kind === "site.wordpress.update" ||
-          op.kind === WORDPRESS_IMPORT_KIND
+          op.kind === WORDPRESS_IMPORT_KIND ||
+          op.kind === HOST_JOB_KIND
         ) {
-          // Backup, update and import recovery never replay a change; the applier settles what it can.
+          // Backup, update, import and host job recovery never replay a change; each settles what it can.
           const outcome =
-            op.kind === "site.wordpress.update"
+            op.kind === HOST_JOB_KIND
+              ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)
+              : op.kind === "site.wordpress.update"
               ? await this.#wordpressApplier.recover(op)
               : op.kind === WORDPRESS_IMPORT_KIND
                 ? await this.#wordpressImportApplier.recover(op)
@@ -1091,10 +1120,10 @@ export class OutboxWorkerService {
             );
             convergedFailed += 1;
           }
-        } else if (op.kind === "panel.container.restart") {
+        } else if (op.kind === "panel.container.restart" || op.kind === PANEL_CONTAINER_APPLY_KIND) {
           // Docker may have finished the restart; Health shows the truth, the operation says interrupted.
           await this.#settleNonTerminalSteps(op.id, "failed", "The restart was interrupted.");
-          await recoverPanelContainerRestart(db, op);
+          await (op.kind === PANEL_CONTAINER_APPLY_KIND ? recoverPanelContainerApply(db, op) : recoverPanelContainerRestart(db, op));
           await this.#settleAssociatedOutboxEvents(op.id, "failed", "The restart was interrupted.");
           convergedFailed += 1;
         } else {

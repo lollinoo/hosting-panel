@@ -114,7 +114,7 @@ describe("administrator log routes", () => {
     await dbClient.close();
   });
 
-  it("refuses a component outside the five names with 400 before the executor is called", async () => {
+  it("refuses a component outside the twelve names with 400 before the executor is called", async () => {
     const spy = vi.spyOn(sim, "getPanelContainerLogs");
     for (const component of ["docker", "hp_mariadb", "../x", " ", "INGRESS_PROXY"]) {
       const res = await get(`/v1/admin/logs/${encodeURIComponent(component)}?tail=5`);

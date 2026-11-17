@@ -1,9 +1,13 @@
 import { Inject, Injectable } from "@nestjs/common";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   ALERT_KINDS,
+  AdminHealthDtoSchema,
   ALERT_SEVERITY,
   DISK_HIGH_PERCENT,
   HEALTH_STALE_AFTER_MS,
+  HOST_SERVICES,
+  HOST_SERVICE_UNIT,
   HostDiskWireSchema,
   OPERATION_TERMINAL_STATUSES,
   PANEL_CONTAINERS,
@@ -42,11 +46,12 @@ import {
   stackRevisions,
   type DatabaseClient,
 } from "@hosting-panel/database";
+import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { evaluateServiceDrift } from "@hosting-panel/hosting-domain";
 import { z } from "zod";
 import { BACKUP_POLL_DEADLINE_MS } from "../backups/site-backups-applier.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
-import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
+import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, HOST_AGENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 
 type Part = AdminHealthDto["components"][number];
 type HeartbeatRow = typeof hostAgentHeartbeats.$inferSelect;
@@ -54,24 +59,50 @@ type DownSite = { siteId: string; siteName: string; observed: AdminHealthDto["si
 
 const PanelContainersSnapshotSchema = z.object({ containers: z.array(PanelContainerStatusWireSchema) });
 const DisksSnapshotSchema = z.object({ disks: z.array(HostDiskWireSchema) });
+const HOST_SERVICES_READ_MS = 3_000;
 const DRIFT_REASONS = [
   ["OUT_OF_BAND_MODIFIED", "out_of_band_modified"],
   ["STATUS_MISMATCH", "status_mismatch"],
   ["SPEC_HASH_MISMATCH", "revision_mismatch"],
 ] as const;
 
-/** Panel health and open alerts, read from stored state only. */
+/** Panel health and open alerts from stored state; Health alone also reads the host services live. */
 @Injectable()
 export class AdminHealthService {
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(ManagedSitesService) private readonly sites: ManagedSitesService,
+    @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
   ) {}
 
-  /** Every panel part, site container and disk. */
+  /** Every panel part, site container and disk, and the four host services. */
   public async health(now = new Date()): Promise<AdminHealthDto> {
-    return (await this.#read(now)).health;
+    const [{ health }, hostServices] = await Promise.all([this.#read(now), this.#hostServices()]);
+    return { ...health, hostServices };
+  }
+
+  /** One live read of the four services, bound to 3 s; null when disabled, out of reach, slow or malformed. */
+  async #hostServices(): Promise<AdminHealthDto["hostServices"]> {
+    if (!this.hostAgent.isRuntimeAvailable) return null;
+    const bound = new AbortController();
+    try {
+      const states = await Promise.race([
+        this.hostAgent.readHostServices(),
+        sleep(HOST_SERVICES_READ_MS, null, { signal: bound.signal }),
+      ]);
+      if (!states) return null;
+      const list = HOST_SERVICES.map((service) => {
+        const s = states.find((x) => x.unit === HOST_SERVICE_UNIT[service]);
+        return s && { service, active: s.active, activeState: s.activeState, since: s.since, restarts: s.restarts };
+      });
+      const parsed = AdminHealthDtoSchema.shape.hostServices.safeParse(list);
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    } finally {
+      bound.abort();
+    }
   }
 
   /** Open alerts, critical first. */
@@ -270,6 +301,6 @@ export class AdminHealthService {
       engine,
       ...containerParts,
     ];
-    return { health: { generatedAt, components, siteContainers, disks }, downSites };
+    return { health: { generatedAt, components, siteContainers, disks, hostServices: null }, downSites };
   }
 }
