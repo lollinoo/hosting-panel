@@ -103,6 +103,7 @@ import {
   resolveRequestId,
 } from "../common/control-plane.error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
+import { shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -174,14 +175,14 @@ function mapAllocationToDto(alloc: typeof hostAllocations.$inferSelect): HostAll
   };
 }
 
-function mapSiteSummaryToDto(site: typeof sites.$inferSelect): SiteSummaryDto {
+function mapSiteSummaryToDto(site: typeof sites.$inferSelect, stopped: ReadonlySet<string>): SiteSummaryDto {
   return {
     id: site.id,
     organizationId: site.organizationId,
     hostAllocationId: site.hostAllocationId,
     name: site.name,
     slug: site.slug,
-    status: site.status,
+    status: shownSiteStatus(site.status, stopped.has(site.id)),
     phpVersion: site.phpVersion,
     createdAt: toIsoString(site.createdAt),
     updatedAt: toIsoString(site.updatedAt),
@@ -951,7 +952,11 @@ export class OrganizationsController {
       allSites,
     );
 
-    const dtoList = authorizedSites.map(mapSiteSummaryToDto);
+    const stopped = await stoppedSiteIds(
+      this.dbClient.db,
+      authorizedSites.map((s) => s.id),
+    );
+    const dtoList = authorizedSites.map((s) => mapSiteSummaryToDto(s, stopped));
     const paginated = paginateItems(dtoList, pagination);
 
     return {

@@ -87,6 +87,12 @@ const DELETE_STEP_DONE: Readonly<Record<SiteDeleteStep, string>> = {
 };
 export const SITE_DELETE_FAILED = "Site could not be deleted";
 
+/** True when a failure may have taken effect; any other failure did not happen for sure. */
+export function isAmbiguousFailure(err: unknown): boolean {
+  const e = err as { code?: unknown; ambiguousOutcome?: unknown } | null | undefined;
+  return e?.code === "OPERATION_AMBIGUOUS" || e?.ambiguousOutcome === true;
+}
+
 // Step and operation messages are shown to every org member: fixed texts only.
 const STEP_DONE: Readonly<Record<SiteProvisionStep, string>> = {
   create_database: "Database ready",
@@ -399,12 +405,25 @@ export class SiteProvisioner {
         // Rotate extra MariaDB user passwords after ownership transfer while keeping primary user and grants intact.
         await rotateExtraDatabaseUsers(this.executor, siteId);
         const services = await db
-          .select({ id: serviceInstances.id })
+          .select({ id: serviceInstances.id, desiredStatus: serviceInstances.desiredStatus })
           .from(serviceInstances)
           .where(and(eq(serviceInstances.siteId, siteId), eq(serviceInstances.organizationId, to)));
         for (const svc of services) {
           const spec = await buildApprovedServiceSpec(db, this.config, { organizationId: to, serviceInstanceId: svc.id });
           await recordDeployedState(db, this.executor, spec, await this.executor.deployService(spec));
+          // The new owner needs a new container, but a service its owner stopped stays stopped.
+          if (svc.desiredStatus === "stopped") {
+            await this.executor.stopService(svc.id).catch(async (err: unknown) => {
+              // The container serves: the wanted state says so (R195 1.3).
+              if (!isAmbiguousFailure(err)) {
+                await db
+                  .update(serviceInstances)
+                  .set({ desiredStatus: "running", updatedAt: new Date() })
+                  .where(eq(serviceInstances.id, svc.id));
+              }
+              throw err;
+            });
+          }
         }
       });
 

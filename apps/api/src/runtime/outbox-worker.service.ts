@@ -20,6 +20,7 @@ import {
   failOutboxEvent,
   inArray,
   isNull,
+  latestSiteOperation,
   lte,
   markExpiredOperationsUnknownTransactional,
   operationSteps,
@@ -39,7 +40,7 @@ import {
   type ClaimPendingOutboxFilter,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { DockerExecutionResult, DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import {
   createApprovedHostMaintenanceCommand,
   createApprovedHostSecurityCommand,
@@ -57,12 +58,13 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
+import { executePanelContainerRestart, recoverPanelContainerRestart } from "../health/panel-restart.js";
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
 import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
 import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
 import { SITE_WORDPRESS_INTERRUPTED, SiteWordpressApplier } from "../sites/site-wordpress-applier.js";
 import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-applier.js";
-import { SiteProvisioner } from "./site-provisioner.js";
+import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -394,6 +396,8 @@ export class OutboxWorkerService {
         await this.#executeServiceDeploy(op);
       } else if (op.kind === "service.restart" || op.kind === "service.stop") {
         await this.#executeServiceLifecycleAction(op, op.kind);
+      } else if (op.kind === "panel.container.restart") {
+        await executePanelContainerRestart(db, this.dockerExecutor, op);
       } else if (op.kind === "host.maintenance") {
         await this.#executeHostMaintenance(op, payload);
       } else if (op.kind === "host.security") {
@@ -425,13 +429,7 @@ export class OutboxWorkerService {
       return "succeeded";
     } catch (err) {
       const errorCode = extractErrorCode(err, "INTERNAL_ERROR");
-      const explicitAmbiguous =
-        errorCode === "OPERATION_AMBIGUOUS" ||
-        Boolean(
-          err !== null &&
-            typeof err === "object" &&
-            (err as { ambiguousOutcome?: unknown }).ambiguousOutcome === true,
-        );
+      const explicitAmbiguous = isAmbiguousFailure(err);
       const rawMessage = err instanceof Error ? err.message : "Operation execution failed";
       const sanitizedMessage = sanitizePublicErrorMessage(rawMessage).slice(0, 1024);
 
@@ -484,9 +482,15 @@ export class OutboxWorkerService {
         !isTerminalOperationStatus(latestOp.status) &&
         canTransitionOperation(latestOp.status, "failed")
       ) {
-        await transitionOperation(db, op.id, "failed", {
-          errorCode,
-          errorMessage: stepMessage,
+        // A stop that failed for sure before the runtime accepted it left the container running (R195 1.1).
+        const stopNotDone =
+          op.kind === "service.stop" && !explicitAmbiguous && ["queued", "processing"].includes(latestOp.status);
+        await settleOperation(db, op.id, { status: "failed", errorCode, errorMessage: stepMessage }, async (tx) => {
+          if (!stopNotDone) return;
+          await tx
+            .update(serviceInstances)
+            .set({ desiredStatus: "running", updatedAt: new Date() })
+            .where(eq(serviceInstances.id, op.resourceId));
         });
       }
 
@@ -622,10 +626,16 @@ export class OutboxWorkerService {
       `Dispatching ${kind} over signed IPC`,
     );
 
+    let gone = false;
     const execResult =
       kind === "service.restart"
-        ? await this.dockerExecutor.restartService(svc.id)
-        : await this.dockerExecutor.stopService(svc.id);
+        ? await this.#restartOrRecreate(op, svc)
+        : await this.dockerExecutor.stopService(svc.id).catch((err: unknown): DockerExecutionResult => {
+            // D8: a container that is gone is already stopped; it is recorded missing and nothing is created.
+            if (extractErrorCode(err) !== "NOT_FOUND") throw err;
+            gone = true;
+            return { operationId: op.id, status: "succeeded" };
+          });
 
     await transitionOperation(db, op.id, "accepted");
     await this.#safeUpdateStep(
@@ -645,8 +655,9 @@ export class OutboxWorkerService {
 
     const obs = await this.dockerExecutor.getObservedState(svc.id);
     const expectedFallbackStatus = kind === "service.stop" ? "stopped" : "running";
-    const observedStatus =
-      obs?.observedStatus ?? execResult.containerStatus ?? expectedFallbackStatus;
+    const observedStatus = gone
+      ? "missing"
+      : obs?.observedStatus ?? execResult.containerStatus ?? expectedFallbackStatus;
     const dockerRef =
       execResult.internalDockerRef ??
       (obs as { internalDockerRef?: string } | null)?.internalDockerRef;
@@ -673,6 +684,30 @@ export class OutboxWorkerService {
       `Service state converged (${observedStatus})`,
     );
     await settleOperation(db, op.id, { status: "succeeded" });
+  }
+
+  /** D8: a restart of a gone container creates it again from the stored revision, only after a set-up that succeeded. */
+  async #restartOrRecreate(
+    op: typeof operations.$inferSelect,
+    svc: typeof serviceInstances.$inferSelect,
+  ): Promise<DockerExecutionResult> {
+    try {
+      return await this.dockerExecutor.restartService(svc.id);
+    } catch (err) {
+      if (extractErrorCode(err) !== "NOT_FOUND") throw err;
+      const db = this.dbClient.db;
+      const provision = await latestSiteOperation(db, { siteId: svc.siteId, kind: "site.provision" });
+      // A site whose delete ever started is not rebuilt, even when the delete failed halfway (R195 1.2).
+      if (provision?.status !== "succeeded" || (await latestSiteOperation(db, { siteId: svc.siteId, kind: "site.delete" }))) throw err;
+      const spec = await buildApprovedServiceSpec(db, this.config, {
+        organizationId: op.organizationId,
+        serviceInstanceId: svc.id,
+      });
+      await renewOperationLease(db, op.id, DEPLOY_LEASE_MS);
+      const result = await this.dockerExecutor.deployService(spec);
+      await recordDeployedState(db, this.dockerExecutor, spec, result);
+      return result;
+    }
   }
 
   async #executeHostMaintenance(
@@ -1052,9 +1087,16 @@ export class OutboxWorkerService {
             await this.#convergeUnknownToFailed(
               op,
               `Operation interrupted before convergence: ${mismatchDetail} (TH-08)`,
+              op.kind === "service.stop" && obs?.observedStatus === "running",
             );
             convergedFailed += 1;
           }
+        } else if (op.kind === "panel.container.restart") {
+          // Docker may have finished the restart; Health shows the truth, the operation says interrupted.
+          await this.#settleNonTerminalSteps(op.id, "failed", "The restart was interrupted.");
+          await recoverPanelContainerRestart(db, op);
+          await this.#settleAssociatedOutboxEvents(op.id, "failed", "The restart was interrupted.");
+          convergedFailed += 1;
         } else {
           await this.#convergeUnknownToFailed(
             op,
@@ -1079,15 +1121,25 @@ export class OutboxWorkerService {
   async #convergeUnknownToFailed(
     op: typeof operations.$inferSelect,
     reasonMessage: string,
+    stopNotDone = false,
   ): Promise<void> {
     const db = this.dbClient.db;
     const sanitizedReason = redactSensitiveString(reasonMessage);
 
     await this.#settleNonTerminalSteps(op.id, "failed", sanitizedReason);
 
-    await transitionOperation(db, op.id, "failed", {
-      errorCode: "OPERATION_INTERRUPTED",
-      errorMessage: sanitizedReason,
+    await db.transaction(async (tx) => {
+      const t = tx as unknown as typeof db;
+      await transitionOperation(t, op.id, "failed", {
+        errorCode: "OPERATION_INTERRUPTED",
+        errorMessage: sanitizedReason,
+      });
+      // The container still runs after a Stop left in doubt: it is wanted running again (R196 1.1).
+      if (!stopNotDone) return;
+      await t
+        .update(serviceInstances)
+        .set({ desiredStatus: "running", updatedAt: new Date() })
+        .where(eq(serviceInstances.id, op.resourceId));
     });
 
     await this.#settleAssociatedOutboxEvents(op.id, "failed", sanitizedReason);

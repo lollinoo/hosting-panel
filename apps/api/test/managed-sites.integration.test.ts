@@ -482,6 +482,50 @@ describe("managed WordPress sites API", () => {
     expect(lock!.lockKey).toBe(`site:${siteId}`);
   });
 
+  it("a stopped site shows as stopped in every view, and as ready again after Start", async () => {
+    const { siteId } = await createAndRun();
+    const statuses = async () => [
+      (await call("GET", siteUrl(siteId))).body.data.status,
+      (await call("GET", "/v1/admin/sites", undefined, {}, adminToken)).body.data.sites.find(
+        (s: Json) => s.id === siteId,
+      ).status,
+      (await call("GET", org("/sites"))).body.data.find((s: Json) => s.id === siteId).status,
+      (await call("GET", org(`/sites/${siteId}`))).body.data.status,
+    ];
+    await call("POST", siteUrl(siteId, "/actions"), { action: "stop" }, key());
+    await run();
+    expect(await statuses()).toEqual(["stopped", "stopped", "stopped", "stopped"]);
+    await call("POST", siteUrl(siteId, "/actions"), { action: "start" }, key());
+    await run();
+    expect(await statuses()).toEqual(["ready", "ready", "ready", "ready"]);
+  });
+
+  it("a Restart of a site wanted stopped makes it wanted running", async () => {
+    const { siteId } = await createAndRun();
+    await call("POST", siteUrl(siteId, "/actions"), { action: "stop" }, key());
+    await run();
+    const restart = await call("POST", siteUrl(siteId, "/actions"), { action: "restart" }, key());
+    expect(restart.status).toBe(202);
+    expect((await webService(siteId)).desiredStatus).toBe("running");
+    await run();
+    expect((await getOp(restart.body.data.operationId)).status).toBe("succeeded");
+    expect(sim.getSimulatedContainerInspect((await webService(siteId)).id)?.State?.Running).toBe(true);
+    expect((await call("GET", siteUrl(siteId))).body.data.status).toBe("ready");
+  });
+
+  it("a PHP change on a stopped site is refused and writes no operation", async () => {
+    const { siteId } = await createAndRun();
+    await call("POST", siteUrl(siteId, "/actions"), { action: "stop" }, key());
+    await run();
+    const before = await dbClient.db.select().from(operations);
+    const res = await call("PATCH", siteUrl(siteId, "/runtime"), { phpVersion: "8.5" }, key());
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.message).toBe("Start the site first, then change the PHP version.");
+    expect(await dbClient.db.select().from(operations)).toHaveLength(before.length);
+    expect((await call("GET", siteUrl(siteId))).body.data.phpVersion).toBe("8.4");
+  });
+
   it("changing PHP version creates a revision with the new image and redeploys", async () => {
     const { siteId } = await createAndRun();
     const svc = await webService(siteId);

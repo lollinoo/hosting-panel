@@ -14,6 +14,7 @@ import {
   operationSteps,
   renewOperationLease,
   resolveDecryptedSecretRefs,
+  serviceInstances,
   settleSiteArchive,
   settleSiteRestore,
   siteBackups,
@@ -71,6 +72,7 @@ const DB_FAILED_MSG = "Could not create the site database";
 const START_RUNNING_MSG = "Starting the site";
 const START_DONE_MSG = "Site started";
 const START_SKIPPED_MSG = "The site is already running; skipped";
+const START_STOPPED_MSG = "The site was stopped on purpose; skipped";
 const START_FAILED_MSG = "The files are back but the site did not start. Redeploy the site.";
 const SFTP_RUNNING_MSG = "Turning file access back on";
 const SFTP_DONE_MSG = "File access is on";
@@ -728,6 +730,15 @@ export class SiteRestoreApplier {
       const serviceInstanceId =
         ctx?.serviceInstanceId ??
         (await resolveSiteFilesServiceId(db, this.dockerExecutor, this.config, site));
+      const [svc] = await db
+        .select({ desiredStatus: serviceInstances.desiredStatus })
+        .from(serviceInstances)
+        .where(eq(serviceInstances.id, serviceInstanceId))
+        .limit(1);
+      if (svc?.desiredStatus === "stopped") {
+        await this.parent.safeUpdateStep(op.id, "start_site", "skipped", START_STOPPED_MSG);
+        return null;
+      }
       const state = await this.dockerExecutor.backups({
         action: "siteState",
         siteId: site.id,

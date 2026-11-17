@@ -12,6 +12,7 @@ import {
   type PhpVersion,
   type SiteActionInput,
   type SiteLogLineDto,
+  type SiteStatus,
   wwwPartner,
 } from "@hosting-panel/contracts";
 import {
@@ -80,6 +81,23 @@ const isUniqueViolation = (err: unknown): boolean => {
 export interface ManagedSiteAccepted {
   readonly siteId: string;
   readonly operationId: string;
+}
+
+/** A stored ready site whose services are all wanted stopped shows as stopped. */
+export function shownSiteStatus(status: SiteStatus, allStopped: boolean): SiteStatus {
+  return status === "ready" && allStopped ? "stopped" : status;
+}
+
+/** Ids of the given sites whose every service is wanted stopped. */
+export async function stoppedSiteIds(db: HostingPanelDatabase, siteIds: readonly string[]): Promise<Set<string>> {
+  if (siteIds.length === 0) return new Set();
+  const rows = await db
+    .select({ siteId: serviceInstances.siteId })
+    .from(serviceInstances)
+    .where(inArray(serviceInstances.siteId, [...siteIds]))
+    .groupBy(serviceInstances.siteId)
+    .having(sql`bool_and(${serviceInstances.desiredStatus} = 'stopped')`);
+  return new Set(rows.map((r) => r.siteId));
 }
 
 function slugify(name: string): string {
@@ -269,7 +287,7 @@ export class ManagedSitesService {
       hostAllocationId: site.hostAllocationId,
       name: site.name,
       slug: site.slug,
-      status: site.status,
+      status: shownSiteStatus(site.status, (await stoppedSiteIds(this.dbClient.db, [site.id])).has(site.id)),
       phpVersion: site.phpVersion,
       primaryDomain: primary?.hostname ?? null,
       createdAt: site.createdAt.toISOString(),
@@ -283,10 +301,11 @@ export class ManagedSitesService {
     action: SiteActionInput["action"],
     actorId: string,
     idempotencyKey?: string,
+    write?: (tx: HostingPanelDatabase, operationId: string) => Promise<void>,
   ): Promise<ManagedSiteAccepted> {
     const site = await this.#loadSite(siteId, organizationId);
     if (action !== "retry") {
-      return this.#power(site, action, actorId, idempotencyKey);
+      return this.#power(site, action, actorId, idempotencyKey, write);
     }
     const replay = idempotencyKey
       ? await this.#replay(organizationId, idempotencyKey, siteId)
@@ -339,12 +358,13 @@ export class ManagedSitesService {
     });
   }
 
-  /** start, stop and restart all enqueue the existing service operations under the site lock. */
+  /** start, stop and restart all enqueue the existing service operations under the site lock; `write` joins that transaction. */
   async #power(
     site: typeof sites.$inferSelect,
     action: "start" | "stop" | "restart",
     actorId: string,
     idempotencyKey?: string,
+    write?: (tx: HostingPanelDatabase, operationId: string) => Promise<void>,
   ): Promise<ManagedSiteAccepted> {
     const svc = await this.#webService(site);
     return this.dbClient.db.transaction(async (tx) => {
@@ -359,7 +379,7 @@ export class ManagedSitesService {
         lockKey: `site:${site.id}`,
         steps: SERVICE_STEPS,
       });
-      if (!enqueued.idempotentReplay && action !== "restart") {
+      if (!enqueued.idempotentReplay) {
         await tx
           .update(serviceInstances)
           .set({
@@ -367,6 +387,7 @@ export class ManagedSitesService {
             updatedAt: new Date(),
           })
           .where(eq(serviceInstances.id, svc.id));
+        await write?.(t, enqueued.operation.id);
       }
       return { siteId: site.id, operationId: enqueued.operation.id };
     });
@@ -382,6 +403,10 @@ export class ManagedSitesService {
   ): Promise<ManagedSiteAccepted> {
     const site = await this.#loadSite(siteId, organizationId);
     const svc = await this.#webService(site);
+    // A deploy would start a site its owner stopped.
+    if (svc.desiredStatus === "stopped") {
+      throw new ControlPlaneError("VALIDATION_ERROR", "Start the site first, then change the PHP version.");
+    }
     const [current] = svc.currentRevisionId
       ? await this.dbClient.db
           .select()
@@ -583,6 +608,7 @@ export class ManagedSitesService {
       .leftJoin(domains, and(eq(domains.siteId, sites.id), eq(domains.isPrimary, true)))
       .where(isNotNull(sites.phpVersion))
       .orderBy(asc(sites.name), asc(sites.id));
+    const stopped = await stoppedSiteIds(db, rows.map(({ site }) => site.id));
     const customers = await db
       .selectDistinct({ organizationId: organizations.id, name: organizations.name, ownerEmail: users.email })
       .from(hostAllocations)
@@ -602,7 +628,7 @@ export class ManagedSitesService {
         hostAllocationId: site.hostAllocationId,
         name: site.name,
         slug: site.slug,
-        status: site.status,
+        status: shownSiteStatus(site.status, stopped.has(site.id)),
         phpVersion: site.phpVersion,
         primaryDomain: primaryDomain ?? null,
         owner: site.organizationId === PLATFORM_OPS_ORG_ID ? null : { organizationId: site.organizationId, name: orgName },

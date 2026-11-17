@@ -11,6 +11,8 @@ import {
   PanelContainerStatusWireSchema,
   SITE_CONTAINER_DOWN_GRACE_MS,
   SITE_CONTAINER_STATES,
+  SITE_RESTART_QUIET_MS,
+  isTerminalOperationStatus,
   type AdminAlertDto,
   type AdminHealthDto,
   type HealthReason,
@@ -23,6 +25,7 @@ import {
   backupSettings,
   desc,
   eq,
+  gte,
   hostAgentHeartbeats,
   inArray,
   isNotNull,
@@ -32,6 +35,7 @@ import {
   not,
   observedStates,
   operations,
+  or,
   organizations,
   serviceInstances,
   sites,
@@ -80,8 +84,18 @@ export class AdminHealthService {
     for (const d of health.disks.filter((d) => d.usedPercent >= DISK_HIGH_PERCENT)) {
       push({ kind: "disk_high", subject: d.paths.join("+"), since: d.observedAt, details: { paths: d.paths, usedPercent: d.usedPercent } });
     }
+    const restarts = await db
+      .select({ component: operations.resourceId, status: operations.status, completedAt: operations.completedAt })
+      .from(operations)
+      .where(and(
+        eq(operations.kind, "panel.container.restart"),
+        or(not(inArray(operations.status, [...OPERATION_TERMINAL_STATUSES])), gte(operations.completedAt, new Date(now.getTime() - HEALTH_STALE_AFTER_MS))),
+      ));
+    // A look taken while its restart runs, or before the restart ended, is not a down container.
+    const restarting = (c: Part) => restarts.some((r) => r.component === c.component &&
+      (!isTerminalOperationStatus(r.status) || (r.completedAt !== null && c.observedAt !== null && r.completedAt.getTime() >= Date.parse(c.observedAt))));
     for (const c of health.components) {
-      if (c.state === "down" || c.state === "degraded") {
+      if ((c.state === "down" || c.state === "degraded") && !restarting(c)) {
         push({ kind: "component_down", subject: c.component, since: c.observedAt, details: { component: c.component, state: c.state, reason: c.reason } });
       }
     }
@@ -219,7 +233,7 @@ export class AdminHealthService {
       const reason = obs
         ? evaluateServiceDrift(s.desired, s.specHash ?? "", { observedStatus: obs.observedStatus, observedRevisionHash: obs.observedRevisionHash, outOfBandModified: obs.outOfBandModified, observedAt: obs.observedAt }, { now }).reason
         : "";
-      const raw = (obs?.rawState ?? {}) as { restartCount?: unknown; notRunningSince?: unknown };
+      const raw = (obs?.rawState ?? {}) as { restartCount?: unknown; notRunningSince?: unknown; lastRestartAt?: unknown };
       const stale = !obs || now.getTime() - obs.observedAt.getTime() > HEALTH_STALE_AFTER_MS;
       const since = typeof raw.notRunningSince === "string" ? raw.notRunningSince : null;
       // R189 1.3: seen running while the clock runs means restarting.
@@ -228,7 +242,9 @@ export class AdminHealthService {
       if (
         s.desired === "running" && !stale &&
         s.siteStatus !== "deploying" && s.siteStatus !== "maintenance" &&
-        since !== null && Date.parse(since) <= now.getTime() - SITE_CONTAINER_DOWN_GRACE_MS
+        since !== null && Date.parse(since) <= now.getTime() - SITE_CONTAINER_DOWN_GRACE_MS &&
+        // R191 1.2: a running look keeps its clock only while the last rise is recent.
+        (obs?.observedStatus !== "running" || now.getTime() - Date.parse(String(raw.lastRestartAt)) < SITE_RESTART_QUIET_MS)
       ) {
         downSites.push({ siteId: s.siteId, siteName: s.siteName, observed, since: new Date(since).toISOString() });
       }

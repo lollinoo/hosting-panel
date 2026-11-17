@@ -11,6 +11,7 @@ import {
   auditEvents,
   backupSettings,
   createDatabaseClient,
+  domains,
   eq,
   hostAgentHeartbeats,
   hosts,
@@ -438,6 +439,56 @@ describe("admin health and alerts", () => {
       expect(op!.status).toBe("succeeded");
       await drift();
       expect((await downAlert()).row.observed).toBe("running");
+    });
+
+    it("R190 1.2: the administrator's Restart creates a missing container again", async () => {
+      await start();
+      const { siteId, serviceId } = await createSite();
+      await sim.deleteService(serviceId);
+      await drift();
+      expect((await downAlert()).row.observed).toBe("missing");
+      const res = await call("POST", `/v1/admin/sites/${siteId}/restart`, adminToken, { reason: "Container gone" });
+      expect(res.status).toBe(202);
+      await app.outboxWorker.processPendingOnce();
+      const [op] = await dbClient.db.select().from(operations).where(eq(operations.id, res.body.data.operationId as string));
+      expect(op!.status).toBe("succeeded");
+      await drift();
+      expect((await downAlert()).row.observed).toBe("running");
+    });
+
+    it("R191 1.2: one rise, then no more looks, six minutes later raises no site_container_down", async () => {
+      await start();
+      const { serviceId } = await createSite();
+      const looks: [string, number][] = [["running", 0], ...Array.from({ length: 8 }, () => ["running", 1] as [string, number])];
+      let rise = 0;
+      await play(serviceId, looks, async (i, at) => {
+        if (i === 1) rise = at;
+      });
+      vi.setSystemTime(rise + 6 * MIN);
+      const { row, alert } = await downAlert();
+      expect(row.stale).toBe(false);
+      expect(alert).toBeUndefined();
+    });
+
+    it("R191 5: raises certificate_not_issued and certificate_expiring for a site's domains, nothing for a healthy one", async () => {
+      await start();
+      const { siteId } = await createSite();
+      const days = (n: number) => new Date(Date.now() + n * 24 * 3_600_000);
+      const soon = days(10);
+      const domain = (hostname: string, patch: Partial<typeof domains.$inferInsert>) => ({ id: `dom_${hostname.split(".")[0]!}`, siteId, organizationId: PLATFORM_OPS_ORG_ID, hostname, ...patch });
+      await dbClient.db.insert(domains).values([
+        domain("wp-b.example.test", { certStatus: "failed", certProblem: "port_80_blocked", certAttempts: 2 }),
+        domain("wp-c.example.test", { certStatus: "active", certExpiresAt: soon }),
+        domain("wp-d.example.test", { certStatus: "active", certExpiresAt: days(60) }),
+      ]);
+      const { alerts } = await both();
+      expect(alerts.find((a) => a.kind === "certificate_not_issued")).toMatchObject({
+        subject: "wp-b.example.test", details: { siteId, siteName: SITE.name, hostname: "wp-b.example.test", problem: "port_80_blocked" },
+      });
+      expect(alerts.find((a) => a.kind === "certificate_expiring")).toMatchObject({
+        subject: "wp-c.example.test", details: { siteId, siteName: SITE.name, hostname: "wp-c.example.test", problem: null, expiresAt: soon.toISOString() },
+      });
+      expect(alerts.filter((a) => a.subject === "wp-d.example.test")).toEqual([]);
     });
 
     it("raises each backup kind and restore_undo_incomplete", async () => {

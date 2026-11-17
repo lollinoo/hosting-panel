@@ -8,6 +8,7 @@ import {
   operationSteps,
   operations,
   outboxEvents,
+  serviceInstances,
   siteBackups,
   sites,
   upsertBackupSettings,
@@ -231,6 +232,7 @@ describe("administrator's restore of a site where nothing may exist", () => {
     await dbClient.db.delete(operationSteps);
     await dbClient.db.delete(operations);
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteId));
+    await dbClient.db.update(serviceInstances).set({ desiredStatus: "running" }).where(eq(serviceInstances.id, svcId));
     await upsertBackupSettings(dbClient.db, KEY, { ...SETTINGS, updatedByUserId: adminId });
     auditBaseline = new Set((await dbClient.db.select({ id: auditEvents.id }).from(auditEvents)).map((r) => r.id));
 
@@ -348,6 +350,19 @@ describe("administrator's restore of a site where nothing may exist", () => {
     expect(s.steps).toMatchObject({ provision_database: "succeeded", restore: "succeeded", start_site: "skipped" });
     expect(s.op.status).toBe("succeeded");
     expect(s.site.status).toBe("ready");
+  });
+
+  it("never starts a site its owner stopped, even when its container is gone", async () => {
+    sim.backupState.setSiteState(svcId, { filesVolume: true, container: false });
+    await dbClient.db.update(serviceInstances).set({ desiredStatus: "stopped" }).where(eq(serviceInstances.id, svcId));
+    const { operationId, backupId } = await startRestore();
+    await app.outboxWorker.processPendingOnce();
+
+    expect(log).not.toContain("deploy");
+    expect(sim.deployedSpecs).toHaveLength(0);
+    const s = await stateOf(operationId, backupId);
+    expect(s.steps).toMatchObject({ provision_database: "succeeded", restore: "succeeded", start_site: "skipped" });
+    expect(s.op.status).toBe("succeeded");
   });
 
   it("a failed database step restores nothing and fails with restore_prepare_failed", async () => {
