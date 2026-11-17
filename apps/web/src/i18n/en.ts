@@ -592,7 +592,7 @@ export const en: Messages = {
           copyUnavailable:
             "Copying isn't available here. Select the password and copy it by hand.",
           tempNote:
-            "Use it in your site's code together with the user name. The database server is the same one WordPress uses (DB_HOST in wp-config.php).",
+            "Use it in your site's code together with the user name. The database server is the same one your site already uses.",
           tempOnce: "We show it only once: copy it now. If you lose it, create a new password.",
           done: "Done",
         },
@@ -825,7 +825,7 @@ export const en: Messages = {
         uncertain:
           "We couldn't confirm that the backup started. Wait a minute and reload this page before trying again.",
         tooMany:
-          "Too many large actions (backups, restores, downloads or WordPress updates) were started in the last hour, on this site or across all your sites. You can start another one at {time}.",
+          "Too many large actions (backups, restores, downloads or updates) were started in the last hour, on this site or across all your sites. You can start another one at {time}.",
         uncertainAction:
           "We couldn't confirm that the request was received. Wait a minute and reload this page before trying again.",
         stillWorking:

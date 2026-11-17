@@ -173,7 +173,7 @@ describe("B1. the catalogs", () => {
     };
     scan("components/customer/site-wordpress.tsx", /\bt\.([a-zA-Z]+(?:\.[a-zA-Z]+)*)/g, "site.wordpress.");
     scan("app/sites/[siteId]/wordpress/page.tsx", /\bt\.([a-zA-Z]+(?:\.[a-zA-Z]+)*)/g, "site.wordpress.");
-    scan("app/sites/[siteId]/page.tsx", /m\.site\.overview\.(wordpress[a-zA-Z]*)/g, "site.overview.");
+    scan("site-types/wordpress-overview-card.tsx", /m\.site\.overview\.(wordpress[a-zA-Z]*)/g, "site.overview.");
     scan("components/customer/wordpress-dialogs.tsx", /useMessages\(\)\.site\.wordpress\.(update|reset)\b/g, "site.wordpress.");
     const dialogs = fs.readFileSync(path.join(SRC, "components/customer/wordpress-dialogs.tsx"), "utf-8");
     for (const m of dialogs.matchAll(/\bt\.(update|tables|reset|failed|once|title|body|doneTitle|done|created|cancel|confirm|confirmAll|starting|resetting)\b(?:\.([a-zA-Z]+))?/g)) {
@@ -277,6 +277,7 @@ describe("B2. untrusted text renders escaped", () => {
       "lib/site-wordpress.ts",
       "app/sites/[siteId]/wordpress/page.tsx",
       "app/sites/[siteId]/page.tsx",
+      "site-types/wordpress-overview-card.tsx",
       "app/sites/[siteId]/layout.tsx",
       "components/customer/site-tabs.tsx",
     ];
@@ -292,6 +293,7 @@ const SITE = {
   slug: "qa-site",
   status: "ready",
   phpVersion: "8.4",
+  siteType: "wordpress",
   createdAt: "2026-11-01T00:00:00.000Z",
   updatedAt: "2026-11-01T00:00:00.000Z",
   services: [],
@@ -321,7 +323,7 @@ describe("B3. the tab is there only for a WordPress site on a server with the to
     expect(on[0]).toBe("/sites/site_qa1");
     expect(on[1]).toBe("/sites/site_qa1/wordpress");
     expect(await tabsOf(SITE, false)).not.toContain("/sites/site_qa1/wordpress");
-    expect(await tabsOf({ ...SITE, phpVersion: null }, true)).not.toContain("/sites/site_qa1/wordpress");
+    expect(await tabsOf({ ...SITE, phpVersion: null, siteType: null }, true)).not.toContain("/sites/site_qa1/wordpress");
     const tabs = render(createElement(SiteTabs, { siteId: "site_qa1" }));
     expect(tabs).not.toContain("/wordpress");
   });
@@ -346,7 +348,7 @@ describe("B3. the tab is there only for a WordPress site on a server with the to
     expect(loaded).toContain(en.site.wordpress.header.checkNow);
     expect(loaded).not.toContain(en.site.wordpress.notAvailable);
 
-    mockData.getSite.mockResolvedValue({ ok: true, data: { ...SITE, phpVersion: null } });
+    mockData.getSite.mockResolvedValue({ ok: true, data: { ...SITE, phpVersion: null, siteType: null } });
     mockApi.serverGet.mockClear();
     await expect(SiteWordpressPage({ params })).rejects.toThrow("NEXT_NOT_FOUND");
     expect(mockApi.serverGet).not.toHaveBeenCalled();

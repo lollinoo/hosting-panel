@@ -7,10 +7,8 @@ import { CheckCircle2, Circle, Loader2, XCircle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { errorMessage } from "@/i18n";
+import { errorMessage, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
-
-export const PROVISION_STEPS = ["create_database", "deploy_site", "install_wordpress", "publish_site", "finish"] as const;
 
 type Progress = Pick<OperationDto, "id" | "status" | "steps">;
 
@@ -20,11 +18,13 @@ export function SiteProgress({
   siteId,
   csrfToken,
   initial,
+  steps,
 }: {
   orgId: string;
   siteId: string;
   csrfToken: string;
   initial: Progress | null;
+  steps: readonly (keyof Messages["site"]["progress"])[];
 }) {
   const m = useMessages();
   const router = useRouter();
@@ -97,7 +97,7 @@ export function SiteProgress({
       </CardHeader>
       <CardContent className="space-y-4">
         <ol className="space-y-2 text-sm" aria-live="polite">
-          {PROVISION_STEPS.map((key) => {
+          {steps.map((key) => {
             const s = stepStatus(key);
             const Icon = s === "succeeded" ? CheckCircle2 : s === "failed" ? XCircle : s === "running" ? Loader2 : Circle;
             return (

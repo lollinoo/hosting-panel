@@ -19,6 +19,7 @@ import { en } from "@/i18n/en";
 import { it as itCatalog } from "@/i18n/it";
 import { I18nProvider } from "@/i18n/provider";
 import { SiteTabs } from "@/components/customer/site-tabs";
+import { WEB_SITE_TYPES } from "@/site-types";
 import {
   pendingWordpressUpdates,
   wordpressNeedsCheck,
@@ -89,9 +90,9 @@ const tab = (d: SiteWordpressDto) => render(createElement(SiteWordpress, { baseP
 
 describe("WordPress tab entry", () => {
   it("is hidden without the flag and second with it", () => {
-    const off = render(createElement(SiteTabs, { siteId: "s1", wordpress: false }));
+    const off = render(createElement(SiteTabs, { siteId: "s1" }));
     expect(off).not.toContain("/sites/s1/wordpress");
-    const on = render(createElement(SiteTabs, { siteId: "s1", wordpress: true }));
+    const on = render(createElement(SiteTabs, { siteId: "s1", typeTabs: WEB_SITE_TYPES.wordpress.tabs }));
     const hrefs = [...on.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
     expect(hrefs[1]).toBe("/sites/s1/wordpress");
   });

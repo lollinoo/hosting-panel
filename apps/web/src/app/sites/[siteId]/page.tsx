@@ -1,20 +1,14 @@
-import {
-  isWordpressSite,
-  type OperationDto,
-  type OperationKind,
-  type OperationStatus,
-  type SiteWordpressDto,
-} from "@hosting-panel/contracts";
+import type { OperationDto, OperationKind, OperationStatus } from "@hosting-panel/contracts";
 import { format, getMessages, type Messages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { fetchServerOrgOperations, serverGet } from "@/lib/server-api";
-import { pendingWordpressUpdates, wordpressOverviewKey } from "@/lib/site-wordpress";
+import { fetchServerOrgOperations } from "@/lib/server-api";
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SiteProgress } from "@/components/customer/site-progress";
 import { StatusPill, toSiteStatusView } from "@/components/customer/status-pill";
 import { SiteActions } from "@/components/customer/site-actions";
 import { showSetupProgress } from "@/lib/site-setup";
+import { findWebSiteType } from "@/site-types";
 import { getCustomerContext, getSite } from "../data";
 
 // Only operations a site owner would recognise; anything else is not shown.
@@ -50,25 +44,12 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
   const provision = (operations ?? [])
     .filter((op: OperationDto) => op.kind === "site.provision" && op.resourceId === site.id)
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))[0];
+  const type = findWebSiteType(site.siteType);
   // Only the setup shows here; restarts and PHP changes report through the Manage card.
-  const showProgress = site.phpVersion !== null && showSetupProgress(site.status, provision?.status);
+  const showProgress = type !== null && showSetupProgress(site.status, provision?.status);
   const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const { labelKey } = toSiteStatusView(site.status, site.driftSummary);
-  const showWordpress = isWordpressSite(site) && capabilities?.wordpressToolsAvailable === true;
-  const wpRes = showWordpress
-    ? await serverGet<SiteWordpressDto>(
-        `v1/organizations/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(site.id)}/wordpress`,
-        { timeoutMs: 20_000 },
-      )
-    : null;
-  const wp = wpRes?.ok ? wpRes.data : null;
-  const wpKey = wordpressOverviewKey(wp);
-  const wpText =
-    wpKey === "wordpressUpToDate" && wp?.state
-      ? format(m.site.overview.wordpressUpToDate, { date: when.format(new Date(wp.state.checkedAt)) })
-      : wpKey === "wordpressCount" && wp?.state
-        ? format(m.site.overview.wordpressCount, { count: pendingWordpressUpdates(wp.state) })
-        : m.site.overview[wpKey];
+  const card = type?.OverviewCard && type.available(capabilities) ? await type.OverviewCard({ orgId, siteId: site.id, m, when }) : null;
 
   return (
     <div className="grid gap-6 md:grid-cols-2">
@@ -79,6 +60,7 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
             siteId={site.id}
             csrfToken={session.csrfToken}
             initial={provision ? { id: provision.id, status: provision.status, steps: provision.steps } : null}
+            steps={type.progressSteps}
           />
         </div>
       )}
@@ -127,22 +109,7 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
         </CardContent>
       </Card>
 
-      {showWordpress && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{m.site.overview.wordpressTitle}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <CardDescription role={wpKey === "wordpressLoadFailed" ? "alert" : undefined}>{wpText}</CardDescription>
-            <Link
-              href={`/sites/${site.id}/wordpress`}
-              className="mt-3 inline-block text-sm font-medium text-primary underline-offset-4 hover:underline"
-            >
-              {m.site.overview.wordpressLink}
-            </Link>
-          </CardContent>
-        </Card>
-      )}
+      {card}
       <Card className="md:col-span-2">
         <CardHeader>
           <CardTitle className="text-base">{m.site.overview.activityTitle}</CardTitle>

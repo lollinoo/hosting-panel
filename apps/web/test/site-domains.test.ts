@@ -22,6 +22,7 @@ import { DELETE as removeDomain } from "@/app/api/bff/orgs/[orgId]/managed-sites
 import { POST as setPrimary } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/primary/route";
 import { POST as checkNow } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/check/route";
 import { SITE_TABS, SiteTabs } from "@/components/customer/site-tabs";
+import { WEB_SITE_TYPES } from "@/site-types";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 import { DomainsPanel, domainView } from "@/components/customer/domains-panel";
 import { domainErrorText } from "@/lib/domain-view";
@@ -204,8 +205,8 @@ describe("domains UI", () => {
   });
 
   it("site tabs include domains, files, and database between overview and logs, backups after database", () => {
-    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "wordpress", "domains", "files", "database", "backups", "logs"]);
-    expect(SITE_TABS[2]!.href("s1")).toBe("/sites/s1/domains");
+    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "files", "database", "backups", "logs"]);
+    expect(SITE_TABS[1]!.href("s1")).toBe("/sites/s1/domains");
   });
 
   it("the WordPress tab shows only when the site runs WordPress, second after overview", () => {
@@ -213,7 +214,7 @@ describe("domains UI", () => {
     const plain = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1" })));
     expect(plain).not.toContain("WordPress");
     expect(links(plain)).not.toContain("/sites/s1/wordpress");
-    const wp = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1", wordpress: true })));
+    const wp = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1", typeTabs: WEB_SITE_TYPES.wordpress.tabs })));
     expect(links(wp).slice(0, 3)).toEqual(["/sites/s1", "/sites/s1/wordpress", "/sites/s1/domains"]);
     expect(wp).toContain(">WordPress<");
   });

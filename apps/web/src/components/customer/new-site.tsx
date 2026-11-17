@@ -63,6 +63,7 @@ export function NewSite({ orgId, csrfToken }: { orgId: string; csrfToken: string
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+      {/* shortcut: creation takes the legacy type's form, there is no type chooser (ADR 0029). */}
       <SiteForm onSubmit={submit} submitting={busy} fieldErrors={fieldErrors} />
     </div>
   );

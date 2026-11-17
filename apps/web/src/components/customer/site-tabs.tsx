@@ -6,14 +6,14 @@ import { usePathname } from "next/navigation";
 import { useMessages } from "@/i18n/provider";
 import { LAST_SITE_COOKIE } from "@/app/sites/landing";
 import { cn } from "@/lib/utils";
+import type { WebSiteType } from "@/site-types";
 
 // Later steps append tabs here.
 export const SITE_TABS: {
-  key: "overview" | "wordpress" | "domains" | "files" | "database" | "backups" | "logs";
+  key: "overview" | "domains" | "files" | "database" | "backups" | "logs";
   href: (siteId: string) => string;
 }[] = [
   { key: "overview", href: (siteId) => `/sites/${siteId}` },
-  { key: "wordpress", href: (siteId) => `/sites/${siteId}/wordpress` },
   { key: "domains", href: (siteId) => `/sites/${siteId}/domains` },
   { key: "files", href: (siteId) => `/sites/${siteId}/files` },
   { key: "database", href: (siteId) => `/sites/${siteId}/database` },
@@ -22,8 +22,8 @@ export const SITE_TABS: {
 ];
 
 // Route tabs are page links, so they are a nav with aria-current rather than an ARIA tablist.
-// The WordPress tab shows only for WordPress sites on a server that has the tools.
-export function SiteTabs({ siteId, wordpress = false }: { siteId: string; wordpress?: boolean }) {
+// The site type's own tabs follow the overview; the layout passes them as plain data.
+export function SiteTabs({ siteId, typeTabs = [] }: { siteId: string; typeTabs?: WebSiteType["tabs"] }) {
   const m = useMessages();
   const pathname = usePathname();
 
@@ -32,10 +32,16 @@ export function SiteTabs({ siteId, wordpress = false }: { siteId: string; wordpr
     document.cookie = `${LAST_SITE_COOKIE}=${encodeURIComponent(siteId)}; path=/; max-age=31536000; samesite=lax`;
   }, [siteId]);
 
+  const tabs = [
+    SITE_TABS[0]!,
+    ...typeTabs.map((t) => ({ key: t.key, href: (id: string) => `/sites/${id}/${t.path}` })),
+    ...SITE_TABS.slice(1),
+  ];
+
   return (
     <nav aria-label={m.site.tabsLabel} className="border-b">
       <ul className="-mb-px flex gap-6">
-        {SITE_TABS.filter((tab) => wordpress || tab.key !== "wordpress").map((tab, i) => {
+        {tabs.map((tab, i) => {
           const href = tab.href(siteId);
           const active = pathname === href || (i > 0 && pathname.startsWith(`${href}/`));
           return (

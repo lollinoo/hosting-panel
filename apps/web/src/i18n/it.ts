@@ -595,7 +595,7 @@ export const it = {
           copyUnavailable:
             "Qui non è possibile copiare. Seleziona la password e copiala a mano.",
           tempNote:
-            "Usala nel codice del sito insieme al nome utente. Il server del database è lo stesso che usa WordPress (DB_HOST in wp-config.php).",
+            "Usala nel codice del sito insieme al nome utente. Il server del database è lo stesso che il sito usa già.",
           tempOnce: "La mostriamo una sola volta: copiala ora. Se la perdi, crea una nuova password.",
           done: "Fatto",
         },
@@ -839,7 +839,7 @@ export const it = {
         uncertain:
           "Non abbiamo potuto confermare l'avvio del backup. Attendi un minuto e ricarica questa pagina prima di riprovare.",
         tooMany:
-          "Nell'ultima ora sono state avviate troppe azioni pesanti (backup, ripristini, download o aggiornamenti di WordPress), su questo sito o sull'insieme dei tuoi siti. Puoi avviarne un'altra alle {time}.",
+          "Nell'ultima ora sono state avviate troppe azioni pesanti (backup, ripristini, download o aggiornamenti), su questo sito o sull'insieme dei tuoi siti. Puoi avviarne un'altra alle {time}.",
         uncertainAction:
           "Non abbiamo potuto confermare che la richiesta sia arrivata. Attendi un minuto e ricarica questa pagina prima di riprovare.",
         stillWorking:

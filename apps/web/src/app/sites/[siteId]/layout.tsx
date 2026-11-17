@@ -1,4 +1,3 @@
-import { isWordpressSite } from "@hosting-panel/contracts";
 import { notFound } from "next/navigation";
 import { getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
@@ -8,6 +7,7 @@ import { CertificatePill } from "@/components/customer/certificate-pill";
 import { fetchServerSiteDomains } from "@/lib/server-api";
 import { domainView } from "@/lib/domain-view";
 import { LoadError } from "@/components/shared/load-error";
+import { findWebSiteType } from "@/site-types";
 import { getCustomerContext, getSite } from "../data";
 
 export default async function SiteLayout({
@@ -36,6 +36,8 @@ export default async function SiteLayout({
   const now = new Date();
   const secure = mainDomain ? domainView(mainDomain, mainDomain, now).label === "secure" : false;
   const dnsWaiting = hosts.find((d) => !d.isPrimary && domainView(d, mainDomain!, now).label === "waitingForDns");
+  const type = findWebSiteType(site.siteType);
+  const action = type && site.status === "ready" && primary ? type.headerAction(`${secure ? "https" : "http"}://${primary.hostname}`) : null;
 
   return (
     <div className="space-y-6">
@@ -44,14 +46,14 @@ export default async function SiteLayout({
         <StatusPill status={site.status} driftSummary={site.driftSummary} labels={m.site.status} />
         {mainDomain && <CertificatePill domain={mainDomain} primary={mainDomain} m={m} locale={locale} now={now} />}
         {mainDomain && dnsWaiting && <CertificatePill domain={dnsWaiting} primary={mainDomain} m={m} locale={locale} now={now} />}
-        {site.phpVersion !== null && site.status === "ready" && primary && (
+        {action && (
           <a
-            href={`${secure ? "https" : "http"}://${primary.hostname}/wp-admin/`}
+            href={action.href}
             target="_blank"
             rel="noopener noreferrer"
             className="ml-auto inline-flex h-9 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90"
           >
-            {m.site.wpAdmin} <span aria-hidden>&nbsp;↗</span>
+            {m.site[action.label]} <span aria-hidden>&nbsp;↗</span>
             <span className="sr-only"> {m.site.opensNewTab}</span>
           </a>
         )}
@@ -60,14 +62,14 @@ export default async function SiteLayout({
             href={`${secure ? "https" : "http"}://${primary.hostname}`}
             target="_blank"
             rel="noopener noreferrer"
-            className={`${site.phpVersion !== null && site.status === "ready" ? "" : "ml-auto "}text-sm font-medium text-primary underline-offset-4 hover:underline`}
+            className={`${action ? "" : "ml-auto "}text-sm font-medium text-primary underline-offset-4 hover:underline`}
           >
             {m.site.visit} <span aria-hidden>↗</span>
             <span className="sr-only"> {m.site.opensNewTab}</span>
           </a>
         )}
       </div>
-      <SiteTabs siteId={site.id} wordpress={isWordpressSite(site) && capabilities?.wordpressToolsAvailable === true} />
+      <SiteTabs siteId={site.id} typeTabs={type?.available(capabilities) ? type.tabs : []} />
       {children}
     </div>
   );
