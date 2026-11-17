@@ -40,12 +40,19 @@ import type {
   SiteJobResult,
   SiteRoutesRequest,
   StoredCertificate,
+  TerminalEnded,
+  TerminalOpenRequest,
+  TerminalOpenResult,
+  TerminalReadResult,
+  TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
 import { maskPhpMyAdminQuery } from "./docker-logs.js";
+import { startSimulatedShell } from "./simulator-terminal.js";
+import { TerminalSessions, type TerminalLimits, type TerminalShellSink } from "./terminal-sessions.js";
 import {
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
@@ -106,6 +113,8 @@ export interface InMemoryDockerSimulatorAdapterOptions {
   readonly ingressHttpPort?: number;
   readonly panel?: PanelIngressConfig | null;
   readonly dockerEngineReachable?: boolean;
+  /** Short terminal limits for tests. */
+  readonly terminalLimits?: Partial<TerminalLimits>;
 }
 
 interface MutableSimulatedContainer {
@@ -212,6 +221,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly panelContainerOverrides = new Map<PanelContainer, Partial<Omit<PanelContainerStatus, "component">>>();
   private readonly panelContainerLogs = new Map<PanelContainer, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
+  private readonly terminals: TerminalSessions;
+  private readonly terminalSinks = new Map<string, TerminalShellSink>();
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
     this.secretsRootDir = options?.secretsRootDir ? path.resolve(options.secretsRootDir) : null;
@@ -223,6 +234,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
     this.panel = options?.panel ?? null;
     this.engineReachable = options?.dockerEngineReachable ?? true;
+    this.terminals = new TerminalSessions(options?.terminalLimits);
   }
 
   public setEngineReachable(reachable: boolean): void {
@@ -583,6 +595,63 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     return req.component === "phpmyadmin" ? lines.map((line) => ({ ...line, text: maskPhpMyAdminQuery(line.text) })) : lines;
   }
 
+  /** Restarts an existing panel container: a new start time and a restart count of 0. */
+  public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
+    this.assertEngineAvailable();
+    if (this.panelContainerStatus(req.component).state === "missing") {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    const startedAt = new Date().toISOString();
+    this.setPanelContainer(req.component, { state: "running", startedAt, restartCount: 0 });
+    return { startedAt };
+  }
+
+  /** A fake shell in a running container of that site. */
+  public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    this.assertEngineAvailable();
+    return this.terminals.open(req, async (sink) => {
+      const container = this.containersByServiceId.get(req.serviceInstanceId);
+      if (!container?.running || this.expectedByServiceId.get(req.serviceInstanceId)?.siteId !== req.siteId) {
+        throw new ExecutorCodedError("Site container not found", "NOT_FOUND");
+      }
+      this.terminalSinks.set(req.sessionId, sink);
+      // The sink holds the session's output: let go of it however the session ends.
+      const forget = () => this.terminalSinks.delete(req.sessionId);
+      const shell = startSimulatedShell({ data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } });
+      return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name.slice(1) };
+    });
+  }
+
+  public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
+    this.assertEngineAvailable();
+    this.terminals.write(req);
+  }
+
+  public async readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult> {
+    this.assertEngineAvailable();
+    return this.terminals.read(req);
+  }
+
+  public async closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
+    this.assertEngineAvailable();
+    return this.terminals.close(req);
+  }
+
+  public async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    this.assertEngineAvailable();
+    return this.terminals.list();
+  }
+
+  /** Test hook: output from the shell of that session, as if it printed it. */
+  public emitTerminalOutput(sessionId: string, text: string): void {
+    this.terminalSinks.get(sessionId)?.data(Buffer.from(text, "utf8"));
+  }
+
+  /** Test hook: forgets every session, as an executor restart does. */
+  public forgetTerminalSessions(): void {
+    this.terminals.forgetAll();
+  }
+
   private panelContainerStatus(component: PanelContainer): PanelContainerStatus {
     const on = (expected: boolean) => ({ state: expected ? "running" : "missing", expected }) as const;
     const base =
@@ -684,6 +753,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       networks,
     };
 
+    this.terminals.endService(spec.serviceInstanceId, "container_gone");
     this.containersByServiceId.set(spec.serviceInstanceId, simulated);
     this.expectedByServiceId.set(spec.serviceInstanceId, {
       serviceInstanceId: spec.serviceInstanceId,
@@ -758,6 +828,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     container.running = true;
     container.status = "running";
     container.dead = false;
+    this.terminals.endService(serviceInstanceId, "container_gone");
 
     return {
       operationId: `sim_op_${randomUUID()}`,
@@ -779,6 +850,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
     container.running = false;
     container.status = "exited";
+    this.terminals.endService(serviceInstanceId, "container_gone");
     await this.cleanupSecrets(serviceInstanceId);
 
     return {
@@ -800,6 +872,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
     this.containersByServiceId.delete(serviceInstanceId);
     this.expectedByServiceId.delete(serviceInstanceId);
+    this.terminals.endService(serviceInstanceId, "container_gone");
     await this.cleanupSecrets(serviceInstanceId);
 
     const remaining = this.removeVirtualRoute(serviceInstanceId);

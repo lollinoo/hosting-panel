@@ -15,6 +15,7 @@ import {
   MailRelayStatusIpcRequestSchema,
   MailTestIpcRequestSchema,
   PanelContainerLogsIpcRequestSchema,
+  PanelContainerRestartIpcRequestSchema,
   PanelMailIpcRequestSchema,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
@@ -24,6 +25,10 @@ import {
   SiteJobIpcRequestSchema,
   SitePurgeIpcRequestSchema,
   SiteRoutesIpcRequestSchema,
+  TerminalOpenIpcRequestSchema,
+  TerminalReadIpcRequestSchema,
+  TerminalSessionIpcRequestSchema,
+  TerminalWriteIpcRequestSchema,
   createErrorEnvelope,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
@@ -573,6 +578,43 @@ export class DockerExecutorIpcServer {
           "panel logs",
         );
         writeJson(res, 200, { data: await this.executor.getPanelContainerLogs(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/panel/restart") {
+        const req = this.parseBody(PanelContainerRestartIpcRequestSchema, rawBody, "panel restart");
+        writeJson(res, 200, { data: await this.executor.restartPanelContainer(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/open") {
+        const req = this.parseBody(TerminalOpenIpcRequestSchema, rawBody, "terminal open");
+        writeJson(res, 200, { data: await this.executor.openTerminal(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/write") {
+        // The schema's messages are fixed sentences, so a refusal never carries the input.
+        const req = this.parseBody(TerminalWriteIpcRequestSchema, rawBody, "terminal write");
+        await this.executor.writeTerminal(req);
+        writeJson(res, 200, { data: null });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/read") {
+        const req = this.parseBody(TerminalReadIpcRequestSchema, rawBody, "terminal read");
+        writeJson(res, 200, { data: await this.executor.readTerminal(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/close") {
+        const req = this.parseBody(TerminalSessionIpcRequestSchema, rawBody, "terminal close");
+        writeJson(res, 200, { data: await this.executor.closeTerminal(req) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/terminal/sessions") {
+        writeJson(res, 200, { data: await this.executor.listTerminals() });
         return;
       }
 

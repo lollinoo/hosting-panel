@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { rm } from "node:fs/promises";
 import http from "node:http";
+import type { Duplex } from "node:stream";
 import type { DockerContainerInspectPayload } from "../src/index.js";
 
 export interface MockDockerContainerRecord {
@@ -18,6 +19,7 @@ export interface MockDockerContainerRecord {
   restartCount: number;
   startedAt?: string;
   dead?: boolean;
+  execIds?: string[];
   hostConfig: NonNullable<DockerContainerInspectPayload["HostConfig"]>;
   networks: Record<string, unknown>;
 }
@@ -47,6 +49,12 @@ export interface MockDockerDaemon {
   readonly requestedPaths: string[];
   /** POST /containers/<ref>/exec calls, by the ref used in the path. */
   readonly execCalls: Array<{ container: string; Cmd: string[] }>;
+  /** Full exec create bodies, in call order. */
+  readonly execBodies: Array<Record<string, unknown>>;
+  /** With `execUpgrade`: each hijacked exec stream, by exec id. */
+  readonly execStreams: Array<{ execId: string; socket: Duplex }>;
+  /** While `until` is set, container restarts wait for it before answering. */
+  readonly holdRestarts: { until: Promise<void> | null };
   /** The next `remaining` container restarts answer 500 (or drop the socket with `drop`). */
   readonly failRestarts: { remaining: number; drop?: boolean };
   /** The next `remaining` container creates answer 500. */
@@ -55,6 +63,8 @@ export interface MockDockerDaemon {
   readonly failStarts: { remaining: number };
   /** The next `remaining` container inspects answer 500. */
   readonly failInspects: { remaining: number };
+  /** With `execUpgrade`: the next `remaining` exec starts answer 500 instead of the stream. */
+  readonly failExecStarts: { remaining: number };
   /** The next `remaining` container deletes answer 409 (optionally removing from containers so inspect 404s). */
   readonly deleteConflicts: { remaining: number; removeFromMap?: boolean };
   close(): Promise<void>;
@@ -75,6 +85,8 @@ export async function startMockDockerDaemon(options?: {
   readonly execStaysRunning?: boolean;
   /** Optional hook invoked right as each mock request arrives (after parsing method and routePath). */
   readonly onRequest?: (method: string, routePath: string) => void;
+  /** Exec start upgrades to a raw stream; a stream whose client half-closes is ended. */
+  readonly execUpgrade?: boolean;
 }): Promise<MockDockerDaemon> {
   const socketPath = `/tmp/hp-mock-docker-${randomBytes(5).toString("hex")}.sock`;
   const createdNetworks: Array<{
@@ -97,10 +109,14 @@ export async function startMockDockerDaemon(options?: {
   const containers = new Map<string, MockDockerContainerRecord>();
   const requestedPaths: string[] = [];
   const execCalls: Array<{ container: string; Cmd: string[] }> = [];
+  const execBodies: Array<Record<string, unknown>> = [];
+  const execStreams: Array<{ execId: string; socket: Duplex }> = [];
+  const holdRestarts: { until: Promise<void> | null } = { until: null };
   const failRestarts: { remaining: number; drop?: boolean } = { remaining: 0 };
   const failCreates = { remaining: 0 };
   const failStarts = { remaining: 0 };
   const failInspects = { remaining: 0 };
+  const failExecStarts = { remaining: 0 };
   const deleteConflicts: { remaining: number; removeFromMap?: boolean } = { remaining: 0 };
   const pulledImages = new Set<string>();
   let seq = 1;
@@ -184,6 +200,7 @@ export async function startMockDockerDaemon(options?: {
           return;
         }
         execCalls.push({ container, Cmd: (JSON.parse(bodyStr) as { Cmd: string[] }).Cmd });
+        execBodies.push(JSON.parse(bodyStr) as Record<string, unknown>);
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ Id: `exec_${String(execCalls.length)}` }));
         return;
@@ -482,6 +499,7 @@ export async function startMockDockerDaemon(options?: {
             Dead: target.dead === true,
             ...(target.startedAt !== undefined ? { StartedAt: target.startedAt } : {}),
           },
+          ...(target.execIds ? { ExecIDs: target.execIds } : {}),
           Config: {
             Image: target.image,
             ...(target.cmd ? { Cmd: target.cmd } : {}),
@@ -517,6 +535,13 @@ export async function startMockDockerDaemon(options?: {
           }
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message: "restart failed" }));
+          return;
+        }
+        if (action === "restart" && holdRestarts.until) {
+          void holdRestarts.until.then(() => {
+            res.writeHead(204);
+            res.end();
+          });
           return;
         }
         if (action === "start" && failStarts.remaining > 0) {
@@ -563,6 +588,22 @@ export async function startMockDockerDaemon(options?: {
     });
   });
 
+  if (options?.execUpgrade) {
+    server.on("upgrade", (req: http.IncomingMessage, socket: Duplex) => {
+      const execId = /\/exec\/([^/]+)\/start$/.exec(req.url ?? "")?.[1] ?? "";
+      socket.on("error", () => undefined);
+      if (failExecStarts.remaining > 0) {
+        failExecStarts.remaining -= 1;
+        socket.end("HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+      }
+      socket.on("end", () => socket.end());
+      socket.resume();
+      socket.write("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n");
+      execStreams.push({ execId: decodeURIComponent(execId), socket });
+    });
+  }
+
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, () => resolve());
@@ -583,12 +624,17 @@ export async function startMockDockerDaemon(options?: {
     containers,
     requestedPaths,
     execCalls,
+    execBodies,
+    execStreams,
+    holdRestarts,
     failRestarts,
     failCreates,
     failStarts,
     failInspects,
+    failExecStarts,
     deleteConflicts,
     async close() {
+      for (const s of execStreams) s.socket.destroy();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(socketPath, { force: true });

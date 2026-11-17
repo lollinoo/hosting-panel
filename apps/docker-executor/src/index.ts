@@ -186,6 +186,25 @@ export {
 
 export { SimulatedSiteFiles, type SimSeedEntry } from "./simulator-files.js";
 
+export type { TerminalLimits } from "./terminal-sessions.js";
+
+export {
+  TERMINAL_CONSOLE_SIZE,
+  TERMINAL_END_SETTLE_MS,
+  TERMINAL_KILL_SCRIPT,
+  TERMINAL_KILL_TIMEOUT_MS,
+  TERMINAL_SHELL_USER,
+  TERMINAL_WORKDIR,
+  reapTerminalShells,
+  startDockerTerminal,
+} from "./terminal-docker.js";
+
+export {
+  PANEL_RESTART_ENGINE_TIMEOUT_MS,
+  PANEL_RESTART_STOP_SECONDS,
+  restartContainerByName,
+} from "./panel-restart.js";
+
 export {
   DEFAULT_SFTP_STATE_DIR,
   SFTP_CONFIG_SHA256_LABEL,

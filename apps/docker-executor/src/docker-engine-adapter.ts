@@ -21,6 +21,7 @@ import {
   PANEL_CONTAINER_STATES,
   PANEL_CONTAINERS,
   PanelContainerLogsIpcRequestSchema,
+  PanelContainerRestartIpcRequestSchema,
   type PanelContainerState,
   type BackupsIpcRequest,
   type BackupsResultByAction,
@@ -56,6 +57,11 @@ import {
   type SiteJobRequest,
   type SiteJobResult,
   type SiteRoutesRequest,
+  type TerminalEnded,
+  type TerminalOpenRequest,
+  type TerminalOpenResult,
+  type TerminalReadResult,
+  type TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import {
   DEFAULT_PHPMYADMIN_CONFIG_DIR,
@@ -64,6 +70,10 @@ import {
   ensurePhpMyAdminContainer,
   type PhpMyAdminDeps,
 } from "./phpmyadmin-platform.js";
+import type { DockerExecTarget } from "./docker-exec.js";
+import { PANEL_RESTART_STOP_SECONDS, restartContainerByName } from "./panel-restart.js";
+import { reapTerminalShells, startDockerTerminal } from "./terminal-docker.js";
+import { type TerminalLimits, TerminalSessions } from "./terminal-sessions.js";
 import { SiteDatabasesRunner, mariadbRootExec } from "./site-databases.js";
 import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
 import {
@@ -213,6 +223,7 @@ export interface DockerContainerInspectPayload {
     readonly ExitCode?: number;
     readonly Error?: string;
   };
+  readonly ExecIDs?: readonly string[] | null;
   readonly Config?: {
     readonly Image?: string;
     readonly Cmd?: readonly string[] | null;
@@ -1077,6 +1088,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly panelDumpDir?: string;
   readonly backupNetworkName?: string;
   readonly sharedDbNetworkName?: string;
+  /** Shorter terminal limits (tests and the real-Docker script). */
+  readonly terminalLimits?: Partial<TerminalLimits>;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1139,12 +1152,19 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly sftpNetworkName: string;
   private readonly sftpVolumePrefix: string;
   private sftpQueue: Promise<unknown> = Promise.resolve();
+  /** Applies queued or running on the two queues above; a restart of that container waits for none. */
+  private readonly panelQueued = { mail_relay: 0, sftp: 0 };
+  /** Running panel restarts (never rejecting); an ensure of that component waits for its restart. */
+  private readonly panelRestarts = new Map<PanelContainer, Promise<void>>();
   private readonly backupKeyFile: string;
   private readonly backupNetworkName: string;
   private readonly sharedDbNetworkName: string;
   private readonly backupRunner: BackupRunner;
+  private readonly execTarget: DockerExecTarget;
+  private readonly terminals: TerminalSessions;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
+    this.terminals = new TerminalSessions(options?.terminalLimits);
     this.dockerClient = new DockerSocketHttpClient({
       socketPath: options?.dockerSocketPath ?? DEFAULT_DOCKER_SOCKET_PATH,
       apiPrefix: options?.dockerApiPrefix ?? DEFAULT_DOCKER_API_PREFIX,
@@ -1192,14 +1212,14 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     assertSafeIdentifier(this.phpMyAdminContainerName, "phpMyAdminContainerName");
     assertSafeIdentifier(this.phpMyAdminNetworkName, "phpMyAdminNetworkName");
     const dockerClient = this.dockerClient;
-    const execTarget = {
+    const execTarget = (this.execTarget = {
       request: (m: string, p: string, b?: unknown, o?: { readonly timeoutMs?: number }) =>
         this.dockerClient.request(m, p, b, o),
       socketPath: this.dockerClient.socketPath,
       get apiPrefix() {
         return dockerClient.effectiveApiPrefix;
       },
-    };
+    });
     this.siteFilesHelpers = new SiteFilesHelpers({
       target: execTarget,
       programDir: path.resolve(options?.siteFilesDir ?? DEFAULT_SITE_FILES_DIR),
@@ -1273,6 +1293,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   private async ensureIngressProxyOnce(): Promise<IngressEnsureResult> {
+    await this.panelRestarts.get("ingress_proxy");
     const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256 } =
       await this.ingressManager.ensureStaticConfig(this.panel);
 
@@ -1397,7 +1418,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
   /** Applies run one after the other (a queue, not de-dup: two configs are never merged). */
   public applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
-    const run = this.mailRelayQueue.then(() => this.applyMailRelayNow(req));
+    this.panelQueued.mail_relay += 1;
+    const run = this.mailRelayQueue
+      .then(() => this.panelRestarts.get("mail_relay"))
+      .then(() => this.applyMailRelayNow(req))
+      .finally(() => (this.panelQueued.mail_relay -= 1));
     this.mailRelayQueue = run.catch(() => undefined);
     return run;
   }
@@ -1716,6 +1741,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   private async ensureSharedDatabaseOnce(): Promise<SharedDatabaseEnsureResult> {
+    await this.panelRestarts.get("shared_database");
     // Docker Binds would create a missing source as a root-owned directory: insist on bootstrap's.
     const keyStat = await stat(this.sharedDbRootKeyFile).catch(() => null);
     const dataStat = await stat(this.sharedDbDataDir).catch(() => null);
@@ -2173,7 +2199,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         this.dockerClient.request(method, endpointPath, body, o),
     };
 
-    const run = (): Promise<void> => ensurePhpMyAdminContainer(deps, opts);
+    const run = async (): Promise<void> => {
+      await this.panelRestarts.get("phpmyadmin");
+      return ensurePhpMyAdminContainer(deps, opts);
+    };
     // Serialize behind an in-flight ifPresent check instead of sharing its early return.
     const promise = (inFlight ? inFlight.promise.catch(() => undefined).then(run) : run()).finally(
       () => {
@@ -2187,14 +2216,22 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   public applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
-    const run = this.sftpQueue.then(() => this.applySftpAccessNow(req));
+    this.panelQueued.sftp += 1;
+    const run = this.sftpQueue
+      .then(() => this.panelRestarts.get("sftp"))
+      .then(() => this.applySftpAccessNow(req))
+      .finally(() => (this.panelQueued.sftp -= 1));
     this.sftpQueue = run.catch(() => undefined);
     return run;
   }
 
   /** Reconciles the platform SFTP container from persisted `state.json` on startup without touching site containers. */
   public ensureSftpFromState(): Promise<SftpApplyResult | null> {
-    const run = this.sftpQueue.then(() => this.ensureSftpFromStateNow());
+    this.panelQueued.sftp += 1;
+    const run = this.sftpQueue
+      .then(() => this.panelRestarts.get("sftp"))
+      .then(() => this.ensureSftpFromStateNow())
+      .finally(() => (this.panelQueued.sftp -= 1));
     this.sftpQueue = run.catch(() => undefined);
     return run;
   }
@@ -2626,6 +2663,63 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     return parsed.data.component === "phpmyadmin"
       ? lines.map((line) => ({ ...line, text: maskPhpMyAdminQuery(line.text) }))
       : lines;
+  }
+
+  /** Restarts one existing panel container by its fixed name; refused while that component is busy. */
+  public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
+    const parsed = PanelContainerRestartIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid panel restart request", "VALIDATION_ERROR");
+    }
+    const c = parsed.data.component;
+    const busy = {
+      ingress_proxy: this.ingressEnsureInFlight !== null,
+      shared_database: this.sharedDbEnsureInFlight !== null,
+      phpmyadmin: this.phpMyAdminEnsureInFlight !== null,
+      sftp: this.panelQueued.sftp > 0,
+      mail_relay: this.panelQueued.mail_relay > 0,
+    }[c];
+    if (busy || this.panelRestarts.has(c)) {
+      throw new ExecutorCodedError("This panel container is busy; try again shortly", "RESOURCE_LOCKED");
+    }
+    const run = restartContainerByName(this.execTarget, this.panelContainerName(c), PANEL_RESTART_STOP_SECONDS[c]);
+    const done = run.then(() => undefined, () => undefined);
+    this.panelRestarts.set(c, done);
+    void done.then(() => this.panelRestarts.delete(c));
+    return run;
+  }
+
+  /** /bin/sh as 33:33 in the site's own container; the site label is checked, not trusted. */
+  public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    return this.terminals.open(req, async (sink) => {
+      const summary = await this.findContainerSummaryByServiceId(req.serviceInstanceId);
+      if (!summary || summary.Labels?.[MANAGED_DOCKER_LABELS.siteId] !== req.siteId) {
+        throw new ExecutorCodedError("The site container is not running", "NOT_FOUND");
+      }
+      return startDockerTerminal(this.execTarget, summary.Id, req.sessionId, sink);
+    });
+  }
+
+  public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
+    this.terminals.write(req);
+  }
+
+  public readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult> {
+    return this.terminals.read(req);
+  }
+
+  public closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
+    return this.terminals.close(req);
+  }
+
+  public async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    return this.terminals.list();
+  }
+
+  /** At start: ends the shells a previous executor left in site containers. */
+  public reapTerminalShells(): Promise<void> {
+    return reapTerminalShells(this.execTarget);
   }
 
   /** The closed map from panel component to container name. */

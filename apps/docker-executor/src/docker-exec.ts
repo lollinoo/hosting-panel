@@ -76,7 +76,7 @@ function normalizeUpgradePath(apiPrefix: string, execId: string): string {
 /** Creates an exec instance and hijacks its TCP stream over the Docker Engine unix socket. */
 export async function startDockerExec(
   target: DockerExecTarget,
-  spec: DockerExecSpec & { readonly tty?: boolean },
+  spec: DockerExecSpec & { readonly tty?: boolean; readonly consoleSize?: readonly [number, number] },
 ): Promise<{ readonly execId: string; readonly socket: Duplex }> {
   if (!Array.isArray(spec.cmd) || spec.cmd.length === 0) {
     throw new ExecutorCodedError("Exec command must be a non-empty argv array", "VALIDATION_ERROR");
@@ -92,6 +92,7 @@ export async function startDockerExec(
     AttachStdout: true,
     AttachStderr: true,
     Tty: tty,
+    ...(spec.consoleSize ? { ConsoleSize: [...spec.consoleSize] } : {}),
   };
 
   const createRes = await requestDockerJson(

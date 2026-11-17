@@ -4,6 +4,7 @@ import {
   BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
   CertificateStatusReportWireSchema,
+  EmptyDataEnvelopeSchema,
   ExecutorHealthResponseSchema,
   MailRelayStatusReportWireSchema,
   MailTestIpcResponseSchema,
@@ -24,7 +25,12 @@ import {
   type IpcSigningKey,
   type ObservedServiceStateWire,
   type PanelContainer,
+  PanelContainerRestartWireSchema,
   PanelContainersDataEnvelopeSchema,
+  TerminalEndedEnvelopeSchema,
+  TerminalOpenWireSchema,
+  TerminalReadWireSchema,
+  TerminalSessionsEnvelopeSchema,
   type ServiceInstanceActionIpcRequest,
   type ServiceLogsIpcRequest,
   type SiteJobIpcRequest,
@@ -55,6 +61,11 @@ import type {
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  TerminalEnded,
+  TerminalOpenRequest,
+  TerminalOpenResult,
+  TerminalReadResult,
+  TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
 import {
@@ -125,6 +136,12 @@ export const BACKUPS_TEST_TIMEOUT_MS = 40_000;
 export const BACKUPS_TIMEOUT_MS = 30_000;
 export const PANEL_CONTAINERS_TIMEOUT_MS = 10_000;
 export const PANEL_LOGS_TIMEOUT_MS = 35_000;
+export const TERMINAL_OPEN_TIMEOUT_MS = 20_000;
+export const TERMINAL_WRITE_TIMEOUT_MS = 10_000;
+export const TERMINAL_READ_TIMEOUT_MS = 35_000;
+export const TERMINAL_CLOSE_TIMEOUT_MS = 20_000;
+export const TERMINAL_LIST_TIMEOUT_MS = 10_000;
+export const PANEL_RESTART_TIMEOUT_MS = 35_000;
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -457,6 +474,35 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     const query = new URLSearchParams({ component: req.component, tail: String(req.tail) });
     const json = await this.sendSignedJsonRequest("GET", `/v1/panel/logs?${query}`, undefined, PANEL_LOGS_TIMEOUT_MS);
     return ServiceLogsDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/open", req, TERMINAL_OPEN_TIMEOUT_MS);
+    return z.object({ data: TerminalOpenWireSchema }).parse(json).data;
+  }
+
+  public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
+    EmptyDataEnvelopeSchema.parse(await this.sendSignedJsonRequest("POST", "/v1/terminal/write", req, TERMINAL_WRITE_TIMEOUT_MS));
+  }
+
+  public async readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/read", req, TERMINAL_READ_TIMEOUT_MS);
+    return z.object({ data: TerminalReadWireSchema }).parse(json).data;
+  }
+
+  public async closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/close", req, TERMINAL_CLOSE_TIMEOUT_MS);
+    return TerminalEndedEnvelopeSchema.parse(json).data;
+  }
+
+  public async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    const json = await this.sendSignedJsonRequest("GET", "/v1/terminal/sessions", undefined, TERMINAL_LIST_TIMEOUT_MS);
+    return TerminalSessionsEnvelopeSchema.parse(json).data;
+  }
+
+  public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/panel/restart", req, PANEL_RESTART_TIMEOUT_MS);
+    return z.object({ data: PanelContainerRestartWireSchema }).parse(json).data;
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {

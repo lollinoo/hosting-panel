@@ -284,6 +284,20 @@ describe("Phase1DisabledDockerExecutor site capabilities", () => {
     });
   });
 
+  it("phase1 executor refuses the terminal and panel restart calls with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const sessionId = `term_${"0".repeat(32)}`;
+    const calls = [
+      executor.openTerminal({ sessionId, siteId: "s", serviceInstanceId: "svc" }),
+      executor.writeTerminal({ sessionId, input: "id\n" }),
+      executor.readTerminal({ sessionId, cursor: 0 }),
+      executor.closeTerminal({ sessionId }),
+      executor.listTerminals(),
+      executor.restartPanelContainer({ component: "sftp" }),
+    ];
+    for (const call of calls) await expect(call).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+  });
+
   it("phase1 executor refuses routes and certificates with NOT_SUPPORTED", async () => {
     const executor = new Phase1DisabledDockerExecutor();
     await expect(

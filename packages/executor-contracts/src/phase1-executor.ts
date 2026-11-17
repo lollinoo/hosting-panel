@@ -19,6 +19,11 @@ import type {
   SiteRoutesRequest,
   SiteJobRequest,
   SiteJobResult,
+  TerminalEnded,
+  TerminalOpenRequest,
+  TerminalOpenResult,
+  TerminalReadResult,
+  TerminalSessionRecord,
 } from "./port.js";
 import type { CertificateStatusReport } from "./acme-status.js";
 import type {
@@ -74,6 +79,30 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async getPanelContainerLogs(_req: { component: PanelContainer; tail: number }): Promise<readonly ServiceLogLine[]> {
+    return this.refuse();
+  }
+
+  async openTerminal(_req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    return this.refuse();
+  }
+
+  async writeTerminal(_req: { sessionId: string; input: string }): Promise<void> {
+    return this.refuse();
+  }
+
+  async readTerminal(_req: { sessionId: string; cursor: number }): Promise<TerminalReadResult> {
+    return this.refuse();
+  }
+
+  async closeTerminal(_req: { sessionId: string }): Promise<TerminalEnded> {
+    return this.refuse();
+  }
+
+  async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    return this.refuse();
+  }
+
+  async restartPanelContainer(_req: { component: PanelContainer }): Promise<{ startedAt: string | null }> {
     return this.refuse();
   }
 

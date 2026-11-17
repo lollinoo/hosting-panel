@@ -343,6 +343,17 @@ export async function bootstrapDockerExecutorDaemon(
         }),
       );
     });
+    // Shells a previous executor left behind end before new sessions open (only {event, code} is logged).
+    await dockerAdapter.reapTerminalShells().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "terminal_reap_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
     await dockerAdapter.settleRestores().catch((err: unknown) => {
       console.error(
         JSON.stringify({

@@ -78,6 +78,26 @@ export interface DockerExecutorPort {
   backups<R extends BackupsIpcRequest>(req: R): Promise<BackupsResultByAction[R["action"]]>;
   getPanelContainers(): Promise<readonly PanelContainerStatus[]>;
   getPanelContainerLogs(req: { readonly component: PanelContainer; readonly tail: number }): Promise<readonly ServiceLogLine[]>;
+  /** /bin/sh as 33:33 in the site container; nothing typed or printed is ever logged. */
+  openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult>;
+  writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void>;
+  /** Long poll: waits up to TERMINAL_READ_WAIT_MS when nothing is new. */
+  readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult>;
+  /** Kills the shell and its children; an ended session returns its own end and is dropped. */
+  closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded>;
+  listTerminals(): Promise<readonly TerminalSessionRecord[]>;
+  /** Restarts one existing panel container; never creates one. */
+  restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }>;
+}
+
+export type TerminalExecutorEndReason = "closed" | "shell_exited" | "idle" | "time_limit" | "container_gone";
+export interface TerminalEnded { readonly reason: TerminalExecutorEndReason; readonly at: string }
+export interface TerminalOpenRequest { readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string }
+export interface TerminalOpenResult { readonly containerName: string; readonly openedAt: string }
+export interface TerminalReadResult { readonly output: string; readonly cursor: number; readonly dropped: boolean; readonly ended: TerminalEnded | null }
+export interface TerminalSessionRecord {
+  readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string;
+  readonly containerName: string; readonly openedAt: string; readonly ended: TerminalEnded | null;
 }
 
 export interface PanelContainerStatus {
