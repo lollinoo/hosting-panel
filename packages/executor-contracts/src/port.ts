@@ -17,6 +17,7 @@ import type {
   SiteFilesOp,
   SiteFilesResultByOp,
   SiteHostRoute,
+  SiteTypeKey,
   WordpressImportLoadResult,
   WordpressStateResult,
   WordpressUpdateResult,
@@ -79,7 +80,7 @@ export interface DockerExecutorPort {
   backups<R extends BackupsIpcRequest>(req: R): Promise<BackupsResultByAction[R["action"]]>;
   getPanelContainers(): Promise<readonly PanelContainerStatus[]>;
   getPanelContainerLogs(req: { readonly component: PanelContainer; readonly tail: number }): Promise<readonly ServiceLogLine[]>;
-  /** /bin/sh as 33:33 in the site container; nothing typed or printed is ever logged. */
+  /** /bin/sh as the site type's owner in the site container; nothing typed or printed is ever logged. */
   openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult>;
   writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void>;
   /** Long poll: waits up to TERMINAL_READ_WAIT_MS when nothing is new. */
@@ -95,7 +96,7 @@ export interface DockerExecutorPort {
 
 export type TerminalExecutorEndReason = "closed" | "shell_exited" | "idle" | "time_limit" | "container_gone";
 export interface TerminalEnded { readonly reason: TerminalExecutorEndReason; readonly at: string }
-export interface TerminalOpenRequest { readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string }
+export interface TerminalOpenRequest { readonly sessionId: string; readonly siteId: string; readonly serviceInstanceId: string; readonly siteType?: SiteTypeKey }
 export interface TerminalOpenResult { readonly containerName: string; readonly openedAt: string }
 export interface TerminalReadResult { readonly output: string; readonly cursor: number; readonly dropped: boolean; readonly ended: TerminalEnded | null }
 export interface TerminalSessionRecord {
