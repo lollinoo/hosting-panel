@@ -1,9 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error -- plain ESM script without type declarations
-import { listReleaseViolations, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
+import { listReleaseViolations, releaseImages, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
+import * as contracts from "../../packages/contracts/src/index.js";
+import { DEFAULT_TRAEFIK_IMAGE } from "../../apps/docker-executor/src/traefik-config.js";
 
 const dirs: string[] = [];
 function tmp() {
@@ -97,6 +99,13 @@ describe("listReleaseViolations", () => {
     }
   });
 
+  it("requires every migration of the tree and the image list", () => {
+    const sql = readdirSync(join(__dirname, "../../packages/database/migrations")).filter((f) => f.endsWith(".sql"));
+    expect(sql.length).toBeGreaterThan(17);
+    for (const f of sql) expect(REQUIRED_RELEASE_PATHS).toContain(`packages/database/dist/migrations/${f}`);
+    expect(REQUIRED_RELEASE_PATHS).toContain("IMAGES");
+  });
+
   it("accepts a complete minimal tree", async () => {
     expect(await listReleaseViolations(completeTree())).toEqual([]);
   });
@@ -111,5 +120,16 @@ describe("releaseNodeVersion", () => {
 
   it("rejects a running major that differs from .node-version", () => {
     expect(() => releaseNodeVersion("26", "24.11.1")).toThrow(/major 26/);
+  });
+});
+
+describe("releaseImages", () => {
+  it("names every image of the built code, sorted, each once", () => {
+    const images: string[] = releaseImages(contracts, DEFAULT_TRAEFIK_IMAGE);
+    const named = Object.entries(contracts).filter(([k, v]) => k.endsWith("_IMAGE") && typeof v === "string").map(([, v]) => v);
+    const php = contracts.SUPPORTED_PHP_VERSIONS.flatMap((v) => [contracts.resolveWordpressImage(v), contracts.resolveWordpressCliImage(v)]);
+    expect(named.length).toBeGreaterThan(4);
+    for (const i of [...named, DEFAULT_TRAEFIK_IMAGE, ...php]) expect(images).toContain(i);
+    expect(images).toEqual([...new Set(images)].sort());
   });
 });
