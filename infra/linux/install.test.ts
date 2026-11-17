@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -30,6 +30,8 @@ function install(args: string[], env: Record<string, string> = {}) {
       ...process.env,
       HP_OS_RELEASE_FILE: osRelease("debian", "trixie"),
       HP_INSTALL_STATE_DIR: join(tmp(), "empty-state"),
+      // No case reads this machine's /opt/hosting-panel (R203 2.2).
+      HP_INSTALL_ROOT: join(tmp(), "empty-root"),
       HP_ADMIN_PASSWORD: CANARY,
       // Host-independent defaults (honoured only in --dry-run).
       HP_SSHD_PORTS: "22",
@@ -269,8 +271,56 @@ describe("install.sh --archive", () => {
     expect(r.err).toContain("mislabelled");
   });
 
+  // R203 2.1: the installer never puts an older release over a newer one.
+  function installedRoot(current?: string) {
+    const root = tmp();
+    mkdirSync(join(root, "releases", "0.3.1"), { recursive: true });
+    if (current) symlinkSync(join("releases", current), join(root, "current"));
+    return root;
+  }
+  const listing = (root: string) => readdirSync(root, { recursive: true }).map(String).sort();
+
+  it("refuses --version 0.3.0 over an installed 0.3.1 with exit 2, naming both, and changes nothing", () => {
+    const root = installedRoot("0.3.1");
+    const before = listing(root);
+    const r = dry({ HP_INSTALL_ROOT: root }, ["--version", "0.3.0"]);
+    expect(r.code, r.out).toBe(2);
+    expect(r.err).toMatch(/0\.3\.0.*0\.3\.1/);
+    expect(r.err).toContain("--version 0.3.1");
+    expect(r.out).not.toContain("[STEP 2/12]");
+    expect([listing(root), readlinkSync(join(root, "current"))]).toEqual([before, "releases/0.3.1"]);
+  });
+
+  it("refuses an older --archive over an installed release", () => {
+    const r = dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") }, ["--archive", archive("0.3.0")]);
+    expect(r.code, r.out).toBe(2);
+    expect(r.out).not.toContain("Release 0.3.0 verified");
+  });
+
+  it("goes on with the same version, a newer one, or no installed release", () => {
+    expect(dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") }, ["--version", "0.3.1"]).code).toBe(0);
+    expect(dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") }, ["--version", "0.4.0"]).code).toBe(0);
+    expect(dry({ HP_INSTALL_ROOT: installedRoot() }, ["--version", "0.3.0"]).code).toBe(0);
+  });
+
+  it("without --version or --archive the dry run says the check waits for the lookup", () => {
+    const r = dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") });
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("would refuse the latest release if it is older than the installed one (exit 2)");
+  });
+
+  it("refuses HP_INSTALL_ROOT outside a dry run", () => {
+    const r = install(ARGS, { HP_INSTALL_ROOT: installedRoot("0.3.1") });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("HP_INSTALL_ROOT is only for --dry-run tests");
+  });
+
   it("lists libatomic1 among the apt prerequisites (Node 26 needs it)", () => {
     expect(dry().out).toMatch(/apt-get install -y .*\blibatomic1\b/);
+  });
+
+  it("lists unattended-upgrades among the apt prerequisites (the security upgrade job runs it)", () => {
+    expect(dry().out).toMatch(/apt-get install -y .*\bunattended-upgrades\b/);
   });
 });
 

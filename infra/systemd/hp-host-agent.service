@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=hp-agent
 Group=hp-agent
-SupplementaryGroups=hp-ipc
+SupplementaryGroups=hp-ipc systemd-journal
 WorkingDirectory=/opt/hosting-panel/current/apps/host-agent
 Environment=NODE_ENV=production
 Environment=HP_RUNTIME_BACKEND=linux-systemd

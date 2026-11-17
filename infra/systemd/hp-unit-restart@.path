@@ -1,0 +1,8 @@
+[Unit]
+Description=Hosting panel: restart request for %i
+
+[Path]
+PathExists=/run/hosting-panel/host-jobs/hp-unit-restart@%i
+
+[Install]
+WantedBy=paths.target

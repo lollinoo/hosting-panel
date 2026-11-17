@@ -60,6 +60,17 @@ describe("listReleaseViolations", () => {
     expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hosting-panel-tmpfiles.conf");
   });
 
+  it("requires the eight root units of the host jobs", () => {
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-unit-restart@.path");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-unit-restart@.service");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-panel-update.path");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-panel-update.service");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-os-refresh.path");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-os-refresh.service");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-os-upgrade.path");
+    expect(REQUIRED_RELEASE_PATHS).toContain("infra/systemd/hp-os-upgrade.service");
+  });
+
   it("requires the shared release library", () => {
     expect(REQUIRED_RELEASE_PATHS).toContain("infra/linux/lib/release.sh");
   });

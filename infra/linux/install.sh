@@ -24,7 +24,7 @@ The admin password is prompted (hidden, twice, >= 12 chars). For automation only
 is read instead; never put it on a command line (shell history, ps).
 
 Exit codes: 0 ok, 1 step failed, 2 bad arguments (or archive VERSION differs from its file
-name), 3 unsupported OS/architecture or no
+name, or the release is older than the installed one), 3 unsupported OS/architecture or no
 docker-ce/postgresql-18 for this release or Docker older than 28, 4 checksum failure, 5 health check timeout,
 6 docker0 has no IPv4, 7 SSH is not on port 22 (use --skip-firewall).
 EOF
@@ -39,7 +39,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${SCRIPT_DIR}/lib/common.sh"
 
 STATE_DIR="${HP_INSTALL_STATE_DIR:-/etc/hosting-panel}"
-ROOT="/opt/hosting-panel"
+ROOT="${HP_INSTALL_ROOT:-/opt/hosting-panel}"
 STEP=0
 STEP_NAME=""
 TOTAL=12
@@ -255,6 +255,7 @@ main() {
   fi
 
   if ((dry_run == 0)); then
+    [[ "${ROOT}" == /opt/hosting-panel ]] || die 2 "HP_INSTALL_ROOT is only for --dry-run tests"
     [[ "${EUID}" -eq 0 ]] || die 1 "Run as root (sudo), or pass --dry-run."
     [[ "${STATE_DIR}" == /etc/hosting-panel ]] || die 2 "HP_INSTALL_STATE_DIR is only for --dry-run tests"
     if ((admin_done == 0)) && [[ -z "${admin_password}" ]]; then
@@ -328,6 +329,14 @@ main() {
     fi
     archive="$(fetch_release "${version}" "${DOWNLOAD_DIR}")" || die 1 "Download of release ${version} failed."
   fi
+  # An older release over a newer one would run old code on a database the newer one migrated.
+  local installed
+  installed="$(current_version "${ROOT}")"
+  if [[ "${version}" == latest ]]; then
+    plan "would refuse the latest release if it is older than the installed one (exit 2)"
+  elif [[ -n "${installed}" ]] && version_gt "${installed}" "${version}"; then
+    die 2 "${version} is older than the installed ${installed}; rerun the installer with --version ${installed}, or install an older release with hp-update --allow-downgrade."
+  fi
   if [[ -n "${archive}" ]]; then
     verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
     archive_has_version "${archive}" "${version}" ||
@@ -338,7 +347,7 @@ main() {
   # ---------------------------------------------------------------- 2
   step 2 "apt prerequisites"
   # libatomic1: the official Node 26 linux-x64 binary links against it; minimal images lack it.
-  local prereqs=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2 libatomic1)
+  local prereqs=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2 libatomic1 unattended-upgrades)
   if ((dry_run)); then
     plan "apt-get install -y ${prereqs[*]}"
   else

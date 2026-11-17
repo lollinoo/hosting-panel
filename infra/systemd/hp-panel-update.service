@@ -1,0 +1,8 @@
+[Unit]
+Description=Hosting panel: panel update
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/rm -f /run/hosting-panel/host-jobs/hp-panel-update
+ExecStart=/usr/local/sbin/hp-update
+TimeoutStartSec=30min
