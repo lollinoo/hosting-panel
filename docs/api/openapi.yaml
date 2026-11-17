@@ -50,6 +50,8 @@ tags:
     description: Platform S3 backup target settings, connectivity tests, and per-site backup status (server administrator only)
   - name: Admin Health
     description: Panel health, open alerts, and site and panel logs (server administrator only)
+  - name: Admin Terminal
+    description: Text shell in a site's container, behind a fresh authenticator code (server administrator only)
   - name: Services
     description: Declarative service instances, immutable revisions, and async lifecycle
   - name: Operations
@@ -4324,6 +4326,330 @@ paths:
             available right now. Try again in a few minutes.")
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/admin/sites/{siteId}/restart:
+    post:
+      tags: [Admin Sites]
+      operationId: adminRestartSite
+      summary: Restart a site's container with a reason (server administrator; audited as admin.site.restart)
+      description: >-
+        Queues `service.restart` under the site lock, like the owner's Restart. The wanted state
+        becomes running, so restarting a site its owner stopped starts it again. A container that is
+        gone is created again from the stored revision, but only when the site's last
+        `site.provision` succeeded and no `site.delete` was ever queued for the site. Not counted by
+        the heavy-action limit. The audit row `admin.site.restart` keeps `reason` and `operationId`
+        in `details`; its organisation is null. It is written in the transaction that queues the
+        restart: a replayed `Idempotency-Key` writes no second row.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestartInput"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          description: No `Idempotency-Key`, or the reason is missing, blank or over 500 characters (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or not a managed site (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another operation holds the site (`RESOURCE_LOCKED`), or the key was used for another
+            request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/panel-containers/{component}/restart:
+    post:
+      tags: [Admin Health]
+      operationId: adminRestartPanelContainer
+      summary: Restart one of the panel's own containers with a reason (server administrator; audited)
+      description: >-
+        Queues `panel.container.restart` under the lock `panel:container:<component>`. The worker
+        starts the restart about two seconds after the request was accepted, so a restart of
+        `ingress_proxy` does not cut this answer; an operation older than one minute when the worker
+        reaches it fails with `OPERATION_INTERRUPTED` instead. The container gets 5 seconds to stop
+        (10 for `mail_relay`). The request writes `admin.panel_container.restart` (`details`:
+        `outcome`, `requestId`, `operationId`, `component`, `reason`) in the same transaction as the
+        operation; a replayed key writes no second row. The end writes
+        `admin.panel_container.restart.end` (actor `system`; `details`: `operationId`, `component`,
+        `outcome`, `errorCode`). A failed restart reads "The container did not restart. Check
+        Health, then try again."
+      parameters:
+        - in: path
+          name: component
+          required: true
+          schema:
+            type: string
+            enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestartInput"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    required: [component, operationId]
+                    properties:
+                      component:
+                        type: string
+                        enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+                      operationId:
+                        type: string
+        "400":
+          description: >-
+            No `Idempotency-Key`, `component` is not one of the five, or the reason is missing, blank
+            or over 500 characters (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Health shows the container as not in use or missing (`PANEL_CONTAINER_ABSENT`, "This
+            container is not installed. There is nothing to restart."), a restart of it is already
+            queued or running (`RESOURCE_LOCKED`), or the key was used for another request
+            (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            The container runtime is disabled (`NOT_SUPPORTED`, "The container runtime is disabled on
+            this server.")
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/operations/{operationId}:
+    get:
+      tags: [Admin Health]
+      operationId: getAdminOperation
+      summary: Read any operation by id (server administrator; not audited)
+      parameters:
+        - in: path
+          name: operationId
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The operation and its steps
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/OperationDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: No operation with this id (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/terminal:
+    post:
+      tags: [Admin Terminal]
+      operationId: openAdminTerminal
+      summary: Open a text shell in a site's container (fresh authenticator code; audited as admin.terminal.open)
+      description: >-
+        The shell runs as user 33:33 (the web server's user, never root) in `/var/www/html`, with
+        `TERM=dumb`; there is no terminal emulator, so full-screen programs do not work. Every open
+        needs a six-digit code from the caller's authenticator; a used code is refused until the
+        next one. A missing, wrong or used code, an account with no authenticator or a locked
+        account writes `admin.terminal.denied` (organisation = the site's owner) and never reaches
+        the executor. At most one session per site and four on the server. A session ends by itself
+        after 60 seconds with no read, or 30 minutes after it opened (`expiresAt`). The open writes
+        `admin.terminal.open` and the end writes one `admin.terminal.close` with the reason and the
+        duration in seconds. What is typed and what comes back is never stored.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminalOpenInput"
+      responses:
+        "201":
+          description: The session is open
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TerminalSessionDto"
+        "400":
+          description: >-
+            The code is missing or not six digits (`VALIDATION_ERROR`, "Enter the six-digit code from
+            your authenticator app."); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          description: >-
+            Not signed in, or the code is wrong or already used (`TOTP_INVALID`, "The code is wrong or
+            was already used. Wait for the next code and try again."); a wrong or used code writes the
+            denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Not a server administrator (`PERMISSION_DENIED`), or the account has no authenticator
+            (`ACCOUNT_SETUP_INCOMPLETE`); both write a denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or not a managed site (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Refused (`RESOURCE_LOCKED`, `details[0].reason`): `site_changing` (the site is being
+            deployed, under maintenance or has an operation running), `container_down` (the site is
+            stopped or its container is gone), `site_busy` (a session is already open on this site) or
+            `server_full` (four sessions are open on the server)
+          $ref: "#/components/responses/ErrorResponse"
+        "423":
+          description: Too many wrong codes (`ACCOUNT_LOCKED`, "Too many wrong codes. Wait 15 minutes and try again.")
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            The runtime is disabled or the executor did not answer (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/terminal/{sessionId}/write:
+    post:
+      tags: [Admin Terminal]
+      operationId: writeAdminTerminal
+      summary: Send input to the caller's own session (not audited)
+      parameters:
+        - $ref: "#/components/parameters/TerminalSessionIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminalWriteInput"
+      responses:
+        "204":
+          description: Written
+        "400":
+          description: Input empty or longer than 4096 bytes (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown session, or a session another administrator opened (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The session has ended, or the executor no longer has it or did not finish the write
+            (`RESOURCE_LOCKED`, `details[0].reason` `session_ended`, "This terminal session has
+            ended. Open a new one.")
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The executor did not answer (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/terminal/{sessionId}/read:
+    post:
+      tags: [Admin Terminal]
+      operationId: readAdminTerminal
+      summary: Read output after a cursor; waits up to 20 seconds when nothing is new (not audited)
+      description: >-
+        Output is plain text as the shell printed it; the executor keeps the last 256 KiB and sets
+        `dropped` when older output after the cursor was lost. A read keeps the session alive. Once
+        the session is over `ended` carries the reason; a session the executor no longer knows
+        answers with empty output and the reason stored by the panel.
+      parameters:
+        - $ref: "#/components/parameters/TerminalSessionIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminalReadInput"
+      responses:
+        "200":
+          description: Output since the cursor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TerminalReadDto"
+        "400":
+          description: The cursor is missing or not a whole number from 0 (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown session, or a session another administrator opened (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The executor did not answer (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/terminal/{sessionId}/close:
+    post:
+      tags: [Admin Terminal]
+      operationId: closeAdminTerminal
+      summary: End the session and stop its shell (no body; a second close also answers 204)
+      description: >-
+        Writes `admin.terminal.close` once per session, with the reason the executor gives
+        (`closed`, or the earlier reason if the shell had already ended) or `executor_gone` when the
+        executor no longer has the session. When the executor does not answer the session stays open
+        and the panel closes it on a later pass.
+      parameters:
+        - $ref: "#/components/parameters/TerminalSessionIdParam"
+      responses:
+        "204":
+          description: Closed, or already closed
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown session, or a session another administrator opened (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The executor did not answer (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/organizations/{orgId}/managed-sites/{siteId}/backups:
     get:
       tags: [Managed Sites]
@@ -5138,6 +5464,13 @@ components:
       required: true
       schema:
         type: string
+    TerminalSessionIdParam:
+      in: path
+      name: sessionId
+      required: true
+      description: '`term_` and 32 hex characters; any other value is `NOT_FOUND`'
+      schema:
+        type: string
     IdempotencyKeyHeader:
       in: header
       name: Idempotency-Key
@@ -5222,6 +5555,7 @@ components:
             - ALREADY_EXISTS
             - LAST_OWNER_PROTECTED
             - LAST_ADMINISTRATOR_PROTECTED
+            - PANEL_CONTAINER_ABSENT
             - NOT_SUPPORTED
             - OPERATION_INTERRUPTED
             - OPERATION_AMBIGUOUS
@@ -7881,7 +8215,7 @@ components:
               required: [operationId, kind, siteId, siteName]
               properties:
                 operationId: { type: string }
-                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, site.wordpress.inspect, site.wordpress.update, site.wordpress.import] }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import] }
                 siteId: { type: string, nullable: true }
                 siteName: { type: string, nullable: true }
 
@@ -8069,6 +8403,93 @@ components:
           format: date-time
           nullable: true
 
+    RestartInput:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Why the restart is needed; trimmed first; kept in the audit row
+
+    TerminalOpenInput:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          type: string
+          pattern: "^[0-9]{6}$"
+          description: The current six-digit code from the caller's authenticator app
+
+    TerminalWriteInput:
+      type: object
+      additionalProperties: false
+      required: [input]
+      properties:
+        input:
+          type: string
+          minLength: 1
+          description: Text sent to the shell as typed, at most 4096 UTF-8 bytes
+
+    TerminalReadInput:
+      type: object
+      additionalProperties: false
+      required: [cursor]
+      properties:
+        cursor:
+          type: integer
+          minimum: 0
+          description: The `cursor` of the previous read; 0 for the first
+
+    TerminalSessionDto:
+      type: object
+      additionalProperties: false
+      required: [sessionId, siteId, containerName, openedAt, expiresAt]
+      properties:
+        sessionId:
+          type: string
+        siteId:
+          type: string
+        containerName:
+          type: string
+        openedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: 30 minutes after `openedAt`; the session ends then
+
+    TerminalReadDto:
+      type: object
+      additionalProperties: false
+      required: [output, cursor, dropped, ended]
+      properties:
+        output:
+          type: string
+        cursor:
+          type: integer
+          minimum: 0
+          description: Pass it to the next read
+        dropped:
+          type: boolean
+          description: Older output was dropped (the executor keeps the last 256 KiB)
+        ended:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [reason, at]
+          properties:
+            reason:
+              type: string
+              enum: [closed, shell_exited, idle, time_limit, container_gone, executor_gone, not_started]
+            at:
+              type: string
+              format: date-time
+
     OperationDto:
       type: object
       required:
@@ -8108,6 +8529,7 @@ components:
             - site.wordpress.update
             - site.wordpress.import
             - panel.backups.create
+            - panel.container.restart
             - host.maintenance
             - host.security
             - host.allocate
