@@ -71,6 +71,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users repository", () => {
       name: "Site 1",
       slug: "site-1",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
     ({
       site: { id: site2Id },
@@ -80,6 +81,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users repository", () => {
       name: "Site 2",
       slug: "site-2",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
     ({
       site: { id: siteNoSvcId },
@@ -89,6 +91,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users repository", () => {
       name: "Site No Service",
       slug: "site-no-svc",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
     ({
       site: { id: siteOtherOrgId },
@@ -98,6 +101,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users repository", () => {
       name: "Site Other Org",
       slug: "site-other-org",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
 
     const tEarly = new Date("2026-11-01T10:00:00.000Z");

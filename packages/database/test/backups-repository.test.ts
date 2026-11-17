@@ -18,6 +18,7 @@ import {
   getBackupTarget,
   getSiteBackup,
   heavyActionRetryAt,
+  inArray,
   hostAllocations,
   hosts,
   insertSiteBackup,
@@ -100,6 +101,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       name: "Live Site",
       slug: "live-site",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
     liveSiteId = live.site.id;
 
@@ -109,6 +111,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       name: "Doomed Site",
       slug: "doomed-site",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
     deletedSiteId = doomed.site.id;
   });
@@ -455,6 +458,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       name: "Deploying Site",
       slug: "deploying-site",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
 
     await db().update(sites).set({ status: "ready" }).where(eq(sites.id, liveSiteId));
@@ -518,6 +522,31 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
     await db().delete(sites).where(eq(sites.id, third.site.id));
     await db().update(sites).set({ status: "deploying" }).where(eq(sites.id, liveSiteId));
     await db().update(sites).set({ status: "deploying" }).where(eq(sites.id, deletedSiteId));
+  });
+
+  it("never picks a nightly site without a known site type", async () => {
+    const make = async (slug: string, siteType: string | null) => {
+      const created = await createSiteTransactional(db(), {
+        organizationId: orgId,
+        hostAllocationId: "alloc_bkp",
+        name: slug,
+        slug,
+        phpVersion: "8.4",
+        siteType: "wordpress",
+      });
+      await db().update(sites).set({ status: "ready", siteType }).where(eq(sites.id, created.site.id));
+      return created.site.id;
+    };
+    const untyped = await make("untyped-site", null);
+    const unknown = await make("unknown-type-site", "no-such-type");
+    const runStartedAt = new Date("2026-11-17T04:00:00.000Z");
+    try {
+      expect(await findNextNightlySite(db(), runStartedAt)).toBeNull();
+      await db().update(sites).set({ siteType: "wordpress" }).where(eq(sites.id, unknown));
+      expect((await findNextNightlySite(db(), runStartedAt))?.id).toBe(unknown);
+    } finally {
+      await db().delete(sites).where(inArray(sites.id, [untyped, unknown]));
+    }
   });
 
   it("inserts, settles only running rows, lists newest first, and computes admin status", async () => {
@@ -688,6 +717,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       name: "Other Site",
       slug: "other-bkp-site",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
     const otherSiteId = otherSite.site.id;
 
@@ -887,6 +917,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       name: "Quota Other Site",
       slug: "quota-other-site",
       phpVersion: "8.4",
+      siteType: "wordpress",
     });
     const otherSiteId = otherSite.site.id;
 
@@ -1003,6 +1034,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
         name: `Org Quota Site ${n}`,
         slug: `org-quota-site-${n}`,
         phpVersion: "8.4",
+        siteType: "wordpress",
       });
       siteIds.push(created.site.id);
     }

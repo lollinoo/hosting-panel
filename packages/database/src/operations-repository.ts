@@ -15,6 +15,7 @@ import {
   type PhpVersion,
   type ServiceDesiredStatus,
   type SiteStatus,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
   buildImmutableStackRevision,
@@ -412,6 +413,7 @@ export interface CreateSiteInput {
   readonly actorId?: string;
   readonly status?: SiteStatus;
   readonly phpVersion?: PhpVersion | null;
+  readonly siteType?: SiteTypeKey | null;
   readonly initialDomainStatus?: DomainStatus;
 }
 
@@ -450,6 +452,7 @@ export async function createSiteTransactional(
         slug: input.slug,
         status: input.status ?? "ready",
         phpVersion: input.phpVersion ?? null,
+        siteType: input.siteType ?? null,
       })
       .returning();
 

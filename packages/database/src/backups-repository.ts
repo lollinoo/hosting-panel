@@ -4,6 +4,7 @@ import {
   HEAVY_ACTIONS_PER_HOUR_PER_ORGANIZATION,
   HEAVY_ACTION_WINDOW_MS,
   HEAVY_BACKUP_OPERATION_KINDS,
+  SITE_TYPE_KEYS,
   type AdminSiteBackupStatusDto,
   type BackupKind,
   type BackupProblem,
@@ -398,6 +399,7 @@ export async function findNextNightlySite(
     .where(
       and(
         inArray(sites.status, ["ready", "degraded", "stopped"]),
+        inArray(sites.siteType, [...SITE_TYPE_KEYS]),
         notExists(
           tx
             .select({ id: siteBackups.id })

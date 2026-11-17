@@ -1,5 +1,8 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  resolveMigrationsDirectory,
   createDatabaseClient,
   createSiteTransactional,
   domains,
@@ -66,6 +69,16 @@ describe("@hosting-panel/database — 0004 sites and databases", () => {
     expect(await listSiteDatabases(db(), { organizationId: "org_A", siteId: site.id })).toEqual([]);
   });
 
+  it("migration 0018 gives wordpress to a row with a PHP version and leaves a row without one null", async () => {
+    await db().execute(sql`INSERT INTO sites (id, organization_id, host_allocation_id, name, slug, php_version)
+      VALUES ('s18_wp', 'org_A', 'al_A', 'w', 's18-wp', '8.4'), ('s18_gen', 'org_A', 'al_A', 'g', 's18-gen', NULL)`);
+    const migration = await readFile(path.join(resolveMigrationsDirectory(), "0018_site_type.sql"), "utf8");
+    for (const statement of migration.split(";").filter((x) => x.trim())) await db().execute(sql.raw(statement));
+    const rows = await db().select({ id: sites.id, siteType: sites.siteType }).from(sites)
+      .where(sql`${sites.id} IN ('s18_wp', 's18_gen')`).orderBy(sites.id);
+    expect(rows).toEqual([{ id: "s18_gen", siteType: null }, { id: "s18_wp", siteType: "wordpress" }]);
+  });
+
   it("ensureWordpressTemplate is idempotent", async () => {
     await ensureWordpressTemplate(db());
     await ensureWordpressTemplate(db());
@@ -74,12 +87,13 @@ describe("@hosting-panel/database — 0004 sites and databases", () => {
     expect(rows[0]?.defaultImage).toBe("wordpress:7.1.4-php8.4-apache");
   });
 
-  it("createSiteTransactional honours status, phpVersion and initialDomainStatus", async () => {
+  it("createSiteTransactional honours status, phpVersion, siteType and initialDomainStatus", async () => {
     const { site, domain } = await createSiteTransactional(db(), {
       organizationId: "org_A", hostAllocationId: "al_A", name: "p", slug: "p",
-      status: "deploying", phpVersion: "8.5", initialDomain: "p.example.com", initialDomainStatus: "pending",
+      status: "deploying", phpVersion: "8.5", siteType: "wordpress", initialDomain: "p.example.com", initialDomainStatus: "pending",
     });
     expect(site.status).toBe("deploying");
+    expect(site.siteType).toBe("wordpress");
     expect(site.phpVersion).toBe("8.5");
     expect(domain?.status).toBe("pending");
   });

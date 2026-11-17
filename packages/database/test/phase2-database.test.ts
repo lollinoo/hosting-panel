@@ -68,6 +68,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
       "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -96,6 +97,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
       "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -120,6 +122,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
       "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);

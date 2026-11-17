@@ -107,6 +107,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
       "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
     ]);
 
     const after0008 = await db().execute(
@@ -149,6 +150,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       name: "Site A",
       slug: "site-a",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
     ({
       site: { id: siteBId },
@@ -158,6 +160,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       name: "Site B",
       slug: "site-b",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
     ({
       site: { id: siteMoveId },
@@ -167,6 +170,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       name: "Site Move",
       slug: "site-move",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
     ({
       site: { id: siteNoSvcId },
@@ -176,6 +180,7 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       name: "Site No Service",
       slug: "site-no-svc",
       phpVersion: "8.4",
+      siteType: "wordpress",
     }));
 
     const tEarly = new Date("2026-11-01T08:00:00.000Z");

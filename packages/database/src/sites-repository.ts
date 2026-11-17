@@ -3,13 +3,14 @@ import {
   resolveWordpressImage,
   type ErrorCode,
   type OperationKind,
+  WORDPRESS_SITE_TYPE,
 } from "@hosting-panel/contracts";
 import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites, siteSftpUsers } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
 
-export const WORDPRESS_TEMPLATE_ID = "tpl_site_wordpress";
+export const WORDPRESS_TEMPLATE_ID = WORDPRESS_SITE_TYPE.templateId;
 
 function notFound(message: string): Error {
   return Object.assign(new Error(message), { code: "NOT_FOUND" satisfies ErrorCode });
