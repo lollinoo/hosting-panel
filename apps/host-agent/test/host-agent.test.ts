@@ -1050,18 +1050,20 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(stdout).toContain("secrets-master.key (0400 hp-api:root)");
       expect(stdout).toContain("Bootstrap dry-run completed successfully.");
 
-      const osRelease = await readFile("/etc/os-release", "utf8");
-      const isUbuntu2404OrDebian12 =
-        (/\bID=ubuntu\b/.test(osRelease) && /\bVERSION_ID="24\.04"/.test(osRelease)) ||
-        (/\bID=debian\b/.test(osRelease) && /\bVERSION_ID="12"/.test(osRelease));
-      if (!isUbuntu2404OrDebian12) {
-        await expect(
-          execFileAsync(BOOTSTRAP_SCRIPT_PATH, ["--dry-run"], {
-            shell: false,
-            timeout: 10_000,
-          }),
-        ).rejects.toThrow();
+      // The system is given by a file, so the result does not depend on the machine that runs the test.
+      const dryRunOn = async (osRelease: string) => {
+        const file = join(await createShortTempDir(), "os-release");
+        await writeFile(file, osRelease, "utf8");
+        return execFileAsync(BOOTSTRAP_SCRIPT_PATH, ["--dry-run"], {
+          shell: false,
+          timeout: 10_000,
+          env: { ...process.env, HP_OS_RELEASE_FILE: file },
+        });
+      };
+      for (const supported of ["ID=ubuntu\nVERSION_CODENAME=noble\n", "ID=ubuntu\nVERSION_CODENAME=resolute\n", "ID=debian\nVERSION_CODENAME=bookworm\n", "ID=debian\nVERSION_CODENAME=trixie\n"]) {
+        expect((await dryRunOn(supported)).stdout).toContain("Bootstrap dry-run completed successfully.");
       }
+      await expect(dryRunOn("ID=fedora\nVERSION_CODENAME=\n")).rejects.toThrow(/Unsupported distribution/);
     });
 
     it("creates daemon from environment variables using key file and starts/stops cleanly", async () => {
