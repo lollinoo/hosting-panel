@@ -1903,17 +1903,17 @@ async function main() {
         const createSpecs = restoreFullSpecs.filter(
           (s) => s.phase === "create" && s.containerName?.startsWith(`hp_bk_${restoreFullJobId}`),
         );
-        const expectedSuffixes = ["rs_fetch", "rs_prepare", "rs_switch", "rs_files", "rs_finish"];
+        const expectedSuffixes = ["rs_fetch", "rs_fetch_files", "rs_prepare", "rs_gate_on", "rs_switch", "rs_files", "rs_finish"];
         assert(
           createSpecs.length === expectedSuffixes.length,
-          "all 5 restore step containers captured",
+          "all 7 restore step containers captured",
           JSON.stringify(createSpecs.map((s) => s.containerName)),
         );
         for (const suffix of expectedSuffixes) {
           const spec = createSpecs.find((s) => s.containerName === `hp_bk_${restoreFullJobId}_${suffix}`);
           assert(Boolean(spec), `captured ${suffix} container`, JSON.stringify(createSpecs.map((s) => s.containerName)));
           assert(
-            /^hp_bk_op_[0-9a-f]{32}_rs_(?:fetch|prepare|switch|files|finish)$/.test(spec.containerName),
+            /^hp_bk_op_[0-9a-f]{32}_rs_(?:fetch|fetch_files|prepare|gate_on|switch|files|finish)$/.test(spec.containerName),
             `container ${spec.containerName} matches hp_bk_<jobId>_rs_*`,
             spec.containerName,
           );
@@ -1934,6 +1934,22 @@ async function main() {
               JSON.stringify(binds),
             );
           }
+          // C2 (R207 restore.1): no container of a restore mounts the site volume and the staging volume together.
+          assert(
+            !(binds.some((b) => b.includes(siteVolumeName)) && binds.some((b) => b.startsWith(`hp_bk_${restoreFullJobId}:`))),
+            `${suffix} never mounts the site volume and the staging volume together`,
+            JSON.stringify(binds),
+          );
+          if (suffix === "rs_fetch") {
+            const cmdText = [...(spec.createPayload?.Entrypoint ?? []), ...(spec.createPayload?.Cmd ?? [])].join("\n");
+            assert(
+              binds.some((b) => b === `hp_bk_${restoreFullJobId}:/var/tmp`) &&
+                cmdText.includes("S=/var/tmp/c") &&
+                cmdText.includes('"$HP_SNAP:/backup/databases" --target "$S/databases"'),
+              "_rs_fetch restores DB dumps strictly to /var/tmp/c/databases in staging",
+              "missing expected staging target",
+            );
+          }
           if (binds.some((b) => b.includes(siteVolumeName))) {
             const cmdText = [
               ...(spec.createPayload?.Entrypoint ?? []),
@@ -1947,19 +1963,141 @@ async function main() {
               `${suffix} does not place DB dumps inside site volume`,
               suffix,
             );
-            if (suffix === "rs_fetch") {
+            if (suffix === "rs_fetch_files") {
               assert(
-                binds.some((b) => b === `hp_bk_${restoreFullJobId}:/var/tmp`) &&
-                  cmdText.includes("R=/var/www/html/.hp_rs_$HP_H") &&
-                  cmdText.includes("S=/var/tmp/c") &&
-                  cmdText.includes('"$HP_SNAP:/backup/files" --target "$R/c/files"') &&
-                  cmdText.includes('"$HP_SNAP:/backup/databases" --target "$S/databases"'),
-                "_rs_fetch restores files under .hp_rs_ and DB dumps strictly to /var/tmp/c/databases",
-                "missing expected staging/files targets",
+                cmdText.includes("R=/var/www/html/.hp_rs_$HP_H") &&
+                  cmdText.includes('"$HP_SNAP:/backup/files" --target "$R/c/files"'),
+                "_rs_fetch_files restores files under .hp_rs_ in the site volume",
+                "missing expected files target",
               );
             }
           }
         }
+      });
+    }
+
+    // 6b-2. C2 (R207 restore.1): links the site plants where database copies were written never carry its text into MariaDB
+    if (!fatalSetupFailure) {
+      await runStep("restore-planted-link-never-replayed", async () => {
+        const plantDir = `/var/www/html/hp_plant_${runHex}`;
+        const plantedText = `PLANTED-${runHex}`;
+        const forged = `CREATE TABLE hp_planted_${runHex} (id INT); UPDATE hp_marker SET note='${plantedText}' WHERE id=1;\n`;
+        const racerName = `${runId}_racer`;
+        try {
+          // The site's files hold a forged dump and links to where the dumps were staged.
+          const plant = await runSiteHelper("plant", [
+            "-c",
+            [
+              "set -eu",
+              `mkdir -p ${plantDir}`,
+              `printf '%s' '${Buffer.from(forged, "utf8").toString("base64")}' | base64 -d > ${plantDir}/${db1Name}.sql`,
+              `ln -s /var/tmp/c/databases ${plantDir}/databases`,
+              `ln -s /var/tmp/c ${plantDir}/c`,
+              `sha256sum ${plantDir}/${db1Name}.sql`,
+            ].join("; "),
+          ]);
+          assert(plant.ok, "plant a forged dump and links in the site files", plant.stderr);
+          const forgedSha = plant.stdout.trim().split(/\s+/)[0];
+
+          const noteRes = await runSql(`SELECT note FROM \`${db1Name}\`.hp_marker WHERE id=1;`);
+          assert(noteRes.exitCode === 0, "read marker before backup", noteRes.stderr.toString("utf8"));
+          const backedUpNote = noteRes.stdout.toString("utf8").trim();
+
+          const bkJob = newJobId();
+          runJobIds.push(bkJob);
+          await adapter.backups({ action: "start", jobId: bkJob, siteId, serviceInstanceId, target: goodTarget });
+          const bk = await pollBackupJob(adapter, bkJob);
+          assert(bk.state === "succeeded" && bk.snapshot !== null, "backup of the planted site succeeds", JSON.stringify(bk));
+
+          const brk = await runSql(`UPDATE \`${db1Name}\`.hp_marker SET note='BROKEN-LINK-${runHex}' WHERE id=1;`);
+          assert(brk.exitCode === 0, "break marker before restore", brk.stderr.toString("utf8"));
+
+          // The site's code plants links inside the restore dir while the restore runs.
+          const restoreJob = newJobId();
+          runJobIds.push(restoreJob);
+          const restoreDir = `/var/www/html/.hp_rs_${restoreJob.slice(3)}`;
+          createdContainers.add(racerName);
+          const racer = await docker([
+            "run", "-d", "--name", racerName, "--network", "none", "--user", "33:33", "--read-only",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--entrypoint", "sh",
+            "-v", `${siteVolumeName}:/var/www/html`, WORDPRESS_IMAGE, "-c",
+            [
+              `R=${restoreDir}; n=0`,
+              "while [ $n -lt 3000 ]; do",
+              '  if [ -d "$R/c" ] && [ ! -L "$R/c/databases" ]; then ln -s /var/tmp/c/databases "$R/c/databases" 2>/dev/null && echo planted; fi',
+              '  if [ -d "$R" ] && [ ! -L "$R/databases" ]; then ln -s /var/tmp/c/databases "$R/databases" 2>/dev/null && echo planted; fi',
+              "  n=$((n+1)); sleep 0.05",
+              "done",
+            ].join("\n"),
+          ]);
+          assert(racer.ok, "start the site's racer", racer.stderr);
+
+          const specStart = capturedContainerSpecs.length;
+          await adapter.backups({
+            action: "restore",
+            jobId: restoreJob,
+            siteId,
+            serviceInstanceId,
+            target: goodTarget,
+            snapshotId: bk.snapshot.snapshotId,
+          });
+          const res = await pollBackupJob(adapter, restoreJob);
+          const racerLogs = await docker(["logs", racerName]);
+          assert(res.state === "succeeded" && res.failure === null, "restore of the planted site succeeds", JSON.stringify(res));
+          assert(racerLogs.stdout.includes("planted"), "the site planted a link inside the restore dir during the restore", racerLogs.stdout);
+
+          const after = await runSql(`SELECT note FROM \`${db1Name}\`.hp_marker WHERE id=1;`);
+          assert(after.exitCode === 0, "read marker after restore", after.stderr.toString("utf8"));
+          assert(
+            after.stdout.toString("utf8").trim() === backedUpNote,
+            "MariaDB holds the backed-up marker, not the planted text",
+            after.stdout.toString("utf8").trim(),
+          );
+          const planted = await runSql(
+            `SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_NAME='hp_planted_${runHex}';`,
+          );
+          assert(
+            planted.exitCode === 0 && planted.stdout.toString("utf8").trim() === "0",
+            "no table of the planted text exists anywhere",
+            planted.stdout.toString("utf8"),
+          );
+
+          // Nothing outside the site volume was reachable: every container with the site volume had no staging and a read-only root.
+          const specs = capturedContainerSpecs
+            .slice(specStart)
+            .filter((sp) => sp.phase === "create" && sp.containerName?.startsWith(`hp_bk_${restoreJob}_`));
+          assert(specs.length > 0, "captured the restore's containers", "0");
+          for (const sp of specs) {
+            const binds = sp.createPayload?.HostConfig?.Binds ?? [];
+            if (!binds.some((b) => b.includes(siteVolumeName))) continue;
+            assert(
+              !binds.some((b) => b.startsWith(`hp_bk_${restoreJob}:`)) && sp.createPayload?.HostConfig?.ReadonlyRootfs === true,
+              `${sp.containerName} with the site volume has no staging and a read-only root`,
+              JSON.stringify(binds),
+            );
+          }
+          const kept = await runSiteHelper(
+            "plantchk",
+            [
+              "-c",
+              `readlink ${plantDir}/databases; readlink ${plantDir}/c; sha256sum ${plantDir}/${db1Name}.sql`,
+            ],
+            { ro: true },
+          );
+          assert(
+            kept.ok &&
+              kept.stdout.split(/\r?\n/)[0] === "/var/tmp/c/databases" &&
+              kept.stdout.split(/\r?\n/)[1] === "/var/tmp/c" &&
+              kept.stdout.includes(forgedSha),
+            "the restored links and forged file are the site's own content, unchanged",
+            kept.stdout + kept.stderr,
+          );
+        } finally {
+          await docker(["rm", "-f", racerName]);
+          createdContainers.delete(racerName);
+          await runSiteHelper("unplant", ["-c", `rm -rf ${plantDir}`]).catch(() => undefined);
+        }
+        await assertNoRestoreLeftovers();
       });
     }
 

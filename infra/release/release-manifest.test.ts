@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error -- plain ESM script without type declarations
-import { listReleaseViolations, releaseImages, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
+import { keepWebBuildPath, listReleaseViolations, releaseImages, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
 import * as contracts from "../../packages/contracts/src/index.js";
 import { DEFAULT_TRAEFIK_IMAGE } from "../../apps/docker-executor/src/traefik-config.js";
 
@@ -24,6 +24,19 @@ function completeTree() {
 }
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+describe("the copy of the web build", () => {
+  it("leaves .next/cache, .next/dev and .next/trace out of the archive, and nothing else", () => {
+    const src = join(tmp(), "apps/web/.next");
+    for (const rel of ["BUILD_ID", "cache/webpack/x.pack", "dev/server/page.js", "trace", "server/app/cache/page.js", "static/chunks/a.js"]) touch(src, rel);
+    const out = join(tmp(), "apps/web/.next");
+    cpSync(src, out, { recursive: true, filter: keepWebBuildPath });
+    expect((readdirSync(out, { recursive: true, withFileTypes: true }) as { isFile(): boolean; parentPath: string; name: string }[])
+      .filter((e) => e.isFile()).map((e) => join(e.parentPath, e.name).slice(out.length + 1)).sort()).toEqual([
+      "BUILD_ID", "server/app/cache/page.js", "static/chunks/a.js",
+    ]);
+  });
 });
 
 describe("listReleaseViolations", () => {

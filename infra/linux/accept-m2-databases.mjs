@@ -511,6 +511,63 @@ async function main() {
   const dbShop = siteDatabaseFullName(prefixA, "shop");
   const userApp = siteDatabaseFullName(prefixA, "app");
 
+  // Runs the real db.provision job container for one site with the given password file.
+  const runProvisionJob = async (label, siteId, prefix, pwFile, pw) => {
+    const jobContainer = `${runId}_prov_${label}`;
+    const jobPayload = buildSiteJobContainerPayload(
+      {
+        jobId: `job_accept_${label}_${runHex}`,
+        kind: "db.provision",
+        siteId,
+        organizationId: `org_accept_${runHex}`,
+        params: { dbName: prefix, dbUser: prefix },
+        resolvedSecrets: { HP_DB_PASSWORD: pw },
+      },
+      {
+        executorUser: uidGid,
+        secretBinds: [`${pwFile}:/run/secrets/HP_DB_PASSWORD:ro`],
+        secretFileEnv: [],
+        rootKeyHostPath: rootKeyFile,
+      },
+    );
+    assert(
+      jobPayload.Cmd[2] === DB_PROVISION_SCRIPT,
+      "uses real DB_PROVISION_SCRIPT",
+      String(jobPayload.Cmd[2]),
+    );
+    assert(
+      jobPayload.Env.includes(`HP_DB_NAME_ESCAPED=${prefix.replaceAll("_", "\\_")}`),
+      "sets HP_DB_NAME_ESCAPED",
+      JSON.stringify(jobPayload.Env),
+    );
+
+    const isolatedJobPayload = {
+      ...jobPayload,
+      HostConfig: { ...jobPayload.HostConfig, NetworkMode: networkName },
+    };
+    const created = await dockerJson(
+      "POST",
+      `/containers/create?name=${encodeURIComponent(jobContainer)}`,
+      isolatedJobPayload,
+    );
+    createdContainers.add(jobContainer);
+    await dockerJson("POST", `/containers/${encodeURIComponent(created.Id)}/start`, {});
+    const waited = await dockerJson(
+      "POST",
+      `/containers/${encodeURIComponent(created.Id)}/wait`,
+      {},
+      [200],
+      90_000,
+    );
+    assert(
+      waited.StatusCode === 0,
+      `db.provision (${label}) exits 0`,
+      `exit=${String(waited.StatusCode)}`,
+    );
+    await docker(["rm", "-f", jobContainer]);
+    createdContainers.delete(jobContainer);
+  };
+
   try {
     // 1. Setup
     await runStep(
@@ -732,62 +789,6 @@ async function main() {
       await runStep(
         "provision-own-databases",
         async () => {
-          const runProvisionJob = async (label, siteId, prefix, pwFile, pw) => {
-            const jobContainer = `${runId}_prov_${label}`;
-            const jobPayload = buildSiteJobContainerPayload(
-              {
-                jobId: `job_accept_${label}_${runHex}`,
-                kind: "db.provision",
-                siteId,
-                organizationId: `org_accept_${runHex}`,
-                params: { dbName: prefix, dbUser: prefix },
-                resolvedSecrets: { HP_DB_PASSWORD: pw },
-              },
-              {
-                executorUser: uidGid,
-                secretBinds: [`${pwFile}:/run/secrets/HP_DB_PASSWORD:ro`],
-                secretFileEnv: [],
-                rootKeyHostPath: rootKeyFile,
-              },
-            );
-            assert(
-              jobPayload.Cmd[2] === DB_PROVISION_SCRIPT,
-              "uses real DB_PROVISION_SCRIPT",
-              String(jobPayload.Cmd[2]),
-            );
-            assert(
-              jobPayload.Env.includes(`HP_DB_NAME_ESCAPED=${prefix.replaceAll("_", "\\_")}`),
-              "sets HP_DB_NAME_ESCAPED",
-              JSON.stringify(jobPayload.Env),
-            );
-
-            const isolatedJobPayload = {
-              ...jobPayload,
-              HostConfig: { ...jobPayload.HostConfig, NetworkMode: networkName },
-            };
-            const created = await dockerJson(
-              "POST",
-              `/containers/create?name=${encodeURIComponent(jobContainer)}`,
-              isolatedJobPayload,
-            );
-            createdContainers.add(jobContainer);
-            await dockerJson("POST", `/containers/${encodeURIComponent(created.Id)}/start`, {});
-            const waited = await dockerJson(
-              "POST",
-              `/containers/${encodeURIComponent(created.Id)}/wait`,
-              {},
-              [200],
-              90_000,
-            );
-            assert(
-              waited.StatusCode === 0,
-              `db.provision (${label}) exits 0`,
-              `exit=${String(waited.StatusCode)}`,
-            );
-            await docker(["rm", "-f", jobContainer]);
-            createdContainers.delete(jobContainer);
-          };
-
           await runProvisionJob("a", siteA, prefixA, wpPwFileA, wpPwA);
           await runProvisionJob("b", siteB, prefixB, wpPwFileB, wpPwB);
 
@@ -1466,6 +1467,94 @@ async function main() {
           "dropAll on never-used site returns {}",
           JSON.stringify(dropNeverUsed),
         );
+      });
+
+      // 14a. C1: the owner-change statements give the site account a new password and cut its sessions
+      await runStep("owner-change-new-password", async () => {
+        const oldSession = await openSleepSession(runSql, prefixB, wpPwB);
+        const newPw = randomBytes(32).toString("hex");
+        secretsToGuard.add(newPw);
+        const newPwFile = path.join(tmpRoot, "wp-b-moved.key");
+        await writeFile(newPwFile, newPw, { mode: 0o400 });
+        await runProvisionJob("b_moved", siteB, prefixB, newPwFile, newPw);
+
+        const gone = await oldSession.waitForExit(10_000);
+        oldSession.close();
+        assert(gone.exited, "session opened with the old password is gone", "still open");
+        assert(
+          (await countUserSessions(runSql, prefixB)) === 0,
+          "no session of the site account left",
+          String(await countUserSessions(runSql, prefixB)),
+        );
+        const oldRes = await execClientSql(prefixB, wpPwB, "SELECT 1;");
+        assert(!oldRes.ok, "old password refused", `ok=${String(oldRes.ok)}`);
+        const newRes = await execClientSql(prefixB, newPw, `SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = '${prefixB}';`);
+        assert(newRes.ok && newRes.stdout.trim() === "1", "new password works and reaches the site database", newRes.stderr);
+      });
+
+      // 14b. H4: an account and grant made by hand the 0.5.0 way get the cap and the escaped grant
+      await runStep("upgrade-old-accounts", async () => {
+        const siteC = `site_accept_c_${runHex}`;
+        const prefixC = siteDatabasePrefix(siteC);
+        const lookalike = prefixC.replace("_", "x");
+        const otherUser = `other_${runHex}`;
+        const pwC = randomBytes(32).toString("hex");
+        const pwOther = randomBytes(32).toString("hex");
+        secretsToGuard.add(pwC);
+        secretsToGuard.add(pwOther);
+        const made = await runSql(
+          [
+            `CREATE DATABASE \`${prefixC}\`;`,
+            `CREATE DATABASE \`${lookalike}\`;`,
+            `CREATE USER '${prefixC}'@'%' IDENTIFIED BY '${pwC}';`,
+            `GRANT ALL PRIVILEGES ON \`${prefixC}\`.* TO '${prefixC}'@'%';`,
+            `CREATE USER '${otherUser}'@'%' IDENTIFIED BY '${pwOther}';`,
+            `GRANT ALL PRIVILEGES ON \`${prefixC}\`.* TO '${otherUser}'@'%';`,
+            "",
+          ].join("\n"),
+          { timeoutMs: 15_000 },
+        );
+        assert(made.exitCode === 0, "0.5.0-style account created", made.stderr.toString("utf8"));
+        const before = await execClientSql(prefixC, pwC, `USE \`${lookalike}\`;`);
+        assert(before.ok, "the unescaped grant reaches the look-alike database before the pass", before.stderr);
+
+        const state = async () => {
+          const res = await runSql(
+            `SELECT User, max_user_connections FROM mysql.user WHERE User IN ('${prefixC}', '${otherUser}') ORDER BY User;\n` +
+              `SELECT User, Db FROM mysql.db WHERE User IN ('${prefixC}', '${otherUser}') ORDER BY User, Db;\n`,
+            { timeoutMs: 10_000 },
+          );
+          assert(res.exitCode === 0, "state query succeeds", res.stderr.toString("utf8"));
+          return res.stdout.toString("utf8").trim();
+        };
+        const otherBefore = (await state()).split("\n").filter((l) => l.startsWith(otherUser));
+
+        const first = await adapter.upgradeDatabaseAccounts();
+        assert(first.capped === 1 && first.regranted === 1, "first pass caps 1 and re-grants 1", JSON.stringify(first));
+        const after = await state();
+        const escaped = prefixC.replaceAll("_", "\\_");
+        assert(after.includes(`${prefixC}\t40`), "site account capped at 40", after);
+        assert(
+          after.split("\n").filter((l) => l.startsWith(`${prefixC}\t`)).includes(`${prefixC}\t${escaped}`) &&
+            !after.split("\n").includes(`${prefixC}\t${prefixC}`),
+          "only the escaped grant is left",
+          after,
+        );
+        const otherAfter = after.split("\n").filter((l) => l.startsWith(otherUser));
+        assert(JSON.stringify(otherAfter) === JSON.stringify(otherBefore), "non-site account untouched", JSON.stringify({ otherBefore, otherAfter }));
+
+        const rw = await execClientSql(
+          prefixC,
+          pwC,
+          `CREATE TABLE \`${prefixC}\`.t (i INT); INSERT INTO \`${prefixC}\`.t VALUES (7); SELECT i FROM \`${prefixC}\`.t;`,
+        );
+        assert(rw.ok && rw.stdout.trim() === "7", "account still reads and writes its database", rw.stderr);
+        const lookalikeAfter = await execClientSql(prefixC, pwC, `USE \`${lookalike}\`;`);
+        assert(!lookalikeAfter.ok, "account no longer reaches the look-alike database", `ok=${String(lookalikeAfter.ok)}`);
+
+        const second = await adapter.upgradeDatabaseAccounts();
+        assert(second.capped === 0 && second.regranted === 0, "second pass changes nothing", JSON.stringify(second));
+        assert((await state()) === after, "state unchanged by the second pass", await state());
       });
 
       // 15. The server was never restarted

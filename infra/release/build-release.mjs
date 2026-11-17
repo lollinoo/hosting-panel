@@ -67,6 +67,9 @@ function forbidden(rel) {
   return name === ".env" || (name.startsWith(".env.") && name !== ".env.example");
 }
 
+/** Copy filter of apps/web/.next: the build cache, the dev build and the trace stay out. */
+export const keepWebBuildPath = (src) => !/[/\\]\.next[/\\](cache|dev|trace)([/\\]|$)/.test(src);
+
 /** @param {string} dir @returns {Promise<string[]>} */
 export async function listReleaseViolations(dir) {
   const root = path.resolve(dir);
@@ -153,7 +156,7 @@ async function main() {
     }
   }
   copy("apps/web/next.config.mjs");
-  copy("apps/web/.next", (src) => !/[/\\]\.next[/\\](cache|dev|trace)([/\\]|$)/.test(src));
+  copy("apps/web/.next", keepWebBuildPath);
   copy("infra/systemd");
   copy("infra/linux", (src) => !src.endsWith(".mjs") && !src.endsWith(".test.ts"));
 
