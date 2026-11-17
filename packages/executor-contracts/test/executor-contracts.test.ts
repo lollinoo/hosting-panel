@@ -294,6 +294,7 @@ describe("Phase1DisabledDockerExecutor site capabilities", () => {
       executor.closeTerminal({ sessionId }),
       executor.listTerminals(),
       executor.restartPanelContainer({ component: "sftp" }),
+      executor.applyPanelContainerPin("phpmyadmin"),
     ];
     for (const call of calls) await expect(call).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });

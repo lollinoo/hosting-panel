@@ -11,6 +11,7 @@ import type {
   DockerExecutionResult,
   DockerExecutorPort,
   PanelContainerStatus,
+  PinnedPanelContainer,
   ServiceLogLine,
   SiteDatabasesRequest,
   SiteDatabasesResult,
@@ -103,6 +104,10 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async restartPanelContainer(_req: { component: PanelContainer }): Promise<{ startedAt: string | null }> {
+    return this.refuse();
+  }
+
+  async applyPanelContainerPin(_component: PinnedPanelContainer): Promise<PanelContainerStatus> {
     return this.refuse();
   }
 

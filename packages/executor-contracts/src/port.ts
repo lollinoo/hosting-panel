@@ -5,6 +5,7 @@ import type {
   OperationStatus,
   PanelContainer,
   PanelContainerState,
+  PINNED_PANEL_CONTAINERS,
   SftpAccessApplyRequest,
   SftpApplyResult,
   SftpStatusReport,
@@ -88,6 +89,8 @@ export interface DockerExecutorPort {
   listTerminals(): Promise<readonly TerminalSessionRecord[]>;
   /** Restarts one existing panel container; never creates one. */
   restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }>;
+  /** Re-ensures one pinned panel container, recreating it when its image differs from the pin. */
+  applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus>;
 }
 
 export type TerminalExecutorEndReason = "closed" | "shell_exited" | "idle" | "time_limit" | "container_gone";
@@ -100,12 +103,16 @@ export interface TerminalSessionRecord {
   readonly containerName: string; readonly openedAt: string; readonly ended: TerminalEnded | null;
 }
 
+export type PinnedPanelContainer = (typeof PINNED_PANEL_CONTAINERS)[number];
+
 export interface PanelContainerStatus {
   readonly component: PanelContainer;
   readonly state: PanelContainerState;
   readonly expected: boolean;
   readonly startedAt: string | null;
   readonly restartCount: number;
+  /** Whether the image the container was created from is the pin; null when it does not exist. */
+  readonly imageCurrent?: boolean | null;
 }
 
 export interface SiteRoutesRequest {
