@@ -189,7 +189,7 @@ export class BackupSchedulerService {
         const orphanSiteIds = await listOrphanSiteIdsWithBackupsBefore(tx, cutoff);
         let pruned = 0;
         if (orphanSiteIds.length > 0) {
-          await this.#ensurePlatformOpsOrg(tx);
+          await ensurePlatformOpsOrg(tx);
           for (const orphanSiteId of orphanSiteIds) {
             try {
               await tx.transaction(async (sp) => {
@@ -247,7 +247,7 @@ export class BackupSchedulerService {
     if (!this.config.panelDump) {
       return false;
     }
-    await this.#ensurePlatformOpsOrg(tx);
+    await ensurePlatformOpsOrg(tx);
     try {
       await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
         organizationId: PLATFORM_OPS_ORG_ID,
@@ -268,34 +268,35 @@ export class BackupSchedulerService {
       throw err;
     }
   }
+}
 
-  async #ensurePlatformOpsOrg(tx: DatabaseExecutor): Promise<void> {
-    const [existing] = await tx
-      .select({ id: organizations.id })
-      .from(organizations)
-      .where(eq(organizations.id, PLATFORM_OPS_ORG_ID))
-      .limit(1);
-    if (existing) {
-      return;
-    }
-
-    const [inst] = await tx
-      .select({ id: platformInstallations.id })
-      .from(platformInstallations)
-      .limit(1);
-    if (!inst) {
-      return;
-    }
-
-    await tx
-      .insert(organizations)
-      .values({
-        id: PLATFORM_OPS_ORG_ID,
-        platformInstallationId: inst.id,
-        name: "Platform Infrastructure Operations",
-        slug: PLATFORM_OPS_ORG_SLUG,
-        status: "active",
-      })
-      .onConflictDoNothing();
+/** Creates the platform operations organization once an installation exists. */
+export async function ensurePlatformOpsOrg(tx: DatabaseExecutor): Promise<void> {
+  const [existing] = await tx
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.id, PLATFORM_OPS_ORG_ID))
+    .limit(1);
+  if (existing) {
+    return;
   }
+
+  const [inst] = await tx
+    .select({ id: platformInstallations.id })
+    .from(platformInstallations)
+    .limit(1);
+  if (!inst) {
+    return;
+  }
+
+  await tx
+    .insert(organizations)
+    .values({
+      id: PLATFORM_OPS_ORG_ID,
+      platformInstallationId: inst.id,
+      name: "Platform Infrastructure Operations",
+      slug: PLATFORM_OPS_ORG_SLUG,
+      status: "active",
+    })
+    .onConflictDoNothing();
 }

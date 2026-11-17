@@ -4,14 +4,22 @@ import {
   AdminCreateSiteInputSchema,
   ChangeSiteOwnerInputSchema,
   DeleteSiteInputSchema,
+  RestartInputSchema,
   SiteActionInputSchema,
   type AdminSitesListDto,
   type SiteDomainsDto,
 } from "@hosting-panel/contracts";
+import { appendAuditEvent } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { requireServerAdmin } from "../auth/server-admin.guard.js";
-import { ControlPlaneError, requireIdempotencyKey } from "../common/control-plane.error.js";
+import {
+  ControlPlaneError,
+  extractClientIp,
+  extractRawHeader,
+  requireIdempotencyKey,
+  resolveRequestId,
+} from "../common/control-plane.error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { ManagedSitesService, type ManagedSiteAccepted } from "../sites/managed-sites.service.js";
 import { SiteDomainsService, requestedHostnames } from "../sites/site-domains.service.js";
@@ -75,6 +83,36 @@ export class AdminSitesController {
     }
     const accepted = await this.sitesService.adminRetry(siteId, auth.user.id, idempotencyKey);
     return this.#done(auth, req, "admin.site.retry", accepted);
+  }
+
+  /** Restarts the site's container with a reason kept in the audit row. */
+  @Post(":siteId/restart")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public async restart(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: ManagedSiteAccepted }> {
+    const auth = await requireServerAdmin(this.authz, req, siteId, "site");
+    const idempotencyKey = requireIdempotencyKey(headersOf(req));
+    const { reason } = RestartInputSchema.parse(raw ?? {});
+    const owner = await this.sitesService.ownerOf(siteId);
+    // The row is written with the operation, once: a failed insert queues nothing (R195 1.4).
+    const accepted = await this.sitesService.act(siteId, owner, "restart", auth.user.id, idempotencyKey, (tx, operationId) =>
+      appendAuditEvent(tx, {
+        actorId: auth.user.id,
+        actorType: "user",
+        organizationId: null,
+        action: "admin.site.restart",
+        targetType: "site",
+        targetId: siteId,
+        ipAddress: extractClientIp(req),
+        userAgent: extractRawHeader(headersOf(req), "user-agent"),
+        details: { outcome: "succeeded", requestId: resolveRequestId(req), operationId, reason },
+      }).then(() => undefined),
+    );
+    this.outboxWorker.triggerAsync();
+    return { data: accepted };
   }
 
   @Delete(":siteId")
