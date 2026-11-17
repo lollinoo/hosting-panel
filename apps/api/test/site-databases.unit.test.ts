@@ -96,6 +96,7 @@ class MockDockerExecutor implements DockerExecutorPort {
   public closeTerminal: DockerExecutorPort["closeTerminal"] = (req) => this.#base.closeTerminal(req);
   public listTerminals: DockerExecutorPort["listTerminals"] = () => this.#base.listTerminals();
   public restartPanelContainer: DockerExecutorPort["restartPanelContainer"] = (req) => this.#base.restartPanelContainer(req);
+  public applyPanelContainerPin: DockerExecutorPort["applyPanelContainerPin"] = (c) => this.#base.applyPanelContainerPin(c);
   public siteFiles: DockerExecutorPort["siteFiles"] = (req) => this.#base.siteFiles(req);
 
   public async siteDatabases<R extends SiteDatabasesRequest>(

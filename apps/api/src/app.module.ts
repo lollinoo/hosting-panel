@@ -20,6 +20,11 @@ import { AdminMailRelayController } from "./controllers/admin-mail-relay.control
 import { AdminHealthController } from "./controllers/admin-health.controller.js";
 import { AdminLogsController } from "./controllers/admin-logs.controller.js";
 import { AdminTerminalController } from "./controllers/admin-terminal.controller.js";
+import { AdminFirewallController } from "./controllers/admin-firewall.controller.js";
+import { AdminHostController } from "./controllers/admin-host.controller.js";
+import { AdminUpdatesController } from "./controllers/admin-updates.controller.js";
+import { FirewallService } from "./firewall/firewall.service.js";
+import { UpdatesService } from "./updates/updates.service.js";
 import { AdminHealthService } from "./health/admin-health.service.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
@@ -109,6 +114,9 @@ export class AppModule {
         AdminHealthController,
         AdminLogsController,
         AdminTerminalController,
+        AdminFirewallController,
+        AdminHostController,
+        AdminUpdatesController,
       ],
       providers: [
         {
@@ -157,6 +165,8 @@ export class AppModule {
         SupportAccessService,
         AdminHealthService,
         AdminTerminalService,
+        FirewallService,
+        UpdatesService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,

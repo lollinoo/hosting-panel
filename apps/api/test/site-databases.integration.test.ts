@@ -137,6 +137,7 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
   public closeTerminal: DockerExecutorPort["closeTerminal"] = (req) => this.sim.closeTerminal(req);
   public listTerminals: DockerExecutorPort["listTerminals"] = () => this.sim.listTerminals();
   public restartPanelContainer: DockerExecutorPort["restartPanelContainer"] = (req) => this.sim.restartPanelContainer(req);
+  public applyPanelContainerPin: DockerExecutorPort["applyPanelContainerPin"] = (c) => this.sim.applyPanelContainerPin(c);
   public siteFiles: DockerExecutorPort["siteFiles"] = (req) => this.sim.siteFiles(req);
   public applySftpAccess: DockerExecutorPort["applySftpAccess"] = (req) =>
     this.sim.applySftpAccess(req);

@@ -53,6 +53,7 @@ import {
 } from "./common/control-plane.error.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { AdminTerminalService, TERMINAL_SWEEP_INTERVAL_MS } from "./terminal/admin-terminal.service.js";
+import { FirewallService } from "./firewall/firewall.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "./tokens.js";
 
@@ -535,6 +536,7 @@ export async function createControlPlaneApp(
   const siteSftp = nestApp.get(SiteSftpService);
   const backupScheduler = nestApp.get(BackupSchedulerService);
   const terminal = nestApp.get(AdminTerminalService);
+  const firewall = nestApp.get(FirewallService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
@@ -548,6 +550,7 @@ export async function createControlPlaneApp(
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
   mailRelay.startBackgroundLoop();
+  if (runtimeBackend !== "disabled") void firewall.syncAtStart();
   siteSftp.startBackgroundLoop();
   backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
   terminal.startBackgroundLoop(options?.terminalSweepIntervalMs !== undefined ? options.terminalSweepIntervalMs : TERMINAL_SWEEP_INTERVAL_MS);
@@ -578,6 +581,7 @@ export async function createControlPlaneApp(
       isClosed = true;
 
       await terminal.stop();
+      await firewall.stop();
       await backupScheduler.stop();
       await outboxWorker.stop();
       await driftReconciler.stop();

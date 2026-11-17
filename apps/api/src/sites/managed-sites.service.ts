@@ -400,6 +400,7 @@ export class ManagedSitesService {
     phpVersion: PhpVersion,
     actorId: string,
     idempotencyKey?: string,
+    onNew?: (tx: HostingPanelDatabase, operationId: string) => Promise<unknown>,
   ): Promise<ManagedSiteAccepted> {
     const site = await this.#loadSite(siteId, organizationId);
     const svc = await this.#webService(site);
@@ -457,6 +458,7 @@ export class ManagedSitesService {
           .update(sites)
           .set({ phpVersion, updatedAt: new Date() })
           .where(eq(sites.id, siteId));
+        await onNew?.(t, enqueued.operation.id);
       }
       return { siteId, operationId: enqueued.operation.id };
     });
