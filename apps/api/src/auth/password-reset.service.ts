@@ -5,8 +5,11 @@ import {
   appendAuditEvent,
   createPasswordResetToken,
   eq,
+  gt,
   hosts,
   isNull,
+  passwordResetTokens,
+  sql,
   usePasswordResetToken,
   userSessions,
   users,
@@ -80,10 +83,17 @@ export class PasswordResetService implements OnModuleDestroy {
 
   /** Sets the new password with a token from the mail and ends every session of the account. */
   public async confirm(token: string, newPassword: string): Promise<void> {
-    // Policy and scrypt first: a weak password does not use the token up, and no lock is held during scrypt.
+    // Policy and scrypt before the transaction: a weak password does not use the token up, and no lock is held during scrypt.
     assertPasswordPolicy(newPassword);
-    const passwordHash = await hashPassword(newPassword);
     const tokenHash = sha256(token);
+    // Read-only look with the conditions of usePasswordResetToken, so a token that is not there costs no hash.
+    const [live] = await this.dbClient.db
+      .select({ id: passwordResetTokens.id })
+      .from(passwordResetTokens)
+      .where(and(eq(passwordResetTokens.tokenHash, tokenHash), isNull(passwordResetTokens.usedAt), gt(passwordResetTokens.expiresAt, sql`now()`)))
+      .limit(1);
+    if (!live) throw invalid();
+    const passwordHash = await hashPassword(newPassword);
     await this.dbClient.db.transaction(async (tx) => {
       const userId = await usePasswordResetToken(tx, tokenHash);
       if (userId === null) throw invalid();

@@ -17,6 +17,7 @@ import {
 import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { AuthzContextService } from "../src/auth/authz-context.service.js";
 import { hashPassword } from "../src/auth/password.js";
 import { SUPPORT_ACCESS_PERMISSIONS, SUPPORT_ACCESS_TTL_MS } from "../src/auth/support-access.service.js";
 import { totpCodeAt } from "../src/auth/totp.js";
@@ -207,6 +208,7 @@ describe("support access tenancy over every organization route", () => {
 
   afterEach(async () => {
     await dbClient.db.delete(supportAccessGrants);
+    (app.nestApp.get(AuthzContextService) as unknown as { deniedWindows: Map<string, unknown> }).deniedWindows.clear();
   });
 
   afterAll(async () => {

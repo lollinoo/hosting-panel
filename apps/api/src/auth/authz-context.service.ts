@@ -66,8 +66,15 @@ export interface AuthenticatedRequestContext {
   readonly activeMembershipSummaries: readonly AuthenticatedMembershipSummary[];
 }
 
+// Rows of refused requests per actor and minute: above the ~55 of one sweep of every admin route.
+const DENIED_ROWS_PER_MINUTE = 120;
+const DENIED_ACTORS_MAX = 10_000;
+
 @Injectable()
 export class AuthzContextService {
+  // shortcut: one fixed minute per actor in this process (a burst across two minutes can write 240), enough while one API process runs.
+  private readonly deniedWindows = new Map<string, { start: number; count: number }>();
+
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(OidcService) private readonly oidcService: OidcService,
@@ -381,6 +388,7 @@ export class AuthzContextService {
       readonly details?: Record<string, unknown>;
     },
   ): Promise<void> {
+    if (!this.#deniedRowAllowed(auth.user.id)) return;
     await appendAuditEvent(this.dbClient.db, {
       actorId: auth.user.id,
       actorType: "user",
@@ -401,6 +409,23 @@ export class AuthzContextService {
         ...(input.details ?? {}),
       },
     });
+  }
+
+  /** Counts a denied row for the actor; false once 120 were written in its current minute. */
+  #deniedRowAllowed(actorId: string): boolean {
+    const now = Date.now();
+    let window = this.deniedWindows.get(actorId);
+    if (!window || now - window.start >= 60_000) {
+      this.deniedWindows.delete(actorId);
+      // The map is bounded: the oldest window goes first.
+      if (this.deniedWindows.size >= DENIED_ACTORS_MAX) this.deniedWindows.delete(this.deniedWindows.keys().next().value!);
+      window = { start: now, count: 0 };
+      this.deniedWindows.set(actorId, window);
+    }
+    window.count += 1;
+    // R207 a.6: the first row the cap drops in a window leaves one trace, nothing of the request.
+    if (window.count === DENIED_ROWS_PER_MINUTE + 1) console.warn(JSON.stringify({ event: "audit_denied_rows_capped", actorId }));
+    return window.count <= DENIED_ROWS_PER_MINUTE;
   }
 
   public async recordAudit(

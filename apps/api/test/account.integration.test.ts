@@ -8,10 +8,16 @@ import {
   type DatabaseClient,
 } from "@hosting-panel/database";
 import { findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import * as crypto from "node:crypto";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../src/auth/password.js";
 import { generateTotpSecret, totpCodeAt } from "../src/auth/totp.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, scrypt: vi.fn(actual.scrypt) };
+});
 
 const MASTER_KEY = Buffer.alloc(32, 7);
 const PASSWORD = "correct horse battery";
@@ -225,6 +231,37 @@ describe("self-service account API", () => {
     const off = await call(b, "POST", "/v1/me/totp/disable", { password: PASSWORD, code: codeNow(secret, 1) });
     expect(off.status).toBe(204);
     expect((await dbClient.db.select().from(users).where(eq(users.id, "usr_b")))[0]!.lockedUntil).toBeNull();
+  });
+
+  it("with the password gate full, changing the password or turning off 2FA answers 429 and counts no try", async () => {
+    const secret = generateTotpSecret();
+    await seed("usr_a");
+    await seed("usr_b", { totpSecret: secret });
+    const a = await loginToken("usr_a");
+    const b = await loginToken("usr_b", PASSWORD, codeNow(secret));
+    const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+    const held: Parameters<typeof actual.scrypt>[] = [];
+    vi.mocked(crypto.scrypt).mockImplementation(((...args: Parameters<typeof actual.scrypt>) => {
+      held.push(args);
+    }) as typeof actual.scrypt);
+    // 2 run (held inside scrypt) and 16 wait: the gate is full.
+    const busy = Array.from({ length: 18 }, () => hashPassword("sentinel-busy-pass"));
+    try {
+      for (const [token, path, body] of [
+        [a, "/v1/me/password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD }],
+        [b, "/v1/me/totp/disable", { password: PASSWORD, code: codeNow(secret, 1) }],
+      ] as const) {
+        const res = await call(token, "POST", path, body);
+        expect(res.status).toBe(429);
+        expect(((await res.json()) as { error: { code: string } }).error.code).toBe("RATE_LIMITED");
+      }
+    } finally {
+      vi.mocked(crypto.scrypt).mockImplementation(actual.scrypt);
+      for (const args of held) actual.scrypt(...args);
+      await Promise.all(busy);
+    }
+    const rows = await dbClient.db.select().from(users);
+    expect(rows.map((r) => [r.id, r.failedLoginCount, r.lockedUntil]).sort()).toEqual([["usr_a", 0, null], ["usr_b", 0, null]]);
   });
 
   it("wrong codes on disable are capped", async () => {

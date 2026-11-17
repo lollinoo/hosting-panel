@@ -22,6 +22,7 @@ import {
   sites,
   sql,
   upsertBackupSettings,
+  upsertEncryptedSecretTransactional,
   users,
   type DatabaseClient,
   type HostingPanelDatabase,
@@ -44,10 +45,13 @@ import {
 import {
   SITE_ARCHIVE_STEPS,
   SITE_RESTORE_STEPS,
+  SiteRestoreApplier,
 } from "../src/backups/site-restore-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { SITE_STEP_LEASE_MS } from "../src/runtime/site-provisioner.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { WORDPRESS_API_SITE_TYPE } from "../src/site-types/wordpress.js";
+import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../src/tokens.js";
 
 let beforeResolveSiteFilesServiceId: (() => Promise<void>) | null = null;
 let onRenewOperationLease:
@@ -643,8 +647,9 @@ describe("site restore and download applier (M3b)", () => {
     });
 
     // A thrown error from runSiteJob also yields address_not_updated and keeps the restore succeeded.
-    sim.onJob = async () => {
-      throw new Error("executor timeout");
+    // Only the address job throws; the database password job runs inside the restore step (C1).
+    sim.onJob = async (req) => {
+      if (req.kind === "wordpress.set-url") throw new Error("executor timeout");
     };
     const { backupId: thrownBackupId } = await seedSucceededBackup();
     const { operationId: thrownOpId } = await enqueueRestore(thrownBackupId);
@@ -1042,6 +1047,95 @@ describe("site restore and download applier (M3b)", () => {
     });
   });
 
+  // C1: an owner change gave the site a new database password; a backup from before holds the old one in its files.
+  const MOVED_PW = "c1".repeat(32);
+  const giveNewDatabasePassword = () =>
+    upsertEncryptedSecretTransactional(dbClient.db, {
+      organizationId: orgAId,
+      siteId: siteA1Id,
+      secretKey: "SITE_DB_PASSWORD",
+      value: MOVED_PW,
+      masterKey: KEY,
+      actorId: null,
+    });
+  const kinds = () => sim.jobs.map((j) => j.kind);
+
+  it("a restore after an owner change writes the stored database password into the site's files before the address job (C1)", async () => {
+    await giveNewDatabasePassword();
+    const { backupId } = await seedSucceededBackup();
+    const { operationId } = await enqueueRestore(backupId);
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
+    expect(kinds()).toEqual(["wordpress.settle", "wordpress.set-url"]);
+    expect(sim.jobs[0]).toMatchObject({
+      jobId: `job_${operationId.replace(/^op_/, "")}_rdbpw`,
+      siteId: siteA1Id,
+      organizationId: orgAId,
+      serviceInstanceId: siteA1ServiceId,
+      params: { phpVersion: "8.4" },
+      resolvedSecrets: { HP_DB_PASSWORD: MOVED_PW },
+    });
+    const dump = JSON.stringify([
+      await dbClient.db.select().from(operations),
+      await dbClient.db.select().from(operationSteps),
+      await dbClient.db.select().from(auditEvents),
+      await dbClient.db.select().from(outboxEvents),
+    ]);
+    expect(dump).not.toContain(MOVED_PW);
+
+    // A configuration the job cannot rewrite is left as it is, and the restore ends as before.
+    sim.jobs.length = 0;
+    sim.failNextJob("wordpress.settle", 20, "");
+    const { backupId: b2 } = await seedSucceededBackup();
+    const { operationId: op2 } = await enqueueRestore(b2);
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
+    expect(kinds()).toEqual(["wordpress.settle", "wordpress.set-url"]);
+    expect((await dbClient.db.select().from(operations).where(eq(operations.id, op2)))[0]?.status).toBe("succeeded");
+
+    // Any other failure of the job fails the restore step; the address job never runs.
+    sim.jobs.length = 0;
+    sim.failNextJob("wordpress.settle", 1, "");
+    const { backupId: b3 } = await seedSucceededBackup();
+    const { operationId: op3 } = await enqueueRestore(b3);
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 0, failed: 1 });
+    expect(kinds()).toEqual(["wordpress.settle"]);
+    expect((await dbClient.db.select().from(operations).where(eq(operations.id, op3)))[0]?.status).toBe("failed");
+    const steps3 = await dbClient.db.select().from(operationSteps).where(eq(operationSteps.operationId, op3));
+    expect(steps3.find((s) => s.key === "restore")?.status).toBe("failed");
+    const [row3] = await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, b3));
+    expect(row3?.restoreStatus).toBe("failed");
+    // The files and databases were already switched: the site is not as it was.
+    expect(row3?.restoreProblem).toBe("undo_incomplete");
+  });
+
+  it("recovery that finishes a restore also writes the stored database password before the address job (C1)", async () => {
+    await giveNewDatabasePassword();
+    applier.pollMs = 15;
+    applier.pollGiveUpMs = 45;
+    const { backupId } = await seedSucceededBackup();
+    const { operationId } = await enqueueRestore(backupId);
+    executorScript.setStatusSequence(operationId, [new Error("status timeout")]);
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 0, failed: 1 });
+    expect(kinds()).toEqual([]);
+
+    executorScript.setStatusSequence(operationId, [{ jobId: operationId, state: "succeeded", failure: null, snapshot: null }]);
+    expect(await app.outboxWorker.recoverUnknownOperations()).toEqual({ markedUnknown: 0, convergedSucceeded: 1, convergedFailed: 0 });
+    expect(kinds()).toEqual(["wordpress.settle", "wordpress.set-url"]);
+    expect(sim.jobs[0]?.resolvedSecrets).toEqual({ HP_DB_PASSWORD: MOVED_PW });
+  });
+
+  it("a site type without the database password job runs nothing for it at a restore (C1)", async () => {
+    const config = app.nestApp.get<ControlPlaneRuntimeConfig>(CONTROL_PLANE_CONFIG_TOKEN);
+    const restorer = new SiteRestoreApplier(applier, dbClient, sim, config, () => ({
+      ...WORDPRESS_API_SITE_TYPE,
+      databasePasswordJob: null,
+    }));
+    vi.spyOn(applier, "apply").mockImplementation((op) => restorer.apply(op));
+    const { backupId } = await seedSucceededBackup();
+    await enqueueRestore(backupId);
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
+    expect(kinds()).toEqual(["wordpress.set-url"]);
+  });
+
   it("runs only the address step when recovering a restore whose restore step already succeeded", async () => {
     const { backupId } = await seedSucceededBackup({
       siteUrl: "http://pre-crash.hotelroma-restore.it",
@@ -1258,8 +1352,9 @@ describe("site restore and download applier (M3b)", () => {
     const oldDate = new Date(Date.now() - 20 * 86_400_000);
     const newerDate = new Date(Date.now() - 1 * 86_400_000);
 
-    // Newer backup kept as latest.
-    await seedSucceededBackup({ startedAt: newerDate, kind: "nightly" });
+    // The newest retentionDays good copies stay whatever their age (R207 restore.3), so fill them with newer copies.
+    for (let i = 0; i < SETTINGS.retentionDays; i++)
+      await seedSucceededBackup({ startedAt: new Date(newerDate.getTime() - i * 60_000), kind: "nightly" });
 
     // Expired succeeded backup with a ready archive -> must call discardArchive once before delete.
     const { backupId: oldForgottenId } = await seedSucceededBackup({
@@ -1654,7 +1749,8 @@ describe("site restore and download applier (M3b)", () => {
 
   it("R105: marks a prune unknown on a lease-renewal DB error while the forget job is polled, and settles it via recovery without forgetting again", async () => {
     applier.pollMs = 15;
-    await seedSucceededBackup({ startedAt: new Date(Date.now() - 86_400_000), kind: "nightly" });
+    for (let i = 0; i < SETTINGS.retentionDays; i++)
+      await seedSucceededBackup({ startedAt: new Date(Date.now() - 86_400_000 - i * 60_000), kind: "nightly" });
     await seedSucceededBackup({
       startedAt: new Date(Date.now() - 20 * 86_400_000),
       kind: "nightly",

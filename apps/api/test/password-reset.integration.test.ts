@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, scrypt } from "node:crypto";
 import {
   auditEvents,
   createDatabaseClient,
@@ -19,6 +19,16 @@ import { PasswordResetService } from "../src/auth/password-reset.service.js";
 import { hashPassword } from "../src/auth/password.js";
 import { generateTotpSecret, totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, scrypt: vi.fn(actual.scrypt) };
+});
+
+vi.mock("../src/auth/password.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/auth/password.js")>();
+  return { ...actual, hashPassword: vi.fn(actual.hashPassword) };
+});
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "sentinel-admin-pass";
@@ -354,5 +364,53 @@ describe("password reset by mail", () => {
       }
       expect(JSON.stringify(stored)).not.toContain(token);
     }
+  });
+  it("with the gate full, a confirmation with a token that does not exist answers invalid at once and starts no hash", async () => {
+    const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+    const held: Parameters<typeof actual.scrypt>[] = [];
+    vi.mocked(scrypt).mockImplementation(((...args: Parameters<typeof actual.scrypt>) => {
+      held.push(args);
+    }) as typeof actual.scrypt);
+    // 2 run (held inside scrypt) and 16 wait: the gate is full.
+    const busy = Array.from({ length: 18 }, () => hashPassword("sentinel-busy-pass"));
+    let junk: Awaited<ReturnType<typeof confirm>>;
+    try {
+      vi.mocked(hashPassword).mockClear();
+      junk = await confirm("sentinel-junk-token");
+      expect(junk.status).toBe(400);
+      expect(hashPassword).not.toHaveBeenCalled();
+      expect(held).toHaveLength(2);
+    } finally {
+      vi.mocked(scrypt).mockImplementation(actual.scrypt);
+      for (const args of held) actual.scrypt(...args);
+      await Promise.all(busy);
+    }
+    // The answer of a token that exists but no longer serves, which still costs a hash.
+    await configureRelay();
+    const token = tokenOf(await requestMail(EN));
+    await dbClient.db.update(users).set({ userStatus: "disabled" }).where(eq(users.email, EN));
+    const invalid = await confirm(token);
+    expect(invalid.body.error.code).toBe("PASSWORD_RESET_INVALID");
+    expect({ status: junk.status, code: junk.body.error?.code, message: junk.body.error?.message }).toEqual({
+      status: invalid.status,
+      code: invalid.body.error.code,
+      message: invalid.body.error.message,
+    });
+  });
+
+  it("a weak password leaves a real token usable", async () => {
+    await configureRelay();
+    const token = tokenOf(await requestMail());
+    expect((await confirm(token, "short")).body.error.code).toBe("VALIDATION_ERROR");
+    expect((await confirm(token)).status).toBe(204);
+  });
+
+  it("of two confirmations of one token at once, exactly one succeeds", async () => {
+    await configureRelay();
+    const token = tokenOf(await requestMail());
+    const answers = await Promise.all([confirm(token), confirm(token, "sentinel-new-pass-2")]);
+    expect(answers.map((a) => a.status).sort()).toEqual([204, 400]);
+    expect(answers.find((a) => a.status === 400)!.body.error.code).toBe("PASSWORD_RESET_INVALID");
+    expect(await audits("auth.password_reset.completed")).toHaveLength(1);
   });
 });

@@ -30,5 +30,14 @@ export const WORDPRESS_API_SITE_TYPE: ApiSiteType = {
     kind: "wordpress.set-url",
     params: { phpVersion: site.phpVersion ?? DEFAULT_PHP_VERSION, siteUrl, previousUrl },
   }),
+  // The DB_PASSWORD define of wp-config.php; exit 20 when the file does not hold exactly one.
+  databasePasswordJob: {
+    job: (site) => ({
+      kind: "wordpress.settle",
+      params: { phpVersion: site.phpVersion ?? DEFAULT_PHP_VERSION },
+      secrets: { HP_DB_PASSWORD: "SITE_DB_PASSWORD" },
+    }),
+    unwritableExitCode: 20,
+  },
   fileReasonMessages: { archive_not_wordpress: "The archive does not contain a WordPress site." },
 };

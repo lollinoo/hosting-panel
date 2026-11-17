@@ -553,9 +553,8 @@ export class ManagedSitesService {
       const code = (err as { code?: string } | null)?.code;
       // NOT_FOUND here is the site's container gone, not the site: never "does not exist".
       if (code === "NOT_FOUND" && containerGoneIsNotFound) throw err;
-      if (code === "NOT_SUPPORTED" || code === "DOCKER_ENGINE_UNAVAILABLE" || code === "NOT_FOUND")
-        throw unavailable;
-      throw err;
+      // What the executor said never reaches the caller (ADR 0026 2.3).
+      throw unavailable;
     }
   }
 

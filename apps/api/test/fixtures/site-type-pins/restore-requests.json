@@ -32,6 +32,24 @@
     {
       "args": [
         {
+          "jobId": "job_<id:1>_rdbpw",
+          "kind": "wordpress.settle",
+          "organizationId": "org_<id:5>",
+          "params": {
+            "phpVersion": "8.3"
+          },
+          "resolvedSecrets": {
+            "HP_DB_PASSWORD": "<present>"
+          },
+          "serviceInstanceId": "svc_<id:2>",
+          "siteId": "site_<id:3>"
+        }
+      ],
+      "method": "runSiteJob"
+    },
+    {
+      "args": [
+        {
           "jobId": "job_<id:1>_rurl",
           "kind": "wordpress.set-url",
           "organizationId": "org_<id:5>",

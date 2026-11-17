@@ -26,9 +26,11 @@ import {
   membershipRoles,
   memberships,
   operations,
+  operationSteps,
   organizations,
   outboxEvents,
   platformInstallations,
+  resolveDecryptedSecretRefs,
   rolePermissions,
   sites,
   users,
@@ -97,10 +99,13 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
   public readonly sim: InMemoryDockerSimulatorAdapter;
   public readonly sites = new Map<string, FakeSiteDbState>();
   public readonly dbCalls: SiteDatabasesRequest[] = [];
+  public readonly jobs: SiteJobRequest[] = [];
   public failDropAllWithNotSupportedForSite = new Set<string>();
   public failNextDropAllForSite = new Map<string, ErrorCode>();
   public failNextListForSite = new Map<string, ErrorCode>();
   public failNextSetUserPasswordForSite = new Map<string, ErrorCode>();
+  /** One-shot exit code of a site job, by "siteId kind". */
+  public nextJobExit = new Map<string, number>();
 
   public constructor() {
     this.sim = new InMemoryDockerSimulatorAdapter();
@@ -145,6 +150,12 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
   public backups: DockerExecutorPort["backups"] = (req) => this.sim.backups(req);
 
   public async runSiteJob(req: SiteJobRequest) {
+    this.jobs.push(req);
+    const forced = this.nextJobExit.get(`${req.siteId} ${req.kind}`);
+    if (forced !== undefined) {
+      this.nextJobExit.delete(`${req.siteId} ${req.kind}`);
+      return { jobId: req.jobId, exitCode: forced, outputTail: "" };
+    }
     const res = await this.sim.runSiteJob(req);
     if (res.exitCode === 0 && req.kind === "db.provision") {
       this.seedPrimary(req.siteId);
@@ -1172,7 +1183,7 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     expect(fakeExec.sites.has(disp3)).toBe(false);
   });
 
-  it("moving a site rotates extra database user passwords without touching primary user, databases, or grants", async () => {
+  it("moving a site gives the site's own account and every extra account a new password, keeping databases and grants (C1)", async () => {
     const slug = randomUUID().slice(0, 6);
     const created = await call(
       "POST",
@@ -1212,8 +1223,21 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
 
     expect(fakeExec.verifyUserPassword(moveSiteId, user1, pw1)).toBe(true);
     expect(fakeExec.verifyUserPassword(moveSiteId, user2, pw2)).toBe(true);
-    const primaryHashBefore = fakeExec.sites.get(moveSiteId)!.users.get(prefix)!.passwordHash;
+    const sitePassword = async (organizationId: string) =>
+      (await resolveDecryptedSecretRefs(dbClient.db, {
+        organizationId,
+        siteId: moveSiteId,
+        secretRefs: { P: "SITE_DB_PASSWORD" },
+        masterKey: KEY,
+      })).P!;
+    const pwBefore = await sitePassword(orgAId);
+    expect(pwBefore).toMatch(/^[0-9a-f]{64}$/);
     fakeExec.dbCalls.length = 0;
+    fakeExec.jobs.length = 0;
+    const logged: unknown[] = [];
+    const spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => void logged.push(args)),
+    );
 
     const moveRes = await call(
       "POST",
@@ -1233,6 +1257,19 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     );
     expect(moveOp.status).toBe(200);
     expect(moveOp.body.data.status).toBe("succeeded");
+    for (const spy of spies) spy.mockRestore();
+
+    // The stored password changed; the site's config job wrote it before db.provision set it.
+    const pwAfter = await sitePassword(orgBId);
+    expect(pwAfter).toMatch(/^[0-9a-f]{64}$/);
+    expect(pwAfter).not.toBe(pwBefore);
+    const siteJobs = fakeExec.jobs.filter((j) => j.siteId === moveSiteId);
+    expect(siteJobs.map((j) => j.kind)).toEqual(["wordpress.settle", "db.provision"]);
+    for (const j of siteJobs) {
+      expect(j.organizationId).toBe(orgBId);
+      expect(j.resolvedSecrets).toEqual({ HP_DB_PASSWORD: pwAfter });
+    }
+    expect(siteJobs[1]!.params).toEqual({ dbName: prefix, dbUser: prefix });
 
     const siteCalls = fakeExec.dbCalls.filter((c) => c.siteId === moveSiteId);
     expect(siteCalls.some((c) => c.op === "list")).toBe(true);
@@ -1247,7 +1284,6 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
 
     expect(fakeExec.verifyUserPassword(moveSiteId, user1, pw1)).toBe(false);
     expect(fakeExec.verifyUserPassword(moveSiteId, user2, pw2)).toBe(false);
-    expect(fakeExec.sites.get(moveSiteId)!.users.get(prefix)!.passwordHash).toBe(primaryHashBefore);
 
     const listAfter = await call(
       "GET",
@@ -1270,6 +1306,11 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     ]);
     for (const c of pwCalls) {
       expect(tableDump).not.toContain(c.passwordHash);
+    }
+    const logDump = JSON.stringify(logged);
+    for (const pw of [pwBefore, pwAfter]) {
+      expect(tableDump).not.toContain(pw);
+      expect(logDump).not.toContain(pw);
     }
   });
 
@@ -1348,6 +1389,133 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     expect(retryOp.status).toBe(200);
     expect(retryOp.body.data.status).toBe("succeeded");
     expect(fakeExec.verifyUserPassword(failMoveSiteId, user1, pw1)).toBe(false);
+  });
+
+  it("a site configuration the job cannot rewrite fails the move before MariaDB changes, and a retry completes it (C1)", async () => {
+    const slug = randomUUID().slice(0, 6);
+    const created = await call(
+      "POST",
+      `/v1/organizations/${orgAId}/managed-sites`,
+      {
+        name: `Move Cfg ${slug}`,
+        domain: `move-cfg-${slug}.example.test`,
+        title: `Move Cfg ${slug}`,
+        adminUser: "admin",
+        adminEmail: `admin@${slug}.example.test`,
+        adminPassword: "canary-Pass-123456",
+      },
+      ownerAToken,
+      { "Idempotency-Key": randomUUID() },
+    );
+    expect(created.status).toBe(202);
+    await app.outboxWorker.processPendingOnce();
+    const siteId = created.body.data.siteId as string;
+    const uRes = await call("POST", dbBase(orgAId, siteId, "/database-users"), { name: "app1" });
+    expect(uRes.status).toBe(201);
+    const user1 = uRes.body.data.user.name as string;
+    const pw1 = uRes.body.data.temporaryPassword as string;
+
+    const storedPassword = async (organizationId: string) =>
+      (await resolveDecryptedSecretRefs(dbClient.db, {
+        organizationId,
+        siteId,
+        secretRefs: { P: "SITE_DB_PASSWORD" },
+        masterKey: KEY,
+      })).P!;
+    const pwBefore = await storedPassword(orgAId);
+    fakeExec.jobs.length = 0;
+    fakeExec.nextJobExit.set(`${siteId} wordpress.settle`, 20);
+    const moveRes = await call(
+      "POST",
+      `/v1/admin/sites/${siteId}/owner`,
+      { ownerOrganizationId: orgBId },
+      adminToken,
+      { "Idempotency-Key": randomUUID() },
+    );
+    expect(moveRes.status).toBe(202);
+    await app.outboxWorker.processPendingOnce();
+    const failedOp = await call("GET", `/v1/organizations/${orgBId}/operations/${moveRes.body.data.operationId}`, undefined, ownerBToken);
+    expect(failedOp.body.data.status).toBe("failed");
+    expect(failedOp.body.data.errorMessage).toBe("The owner change did not finish");
+    // Nothing of MariaDB changed: no db.provision, and the extra account keeps its password.
+    expect(fakeExec.jobs.filter((j) => j.siteId === siteId).map((j) => j.kind)).toEqual(["wordpress.settle"]);
+    expect(fakeExec.verifyUserPassword(siteId, user1, pw1)).toBe(true);
+    // The stored password is still the one the site and MariaDB hold.
+    expect(await storedPassword(orgBId)).toBe(pwBefore);
+
+    const retryRes = await call("POST", `/v1/admin/sites/${siteId}/actions`, { action: "retry" }, adminToken, {
+      "Idempotency-Key": randomUUID(),
+    });
+    expect(retryRes.status).toBe(202);
+    await app.outboxWorker.processPendingOnce();
+    const retryOp = await call("GET", `/v1/organizations/${orgBId}/operations/${retryRes.body.data.operationId}`, undefined, ownerBToken);
+    expect(retryOp.body.data.status).toBe("succeeded");
+    expect(fakeExec.jobs.filter((j) => j.siteId === siteId).map((j) => j.kind)).toEqual([
+      "wordpress.settle",
+      "wordpress.settle",
+      "db.provision",
+    ]);
+    expect(fakeExec.verifyUserPassword(siteId, user1, pw1)).toBe(false);
+    // The retry stored exactly what its job wrote into the site.
+    const writes = fakeExec.jobs.filter((j) => j.siteId === siteId && j.kind === "wordpress.settle");
+    expect(await storedPassword(orgBId)).toBe(writes[1]?.resolvedSecrets?.["HP_DB_PASSWORD"]);
+    expect(writes[1]?.resolvedSecrets?.["HP_DB_PASSWORD"]).not.toBe(pwBefore);
+  });
+
+  it("a failed password job of a move keeps the stored database password (C1)", async () => {
+    const slug = randomUUID().slice(0, 6);
+    const created = await call(
+      "POST",
+      `/v1/organizations/${orgAId}/managed-sites`,
+      {
+        name: `Move Job ${slug}`,
+        domain: `move-job-${slug}.example.test`,
+        title: `Move Job ${slug}`,
+        adminUser: "admin",
+        adminEmail: `admin@${slug}.example.test`,
+        adminPassword: "canary-Pass-123456",
+      },
+      ownerAToken,
+      { "Idempotency-Key": randomUUID() },
+    );
+    expect(created.status).toBe(202);
+    await app.outboxWorker.processPendingOnce();
+    const siteId = created.body.data.siteId as string;
+    const storedPassword = async (organizationId: string) =>
+      (await resolveDecryptedSecretRefs(dbClient.db, {
+        organizationId,
+        siteId,
+        secretRefs: { P: "SITE_DB_PASSWORD" },
+        masterKey: KEY,
+      })).P!;
+    const pwBefore = await storedPassword(orgAId);
+
+    fakeExec.jobs.length = 0;
+    fakeExec.nextJobExit.set(`${siteId} wordpress.settle`, 1);
+    const moveRes = await call(
+      "POST",
+      `/v1/admin/sites/${siteId}/owner`,
+      { ownerOrganizationId: orgBId },
+      adminToken,
+      { "Idempotency-Key": randomUUID() },
+    );
+    expect(moveRes.status).toBe(202);
+    await app.outboxWorker.processPendingOnce();
+    const failedOp = await call("GET", `/v1/organizations/${orgBId}/operations/${moveRes.body.data.operationId}`, undefined, ownerBToken);
+    expect(failedOp.body.data.status).toBe("failed");
+    expect(fakeExec.jobs.filter((j) => j.siteId === siteId).map((j) => j.kind)).toEqual(["wordpress.settle"]);
+    // The job got a new password, which was never stored.
+    const offered = fakeExec.jobs[0]?.resolvedSecrets?.["HP_DB_PASSWORD"];
+    expect(offered).toMatch(/^[0-9a-f]{64}$/);
+    expect(offered).not.toBe(pwBefore);
+    expect(await storedPassword(orgBId)).toBe(pwBefore);
+    const dump = JSON.stringify([
+      await dbClient.db.select().from(operations),
+      await dbClient.db.select().from(operationSteps),
+      await dbClient.db.select().from(auditEvents),
+      await dbClient.db.select().from(outboxEvents),
+    ]);
+    expect(dump).not.toContain(offered);
   });
 
   it("ignores NOT_SUPPORTED from list or setUserPassword during site move", async () => {

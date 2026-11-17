@@ -502,21 +502,34 @@ export class OutboxWorkerService {
       const stepMessage = siteOp ? SITE_ACTION_FAILED : sanitizedMessage;
       await this.#failRemainingSteps(op.id, stepMessage);
 
+      // A stop that failed for sure before the runtime accepted it left the container running (R195 1.1).
+      const stopNotDone =
+        op.kind === "service.stop" && !explicitAmbiguous && ["queued", "processing"].includes(latestOp?.status ?? "");
+      const keepRunning = async (tx: typeof db): Promise<void> => {
+        if (!stopNotDone) return;
+        await tx
+          .update(serviceInstances)
+          .set({ desiredStatus: "running", updatedAt: new Date() })
+          .where(eq(serviceInstances.id, op.resourceId));
+      };
+
+      if (latestOp?.status === "queued") {
+        // queued -> failed is not allowed: cancel it with the event's failure, or its site stays locked (R189 3.2).
+        await db.transaction(async (tx) => {
+          const t = tx as unknown as typeof db;
+          await keepRunning(t);
+          await transitionOperation(t, op.id, "cancelled", { errorCode, errorMessage: stepMessage });
+          await failOutboxEvent(t, event.id, sanitizedMessage);
+        });
+        return "failed";
+      }
+
       if (
         latestOp &&
         !isTerminalOperationStatus(latestOp.status) &&
         canTransitionOperation(latestOp.status, "failed")
       ) {
-        // A stop that failed for sure before the runtime accepted it left the container running (R195 1.1).
-        const stopNotDone =
-          op.kind === "service.stop" && !explicitAmbiguous && ["queued", "processing"].includes(latestOp.status);
-        await settleOperation(db, op.id, { status: "failed", errorCode, errorMessage: stepMessage }, async (tx) => {
-          if (!stopNotDone) return;
-          await tx
-            .update(serviceInstances)
-            .set({ desiredStatus: "running", updatedAt: new Date() })
-            .where(eq(serviceInstances.id, op.resourceId));
-        });
+        await settleOperation(db, op.id, { status: "failed", errorCode, errorMessage: stepMessage }, keepRunning);
       }
 
       await failOutboxEvent(db, event.id, sanitizedMessage);

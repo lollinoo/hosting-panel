@@ -1291,6 +1291,11 @@ describe("site backups API and outbox execution", () => {
       .update(siteBackups)
       .set({ status: "succeeded", snapshotId: SNAP_HEX_OK, sizeBytes: 2000, finishedAt: newerDate })
       .where(eq(siteBackups.id, newerId));
+    // The newest retentionDays good copies stay whatever their age (R207 restore.3), so push the old copy out of them.
+    for (let i = 1; i < SETTINGS.retentionDays; i++) {
+      const { id } = await insertSiteBackup(dbClient.db, { siteId: siteA1Id, kind: "nightly", status: "running", operationId: null, startedAt: new Date(newerDate.getTime() - i * 60_000) });
+      await dbClient.db.update(siteBackups).set({ status: "succeeded", snapshotId: i.toString(16).padStart(64, "c"), sizeBytes: 2000, finishedAt: newerDate }).where(eq(siteBackups.id, id));
+    }
 
     executorScript.setHandlers({
       onForget: () => {

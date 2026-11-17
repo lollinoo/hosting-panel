@@ -31,6 +31,12 @@ export interface ApiSiteType {
   } | null;
   /** Job that moves the site to a new address; null when the type needs none. */
   addressJob(site: { readonly phpVersion: string | null }, siteUrl: string, previousUrl: string): SiteTypeJob | null;
+  /** Job that writes the stored database password into the configuration the site keeps in its own files; null when the type needs none. */
+  readonly databasePasswordJob: {
+    job(site: { readonly phpVersion: string | null }): SiteTypeJob;
+    /** Exit code of a configuration the job cannot rewrite; the job then changed nothing. */
+    readonly unwritableExitCode: number;
+  } | null;
   /** Customer text of the type's own file-error reasons. */
   readonly fileReasonMessages: Readonly<Record<string, string>>;
 }

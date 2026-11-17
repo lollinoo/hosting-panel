@@ -18,6 +18,7 @@ import {
   eq,
   hostAllocations,
   hosts,
+  insertSiteBackup,
   membershipRoles,
   memberships,
   operationSteps,
@@ -1440,7 +1441,7 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
     executorScript.setHandlers({
       onRunSiteJob: (req) => ({
         jobId: req.jobId,
-        exitCode: 1,
+        exitCode: req.kind === "wordpress.set-url" ? 1 : 0,
         outputTail: "wp-cli failed",
       }),
     });
@@ -1729,6 +1730,11 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
       .update(siteBackups)
       .set({ startedAt: oldDate, finishedAt: oldDate })
       .where(eq(siteBackups.id, bkpOld));
+    // The newest retentionDays good copies stay whatever their age (R207 restore.3), so push the old copy out of them.
+    for (let i = 0; i < BASE_SETTINGS.retentionDays; i++) {
+      const { id } = await insertSiteBackup(dbClient.db, { siteId: siteA2Id, kind: "nightly", status: "running", operationId: null, startedAt: new Date(Date.now() - (i + 1) * 60_000) });
+      await dbClient.db.update(siteBackups).set({ status: "succeeded", snapshotId: i.toString(16).padStart(64, "c"), finishedAt: new Date() }).where(eq(siteBackups.id, id));
+    }
 
     executorScript.reset();
     // Run retention via a new admin backup run

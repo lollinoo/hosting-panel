@@ -24,6 +24,8 @@ import {
   DEMO_IDS,
   eq,
   hostAgentHeartbeats,
+  membershipRoles,
+  memberships,
   operations,
   outboxEvents,
   sql,
@@ -129,6 +131,14 @@ describe("AC-F2-01 guard (R118) fails on forbidden process use", () => {
     for (const [rel, content] of cases) expect(apiSourceViolations(rel, content), content.slice(-60)).not.toEqual([]);
   });
 });
+
+/** R207 addendum 4 A: the generic service routes need a server administrator who is also an owner of the organisation. */
+async function makeInfraOwnerOfAcme(handle: ControlPlaneAppHandle): Promise<void> {
+  await handle.dbClient.db.insert(memberships).values({ id: "mem_infra_acme", organizationId: DEMO_IDS.organizations.acme, userId: DEMO_IDS.users.infra });
+  await handle.dbClient.db
+    .insert(membershipRoles)
+    .values({ id: "mr_infra_acme_owner", membershipId: "mem_infra_acme", roleId: DEMO_IDS.roles.customer_owner });
+}
 
 describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets & Reconciler Suite (HCP-SPEC-003)", () => {
   let tmpDir: string;
@@ -273,6 +283,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
 
     expect(app.baseUrl).not.toBeNull();
     baseUrl = app.baseUrl!;
+    await makeInfraOwnerOfAcme(app);
 
     const personas = ["usr_infra", "usr_hosting", "usr_elena", "usr_marco", "usr_giulia"];
     for (const personaId of personas) {
@@ -636,7 +647,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
       {
         method: "POST",
-        token: tokens["usr_elena"],
+        token: tokens["usr_infra"],
         headers: { "Idempotency-Key": "idem-create-shop-app" },
         body: {
           serviceTemplateId: DEMO_IDS.templates.wordpress,
@@ -812,7 +823,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
       {
         method: "POST",
-        token: tokens["usr_elena"],
+        token: tokens["usr_infra"],
         headers: { "Idempotency-Key": "idem-create-recovery-svc-a" },
         body: {
           serviceTemplateId: DEMO_IDS.templates.wordpress,
@@ -869,7 +880,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
       {
         method: "POST",
-        token: tokens["usr_elena"],
+        token: tokens["usr_infra"],
         headers: { "Idempotency-Key": "idem-create-recovery-svc-b" },
         body: {
           serviceTemplateId: DEMO_IDS.templates.wordpress,
@@ -1327,6 +1338,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     });
 
     try {
+      await makeInfraOwnerOfAcme(f03App);
       const tokRes = await fetch(`${f03App.baseUrl}/v1/dev/auth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1334,13 +1346,20 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       });
       const elenaJwt = ((await tokRes.json()) as { data: { accessToken: string } }).data
         .accessToken;
+      const infraTokRes = await fetch(`${f03App.baseUrl}/v1/dev/auth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: "usr_infra" }),
+      });
+      const infraJwt = ((await infraTokRes.json()) as { data: { accessToken: string } }).data
+        .accessToken;
 
       const createSvcRes = await fetch(
         `${f03App.baseUrl}/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${elenaJwt}`,
+            Authorization: `Bearer ${infraJwt}`,
             "Content-Type": "application/json",
             "Idempotency-Key": "idem-f03-svc-create",
           },

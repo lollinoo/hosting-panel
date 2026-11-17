@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   canTransitionOperation,
@@ -26,6 +27,7 @@ import {
   sites,
   transitionOperation,
   updateOperationStepTransactional,
+  upsertEncryptedSecretTransactional,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort, SiteJobRequest } from "@hosting-panel/executor-contracts";
@@ -414,7 +416,8 @@ export class SiteProvisioner {
       }
 
       await step("redeploy", async () => {
-        // Rotate extra MariaDB user passwords after ownership transfer while keeping primary user and grants intact.
+        // The former owner knows every database password of the site: all of them change (C1).
+        await this.#rotateSiteDatabasePassword(op, site, to);
         await rotateExtraDatabaseUsers(this.executor, siteId);
         const services = await db
           .select({ id: serviceInstances.id, desiredStatus: serviceInstances.desiredStatus })
@@ -461,6 +464,64 @@ export class SiteProvisioner {
       await this.#settleFailure({ ...op, organizationId: owner }, current, err, SITE_REASSIGN_FAILED, "admin.site.reassign.failed");
       throw err;
     }
+  }
+
+  /**
+   * C1: a new SITE_DB_PASSWORD, written first into the configuration the site keeps in its own files
+   * (one it cannot rewrite stops here, before MariaDB changes), then set by db.provision, which also
+   * cuts the account's connections. A rerun picks another password and converges the same way.
+   */
+  async #rotateSiteDatabasePassword(
+    op: typeof operations.$inferSelect,
+    site: typeof sites.$inferSelect,
+    organizationId: string,
+  ): Promise<void> {
+    const db = this.dbClient.db;
+    const [siteDb] = await listSiteDatabases(db, { organizationId, siteId: site.id });
+    const [svc] = await db
+      .select({ id: serviceInstances.id })
+      .from(serviceInstances)
+      .where(and(eq(serviceInstances.siteId, site.id), eq(serviceInstances.organizationId, organizationId)))
+      .limit(1);
+    const writer = findApiSiteType(site.siteType)?.databasePasswordJob ?? null;
+    if (!siteDb || (writer && !svc)) return;
+    // Stored only once the site holds it, so a failed job leaves the stored secret as MariaDB and the site have it.
+    const password = randomBytes(32).toString("hex");
+    const secrets = (refs: Record<string, string>) =>
+      resolveDecryptedSecretRefs(db, { organizationId, siteId: site.id, secretRefs: refs, masterKey: this.config.secretsMasterKey });
+    const jobId = (suffix: string) => `job_${op.id.replace(/^op_/, "")}_${suffix}`;
+    if (writer && svc) {
+      const job = writer.job(site);
+      const resolved = job.secrets ? { ...(await secrets(job.secrets)) } : undefined;
+      for (const [name, ref] of Object.entries(job.secrets ?? {})) {
+        if (ref === "SITE_DB_PASSWORD" && resolved) resolved[name] = password;
+      }
+      await this.#runJob({
+        jobId: jobId("dbpw"),
+        kind: job.kind,
+        siteId: site.id,
+        organizationId,
+        serviceInstanceId: svc.id,
+        params: job.params,
+        ...(resolved ? { resolvedSecrets: resolved } : {}),
+      });
+    }
+    await upsertEncryptedSecretTransactional(db, {
+      organizationId,
+      siteId: site.id,
+      secretKey: "SITE_DB_PASSWORD",
+      value: password,
+      masterKey: this.config.secretsMasterKey,
+      actorId: null,
+    });
+    await this.#runJob({
+      jobId: jobId("db"),
+      kind: "db.provision",
+      siteId: site.id,
+      organizationId,
+      params: { dbName: siteDb.dbName, dbUser: siteDb.dbUser },
+      resolvedSecrets: await secrets({ HP_DB_PASSWORD: "SITE_DB_PASSWORD" }),
+    });
   }
 
   async #runJob(req: SiteJobRequest): Promise<void> {

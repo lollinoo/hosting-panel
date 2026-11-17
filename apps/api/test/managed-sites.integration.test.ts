@@ -21,7 +21,7 @@ import {
   users,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
@@ -295,7 +295,13 @@ describe("managed WordPress sites API", () => {
     const { siteId } = await createAndRun();
     const svc = await webService(siteId);
     const headers = () => ({ "Idempotency-Key": randomUUID() });
-    const rev = await call("POST", org(`/services/${svc.id}/revisions`), { declarativeConfig: { image: "nginx:latest" } }, headers());
+    // The two generic routes are the administrator's (R207 orgs.2): even the administrator is sent to the site's page.
+    // R207 addendum 4 A: that administrator must also be an owner of the organisation.
+    const [admin] = await dbClient.db.select().from(users).where(eq(users.email, "admin@x.it"));
+    const membershipId = `mem_${randomUUID()}`;
+    await dbClient.db.insert(memberships).values({ id: membershipId, organizationId: orgId, userId: admin!.id });
+    await dbClient.db.insert(membershipRoles).values({ id: `mrl_${randomUUID()}`, membershipId, roleId: "role_customer_owner" });
+    const rev = await call("POST", org(`/services/${svc.id}/revisions`), { declarativeConfig: { image: "nginx:latest" } }, headers(), adminToken);
     expect(rev.status).toBe(400);
     expect(rev.body.error.message).toBe("Manage this site from its page");
     const life = await call("POST", org(`/services/${svc.id}/lifecycle`), { action: "deploy" }, headers());
@@ -306,8 +312,10 @@ describe("managed WordPress sites API", () => {
       org(`/sites/${siteId}/services`),
       { serviceTemplateId: "tpl_site_wordpress", name: "extra", configuration: {} },
       headers(),
+      adminToken,
     );
     expect(added.status).toBe(400);
+    expect(added.body.error.message).toBe("Manage this site from its page");
   });
 
   it("failure output stays out of customer-visible fields", async () => {
@@ -652,6 +660,17 @@ describe("managed WordPress sites API", () => {
     const res = await call("GET", siteUrl(siteId, "/logs"));
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe("DOCKER_ENGINE_UNAVAILABLE");
+  });
+
+  it("logs keep what the executor said away from the customer on a time-out", async () => {
+    const { siteId } = await createAndRun();
+    const said = "Timed out waiting for docker-executor IPC response after mutating command dispatch";
+    vi.spyOn(sim, "getServiceLogs").mockRejectedValue(new ExecutorIpcClientError(said, "OPERATION_AMBIGUOUS", 502, true));
+    const res = await call("GET", siteUrl(siteId, "/logs"));
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe("DOCKER_ENGINE_UNAVAILABLE");
+    expect(res.body.error.message).toBe("The logs are not available right now. Try again in a few minutes.");
+    expect(res.raw).not.toContain("docker-executor");
   });
 
   it("customer cannot act on a site of another organization", async () => {

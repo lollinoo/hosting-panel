@@ -55,7 +55,13 @@ function render(value: unknown): unknown {
     if (Array.isArray(node)) return node.map((v) => walk(v, null));
     if (node !== null && typeof node === "object") {
       const entries = Object.entries(node as Json).filter(([k]) => k !== "siteType").sort(([a], [b]) => a.localeCompare(b));
-      return Object.fromEntries(entries.map(([k, v]) => [k, walk(v, k)]));
+      return Object.fromEntries(
+        entries.map(([k, v]) =>
+          k === "resolvedSecrets" && v !== null && typeof v === "object"
+            ? [k, Object.fromEntries(Object.keys(v as Json).sort().map((name) => [name, "<present>"]))]
+            : [k, walk(v, k)],
+        ),
+      );
     }
     if (typeof node !== "string") return node;
     if (key !== null && SECRET_KEY.test(key) && node !== "") {

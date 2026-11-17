@@ -409,6 +409,8 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
     sim.sftpApplies.length = 0;
     await app.siteSftp.ensureApplied(true);
     sim.sftpApplies.length = 0;
+    // The cases share one app: each starts with the full hourly budget of SFTP restarts (R207 limits.4).
+    (app.siteSftp as unknown as { restarts: Map<string, number[]> }).restarts.clear();
     await snapshotAudits();
   });
 

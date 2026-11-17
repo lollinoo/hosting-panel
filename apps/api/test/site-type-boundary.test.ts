@@ -83,9 +83,9 @@ const VALUES = [
   ...MODULE_VALUES,
 ];
 
-// Lines allowed to hold a word or a value, each with its reason; matched by file and text, not line number.
-const ALLOW: readonly { readonly file: string; readonly text: string; readonly reason: string }[] = [
-  { file: "apps/web/src/lib/file-browser.ts", text: '"html",', reason: "an editable file extension" },
+// Lines allowed to hold a word or a value, each with its reason; matched by file and text (whole trimmed line when exact), not line number.
+const ALLOW: readonly { readonly file: string; readonly text: string; readonly reason: string; readonly exact?: boolean }[] = [
+  { file: "apps/web/src/lib/file-browser.ts", text: '"html",', reason: "an editable file extension", exact: true },
   { file: "apps/docker-executor/src/phpmyadmin-platform.ts", text: "33:33", reason: "the phpMyAdmin image's own user" },
   { file: "apps/docker-executor/src/phpmyadmin-platform.ts", text: "/var/www/html/tmp", reason: "the phpMyAdmin image's own directory" },
   { file: "packages/contracts/src/ipc-schemas.ts", text: '"wordpress.', reason: "job kinds of the type in the shared job-kind enum (wiring, ADR 0029)" },
@@ -98,7 +98,7 @@ export function siteTypeViolations(rel: string, text: string, firstLine = 1): st
   const out: string[] = [];
   text.split("\n").forEach((line, i) => {
     const hit = WORDS.exec(line)?.[0] ?? VALUES.find((v) => line.includes(v));
-    if (hit && !ALLOW.some((a) => a.file === rel && line.includes(a.text))) out.push(`${rel}:${firstLine + i} ${hit}`);
+    if (hit && !ALLOW.some((a) => a.file === rel && (a.exact ? line.trim() === a.text : line.includes(a.text)))) out.push(`${rel}:${firstLine + i} ${hit}`);
   });
   return out;
 }
@@ -121,6 +121,12 @@ describe("site-type boundary (ADR 0029, D10)", () => {
       expect(siteTypeViolations("x.ts", line), line).not.toEqual([]);
     }
     expect(siteTypeViolations("x.ts", 'const ok = "html5";\nconst t = definition.files.mountPath;\nconst q = "wpx";')).toEqual([]);
+  });
+
+  it("the allow line of file-browser.ts covers that exact line only (R206 addendum 2)", () => {
+    const rel = "apps/web/src/lib/file-browser.ts";
+    expect(siteTypeViolations(rel, '  "html",')).toEqual([]);
+    expect(siteTypeViolations(rel, '  "html", "/var/www/html",')).not.toEqual([]);
   });
 
   it("every listed file exists, and every subsystem folder holds files", async () => {

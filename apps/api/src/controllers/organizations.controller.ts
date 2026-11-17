@@ -64,6 +64,7 @@ import {
   enqueueOperationTransactional,
   eq,
   hostAllocations,
+  inArray,
   listEncryptedSecretsMetadata,
   membershipRoles,
   memberships,
@@ -78,6 +79,7 @@ import {
   serviceInstances,
   serviceTemplates,
   sites,
+  sql,
   stackRevisions,
   upsertEncryptedSecretTransactional,
   users,
@@ -777,6 +779,8 @@ export class OrganizationsController {
       permission: "organization.members.manage",
       targetType: "membership",
     });
+    // R207 addendum 4 A: the organisation check first, then only a server administrator who is also a member.
+    await this.authzService.requirePlatformPermission(auth, req, "platform.users.manage", "membership", null);
 
     const body = CreateInvitationInputSchema.parse(rawBody ?? {});
 
@@ -798,6 +802,15 @@ export class OrganizationsController {
         })
         .returning();
       user = createdUser!;
+    } else {
+      const [existing] = await this.dbClient.db
+        .select({ id: memberships.id })
+        .from(memberships)
+        .where(and(eq(memberships.organizationId, orgId), eq(memberships.userId, user.id)))
+        .limit(1);
+      if (existing) {
+        throw new ControlPlaneError("ALREADY_EXISTS", "This account is already a member of the organization.");
+      }
     }
 
     const membershipId = `mem_${randomUUID().replace(/-/g, "")}`;
@@ -1235,6 +1248,8 @@ export class OrganizationsController {
       targetId: siteId,
       resource: { id: site.id, organizationId: site.organizationId },
     });
+    // ADR 0029, R207 addendum 4 A: a generic service is also the server administrator's.
+    await this.authzService.requirePlatformPermission(auth, req, "platform.users.manage", "site", siteId);
     await this.#refuseManagedSite(site.id);
 
     const body = CreateServiceInstanceInputSchema.parse(rawBody ?? {});
@@ -1379,6 +1394,8 @@ export class OrganizationsController {
       targetId: serviceId,
       resource: { id: svc.id, organizationId: svc.organizationId },
     });
+    // ADR 0029, R207 addendum 4 A: a revision is also the server administrator's.
+    await this.authzService.requirePlatformPermission(auth, req, "platform.users.manage", "service_instance", serviceId);
     await this.#refuseManagedSite(svc.siteId);
 
     const body = CreateStackRevisionInputSchema.parse(rawBody ?? {});
@@ -1399,6 +1416,19 @@ export class OrganizationsController {
         "VALIDATION_ERROR",
         `Plaintext secret keys detected in declarative configuration: ${secretViolations.join(", ")}. Use secretRefs instead.`,
       );
+    }
+
+    const [tpl] = await this.dbClient.db
+      .select()
+      .from(serviceTemplates)
+      .where(eq(serviceTemplates.id, svc.serviceTemplateId))
+      .limit(1);
+    if (!tpl) {
+      throw new ControlPlaneError("NOT_FOUND", `Service template '${svc.serviceTemplateId}' not found.`);
+    }
+    const validation = validateDeclarativeServiceInput(tpl, "dedicated", body.declarativeConfig, body.resourceLimits);
+    if (!validation.valid) {
+      throw new ControlPlaneError(validation.errorCode ?? "VALIDATION_ERROR", validation.message);
     }
 
     const newRev = await appendStackRevisionTransactional(this.dbClient.db, {
@@ -1550,35 +1580,45 @@ export class OrganizationsController {
       targetId: orgId,
     });
 
-    const pagination = parsePaginationQuery(rawQuery);
-    const ops = await this.dbClient.db
+    const { cursor, limit } = parsePaginationQuery(rawQuery);
+    const [{ total } = { total: 0 }] = await this.dbClient.db
+      .select({ total: sql<number>`count(*)::int` })
+      .from(operations)
+      .where(eq(operations.organizationId, orgId));
+    // Keyset over (submitted_at, id), the cursor row read in SQL as admin-audit does; an unknown cursor gives an empty page.
+    const rows = await this.dbClient.db
       .select()
       .from(operations)
-      .where(eq(operations.organizationId, orgId))
-      .orderBy(desc(operations.submittedAt));
-
-    const dtoList: OperationDto[] = [];
-    for (const op of ops) {
-      const steps = await this.dbClient.db
-        .select()
-        .from(operationSteps)
-        .where(eq(operationSteps.operationId, op.id))
-        .orderBy(asc(operationSteps.id));
-
-      dtoList.push(mapOperationToDto(op, steps));
-    }
-
-    const paginated = paginateItems(dtoList, pagination);
+      .where(
+        and(
+          eq(operations.organizationId, orgId),
+          cursor
+            ? sql`(${operations.submittedAt}, ${operations.id}) < (SELECT o.submitted_at, o.id FROM operations o WHERE o.id = ${cursor} AND o.organization_id = ${orgId})`
+            : undefined,
+        ),
+      )
+      .orderBy(desc(operations.submittedAt), desc(operations.id))
+      .limit(limit + 1);
+    const pageOps = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    const steps =
+      pageOps.length === 0
+        ? []
+        : await this.dbClient.db
+            .select()
+            .from(operationSteps)
+            .where(inArray(operationSteps.operationId, pageOps.map((op) => op.id)))
+            .orderBy(asc(operationSteps.id));
 
     return {
-      data: paginated.data,
+      data: pageOps.map((op) => mapOperationToDto(op, steps.filter((step) => step.operationId === op.id))),
       meta: {
-        total: dtoList.length,
-        cursor: pagination.cursor ?? null,
+        total,
+        cursor: cursor ?? null,
         requestId: resolveRequestId(req),
         timestamp: new Date().toISOString(),
       },
-      page: paginated.page,
+      page: { nextCursor: hasMore ? pageOps[pageOps.length - 1]!.id : null, hasMore },
     };
   }
 

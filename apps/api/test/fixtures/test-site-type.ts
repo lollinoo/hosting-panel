@@ -12,5 +12,6 @@ export const TEST_API_SITE_TYPE: ApiSiteType = {
   image: () => "hp-test-static:1",
   install: null,
   addressJob: () => null,
+  databasePasswordJob: null,
   fileReasonMessages: {},
 };

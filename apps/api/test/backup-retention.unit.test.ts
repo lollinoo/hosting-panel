@@ -9,6 +9,11 @@ function daysAgo(days: number, offsetMs = 0): Date {
   return new Date(NOW.getTime() - days * DAY_MS + offsetMs);
 }
 
+// Good copies newer than any tested row, so that row is outside the newest retentionDays (R207 restore.3).
+function newerCopies(count: number): RetentionRow[] {
+  return Array.from({ length: count }, (_, n) => makeRow({ id: `bak_fill${String(n)}`, startedAt: daysAgo(0, -(n + 1) * 1_000) }));
+}
+
 function makeRow(overrides: Partial<RetentionRow> & Pick<RetentionRow, "id" | "startedAt">): RetentionRow {
   return {
     kind: "nightly",
@@ -23,7 +28,7 @@ describe("backup retention selectExpired", () => {
     const newer = makeRow({ id: "bak_new", startedAt: daysAgo(1) });
     const old = makeRow({ id: "bak_old", startedAt: daysAgo(15) });
 
-    const result = selectExpired([old, newer], NOW, RETENTION_DAYS, true);
+    const result = selectExpired([old, newer, ...newerCopies(RETENTION_DAYS)], NOW, RETENTION_DAYS, true);
 
     expect(result.forget.map((row) => row.id)).toEqual(["bak_old"]);
     expect(result.drop).toEqual([]);
@@ -112,7 +117,7 @@ describe("backup retention selectExpired", () => {
     const exactCutoff = makeRow({ id: "bak_exact", startedAt: daysAgo(RETENTION_DAYS) });
     const justExpired = makeRow({ id: "bak_just_past", startedAt: daysAgo(RETENTION_DAYS, -1) });
 
-    const result = selectExpired([exactCutoff, justExpired, newer], NOW, RETENTION_DAYS, true);
+    const result = selectExpired([exactCutoff, justExpired, newer, ...newerCopies(RETENTION_DAYS)], NOW, RETENTION_DAYS, true);
 
     expect(result.forget.map((row) => row.id)).toEqual(["bak_just_past"]);
     expect(result.drop).toEqual([]);
@@ -134,7 +139,7 @@ describe("backup retention selectExpired", () => {
     const atBoundary = makeRow({ id: "bak_365", startedAt: daysAgo(365) });
     const pastBoundary = makeRow({ id: "bak_366", startedAt: daysAgo(366) });
 
-    const result = selectExpired([pastBoundary, atBoundary, newer], NOW, 365, true);
+    const result = selectExpired([pastBoundary, atBoundary, newer, ...newerCopies(365)], NOW, 365, true);
 
     expect(result.forget.map((row) => row.id)).toEqual(["bak_366"]);
     expect(result.drop).toEqual([]);
@@ -162,12 +167,21 @@ describe("backup retention selectExpired", () => {
     expect(result.drop).toEqual([]);
   });
 
-  it("R12: a kept pre_update copy still expires by age, but the newest good copy of the site stays", () => {
+  it("R12: old pre_update copies among the newest retentionDays good copies of the site stay", () => {
     const old = makeRow({ id: "bak_p_old", kind: "pre_update", startedAt: daysAgo(20) });
     const oldest = makeRow({ id: "bak_p_oldest", kind: "pre_update", startedAt: daysAgo(30) });
 
-    expect(selectExpired([old, oldest], NOW, RETENTION_DAYS, true).forget.map((row) => row.id)).toEqual([
-      "bak_p_oldest",
-    ]);
+    expect(selectExpired([old, oldest], NOW, RETENTION_DAYS, true).forget.map((row) => row.id)).toEqual([]);
+  });
+  // R207 restore.3: a stalled schedule never empties a site down to one copy, whatever the clock says.
+  it("R13: keeps the newest retentionDays good copies when now is 400 days after the newest", () => {
+    const later = new Date(NOW.getTime() + 400 * DAY_MS);
+    const copies = Array.from({ length: RETENTION_DAYS + 2 }, (_, n) => makeRow({ id: `bak_n${String(n)}`, startedAt: daysAgo(n) }));
+    copies.push(makeRow({ id: "bak_failed", status: "failed", snapshotId: null, startedAt: daysAgo(3) }));
+
+    const result = selectExpired(copies, later, RETENTION_DAYS, true);
+
+    expect(result.forget.map((row) => row.id)).toEqual(["bak_n14", "bak_n15"]);
+    expect(result.drop.map((row) => row.id)).toEqual(["bak_failed"]);
   });
 });

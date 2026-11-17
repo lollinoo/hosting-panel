@@ -395,6 +395,17 @@ export class SiteRestoreApplier {
     opts: { readonly throwOnFailure: boolean },
   ): Promise<void> {
     if (statusRes.state === "succeeded") {
+      // Part of the restore step, so recovery runs it again until the step is done.
+      const passwordFailure = await this.#writeDatabasePassword(op, ctx);
+      if (passwordFailure) {
+        // The files and databases are already switched: the site is not as it was.
+        await this.#settleRestoreRowAndAudit(op, "failed", "undo_incomplete");
+        await this.#failRestoreStepsAndOp(op.id, RESTORE_FAILED_MSG, passwordFailure.code, RESTORE_FAILED_MSG);
+        if (opts.throwOnFailure) {
+          throw new BackupSettledFailure(passwordFailure);
+        }
+        return;
+      }
       await this.parent.safeUpdateStep(op.id, "restore", "succeeded", RESTORE_DONE_MSG);
       const admin = await this.#isAdminRun(op.id);
       if (admin) {
@@ -497,6 +508,56 @@ export class SiteRestoreApplier {
       throw new BackupSettledFailure(
         new ControlPlaneError("OPERATION_INTERRUPTED", ARCHIVE_INTERRUPTED_MSG),
       );
+    }
+  }
+
+  /**
+   * C1: a backup from before an owner change holds an older database password in the site's own files;
+   * the stored one goes back in before the site starts. A configuration the job cannot rewrite stays as it is.
+   */
+  async #writeDatabasePassword(
+    op: BackupOperationRef,
+    ctx: RestoreContext | undefined,
+  ): Promise<ControlPlaneError | null> {
+    const db = this.dbClient.db;
+    const site = ctx?.site ?? (await this.#findRestoreSite(op.resourceId));
+    const writer = site?.type.databasePasswordJob ?? null;
+    const [restoreStep] = await db
+      .select({ status: operationSteps.status })
+      .from(operationSteps)
+      .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "restore")))
+      .limit(1);
+    // A succeeded restore step already wrote it.
+    if (!site || !writer || restoreStep?.status === "succeeded") return null;
+    try {
+      const serviceInstanceId =
+        ctx?.serviceInstanceId ??
+        (await resolveSiteFilesServiceId(db, this.dockerExecutor, this.config, site));
+      const job = writer.job(site);
+      const res = await this.dockerExecutor.runSiteJob({
+        jobId: `job_${op.id.replace(/^op_/, "")}_rdbpw`,
+        kind: job.kind,
+        siteId: site.id,
+        organizationId: site.organizationId,
+        serviceInstanceId,
+        params: job.params,
+        ...(job.secrets
+          ? {
+              resolvedSecrets: await resolveDecryptedSecretRefs(db, {
+                organizationId: site.organizationId,
+                siteId: site.id,
+                secretRefs: job.secrets,
+                masterKey: this.config.secretsMasterKey,
+              }),
+            }
+          : {}),
+      });
+      if (res.exitCode === 0 || res.exitCode === writer.unwritableExitCode) return null;
+      return new ControlPlaneError("INTERNAL_ERROR", RESTORE_FAILED_MSG);
+    } catch (err) {
+      // R104: an unknown outcome is left to recovery, which runs the job again.
+      if (isAmbiguousError(err)) throw err;
+      return new ControlPlaneError(extractKnownErrorCode(err) ?? "INTERNAL_ERROR", RESTORE_FAILED_MSG);
     }
   }
 

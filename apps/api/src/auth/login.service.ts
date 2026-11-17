@@ -14,7 +14,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { OidcService } from "./oidc.service.js";
-import { hashPassword, verifyPassword } from "./password.js";
+import { assertPasswordGateOpen, hashPassword, passwordGateLoad, verifyPassword } from "./password.js";
 import { reservePasswordAttempt, reserveTotpAttempt } from "./attempt-limits.js";
 import { checkUserTotp, saveTotpStep } from "./totp-secret.js";
 
@@ -27,6 +27,8 @@ const MESSAGES: Record<"ACCOUNT_LOCKED" | "TOTP_INVALID" | "ACCOUNT_SETUP_INCOMP
 
 // Hash of a random password, so unknown emails cost one scrypt like real ones.
 let dummyHash: Promise<string> | undefined;
+// Places of the password gate that unknown addresses may hold, so a flood of them never keeps real accounts out.
+const UNKNOWN_ADDRESS_SHARE = 4;
 
 type UserRow = typeof users.$inferSelect;
 
@@ -44,7 +46,9 @@ export class LoginService {
   public async login(input: LoginInput, ip: string | null): Promise<LoginResultDto> {
     const [user] = await this.dbClient.db.select().from(users).where(eq(users.email, input.email)).limit(1);
     if (!user) {
-      await verifyPassword(input.password, await getDummyHash());
+      const dummy = await getDummyHash();
+      // The test and the entry run in the same tick, so a burst cannot pass the test together.
+      if (passwordGateLoad() < UNKNOWN_ADDRESS_SHARE) await verifyPassword(input.password, dummy);
       return this.fail(undefined, ip, "INVALID_CREDENTIALS", "unknown_user");
     }
     const now = Date.now();
@@ -52,6 +56,8 @@ export class LoginService {
     // Only password + TOTP may bypass a lock, so other requests to a locked account stop before any check.
     const canBypass = input.totpCode !== undefined && user.totpEnabledAt !== null;
     if (locked && !canBypass) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
+    // A full gate refuses here, before any try is counted.
+    assertPasswordGateOpen();
     // Reserve (count) the password attempt before scrypt, so parallel bursts get at most 5 checks.
     if (!locked && !(await reservePasswordAttempt(this.dbClient.db, user.id))) {
       if (!canBypass) return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
@@ -63,7 +69,7 @@ export class LoginService {
       return this.fail(user, ip, "ACCOUNT_LOCKED", "locked");
     }
 
-    const passwordOk = await verifyPassword(input.password, user.passwordHash ?? (await getDummyHash()));
+    const passwordOk = await verifyPassword(input.password, user.passwordHash ?? (await getDummyHash()), true);
     if (!user.passwordHash || !passwordOk || user.userStatus !== "active") {
       const reason = !passwordOk || !user.passwordHash ? "bad_password" : "inactive";
       return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "INVALID_CREDENTIALS", reason);
@@ -127,7 +133,9 @@ export class LoginService {
     code: "INVALID_CREDENTIALS" | keyof typeof MESSAGES,
     reason: string,
   ): Promise<never> {
-    await this.audit(user?.id ?? null, ip, "auth.login.failure", { reason });
+    // No row for an unknown address or a try refused before any check (reason "locked"), so a loop of
+    // tries cannot fill the table; every checked try keeps its row, a bypass try on a locked account included.
+    if (user && reason !== "locked") await this.audit(user.id, ip, "auth.login.failure", { reason });
     throw new ControlPlaneError(
       code,
       code === "INVALID_CREDENTIALS" ? INVALID_CREDENTIALS_MESSAGE : MESSAGES[code],
@@ -153,6 +161,11 @@ export class LoginService {
 }
 
 function getDummyHash(): Promise<string> {
-  dummyHash ??= hashPassword(randomUUID());
+  // Admitted: one shared hash per process, and a known account without a password has its try counted already.
+  // A failed first hash is not kept, or every later unknown address would fail.
+  dummyHash ??= hashPassword(randomUUID(), true).catch((error: unknown) => {
+    dummyHash = undefined;
+    throw error;
+  });
   return dummyHash;
 }

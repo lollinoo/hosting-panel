@@ -274,6 +274,7 @@ describe("administrator's restore of a site where nothing may exist", () => {
       "siteState",
       "job:db.provision",
       "restore",
+      "job:wordpress.settle",
       "siteState",
       "deploy",
       "job:wordpress.set-url",
@@ -321,7 +322,15 @@ describe("administrator's restore of a site where nothing may exist", () => {
     const { operationId, backupId } = await startRestore();
     await app.outboxWorker.processPendingOnce();
 
-    expect(log).toEqual(["siteState", "job:db.provision", "restore", "siteState", "deploy", "job:wordpress.set-url"]);
+    expect(log).toEqual([
+      "siteState",
+      "job:db.provision",
+      "restore",
+      "job:wordpress.settle",
+      "siteState",
+      "deploy",
+      "job:wordpress.set-url",
+    ]);
     expect(backupCalls.find((c) => c.action === "restore")).not.toHaveProperty("createVolume");
     const s = await stateOf(operationId, backupId);
     expect(s.steps).toMatchObject({ provision_database: "succeeded", restore: "succeeded", start_site: "succeeded" });

@@ -6,6 +6,7 @@ import {
   users,
   type DatabaseClient,
 } from "@hosting-panel/database";
+import * as crypto from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as password from "../src/auth/password.js";
 import * as totp from "../src/auth/totp.js";
@@ -15,6 +16,11 @@ import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.
 vi.mock("../src/auth/password.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/auth/password.js")>();
   return { ...actual, verifyPassword: vi.fn(actual.verifyPassword) };
+});
+
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:crypto")>();
+  return { ...actual, scrypt: vi.fn(actual.scrypt) };
 });
 
 vi.mock("../src/auth/totp.js", async (importOriginal) => {
@@ -139,7 +145,7 @@ describe("POST /v1/auth/login", () => {
     expect(ja.error.message).toBe(BAD_MESSAGE);
     expect(jb.error.message).toBe(ja.error.message);
     const audits = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "auth.login.failure"));
-    expect(audits).toHaveLength(2);
+    expect(audits).toHaveLength(1);
     expect(JSON.stringify(audits)).not.toContain("wrong password");
   });
 
@@ -392,5 +398,183 @@ describe("POST /v1/auth/login", () => {
     const ok = await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: code });
     expect(ok.status).toBe(200);
   });
-});
 
+  const failureRows = async () =>
+    (await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "auth.login.failure"))).length;
+
+  it("100 sign-ins on a locked account and 100 on an unknown address add no audit row", async () => {
+    await seedUser();
+    await passwordLock();
+    // One row per wrong password, the fifth (the one that sets the lock) included.
+    expect(await failureRows()).toBe(5);
+    for (let i = 0; i < 100; i += 10) {
+      const batch = await Promise.all(
+        Array.from({ length: 10 }, (_, j) =>
+          login(j % 2 === 0 ? { email: "mario@hotel.it", password: PASSWORD } : { email: "mario@hotel.it", password: "nope nope", totpCode: "123456" }),
+        ),
+      );
+      for (const r of batch) expect(r.status).toBe(423);
+    }
+    for (let i = 0; i < 100; i += 10) {
+      const batch = await Promise.all(Array.from({ length: 10 }, (_, j) => login({ email: `ghost${i + j}@hotel.it`, password: PASSWORD })));
+      for (const r of batch) expect(r.status).toBe(401);
+    }
+    expect(await failureRows()).toBe(5);
+  }, 60_000);
+
+  it("a bypass try with the right password and a wrong code on a locked account keeps its bad_totp row", async () => {
+    const secret = generateTotpSecret();
+    await seedUser({ totpSecret: secret });
+    await passwordLock();
+    expect(await failureRows()).toBe(5);
+    const wrong = currentCode(secret) === "000000" ? "111111" : "000000";
+    expect((await login({ email: "mario@hotel.it", password: PASSWORD, totpCode: wrong })).status).toBe(423);
+    const rows = (await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "auth.login.failure"))).slice(5);
+    expect(rows.map((r) => (r.details as { reason: string }).reason)).toEqual(["bad_totp"]);
+    expect(JSON.stringify(rows[0])).not.toContain(wrong);
+    expect(JSON.stringify(rows[0])).not.toContain(PASSWORD);
+    // Tries refused before any check still add none.
+    for (let i = 0; i < 100; i += 10) {
+      const batch = await Promise.all(Array.from({ length: 10 }, () => login({ email: "mario@hotel.it", password: PASSWORD })));
+      for (const r of batch) expect(r.status).toBe(423);
+    }
+    expect(await failureRows()).toBe(6);
+  }, 60_000);
+
+  it("a sign-in refused by the full password gate answers 429 RATE_LIMITED, writes no row and counts no try", async () => {
+    await seedUser();
+    const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+    const held: Parameters<typeof actual.scrypt>[] = [];
+    vi.mocked(crypto.scrypt).mockImplementation(((...args: Parameters<typeof actual.scrypt>) => {
+      held.push(args);
+    }) as typeof actual.scrypt);
+    // 2 run (held inside scrypt) and 16 wait: the gate is full.
+    const busy = Array.from({ length: 18 }, () => password.hashPassword("sentinel-busy-pass"));
+    try {
+      for (const body of [
+        { email: "mario@hotel.it", password: "nope nope" },
+        { email: "mario@hotel.it", password: PASSWORD },
+      ]) {
+        const res = await login(body);
+        expect(res.status).toBe(429);
+        expect(((await res.json()) as Err).error.code).toBe("RATE_LIMITED");
+      }
+      // An unknown address gets no check while its share of 4 is taken, and the usual answer at once.
+      const ghost = await login({ email: "ghost@hotel.it", password: PASSWORD });
+      expect(ghost.status).toBe(401);
+      expect(((await ghost.json()) as Err).error.code).toBe("INVALID_CREDENTIALS");
+      expect(held).toHaveLength(2);
+    } finally {
+      vi.mocked(crypto.scrypt).mockImplementation(actual.scrypt);
+      for (const args of held) actual.scrypt(...args);
+      await Promise.all(busy);
+    }
+    const row = await getUser();
+    expect([row.failedLoginCount, row.totpFailedCount, row.lockedUntil]).toEqual([0, 0, null]);
+    expect(await failureRows()).toBe(0);
+    // Once the gate drains, the same sign-in is served again.
+    expect((await login({ email: "mario@hotel.it", password: PASSWORD })).status).toBe(200);
+  });
+
+  /** Holds every scrypt call until release() runs; later calls run for real. */
+  async function holdScrypt() {
+    const actual = await vi.importActual<typeof import("node:crypto")>("node:crypto");
+    const held: Parameters<typeof actual.scrypt>[] = [];
+    vi.mocked(crypto.scrypt).mockImplementation(((...args: Parameters<typeof actual.scrypt>) => {
+      held.push(args);
+    }) as typeof actual.scrypt);
+    return {
+      held,
+      release: () => {
+        vi.mocked(crypto.scrypt).mockImplementation(actual.scrypt);
+        for (const args of held.splice(0)) actual.scrypt(...args);
+      },
+    };
+  }
+
+  /** Sends the sign-ins at once; resolves when each one has answered or reached its password check. */
+  async function sendAll(bodies: { email: string; password: string }[]) {
+    const spy = vi.mocked(password.verifyPassword);
+    const real = spy.getMockImplementation()!;
+    const checked = new Set<string>();
+    const placed = new Set<string>();
+    let ready!: () => void;
+    const allPlaced = new Promise<void>((resolve) => (ready = resolve));
+    const place = (key: string) => {
+      placed.add(key);
+      if (placed.size === bodies.length) ready();
+    };
+    spy.mockImplementation((plain, stored, admitted) => {
+      const result = real(plain, stored, admitted);
+      checked.add(plain);
+      place(plain);
+      return result;
+    });
+    const answers = bodies.map(async (body) => {
+      const res = await login(body);
+      place(body.password);
+      const json = (await res.json()) as Partial<Err> & Partial<Ok>;
+      return { key: body.password, status: res.status, code: json.error?.code, message: json.error?.message };
+    });
+    await allPlaced;
+    spy.mockImplementation(real);
+    return { answers: Promise.all(answers), checked };
+  }
+
+  const ghosts = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ email: `ghost${i}@example.test`, password: `sentinel-ghost-${i}` }));
+
+  it("with the gate held by sign-ins of unknown addresses, a real account with the right password is served", async () => {
+    await seedUser({ email: "admin@example.test" });
+    // The dummy hash exists before scrypt is held.
+    expect((await login({ email: "warm@example.test", password: PASSWORD })).status).toBe(401);
+    const gate = await holdScrypt();
+    try {
+      const flood = await sendAll(ghosts(30));
+      const own = await sendAll([{ email: "admin@example.test", password: PASSWORD }]);
+      expect(gate.held).toHaveLength(2);
+      gate.release();
+      const [answer] = await own.answers;
+      expect(answer!.status).toBe(200);
+      for (const a of await flood.answers) expect(a.status).toBe(401);
+    } finally {
+      gate.release();
+    }
+  });
+
+  it("of many sign-ins of unknown addresses started in one tick, at most 4 reach the gate and none writes a row", async () => {
+    expect((await login({ email: "warm@example.test", password: PASSWORD })).status).toBe(401);
+    const rowsBefore = (await dbClient.db.select().from(auditEvents)).length;
+    const gate = await holdScrypt();
+    try {
+      const flood = await sendAll(ghosts(30));
+      expect(flood.checked.size).toBe(4);
+      expect(gate.held).toHaveLength(2);
+      gate.release();
+      for (const a of await flood.answers) {
+        expect(a).toMatchObject({ status: 401, code: "INVALID_CREDENTIALS", message: BAD_MESSAGE });
+      }
+    } finally {
+      gate.release();
+    }
+    expect((await dbClient.db.select().from(auditEvents)).length).toBe(rowsBefore);
+  });
+
+  it("an unknown address answered at once and one answered after a check get the same answer", async () => {
+    expect((await login({ email: "warm@example.test", password: PASSWORD })).status).toBe(401);
+    const gate = await holdScrypt();
+    try {
+      const flood = await sendAll(ghosts(8));
+      gate.release();
+      const answers = await flood.answers;
+      const afterCheck = answers.filter((a) => flood.checked.has(a.key));
+      const atOnce = answers.filter((a) => !flood.checked.has(a.key));
+      expect([afterCheck.length, atOnce.length]).toEqual([4, 4]);
+      for (const a of answers) {
+        expect({ status: a.status, code: a.code, message: a.message }).toEqual({ status: 401, code: "INVALID_CREDENTIALS", message: BAD_MESSAGE });
+      }
+    } finally {
+      gate.release();
+    }
+  });
+});

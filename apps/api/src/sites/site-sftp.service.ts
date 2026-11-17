@@ -52,6 +52,9 @@ const FORCED_APPLY_EVERY_TICKS = 10;
 const GENERATED_PASSWORD_BYTES = 18;
 const SFTP_MUTATION_QUEUE_WAIT_MS = 8_000;
 const SAFE_ERROR_CODES = new Set<string>(ERROR_CODES);
+// Each such change stops and starts the shared SFTP server for every customer (ADR 0020).
+const SFTP_RESTARTS_PER_HOUR = 12;
+const HOUR_MS = 3_600_000;
 
 /** Deterministic per-site OS username prefix surviving organization reassignment. */
 export function sftpUsernamePrefix(siteId: string): string {
@@ -135,6 +138,8 @@ export class SiteSftpService {
   #stopped = false;
   #dirty = false;
   #appliedFingerprint: string | null = null;
+  // shortcut: in memory of one API process, emptied by a restart of the API; enough while one process runs.
+  private readonly restarts = new Map<string, number[]>();
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -196,7 +201,10 @@ export class SiteSftpService {
       });
     }
 
-    return this.#queue(async () => {
+    // Only the site's first account restarts the server (a new mount).
+    const first =
+      (await listSiteSftpUsers(this.dbClient.db, { organizationId: site.organizationId, siteId: site.id })).length === 0;
+    return this.#limitRestart(site.organizationId, first, () => this.#queue(async () => {
       await this.#assertSiteReady(site);
 
       const existingUsers = await listSiteSftpUsers(this.dbClient.db, {
@@ -274,7 +282,7 @@ export class SiteSftpService {
         user: toUserDto(created),
         temporaryPassword,
       };
-    }, SFTP_MUTATION_QUEUE_WAIT_MS);
+    }, SFTP_MUTATION_QUEUE_WAIT_MS));
   }
 
   /**
@@ -287,7 +295,7 @@ export class SiteSftpService {
   ): Promise<SiteSftpPasswordResetDto & { username: string }> {
     this.#assertAvailable();
 
-    return this.#queue(async () => {
+    return this.#limitRestart(site.organizationId, true, () => this.#queue(async () => {
       await this.#assertSiteReady(site);
 
       const existing = await getSiteSftpUser(this.dbClient.db, {
@@ -344,7 +352,7 @@ export class SiteSftpService {
         temporaryPassword,
         username: existing.username,
       };
-    }, SFTP_MUTATION_QUEUE_WAIT_MS);
+    }, SFTP_MUTATION_QUEUE_WAIT_MS));
   }
 
   /**
@@ -353,7 +361,8 @@ export class SiteSftpService {
   public async deleteUser(site: SiteRef, userId: string): Promise<{ username: string }> {
     this.#assertAvailable();
 
-    return this.#queue(async () => {
+    // A removal is never refused by the budget: a leaked account can always be taken away.
+    return this.#limitRestart(site.organizationId, true, () => this.#queue(async () => {
       const existing = await getSiteSftpUser(this.dbClient.db, {
         organizationId: site.organizationId,
         siteId: site.id,
@@ -394,7 +403,7 @@ export class SiteSftpService {
       }
 
       return { username: existing.username };
-    }, SFTP_MUTATION_QUEUE_WAIT_MS);
+    }, SFTP_MUTATION_QUEUE_WAIT_MS), true);
   }
 
   /**
@@ -523,6 +532,39 @@ export class SiteSftpService {
         "NOT_SUPPORTED",
         "Site SFTP management requires the linux-systemd runtime backend.",
       );
+    }
+  }
+
+  /**
+   * Runs a route's change that restarts the shared SFTP server, at most 12 per organisation in any hour;
+   * the 13th is refused before the queue. A change that fails is not counted. While the 12 are spent every
+   * new account is refused too, and a removal (`always`) still runs and is counted, so the restarts of an
+   * hour stay bounded by 12 plus the accounts that exist (R207 a.5).
+   */
+  async #limitRestart<T>(organizationId: string, restartsServer: boolean, change: () => Promise<T>, always = false): Promise<T> {
+    const now = Date.now();
+    // Drop what is older than an hour, so the map only holds organisations of the last hour.
+    for (const [org, times] of this.restarts) {
+      const recent = times.filter((t) => now - t < HOUR_MS);
+      if (recent.length === 0) this.restarts.delete(org);
+      else this.restarts.set(org, recent);
+    }
+    const times = this.restarts.get(organizationId) ?? [];
+    if (!always && times.length >= SFTP_RESTARTS_PER_HOUR) {
+      throw new ControlPlaneError(
+        "RATE_LIMITED",
+        "Too many SFTP account changes for this organization in the last hour. Try again later.",
+      );
+    }
+    if (!restartsServer) return change();
+    this.restarts.set(organizationId, [...times, now]);
+    try {
+      return await change();
+    } catch (err) {
+      const current = this.restarts.get(organizationId);
+      const i = current?.indexOf(now) ?? -1;
+      if (i >= 0) current!.splice(i, 1);
+      throw err;
     }
   }
 

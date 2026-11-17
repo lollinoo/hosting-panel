@@ -1209,4 +1209,70 @@ describe("SiteSftpService & SiteSftpController (unit)", () => {
     ]);
     expect(SftpAccessApplyIpcRequestSchema.parse(sent)).toEqual(sent);
   });
+
+  it("refuses the 13th change that restarts the shared SFTP server for one organisation in an hour, before the queue, the database and the executor", async () => {
+    const t0 = Date.parse("2026-11-17T10:00:00Z");
+    vi.useFakeTimers({ toFake: ["Date"], now: t0 });
+    const alice = await service.createUser(siteA, "alice"); // 1: the site's first account
+    await service.createUser(siteA, "bob"); // a second account does not restart the server: not counted
+    const bob = [...repoState.users.values()].find((u) => u.username.endsWith("_bob"))!;
+    await service.deleteUser(siteA, bob.id); // 2
+    for (let i = 0; i < 9; i += 1) await service.resetPassword(siteA, alice.user.id); // 3..11
+
+    // The 12th holds the queue; the 13th is refused at once, while the queue is still busy.
+    let release!: () => void;
+    executor.applySpy.mockImplementationOnce(async (req) => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { applied: req.users.length };
+    });
+    const twelfth = service.resetPassword(siteA, alice.user.id);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    const applies = executor.applySpy.mock.calls.length;
+    await expect(service.resetPassword(siteA, alice.user.id)).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    release();
+    await twelfth;
+    const hashAfter12 = repoState.users.get(alice.user.id)!.passwordHash;
+    await expect(service.resetPassword(siteA, alice.user.id)).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    // R207 a.5: a new account beside an existing one is refused too while the budget is spent (a removal runs: next case).
+    await expect(service.createUser(siteA, "carol")).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    expect(executor.applySpy).toHaveBeenCalledTimes(applies);
+    expect(repoState.users.get(alice.user.id)!.passwordHash).toBe(hashAfter12);
+
+    // Another organisation is not affected.
+    const dave = await service.createUser(siteB, "dave");
+    await service.resetPassword(siteB, dave.user.id);
+
+    // Refused calls are not counted: half an hour later three more are refused, and an hour after
+    // the first twelve a full twelve pass again.
+    vi.setSystemTime(t0 + 30 * 60_000);
+    for (let i = 0; i < 3; i += 1) {
+      await expect(service.resetPassword(siteA, alice.user.id)).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    }
+    vi.setSystemTime(t0 + 61 * 60_000);
+    for (let i = 0; i < 12; i += 1) await service.resetPassword(siteA, alice.user.id);
+    await expect(service.resetPassword(siteA, alice.user.id)).rejects.toMatchObject({ code: "RATE_LIMITED" });
+
+    // An operation's step (the removal of a site) is never refused.
+    const before = executor.applySpy.mock.calls.length;
+    await service.removeSite(siteA.organizationId, siteA.id);
+    expect(executor.applySpy).toHaveBeenCalledTimes(before + 1);
+    await service.ensureApplied(true);
+  });
+
+  it("with the twelve changes of the hour spent, a removal still reaches the executor and is counted, a new account and a new password answer 429", async () => {
+    const alice = await service.createUser(siteA, "alice"); // 1: the site's first account
+    await service.createUser(siteA, "bob"); // not counted
+    for (let i = 0; i < 11; i += 1) await service.resetPassword(siteA, alice.user.id); // 2..12
+    const bob = [...repoState.users.values()].find((u) => u.username.endsWith("_bob"))!;
+    const applies = executor.applySpy.mock.calls.length;
+    await service.deleteUser(siteA, bob.id);
+    expect(executor.applySpy).toHaveBeenCalledTimes(applies + 1);
+    expect(repoState.users.has(bob.id)).toBe(false);
+    expect((service as unknown as { restarts: Map<string, number[]> }).restarts.get(siteA.organizationId)).toHaveLength(13);
+    await expect(service.createUser(siteA, "carol")).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    await expect(service.resetPassword(siteA, alice.user.id)).rejects.toMatchObject({ code: "RATE_LIMITED" });
+    expect(executor.applySpy).toHaveBeenCalledTimes(applies + 1);
+  });
 });
