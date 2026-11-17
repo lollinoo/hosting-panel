@@ -66,6 +66,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -92,6 +93,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -114,6 +116,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0013_wordpress_import.sql",
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
@@ -799,6 +802,21 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
     expect((await record(1, 135)).observedState.rawState).toEqual({ restartCount: 1 });
     await record(2, 150);
     expect((await record(0, 165)).observedState.rawState).toEqual({ restartCount: 0 });
+  });
+
+  it("10b. forgets a remembered rise when the container is seen missing (R191 1.3)", async () => {
+    const t0 = new Date("2026-11-16T11:00:00.000Z");
+    const record = (observedStatus: string, seconds: number, rawState: Record<string, unknown>) =>
+      recordObservedStateReconciliationTransactional(client.db, {
+        serviceInstanceId: DEMO_IDS.services.acmeBlogWp,
+        observedStatus,
+        rawState,
+        observedAt: new Date(t0.getTime() + seconds * 1000),
+      });
+    await record("running", 0, { restartCount: 0 });
+    await record("running", 15, { restartCount: 1 });
+    await record("missing", 30, {});
+    expect((await record("running", 45, { restartCount: 0 })).observedState.rawState).toEqual({ restartCount: 0 });
   });
 
   const makeOperation = async (patch: Partial<typeof operations.$inferInsert>) => {

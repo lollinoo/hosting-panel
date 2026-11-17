@@ -899,7 +899,7 @@ export async function recordObservedStateReconciliationTransactional(
     const count = input.rawState?.restartCount;
     const change = typeof count === "number" && typeof prev.restartCount === "number" ? Math.sign(count - prev.restartCount) : 0;
     const wanted = service.desiredStatus === "running";
-    let lastRestartAt = !wanted || change < 0 ? null
+    let lastRestartAt = !wanted || change < 0 || input.observedStatus === "missing" ? null
       : change > 0 ? observedAt.toISOString()
       : typeof prev.lastRestartAt === "string" ? prev.lastRestartAt : null;
     if (input.observedStatus === "running" && (lastRestartAt === null || observedAt.getTime() - Date.parse(lastRestartAt) >= SITE_RESTART_QUIET_MS)) lastRestartAt = null;
