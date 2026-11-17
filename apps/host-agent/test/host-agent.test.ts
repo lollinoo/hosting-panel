@@ -461,7 +461,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
     it("rejects non-allowlisted maintenance actions and policyRef values with 403 HOST_POLICY_DENIED", async () => {
       const dir = await createShortTempDir();
       const socketPath = join(dir, "host-agent.sock");
-      const adapter = new LinuxSystemHostAdapter();
+      const adapter = new LinuxSystemHostAdapter({ nftablesInstalledPath: join(dir, "hosting-panel.nft") });
 
       const server = new HostAgentIpcServer({
         adapter,
@@ -580,6 +580,9 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         "/usr/bin/nft",
         "/usr/bin/uname",
         "/usr/bin/df",
+        "/usr/bin/systemctl",
+        "/usr/bin/journalctl",
+        "/usr/bin/apt-get",
       ]);
     });
   });
@@ -776,6 +779,13 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(text).toContain("ip6 nexthdr ipv6-icmp accept");
       expect(text).toContain("tcp dport { 22, 80, 443 }");
       expect(text).toContain("policy drop;");
+      // M5d: the panel lists, and the drop runs before the input chain, with SSH first.
+      expect(text).toContain("type filter hook prerouting priority raw; policy accept;");
+      expect(text).toContain("tcp dport 22 accept");
+      expect(text).toContain("ip saddr @blocked_v4 drop");
+      expect(text).toContain("ip6 saddr @blocked_v6 drop");
+      expect(text).toContain("tcp dport @opened_tcp_ports ct state new accept");
+      expect(text.indexOf("tcp dport 22 accept")).toBeLessThan(text.indexOf("ip saddr @blocked_v4 drop"));
     });
 
     it("baseline allows 3000 only from docker bridges", async () => {
@@ -800,6 +810,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       const invocations: Array<{ binary: string; args: readonly string[] }> = [];
       const adapter = new LinuxSystemHostAdapter({
         nftablesRulesetPath: tamperedPath,
+        nftablesInstalledPath: join(dir, "hosting-panel.nft"),
         execFileRunner: async (binary, args) => {
           invocations.push({ binary, args });
           return { stdout: "", stderr: "" };
@@ -856,9 +867,12 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
     });
 
     it("invokes nft with static argument arrays once SHA-256 verification succeeds and handles unprivileged verify gracefully", async () => {
+      const installedPath = join(await createShortTempDir(), "hosting-panel.nft");
+      await writeFile(installedPath, "# installer copy\n", "utf8");
       const invocations: Array<{ binary: string; args: readonly string[] }> = [];
       const mockedAdapter = new LinuxSystemHostAdapter({
         nftablesRulesetPath: REPO_DEDICATED_NFTABLES_RULESET_PATH,
+        nftablesInstalledPath: installedPath,
         execFileRunner: async (binary, args) => {
           invocations.push({ binary, args });
           return { stdout: "", stderr: "" };
@@ -888,6 +902,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       // Real unprivileged host verification
       const realAdapter = new LinuxSystemHostAdapter({
         nftablesRulesetPath: REPO_DEDICATED_NFTABLES_RULESET_PATH,
+        nftablesInstalledPath: installedPath,
       });
       const liveVerify = await realAdapter.executeSecurityPolicy(
         createApprovedHostSecurityCommand({
@@ -931,7 +946,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         {
           file: "hp-host-agent.service",
           user: "hp-agent",
-          supplementaryGroups: "hp-ipc",
+          supplementaryGroups: "hp-ipc systemd-journal",
           capBoundingSet: "CAP_NET_ADMIN CAP_DAC_READ_SEARCH",
           ambientCaps: "CAP_NET_ADMIN CAP_DAC_READ_SEARCH",
           inaccessibleDockerSock: true,

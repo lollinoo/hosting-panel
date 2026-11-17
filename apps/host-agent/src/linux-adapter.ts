@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, readFile, stat, statfs } from "node:fs/promises";
+import { access, readdir, readFile, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import {
@@ -16,10 +17,25 @@ import {
 import {
   createApprovedHostMaintenanceCommand,
   createApprovedHostSecurityCommand,
+  HOST_JOB_TRIGGER_DIR,
+  HOST_JOB_UNITS,
+  HOST_JOBS,
+  HOST_JOURNAL_MAX_LINES,
+  HOST_JOURNAL_UNITS,
+  HOST_SERVICE_UNITS,
+  hostAgentError,
   type ApprovedHostMaintenanceCommand,
   type ApprovedHostSecurityCommand,
   type HostAgentPort,
   type HostDisk,
+  type HostFirewallSets,
+  type HostFirewallState,
+  type HostJob,
+  type HostJobState,
+  type HostJournalLine,
+  type HostJournalUnit,
+  type HostOsPackages,
+  type HostServiceState,
   type HostMaintenanceResult,
   type HostSecurityResult,
   type HostTelemetry,
@@ -27,9 +43,22 @@ import {
 import {
   DEDICATED_NFTABLES_RULESET_SHA256,
   HostPolicyDeniedError,
+  INSTALLED_NFTABLES_RULESET_PATH,
   resolveDefaultNftablesRulesetPath,
   verifyStaticNftablesRuleset,
 } from "./nftables-baseline.js";
+import { buildFirewallSetsProgram, parseFirewallListing, validateFirewallSets } from "./firewall-sets.js";
+import {
+  HOST_JOB_RUNNING,
+  HOST_JOB_UNITS_MISSING,
+  HOST_TOOL_FAILED,
+  hostJobState,
+  hostToolFailed,
+  parseAptUpgradeSimulation,
+  parseHostServices,
+  parseJournalJson,
+  parseSystemctlShow,
+} from "./host-parsers.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,6 +69,9 @@ export const ALLOWED_LINUX_BINARIES = [
   "/usr/bin/nft",
   "/usr/bin/uname",
   "/usr/bin/df",
+  "/usr/bin/systemctl",
+  "/usr/bin/journalctl",
+  "/usr/bin/apt-get",
 ] as const;
 
 export type AllowedLinuxBinary = (typeof ALLOWED_LINUX_BINARIES)[number];
@@ -56,19 +88,61 @@ export interface ExecFileResult {
   readonly stderr: string;
 }
 
+export interface RunOptions {
+  readonly input?: string;
+  readonly maxBuffer?: number;
+}
+
 export type ExecFileRunner = (
   binaryPath: AllowedLinuxBinary,
   args: readonly string[],
+  options?: RunOptions,
 ) => Promise<ExecFileResult>;
 
 const SAFE_ARG_PATTERN = /^[^\r\n\0]{1,512}$/;
 
+const NFT_LIST_FORM = ["-j", "list", "table", "inet", "hp_dedicated_filter"] as const;
+const SYSTEMCTL_SERVICES_FORM: readonly string[] = [
+  "show", "--timestamp=unix", "--property=Id,ActiveState,ActiveEnterTimestamp,NRestarts", "--",
+  ...HOST_SERVICE_UNITS.map((u) => `${u}.service`),
+];
+const systemctlJobForm = (unit: string): string[] => [
+  "show", "--timestamp=unix",
+  "--property=Id,LoadState,ActiveState,Result,ExecMainStartTimestamp,ExecMainExitTimestamp,ExecMainStatus", "--",
+  `${unit}.service`, `${unit}.path`,
+];
+const journalctlForm = (unit: string, lines: string): string[] => [
+  `--unit=${unit}.service`, `--lines=${lines}`, "--output=json", "--output-fields=MESSAGE", "--no-pager", "--quiet",
+];
+const sameArgs = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x, i) => x === b[i]);
+
+/** R198 2.1: systemctl, journalctl and apt-get run only with one of their fixed argument forms. */
+export function isClosedArgumentForm(binaryPath: AllowedLinuxBinary, args: readonly string[]): boolean {
+  switch (binaryPath) {
+    case "/usr/bin/systemctl":
+      return sameArgs(args, SYSTEMCTL_SERVICES_FORM) || Object.values(HOST_JOB_UNITS).some((u) => sameArgs(args, systemctlJobForm(u)));
+    case "/usr/bin/journalctl": {
+      const n = (args[1] ?? "").match(/^--lines=([1-9]\d{0,2})$/)?.[1];
+      return n !== undefined && Number(n) <= HOST_JOURNAL_MAX_LINES && HOST_JOURNAL_UNITS.some((u) => sameArgs(args, journalctlForm(u, n)));
+    }
+    case "/usr/bin/apt-get":
+      return sameArgs(args, ["-s", "upgrade"]);
+    default:
+      return true;
+  }
+}
+
 export async function runAllowlistedBinary(
   binaryPath: AllowedLinuxBinary,
   args: readonly string[],
+  options: RunOptions = {},
 ): Promise<ExecFileResult> {
   if (!ALLOWED_LINUX_BINARIES_SET.has(binaryPath)) {
     throw new HostPolicyDeniedError("Requested Linux binary is not allowlisted");
+  }
+
+  if (!isClosedArgumentForm(binaryPath, args)) {
+    throw new HostPolicyDeniedError("Requested arguments are not an accepted form");
   }
 
   for (const arg of args) {
@@ -77,13 +151,17 @@ export async function runAllowlistedBinary(
     }
   }
 
-  const { stdout, stderr } = await execFileAsync(binaryPath, [...args], {
+  const pending = execFileAsync(binaryPath, [...args], {
     shell: false,
     env: SANITIZED_LINUX_ENV,
     timeout: 10_000,
-    maxBuffer: 256 * 1024,
+    maxBuffer: options.maxBuffer ?? 256 * 1024,
     windowsHide: true,
   });
+  // stdin always closes, so no program waits on it; nft -f - reads its program from here.
+  pending.child?.stdin?.on("error", () => undefined);
+  pending.child?.stdin?.end(options.input ?? "");
+  const { stdout, stderr } = await pending;
 
   return {
     stdout: String(stdout),
@@ -251,11 +329,16 @@ export interface LinuxSystemHostAdapterOptions {
   readonly procMeminfoPath?: string;
   readonly cgroupControllersPath?: string;
   readonly nftablesRulesetPath?: string;
+  readonly nftablesInstalledPath?: string;
   readonly expectedRulesetSha256?: string;
   readonly cpuSampleDelayMs?: number;
   readonly requireProvisionedDirectories?: boolean;
   readonly allowUnprivilegedVerifyFallback?: boolean;
   readonly execFileRunner?: ExecFileRunner;
+  readonly hostJobTriggerDir?: string;
+  readonly rebootRequiredPath?: string;
+  readonly aptListsDir?: string;
+  readonly unattendedUpgradePath?: string;
 }
 
 export class LinuxSystemHostAdapter implements HostAgentPort {
@@ -270,11 +353,16 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
   private readonly procMeminfoPath: string;
   private readonly cgroupControllersPath: string;
   private readonly nftablesRulesetPath: string;
+  private readonly nftablesInstalledPath: string;
   private readonly expectedRulesetSha256: string;
   private readonly cpuSampleDelayMs: number;
   private readonly requireProvisionedDirectories: boolean;
   private readonly allowUnprivilegedVerifyFallback: boolean;
   private readonly execFileRunner: ExecFileRunner;
+  private readonly hostJobTriggerDir: string;
+  private readonly rebootRequiredPath: string;
+  private readonly aptListsDir: string;
+  private readonly unattendedUpgradePath: string;
   private lastCpuSample: CpuTickSample | null = null;
 
   public constructor(options?: LinuxSystemHostAdapterOptions) {
@@ -295,12 +383,17 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
       options?.cgroupControllersPath ?? "/sys/fs/cgroup/cgroup.controllers";
     this.nftablesRulesetPath =
       options?.nftablesRulesetPath ?? resolveDefaultNftablesRulesetPath();
+    this.nftablesInstalledPath = options?.nftablesInstalledPath ?? INSTALLED_NFTABLES_RULESET_PATH;
     this.expectedRulesetSha256 =
       options?.expectedRulesetSha256 ?? DEDICATED_NFTABLES_RULESET_SHA256;
     this.cpuSampleDelayMs = options?.cpuSampleDelayMs ?? 20;
     this.requireProvisionedDirectories = options?.requireProvisionedDirectories ?? false;
     this.allowUnprivilegedVerifyFallback = options?.allowUnprivilegedVerifyFallback ?? true;
     this.execFileRunner = options?.execFileRunner ?? runAllowlistedBinary;
+    this.hostJobTriggerDir = options?.hostJobTriggerDir ?? HOST_JOB_TRIGGER_DIR;
+    this.rebootRequiredPath = options?.rebootRequiredPath ?? "/run/reboot-required";
+    this.aptListsDir = options?.aptListsDir ?? "/var/lib/apt/lists";
+    this.unattendedUpgradePath = options?.unattendedUpgradePath ?? "/usr/bin/unattended-upgrade";
   }
 
   public async checkHealth(): Promise<HostAgentHealthResponse> {
@@ -663,8 +756,23 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
       this.expectedRulesetSha256,
     );
 
-    const nftBinary = await this.resolveNftBinaryPath();
     const operationId = `op_sec_${randomUUID()}`;
+    if (!(await this.firewallInstalled())) {
+      return {
+        operationId,
+        hostId: approved.hostId,
+        policyRef: approved.policyRef,
+        status: "failed",
+        output: JSON.stringify({
+          policyRef: approved.policyRef,
+          rulesetId: verifiedRuleset.rulesetId,
+          rulesetSha256Verified: true,
+          reason: "panel firewall not installed on this server",
+          checkedAt: new Date().toISOString(),
+        }),
+      };
+    }
+    const nftBinary = await this.resolveNftBinaryPath();
 
     if (approved.policyRef === "verify_baseline_firewall") {
       try {
@@ -764,5 +872,128 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
         output: JSON.stringify(failureOutput),
       };
     }
+  }
+
+  /** Runs a tool; any failure but a policy refusal becomes the fixed sentence. */
+  private async runTool(binary: AllowedLinuxBinary, args: readonly string[], options?: RunOptions): Promise<string> {
+    try {
+      return (await this.execFileRunner(binary, args, options)).stdout;
+    } catch (err) {
+      if (err instanceof HostPolicyDeniedError) throw err;
+      throw hostToolFailed();
+    }
+  }
+
+  /** True only when the installer's boot copy of the ruleset is a file (R202 1.2). */
+  private firewallInstalled(): Promise<boolean> {
+    return stat(this.nftablesInstalledPath).then((s) => s.isFile(), () => false);
+  }
+
+  public async readFirewall(): Promise<HostFirewallState> {
+    const readAt = new Date().toISOString();
+    if (!(await this.firewallInstalled()))
+      return { baseRules: "unmanaged", openedPorts: [], blockedV4: [], blockedV6: [], readAt };
+    try {
+      const { stdout } = await this.execFileRunner(await this.resolveNftBinaryPath(), NFT_LIST_FORM);
+      return { ...parseFirewallListing(stdout), readAt };
+    } catch (err) {
+      if (err instanceof HostPolicyDeniedError || (err as { code?: unknown }).code === "NOT_SUPPORTED") throw err;
+      // nft answers a missing table with ENOENT text; only that case is "absent".
+      if (/No such file or directory/.test(String((err as { stderr?: unknown }).stderr ?? "")))
+        return { baseRules: "absent", openedPorts: [], blockedV4: [], blockedV6: [], readAt };
+      throw hostToolFailed();
+    }
+  }
+
+  public async replaceFirewallSets(sets: HostFirewallSets): Promise<HostFirewallState> {
+    const valid = validateFirewallSets(sets);
+    if ((await this.readFirewall()).baseRules !== "current")
+      throw hostAgentError("RESOURCE_LOCKED", "Firewall base rules are not current");
+    await this.runTool(await this.resolveNftBinaryPath(), ["-f", "-"], { input: buildFirewallSetsProgram(valid) });
+    return this.readFirewall();
+  }
+
+  public async readHostServices(): Promise<readonly HostServiceState[]> {
+    return parseHostServices(await this.runTool("/usr/bin/systemctl", SYSTEMCTL_SERVICES_FORM));
+  }
+
+  public async readHostJournal(unit: HostJournalUnit, lines: number): Promise<readonly HostJournalLine[]> {
+    if (!(HOST_JOURNAL_UNITS as readonly string[]).includes(unit) || !Number.isInteger(lines) || lines < 1 || lines > HOST_JOURNAL_MAX_LINES)
+      throw new HostPolicyDeniedError("Journal request refused");
+    return parseJournalJson(await this.runTool("/usr/bin/journalctl", journalctlForm(unit, String(lines)), { maxBuffer: 10 * 1024 * 1024 }));
+  }
+
+  public async readOsPackages(): Promise<HostOsPackages> {
+    const packages = parseAptUpgradeSimulation(await this.runTool("/usr/bin/apt-get", ["-s", "upgrade"], { maxBuffer: 1024 * 1024 }));
+    const [rebootRequired, canUpgrade, listsReadAt] = await Promise.all([
+      access(this.rebootRequiredPath).then(() => true, () => false),
+      access(this.unattendedUpgradePath, fsConstants.X_OK).then(() => true, () => false),
+      this.newestAptListTime(),
+    ]);
+    return { packages, rebootRequired, canUpgrade, listsReadAt };
+  }
+
+  /** Newest mtime of a regular file in the apt lists directory, or null. */
+  private async newestAptListTime(): Promise<string | null> {
+    const entries = await readdir(this.aptListsDir, { withFileTypes: true }).catch(() => []);
+    let newest = 0;
+    for (const e of entries) {
+      if (!e.isFile()) continue;
+      // apt-get update may remove a list between readdir and stat: that file is skipped.
+      const st = await stat(join(this.aptListsDir, e.name)).catch((err: unknown) => {
+        if ((err as { code?: unknown }).code === "ENOENT") return null;
+        throw err;
+      });
+      if (st) newest = Math.max(newest, st.mtimeMs);
+    }
+    return newest > 0 ? new Date(newest).toISOString() : null;
+  }
+
+  private assertHostJob(job: HostJob): void {
+    if (!(HOST_JOBS as readonly string[]).includes(job)) throw new HostPolicyDeniedError("Host job refused");
+  }
+
+  private async readJobBlocks(job: HostJob): Promise<Map<string, Record<string, string>>> {
+    return parseSystemctlShow(await this.runTool("/usr/bin/systemctl", systemctlJobForm(HOST_JOB_UNITS[job])));
+  }
+
+  private triggerExists(job: HostJob): Promise<boolean> {
+    return access(join(this.hostJobTriggerDir, HOST_JOB_UNITS[job])).then(() => true, () => false);
+  }
+
+  /** On the job calls only missing units are NOT_SUPPORTED; any other tool failure is retryable (R203 1.2). */
+  private async jobRead<T>(read: Promise<T>): Promise<T> {
+    try {
+      return await read;
+    } catch (err) {
+      if (err instanceof HostPolicyDeniedError || (err as Error).message === HOST_JOB_UNITS_MISSING) throw err;
+      throw hostAgentError("HOST_AGENT_UNAVAILABLE", HOST_TOOL_FAILED);
+    }
+  }
+
+  public async requestHostJob(job: HostJob): Promise<HostJobState> {
+    this.assertHostJob(job);
+    const blocks = await this.jobRead(this.readJobBlocks(job));
+    const trigger = join(this.hostJobTriggerDir, HOST_JOB_UNITS[job]);
+    // R198 2.4: a file no active path unit watches would wait forever; remove it.
+    if (blocks.get(`${HOST_JOB_UNITS[job]}.path`)?.ActiveState !== "active") {
+      await rm(trigger, { force: true });
+      throw hostAgentError("NOT_SUPPORTED", HOST_JOB_UNITS_MISSING);
+    }
+    if ((await this.jobRead(this.triggerExists(job).then((t) => hostJobState(job, blocks, t)))).state === "running")
+      throw hostAgentError("RESOURCE_LOCKED", HOST_JOB_RUNNING);
+    try {
+      await writeFile(trigger, "", { flag: "wx", mode: 0o600 });
+    } catch (err) {
+      if ((err as { code?: unknown }).code === "EEXIST") throw hostAgentError("RESOURCE_LOCKED", HOST_JOB_RUNNING);
+      throw hostToolFailed();
+    }
+    // R203 1.1: root's unit may already run; a read here that failed would say "not started".
+    return hostJobState(job, blocks, true);
+  }
+
+  public async readHostJob(job: HostJob): Promise<HostJobState> {
+    this.assertHostJob(job);
+    return this.jobRead(this.readJobBlocks(job).then(async (blocks) => hostJobState(job, blocks, await this.triggerExists(job))));
   }
 }

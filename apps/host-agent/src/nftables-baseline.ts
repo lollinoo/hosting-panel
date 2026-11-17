@@ -5,10 +5,13 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const DEDICATED_NFTABLES_RULESET_SHA256 =
-  "e02539a5ed5ef38253d5a4b824a593cfdefef288cf88696f6cb6a7898369a0fc" as const;
+  "80c56bc1101e13b8e858fd0cf5f26bb74684f637050656bd0ef8372284011651" as const;
 
 export const PRODUCTION_DEDICATED_NFTABLES_RULESET_PATH =
   "/etc/hosting-panel/nftables-dedicated.conf" as const;
+
+/** The boot copy install.sh writes only after it checked that SSH listens on 22 (R202 1.1). */
+export const INSTALLED_NFTABLES_RULESET_PATH = "/etc/nftables.d/hosting-panel.nft" as const;
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 

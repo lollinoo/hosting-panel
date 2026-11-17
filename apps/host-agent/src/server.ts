@@ -3,9 +3,17 @@ import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname } from "node:path";
+import { z } from "zod";
 import {
   DEFAULT_IPC_MAX_CLOCK_SKEW_MS,
   HostAgentHealthResponseSchema,
+  HostFirewallStateWireSchema,
+  HostJobIpcRequestSchema,
+  HostJobStateWireSchema,
+  HostJournalLineWireSchema,
+  HostOsPackagesWireSchema,
+  HostServiceStateWireSchema,
+  IPC_HOST_JOURNAL_UNITS,
   HostMaintenanceIpcRequestSchema,
   HostSecurityIpcRequestSchema,
   HostTelemetryWireSchema,
@@ -24,6 +32,7 @@ import {
   isAllowlistedHostSecurityPolicy,
   type HostAgentPort,
 } from "@hosting-panel/host-agent-contracts";
+import { validateFirewallSets } from "./firewall-sets.js";
 import { HOST_AGENT_VERSION } from "./linux-adapter.js";
 import { HostPolicyDeniedError } from "./nftables-baseline.js";
 
@@ -214,6 +223,21 @@ async function readBoundedBody(req: IncomingMessage): Promise<Buffer> {
   }
 
   return chunks.length === 0 ? Buffer.alloc(0) : Buffer.concat(chunks);
+}
+
+const HostJournalQuerySchema = z.object({ unit: z.enum(IPC_HOST_JOURNAL_UNITS), lines: z.string().regex(/^[1-9]\d{0,2}$/) }).strict();
+
+/** Query as an object; null when a key repeats. */
+function queryObject(url: URL): Record<string, string> | null {
+  const keys = [...url.searchParams.keys()];
+  return new Set(keys).size === keys.length ? Object.fromEntries(url.searchParams) : null;
+}
+
+/** Parses with a closed schema; anything else is a policy refusal. */
+function closedInput<T>(schema: z.ZodType<T>, value: unknown): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new HostPolicyDeniedError("Request refused by host policy");
+  return parsed.data;
 }
 
 function parseJsonObject(rawBody: Buffer): Record<string, unknown> | null {
@@ -595,6 +619,42 @@ export class HostAgentIpcServer {
         return;
       }
 
+      if (method === "GET" && pathname === "/v1/firewall") {
+        sendJsonResponse(res, 200, { data: HostFirewallStateWireSchema.parse(await this.adapter.readFirewall()) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/firewall/sets") {
+        const sets = validateFirewallSets(parseJsonObject(rawBody));
+        sendJsonResponse(res, 200, { data: HostFirewallStateWireSchema.parse(await this.adapter.replaceFirewallSets(sets)) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/host-services") {
+        sendJsonResponse(res, 200, { data: z.array(HostServiceStateWireSchema).parse(await this.adapter.readHostServices()) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/host-journal") {
+        const q = closedInput(HostJournalQuerySchema, queryObject(parsedUrl));
+        const lines = Number(q.lines);
+        if (lines > 500) throw new HostPolicyDeniedError("Request refused by host policy");
+        sendJsonResponse(res, 200, { data: z.array(HostJournalLineWireSchema).parse(await this.adapter.readHostJournal(q.unit, lines)) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/os-packages") {
+        sendJsonResponse(res, 200, { data: HostOsPackagesWireSchema.parse(await this.adapter.readOsPackages()) });
+        return;
+      }
+
+      if (pathname === "/v1/host-jobs" && (method === "POST" || method === "GET")) {
+        const { job } = closedInput(HostJobIpcRequestSchema, method === "POST" ? parseJsonObject(rawBody) : queryObject(parsedUrl));
+        const state = method === "POST" ? await this.adapter.requestHostJob(job) : await this.adapter.readHostJob(job);
+        sendJsonResponse(res, 200, { data: HostJobStateWireSchema.parse(state) });
+        return;
+      }
+
       sendErrorResponse(res, 404, "NOT_FOUND", "Unknown host-agent IPC endpoint", requestId);
     } catch (err) {
       const code = (err as { code?: unknown }).code;
@@ -614,6 +674,17 @@ export class HostAgentIpcServer {
           422,
           "NOT_SUPPORTED",
           err instanceof Error ? err.message : "Operation not supported",
+          requestId,
+        );
+        return;
+      }
+
+      if (code === "RESOURCE_LOCKED" || code === "HOST_AGENT_UNAVAILABLE") {
+        sendErrorResponse(
+          res,
+          code === "RESOURCE_LOCKED" ? 409 : 503,
+          code,
+          err instanceof Error ? err.message : "Host agent is busy",
           requestId,
         );
         return;
