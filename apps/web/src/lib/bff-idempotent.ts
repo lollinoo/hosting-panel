@@ -10,7 +10,7 @@ export async function forwardIdempotent(
   segments: Record<string, string>,
   upstreamPath: string,
   method: "POST" | "DELETE",
-  opts?: { timeoutMs?: number },
+  opts?: { timeoutMs?: number; headers?: Record<string, string> },
 ) {
   const segmentError = validatePathSegments(segments);
   if (segmentError) return segmentError;
@@ -32,6 +32,7 @@ export async function forwardIdempotent(
       idempotencyKey,
       body: parsed.body,
       timeoutMs: opts?.timeoutMs,
+      headers: opts?.headers,
     }),
   );
 }

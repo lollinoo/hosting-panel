@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement, type ReactElement } from "react";
-import { PANEL_CONTAINERS } from "@hosting-panel/contracts";
+import { HOST_JOURNAL_SOURCES, HOST_SERVICES, HOST_SERVICE_UNIT, PANEL_CONTAINERS } from "@hosting-panel/contracts";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 
@@ -44,7 +44,7 @@ import SiteLogsPage from "@/app/sites/[siteId]/logs/page";
 import { SiteLogs } from "@/components/customer/site-logs";
 import { AuditFilters } from "@/components/admin/audit-filters";
 import { I18nProvider } from "@/i18n/provider";
-import { AUDIT_TRAIL_MAX, auditHref, isoToLocalInput, parseLogSource, parseTail, parseTrail } from "@/lib/admin-address";
+import { AUDIT_TRAIL_MAX, auditHref, isoToLocalInput, logUrl, parseLogSource, parseTail, parseTrail } from "@/lib/admin-address";
 
 const render = (el: ReactElement, locale: "en" | "it" = "en") =>
   renderToStaticMarkup(createElement(I18nProvider, { locale, messages: locale === "en" ? en : itMsgs, children: el }));
@@ -53,6 +53,7 @@ const req = (url: string) => new Request(`http://localhost:3000${url}`, { header
 const comp = (component: string) => ({ params: Promise.resolve({ component }) });
 const site = (siteId: string) => ({ params: Promise.resolve({ siteId }) });
 const BAD = ["docker", "site:../x", "hp_mariadb", "", "..%2F", "../", "site:"];
+const NEAR = ["hp-api2", "hp_api", "HP-API", "hp-api.service", "hp-panel-update ", "hp-os"];
 const sp = (q: Record<string, string>) => ({ searchParams: Promise.resolve(q) });
 
 beforeEach(() => {
@@ -74,6 +75,14 @@ describe("(a)(b) source and tail in the address", () => {
     for (const c of PANEL_CONTAINERS) expect(parseLogSource(c)).toEqual({ kind: "panel", component: c });
     expect(parseLogSource("site:abc")).toEqual({ kind: "site", siteId: "abc" });
     for (const v of [...BAD, undefined, `site:${"a".repeat(129)}`]) expect(parseLogSource(v)).toBeNull();
+  });
+
+  it("parseLogSource takes the seven journals and nothing near them; logUrl sends them to the logs route", () => {
+    for (const unit of HOST_JOURNAL_SOURCES) {
+      expect(parseLogSource(unit)).toEqual({ kind: "journal", unit });
+      expect(logUrl({ kind: "journal", unit }, 500)).toBe(`/api/admin/logs/${unit}?tail=500`);
+    }
+    for (const v of NEAR) expect(parseLogSource(v)).toBeNull();
   });
 
   it("parseTail keeps 100, 200, 500 and gives 200 otherwise", () => {
@@ -98,6 +107,17 @@ describe("(c) log BFF routes", () => {
       expect((await panelLogs(req("/x"), comp(v))).status).toBe(400);
       expect((await siteLogs(req("/x"), site(v === "docker" || v === "hp_mariadb" ? "../x" : v))).status).toBe(400);
     }
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("the logs route takes the five parts and the seven journals, and no name near them", async () => {
+    for (const c of [...PANEL_CONTAINERS, ...HOST_JOURNAL_SOURCES]) {
+      await panelLogs(req(`/api/admin/logs/${c}?tail=500`), comp(c));
+      expect(fetchUpstream).toHaveBeenLastCalledWith(`v1/admin/logs/${c}?tail=500`, expect.objectContaining({ method: "GET", timeoutMs: 40000 }));
+    }
+    expect(fetchUpstream).toHaveBeenCalledTimes(12);
+    fetchUpstream.mockClear();
+    for (const v of NEAR) expect((await panelLogs(req("/x"), comp(v))).status, v).toBe(400);
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 
@@ -126,8 +146,24 @@ describe("(d) Logs page", () => {
     expect(html).not.toContain(en.admin.logs.choose);
   });
 
+  it("a third group between the parts and the sites lists the seven journals in words, and opens one in the one-panel viewer", async () => {
+    for (const [locale, m] of [["en", en]] as const) {
+      const html = decode(render(await AdminLogsPage(sp({ source: "hp-os-upgrade" })), locale)).replace(' selected=""', "");
+      const t = m.admin.logs;
+      const at = (s: string) => html.indexOf(s);
+      expect(at(`label="${t.panelGroup}"`)).toBeLessThan(at(`label="${t.hostGroup}"`));
+      expect(at(`label="${t.hostGroup}"`)).toBeLessThan(at(`label="${t.sitesGroup}"`));
+      for (const s of HOST_SERVICES) expect(html).toContain(`<option value="${HOST_SERVICE_UNIT[s]}">${m.admin.health.components[s]}</option>`);
+      for (const u of ["hp-panel-update", "hp-os-refresh", "hp-os-upgrade"] as const) expect(html).toContain(`<option value="${u}">${t.units[u]}</option>`);
+      expect(html.match(/<option value="hp-/g)).toHaveLength(HOST_JOURNAL_SOURCES.length);
+      expect(html).toContain(t.viewer.journal);
+      expect(html).not.toContain(t.viewer.visits);
+      expect(html).not.toContain(t.viewer.errors);
+    }
+  });
+
   it("a source outside the closed forms shows choose and loads nothing", async () => {
-    for (const source of [...BAD, "site:a/b"]) {
+    for (const source of [...BAD, ...NEAR, "site:a/b"]) {
       hooks.on = true;
       hooks.slots = [];
       hooks.i = 0;
@@ -193,6 +229,21 @@ describe("(e) SiteLogs", () => {
     expect(ok).toContain(en.admin.logs.viewer.errors);
     expect(ok).toContain("boom");
     expect(ok).toContain('role="status"');
+  });
+
+  it("journal mode draws one panel with every line, and a 503 says the journal cannot be read", async () => {
+    answer(200, { data: [{ at: null, stream: "stdout", text: "Started job" }] });
+    const one = decode(await run(createElement(SiteLogs, { url: "/api/admin/logs/hp-api?tail=200", admin: true, journal: true })));
+    expect(one).toContain(en.admin.logs.viewer.journal);
+    expect(one).toContain("Started job");
+    expect(one).not.toContain(en.admin.logs.viewer.visits);
+    expect(one).not.toContain(en.admin.logs.viewer.errors);
+    expect(one.match(/<pre/g)).toHaveLength(1);
+    answer(503, null);
+    const down = decode(await run(createElement(SiteLogs, { url: "/u", admin: true, journal: true })));
+    expect(down).toContain(en.admin.logs.viewer.journalUnavailable);
+    expect(down).not.toContain(en.admin.logs.viewer.unavailable);
+    expect(down).toContain('role="alert"');
   });
 
   it("R186 2.3: the status line says the load ended, in both languages and both text groups; not after a failure", async () => {

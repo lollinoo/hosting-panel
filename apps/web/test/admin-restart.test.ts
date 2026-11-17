@@ -6,6 +6,8 @@ import {
   AdminHealthDtoSchema,
   HEALTH_REASONS,
   HEALTH_STATES,
+  HOST_SERVICES,
+  HOST_SERVICE_UNIT,
   PANEL_COMPONENTS,
   PANEL_CONTAINERS,
   SITE_CONTAINER_STATES,
@@ -53,6 +55,7 @@ import {
   canRestartPart,
   followRestart,
   restartErrorText,
+  restartName,
   restartUrl,
   restartWarning,
   type RestartTarget,
@@ -94,6 +97,7 @@ const els = (n: unknown): El[] =>
 
 const site = (desired: "running" | "stopped"): RestartTarget => ({ kind: "site", siteId: "s1", siteName: "wp-a.example.test", desired });
 const part = (component: (typeof PANEL_CONTAINERS)[number]): RestartTarget => ({ kind: "part", component });
+const service = (s: (typeof HOST_SERVICES)[number]): RestartTarget => ({ kind: "service", service: s });
 
 beforeEach(() => {
   fetchUpstream.mockReset();
@@ -113,6 +117,26 @@ describe("keyedSend", () => {
     const keys: Record<string, string> = {};
     expect(await keyedSend(keys, "csrf", "n", "POST", "/x", {})).toEqual({ ok: true, data: body });
     expect(keys).toEqual({});
+  });
+
+  it("a 200 and a 201 succeed and drop the key", async () => {
+    for (const status of [200, 201]) {
+      const body = { data: { baseRules: "current" } };
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(body), { status })));
+      const keys: Record<string, string> = {};
+      expect(await keyedSend(keys, "csrf", "n", "POST", "/x", {})).toEqual({ ok: true, data: body });
+      expect(keys).toEqual({});
+    }
+  });
+
+  it("a refusal gives back the reason of its first detail, and none without details", async () => {
+    const refusal = { error: { code: "VALIDATION_ERROR", details: [{ field: "address", reason: "overlaps" }, { field: "note", reason: "note_invalid" }] } };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(refusal), { status: 400 })));
+    expect(await keyedSend({}, "csrf", "n", "POST", "/x", {})).toEqual({ ok: false, code: "VALIDATION_ERROR", reason: "overlaps" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { code: "RESOURCE_LOCKED" } }), { status: 409 })));
+    const bare = await keyedSend({}, "csrf", "n", "POST", "/x", {});
+    expect(bare).toEqual({ ok: false, code: "RESOURCE_LOCKED" });
+    expect(bare.ok === false && bare.reason).toBeUndefined();
   });
 });
 
@@ -144,6 +168,27 @@ describe("restart rules and texts", () => {
         `${w.site.replace("{name}", "wp-a.example.test")} ${w.siteStopped.replace("{name}", "wp-a.example.test")}`,
       );
       for (const c of PANEL_CONTAINERS) expect(restartWarning(m, part(c))).toBe(w[c]);
+    }
+  });
+
+  it("the four services: their BFF route, their name and their own warning", () => {
+    for (const s of HOST_SERVICES) {
+      expect(restartUrl(service(s))).toBe(`/api/admin/host-services/${s}/restart`);
+      for (const m of [en, itMsgs]) {
+        expect(restartName(m, service(s))).toBe(m.admin.health.components[s]);
+        expect(restartWarning(m, service(s))).toBe(m.admin.health.restart.warn[s]);
+      }
+    }
+  });
+
+  it("restartErrorText: a lock gets its own sentence for site work and for another server job", () => {
+    for (const m of [en, itMsgs]) {
+      const r = m.admin.health.restart;
+      expect(restartErrorText(m, "X", "RESOURCE_LOCKED", "site_work_running")).toBe(r.siteWork);
+      expect(restartErrorText(m, "X", "RESOURCE_LOCKED", "host_job_running")).toBe(r.hostJob);
+      expect(restartErrorText(m, "X", "RESOURCE_LOCKED", "other")).toBe(r.locked.replace("{name}", "X"));
+      expect(restartErrorText(m, "X", "NOT_FOUND", "host_job_running")).toBe(r.notFound.replace("{name}", "X"));
+      expect(new Set([r.siteWork, r.hostJob, r.locked]).size).toBe(3);
     }
   });
 
@@ -197,6 +242,36 @@ describe("followRestart", () => {
     const d = clock();
     const notOk = vi.fn(async () => new Response("{}", { status: 502 })) as unknown as typeof fetch;
     expect(await followRestart("op1", { fetch: notOk, ...d })).toBe("unknown");
+  });
+});
+
+describe("followRestart with a follow time", () => {
+  const LONG = 30 * 60_000;
+  const timed = (fail: (t: number) => Response | Error | null, end: string) => {
+    let t = 0;
+    const fetchFn = vi.fn(async () => {
+      const r = fail(t);
+      if (r instanceof Error) throw r;
+      return r ?? new Response(JSON.stringify({ data: { status: end } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return { fetch: fetchFn, now: () => t, sleep: async (ms: number) => void (t += ms) };
+  };
+
+  it("reads that fail for minutes, then an end, still give succeeded", async () => {
+    const away = (t: number) => (t < 5 * 60_000 ? (t % 3 ? new Response("{}", { status: 502 }) : new Error("offline")) : null);
+    expect(await followRestart("op1", timed(away, "succeeded"), LONG)).toBe("succeeded");
+    expect(await followRestart("op1", timed((t) => (t < 5 * 60_000 ? new Response("{}", { status: 504 }) : null), "failed"), LONG)).toBe("failed");
+  });
+
+  it("the deadline is the given time, and without a terminal status the end is unknown, never failed", async () => {
+    for (const fail of [() => new Response("{}", { status: 502 }), () => new Error("x"), () => new Response("not json", { status: 200 }), () => null]) {
+      const d = timed(fail, "processing");
+      expect(await followRestart("op1", d, LONG)).toBe("unknown");
+      expect(d.now()).toBe(LONG);
+    }
+    const shipped = timed(() => null, "processing");
+    expect(await followRestart("op1", shipped)).toBe("unknown");
+    expect(shipped.now()).toBe(RESTART_FOLLOW_MS);
   });
 });
 
@@ -275,6 +350,7 @@ describe("Health page actions and the dialog", () => {
         observed, driftReason: null, restartCount: 0, observedAt: T, stale: false,
       })),
       disks: [],
+      hostServices: null,
     });
   const upstream = (h: AdminHealthDto) =>
     fetchUpstream.mockImplementation(async (path: string) => ({ ok: true, status: 200, data: { data: path === "v1/admin/health" ? h : [] } }));
@@ -293,6 +369,35 @@ describe("Health page actions and the dialog", () => {
     expect(h).toContain('href="/admin/sites/s2/terminal"');
     for (const i of [1, 3, 4]) expect(h).not.toContain(`href="/admin/sites/s${i}/terminal"`);
     expect(h).toContain('aria-label="Open the terminal of wp-0.example.test"');
+  });
+
+  it("the services card: one sentence when they cannot be read; otherwise state, since, restarts, journal and Restart", async () => {
+    for (const m of [en, itMsgs]) {
+      getRequestLocale.mockResolvedValue(m === en ? "en" : "it");
+      const t = m.admin.health;
+      upstream(health());
+      const none = html(m, await AdminHealthPage());
+      expect(none).toContain(t.services.title);
+      expect(none).toContain(t.services.unreadable);
+      for (const s of HOST_SERVICES) expect(none).not.toContain(`source=${HOST_SERVICE_UNIT[s]}`);
+
+      const filled = { ...health(), hostServices: HOST_SERVICES.map((s, i) => ({
+        service: s, active: s !== "executor", activeState: s === "executor" ? "failed" : "active", since: i ? T : null, restarts: i + 7,
+      })) };
+      upstream(filled);
+      const page = html(m, await AdminHealthPage());
+      const h = page.slice(page.indexOf(t.services.title), page.indexOf(t.sitesTitle));
+      expect(page.indexOf(t.partsTitle)).toBeLessThan(page.indexOf(t.services.title));
+      expect(h).not.toContain(t.services.unreadable);
+      expect(h.split(`>${t.services.running}<`)).toHaveLength(4);
+      expect(h).toContain(`>${t.services.stopped.replace("{state}", "failed")}<`);
+      expect(h).toContain(`>${t.services.colSince}<`);
+      for (const [i, s] of HOST_SERVICES.entries()) {
+        expect(h).toContain(`href="/admin/logs?source=${HOST_SERVICE_UNIT[s]}"`);
+        expect(h).toContain(`aria-label="${t.restart.buttonLabel.replace("{name}", t.components[s])}"`);
+        expect(h).toContain(`>${i + 7}<`);
+      }
+    }
   });
 
   it("after 202 the trigger keeps focus but opens nothing; idle it opens the dialog", () => {

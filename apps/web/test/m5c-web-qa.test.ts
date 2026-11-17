@@ -457,6 +457,7 @@ describe("6. Restart asks before it acts", () => {
         driftReason: null, restartCount: 0, observedAt: T, stale: false,
       })),
       disks: [],
+      hostServices: null,
     });
     fetchUpstream.mockImplementation(async (p: string) => ({ ok: true, status: 200, data: { data: p === "v1/admin/health" ? h : [] } }));
     const targets = els(await AdminHealthPage()).filter((e) => e.type === RestartButton).map((e) => e.props.target);
@@ -666,6 +667,7 @@ describe("9. the screen and the routes fit together", () => {
     ["POST", "`/api/admin/terminal/${o.sessionId}/read`", "src/app/api/admin/terminal/[sessionId]/read/route.ts"],
     ["POST", "`/api/admin/panel-containers/${target.component}/restart`", "src/app/api/admin/panel-containers/[component]/restart/route.ts"],
     ["POST", "`/api/admin/sites/${target.siteId}/restart`", "src/app/api/admin/sites/[siteId]/restart/route.ts"],
+    ["POST", "`/api/admin/host-services/${target.service}/restart`", "src/app/api/admin/host-services/[service]/restart/route.ts"],
     ["GET", "`/api/admin/operations/${operationId}`", "src/app/api/admin/operations/[operationId]/route.ts"],
   ] as const;
 

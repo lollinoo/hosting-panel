@@ -327,6 +327,7 @@ describe("3. hostile values are text", () => {
           components,
           siteContainers: [{ siteId: "s1", siteName: XSS, organizationName: XSS2, desired: "running", observed: "stopped", driftReason: null, restartCount: 2, observedAt: T, stale: false }],
           disks: [],
+          hostServices: null,
         },
       },
       "v1/admin/alerts": {

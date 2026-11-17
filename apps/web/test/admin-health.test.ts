@@ -93,6 +93,7 @@ const makeHealth = (over: Partial<AdminHealthDto> = {}): AdminHealthDto =>
       { siteId: "s2", siteName: "wp-b.example.test", organizationName: "Example Org", desired: "running", observed: "running", driftReason: null, restartCount: null, observedAt: null, stale: false },
     ],
     disks: [{ paths: ["docker_data", "root"], usedBytes: "5368709120", totalBytes: "10737418240", usedPercent: 50, observedAt: T }],
+    hostServices: null,
     ...over,
   });
 
@@ -394,13 +395,15 @@ describe("alerts BFF route (f)", () => {
 });
 
 describe("navigation (g)", () => {
-  it("(g) Health is first and Logs comes right before the activity log, in both languages", () => {
+  it("(g) Health is first, Firewall follows Backups, and Logs, Updates and the activity log come in a row, in both languages", () => {
     for (const m of [en, itMsgs]) {
       const h = html(m, createElement(SidebarNav));
       const hrefs = [...h.matchAll(/href="([^"]+)"/g)].map((x) => x[1]);
       expect(hrefs[0]).toBe("/admin/health");
-      expect(hrefs.indexOf("/admin/logs")).toBe(hrefs.indexOf("/admin/audit") - 1);
-      for (const label of [m.admin.nav.health, m.admin.nav.logs, m.admin.nav.audit]) expect(h).toContain(`>${label}<`);
+      expect(hrefs.indexOf("/admin/firewall")).toBe(hrefs.indexOf("/admin/backups") + 1);
+      expect(hrefs.indexOf("/admin/updates")).toBe(hrefs.indexOf("/admin/logs") + 1);
+      expect(hrefs.indexOf("/admin/audit")).toBe(hrefs.indexOf("/admin/updates") + 1);
+      for (const label of [m.admin.nav.health, m.admin.nav.firewall, m.admin.nav.logs, m.admin.nav.updates, m.admin.nav.audit]) expect(h).toContain(`>${label}<`);
     }
     expect(en.admin.nav.health).not.toBe(itMsgs.admin.nav.health);
   });
