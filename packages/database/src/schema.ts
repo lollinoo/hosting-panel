@@ -544,18 +544,22 @@ export const operations = pgTable(
   ],
 );
 
-export const operationSteps = pgTable("operation_steps", {
-  id: text("id").primaryKey(),
-  operationId: text("operation_id")
-    .notNull()
-    .references(() => operations.id, { onDelete: "cascade" }),
-  key: text("key").notNull(),
-  label: text("label").notNull(),
-  status: text("status").$type<OperationStepStatus>().notNull().default("pending"),
-  message: text("message"),
-  startedAt: timestamp("started_at", { withTimezone: true }),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+export const operationSteps = pgTable(
+  "operation_steps",
+  {
+    id: text("id").primaryKey(),
+    operationId: text("operation_id")
+      .notNull()
+      .references(() => operations.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    label: text("label").notNull(),
+    status: text("status").$type<OperationStepStatus>().notNull().default("pending"),
+    message: text("message"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [index("idx_operation_steps_operation").on(t.operationId)],
+);
 
 export const outboxEvents = pgTable(
   "outbox_events",
