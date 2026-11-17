@@ -49,9 +49,13 @@ tags:
   - name: Admin Backups
     description: Platform S3 backup target settings, connectivity tests, and per-site backup status (server administrator only)
   - name: Admin Health
-    description: Panel health, open alerts, and site and panel logs (server administrator only)
+    description: Panel health, open alerts, site and panel logs, and restarts of the panel's parts (server administrator only)
   - name: Admin Terminal
     description: Text shell in a site's container, behind a fresh authenticator code (server administrator only)
+  - name: Admin Firewall
+    description: Ports of the safe list and blocked addresses on the server's firewall (server administrator only)
+  - name: Admin Updates
+    description: Panel release, panel containers, site images and system packages (server administrator only)
   - name: Services
     description: Declarative service instances, immutable revisions, and async lifecycle
   - name: Operations
@@ -4169,7 +4173,9 @@ paths:
       operationId: getAdminHealth
       summary: State of the panel's parts, the site containers and the disks (server administrator)
       description: >-
-        Computed on each call from stored rows; nothing calls the executor or the host agent here.
+        Computed on each call from stored rows, plus one live read of the four host services from
+        the host agent (`hostServices`), bound to 3 seconds; when the agent is disabled, out of
+        reach, slow or sends something malformed, `hostServices` is `null` and the rest is unchanged.
         `api`, `web` and `database` are always `ok` (the answer itself proves them). `executor` and
         `host_agent` come from their heartbeat rows: no row is `unknown`/`not_reporting`, a row older
         than five minutes or offline is `down`/`not_reporting`. `docker_engine` follows the executor's
@@ -4275,17 +4281,21 @@ paths:
     get:
       tags: [Admin Health]
       operationId: getAdminPanelLogs
-      summary: Read recent log lines of one of the panel's own containers (server administrator; not audited)
+      summary: Read recent log lines of a panel container, a panel service or a host job (server administrator; not audited)
       description: >-
-        The executor maps the name to its container itself. In `phpmyadmin` lines every query
-        string is replaced with `?[masked]`.
+        Twelve sources. The five panel containers are read through the executor, which maps the
+        name to its container itself; in `phpmyadmin` lines every query string is replaced with
+        `?[masked]`. The seven journal sources (the four panel services and the three host jobs:
+        panel update, package list refresh, package upgrade) are read through the host agent with
+        `journalctl` on that unit only; each line is `stdout`, its text cut to 2000 characters.
+        No read is audited.
       parameters:
         - in: path
           name: component
           required: true
           schema:
             type: string
-            enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+            enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay, hp-api, hp-web, hp-docker-executor, hp-host-agent, hp-panel-update, hp-os-refresh, hp-os-upgrade]
         - in: query
           name: tail
           description: Lines to read, clamped to 1–500; 200 when absent or not a number
@@ -4308,7 +4318,7 @@ paths:
                     items:
                       $ref: "#/components/schemas/SiteLogLineDto"
         "400":
-          description: '`component` is not one of the five panel containers (`VALIDATION_ERROR`)'
+          description: '`component` is not one of the twelve sources (`VALIDATION_ERROR`)'
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
@@ -4320,10 +4330,17 @@ paths:
             The container does not exist (`NOT_FOUND`, "There is no log to show: this part is not
             running on this server.")
           $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: >-
+            A journal source while the host agent is disabled (`NOT_SUPPORTED`, "The host agent is
+            disabled on this server.")
+          $ref: "#/components/responses/ErrorResponse"
         "503":
           description: >-
-            Runtime disabled or the executor failed (`DOCKER_ENGINE_UNAVAILABLE`, "The logs are not
-            available right now. Try again in a few minutes.")
+            A container source with the runtime disabled or a failed executor
+            (`DOCKER_ENGINE_UNAVAILABLE`), or a journal source the agent did not read
+            (`HOST_AGENT_UNAVAILABLE`); both read "The logs are not available right now. Try again
+            in a few minutes."
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/restart:
@@ -4356,7 +4373,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/ManagedSiteAccepted"
         "400":
-          description: No `Idempotency-Key`, or the reason is missing, blank or over 500 characters (`VALIDATION_ERROR`)
+          description: No `Idempotency-Key`, or the reason is missing, blank, over 500 characters or holds U+0000 (`VALIDATION_ERROR`)
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
@@ -4422,8 +4439,8 @@ paths:
                         type: string
         "400":
           description: >-
-            No `Idempotency-Key`, `component` is not one of the five, or the reason is missing, blank
-            or over 500 characters (`VALIDATION_ERROR`)
+            No `Idempotency-Key`, `component` is not one of the five, or the reason is missing, blank,
+            over 500 characters or holds U+0000 (`VALIDATION_ERROR`)
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
@@ -4448,6 +4465,22 @@ paths:
       tags: [Admin Health]
       operationId: getAdminOperation
       summary: Read any operation by id (server administrator; not audited)
+      description: >-
+        Any kind, including the server-wide ones with no site. `panel.container.restart` and
+        `panel.container.apply` (a panel container moved to its pinned image) carry the container's
+        name in `resourceId`; a failed apply reads "The container was not moved to its pinned image.
+        Check Health, then try again." `host.job` carries the job in `resourceId`
+        (`restart_hp_api`, `restart_hp_web`, `restart_hp_docker_executor`,
+        `restart_hp_host_agent`, `panel_update`, `os_refresh`, `os_upgrade`). A host job that ran and
+        ended with an error, including a panel update that rolled back, is `failed` with
+        `HOST_JOB_FAILED` ("The job ended with an error. Read its log on the Logs page, then try
+        again."). One that was older than a minute when the worker reached it, or whose run did not
+        start within two minutes, is `failed` with `OPERATION_INTERRUPTED` ("The job did not start.
+        Check Health, then try again."); one the host agent refused because a job was already
+        running, or did not answer when asked to start it, is `failed` with the same sentence and
+        `RESOURCE_LOCKED` or `HOST_AGENT_UNAVAILABLE`. The finer result (`updated`, `already_current`,
+        `rolled_back`, `rollback_unhealthy`, `not_started`, ...) is in the job's end row in the audit
+        log, and the last panel update's result is in `GET /v1/admin/updates`.
       parameters:
         - in: path
           name: operationId
@@ -4648,6 +4681,620 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "503":
           description: The executor did not answer (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/host-services/{service}/restart:
+    post:
+      tags: [Admin Health]
+      operationId: adminRestartHostService
+      summary: Restart one of the panel's four services with a reason (server administrator; audited as admin.host_service.restart)
+      description: >-
+        Queues a `host.job` (`restart_hp_api`, `restart_hp_web`, `restart_hp_docker_executor` or
+        `restart_hp_host_agent`) under the lock `host:job`, so one host job runs at a time on the
+        server. About two seconds after this answer the host agent writes an empty trigger file; a
+        root systemd path unit sees it and runs `systemctl restart` on that one service. The panel
+        then follows the unit until it ends. Restarting `api` or `web` drops the panel for a few
+        seconds; restarting `host_agent` may cut the agent's own answer, and the panel reads the end
+        once the agent is back. A restart of `executor` is refused while a backup, a restore, a
+        WordPress update or an import runs. The request writes `admin.host_service.restart`
+        (`details`: `outcome`, `requestId`, `service`, `reason`, `operationId`) in the transaction
+        that queues the job; a replayed key writes no second row. The end writes
+        `admin.host_service.restart.end` (actor `system`; `details`: `operationId`, `outcome`,
+        `result`, `exitStatus`).
+      parameters:
+        - in: path
+          name: service
+          required: true
+          schema:
+            type: string
+            enum: [api, web, executor, host_agent]
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestartInput"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [service, operationId]
+                    properties:
+                      service:
+                        type: string
+                        enum: [api, web, executor, host_agent]
+                      operationId:
+                        type: string
+        "400":
+          description: >-
+            `service` is not one of the four, no `Idempotency-Key`, or the reason is missing, blank,
+            over 500 characters or holds U+0000 (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another host job is queued or running (`RESOURCE_LOCKED`, `details[0].reason`
+            `host_job_running`), site work is running and the service is `executor`
+            (`RESOURCE_LOCKED`, `site_work_running`), or the key was used for another request
+            (`IDEMPOTENCY_CONFLICT`).
+            A replay of this same request with its key answers its first operation with `202`, also
+            when site work began after it.
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`, "The host agent is disabled on this server.")
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/firewall:
+    get:
+      tags: [Admin Firewall]
+      operationId: getAdminFirewall
+      summary: The stored firewall lists and what the server's firewall holds now (server administrator; not audited)
+      description: >-
+        The database holds the truth: the open ports of the safe list and the blocked addresses.
+        The answer adds one read of the kernel's table `inet hp_dedicated_filter` through the host
+        agent (`nft -j list table`), outside the queue of changes. `baseRules` says whether the base
+        rules are in place: `current`, `outdated`, `absent`, `unmanaged` (the installer did not load
+        the panel's firewall, so the panel does not change it), `unreadable` (the agent did not
+        answer) or `disabled` (the agent is off). `inForce` on a port or a block is `null` unless the
+        base rules are `current`. Blocks are newest first. To put the base rules in place, use
+        `POST /v1/hosts/{hostId}/security` (`hostId` is in this answer); after it the panel sends the
+        lists again. The lists are also sent when the API starts, retried every 10 seconds while the
+        agent is away. There is no periodic pass.
+      responses:
+        "200":
+          description: The firewall view
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FirewallDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/firewall/ports/{name}/open:
+    post:
+      tags: [Admin Firewall]
+      operationId: openAdminFirewallPort
+      summary: Open one port of the safe list (server administrator; audited as admin.firewall.port_open)
+      description: >-
+        Changes run one at a time. Each one reads the kernel's table first: base rules that are
+        `outdated`, `absent` or `unmanaged` refuse the change. When the read fails the change goes
+        ahead, and the agent refuses the lists unless the base rules are `current`. The
+        change is stored, then the whole lists are sent to the host; the answer shows the result. If
+        the send fails, the change stays stored and `inForce` shows it is not active; it is sent with
+        the next change, the next base-rules apply or the next start of the API. Opening a port that
+        is already open changes nothing and writes no row. The row `admin.firewall.port_open` keeps
+        `outcome`, `requestId`, `name` and `port` in `details`. No `Idempotency-Key` is needed; one
+        sent is ignored.
+      parameters:
+        - $ref: "#/components/parameters/FirewallPortNameParam"
+      responses:
+        "200":
+          description: The firewall view after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FirewallDto"
+        "400":
+          description: '`name` is not on the safe list (`VALIDATION_ERROR`, `details[0]`: field `name`, reason `unknown_port`)'
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The base rules are not in place (`FIREWALL_BASE_RULES_NOT_CURRENT`, "The base firewall
+            rules are not in place. Apply them first."; when the panel firewall is not installed,
+            "The panel firewall is not installed on this server.")
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The API is stopping (`HOST_AGENT_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/firewall/ports/{name}/close:
+    post:
+      tags: [Admin Firewall]
+      operationId: closeAdminFirewallPort
+      summary: Close one port of the safe list (server administrator; audited as admin.firewall.port_close)
+      description: >-
+        Same steps as the open. Closing a port that is already closed changes nothing and writes no
+        row. Ports 22, 80, 443 and 3000 are not on the safe list and cannot be closed here.
+      parameters:
+        - $ref: "#/components/parameters/FirewallPortNameParam"
+      responses:
+        "200":
+          description: The firewall view after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FirewallDto"
+        "400":
+          description: '`name` is not on the safe list (`VALIDATION_ERROR`, `details[0]`: field `name`, reason `unknown_port`)'
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The base rules are not in place (`FIREWALL_BASE_RULES_NOT_CURRENT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The API is stopping (`HOST_AGENT_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/firewall/blocks:
+    post:
+      tags: [Admin Firewall]
+      operationId: createAdminFirewallBlock
+      summary: Block one address or range (server administrator; audited as admin.firewall.block)
+      description: >-
+        Same steps as a port change. A blocked address gets no answer from the server or the sites,
+        and the server's answers to it are dropped too; it can still reach SSH (port 22). The
+        address is stored in its short form (for example `192.0.2.0/24` or `2001:db8::/48`). An
+        IPv4 range may not be wider than /16, an IPv6 range not wider than /32; at most 500 blocks per
+        family. The web app sends the visitor's address in `X-HP-Client-Address`; a block that would
+        cover it is refused. Without the header, or with a malformed one, that check is skipped:
+        the header is advice, not a boundary. The row `admin.firewall.block` keeps `outcome`,
+        `requestId`, `address`, `family` and `note` in `details`. No `Idempotency-Key` is needed; one
+        sent is ignored.
+      parameters:
+        - in: header
+          name: X-HP-Client-Address
+          required: false
+          description: The address of the person using the panel, as the web app received it
+          schema:
+            type: string
+            example: 198.51.100.7
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FirewallBlockInput"
+      responses:
+        "201":
+          description: Blocked; the firewall view after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FirewallDto"
+        "400":
+          description: >-
+            Refused (`VALIDATION_ERROR`; the input is never echoed). `details[0].field` `address` with
+            `reason` `invalid`, `ipv4_mapped`, `host_bits` (bits set after the prefix), `too_wide`,
+            `reserved` (for example loopback or link-local), `own_address`, `overlaps` (covers or is
+            covered by a stored block) or `limit` (500 in this family); or field `note` with reason
+            `note_invalid` (over 200 characters or with control characters)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The base rules are not in place (`FIREWALL_BASE_RULES_NOT_CURRENT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The API is stopping (`HOST_AGENT_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/firewall/blocks/{blockId}:
+    delete:
+      tags: [Admin Firewall]
+      operationId: deleteAdminFirewallBlock
+      summary: Remove one block (server administrator; audited as admin.firewall.unblock)
+      description: >-
+        Same steps as a port change. The row `admin.firewall.unblock` keeps `outcome`, `requestId`,
+        `address` and `family` in `details`.
+      parameters:
+        - in: path
+          name: blockId
+          required: true
+          schema:
+            type: string
+            pattern: "^fwb_[0-9a-f]{32}$"
+      responses:
+        "200":
+          description: Removed; the firewall view after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/FirewallDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: No block with this id, or an id of the wrong form (`NOT_FOUND`, "This block does not exist.")
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The base rules are not in place (`FIREWALL_BASE_RULES_NOT_CURRENT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The API is stopping (`HOST_AGENT_UNAVAILABLE`, retryable)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/updates:
+    get:
+      tags: [Admin Updates]
+      operationId: getAdminUpdates
+      summary: What can be updated (server administrator; not audited)
+      description: >-
+        Reads nothing over the network. `panel.installedVersion` is the running release's version.
+        `panel.check` is the last check, kept in memory: after a start of the API it is
+        `never_checked`. `panel.running` is a panel update still queued or running; `panel.last` is
+        the end of the last one. `components` come from the panel-container row the drift pass
+        writes every 15 seconds; `imageCurrent` is `null` when nothing was seen. `sites` lists the
+        sites whose container runs another image than the one pinned for their PHP version, by name,
+        at most 200; `sitesTotal` counts them all. No registry is asked: an image is behind only when
+        a panel release changed its pin.
+      responses:
+        "200":
+          description: The update view
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/UpdatesDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/updates/panel/check:
+    post:
+      tags: [Admin Updates]
+      operationId: checkAdminPanelRelease
+      summary: Ask the release source for the latest panel version (server administrator; audited as admin.update.check)
+      description: >-
+        One request to the project's public release source, bound to 10 seconds and 1 MiB. It never
+        fails the call: an error, a timeout or a rate limit reads `failed`, no published release
+        reads `no_release`. The result replaces `panel.check` until the API stops. The row
+        `admin.update.check` keeps `outcome`, `state` and `latestVersion` in `details`.
+      responses:
+        "200":
+          description: The update view with the new check
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/UpdatesDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/updates/panel/apply:
+    post:
+      tags: [Admin Updates]
+      operationId: applyAdminPanelUpdate
+      summary: Update the panel to the latest release (server administrator; audited as admin.update.panel)
+      description: >-
+        Queues the `host.job` `panel_update` under the lock `host:job`. No body: the starting version
+        is read on the server. About two seconds later a root systemd unit runs `hp-update`, the same
+        command an administrator runs over SSH; it restarts the four panel services, checks health
+        and rolls back by itself when the check fails. The panel goes away for a while during the
+        update. Refused while a backup, a restore, a WordPress update or an import runs. The request
+        writes `admin.update.panel` (`details`: `outcome`, `requestId`, `fromVersion`,
+        `operationId`); a replayed key writes no second row. The end writes `admin.update.panel.end`
+        (actor `system`; `details`: `operationId`, `outcome`, `result`, `exitStatus`,
+        `fromVersion`, `toVersion`). `result` is `updated` or `already_current` on exit 0,
+        `rolled_back` on exit 6, `rollback_unhealthy` on exit 7, `failed` otherwise.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostJobAccepted"
+        "400":
+          description: No `Idempotency-Key` (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another host job is queued or running (`RESOURCE_LOCKED`, `host_job_running`), site work
+            is running (`RESOURCE_LOCKED`, `site_work_running`), or the key was used for another
+            request (`IDEMPOTENCY_CONFLICT`).
+            A replay of this same request with its key answers its first operation with `202`, also
+            when site work began after it.
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/updates/components/{component}/apply:
+    post:
+      tags: [Admin Updates]
+      operationId: applyAdminPanelComponent
+      summary: Move one panel container to its pinned image (server administrator; audited as admin.update.component)
+      description: >-
+        For four containers this queues `panel.container.apply` under the lock
+        `panel:container:<component>`. About two seconds later the executor creates the container
+        again on the image pinned by this panel release, with the same settings and data; pulling
+        the image may take up to 15 minutes. The end writes `admin.update.component.end` (actor
+        `system`; `details`: `operationId`, `component`, `outcome`, `errorCode`). For `mail_relay`
+        there is no operation: the answer has `operationId` `null` and the mail relay's own apply runs
+        in the background. The request writes `admin.update.component` (`details`: `outcome`,
+        `requestId`, `operationId`, `component`). A replayed key on an operation writes no second
+        row; on `mail_relay` it writes one each time.
+      parameters:
+        - in: path
+          name: component
+          required: true
+          schema:
+            type: string
+            enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "202":
+          description: Accepted; with an `operationId`, follow it with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComponentApplyAccepted"
+        "400":
+          description: No `Idempotency-Key`, or `component` is not one of the five (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Health shows the container as not in use or missing (`PANEL_CONTAINER_ABSENT`, "This
+            container is not installed. There is nothing to update."), a restart or an apply of it is
+            already queued or running (`RESOURCE_LOCKED`), or the key was used for another request
+            (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The container runtime is disabled (`NOT_SUPPORTED`, "The container runtime is disabled on this server.")
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/image-update:
+    post:
+      tags: [Admin Updates]
+      operationId: adminUpdateSiteImage
+      summary: Move one site to the image pinned for its PHP version (server administrator; audited as admin.update.site_image)
+      description: >-
+        Uses the same path as the owner's PHP version change, with the same version: it queues
+        `service.deploy` under the site lock and the site's container is created again on the pinned
+        image. The site does not answer for a short while. A replayed key answers the first
+        operation without any check and writes no second row. The row `admin.update.site_image`
+        keeps `outcome`, `requestId`, `operationId`, `siteId`, `organizationId`, `fromImage` and
+        `toImage` in `details`; its organisation is the site's owner.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteImageUpdateAccepted"
+        "400":
+          description: >-
+            No `Idempotency-Key`, the site already runs the pinned image (`VALIDATION_ERROR`,
+            `details[0].reason` `already_current`), or the site is stopped (`stopped`, "Start the site
+            first, then update its image.")
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or not a managed site (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another operation holds the site (`RESOURCE_LOCKED`), or the key was used for another
+            request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The container runtime is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/os-packages:
+    get:
+      tags: [Admin Updates]
+      operationId: getAdminOsPackages
+      summary: System packages with an update, read live (server administrator; not audited)
+      description: >-
+        The host agent runs `apt-get -s upgrade`, a simulation that changes nothing, on the package
+        lists the server already has; `listsReadAt` is when those lists were last refreshed.
+        `origin` is `security`, `distribution` or `other` (any other source). `canUpgrade` is false
+        when the server has no `unattended-upgrade`. `rebootRequired` mirrors the system's own
+        marker; restarting the server is done over SSH. `running` is a package job still queued or
+        running.
+      responses:
+        "200":
+          description: The package view
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/OsPackagesDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            The agent did not answer or sent something malformed (`HOST_AGENT_UNAVAILABLE`, "The host
+            agent did not answer. Check Health, then try again.")
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/os-packages/refresh:
+    post:
+      tags: [Admin Updates]
+      operationId: refreshAdminOsPackages
+      summary: Refresh the system package lists (server administrator; audited as admin.os_packages.refresh)
+      description: >-
+        Queues the `host.job` `os_refresh` under the lock `host:job`. A root systemd unit runs
+        `apt-get update`. The request writes `admin.os_packages.refresh` (`details`: `outcome`,
+        `requestId`, `operationId`); a replayed key writes no second row. The end writes
+        `admin.os_packages.refresh.end`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostJobAccepted"
+        "400":
+          description: No `Idempotency-Key` (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another host job is queued or running (`RESOURCE_LOCKED`, `host_job_running`), or the key
+            was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/os-packages/upgrade:
+    post:
+      tags: [Admin Updates]
+      operationId: upgradeAdminOsPackages
+      summary: Install the system package updates the server allows (server administrator; audited as admin.os_packages.upgrade)
+      description: >-
+        Queues the `host.job` `os_upgrade` under the lock `host:job`. A root systemd unit runs
+        `unattended-upgrade -v`, which installs only what the server's unattended-upgrades settings
+        allow (on a default install, the distribution's security updates). Packages from other
+        sources are updated over SSH. Refused while a backup, a restore, a WordPress update or an
+        import runs. The request writes `admin.os_packages.upgrade` (`details`: `outcome`,
+        `requestId`, `operationId`); a replayed key writes no second row. The end writes
+        `admin.os_packages.upgrade.end`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      responses:
+        "202":
+          description: Accepted; follow the operation with GET /v1/admin/operations/{operationId}
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HostJobAccepted"
+        "400":
+          description: No `Idempotency-Key` (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Not a server administrator (`PERMISSION_DENIED`); writes the denied audit
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another host job is queued or running (`RESOURCE_LOCKED`, `host_job_running`), site work
+            is running (`RESOURCE_LOCKED`, `site_work_running`), or the key was used for another
+            request (`IDEMPOTENCY_CONFLICT`).
+            A replay of this same request with its key answers its first operation with `202`, also
+            when site work began after it.
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The host agent is disabled (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}/backups:
@@ -5471,6 +6118,16 @@ components:
       description: '`term_` and 32 hex characters; any other value is `NOT_FOUND`'
       schema:
         type: string
+    FirewallPortNameParam:
+      in: path
+      name: name
+      required: true
+      description: >-
+        A port of the safe list: `http_alt` 8080, `https_alt` 8443, `node_exporter` 9100,
+        `zabbix_agent` 10050, `checkmk_agent` 6556, `nrpe` 5666 (all TCP)
+      schema:
+        type: string
+        enum: [http_alt, https_alt, node_exporter, zabbix_agent, checkmk_agent, nrpe]
     IdempotencyKeyHeader:
       in: header
       name: Idempotency-Key
@@ -5556,6 +6213,8 @@ components:
             - LAST_OWNER_PROTECTED
             - LAST_ADMINISTRATOR_PROTECTED
             - PANEL_CONTAINER_ABSENT
+            - FIREWALL_BASE_RULES_NOT_CURRENT
+            - HOST_JOB_FAILED
             - NOT_SUPPORTED
             - OPERATION_INTERRUPTED
             - OPERATION_AMBIGUOUS
@@ -7962,7 +8621,7 @@ components:
     AdminHealthDto:
       type: object
       additionalProperties: false
-      required: [generatedAt, components, siteContainers, disks]
+      required: [generatedAt, components, siteContainers, disks, hostServices]
       properties:
         generatedAt:
           type: string
@@ -8065,6 +8724,43 @@ components:
               observedAt:
                 type: string
                 format: date-time
+        hostServices:
+          type: array
+          nullable: true
+          description: >-
+            The four panel services as systemd reports them now, in the order api, web, executor,
+            host_agent; `null` when the host agent is disabled, did not answer within 3 seconds or
+            sent something malformed
+          minItems: 4
+          maxItems: 4
+          items:
+            $ref: "#/components/schemas/HostServiceStatusDto"
+
+    HostServiceStatusDto:
+      type: object
+      additionalProperties: false
+      required: [service, active, activeState, since, restarts]
+      properties:
+        service:
+          type: string
+          enum: [api, web, executor, host_agent]
+        active:
+          type: boolean
+          description: The unit's state is `active`
+        activeState:
+          type: string
+          minLength: 1
+          maxLength: 32
+          description: systemd's own word (for example `active`, `activating`, `failed`)
+        since:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the unit entered its active state; `null` when it never did
+        restarts:
+          type: integer
+          minimum: 0
+          description: Restarts systemd made by itself since the unit was last started by hand or at boot
 
     AdminAlertDto:
       type: object
@@ -8215,7 +8911,7 @@ components:
               required: [operationId, kind, siteId, siteName]
               properties:
                 operationId: { type: string }
-                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import] }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply] }
                 siteId: { type: string, nullable: true }
                 siteName: { type: string, nullable: true }
 
@@ -8412,7 +9108,7 @@ components:
           type: string
           minLength: 1
           maxLength: 500
-          description: Why the restart is needed; trimmed first; kept in the audit row
+          description: Why the restart is needed; trimmed first; kept in the audit row; a reason holding U+0000 is refused (`VALIDATION_ERROR`)
 
     TerminalOpenInput:
       type: object
@@ -8490,6 +9186,302 @@ components:
               type: string
               format: date-time
 
+    FirewallDto:
+      type: object
+      additionalProperties: false
+      required: [baseRules, readAt, hostId, staticRules, ports, blocks]
+      properties:
+        baseRules:
+          type: string
+          enum: [current, outdated, absent, unmanaged, unreadable, disabled]
+          description: >-
+            `current` the base rules are in place; `outdated` an older version is; `absent` none
+            are; `unmanaged` the server was installed without the panel's firewall
+            (`--skip-firewall`): the panel changes nothing there and an apply fails; `unreadable` the
+            host agent did not answer; `disabled` the agent is off
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the kernel's table was read; `null` when it was not
+        hostId:
+          type: string
+          nullable: true
+          description: The server's id, for `POST /v1/hosts/{hostId}/security`
+        staticRules:
+          type: array
+          description: What the base rules always allow; not changeable here
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, ports]
+            properties:
+              key:
+                type: string
+                enum: [ssh, web, panel, icmp, replies]
+              ports:
+                type: array
+                items:
+                  type: integer
+        ports:
+          type: array
+          description: The six ports of the safe list, always all of them
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, port, open, inForce]
+            properties:
+              name:
+                type: string
+                enum: [http_alt, https_alt, node_exporter, zabbix_agent, checkmk_agent, nrpe]
+              port:
+                type: integer
+              open:
+                type: boolean
+                description: What the panel stored
+              inForce:
+                type: boolean
+                nullable: true
+                description: The kernel agrees with `open`; `null` unless `baseRules` is `current`
+        blocks:
+          type: array
+          description: Newest first
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, address, family, note, createdAt, inForce]
+            properties:
+              id:
+                type: string
+                pattern: "^fwb_[0-9a-f]{32}$"
+              address:
+                type: string
+                description: Address or range in its short form
+                example: 203.0.113.0/24
+              family:
+                type: string
+                enum: [ipv4, ipv6]
+              note:
+                type: string
+                nullable: true
+                maxLength: 200
+              createdAt:
+                type: string
+                format: date-time
+              inForce:
+                type: boolean
+                nullable: true
+                description: The kernel holds the block; `null` unless `baseRules` is `current`
+
+    FirewallBlockInput:
+      type: object
+      additionalProperties: false
+      required: [address]
+      properties:
+        address:
+          type: string
+          maxLength: 64
+          description: >-
+            One IPv4 or IPv6 address, or a range with a prefix (IPv4 /16 to /32, IPv6 /32 to /128)
+          example: 192.0.2.0/24
+        note:
+          type: string
+          nullable: true
+          maxLength: 200
+          description: Why; no control characters. Empty is stored as `null`
+
+    UpdatesDto:
+      type: object
+      additionalProperties: false
+      required: [panel, components, sites, sitesTotal]
+      properties:
+        panel:
+          type: object
+          additionalProperties: false
+          required: [installedVersion, check, running, last]
+          properties:
+            installedVersion:
+              type: string
+              nullable: true
+              pattern: '^\d+\.\d+\.\d+$'
+            check:
+              type: object
+              additionalProperties: false
+              required: [state, latestVersion, checkedAt]
+              properties:
+                state:
+                  type: string
+                  enum: [never_checked, up_to_date, newer, no_release, failed]
+                latestVersion:
+                  type: string
+                  nullable: true
+                  pattern: '^\d+\.\d+\.\d+$'
+                checkedAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+            running:
+              type: object
+              nullable: true
+              additionalProperties: false
+              required: [operationId]
+              properties:
+                operationId:
+                  type: string
+            last:
+              type: object
+              nullable: true
+              additionalProperties: false
+              required: [operationId, result, endedAt]
+              properties:
+                operationId:
+                  type: string
+                result:
+                  $ref: "#/components/schemas/HostJobResult"
+                endedAt:
+                  type: string
+                  format: date-time
+        components:
+          type: array
+          description: The five panel containers, in this order
+          minItems: 5
+          maxItems: 5
+          items:
+            type: object
+            additionalProperties: false
+            required: [component, expected, imageCurrent, runningOperationId]
+            properties:
+              component:
+                type: string
+                enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+              expected:
+                type: boolean
+                nullable: true
+                description: The panel needs this container now; `null` when nothing was seen
+              imageCurrent:
+                type: boolean
+                nullable: true
+                description: The container runs the image this release pins; `null` when nothing was seen
+              runningOperationId:
+                type: string
+                nullable: true
+                description: A `panel.container.apply` of this container still queued or running
+        sites:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            additionalProperties: false
+            required: [siteId, siteName, organizationName, phpVersion, stopped]
+            properties:
+              siteId:
+                type: string
+              siteName:
+                type: string
+              organizationName:
+                type: string
+                nullable: true
+                description: '`null` for sites held by the platform'
+              phpVersion:
+                type: string
+                enum: ["8.3", "8.4", "8.5"]
+              stopped:
+                type: boolean
+        sitesTotal:
+          type: integer
+          minimum: 0
+
+    HostJobResult:
+      type: string
+      enum: [succeeded, updated, already_current, rolled_back, rollback_unhealthy, failed, not_started]
+
+    OsPackagesDto:
+      type: object
+      additionalProperties: false
+      required: [packages, rebootRequired, canUpgrade, listsReadAt, running]
+      properties:
+        packages:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, installedVersion, newVersion, origin]
+            properties:
+              name:
+                type: string
+                minLength: 1
+              installedVersion:
+                type: string
+                minLength: 1
+              newVersion:
+                type: string
+                minLength: 1
+              origin:
+                type: string
+                enum: [security, distribution, other]
+        rebootRequired:
+          type: boolean
+        canUpgrade:
+          type: boolean
+        listsReadAt:
+          type: string
+          format: date-time
+          nullable: true
+        running:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [operationId, job]
+          properties:
+            operationId:
+              type: string
+            job:
+              type: string
+              enum: [os_refresh, os_upgrade]
+
+    HostJobAccepted:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [operationId]
+          properties:
+            operationId:
+              type: string
+
+    ComponentApplyAccepted:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [component, operationId]
+          properties:
+            component:
+              type: string
+              enum: [ingress_proxy, shared_database, phpmyadmin, sftp, mail_relay]
+            operationId:
+              type: string
+              nullable: true
+              description: '`null` for `mail_relay`'
+
+    SiteImageUpdateAccepted:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [siteId, operationId]
+          properties:
+            siteId:
+              type: string
+            operationId:
+              type: string
+
     OperationDto:
       type: object
       required:
@@ -8530,6 +9522,8 @@ components:
             - site.wordpress.import
             - panel.backups.create
             - panel.container.restart
+            - panel.container.apply
+            - host.job
             - host.maintenance
             - host.security
             - host.allocate
