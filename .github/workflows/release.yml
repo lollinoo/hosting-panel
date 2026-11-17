@@ -41,6 +41,10 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
+      # The type check and the tests read the built packages, as in ci.yml.
+      - name: Build monorepo packages and applications
+        run: corepack pnpm run build
+
       - name: Lint codebase
         run: corepack pnpm run lint
 
