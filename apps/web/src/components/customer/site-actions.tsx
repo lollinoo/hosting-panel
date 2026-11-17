@@ -156,13 +156,13 @@ export function SiteActions({
             <Button
               type="button"
               variant="outline"
-              disabled={busy !== null || php === phpVersion || status === "deploying" || status === "maintenance"}
+              disabled={busy !== null || php === phpVersion || status === "deploying" || status === "maintenance" || status === "stopped"}
               onClick={() => run(`php:${php}`, "PATCH", `${base}/runtime`, { phpVersion: php })}
             >
               {busy?.startsWith("php:") ? t.working : t.phpApply}
             </Button>
           </div>
-          <CardDescription>{t.phpHint}</CardDescription>
+          <CardDescription>{status === "stopped" ? t.phpStopped : t.phpHint}</CardDescription>
         </div>
 
         <div aria-live="polite">

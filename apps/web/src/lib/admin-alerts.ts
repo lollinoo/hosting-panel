@@ -44,7 +44,7 @@ export function alertText(m: Messages, a: AdminAlertDto): string {
       });
     }
     case "site_container_down":
-      // R190 1.2: Restart needs a container; a missing one comes back only through a deploy.
+      // R191 1.1: Restart on the site row recreates a missing container.
       return a.details.observed === "missing"
         ? format(t.siteContainerMissing, { site: a.details.siteName })
         : format(t.alerts.site_container_down, { site: a.details.siteName, observed: t.seen[a.details.observed] });

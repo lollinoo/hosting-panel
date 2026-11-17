@@ -1,9 +1,13 @@
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { PANEL_CONTAINERS, type HealthState } from "@hosting-panel/contracts";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
+import { getServerSession } from "@/lib/server-session";
 import { fetchServerAdminAlerts, fetchServerAdminHealth } from "@/lib/server-api";
 import { alertLink, alertText, formatZonedDate } from "@/lib/admin-alerts";
+import { canOpenTerminal, canRestartPart } from "@/lib/admin-restart";
+import { RestartButton } from "@/components/admin/restart-dialog";
 import { formatSize } from "@/lib/file-browser";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +24,8 @@ const isContainer = (c: string) => (PANEL_CONTAINERS as readonly string[]).inclu
 
 /** The administrator's Health page: alerts, panel parts, site containers and disks. */
 export default async function AdminHealthPage() {
+  const session = await getServerSession();
+  if (!session) redirect("/login");
   const [m, health, alerts] = await Promise.all([
     getRequestLocale().then(getMessages),
     fetchServerAdminHealth(),
@@ -75,6 +81,7 @@ export default async function AdminHealthPage() {
                   <TableRow>
                     <TableHead>{t.colPart}</TableHead><TableHead>{t.colState}</TableHead>
                     <TableHead>{t.colWhy}</TableHead><TableHead>{t.colSeen}</TableHead><TableHead>{t.colLog}</TableHead>
+                    <TableHead>{t.colActions}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -89,6 +96,9 @@ export default async function AdminHealthPage() {
                           <Link href={`/admin/logs?source=${c.component}`} className="underline"
                             aria-label={format(t.openLogOf, { name: t.components[c.component] })}>{t.openLog}</Link>
                         ) : null}
+                      </TableCell>
+                      <TableCell>
+                        {canRestartPart(c) ? <RestartButton target={{ kind: "part", component: c.component }} csrfToken={session.csrfToken} /> : null}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -108,7 +118,7 @@ export default async function AdminHealthPage() {
                     <TableRow>
                       <TableHead>{t.colSite}</TableHead><TableHead>{t.colOwner}</TableHead><TableHead>{t.colWanted}</TableHead>
                       <TableHead>{t.colObserved}</TableHead><TableHead>{t.colDrift}</TableHead><TableHead>{t.colRestarts}</TableHead>
-                      <TableHead>{t.colSeen}</TableHead><TableHead>{t.colLog}</TableHead>
+                      <TableHead>{t.colSeen}</TableHead><TableHead>{t.colLog}</TableHead><TableHead>{t.colActions}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -127,6 +137,13 @@ export default async function AdminHealthPage() {
                         <TableCell>
                           <Link href={`/admin/logs?source=site:${s.siteId}`} className="underline"
                             aria-label={format(t.openLogOf, { name: s.siteName })}>{t.openLog}</Link>
+                        </TableCell>
+                        <TableCell className="space-y-1">
+                          {canOpenTerminal(s.observed) ? (
+                            <Link href={`/admin/sites/${s.siteId}/terminal`} className="underline block"
+                              aria-label={format(m.admin.terminal.linkAria, { site: s.siteName })}>{m.admin.terminal.linkLabel}</Link>
+                          ) : null}
+                          <RestartButton target={{ kind: "site", siteId: s.siteId, siteName: s.siteName, desired: s.desired }} csrfToken={session.csrfToken} />
                         </TableCell>
                       </TableRow>
                     ))}

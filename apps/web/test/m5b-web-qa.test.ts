@@ -234,14 +234,13 @@ describe("1. every alert reads clearly", () => {
     }
   });
 
-  it("R190 1.2: a missing container gets its own sentence (the PHP version change, no Restart); the other seen states keep R189 1.1", () => {
+  it("R190 1.2: a missing container gets its own sentence (the Restart button of Health, no PHP version change); the other seen states keep R189 1.1", () => {
     for (const [lc, m] of LOCALES) {
       const text = (observed: string) => alertText(m, AdminAlertDtoSchema.parse({ ...(FULL.site_container_down as object), details: { siteId: "s1", siteName: "wp-a.example.test", observed } }));
       const missing = text("missing");
       expect(missing, lc).toContain("wp-a.example.test");
-      expect(missing, lc).not.toContain(m.site.manage.restart);
-      expect(missing, lc).toContain("PHP");
-      expect(missing, lc).toContain(m.site.manage.phpApply);
+      expect(missing, lc).toContain(m.admin.health.restart.button);
+      expect(missing, lc).not.toContain(m.site.manage.phpApply);
       expect(missing, lc).not.toMatch(/[{}]|undefined/);
       for (const observed of ["stopped", "degraded", "unknown"]) {
         expect(text(observed), `${lc} ${observed}`).toBe(format(m.admin.health.alerts.site_container_down, { site: "wp-a.example.test", observed: m.admin.health.seen[observed as "stopped"] }));

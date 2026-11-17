@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ChangeOwnerDialog, type Customers } from "@/components/admin/change-owner-dialog";
 import { DeleteSiteDialog, type ConfirmDelete } from "@/components/customer/delete-site-dialog";
 import { StatusPill } from "@/components/customer/status-pill";
-import { errorMessage } from "@/i18n";
+import { errorMessage, format } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 
@@ -94,6 +94,13 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
                   <Button asChild size="sm" variant="outline">
                     <Link href={`/admin/sites/${s.id}/domains`}>{t.domains}</Link>
                   </Button>
+                  {(s.status === "ready" || s.status === "degraded") && (
+                    <Button asChild size="sm" variant="outline">
+                      <Link href={`/admin/sites/${s.id}/terminal`} aria-label={format(m.admin.terminal.linkAria, { site: s.name })}>
+                        {m.admin.terminal.linkLabel}
+                      </Link>
+                    </Button>
+                  )}
                   {s.status === "degraded" && (
                     <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => retry(s)}>
                       {busy === s.id ? t.working : t.retry}

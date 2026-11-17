@@ -273,9 +273,12 @@ describe("Health page (e)", () => {
 
     expect(fetchUpstream.mock.calls.map(([p]) => p).sort()).toEqual(["v1/admin/alerts", "v1/admin/health"]);
     expect(h).toContain(t.title);
-    expect(h.indexOf(t.alertsTitle)).toBeLessThan(h.indexOf(t.partsTitle));
-    expect(h.indexOf(t.partsTitle)).toBeLessThan(h.indexOf(t.sitesTitle));
-    expect(h.indexOf(t.sitesTitle)).toBeLessThan(h.indexOf(t.disksTitle));
+    // The headings themselves: an alert sentence may name a section ("Sites' containers").
+    const at = (title: string) => h.indexOf(`>${title}<`);
+    expect(at(t.alertsTitle)).toBeGreaterThan(-1);
+    expect(at(t.alertsTitle)).toBeLessThan(at(t.partsTitle));
+    expect(at(t.partsTitle)).toBeLessThan(at(t.sitesTitle));
+    expect(at(t.sitesTitle)).toBeLessThan(at(t.disksTitle));
     expect(h).toContain(alertText(en, A.site_container_down));
     expect(h).toContain('href="/admin/logs?source=site:s1"');
     expect(h).toContain('href="/admin/backups"');
