@@ -6987,10 +6987,6 @@ components:
         - type: object
           required: [primaryDomain]
           properties:
-            phpVersion:
-              type: string
-              nullable: true
-              enum: ["8.3", "8.4", "8.5"]
             primaryDomain:
               type: string
               nullable: true
@@ -8476,7 +8472,7 @@ components:
 
     SiteSummaryDto:
       type: object
-      required: [id, organizationId, hostAllocationId, name, slug, status, createdAt, updatedAt]
+      required: [id, organizationId, hostAllocationId, name, slug, status, phpVersion, siteType, createdAt, updatedAt]
       properties:
         id:
           type: string
@@ -8491,6 +8487,15 @@ components:
         status:
           type: string
           enum: [ready, deploying, degraded, stopped, maintenance]
+        phpVersion:
+          type: string
+          nullable: true
+          enum: ["8.3", "8.4", "8.5"]
+        siteType:
+          type: string
+          nullable: true
+          enum: ["wordpress"]
+          description: The type of a managed site; null for a site made through the generic service routes.
         createdAt:
           type: string
           format: date-time
