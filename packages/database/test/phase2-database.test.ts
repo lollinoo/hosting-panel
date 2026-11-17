@@ -67,6 +67,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
+      "0017_m5d_firewall.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -94,6 +95,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
+      "0017_m5d_firewall.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -117,10 +119,22 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0014_password_reset_tokens.sql",
       "0015_operations_audit_indexes.sql",
       "0016_admin_terminal_sessions.sql",
+      "0017_m5d_firewall.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
     expect(secondRows.map((r) => r.appliedAt.getTime())).toEqual(firstTimestamps);
+  });
+
+  it("1c. 0017 refuses an unknown firewall family and a second row with the same cidr", async () => {
+    await expect(
+      client.db.execute(sql`INSERT INTO firewall_blocks (id, family, cidr) VALUES ('fwb_x1', 'ipv5', '192.0.2.0/24')`),
+    ).rejects.toThrow();
+    await client.db.execute(sql`INSERT INTO firewall_blocks (id, family, cidr) VALUES ('fwb_x2', 'ipv4', '198.51.100.0/24')`);
+    await expect(
+      client.db.execute(sql`INSERT INTO firewall_blocks (id, family, cidr) VALUES ('fwb_x3', 'ipv4', '198.51.100.0/24')`),
+    ).rejects.toThrow();
+    await client.db.execute(sql`DELETE FROM firewall_blocks`);
   });
 
   it("1b. 0011 adds the panel copy outcome columns and refuses an unknown status", async () => {

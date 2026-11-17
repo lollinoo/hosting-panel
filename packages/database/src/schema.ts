@@ -24,6 +24,7 @@ import type {
   DnsStatus,
   DomainStatus,
   ErrorCode,
+  FirewallFamily,
   GrantEffect,
   HostAllocationStatus,
   HeartbeatRowComponent,
@@ -799,3 +800,13 @@ export const adminTerminalSessions = pgTable(
   },
   (t) => [index("idx_admin_terminal_sessions_open").on(t.openedAt).where(sql`${t.closedAt} IS NULL`)],
 );
+
+// No CHECK on name: the safe list lives in the contracts and may change without a migration.
+export const firewallOpenPorts = pgTable("firewall_open_ports", { name: text("name").primaryKey() });
+export const firewallBlocks = pgTable("firewall_blocks", {
+  id: text("id").primaryKey(),
+  family: text("family").notNull().$type<FirewallFamily>(),
+  cidr: text("cidr").notNull().unique(),
+  note: text("note"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
