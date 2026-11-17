@@ -504,4 +504,42 @@ describe("release workflow and docs", () => {
     expect(readme).toContain("hp-restore-panel --endpoint");
     expect(readme).not.toContain("Limite attuale (M3b → M3c)");
   });
+
+  it("m5d host docs are consistent", () => {
+    const readme = read("README.md");
+    expect(readme).toContain("docs/architecture/adr/0028-host-firewall-and-updates.md");
+    expect(readme).not.toContain("I log dei quattro servizi del pannello non sono in questa pagina");
+    expect(readme).not.toContain("journalctl -u hp-api -u hp-web");
+
+    const adr27 = read("docs/architecture/adr/0027-restart-and-terminal.md");
+    const limit25 = adr27.slice(adr27.indexOf("\n25. "), adr27.indexOf("\n26. "));
+    expect(limit25).toContain("pagina **Log**");
+    expect(limit25).toContain("Esecutore (hp-docker-executor)");
+    expect(limit25).not.toContain("non i servizi del server");
+
+    // Every route the three M5d controllers serve is in openapi.yaml under its method.
+    const api = read("docs/api/openapi.yaml");
+    const routes: string[] = [];
+    for (const file of ["admin-firewall", "admin-host", "admin-updates"]) {
+      const code = read(`apps/api/src/controllers/${file}.controller.ts`);
+      const prefix = code.match(/@Controller\("([^"]*)"\)/)![1]!;
+      for (const [, method, sub] of code.matchAll(/@(Get|Post|Delete)\("([^"]*)"\)/g)) {
+        const path = `/${prefix}${sub ? `/${sub}` : ""}`.replace(/:(\w+)/g, "{$1}");
+        const start = api.indexOf(`\n  ${path}:\n`);
+        expect(start, path).toBeGreaterThan(0);
+        const block = api.slice(start + 1, start + 1 + api.slice(start + 1).search(/\n {2}\S/));
+        expect(block, `${method} ${path}`).toContain(`\n    ${method!.toLowerCase()}:\n`);
+        routes.push(path);
+      }
+    }
+    expect(routes).toHaveLength(14);
+    for (const s of ["FIREWALL_BASE_RULES_NOT_CURRENT", "HOST_JOB_FAILED", "- host.job", "- panel.container.apply", "hostServices:", "hp-os-upgrade]"]) {
+      expect(api).toContain(s);
+    }
+
+    const harness = read("HARNESS.md");
+    for (const unit of ["hp-unit-restart@", "hp-panel-update", "hp-os-refresh", "hp-os-upgrade"]) {
+      expect(harness).toContain(unit);
+    }
+  });
 });

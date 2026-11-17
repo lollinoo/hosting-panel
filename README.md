@@ -40,7 +40,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Split Agents `hp-docker-executor` & `hp-host-agent`** | ✅ **Operativo** | `ADR-010` approvato (`AC-F2-01`) |
 | **Canale IPC su UDS `0660` Firmato + Anti-Replay** | ✅ **Operativo** | `ADR-013` (`HMAC-SHA256` / `Ed25519`, `AC-F2-02`) |
 | **Runtime Docker Hardened & Ingress Traefik v3 Zero-Sock** | ✅ **Operativo** | `ADR-014` (`CapDrop: ALL`, reti per `Site`, `AC-F2-03`) |
-| **Telemetria Linux, Manutenzione Allowlisted & `nftables`** | ✅ **Operativo** | `hp-host-agent` via `execFile`, zero shell (`AC-F2-04`) |
+| **Telemetria Linux, Manutenzione Allowlisted & `nftables`** | ✅ **Operativo** | `hp-host-agent` via `execFile`, zero shell (`AC-F2-04`); firewall, aggiornamenti, pacchetti e giornali dal pannello, lavori di root solo tramite unità `systemd` fisse (`ADR-0028`) |
 | **Segreti Write-Only `AES-256-GCM` & Mount `tmpfs` `0400`** | ✅ **Operativo** | Migrazione `0002` + `ADR-015` (`AC-F2-05`) |
 | **Outbox `202 Accepted`, Recovery `unknown` & Drift Reconciler** | ✅ **Operativo** | `SKIP LOCKED`, `TH-08`, `TH-10` (`AC-F2-06`..`AC-F2-08`) |
 | **Unit `systemd`, Bootstrap Linux & Runner Outage `AC-F1-08`** | ✅ **Operativo** | `infra/systemd/*`, `infra/linux/*` (`AC-F2-09`) |
@@ -152,7 +152,7 @@ sudo bash hosting-panel-$V/infra/linux/install.sh --archive hosting-panel-$V-lin
 
 **Sicurezza di `--archive`**: tenere archivio e `.sha256` in una directory scrivibile solo da root (ad esempio `/root`), non in un download condiviso o in `/tmp` accessibile ad altri utenti.
 
-Flag di `install.sh`: `--hostname`, `--admin-email`, `--admin-name`, `--acme-email` (predefinito: email admin), `--ipv4`, `--version` oppure `--archive` (senza, usa l'ultima release GitHub), `--acme-staging`, `--skip-firewall`, `--dry-run`, `--allow-other-linux`. La password dell'amministratore va inserita nel prompt nascosto (chiesta due volte, almeno 12 caratteri): è il metodo raccomandato. Solo per installazioni automatizzate si può passare la variabile d'ambiente `HP_ADMIN_PASSWORD`, ma senza mai scriverla sulla riga di comando: finirebbe nella cronologia della shell e sarebbe visibile ad altri utenti tramite `ps`. Codici di uscita: `0` ok, `1` errore generico (un passo è fallito: correggere la causa e rilanciare), `2` argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `3` OS non supportato o pacchetto assente per il codename, `4` checksum errato, `5` timeout health check, `6` `docker0` senza IPv4, `7` SSH non sulla porta 22 (usare `--skip-firewall` e gestire il firewall a mano).
+Flag di `install.sh`: `--hostname`, `--admin-email`, `--admin-name`, `--acme-email` (predefinito: email admin), `--ipv4`, `--version` oppure `--archive` (senza, usa l'ultima release GitHub), `--acme-staging`, `--skip-firewall`, `--dry-run`, `--allow-other-linux`. La password dell'amministratore va inserita nel prompt nascosto (chiesta due volte, almeno 12 caratteri): è il metodo raccomandato. Solo per installazioni automatizzate si può passare la variabile d'ambiente `HP_ADMIN_PASSWORD`, ma senza mai scriverla sulla riga di comando: finirebbe nella cronologia della shell e sarebbe visibile ad altri utenti tramite `ps`. Codici di uscita: `0` ok, `1` errore generico (un passo è fallito: correggere la causa e rilanciare), `2` argomenti errati, archivio il cui `VERSION` non corrisponde al nome del file o versione più vecchia di quella installata (rilanciare con `--version` e la versione installata, oppure usare `hp-update --allow-downgrade`), `3` OS non supportato o pacchetto assente per il codename, `4` checksum errato, `5` timeout health check, `6` `docker0` senza IPv4, `7` SSH non sulla porta 22 (usare `--skip-firewall` e gestire il firewall a mano).
 
 1. **DNS**: creare un record A `<hostname>` verso l'IP del server. Finché il DNS non punta al server il pannello è raggiungibile su `https://<ip-server>` con certificato autofirmato; su `https://<hostname>` arriva il certificato Let's Encrypt appena il DNS è propagato. Per server di prova usare `--acme-staging` (certificati di staging, non attendibili dai browser).
 2. **Enrolment TOTP**: al passo 11 l'installer stampa **una sola volta** il segreto TOTP e l'URI `otpauth` dell'amministratore: registrarli subito in un'app di autenticazione (il 2FA è obbligatorio per gli amministratori).
@@ -278,6 +278,14 @@ sudo hp-update --version 0.2.1    # oppure --archive <file>
 
 `hp-update` (wrapper dello `update.sh` della release corrente) accetta `--version` | `--archive`, `--allow-downgrade`, `--dry-run`, `--allow-other-linux`. Riavvia **solo** `hp-host-agent`, `hp-docker-executor`, `hp-api` e `hp-web`; non tocca mai direttamente container Docker, proxy o firewall. Dopo l'aggiornamento esegue il health check e, se fallisce, esegue il rollback automatico; conserva le ultime 3 release. Codici di uscita: `0` aggiornato o già aggiornato, `1` errore generico (un passo è fallito o un altro aggiornamento è in corso), `2` downgrade rifiutato, argomenti errati o archivio il cui `VERSION` non corrisponde al nome del file, `4` checksum, `6` rollback eseguito, `7` rollback fallito.
 
+Dal pannello, **Amministrazione › Aggiornamenti** fa lo stesso senza SSH. Il comando `hp-update` resta e funziona come prima.
+
+- **Pannello**: **Cerca una nuova versione** legge l'ultima versione pubblicata; il risultato si perde quando l'API riparte. **Aggiorna il pannello** lancia `hp-update` come root, tramite l'unità `hp-panel-update`. Dura di solito un minuto e mezzo; il database e il proxy possono riavviarsi una volta; se il nuovo pannello non risponde, torna da solo alla versione di prima, e in quel caso il database e il proxy possono riavviarsi una seconda volta. Il suo giornale è nella pagina **Log** («hp-panel-update»). Un `1` per un aggiornamento già in corso si legge come un errore.
+- **Container del pannello e siti**: il pannello confronta le immagini in uso con quelle fissate nella versione installata, senza chiedere niente a un registry. **Applica** sposta un container del pannello sulla sua immagine; **Aggiorna** fa lo stesso per un sito avviato (un sito fermo va prima avviato).
+- **Pacchetti del sistema**: l'elenco viene da una simulazione (`apt-get -s upgrade`), diviso in sicurezza, distribuzione e altri. **Aggiorna l'elenco dei pacchetti** lancia `apt-get update`; **Installa gli aggiornamenti di sicurezza** lancia `unattended-upgrade` (che `install.sh` installa). Gli altri pacchetti e il riavvio del server si fanno da SSH (`sudo apt-get upgrade`, `sudo reboot`).
+
+Ogni lavoro da root è un'unità `systemd` fissa: l'agente host scrive solo un file vuoto in `/run/hosting-panel/host-jobs` e un'unità *path* avvia il comando scritto nell'unità. Uno solo alla volta, mai durante un backup, un ripristino, un aggiornamento WordPress o un'importazione. Se un'unità *path* è in errore, il pannello rifiuta il lavoro: da SSH `sudo systemctl reset-failed <unità>.path` e `sudo systemctl start <unità>.path`. Su Debian `unattended-upgrades` può accendere aggiornamenti notturni (non verificato); per spegnerli, `sudo dpkg-reconfigure unattended-upgrades`.
+
 #### Recupero accessi
 
 ```bash
@@ -303,15 +311,12 @@ Dettagli e limiti: [ADR 0025](docs/architecture/adr/0025-people-and-access.md).
 - **Avvisi**: i problemi aperti, prima i critici. Ogni avviso dice cosa fare, spesso con il comando da usare sul server. Un avviso sparisce da solo quando il problema finisce; non c'è uno storico degli avvisi.
 - **Parti del pannello**: API, pannello web, database del pannello, esecutore, agente host, Docker Engine e i cinque container del pannello (`hp_ingress_proxy`, `hp_mariadb`, `hp_phpmyadmin`, `hp_sftp`, `hp_mail_relay`). Stati: Funziona, Degradato, Non funziona, Non in uso (un container che il pannello non usa ancora, per esempio phpMyAdmin prima del primo accesso), Sconosciuto. L'esecutore e l'agente host risultano «Non funziona» se non inviano segnali da 5 minuti. I container sono controllati ogni 15 secondi.
 - **Container dei siti**: per ogni sito, come dovrebbe essere e com'è, la differenza dalla configurazione voluta e i riavvii. Un dato più vecchio di 5 minuti è segnato come «non rilevato di recente».
+- **Servizi del server**: i quattro servizi del pannello (`hp-api`, `hp-web`, `hp-docker-executor`, `hp-host-agent`), letti dal vivo a ogni apertura (al massimo 3 secondi; se l'agente host non risponde la scheda lo dice). Ognuno ha **Riavvia**, con un motivo, come i container (`admin.host_service.restart` e, alla fine, `admin.host_service.restart.end`).
 - **Dischi**: lo spazio usato dei dischi che contengono `/var/lib/hosting-panel`, `/var/lib/docker`, `/var/lib/postgresql` e `/`. Dal 90% c'è un avviso critico.
 
 In cima a ogni pagina di **Amministrazione** una riga dice quanti avvisi sono aperti e il livello più alto, con il link a **Stato**; senza avvisi la riga non c'è. La riga si aggiorna a ogni cambio di pagina. Se gli avvisi non si possono caricare, la riga lo dice: in quel caso la pagina non sa se va tutto bene.
 
-**Amministrazione › Log** mostra le ultime righe (100, 200 o 500) dei cinque container del pannello e del container di ogni sito. Nelle righe di phpMyAdmin la parte dopo `?` degli indirizzi è nascosta. Leggere il log di un sito è registrato nel **Registro attività** (`admin.site.logs.read`); leggere quello di un container del pannello no. I log dei quattro servizi del pannello non sono in questa pagina; sul server:
-
-```bash
-journalctl -u hp-api -u hp-web -u hp-docker-executor -u hp-host-agent
-```
+**Amministrazione › Log** mostra le ultime righe (100, 200 o 500) dei cinque container del pannello, del container di ogni sito e dei giornali di systemd dei quattro servizi del pannello e dei tre lavori del server (`hp-panel-update`, `hp-os-refresh`, `hp-os-upgrade`). Nelle righe di phpMyAdmin la parte dopo `?` degli indirizzi è nascosta. Leggere il log di un sito è registrato nel **Registro attività** (`admin.site.logs.read`); leggere quello di un container del pannello o un giornale no. Per righe più vecchie delle ultime 500 si usa `journalctl` sul server.
 
 I container dei siti e `hp_mariadb` tengono al massimo 3 file di log da 10 MB. Un container creato prima di questa versione non ha questo limite finché non viene ricreato: quello di un sito al suo prossimo deploy, `hp_mariadb` solo se manca o cambia la sua configurazione.
 
@@ -344,6 +349,28 @@ Un riavvio del pannello parte circa 2 secondi dopo la richiesta e dura al massim
 - Il **Registro attività** registra chi ha aperto la sessione, su quale sito, quando, quanto è durata e come è finita (`admin.terminal.open`, `admin.terminal.close`), e ogni apertura rifiutata (`admin.terminal.denied`). Ciò che viene digitato e ciò che la shell stampa **non** è mai registrato.
 
 Dettagli e limiti: [ADR 0027](docs/architecture/adr/0027-restart-and-terminal.md).
+
+#### Firewall
+
+**Amministrazione › Firewall** gestisce il firewall `nftables` del server (tabella `inet hp_dedicated_filter`).
+
+- **Regole di base**: in ingresso restano aperte solo SSH sulla 22, HTTP e HTTPS (80, 443) e le porte sicure aperte nella pagina; la porta del pannello web (3000) risponde solo ai container del server (la console si raggiunge dalla 443); tutto il resto in ingresso è chiuso, anche SSH su un'altra porta, tranne l'SFTP dei siti sulla 2222, che va a un container e non passa da queste regole. La pagina dice se sono in vigore; **Applica le regole di base** le carica di nuovo. Se SSH ascolta su un'altra porta, non applicarle.
+- **Server installato con `--skip-firewall`**: il pannello non tocca il firewall del server, e la pagina lo dice; non offre **Applica le regole di base** né le modifiche, e quanto è salvato nella pagina non è in vigore. Il pannello gestisce il firewall solo se c'è `/etc/nftables.d/hosting-panel.nft`, che l'installer scrive solo dopo aver controllato che SSH ascolti sulla 22. Per affidargli il firewall: controlla che SSH ascolti sulla 22, poi rilancia sul server, via SSH, il comando `sudo bash …/install.sh` dell'installazione (sopra) con `--version` e la versione installata che mostra la pagina **Aggiornamenti** (o l'archivio di quella versione), gli altri argomenti come all'installazione, senza `--skip-firewall`; l'installer controlla di nuovo la porta di SSH e carica le regole di base, e il pannello si riavvia e resta assente per circa un minuto. L'installer rifiuta una versione più vecchia di quella installata. Una versione più nuova data all'installer è un aggiornamento senza il health check e il rollback di `hp-update`: aggiorna dalla pagina **Aggiornamenti**.
+- **Porte sicure**: sei porte da aprire o chiudere per nome (8080, 8443, 9100, 10050, 6556, 5666). Mai 22, 80, 443, 3000, un database o una porta di Docker. La porta SFTP 2222 non è qui.
+- **Indirizzi bloccati**: un indirizzo o una rete IPv4 (fino a `/16`) o IPv6 (fino a `/32`), con una nota; al massimo 500 per famiglia. Un indirizzo bloccato non raggiunge più i siti né il pannello, e il server e i siti non ricevono più le sue risposte. La porta 22 resta raggiungibile. Il pannello rifiuta un blocco che contiene l'indirizzo da cui lo stai usando, quando lo conosce.
+
+Le liste sono salvate nel database e mandate al server a ogni modifica e a ogni avvio dell'API. Una voce salvata ma non nel kernel si mostra «Salvato, non attivo»: **Applica di nuovo** la rimette (se un blocco ti ha chiuso fuori, prima toglilo). Dopo un riavvio del server le liste mancano finché l'API non riparte. Ogni modifica è nel **Registro attività** (`admin.firewall.port_open`, `port_close`, `block`, `unblock`).
+
+**Se un blocco ti chiude fuori dal pannello**, entra con SSH (la 22 resta aperta) e svuota i blocchi:
+
+```bash
+sudo nft flush set inet hp_dedicated_filter blocked_v4
+sudo nft flush set inet hp_dedicated_filter blocked_v6
+```
+
+Vale fino alla prossima modifica del firewall o al prossimo avvio dell'API, che rimandano le liste salvate: appena rientri nel pannello togli il blocco sbagliato (si vede come «Salvato, non attivo») e solo dopo usa **Applica di nuovo**, che rimanda tutte le voci salvate.
+
+Dettagli e limiti: [ADR 0028](docs/architecture/adr/0028-host-firewall-and-updates.md).
 
 Per collegare in locale container reali PostgreSQL 18.1, Redis 7.4 e Keycloak 26.2.0 vincolati su `127.0.0.1`:
 
@@ -386,6 +413,6 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0025`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress, `ADR-0025` amministratori, password per email e accesso di assistenza).
+- [Registro delle ADR (`ADR 0001..0028`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress, `ADR-0025` amministratori, password per email e accesso di assistenza, `ADR-0026` stato, avvisi e log, `ADR-0027` riavvio e terminale, [`ADR-0028`](docs/architecture/adr/0028-host-firewall-and-updates.md) firewall, aggiornamenti, pacchetti e giornali del server).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.

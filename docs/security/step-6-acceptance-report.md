@@ -755,3 +755,400 @@ after the round. No reviewer read them.
 - The real Docker Engine was touched only by the real-Docker scripts: `exec-docker`'s and the
   engineers' runs of the terminal script, and the lead's runs of the ten scripts above. Every other
   run in this part used the executor's simulator or a mocked Engine.
+
+## M5d: the host
+
+### Acceptance properties (M5D-FRAME D22, D27, D28; rulings R198 and R199)
+
+| Property | Proven by |
+|---|---|
+| Acceptance 2 of M5, first part, in the frame's words: "every route is `infrastructure_admin` only (customer gets `403` + audit)". D22: every M5d route is under `/v1/admin/…` behind `requireServerAdmin` | `apps/api/test/admin-route-guard.integration.test.ts`: "the router holds at least 40 administrator, hosts and allocations routes", "a member and an owner get 403 PERMISSION_DENIED and exactly one denied audit row naming them, and nothing changes", "without credentials every route answers 401 except the pinned open ones"; `apps/api/test/admin-firewall.integration.test.ts`: "a customer gets 403 and one denied row on each of the five routes, and nothing changes"; `apps/api/test/admin-updates.integration.test.ts`: "a customer gets 403 and a denied row on all eight routes, and nothing is queued"; `apps/api/test/admin-host-services.integration.test.ts`: "refuses an unknown service, a missing reason and a disabled runtime before anything is queued; a customer gets 403 and a denied row"; `apps/api/test/m5d-api-qa.integration.test.ts` (QA): "P1: every M5d route and a journal source: 401 without a session, 403 plus one denied row for an owner and a support user, even with a hostile body; nothing reaches the host" |
+| The web side of the same: every M5d BFF route answers `401` without a session and `403` without the CSRF token or from another origin, and forwards nothing; a customer who types `/admin/firewall` or `/admin/updates` is sent away | `apps/web/test/m5d-web-qa.test.ts` (QA): "%s: 401 without a session and nothing is forwarded" (12 routes), "%s: 403 without the CSRF token, with a wrong one or from another origin" (11 routes), "a customer who types the address of a new page is sent away by the admin layout" |
+| Acceptance 2 of M5, second part: "firewall rejects rules that would close 22/80/443 or the panel" | `packages/contracts/test/admin-firewall.test.ts`: "opens no port the panel or a database needs"; `apps/api/test/firewall.unit.test.ts`: "an unknown port name is refused and never reaches the agent"; `m5d-api-qa.integration.test.ts`: "P2: names for 22/80/443/3000, a number, capitals and a slash give 400 unknown_port and reach no agent; the safe list holds none of the closed ports", "P2: over open, block, block a network, unblock and close, every list the agent received holds only safe ports and canonical addresses"; `apps/host-agent/test/m5d-host-qa.test.ts` (QA): "80/443/22 are fixed rules, the opened set only accepts, 3000 only from the bridges, and the only drops are the designed ones", "prerouting accepts 22 before any drop, and the blocked sets are used only to drop", "a blocked address can still reach exactly 22, ND, and the local and bridge interfaces"; `m5d-web-qa.test.ts`: "%s: a parameter outside its closed form is 400 and nothing is forwarded" (port names `ssh`, `http`, `https`, `panel`, `22`, `8080` and others); on a real kernel, steps `04-static-ports-v4`, `05-static-ports-v6` and `11-block-v6-network-keeps-nd-and-22` of `qa-host`'s script (below) |
+| The block that would lock the administrator out is refused | `firewall.unit.test.ts`: "blocks and unblocks: canonical form, families, refusals with reasons, 404 for an unknown id"; `admin-firewall.integration.test.ts`: "block and unblock: 201 then 200, every refusal with its reason, 404 for an unknown or malformed id" (this case is intermittent, see "Test runs"); `m5d-web-qa.test.ts`: "the block route sets the client address only from an x-real-ip that is one whole address, and over the browser's", "%s: forwards once, only to its own path and method, and never a browser-sent client address". R198 3.2: this check is advice, not a boundary |
+| Acceptance 2 of M5, third part: "host agent still has no `sh -c` / shell interpolation" | `apps/host-agent/test/m5d-host-qa.test.ts` (QA): "src has no subdirectory, and only linux-adapter.ts imports child_process, and only execFile", "one runner: execFileAsync is called once, with shell:false, and every program path is one of the allowed seven", "refuses a program outside the seven before execFile", "over IPC, hostile bodies never change the path or the program nft gets", and the block "P1 no shell in the root units"; `apps/host-agent/test/host-m5d.test.ts`: "starts an accepted form with execFile, no shell, the fixed environment and the input on stdin" and the block "closed argument forms (R198 2.1)" |
+| D22: every change writes an audit row; a job has one row at the request and one at its end; no row holds a journal line, a package list or what the updater printed | `admin-host-services.integration.test.ts`: "answers 202, writes one request row with the reason, and the worker records one .end row"; `apps/api/test/host-jobs.test.ts`: "settleHostJob twice writes one end row: whichever path comes second writes nothing"; `admin-firewall.integration.test.ts`: "view, open and close: 200, the DTO parses, one audit row per change, none for a port already in its state"; `m5d-api-qa.integration.test.ts`: "P4: markers in journal lines, package names, service states, failed jobs and lost polls never reach a record; errors carry fixed sentences" |
+| D27, firewall: a port outside the safe list never reaches the agent; no input can produce an nft program naming another table, chain or rule; the lists are sent again after "apply base rules" and at start; "not in force" is shown | `firewall.unit.test.ts` and `m5d-api-qa.integration.test.ts` as above; `m5d-host-qa.test.ts`: the block "P2 every nft call is one of four argument lists"; `admin-firewall.integration.test.ts`: "after the shipped apply of the base rules and one worker pass the host holds the stored lists again", "rows stored before the API starts reach the host at start"; `apps/web/test/admin-firewall.test.ts`: "not in force: the badge on the entry and the banner with Apply again"; `m5d-web-qa.test.ts`: "stored, not in force, for a port and for a block: the words on the entry and Apply again" |
+| D27, jobs: a request writes exactly the fixed file name; an unknown job is refused before any file; the end is recorded once, also across a restart of the API | `m5d-host-qa.test.ts`: "%s writes one empty 0600 file with its fixed name and nothing else", "an existing trigger answers RESOURCE_LOCKED and is not overwritten", "a dangling link at the trigger path answers RESOURCE_LOCKED and its target is never created"; `host-m5d.test.ts`: "refuses a job outside the list before any file or program"; `host-jobs.test.ts`: "settleHostJob twice writes one end row: whichever path comes second writes nothing", "recovery is pending while the job runs or the agent is away, and settles once its run has ended"; `admin-host-services.integration.test.ts`: "a stale request ends OPERATION_INTERRUPTED, not_started, and requests nothing"; `apps/api/test/host-job-end-across-restart.integration.test.ts` (QA, `qa-api`): "the first app stops while the job runs; the job ends; the second app settles it in its recovery pass, once, and the first app's late look writes nothing", "two concurrent settleHostJob calls write one end row; the operation keeps the winner's result" (two apps over one database in one process, not a restart of a real service) |
+| D27, journals and packages: hostile program output reaches no answer and no record | `m5d-host-qa.test.ts`: "no thrown error, no IPC answer and no console or stdio write holds program output"; `host-m5d.test.ts`: "answers 422 NOT_SUPPORTED with a fixed sentence, never the text of a program"; `m5d-api-qa.integration.test.ts`: "P4: …" as above |
+| D28: the firewall on a real kernel | `infra/linux/accept-m5-firewall.mjs`, written and run by `qa-host` (see below); not run by this report's author |
+| R198 1.5: no page shows an image name | `m5d-web-qa.test.ts`: "no page shows an image name (R198 1.5): the contract carries none and the Updates page writes none"; `m5d-api-qa.integration.test.ts`: "P3: no answer of any M5d route holds an image name, tag, digest, host path or raw unit property" |
+| R198 1.7: a stopped site shows its sentence and no Update button | `apps/web/test/admin-updates.test.ts` (the case on sites with stopped and the "more" line); `m5d-api-qa.integration.test.ts`: "P12: image-update changes one site only; unknown 404, current and stopped 400; a customer cannot call it nor read the row, but sees the deploy without an image name" |
+| R198 1.8: the dialog before a block names the address and says that the server and the sites stop getting answers from it | `m5d-web-qa.test.ts`: "the block dialog names the address and says what a block costs (R198 1.8); the form alone sends nothing" (English and Italian) |
+| R198 2.1: a closed argument form is the whole argument list | `host-m5d.test.ts`: the block "closed argument forms (R198 2.1)"; `m5d-host-qa.test.ts`: the block "P2 closed argument forms through the real runner (execFile is a spy)" |
+| R198 2.4: a stale trigger file does not run later | `host-m5d.test.ts`: "removes a stale trigger file and answers NOT_SUPPORTED when the path unit is not active (R198 2.4)"; `m5d-host-qa.test.ts`: "a stale trigger with no active path unit is removed and nothing else is touched (R198 2.4)" |
+| R198 2.5: "belongs to this request" compares whole seconds | `host-jobs.test.ts`: "R198 2.5: a job started in the same whole second as its operation belongs to it"; `admin-host-services.integration.test.ts`: "R198 2.5: a run the simulator dates to the whole second of an operation started at .900 belongs to it" |
+| No self-lockout on the page: closing a port asks first; with base rules absent or outdated every change control is disabled, and the page offers the apply only when the server has its host row (without one it says the server is not registered and offers no button); on a server installed with `--skip-firewall` (base rules `unmanaged`) it says the panel does not manage the firewall, offers no apply and no change control; the sentences of the apply say that only 22, 80, 443 and the ports opened on the page stay open and warn about SSH on another port; a failed read shows its sentence, not an empty list | `m5d-web-qa.test.ts`: "closing a port asks first and sends nothing; opening sends at once; the dialog names the port", "base rules absent or outdated: every change control is disabled and the page says what to do, with the button that does it", "base rules absent on a server without a host row: the sentence asks to apply them, so the page must offer a way", "R202: the base rules' sentences name 22, 80 and 443 and warn about SSH on another port; unmanaged says how to hand over", "disabled and a failed read: their one sentence, no control and no empty list"; `apps/web/test/admin-firewall.test.ts`: "%s: unmanaged shows its sentence, no apply and no enabled change control" |
+| Every timed action ends in words; a 401 does not loop for ever; a job running when the page opens is followed again; the page reloads after the panel's own update | `m5d-web-qa.test.ts`: "a follow that gets 401 stops at the first one and ends signed out", "reads that fail for 25 minutes are not a failure; a terminal end is; a cancelled one counts as failed", "the panel's own update reloads the page at a known end, and not at its deadline", "a job running when the page opens is followed again: the panel, a part, a package job; the site update has nothing to resume", "Install security updates only when the server can install them and one security update exists, or while that job runs" |
+| Hostile data on the pages is text; a refusal shows a catalog sentence, never the server's text or a code | `m5d-web-qa.test.ts`: "a block note on the Firewall page", "a package name, a version, a site and its owner on the Updates page", "a journal line in the one-panel viewer, and a service's state on Health", "a refusal is always a sentence of the catalog, never the server's text or a code", "the three senders show the catalog's sentence of a refusal, never its message" |
+| R199 5: the two catalogs carry the same keys and placeholders | `m5d-web-qa.test.ts`: "the same keys and the same placeholders in both catalogs", "filled, no sentence keeps a brace, a key name or undefined", "the Italian text differs from the English one except for the words that are the same in both" (they are "Firewall" twice and "Container") |
+| The customer's side did not change | `m5d-web-qa.test.ts`: "no Firewall or Updates link, no service restart and no host route on a customer page", "the customer's site-logs viewer renders as before: two panels, the customer texts, no journal sentence"; `apps/web/test/ui-copy.test.ts`: "customer surfaces avoid infrastructure jargon" (it reads the customer sections of both catalogs whole and the sources of `components/customer`, so it reads any customer key or source M5d changed; M5d added no customer key) |
+
+### Test runs
+
+This report's author ran each file alone with `timeout 300 corepack pnpm exec vitest run <file>`
+from the repository root, one after another, on 2026-11-17, between 06:03 and 06:16 UTC (Node
+26.13.1). The time is when the run began. The counts are what vitest printed. No total is given for
+the whole suite. The files are those `git status` shows as new or changed in M5d under the test
+folders of `packages/contracts`, `packages/database`, `packages/host-agent-contracts`,
+`packages/executor-contracts`, `apps/host-agent`, `apps/docker-executor`, `apps/api`, `apps/web`
+and `infra/`, plus `ui-copy.test.ts`, which is named above.
+
+| File | Written by | Result |
+|---|---|---|
+| `packages/contracts/test/admin-firewall.test.ts` | engineers | 60 passed, 06:03:28 |
+| `packages/contracts/test/admin-host.test.ts` | engineers | 6 passed, 06:03:28 |
+| `packages/contracts/test/contracts.test.ts` | engineers | 50 passed, 06:03:29 |
+| `packages/database/test/phase2-database.test.ts` | engineers | 16 passed, 06:03:29 |
+| `packages/database/test/site-sftp-users-database.test.ts` | engineers | 6 passed, 06:03:32 |
+| `packages/host-agent-contracts/test/host-agent-contracts.test.ts` | engineers | 10 passed, 06:03:35 |
+| `packages/executor-contracts/test/executor-contracts.test.ts` | engineers | 13 passed, 06:03:36 |
+| `apps/host-agent/test/host-agent.test.ts` | engineers | 21 passed, 06:03:36 (see the note below the table) |
+| `apps/host-agent/test/host-job-units.test.ts` | engineers | 8 passed, 06:03:37 |
+| `apps/host-agent/test/host-m5d.test.ts` | engineers | 107 passed, 06:03:37 |
+| `apps/host-agent/test/host-simulator-m5d.test.ts` | engineers | 29 passed, 06:03:38 |
+| `apps/docker-executor/test/panel-containers.test.ts` | engineers | 14 passed, 06:03:39 |
+| `apps/docker-executor/test/panel-container-apply.test.ts` | engineers | 5 passed, 06:03:40 |
+| `apps/docker-executor/test/panel-containers-qa.test.ts` | QA (executor, M5b; repaired by `qa-api`, R200) | 48 passed, 06:03:40 |
+| `apps/api/test/firewall.unit.test.ts` | engineers | 13 passed (13), 06:04:09 |
+| `apps/api/test/host-jobs.test.ts` | engineers | 16 passed (16), 06:04:11 |
+| `apps/api/test/release-version.test.ts` | engineers | 11 passed (11), 06:04:18 |
+| `apps/api/test/infra-layout.test.ts` | engineers | 31 passed (31), 06:04:18 |
+| `apps/api/test/site-databases.unit.test.ts` | engineers | 20 passed (20), 06:04:19 |
+| `apps/api/test/site-files.unit.test.ts` | engineers | 31 passed (31), 06:04:22 |
+| `apps/api/test/site-sftp.unit.test.ts` | engineers | 15 passed (15), 06:04:25 |
+| `apps/api/test/admin-firewall.integration.test.ts` | engineers | 1 failed, 10 passed (11), 06:04:26; see below |
+| `apps/api/test/admin-host-services.integration.test.ts` | engineers | 10 passed (10), 06:04:44 |
+| `apps/api/test/admin-updates.integration.test.ts` | engineers | 11 passed (11), 06:05:11 |
+| `apps/api/test/admin-health.integration.test.ts` | engineers | 26 passed (26), 06:05:38 |
+| `apps/api/test/admin-logs.integration.test.ts` | engineers | 10 passed (10), 06:06:22 |
+| `apps/api/test/admin-route-guard.integration.test.ts` | engineers | 4 passed (4), 06:06:38 |
+| `apps/api/test/site-databases.integration.test.ts` | engineers | 13 passed (13), 06:06:43 |
+| `apps/web/test/admin-firewall.test.ts` | engineers | 28 passed (28), 06:06:52 |
+| `apps/web/test/admin-updates.test.ts` | engineers | 18 passed (18), 06:06:53 |
+| `apps/web/test/admin-health.test.ts` | engineers | 15 passed (15), 06:06:54 |
+| `apps/web/test/admin-logs-audit.test.ts` | engineers | 25 passed (25), 06:06:55 |
+| `apps/web/test/admin-restart.test.ts` | engineers | 25 passed (25), 06:06:56 |
+| `apps/web/test/ui-copy.test.ts` | engineers (shipped) | 5 passed (5), 06:06:57 |
+| `apps/web/test/m5b-web-qa.test.ts` | QA (web, M5b) | 36 passed (36), 06:06:57 |
+| `apps/web/test/m5c-web-qa.test.ts` | QA (web, M5c) | 82 passed (82), 06:06:58 |
+| `infra/linux/install.test.ts` | engineers | 39 passed (39), 06:06:59 |
+| `infra/release/release-manifest.test.ts` | engineers | 12 passed (12), 06:07:01 |
+| `apps/web/test/m5d-web-qa.test.ts` | QA (web, this report's author) | 5 failed, 91 passed (96), 06:08:07; the five fail on purpose for the defects below |
+| `apps/host-agent/test/m5d-host-qa.test.ts` | QA (host), a colleague | 1 failed, 138 passed (139), 06:07:02; the one fails on purpose (`qa-host`'s defect: the slow `Inst` line pattern of `host-parsers.ts:114`, low) |
+| `apps/api/test/m5d-api-qa.integration.test.ts` | QA (api), a colleague | 2 failed, 24 passed (26), 06:07:08; the two failing cases are named "defect probe" by their author: "P3 (defect probe): a restart reason holding NUL is refused with 400, never a 500" and "P5 (defect probe): a replayed panel-update key after site work began answers the first operation, not 409". Its author posted the same count (26, 2 failing on purpose) at 07:13 local |
+| `apps/api/test/host-job-end-across-restart.integration.test.ts` | QA (api), a colleague | 1 failed, 5 passed (6), 06:15:50; the one fails on purpose: "(defect probe) the API closes promptly while it watches a host job, so a restart from the panel does not wait for the stop time-out" (`qa-api`'s defect, medium) |
+
+The runs of the first 14 files printed no total in brackets: the line was cut by this author's
+script, not by vitest. `m5d-web-qa.test.ts` was also run three times in a row before the table
+(91 passed and the same five failed each time, 96 tests).
+
+`admin-firewall.integration.test.ts`, "block and unblock: 201 then 200, every refusal with its
+reason, 404 for an unknown or malformed id", is intermittent: it failed in the run above and in one
+more run of the whole file, and of three runs of that case alone two passed and one failed. The
+assertion that fails is that a refusal's body does not match `/flush|sneaky|198\.51\.100|bad/`;
+vitest cuts the body it prints, so the matched text was not seen. The body holds a random request
+id (`req_` and 32 hex digits, `apps/api/src/common/control-plane.error.ts`), which can contain
+`bad`; that is a likely cause, but the number of failures seen is higher than its odds, so the cause
+is not confirmed by this report's author. It was posted to the team channel. `qa-api` answered that the
+case passed 4 of 4 runs alone for them, and that the same pattern is also run over block ids,
+operation ids and audit rows, each 32 hex digits, which they put at about one run in ten; the
+repair they propose is in the test (match only the planted words). Not a product defect.
+
+**A note on `host-agent.test.ts`.** R199 point 2 says a worker leaves out its shipped case "invokes
+nft with static argument arrays once SHA-256 verification succeeds and handles unprivileged verify
+gracefully", because that case starts `nft -c -f` on the repository's ruleset file. This report's
+author ran the whole file once (the row above) before stopping the batch, so that case ran once,
+as an unprivileged user (a check that loads nothing). It was posted to the team channel at once.
+No other file run here starts a program on this machine.
+
+### Accept script on a real kernel (D28): reported by qa-host, not run by this report's author
+
+`qa-host` wrote `infra/linux/accept-m5-firewall.mjs` (R198 2.6 moved it from the engineers to QA)
+and reports that it ran twice in a row, 14 of 14 passed each time, with IPv6. Their last run, as
+they report it:
+
+```
+PASS 01-ruleset-pin, 02-setup, 03-load-twice, 04-static-ports-v4, 05-static-ports-v6,
+06-open-safe-port, 07-close-safe-port, 08-block-v4-address, 09-block-v4-network,
+10-block-v6-address, 11-block-v6-network-keeps-nd-and-22, 12-unblock,
+13-hostile-refused-before-nft, PASS nothing-left containers=0 networks=0 volumes=0,
+RESULT 14/14 passed (prefix hp_swarmtest_m5f_ff8dd8c0, IPv6 run)
+```
+
+As the script's header says and its code shows, it loads the shipped
+`infra/linux/nftables-dedicated.conf` with a real `nft` inside a throw-away container's own
+network namespace (the local `alpine:3`, never pulled; the server container with `NET_ADMIN`
+only, never privileged and never on the host's network), and drives the agent's own built code
+(`buildFirewallSetsProgram`, `parseFirewallListing` and `validateFirewallSets` from
+`apps/host-agent/dist`) against real connections from a second container. `qa-host` says the
+`nft` there is Alpine's, not the 1.0.9 of Ubuntu noble. These results are theirs: this report's
+author did not run the script and used no Docker. The script has no API and no database, so the
+audit rows are proven by the API's tests above, not by it.
+
+### Defects found by these runs, repaired by R201
+
+| Defect | What the design says | What the code did | Where | Weight | Test |
+|---|---|---|---|---|---|
+| The Updates page says untrue sentences for most refusals | D25: every refusal says what to do next; R200 4: the routes as built | `updatesErrorText` gave its own sentence only for `RESOURCE_LOCKED` with `host_job_running`; everything else went to the shared catalog. A panel update refused with `site_work_running` and a container apply refused with `RESOURCE_LOCKED` said "This site is finishing another change" (no site is involved); a site update refused as `stopped` or `already_current` said "Check the highlighted fields" (there are none); `PANEL_CONTAINER_ABSENT`, `NOT_SUPPORTED` and `HOST_AGENT_UNAVAILABLE` said "contact support". On the Firewall page `HOST_AGENT_UNAVAILABLE` also said "contact support" | `apps/web/src/lib/admin-updates.ts:24`, `apps/web/src/lib/admin-firewall.ts` | medium | `m5d-web-qa.test.ts`: "the Updates page says a true sentence for each refusal its API gives (not a site's, not a field's, not 'contact support')": repaired by R201 1.6 (`updatesErrorText` picks a sentence of `admin.updates.errors` for each code and reason the Updates routes give: site work, busy, already current, stopped, absent, not supported, not found, agent out of reach, session ended, no answer, other; `firewallErrorText` maps `HOST_AGENT_UNAVAILABLE` to `admin.firewall.errors.agentDown`); passes |
+| Six firewall refusals do not say what to do next | D25: every refusal says what to do next, in words an owner who never saw a server understands | `admin.firewall.refusals.invalid`, `too_wide`, `reserved`, `note_invalid` and `unknown_port` (and `own_address` in English) said only what is wrong; `reserved` said "unspecified, loopback, link-local or multicast" | `apps/web/src/i18n/en.ts`, `apps/web/src/i18n/it.ts` (`admin.firewall.refusals`) | low to medium | `m5d-web-qa.test.ts`: "every refusal names what to do next": repaired by R201 1.7 (each of the six sentences now ends with the next step in both catalogs, and `reserved` says the address belongs to the server itself or to no single machine); passes |
+| With no host row, the page asks to apply the base rules and offers no button | D25: every refusal says what to do next | The apply button is drawn only when `hostId` is set; the API answers `hostId: null` when no host row exists, while the sentence for absent or outdated base rules still asked to apply them | `apps/web/src/app/admin/firewall/page.tsx`; `apps/api/src/firewall/firewall.service.ts:180` | low | `m5d-web-qa.test.ts`: "base rules absent on a server without a host row: the sentence asks to apply them, so the page must offer a way": repaired by R201 1.8 (with base rules absent or outdated and no `hostId`, the page shows `admin.firewall.base.unregistered`, which says to run `sudo hp-accounts setup` over SSH, then reload the page); passes |
+| Two buttons named "Check" on the Updates page | Every button's name says what it acts on | The panel's check and the package lists' check were both named "Check" ("Controlla"); a screen reader's list of buttons cannot tell them apart | `apps/web/src/app/admin/updates/page.tsx` | low | `m5d-web-qa.test.ts`: "every button on the Firewall and Updates pages has a name that says what it acts on: no two buttons share one": repaired by R201 1.9 (the buttons are now "Check for a new version" / "Cerca una nuova versione", "Refresh the package list" / "Aggiorna l'elenco dei pacchetti" and "Update the panel" / "Aggiorna il pannello"); passes |
+| The BFF forwards a block id of the wrong shape | The closed form `fwb_` and 32 lowercase hex digits | Only the generic segment check ran: capitals or 33 digits reached the API, which answers `404` (R200 3: by design for the API) | `apps/web/src/app/api/admin/firewall/blocks/[blockId]/route.ts` | low | `m5d-web-qa.test.ts`: "%s: a parameter outside its closed form is 400 and nothing is forwarded", the row named "unblock": repaired by R201 1.10 (the route checks `FIREWALL_BLOCK_ID_PATTERN` first and answers `400 VALIDATION_ERROR` without calling the API); passes |
+| A firewall case fails by chance | A test fails only when the code is wrong | "block and unblock" ran `/flush\|sneaky\|198\.51\.100\|bad/` over refusal bodies and audit rows that hold random ids of 32 hex digits (`req_…`, `fwb_…`, operation ids). `bad` is hexadecimal, so the case could fail with correct code; it failed in some runs above (see "Test runs") | `apps/api/test/admin-firewall.integration.test.ts:137-141,162` | low (a test, not the product) | `admin-firewall.integration.test.ts`: "block and unblock: 201 then 200, every refusal with its reason, 404 for an unknown or malformed id": repaired by R201 1.5 (the case looks only for the planted forms `flush`, `sneaky`, `198.51.100.` and `bad` followed within six characters by `note`, which no id or time stamp can make; it still checks that no refusal body and no audit row repeats the hostile input); passes 5 of 5 runs below, and 10 of 10 for `fix-api` |
+| The API description does not parse (found by the lead, not by these runs) | `docs/api/openapi.yaml` is the API description as built | Two copies of the same 87 lines (the tail of the `Operation` schema, from its `required:` list to its timeline steps) sat inside the `pattern:` lines of `UpdatesDto` (`panel.installedVersion` and `panel.check.latestVersion`), and the closing `$'` of both patterns was missing: the mark of an edit made with a JavaScript replacement string that held `$'`, which means "the text after the match". A strict YAML load stops at the keys written twice | `docs/api/openapi.yaml` (`UpdatesDto`) | medium (no tool could read the file) | The lead's check, outside the repository (a strict YAML load that refuses a key written twice, checks every `$ref` and compares with the shipped description): repaired by R201 1.11 (both copies removed and both patterns closed again as `'^\d+\.\d+\.\d+$'`); ends `RESULT ok`. The repository's own tests still do not parse the file: `infra-layout.test.ts` reads it as text, and the repository has no YAML parser |
+
+The first six were posted to the team channel; the seventh is in R201. The first five are repaired
+by `fix-web`, the sixth by `fix-api` and the seventh by `fix-docs`.
+
+Colleagues posted these defects from their own files (not found by this report's tests). All four
+are repaired by R201 (`fix-api`):
+
+| Defect | What the design says | What the code did | Where | Weight | Test |
+|---|---|---|---|---|---|
+| The API does not close while it watches a host job (`qa-api`) | R201 1.1: a stop of the API is prompt | `stop()` waited for the host lane, which followed a running host job for up to two hours, so `hp-api` waited for systemd's stop time-out when the panel restarted it | `apps/api/src/runtime/outbox-worker.service.ts:256-281`, `apps/api/src/host/host-jobs.ts:197-242` | medium | `host-job-end-across-restart.integration.test.ts`: "(defect probe) the API closes promptly while it watches a host job, so a restart from the panel does not wait for the stop time-out": repaired by R201 1.1 (`stop()` raises a signal that `executeHostJob` receives: both its waits end at once and the follow returns without writing; the job goes on and the recovery pass after the next start records its end, ADR 0028 limit 24); passes. `host-jobs.test.ts` has four cases named "R201 1.1: …"; they pass |
+| A replayed key after site work began answers `409` (`qa-api`) | R201 1.2: a replayed key answers its first operation | The check for running site work ran for every request, a replayed one too, so the replay of a key accepted before a backup started was refused with `409` | `apps/api/src/host/host-jobs.ts:76-124` | low to medium | `m5d-api-qa.integration.test.ts`: "P5 (defect probe): a replayed panel-update key after site work began answers the first operation, not 409": repaired by R201 1.2 (the check runs only when the enqueue made a new operation, in the same transaction, so a refused new request leaves no operation and no audit row); passes. `host-jobs.test.ts`: "R201 1.2: once site work runs, a replayed key answers its operation; a new key is refused and leaves no row"; passes |
+| A restart reason holding NUL answers `500` (`qa-api`) | R201 1.3: a bad body is a `400` | `RestartInputSchema` accepted U+0000 (`trim()` keeps it) and PostgreSQL refused the audit row | `packages/contracts/src/admin-health.ts:32-34` | low | `m5d-api-qa.integration.test.ts`: "P3 (defect probe): a restart reason holding NUL is refused with 400, never a 500": repaired by R201 1.3 (`RestartInputSchema` refuses a reason holding U+0000, so the three restart routes answer `400 VALIDATION_ERROR`); passes. `fix-api` narrowed the case to the status and the code, because a contract refusal carries its Zod issue code as its reason. `contracts.test.ts`: "refuses a reason holding U+0000 anywhere; a line break stays accepted"; passes |
+| The slow `Inst` line pattern (`qa-host`) | R201 1.4: the package parser reads a line in linear time | The origins group `.+` before ` [` backtracked quadratically on a long line of brackets | `apps/host-agent/src/host-parsers.ts:115` | low | `m5d-host-qa.test.ts`: "apt-get -s upgrade with a 96,000-char bracket line is refused within 250 ms": repaired by R201 1.4 (the origins group takes no bracket, `[^[\]]+`); passes. The real-line fixtures of `host-m5d.test.ts` still pass |
+
+### Runs after R201
+
+This report's author ran each file alone with `timeout` and `corepack pnpm exec vitest run <file>`
+from the repository root, one after another, on 2026-11-17, between 06:34 and 06:48 UTC (Node
+26.13.1), after `fix-web` and `fix-api` posted their repairs. The time is when the run began. The
+counts are what vitest printed.
+
+| File | Result |
+|---|---|
+| `apps/web/test/m5d-web-qa.test.ts` | 96 passed (96), 06:34:22 |
+| `apps/web/test/admin-firewall.test.ts` | 28 passed (28), 06:34:24 |
+| `apps/web/test/admin-updates.test.ts` | 18 passed (18), 06:34:25 |
+| `apps/api/test/host-job-end-across-restart.integration.test.ts` | 6 passed (6), 06:42:50 |
+| `apps/api/test/admin-firewall.integration.test.ts` | 11 passed (11), 06:43:01; again 11 passed (11) at 06:46:35, 06:46:53, 06:47:10 and 06:47:28 |
+| `apps/api/test/m5d-api-qa.integration.test.ts` | 26 passed (26), 06:43:23 |
+| `apps/host-agent/test/m5d-host-qa.test.ts` | 139 passed (139), 06:44:22 |
+| `packages/contracts/test/contracts.test.ts` | 51 passed (51), 06:44:26 |
+| `apps/host-agent/test/host-m5d.test.ts` | 107 passed (107), 06:44:32 |
+| `apps/api/test/host-jobs.test.ts` | 21 passed (21), 06:44:44 |
+
+### Defects found by the review, repaired by R202
+
+| Defect | What the design says | What the code did | Where | Weight | Test |
+|---|---|---|---|---|---|
+| On a server installed with `--skip-firewall` the panel could load its base rules and close SSH on another port | R202 1.1: the panel changes the firewall only where `/etc/nftables.d/hosting-panel.nft` exists; `install.sh` writes it only without `--skip-firewall`, after checking SSH listens on 22 | `readFirewall` answered `absent` when the table did not exist, and the apply ran `nft -f` on the ruleset, which drops every incoming connection except tcp 22, 80 and 443; the page offered the button for `absent` or `outdated` with a host row, and the Server page of step 2 (`host-detail-actions.tsx`) posts to the same route | `apps/host-agent/src/linux-adapter.ts` (`firewallInstalled`, `readFirewall`, `executeSecurityPolicy`, `replaceFirewallSets`); `apps/api/src/firewall/firewall.service.ts`; `packages/contracts/src/ipc-schemas.ts`; `apps/web/src/app/admin/firewall/page.tsx` | high | `apps/host-agent/test/host-m5d.test.ts`: "reads unmanaged and starts no program", "counts a path that is not a file as no copy", "ends %s failed with a fixed reason before any nft call", "refuses a change with RESOURCE_LOCKED and starts no program", "with the copy back, applies the ruleset as before", "carries unmanaged across the wire: the server answers it, the client parses it, a change is 409 (R202 1.3)"; `packages/contracts/test/contracts.test.ts`: "carries the four base rule states the agent reads, unmanaged among them (R202 1.3)"; `apps/api/test/firewall.unit.test.ts`: "unmanaged (R202 1.3): start pass loads nothing, changes answer as for absent, the view says unmanaged"; `apps/web/test/admin-firewall.test.ts`: "%s: unmanaged shows its sentence, no apply and no enabled change control"; `apps/web/test/m5d-web-qa.test.ts`: "R202: the base rules' sentences name 22, 80 and 443 and warn about SSH on another port; unmanaged says how to hand over": all pass. Repaired: without the file (or if it is not a file) the agent starts no `nft`, reads `unmanaged`, ends the base-rules apply and its verify `failed` with "panel firewall not installed on this server" and refuses the lists with `RESOURCE_LOCKED`; the API answers a change `409 FIREWALL_BASE_RULES_NOT_CURRENT` and its start pass loads nothing; the page says the panel does not manage this server's firewall and how to hand it over, and offers no apply and no change |
+| A host job whose agent cannot answer never ended and held `host:job` for good | R202 2.1: a job that cannot start ends `not_started` | `executeHostJob` treated every error of the request except two as "may have started", and `endOf` and `recoverHostJob` read a failed read as pending for ever | `apps/api/src/host/host-jobs.ts` | medium | `apps/api/test/host-jobs.test.ts`: "R202 2.1: a request refused with NOT_SUPPORTED ends not_started with that code and reads nothing", "R202 2.1: a NOT_SUPPORTED read keeps polling inside the start deadline and ends not_started past it", "R202 2.1: an agent out of reach past the start deadline is still not an end", "R202 2.1: recovery settles a NOT_SUPPORTED read only past the start deadline, never an agent out of reach": all pass. Repaired: a request refused with `NOT_SUPPORTED` settles `not_started` at once with that code; a `NOT_SUPPORTED` read settles it only past the 120 s start deadline; an agent out of reach stays pending; recovery follows the same rule |
+| A site image update could leave a deploy with no audit row | R202 2.2: the row and the operation are written together | The `admin.update.site_image` row was written after `changeRuntime` committed, in a statement of its own, and a replay of the key hid a missing row | `apps/api/src/updates/updates.service.ts`; `apps/api/src/sites/managed-sites.service.ts` (`changeRuntime`) | medium | `apps/api/test/admin-updates.integration.test.ts`: "R202 2.2: an image update whose audit row cannot be written leaves no operation and answers an error"; `apps/api/test/m5d-api-qa.integration.test.ts`: "P12 (R202 2.2): when the site_image row cannot be written no deploy is left; a retry with the same key deploys once with one row": both pass. Repaired: `changeRuntime` writes the row through a callback in the transaction that creates the operation, only when the operation is new |
+| A key used for one site, sent for another, answered the first site's operation | R202 3: a replay answers only its own request | The replay check matched only the organisation and the key | `apps/api/src/updates/updates.service.ts` | low | `apps/api/test/admin-updates.integration.test.ts`: "R202 3: a key used for site A, sent for site B, never answers site A's operation": passes. Repaired: the replay matches kind `service.deploy` and lock `site:<id>` |
+| Apply of the shared database ran during site work | R202 3: it restarts the database every site uses | The container apply never looked at site work | `apps/api/src/updates/updates.service.ts` | low | `apps/api/test/admin-updates.integration.test.ts`: "R202 3: shared_database apply waits for site work; other containers do not; a replay answers its operation": passes. Repaired: a new request for `shared_database` calls `assertNoSiteWork` in the enqueue transaction (`409`, `site_work_running`); a replay answers its operation |
+| A package list file removed during a refresh failed the read | R202 3 | `newestAptListTime` failed on any stat error | `apps/host-agent/src/linux-adapter.ts` | low | `apps/host-agent/test/host-m5d.test.ts`: "skips a file gone between the listing and its stat; any other stat failure still fails the read": passes. Repaired as the name says |
+| `::1.2.3.4` and `::/96` were accepted | IPv4 inside IPv6 is refused | `RESERVED` lacked `::/96` | `packages/contracts/src/admin-firewall.ts` | low | `packages/contracts/test/admin-firewall.test.ts`: "refuses $input as $reason and never echoes it" with `::/96`, `::102:300/120` and `::1.2.3.4` as `reserved`: passes |
+| The page's sentences on the base rules, port 3000, the not-in-force banner and the update rollback were untrue or incomplete | R202 3: every sentence true of the ruleset and the code | `base.absent`, `applyTitle` and `applyBody` did not name the ports left open; `static.panel` did not say the console is reached through the web ports; the banner did not say to unblock first; `updateFacts` did not say a rollback restarts the database and the proxy once more | `apps/web/src/i18n/en.ts`, `apps/web/src/i18n/it.ts` | low | `apps/web/test/m5d-web-qa.test.ts`: "R202: the base rules' sentences name 22, 80 and 443 and warn about SSH on another port; unmanaged says how to hand over": passes |
+| Command sentences did not say where to type them | R202 3 | Sentences named a command without saying it is typed on the server, over SSH | `apps/web/src/i18n/en.ts`, `apps/web/src/i18n/it.ts` | low | `apps/web/test/m5d-web-qa.test.ts`: "R202: a sentence of Firewall or Updates that names a command says it is typed on the server, over SSH": passes |
+| A follow kept polling after a 401 | R202 3 | `followRestart` went on after a 401 | `apps/web/src/lib/admin-restart.ts` | low | `apps/web/test/m5d-web-qa.test.ts`: "a follow that gets 401 stops at the first one and ends signed out": passes. Repaired: it returns `signedOut` at the first 401 |
+| The firewall BFF gave up before the API's worst case | R202 3 | The four firewall BFF routes and the page's own read did not wait as long as the API's worst case | `apps/web/src/app/api/admin/firewall/`, `apps/web/src/app/admin/firewall/page.tsx` | low | `apps/web/test/admin-firewall.test.ts`: "%s hands on a time-out above the API's worst case", "the page's own read waits as long", "%s: the apply button's answers: a host row gone, no answer, a lost connection": all pass. Repaired: `FIREWALL_BFF_TIMEOUT_MS` is 65000 |
+| A path parameter holding `%00` answered `404` with no denied row | R202 5: every denial leaves its row | U+0000 reached the denied row's `targetId`, which PostgreSQL refuses, so the request ended without its denied row | `apps/api/src/auth/authz-context.service.ts` (`recordDeniedAudit`) | low | `apps/api/test/admin-route-guard.integration.test.ts`: "R202 5: a path parameter holding %00 still answers a customer 403 with one denied row": passes. Repaired: U+0000 in `targetId` is written as U+FFFD |
+| Documents untrue after R201 | R202 3 | README named the Updates buttons "Controlla", "Aggiorna" and "Aggiorna l'elenco"; this report said the page without a host row offered an apply; OpenAPI lacked `unmanaged` | `README.md`, this report, `docs/api/openapi.yaml` | low | No test reads them. Repaired against the code and the i18n catalogs; the OpenAPI check script ends `RESULT ok` (refs 156, without a target 0) |
+
+Accepted by R202 point 4, not repaired, each written as a limit in ADR 0028: host jobs and "Apply"
+share one lane, so an Apply older than 60 s when its turn comes ends `OPERATION_INTERRUPTED` and a
+host job past 120 s ends `not_started` (limit 16); site work does not wait for a host job (limit
+26); a repeated mail-relay Apply writes a second audit row (limit 15); "current" only means the
+three sets exist (limit 27).
+
+### Runs after R202
+
+This report's author ran each file alone with `timeout` and `corepack pnpm exec vitest run <file>`
+from the repository root, one after another, on 2026-11-17, between 07:47 and 07:59 UTC (Node
+26.13.1), after `r1-web` and `r1-core` posted their repairs. The time is when the run began. The
+counts are what vitest printed.
+
+| File | Result |
+|---|---|
+| `apps/web/test/m5d-web-qa.test.ts` | 98 passed (98), 07:47:58 |
+| `apps/web/test/admin-firewall.test.ts` | 37 passed (37), 07:48:00 |
+| `apps/web/test/admin-updates.test.ts` | 18 passed (18), 07:48:01 |
+| `apps/web/test/admin-restart.test.ts` | 25 passed (25), 07:48:02 |
+| `apps/host-agent/test/host-m5d.test.ts` | 115 passed (115), 07:57:20 |
+| `packages/contracts/test/admin-firewall.test.ts` | 63 passed (63), 07:57:21 |
+| `packages/contracts/test/contracts.test.ts` | 52 passed (52), 07:57:22 |
+| `apps/api/test/host-jobs.test.ts` | 25 passed (25), 07:57:22 |
+| `apps/api/test/firewall.unit.test.ts` | 14 passed (14), 07:57:35 |
+| `apps/api/test/admin-updates.integration.test.ts` | 14 passed (14), 07:57:42 |
+| `apps/api/test/m5d-api-qa.integration.test.ts` | 26 passed (26), 07:58:14 |
+| `apps/api/test/admin-route-guard.integration.test.ts` | 5 passed (5), 07:59:12 |
+
+### Defects found by the second review, repaired by R203
+
+| Defect | What the design says | What the code did | Where | Weight | Test |
+|---|---|---|---|---|---|
+| A host job that did start could be recorded as "did not start" | R203 1.1: after the trigger file is written the request starts no program; 1.2: on the two job calls `NOT_SUPPORTED` means only missing units | `requestHostJob` ended with a second `systemctl show` after the job was handed to root, and every failed `systemctl` (exit, time limit, an answer it could not read) was `NOT_SUPPORTED`, which the API settles as not started past 120 s, freeing `host:job` while root's unit ran | `apps/host-agent/src/linux-adapter.ts` (`jobRead`, `requestHostJob`, `readHostJob`); the comment at `endOf` in `apps/api/src/host/host-jobs.ts` | medium | `apps/host-agent/test/host-m5d.test.ts`: "R203 1.1: a request whose trigger was written answers running and starts systemctl once", "R203 1.2: a first read that fails refuses the request with HOST_AGENT_UNAVAILABLE and writes no trigger", "R203 1.2: a read with a failing runner or an unreadable answer is HOST_AGENT_UNAVAILABLE with the fixed sentence", "R203 1.2: units that are not loaded stay NOT_SUPPORTED with the units sentence", "writes exactly the fixed empty file of the job and answers running without a second read (R203 1.1)"; `apps/api/test/host-jobs.test.ts`, unchanged: "R202 2.1: an agent out of reach past the start deadline is still not an end": all pass. Repaired: after the write the request answers running from the blocks read before it; on the two job calls only `HOST_JOB_UNITS_MISSING` is `NOT_SUPPORTED`, any other `systemctl` failure is `HOST_AGENT_UNAVAILABLE` (503) with the fixed sentence; a write that fails with anything but `EEXIST` stays `NOT_SUPPORTED`. The API's rule did not change |
+| Handing the firewall to the panel as the README said could put an older panel back | R203 2.1: the installer refuses an older version than the installed one; 2.2: its test root is temporary; 2.3: the hand-over keeps the installed version | `install.sh` swapped `current` to the version given with no comparison, and the README and `base.unmanaged` said to rerun the installation command, which names the archive of the first version | `infra/linux/install.sh`; `README.md`; `apps/web/src/i18n/en.ts`, `it.ts` (`base.unmanaged`) | medium | `infra/linux/install.test.ts`: "refuses --version 0.3.0 over an installed 0.3.1 with exit 2, naming both, and changes nothing", "refuses an older --archive over an installed release", "goes on with the same version, a newer one, or no installed release", "without --version or --archive the dry run says the check waits for the lookup", "refuses HP_INSTALL_ROOT outside a dry run"; `apps/web/test/m5d-web-qa.test.ts`: "R202: the base rules' sentences name 22, 80 and 443 and warn about SSH on another port; unmanaged says how to hand over": all pass. Repaired: after the `latest` lookup and before the archive is verified, an installed version newer than the one given ends the installer with exit 2, a sentence naming both versions and the two ways on (`--version` with the installed one, or `hp-update --allow-downgrade`); a dry run on `latest` says in one line of its plan that the check waits for the lookup; `HP_INSTALL_ROOT` moves the root for tests and is refused outside a dry run; every test run gets a temporary root. The sentences say: the installer again, over SSH, with `--version` and the installed version the Updates page shows, without `--skip-firewall`; the panel restarts and is away for about a minute |
+| On `unmanaged` a change was refused with "Apply them first", an apply that always fails | R203 3.1 | `#change` gave the same message in every state; `errors.notCurrent` ended "Apply the base rules and try again" | `apps/api/src/firewall/firewall.service.ts`; `apps/web/src/i18n/en.ts`, `it.ts` | low | `apps/api/test/firewall.unit.test.ts`: "unmanaged (R202 1.3): start pass loads nothing, changes answer as for absent, the view says unmanaged"; `apps/web/test/m5d-web-qa.test.ts`: "R202: the base rules' sentences name 22, 80 and 443 and warn about SSH on another port; unmanaged says how to hand over": both pass. Repaired: on `unmanaged` the same code with "The panel firewall is not installed on this server."; `errors.notCurrent` ends "Reload the page, which says what to do." |
+| The simulator applied the base rules on `unmanaged` | R203 3.2: as the real agent | `executeSecurityPolicy` of the simulator never looked at `unmanaged` | `apps/host-agent/src/simulator-adapter.ts` | low | `apps/host-agent/test/host-simulator-m5d.test.ts`: "R203 3.2: refuses the apply on unmanaged, as the real agent, and changes no state": passes. Repaired: the apply ends `failed` with "panel firewall not installed on this server" and changes no state |
+| This report named a test that no longer exists | R203 3.3 | The R198 table quoted the follow test by its name before R202 | this report | low | `apps/web/test/m5d-web-qa.test.ts`: "a follow that gets 401 stops at the first one and ends signed out": passes; the name is quoted as it is |
+| "Everything else incoming is closed" was untrue for site SFTP on 2222 | R203 3.4 | The base rules filter the `input` chain only; 2222 is forwarded to a container and never passes it | `apps/web/src/i18n/en.ts`, `it.ts` (`base.absent`, `base.applyBody`); `README.md` | low | `apps/web/test/m5d-web-qa.test.ts`: "R202: the base rules' sentences name 22, 80 and 443 and warn about SSH on another port; unmanaged says how to hand over" (its `applyBody` pattern now matches the clause that closes everything else, except site SFTP on port 2222, R203 3.6): passes |
+| No test checked that the apply shows the base rules' error sentences | R203 3.5 | The page's `errors="firewall-base"` was read by no test | `apps/web/test/admin-firewall.test.ts` | low | `apps/web/test/admin-firewall.test.ts`: "%s: the warning, Apply base rules with a hostId, every change control disabled": passes. It records the props of every `ConfirmAction` and checks the apply gets `errors: "firewall-base"`; changed to expect "firewall", it failed with "firewall-base" received |
+| The Health case ran out of the 5 s of a test in the whole suite | R203 4: not a defect of the product | The start of the application took most of the 5 s | `apps/api/test/admin-health.integration.test.ts` | low | "an agent that never answers still gives Health within the 3 s bound, with hostServices null": passes, with its own limit of 15 s; its assertion that the read takes less than 5 s stays |
+
+Two shipped assertions changed with R203 1.1, because they counted the second `systemctl show` it
+removes: in `apps/host-agent/test/host-m5d.test.ts` the case once called "writes exactly the fixed
+empty file of the job and answers a fresh read" now expects one `systemctl` call and is called
+"writes exactly the fixed empty file of the job and answers running without a second read (R203
+1.1)"; in `apps/host-agent/test/m5d-host-qa.test.ts` "%s writes one empty 0600 file with its fixed
+name and nothing else" expects one call instead of two.
+
+Recorded by R203 point 5, not repaired: the start pass on an `unmanaged` server sends one refused
+`replaceFirewallSets` and logs one line; Traefik's read time limit (60 s by default) may end the
+firewall request before the page's 65 s (M6); a later installer run with `--skip-firewall` leaves the
+sign file, and a sign file deleted by hand shows `unmanaged` too (both in ADR 0028 limit 25); a
+newer version given to the installer is an update without `hp-update`'s health check and way back
+(ADR 0028 limit 28, a guard is M6); the step-2 Hosts page's Verify ends failed on a `--skip-firewall`
+server; `restart_hp_host_agent` answers right after the write, so systemd stopping the agent first
+gives `OPERATION_AMBIGUOUS` and the API polls; the `phpVersion` assertion that cannot fail stays.
+
+### Runs after R203
+
+The engineer of R203 (`r2-fix`) ran each file alone with `timeout 300 corepack pnpm exec vitest run
+<file>` from the repository root, one after another, on 2026-11-17 between 08:45 and 08:47 UTC (Node
+26.13.1), after every repair. The time is when the run began. The counts are what vitest printed.
+`bash -n infra/linux/install.sh`, eslint on every changed code file and the `typecheck` scripts of
+the host agent, the API and the web app ended without error.
+
+| File | Result |
+|---|---|
+| `apps/host-agent/test/host-m5d.test.ts` | 119 passed (119), 08:45:16 |
+| `apps/host-agent/test/m5d-host-qa.test.ts` | 139 passed (139), 08:45:16 |
+| `apps/host-agent/test/host-simulator-m5d.test.ts` | 30 passed (30), 08:45:21 |
+| `apps/api/test/host-jobs.test.ts` | 25 passed (25), 08:45:21 |
+| `apps/api/test/firewall.unit.test.ts` | 14 passed (14), 08:45:34 |
+| `apps/api/test/admin-firewall.integration.test.ts` | 11 passed (11), 08:45:37 |
+| `apps/api/test/admin-health.integration.test.ts` | 26 passed (26), 08:45:54 |
+| `infra/linux/install.test.ts` | 44 passed (44), 08:46:37 |
+| `apps/web/test/admin-firewall.test.ts` | 37 passed (37), 08:46:40 |
+| `apps/web/test/m5d-web-qa.test.ts` | 98 passed (98), 08:46:41 |
+| `apps/api/test/infra-layout.test.ts` | 31 passed (31), 08:46:43 |
+
+### The lead's runs of cycle 13
+
+All on 2026-11-17, Node 26.13.1. "Tree" is the id of a snapshot of the uncommitted working tree,
+the run folder `.herdr-swarm` left out. This report's author did not run them.
+
+The whole checks (`corepack pnpm run build`, `lint`, `typecheck`, `test`):
+- run `c13-qa`, on the tree the test phase left: build, lint and typecheck exit 0; `test` exit 1
+  with 201 test files, 9 tests failed, 3806 passed, 43 skipped. The nine failures are exactly the
+  nine cases the test phase left failing on purpose, each for a defect R201 then repaired (five in
+  the web app, three in the API, one in the host agent).
+- run `c13-fixqa`, on the tree after the repair of R201 (`18deb98`), the one the four reviewers of
+  round 1 read: all four exit 0; 201 test files, 3821 passed, 43 skipped, none failed.
+- run `c13-r1`, on the tree after the repair of round 1 (`fbfa36e`), the one the two reviewers of
+  round 2 read: build, lint and typecheck exit 0; `test` exit 1 with 201 test files, 3852 passed, 43
+  skipped, 1 failed: "an agent that never answers still gives Health within the 3 s bound, with
+  hostServices null" in `apps/api/test/admin-health.integration.test.ts` ran out of the 5 s a test
+  gets, under the load of the whole suite (run alone it passed, in about 4.4 s). R203 point 4 gave the
+  case 15 s.
+- run `c13-r2`, on the tree after the repair of round 2 (`9e63275`): all four exit 0; 201 test
+  files, 3863 passed, 43 skipped, none failed.
+
+The eleven real-Docker scripts (`accept-m1-files`, `accept-m1-sftp`, `accept-m2-databases`,
+`accept-m2-phpmyadmin`, `accept-m3-backups`, `accept-m3-panel`, `accept-m4-wordpress`,
+`accept-m4-import`, `accept-m5-health`, `accept-m5-terminal`, `accept-m5-firewall`), on throw-away
+containers only, with what was left behind counted afterwards:
+- run `c13`, on the tree after the repair of R201 (`18deb98`): all eleven passed (17/17, 19/19,
+  17/17, 24/24, 28/28, 13/13, 12/12, 13/13, 6/6, 11/11, and the firewall script 14/14 with its
+  IPv6 steps); containers, volumes, networks and shared-memory files left behind: 0, 0, 0, 0.
+- run `c13b`, on the tree after the repair of round 1 (`fbfa36e`): all eleven passed with the same
+  counts; left behind: 0, 0, 0, 0.
+- run `c13c`, on the tree after the repair of round 2 (`9e63275`): the summary
+  `.herdr-swarm/swarm-1114-132739/scratch/c13c-accept-summary.log` reads, word for word:
+
+```
+v26.13.1
+m1-files exit=0 fail=0 | accept-m1-files: 17/17 passed in 12.8s
+m1-sftp exit=0 fail=0 | accept-m1-sftp: 19/19 passed in 35.5s
+m2-databases exit=0 fail=0 | accept-m2-databases: 17/17 passed in 18.5s
+m2-phpmyadmin exit=0 fail=0 | accept-m2-phpmyadmin: 24/24 passed in 56.7s
+m3-backups exit=0 fail=0 | accept-m3-backups: 28/28 passed in 226.1s
+m3-panel exit=0 fail=0 | RESULT 13/13 passed in 79s
+m4-wordpress exit=0 fail=0 | 12/12 passed in 169.3 s
+m4-import exit=0 fail=0 | 13/13 passed in 127.6 s
+m5-health exit=0 fail=0 | RESULT 6/6 passed
+m5-terminal exit=0 fail=0 | RESULT 11/11 passed
+m5-firewall exit=0 fail=0 | RESULT 14/14 passed (prefix hp_swarmtest_m5f_4ea22560, IPv6 run)
+left-containers=0
+left-volumes=0
+left-networks=0
+left-shm=0
+end-accept
+```
+
+The reviews. Round 1: four reviewers read the tree `18deb98` and found one high, two medium and
+thirteen low defects; R202 decided them (table above). Round 2: two reviewers read the tree
+`fbfa36e`, the repair of round 1, and found two medium and six low defects, both medium ones opened
+by that repair; R203 decided them (table above). **The repair of R203 (tree `9e63275`) was read by
+no reviewer:** the cycle's thirty agents ended with its engineer. The lead read its whole patch
+against the tree `fbfa36e` and against R203, checked that every test name this report quotes for it
+exists in its file, and ran the two runs `c13-r2` and `c13c` above on it.
+
+### Not proven
+
+- R198 point 5, one item at a time (there is no root and no published release here):
+  - the root units started by a trigger file under a real systemd as installed;
+  - `hp-update` run by its unit;
+  - `apt-get update` and `unattended-upgrade` run by their units;
+  - the agent's sandbox with the journal group;
+  - the bus for `systemctl show` and `apt-get -s`;
+  - `nft` 1.0.9 of Ubuntu noble (the architects ran 1.1.6, `qa-host`'s script ran Alpine's);
+  - the proxy's `X-Real-Ip` as the web app receives it (the BFF's use of it is proven on headers
+    written by the tests);
+  - the session across a panel update (the page's reload is proven with a stand-in `window`);
+  - a block against a port a container publishes (the DNAT case) outside a container's own
+    namespace.
+- Risks the architects named and accepted that no test closes:
+  - R198 2.2: once an address is blocked, the server and the sites no longer get answers from it.
+    Only the sentence that says so in the block dialog is tested.
+  - R198 2.9: during "Apply again" there is an instant when opened ports are closed and blocks are
+    lifted. No test measures it.
+  - R198 3.1 (D19): what `unattended-upgrades`, installed by `install.sh`, does by its own defaults
+    on a server.
+  - R198 3.2: port 3000 stays reachable from every non-internal bridge, so the own-address check is
+    advice, not a boundary.
+  - ADR 0028 limit 22 (a firewall change goes ahead when the kernel read fails) is tested as built
+    (`firewall.unit.test.ts`: "an unreadable agent: the change is stored, baseRules unreadable,
+    inForce null"); `docs` asked the reviewer whether the design meant it.
+- What the engineers' and colleagues' reports say they could not test:
+  - the real sandbox, the JSON listing and error text of `nft` 1.0.9, and the real output of
+    `systemctl`, `journalctl` and `apt-get`: every fixture is invented (`eng-agent`, `qa-host`);
+  - the live bootstrap, and path units triggering under a real systemd (`eng-units`);
+  - a real request to GitHub, an image pull on a real Docker Engine, the mail relay apply reaching
+    the executor, and a site update refused because the site is busy (`ops-2`);
+  - the end of a job recorded once across a restart of the real `hp-api` service (`ops-1`); `qa-api`'s
+    file above stops one app and starts a second over the same database, in one test process;
+  - the verify path without `CAP_NET_ADMIN` on a real kernel (`qa-host`);
+  - the dialogs opening, the click handlers and the follow to the end in a browser (`web-fw`,
+    `web-ops`). This report's tests call the handlers through a stand-in for React's hooks, with no
+    DOM; they depend on the order of each component's state and ref calls and can break on a React
+    upgrade while the page still works.
+- R202 point 5, named by the review and closed by no test:
+  - the 30 s lease against a slow first follow step;
+  - the package list, bounded only by the 1 MiB of the read;
+  - DHCP and path-MTU answers under a block;
+  - whether `nft` 1.0.9 merges adjacent networks;
+  - a package upgrade of `nftables` that flushes the ruleset;
+  - the 30 minutes `hp-panel-update.service` allows;
+  - two requests for one job at the same instant.
+- R202 1.5 (ADR 0028 limit 25): the SSH port is checked once, by the installer. An administrator who
+  later moves SSH off 22 on a server that has `/etc/nftables.d/hosting-panel.nft` is told the ports by
+  the apply dialog, not stopped; the agent cannot learn the SSH port. The Server page of step 2
+  (`host-detail-actions.tsx`) shows a refused apply as a failed operation, without the reason
+  sentence.
+- The repair of R203 was read by no reviewer: the cycle's thirty agents ended with it. The lead read
+  its patch against tree `fbfa36e` and ran the checks ("The lead's runs of cycle 13"). The runs in
+  "Runs after R203" are its engineer's.
+- R203 point 5, recorded and closed by no test: `restart_hp_host_agent` stopped by systemd before
+  its answer leaves (read in the code by the reviewer, run by nobody); Traefik's 60 s read time limit
+  against the page's 65 s; the installer's refusal of an older version on a real installed root (the
+  tests use a temporary root in dry runs).
+- Nobody opened the Firewall, Updates, Health or Logs pages in a browser, and no screen reader was
+  used. Accessibility is proven only as roles, labels and names in the markup.
+- No test of this report ran a real `systemctl`, `journalctl`, `apt-get`, `unattended-upgrade` or
+  Docker. The one `nft` run is named in "Test runs".

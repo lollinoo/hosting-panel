@@ -137,7 +137,7 @@ Ogni limite dice su cosa non si può contare e cosa fa l'amministratore. Fonti: 
     - *Su cosa non si può contare:* che un servizio generico con segreti riparta dopo un riavvio del server, o che Riavvia lo ripari.
     - *Cosa fa l'amministratore:* la riparazione (riscrivere i segreti prima di un avvio e togliere la cartella sbagliata) è rimandata a M6.
 25. **Un'uccisione che non riesce per 10 minuti si arrende** (R195 2.1): l'esecutore scrive `terminal_kill_failed` (codice fisso `INTERNAL_ERROR`) e i processi della sessione restano finché il container del sito non si riavvia.
-    - *Su cosa non si può contare:* che il pannello lo mostri (R197 2). La riga è solo nel giornale dell'esecutore, sul server: `journalctl -u hp-docker-executor`. La pagina **Log** mostra i container (i cinque del pannello e quelli dei siti), non i servizi del server.
+    - *Su cosa non si può contare:* che il pannello lo segnali da solo (R197 2): non c'è un avviso. La riga è solo nel giornale dell'esecutore. Da M5d si legge nella pagina **Log**, origine «Esecutore (hp-docker-executor)» (ADR 0028), tra le ultime 500 righe; per righe più vecchie, sul server con `journalctl -u hp-docker-executor`.
     - *Cosa fa l'amministratore:* se trova quella riga nel giornale dell'esecutore, riavvia il sito.
 26. **Una sessione chiusa mentre la sua shell stava ancora partendo prova l'uccisione una volta sola** (R196 2); se non riesce, non c'è una riga di log.
 27. **Dopo «non è stato possibile inviare» una riga può girare due volte** (R195 5): la pagina non la rimanda da sola, ma se l'esecutore era bloccato per più di 8 secondi e la prima è arrivata tardi, premere di nuovo Invio la fa girare di nuovo.
