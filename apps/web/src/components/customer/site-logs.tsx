@@ -8,8 +8,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { errorMessage } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 
-/** Log viewer of a site (customer) or of any source (admin texts); `url` is the BFF address it loads. */
-export function SiteLogs({ url, admin = false }: { url: string; admin?: boolean }) {
+/** Log viewer of a site (customer) or of any source (admin texts); `url` is the BFF address it loads; a journal has one panel. */
+export function SiteLogs({ url, admin = false, journal = false }: { url: string; admin?: boolean; journal?: boolean }) {
   const m = useMessages();
   const t = admin ? m.admin.logs.viewer : m.site.logs;
   const locale = useLocale();
@@ -27,7 +27,7 @@ export function SiteLogs({ url, admin = false }: { url: string; admin?: boolean 
       else
         setError(
           res.status === 503
-            ? t.unavailable
+            ? journal ? m.admin.logs.viewer.journalUnavailable : t.unavailable
             : admin && res.status === 404
               ? m.admin.logs.viewer.notFound
               : errorMessage(m, body?.error?.code ?? ""),
@@ -37,7 +37,7 @@ export function SiteLogs({ url, admin = false }: { url: string; admin?: boolean 
     } finally {
       setLoading(false);
     }
-  }, [url, admin, m, t.unavailable]);
+  }, [url, admin, journal, m, t.unavailable]);
 
   useEffect(() => {
     void load();
@@ -85,7 +85,8 @@ export function SiteLogs({ url, admin = false }: { url: string; admin?: boolean 
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      {!error && (
+      {!error && journal && panel("stdout", m.admin.logs.viewer.journal)}
+      {!error && !journal && (
         <div className="grid gap-4 lg:grid-cols-2">
           {panel("stdout", t.visits)}
           {panel("stderr", t.errors)}

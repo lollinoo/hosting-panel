@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getServerSession } from "./server-session";
 import { fetchUpstream } from "./upstream";
+import { FIREWALL_BFF_TIMEOUT_MS } from "./admin-firewall";
 import type {
   HostDto,
   HostAllocationDto,
@@ -25,6 +26,9 @@ import type {
   AdminSiteBackupStatusDto,
   AdminHealthDto,
   AdminAlertDto,
+  FirewallDto,
+  UpdatesDto,
+  OsPackagesDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -122,6 +126,10 @@ export async function fetchServerAdminHealth(): Promise<AdminHealthDto | null> {
 export async function fetchServerAdminAlerts(): Promise<AdminAlertDto[] | null> {
   return orNull(await serverGet<AdminAlertDto[]>("v1/admin/alerts"));
 }
+
+export async function fetchServerAdminFirewall(): Promise<FirewallDto | null> { return orNull(await serverGet<FirewallDto>("v1/admin/firewall", { timeoutMs: FIREWALL_BFF_TIMEOUT_MS })); }
+export async function fetchServerAdminUpdates(): Promise<UpdatesDto | null> { return orNull(await serverGet<UpdatesDto>("v1/admin/updates")); }
+export async function fetchServerAdminOsPackages(): Promise<OsPackagesDto | null> { return orNull(await serverGet<OsPackagesDto>("v1/admin/os-packages")); }
 
 export async function fetchServerOrg(orgId: string): Promise<OrganizationDetailDto | null> {
   return orNull(await serverGet<OrganizationDetailDto>(`v1/organizations/${orgId}`));

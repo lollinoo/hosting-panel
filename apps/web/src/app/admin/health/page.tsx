@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { PANEL_CONTAINERS, type HealthState } from "@hosting-panel/contracts";
+import { HOST_SERVICE_UNIT, PANEL_CONTAINERS, type HealthState } from "@hosting-panel/contracts";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
 import { getServerSession } from "@/lib/server-session";
@@ -104,6 +104,45 @@ export default async function AdminHealthPage() {
                   ))}
                 </TableBody>
               </Table>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader><CardTitle>{t.services.title}</CardTitle></CardHeader>
+            <CardContent>
+              {!health.hostServices ? (
+                <p className="text-sm text-muted-foreground">{t.services.unreadable}</p>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>{t.colPart}</TableHead><TableHead>{t.colState}</TableHead><TableHead>{t.services.colSince}</TableHead>
+                      <TableHead>{t.colRestarts}</TableHead><TableHead>{t.colLog}</TableHead><TableHead>{t.colActions}</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {health.hostServices.map((s) => (
+                      <TableRow key={s.service}>
+                        <TableCell>{t.components[s.service]}</TableCell>
+                        <TableCell>
+                          <Badge variant={s.active ? "success" : "destructive"}>
+                            {s.active ? t.services.running : format(t.services.stopped, { state: s.activeState })}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>{seen(s.since)}</TableCell>
+                        <TableCell>{s.restarts}</TableCell>
+                        <TableCell>
+                          <Link href={`/admin/logs?source=${HOST_SERVICE_UNIT[s.service]}`} className="underline"
+                            aria-label={format(t.openLogOf, { name: t.components[s.service] })}>{t.openLog}</Link>
+                        </TableCell>
+                        <TableCell>
+                          <RestartButton target={{ kind: "service", service: s.service }} csrfToken={session.csrfToken} />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
             </CardContent>
           </Card>
 

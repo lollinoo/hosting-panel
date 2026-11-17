@@ -1,9 +1,9 @@
 import Link from "next/link";
-import { PANEL_CONTAINERS } from "@hosting-panel/contracts";
+import { HOST_JOURNAL_SOURCES, PANEL_CONTAINERS } from "@hosting-panel/contracts";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
 import { fetchServerAdminSites } from "@/lib/server-api";
-import { LOG_TAIL_CHOICES, logUrl, parseLogSource, parseTail } from "@/lib/admin-address";
+import { LOG_TAIL_CHOICES, logUnitName, logUrl, parseLogSource, parseTail } from "@/lib/admin-address";
 import { SiteLogs } from "@/components/customer/site-logs";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -54,6 +54,13 @@ export default async function AdminLogsPage({ searchParams }: { searchParams: Pr
                 </option>
               ))}
             </optgroup>
+            <optgroup label={t.hostGroup}>
+              {HOST_JOURNAL_SOURCES.map((u) => (
+                <option key={u} value={u}>
+                  {logUnitName(m, u)}
+                </option>
+              ))}
+            </optgroup>
             {sites && (
               <optgroup label={t.sitesGroup}>
                 {sites.sites.map((s) => (
@@ -79,7 +86,7 @@ export default async function AdminLogsPage({ searchParams }: { searchParams: Pr
           {t.show}
         </Button>
       </form>
-      {url ? <SiteLogs key={url} url={url} admin /> : <p className="text-sm text-muted-foreground">{t.choose}</p>}
+      {url ? <SiteLogs key={url} url={url} admin journal={source?.kind === "journal"} /> : <p className="text-sm text-muted-foreground">{t.choose}</p>}
     </div>
   );
 }

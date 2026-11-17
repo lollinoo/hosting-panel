@@ -1,25 +1,43 @@
-import { PANEL_CONTAINERS, type PanelContainer } from "@hosting-panel/contracts";
+import {
+  HOST_JOURNAL_SOURCES,
+  HOST_SERVICES,
+  HOST_SERVICE_UNIT,
+  PANEL_CONTAINERS,
+  type HostJournalSource,
+  type PanelContainer,
+} from "@hosting-panel/contracts";
+import type { Messages } from "@/i18n";
 
 // Same as PATH_SEGMENT_REGEX in bff-guard.ts, which is server-only (node:crypto) and this file is not.
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 
 export const LOG_TAIL_CHOICES = [100, 200, 500] as const;
-export type LogSource = { kind: "panel"; component: PanelContainer } | { kind: "site"; siteId: string };
+export type LogSource =
+  | { kind: "panel"; component: PanelContainer }
+  | { kind: "site"; siteId: string }
+  | { kind: "journal"; unit: HostJournalSource };
 
-/** `?source=`: one of the five panel containers or `site:<id>`, else null. */
+/** `?source=`: one of the five panel containers, one of the seven journals or `site:<id>`, else null. */
 export function parseLogSource(v: string | undefined): LogSource | null {
   if (!v) return null;
   if (v.startsWith("site:")) {
     const id = v.slice(5);
     return ID.test(id) ? { kind: "site", siteId: id } : null;
   }
+  if ((HOST_JOURNAL_SOURCES as readonly string[]).includes(v)) return { kind: "journal", unit: v as HostJournalSource };
   return (PANEL_CONTAINERS as readonly string[]).includes(v) ? { kind: "panel", component: v as PanelContainer } : null;
+}
+
+/** A journal's name in words: a service by its Health name, a job by its own label. */
+export function logUnitName(m: Messages, unit: HostJournalSource): string {
+  const service = HOST_SERVICES.find((s) => HOST_SERVICE_UNIT[s] === unit);
+  return service ? m.admin.health.components[service] : m.admin.logs.units[unit as keyof Messages["admin"]["logs"]["units"]];
 }
 
 export const parseTail = (v: string | undefined) => ((LOG_TAIL_CHOICES as readonly number[]).includes(Number(v)) ? Number(v) : 200);
 
 export const logUrl = (s: LogSource, tail: number) =>
-  s.kind === "site" ? `/api/admin/sites/${s.siteId}/logs?tail=${tail}` : `/api/admin/logs/${s.component}?tail=${tail}`;
+  s.kind === "site" ? `/api/admin/sites/${s.siteId}/logs?tail=${tail}` : `/api/admin/logs/${s.kind === "panel" ? s.component : s.unit}?tail=${tail}`;
 
 /** The BFF's clamp of `?tail=`, as the customer log route does. */
 export function clampTail(req: Request): number {

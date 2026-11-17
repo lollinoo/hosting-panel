@@ -14,7 +14,8 @@ import { useMessages } from "@/i18n/provider";
 import { followRestart, restartErrorText, restartName, restartUrl, restartWarning, type RestartTarget } from "@/lib/admin-restart";
 import { keyedSend } from "@/lib/keyed-send";
 
-const targetKey = (t: RestartTarget) => (t.kind === "part" ? `part-${t.component}` : `site-${t.siteId}`);
+const targetKey = (t: RestartTarget) =>
+  t.kind === "part" ? `part-${t.component}` : t.kind === "service" ? `service-${t.service}` : `site-${t.siteId}`;
 
 /** The dialog's form: `onConfirm` resolves to null on success or to the message to show. */
 export function RestartForm({
@@ -78,13 +79,13 @@ export function RestartButton({ target, csrfToken }: { target: RestartTarget; cs
   const keys = React.useRef<Record<string, string>>({});
   const busyRef = React.useRef(false);
   const [open, setOpen] = React.useState(false);
-  const [phase, setPhase] = React.useState<"accepted" | "succeeded" | "failed" | "unknown" | null>(null);
+  const [phase, setPhase] = React.useState<"accepted" | "succeeded" | "failed" | "unknown" | "signedOut" | null>(null);
 
   async function confirm(reason: string): Promise<string | null> {
     busyRef.current = true;
     const sent = await keyedSend(keys.current, csrfToken, `restart:${targetKey(target)}:${reason}`, "POST", restartUrl(target), { reason });
     busyRef.current = false;
-    if (!sent.ok) return restartErrorText(m, name, sent.code);
+    if (!sent.ok) return restartErrorText(m, name, sent.code, sent.reason);
     setOpen(false);
     setPhase("accepted");
     void follow((sent.data as { data?: { operationId?: string } } | null)?.data?.operationId);
@@ -100,6 +101,7 @@ export function RestartButton({ target, csrfToken }: { target: RestartTarget; cs
     : phase === "succeeded" ? format(r.done, { name })
     : phase === "failed" ? format(r.failed, { name })
     : phase === "unknown" ? format(r.unknown, { name })
+    : phase === "signedOut" ? format(r.signedOut, { name })
     : null;
 
   return (
