@@ -1,11 +1,7 @@
 import { z } from "zod";
 import { OperationStatusSchema, OperationStepStatusSchema } from "./operations.js";
-import {
-  SITE_IMPORT_LEFT_OUT,
-  SiteFileChunkBase64Schema,
-  SiteFileItemPathSchema,
-  SiteFileUploadIdSchema,
-} from "./site-files.js";
+import { SiteFileChunkBase64Schema, SiteFileItemPathSchema, SiteFileUploadIdSchema } from "./site-files.js";
+import { SITE_IMPORT_LEFT_OUT } from "./site-wordpress-files.js";
 import { IMPORT_ORIGIN_PATTERN } from "./site-wordpress.js";
 
 export const WORDPRESS_IMPORT_KIND = "site.wordpress.import" as const;

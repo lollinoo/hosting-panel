@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   HostFirewallSetsIpcSchema,
@@ -89,6 +90,14 @@ import {
   PANEL_COMPONENTS,
   PANEL_CONTAINERS,
   PanelContainerLogsIpcRequestSchema,
+  SITE_DATABASE_PREFIX_PATTERN,
+  SITE_DATABASE_NAME_PATTERN,
+  SITE_DATABASE_CUSTOM_NAME_PATTERN,
+  siteDatabasePrefix,
+  resolveWordpressRuntime,
+  SiteSummaryDtoSchema,
+  ManagedSiteDtoSchema,
+  AdminSiteDtoSchema,
 } from "../src/index.js";
 
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
@@ -738,6 +747,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
         },
       ],
       phpVersion: null,
+      siteType: null,
       driftSummary: {
         totalServices: 1,
         inSyncCount: 1,
@@ -955,9 +965,10 @@ describe("@hosting-panel/contracts — WordPress tools DTOs", () => {
     items: [item],
   };
 
-  it("isWordpressSite holds today's rule", () => {
-    expect(isWordpressSite({ phpVersion: "8.4" })).toBe(true);
-    expect(isWordpressSite({ phpVersion: null })).toBe(false);
+  it("isWordpressSite reads the site type", () => {
+    expect(isWordpressSite({ siteType: "wordpress" })).toBe(true);
+    expect(isWordpressSite({ siteType: null })).toBe(false);
+    expect(isWordpressSite({ siteType: "x" })).toBe(false);
   });
 
   it("kinds and backup lists grow", () => {
@@ -1119,5 +1130,72 @@ describe("RestartInputSchema (R201 1.3)", () => {
       expect(RestartInputSchema.safeParse({ reason }).success).toBe(false);
     }
     expect(RestartInputSchema.parse({ reason: "disk full\nsee ticket" })).toEqual({ reason: "disk full\nsee ticket" });
+  });
+});
+
+describe("@hosting-panel/contracts — values read from the site-type definition", () => {
+  const hex = "0123456789ab";
+
+  it("the database patterns accept and refuse the same strings as before", () => {
+    expect(SITE_DATABASE_PREFIX_PATTERN.source).toBe("^(?:wp)_[0-9a-f]{12}$");
+    expect(SITE_DATABASE_PREFIX_PATTERN.test(`wp_${hex}`)).toBe(true);
+    expect(SITE_DATABASE_PREFIX_PATTERN.test(`xx_${hex}`)).toBe(false);
+    expect(SITE_DATABASE_PREFIX_PATTERN.test(`wp_${hex}_shop`)).toBe(false);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`wp_${hex}`)).toBe(true);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`wp_${hex}_shop_1`)).toBe(true);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`xx_${hex}_shop`)).toBe(false);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`wp_${hex}_Shop`)).toBe(false);
+    expect(SITE_DATABASE_CUSTOM_NAME_PATTERN.test(`wp_${hex}_shop`)).toBe(true);
+    expect(SITE_DATABASE_CUSTOM_NAME_PATTERN.test(`wp_${hex}`)).toBe(false);
+    expect(SITE_DATABASE_CUSTOM_NAME_PATTERN.test(`xx_${hex}_shop`)).toBe(false);
+  });
+
+  it("siteDatabasePrefix gives the same string as before", () => {
+    expect(siteDatabasePrefix("site_1")).toBe(`wp_${createHash("sha256").update("site_1").digest("hex").slice(0, 12)}`);
+  });
+
+  it("the heavy kinds keep their five values in order", () => {
+    expect(HEAVY_BACKUP_OPERATION_KINDS).toEqual([
+      "site.backups.create",
+      "site.backups.restore",
+      "site.backups.download",
+      "site.wordpress.update",
+      "site.wordpress.import",
+    ]);
+  });
+
+  it("the WordPress runtime keeps its path and volume suffix", () => {
+    expect(resolveWordpressRuntime("8.4")).toEqual({
+      image: "wordpress:7.1.4-php8.4-apache",
+      internalPort: 80,
+      contentPath: "/var/www/html",
+      volumeSuffix: "html",
+      resourceLimits: { cpuMilli: 1000, memoryBytes: "536870912" },
+    });
+  });
+});
+
+describe("@hosting-panel/contracts — the site DTOs carry the site type", () => {
+  const site = {
+    id: "site_1",
+    organizationId: "org_1",
+    hostAllocationId: "alloc_1",
+    name: "Shop",
+    slug: "shop",
+    status: "ready",
+    phpVersion: "8.4",
+    siteType: "wordpress",
+    createdAt: SAMPLE_TIMESTAMP,
+    updatedAt: SAMPLE_TIMESTAMP,
+  };
+
+  it("siteType is a known key or null, and required", () => {
+    expect(SiteSummaryDtoSchema.parse(site).siteType).toBe("wordpress");
+    expect(SiteSummaryDtoSchema.parse({ ...site, phpVersion: null, siteType: null }).siteType).toBeNull();
+    expect(SiteSummaryDtoSchema.safeParse({ ...site, siteType: "x" }).success).toBe(false);
+    const { siteType: _omitted, ...withoutType } = site;
+    expect(SiteSummaryDtoSchema.safeParse(withoutType).success).toBe(false);
+    expect(ManagedSiteDtoSchema.parse({ ...site, primaryDomain: null }).siteType).toBe("wordpress");
+    expect(AdminSiteDtoSchema.parse({ ...site, primaryDomain: null, owner: null }).siteType).toBe("wordpress");
   });
 });

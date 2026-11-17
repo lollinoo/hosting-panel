@@ -7,7 +7,8 @@ export const SITE_FILE_PATH_MAX = 1024;
 export const SITE_FILE_SEGMENT_MAX_BYTES = 255;
 export const SITE_FILE_BATCH_MAX = 100;
 
-export const SITE_FILE_ERROR_REASONS = [
+/** The reasons every site type's files code can give; site-files-ipc.ts adds the type's own. */
+export const SITE_FILE_CORE_ERROR_REASONS = [
   "invalid_path",
   "not_found",
   "exists",
@@ -22,14 +23,9 @@ export const SITE_FILE_ERROR_REASONS = [
   "archive_unsafe",
   "zip_unavailable",
   "not_ready",
-  "files_missing",
-  "archive_not_wordpress",
-  "staging_unsafe",
-  "dump_not_sql",
 ] as const;
-export type SiteFileErrorReason = (typeof SITE_FILE_ERROR_REASONS)[number];
 
-export const SITE_FILE_REASON_CODES: Readonly<Record<SiteFileErrorReason, ErrorCode>> = {
+export const SITE_FILE_CORE_REASON_CODES: Readonly<Record<(typeof SITE_FILE_CORE_ERROR_REASONS)[number], ErrorCode>> = {
   invalid_path: "VALIDATION_ERROR",
   not_a_directory: "VALIDATION_ERROR",
   is_a_directory: "VALIDATION_ERROR",
@@ -44,31 +40,7 @@ export const SITE_FILE_REASON_CODES: Readonly<Record<SiteFileErrorReason, ErrorC
   disk_full: "QUOTA_EXCEEDED",
   zip_unavailable: "NOT_SUPPORTED",
   not_ready: "RESOURCE_LOCKED",
-  files_missing: "NOT_FOUND",
-  archive_not_wordpress: "VALIDATION_ERROR",
-  staging_unsafe: "RESOURCE_LOCKED",
-  dump_not_sql: "VALIDATION_ERROR",
 } as const;
-
-/** What an import never takes from the archive, each the path from the site root (R161). */
-export const SITE_IMPORT_LEFT_OUT = [
-  "wp-config.php",
-  ".htaccess",
-  ".maintenance",
-  "wp-content/mu-plugins",
-  "wp-content/advanced-cache.php",
-  "wp-content/object-cache.php",
-  "wp-content/db.php",
-  "wp-content/db-error.php",
-  "wp-content/install.php",
-  "wp-content/maintenance.php",
-  "wp-content/php-error.php",
-  "wp-content/fatal-error-handler.php",
-  "wp-content/sunrise.php",
-  "wp-content/blog-deleted.php",
-  "wp-content/blog-inactive.php",
-  "wp-content/blog-suspended.php",
-] as const;
 
 const hasControlChar = (s: string): boolean => {
   for (let i = 0; i < s.length; i += 1) {

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { BACKUP_FAILURE_CLASSES, BackupTargetSchema } from "./ipc-schemas.js";
 import type { OperationKind } from "./operations.js";
 import { SiteFileChunkDtoSchema } from "./site-files.js";
+import { SITE_TYPES } from "./site-types/registry.js";
 
 export const MANUAL_BACKUPS_KEPT = 3;
 export const PRE_UPDATE_BACKUPS_KEPT = 3;
@@ -11,13 +12,12 @@ export const HEAVY_ACTIONS_PER_HOUR = 6;
 export const HEAVY_ACTION_WINDOW_MS = 60 * 60_000;
 /** Heavy customer actions allowed per organisation in HEAVY_ACTION_WINDOW_MS. */
 export const HEAVY_ACTIONS_PER_HOUR_PER_ORGANIZATION = 24;
-export const HEAVY_BACKUP_OPERATION_KINDS = [
+export const HEAVY_BACKUP_OPERATION_KINDS: readonly OperationKind[] = [
   "site.backups.create",
   "site.backups.restore",
   "site.backups.download",
-  "site.wordpress.update",
-  "site.wordpress.import",
-] as const satisfies readonly OperationKind[];
+  ...Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds),
+];
 
 export const BACKUP_PROBLEMS = [
   ...BACKUP_FAILURE_CLASSES,

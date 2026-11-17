@@ -4,6 +4,7 @@ import {
   OperationStepStatusSchema,
   type OperationKind,
 } from "./operations.js";
+import { WORDPRESS_SITE_TYPE } from "./site-types/wordpress.js";
 
 export const WORDPRESS_ITEM_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
 export const WORDPRESS_UPDATE_TARGET_PATTERN = /^(all|core|(plugin|theme):[A-Za-z0-9_][A-Za-z0-9._-]{0,99})$/;
@@ -98,9 +99,8 @@ export function wordpressJobReason(
 // API part: the DTOs of the WordPress tab (api-wp Contract, R128).
 export const WORDPRESS_STATE_STALE_MS = 12 * 3_600_000;
 
-/** Today's rule for a WordPress site; M6 replaces the body with the site type. */
-export function isWordpressSite(site: { readonly phpVersion: string | null }): boolean {
-  return site.phpVersion !== null;
+export function isWordpressSite(site: { readonly siteType: string | null }): boolean {
+  return site.siteType === WORDPRESS_SITE_TYPE.key;
 }
 
 export const WORDPRESS_OPERATION_KINDS = [

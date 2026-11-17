@@ -2,6 +2,7 @@ import { z } from "zod";
 import { PresetRoleNameSchema } from "./permissions.js";
 import { SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
 import { CertificateAlertDtoSchema } from "./site-domains.js";
+import { SiteTypeKeySchema } from "./site-types/keys.js";
 
 export const PLATFORM_OPS_ORG_ID = "org_platform_ops";
 
@@ -636,6 +637,8 @@ export const SiteSummaryDtoSchema = z.object({
   status: SiteStatusSchema,
   // null marks a pre-Step-2 row that is not a managed WordPress site
   phpVersion: z.enum(SUPPORTED_PHP_VERSIONS).nullable(),
+  // null: not a managed site (made through the generic service routes)
+  siteType: SiteTypeKeySchema.nullable(),
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });

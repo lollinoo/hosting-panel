@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WORDPRESS_SITE_TYPE } from "./site-types/wordpress.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
 const EntityIdSchema = z.string().min(1).max(128);
@@ -26,8 +27,8 @@ export function resolveWordpressRuntime(php: PhpVersion) {
   return {
     image: resolveWordpressImage(php),
     internalPort: 80 as const,
-    contentPath: "/var/www/html" as const,
-    volumeSuffix: "html" as const,
+    contentPath: WORDPRESS_SITE_TYPE.files.mountPath,
+    volumeSuffix: WORDPRESS_SITE_TYPE.files.volumeSuffix,
     resourceLimits: { cpuMilli: 1000 as const, memoryBytes: "536870912" as const },
   };
 }

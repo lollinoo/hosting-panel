@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { LEGACY_SITE_TYPE } from "./site-types/keys.js";
+import { SITE_TYPES } from "./site-types/registry.js";
 
 export const SITE_DATABASES_MAX = 10;
 export const SITE_DATABASE_USERS_MAX = 10;
 export const SITE_DATABASE_SUFFIX_PATTERN = /^[a-z0-9][a-z0-9_]{0,15}$/;
-export const SITE_DATABASE_PREFIX_PATTERN = /^wp_[0-9a-f]{12}$/;
-export const SITE_DATABASE_NAME_PATTERN = /^wp_[0-9a-f]{12}(?:_[a-z0-9][a-z0-9_]{0,15})?$/;
-export const SITE_DATABASE_CUSTOM_NAME_PATTERN = /^wp_[0-9a-f]{12}_[a-z0-9][a-z0-9_]{0,15}$/;
+const PREFIXES = [...new Set(Object.values(SITE_TYPES).flatMap((t) => (t.database ? [t.database.namePrefix] : [])))].join("|");
+export const SITE_DATABASE_PREFIX_PATTERN = new RegExp(`^(?:${PREFIXES})_[0-9a-f]{12}$`);
+export const SITE_DATABASE_NAME_PATTERN = new RegExp(`^(?:${PREFIXES})_[0-9a-f]{12}(?:_[a-z0-9][a-z0-9_]{0,15})?$`);
+export const SITE_DATABASE_CUSTOM_NAME_PATTERN = new RegExp(`^(?:${PREFIXES})_[0-9a-f]{12}_[a-z0-9][a-z0-9_]{0,15}$`);
 export const SITE_DATABASE_SIGNON_USER_PATTERN = /^pma_[0-9a-f]{12}$/;
 export const MYSQL_NATIVE_PASSWORD_HASH_PATTERN = /^\*[0-9A-F]{40}$/;
 
@@ -15,11 +18,11 @@ function siteHash12(siteId: string): string {
 }
 
 /** Prefix of every database and user of a site; also the name of the site's own database and user. */
-export function siteDatabasePrefix(siteId: string): string {
-  return `wp_${siteHash12(siteId)}`;
+export function siteDatabasePrefix(siteId: string, namePrefix = SITE_TYPES[LEGACY_SITE_TYPE].database!.namePrefix): string {
+  return `${namePrefix}_${siteHash12(siteId)}`;
 }
 
-/** The phpMyAdmin sign-on account, never the WordPress user and never listed. */
+/** The phpMyAdmin sign-on account, never the site's own user and never listed. */
 export function siteDatabaseSignOnUser(siteId: string): string {
   return `pma_${siteHash12(siteId)}`;
 }

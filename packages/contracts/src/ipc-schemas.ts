@@ -13,13 +13,13 @@ import {
   SITE_FILE_BATCH_MAX,
   SITE_FILE_CHUNK_BYTES,
   SITE_FILE_SEGMENT_MAX_BYTES,
-  SITE_IMPORT_LEFT_OUT,
   SiteFileChunkBase64Schema,
   SiteFileEntrySchema,
   SiteFileItemPathSchema,
   SiteFilePathSchema,
   SiteFileUploadIdSchema,
 } from "./site-files.js";
+import { SiteTypeKeySchema } from "./site-types/keys.js";
 import {
   MailFailureDtoSchema,
   MailRelayHostSchema,
@@ -396,6 +396,7 @@ export const TerminalOpenIpcRequestSchema = z.object({
   sessionId: TerminalSessionIdSchema,
   siteId: z.string().min(1).max(128),
   serviceInstanceId: z.string().min(1).max(128),
+  siteType: SiteTypeKeySchema.optional(),
 }).strict();
 export const TerminalOpenWireSchema = z.object({
   containerName: z.string().min(1).max(128),
@@ -514,18 +515,16 @@ export type PanelMailResult = z.infer<typeof PanelMailIpcResponseSchema>;
 export const SITE_FILES_LIST_MAX = 5_000;
 export const SITE_FILES_MAX_FILE_BYTES = 2_147_483_648;
 
-const SiteFilesServiceIdSchema = z.string().min(1).max(128);
-const SiteFileOffsetSchema = z.number().int().min(0).max(SITE_FILES_MAX_FILE_BYTES);
+export const SiteFilesServiceIdSchema = z.string().min(1).max(128);
+export const SiteFileOffsetSchema = z.number().int().min(0).max(SITE_FILES_MAX_FILE_BYTES);
 const SiteFilesBatchSchema = z.array(SiteFileItemPathSchema).min(1).max(SITE_FILE_BATCH_MAX);
 
-export const SITE_IMPORT_SLOTS = ["archive", "dump"] as const;
-export const SiteImportSlotSchema = z.enum(SITE_IMPORT_SLOTS);
-export const SiteImportIdSchema = z.string().regex(/^[0-9a-f]{32}$/);
-
-export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
+/** The files operations every site type has; site-files-ipc.ts adds the type's own. */
+export const SITE_FILES_CORE_REQUESTS = [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("list"),
       path: SiteFilePathSchema,
     })
@@ -533,6 +532,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("stat"),
       path: SiteFilePathSchema,
     })
@@ -540,6 +540,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("read"),
       path: SiteFileItemPathSchema,
       offset: SiteFileOffsetSchema,
@@ -549,6 +550,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("write"),
       path: SiteFileItemPathSchema,
       uploadId: SiteFileUploadIdSchema,
@@ -561,6 +563,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("mkdir"),
       path: SiteFileItemPathSchema,
     })
@@ -568,6 +571,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("move"),
       from: SiteFileItemPathSchema,
       to: SiteFileItemPathSchema,
@@ -576,6 +580,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("delete"),
       paths: SiteFilesBatchSchema,
     })
@@ -583,6 +588,7 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("archive"),
       paths: SiteFilesBatchSchema,
       to: SiteFileItemPathSchema,
@@ -591,50 +597,16 @@ export const SiteFilesIpcRequestSchema = z.discriminatedUnion("op", [
   z
     .object({
       serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
       op: z.literal("extract"),
       path: SiteFileItemPathSchema,
       to: SiteFilePathSchema,
     })
     .strict(),
-  z
-    .object({
-      serviceInstanceId: SiteFilesServiceIdSchema,
-      op: z.literal("import.put"),
-      slot: SiteImportSlotSchema,
-      uploadId: SiteFileUploadIdSchema,
-      offset: SiteFileOffsetSchema,
-      dataBase64: SiteFileChunkBase64Schema,
-      final: z.boolean(),
-    })
-    .strict(),
-  z
-    .object({
-      serviceInstanceId: SiteFilesServiceIdSchema,
-      op: z.literal("import.take"),
-      slot: SiteImportSlotSchema,
-      path: SiteFileItemPathSchema,
-    })
-    .strict(),
-  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.stat") }).strict(),
-  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.discard") }).strict(),
-  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.unpack"), importId: SiteImportIdSchema }).strict(),
-  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.switch"), importId: SiteImportIdSchema }).strict(),
-  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.undo"), importId: SiteImportIdSchema }).strict(),
-  z.object({ serviceInstanceId: SiteFilesServiceIdSchema, op: z.literal("import.finish"), importId: SiteImportIdSchema }).strict(),
-]);
-export type SiteFilesIpcRequest = z.infer<typeof SiteFilesIpcRequestSchema>;
-export type SiteFilesOp = SiteFilesIpcRequest["op"];
-export type SiteImportOp = Extract<SiteFilesOp, `import.${string}`>;
+] as const;
 
 const SiteFilesEmptyResultSchema = z.object({}).strict();
 const SiteFilesCountResultSchema = z.object({ entries: z.number().int().nonnegative() });
-const SiteImportSlotStateSchema = z
-  .object({
-    state: z.enum(["empty", "partial", "complete"]),
-    size: z.number().int().nonnegative(),
-    uploadId: SiteFileUploadIdSchema.nullable(),
-  })
-  .strict();
 // Root stat returns { name: "" }; directory entries in list always require non-empty names.
 const SiteFilesStatEntrySchema = z
   .object({
@@ -643,7 +615,7 @@ const SiteFilesStatEntrySchema = z
   })
   .strict();
 
-export const SITE_FILES_RESULT_SCHEMAS = {
+export const SITE_FILES_CORE_RESULTS = {
   list: z.object({
     entries: z.array(SiteFileEntrySchema).max(SITE_FILES_LIST_MAX),
     truncated: z.boolean(),
@@ -660,21 +632,7 @@ export const SITE_FILES_RESULT_SCHEMAS = {
   delete: SiteFilesEmptyResultSchema,
   archive: SiteFilesCountResultSchema,
   extract: SiteFilesCountResultSchema,
-  "import.put": z.object({ received: z.number().int().nonnegative() }),
-  "import.take": z.object({ size: z.number().int().nonnegative() }),
-  "import.stat": z.object({ archive: SiteImportSlotStateSchema, dump: SiteImportSlotStateSchema, remains: z.boolean() }),
-  "import.discard": SiteFilesEmptyResultSchema,
-  "import.unpack": z.object({
-    entries: z.number().int().nonnegative(),
-    leftOut: z.array(z.enum(SITE_IMPORT_LEFT_OUT)).max(SITE_IMPORT_LEFT_OUT.length),
-  }),
-  "import.switch": z.object({ moved: z.number().int().nonnegative() }),
-  "import.undo": z.object({ complete: z.boolean() }).strict(),
-  "import.finish": SiteFilesEmptyResultSchema,
 } as const;
-export type SiteFilesResultByOp = {
-  [K in SiteFilesOp]: z.infer<(typeof SITE_FILES_RESULT_SCHEMAS)[K]>;
-};
 
 export const SFTP_USERNAME_PATTERN = /^[a-z][a-z0-9]{1,14}_[a-z0-9]{1,16}$/;
 /** sha512-crypt; the charset excludes ':' and newlines, so it is safe to render into /etc/shadow. */
@@ -690,6 +648,7 @@ export const SftpAccessUserSchema = z
     passwordHash: z.string().regex(SHA512_CRYPT_HASH_PATTERN),
     siteId: SftpIdSchema,
     serviceInstanceId: SftpIdSchema,
+    siteType: SiteTypeKeySchema.optional(),
   })
   .strict();
 
@@ -919,6 +878,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       siteId: BackupPathIdSchema,
       serviceInstanceId: BackupPathIdSchema,
       target: BackupTargetSchema,
+      siteType: SiteTypeKeySchema.optional(),
     })
     .strict(),
   z
@@ -945,6 +905,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       target: BackupTargetSchema,
       snapshotId: BackupSnapshotIdSchema,
       createVolume: z.literal(true).optional(),
+      siteType: SiteTypeKeySchema.optional(),
     })
     .strict(),
   z
@@ -990,6 +951,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       action: z.literal("siteState"),
       siteId: BackupPathIdSchema,
       serviceInstanceId: BackupPathIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
     })
     .strict(),
 ]);
