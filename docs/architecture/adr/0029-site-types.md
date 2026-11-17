@@ -18,17 +18,29 @@ M6a non aggiunge un tipo nuovo. Sposta i fatti di WordPress in un posto solo per
 - **Una chiave salvata sul sito.** Il tipo è la colonna `sites.site_type`. Oggi l'unica chiave è `wordpress` (`SITE_TYPE_KEYS` in `packages/contracts/src/site-types/keys.ts`).
 - **Fatti costanti.** I fatti del tipo sono scritti nel codice, mai letti da una richiesta, da una riga del database o da un file. La parte comune a tutti i livelli è la `SiteTypeDefinition` (sezione 5).
 - **Un modulo per livello.** Ogni livello ha un registro (un elenco chiave → modulo) e un modulo per tipo: contratti, API, esecutore, simulatore e web.
-- **Un sito senza tipo noto non è gestito.** Se la colonna è vuota o porta una chiave sconosciuta, il sito non è un sito gestito: è un *servizio generico*. I cinque sottosistemi lo rifiutano (lo trattano come un sito che non c'è). Non è mai trattato come WordPress. Le tredici letture che distinguono un sito gestito da un servizio generico leggono la colonna con l'elenco delle chiavi note.
+- **Un sito senza tipo noto non è gestito.** Se la colonna è vuota o porta una chiave sconosciuta, il sito non è un sito gestito: è un *servizio generico*. I cinque sottosistemi lo rifiutano (lo trattano come un sito che non c'è). Non è mai trattato come WordPress. Le letture che distinguono un sito gestito da un servizio generico (per esempio in `apps/api/src/controllers/organizations.controller.ts` e `packages/database/src/backups-repository.ts`) leggono la colonna con l'elenco delle chiavi note.
 - **Nessun valore indovinato.** `findSiteType` in `packages/contracts/src/site-types/registry.ts` non lancia mai: un valore sconosciuto dà `null`, cioè «non gestito». `getSiteType` vuole una chiave già nota.
 - **La creazione salva il tipo.** Un sito nuovo nasce con `site_type = wordpress` (`apps/api/src/sites/managed-sites.service.ts`).
 - **Riparazione all'avvio.** Se `hp-update` torna a una versione precedente e quella versione crea un sito, il sito nasce con la versione PHP ma senza tipo. All'avvio l'API dà il tipo `wordpress` a ogni sito con una versione PHP e senza tipo (`apps/api/src/create-app.ts`). Questo vale anche quando l'API non possiede la connessione al database.
 
 ### Il servizio generico
 
-Le route generiche dei servizi in `apps/api/src/controllers/organizations.controller.ts` restano, raggiungibili solo con l'API. M6a fa tre riparazioni:
+Le route generiche dei servizi in `apps/api/src/controllers/organizations.controller.ts` restano, ma in questa versione nessuno le apre (`R207` addendum 4 A). `createService`, `appendRevision` e, per i membri, `createInvitation` fanno prima il controllo dell'organizzazione (le chiavi `service.create`, `service.configuration.manage`, `organization.members.manage`) e subito dopo chiedono il permesso di piattaforma `platform.users.manage`:
+
+| Chi chiama | Risposta |
+|---|---|
+| un cliente di un'altra organizzazione; un amministratore senza visita o con una visita chiusa | `404`, nessuna riga di audit |
+| un amministratore con una visita scaduta | `403 PERMISSION_DENIED`, una riga di rifiuto |
+| un amministratore con una visita aperta | `403`, una riga di rifiuto con la ragione `SUPPORT_ACCESS_PERMISSION_DENIED` (nessuna delle tre chiavi è tra le quattordici) |
+| un membro con la chiave che non è amministratore del server (il cliente) | `403 PERMISSION_DENIED`, una riga di rifiuto |
+| un amministratore del server che è anche membro con la chiave | la route funziona |
+
+Nulla nel pannello rende un amministratore del server membro dell'organizzazione di un cliente: su un server installato le tre route sono chiuse a tutti. Un servizio generico e un secondo membro di un'organizzazione non sono funzioni di questa versione. Quando la route funziona: memoria al più 64 GiB e CPU al più `64_000` milli (`MAX_SERVICE_MEMORY_BYTES`, `MAX_SERVICE_CPU_MILLI` in `packages/policy-engine/src/service-validation.ts` e `apps/docker-executor/src/docker-engine-adapter.ts`); nessuna porta del server stesso (22, 80, 443, 2222, 3000, 4000, 5432 e la porta di phpMyAdmin); una revisione passa da `validateDeclarativeServiceInput`; invitare chi è già membro risponde `409 ALREADY_EXISTS`.
+
+M6a fa tre riparazioni:
 
 - la richiesta in coda, lo stato voluto e la riga di audit si scrivono in una sola transazione;
-- l'ordine dei controlli è: il servizio esiste (altrimenti `404`), il permesso, il rifiuto di un sito gestito, poi la lettura del corpo. Un servizio di un'altra organizzazione con un corpo sbagliato riceve `404`, non `400`;
+- l'ordine dei controlli è: il servizio esiste (altrimenti `404`), il permesso (dal M6b, il controllo dell'organizzazione e poi `platform.users.manage`), il rifiuto di un sito gestito, poi la lettura del corpo. Un servizio di un'altra organizzazione con un corpo sbagliato riceve `404`, non `400`;
 - un'operazione generica fallita salva una frase fissa: «This action did not finish. Try again in a few minutes.».
 
 Con l'esecutore spento (`runtimeBackend: disabled`) un'azione su un servizio generico risponde `422 NOT_SUPPORTED` e non chiama l'esecutore.
@@ -77,6 +89,7 @@ Nessun valore salvato o usato in un hash è cambiato. Rinominarli avrebbe cambia
 - `image(phpVersion)`: l'immagine del sito per una versione PHP. La usano la creazione e la pagina Aggiornamenti.
 - `install`: il passo di installazione della creazione, oppure `null` se il tipo non installa niente. Ha `step` (la chiave salvata), `label`, `done`, `adminSecretKey` (la prima password dell'amministratore, cancellata a fine installazione; `null` se non c'è) e `job(...)`, che costruisce il lavoro da mandare.
 - `addressJob(site, siteUrl, previousUrl)`: il lavoro che sposta il sito su un indirizzo nuovo, oppure `null`.
+- `databasePasswordJob`: il lavoro che scrive la password del database salvata dal pannello nella configurazione che il sito tiene nei suoi file, oppure `null`. Ha `job(site)` e `unwritableExitCode`, l'uscita di una configurazione che il lavoro non sa riscrivere (e allora non cambia niente). Per WordPress: `wordpress.settle` con il segreto `HP_DB_PASSWORD` ← `SITE_DB_PASSWORD`, uscita `20` (ADR 0021 §4).
 - `fileReasonMessages`: le frasi per il cliente dei motivi di errore del file manager propri del tipo.
 
 Un lavoro è un `SiteTypeJob`: `kind` (un tipo di lavoro dell'elenco chiuso), `params` e, se servono, `secrets` (nome della variabile → chiave del segreto). I passi della creazione vengono dal tipo (`siteProvisionSteps`): un tipo senza database e senza installazione ha solo `deploy_site`, `publish_site` e `finish`.
@@ -120,7 +133,7 @@ Ogni passo dice il file e che cosa scriverci. I passi 1–6 sono il tipo vero e 
 1. **La chiave.** In `packages/contracts/src/site-types/keys.ts` aggiungere la chiave a `SITE_TYPE_KEYS`. I registri dei passi 2, 4, 5, 6 e 13 sono scritti come `Record` su tutte le chiavi: finché manca un modulo, il controllo dei tipi di TypeScript fallisce.
 2. **La definizione.** Un file nuovo `<chiave>.ts` accanto a `packages/contracts/src/site-types/wordpress.ts`, con la `SiteTypeDefinition`. Registrarla in `SITE_TYPES` (`packages/contracts/src/site-types/registry.ts`) ed esportarla da `packages/contracts/src/site-types/index.ts`. Il suffisso del volume, la cartella e il proprietario devono essere diversi da quelli degli altri tipi.
 3. **La riga del modello.** In `packages/database/src/sites-repository.ts` oggi esiste solo `ensureWordpressTemplate`, chiamata da `apps/api/src/create-app.ts` e da `apps/api/src/cli/accounts.ts`. Aggiungere la riga del modello del tipo (il suo `templateId`, l'immagine, il volume con il suffisso e la cartella della definizione) e chiamarla negli stessi due posti.
-4. **Il modulo dell'API.** Un file nuovo `<chiave>.ts` in `apps/api/src/site-types/`, con l'`ApiSiteType`: `image`, `install` (o `null`), `addressJob` (o `null`) e `fileReasonMessages`. Registrarlo in `API_SITE_TYPES` (`apps/api/src/site-types/index.ts`). L'immagine del sito deve contenere la cartella `files.mountPath` con proprietario `files.owner`: il container del sito è il solo che riempie un volume vuoto, perché i container di appoggio montano il volume con `nocopy`.
+4. **Il modulo dell'API.** Un file nuovo `<chiave>.ts` in `apps/api/src/site-types/`, con l'`ApiSiteType`: `image`, `install` (o `null`), `addressJob` (o `null`), `databasePasswordJob` (o `null`) e `fileReasonMessages`. Registrarlo in `API_SITE_TYPES` (`apps/api/src/site-types/index.ts`). L'immagine del sito deve contenere la cartella `files.mountPath` con proprietario `files.owner`: il container del sito è il solo che riempie un volume vuoto, perché i container di appoggio montano il volume con `nocopy`.
 5. **Il modulo dell'esecutore.** Un file nuovo `<chiave>.ts` in `apps/docker-executor/src/site-types/`, con l'`ExecutorSiteType`. Registrarlo in `EXECUTOR_SITE_TYPES` (`apps/docker-executor/src/site-types/index.ts`). Il programma del file manager del tipo viene scritto all'avvio da `ensureSiteFilesProgram`, senza altro lavoro. Un tipo senza database ha `dbGate: null`.
 6. **Il simulatore.** Un `SimulatorSiteType` registrato in `apps/docker-executor/src/simulator-site-types.ts`, con i file di partenza e il proprio `shellId`.
 7. **I tipi di lavoro** (solo se il tipo ha un'installazione o un cambio d'indirizzo). Aggiungere i tipi di lavoro allo schema `SiteJobIpcRequestSchema` in `packages/contracts/src/ipc-schemas.ts`, a `SiteJobKind` in `packages/executor-contracts/src/port.ts` e a `SITE_JOB_SPECS` (con il loro script) in `apps/docker-executor/src/site-jobs.ts`. Poi in `runSiteJob` di `apps/docker-executor/src/docker-engine-adapter.ts` scrivere il ramo del tipo: oggi il ramo `wordpress.` sceglie l'immagine CLI di WordPress e crea il volume `html` per `wordpress.install`. Il simulatore di questi lavori è in `apps/docker-executor/src/simulator-adapter.ts`.
@@ -134,7 +147,7 @@ Ogni passo dice il file e che cosa scriverci. I passi 1–6 sono il tipo vero e 
 15. **La pagina Aggiornamenti.** `apps/api/src/updates/updates.service.ts` confronta l'immagine del sito con `image(phpVersion)` del tipo; `apps/web/src/app/admin/updates/page.tsx` mostra la versione PHP. Un tipo senza PHP deve dire che cosa mostrare qui.
 16. **La posta.** Ogni sito nasce con `siteMail: true` (`apps/api/src/sites/managed-sites.service.ts`) e riceve i tre file della posta di WordPress (`siteMailBinds` in `apps/docker-executor/src/site-mail.ts`): `/var/www/html/wp-content/mu-plugins/hp-mail.php`, `/usr/local/etc/php/conf.d/zz-hp-mail.ini` e `/usr/local/lib/hp-mail/hp-sendmail.php`. Un tipo con un'altra cartella o senza PHP deve dire come manda la posta e quali file monta.
 
-Dopo questi passi: aggiungere il tipo ai test della sezione 8 (i test di confine leggono i valori dal registro senza altro lavoro) e scrivere un paragrafo del tipo in questo documento.
+Dopo questi passi: aggiungere il tipo ai test della sezione 8 (i test di confine leggono i valori dal registro; un file nuovo di uno dei cinque sottosistemi va invece aggiunto a mano al suo elenco in `apps/api/test/site-type-boundary.test.ts`, sezione 8) e scrivere un paragrafo del tipo in questo documento.
 
 ## 8. Che cosa impongono i test
 
@@ -210,13 +223,16 @@ Dopo questi passi: aggiungere il tipo ai test della sezione 8 (i test di confine
     - *Cosa fare invece:* prima di aprire un secondo tipo, decidere se ha la posta e con quali file, e provarla su un server.
 19. **Ciò che un secondo tipo incontra per primo.**
     - *Su cosa non si può contare:* che queste parti seguano già il tipo:
-      - i nomi dei database prendono il prefisso `wp` quando non ne ricevono un altro: `siteDatabasePrefix` in `packages/contracts/src/site-databases.ts` (riga 21), chiamato senza prefisso dall'API (`apps/api/src/sites/site-databases.service.ts`, righe 199, 246, 295; `apps/api/src/runtime/site-provisioner.ts`, riga 552) e dall'esecutore (`apps/docker-executor/src/site-databases.ts`, riga 80; `apps/docker-executor/src/site-jobs.ts`, riga 646), mentre il ripristino usa il prefisso del tipo (`apps/docker-executor/src/restore-jobs.ts`, riga 677);
-      - il cambio d'indirizzo ignora i `secrets` del lavoro del tipo (`apps/api/src/sites/site-domains-applier.ts`, righe 127 e 146–150);
-      - il primo passo `current` della creazione è `create_database` anche per un tipo senza database (`apps/api/src/runtime/site-provisioner.ts`, riga 144);
-      - le richieste dei file dell'importazione non mandano `siteType` (`apps/api/src/sites/site-wordpress-import-applier.ts`, riga 418), quindi valgono `wordpress`;
-      - la pulizia delle shell del terminale esegue lo script di ogni tipo in ogni container dei siti (`apps/docker-executor/src/docker-engine-adapter.ts`, riga 2757; `apps/docker-executor/src/terminal-docker.ts`, riga 104);
-      - dopo un ritorno a una versione precedente, quella versione rifiuta il file di stato dell'SFTP che porta `siteType` finché non lo riscrive con la sua prima applicazione all'avvio (`writeSftpState` e `readSftpState` in `apps/docker-executor/src/sftp-platform.ts`, righe 622–628 e 642–662).
+      - i nomi dei database prendono il prefisso `wp` quando non ne ricevono un altro: `siteDatabasePrefix` in `packages/contracts/src/site-databases.ts`, chiamato senza prefisso dall'API (`apps/api/src/sites/site-databases.service.ts`, `apps/api/src/runtime/site-provisioner.ts`) e dall'esecutore (`apps/docker-executor/src/site-databases.ts`, `apps/docker-executor/src/site-jobs.ts`), mentre il ripristino usa il prefisso del tipo (`apps/docker-executor/src/restore-jobs.ts`);
+      - il cambio d'indirizzo ignora i `secrets` del lavoro del tipo (`addressJob` in `apps/api/src/sites/site-domains-applier.ts`);
+      - il primo passo `current` della creazione è `create_database` anche per un tipo senza database (`apps/api/src/runtime/site-provisioner.ts`);
+      - le richieste dei file dell'importazione non mandano `siteType` (`siteFiles` in `apps/api/src/sites/site-wordpress-import-applier.ts`), quindi valgono `wordpress`;
+      - la pulizia delle shell del terminale esegue lo script di ogni tipo in ogni container dei siti (`reapTerminalShells` in `apps/docker-executor/src/docker-engine-adapter.ts` e `apps/docker-executor/src/terminal-docker.ts`);
+      - dopo un ritorno a una versione precedente, quella versione rifiuta il file di stato dell'SFTP che porta `siteType` finché non lo riscrive con la sua prima applicazione all'avvio (`writeSftpState` e `readSftpState` in `apps/docker-executor/src/sftp-platform.ts`).
     - *Cosa fare invece:* correggere ognuna di queste parti, con un test della cucitura, prima di aggiungere il secondo tipo.
+20. **I servizi generici creati sulla versione 0.5.0 restano (M6b).** L'aggiornamento non li tocca e chi li possiede può ancora avviarli, fermarli e riavviarli dalle route del ciclo di vita (non confermato da un test). Uno che chiede più di 64 GiB o di `64_000` milli di CPU, o che pubblica una porta ora riservata (per esempio 22, 80, 443, 2222, 3000, 4000), continua a girare finché il suo container esiste; se il container sparisce l'esecutore rifiuta di crearlo di nuovo (`Resource limits exceed the server ceiling` o `Published host port is reserved by the server`, `apps/docker-executor/src/docker-engine-adapter.ts`), e nessuno può aggiungere una revisione corretta perché `appendRevision` è chiusa a tutti (sopra).
+    - *Su cosa non si può contare:* che un servizio così torni dopo la perdita del suo container.
+    - *Cosa fare invece:* dopo l'aggiornamento l'amministratore guarda i servizi generici del server; uno oltre i limiti o su una porta riservata si può solo eliminare.
 
 ## 10. Conformità alle regole architetturali
 

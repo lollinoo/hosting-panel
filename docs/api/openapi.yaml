@@ -261,6 +261,9 @@ paths:
         Returns `totp_required` when the account has 2FA enabled and no `totpCode` was sent.
         5 failures in 15 minutes lock the account (`ACCOUNT_LOCKED`, 423); TOTP guesses have a separate counter.
         Server administrators without enrolled 2FA get `ACCOUNT_SETUP_INCOMPLETE` (403).
+        An address with no account never gets 429: its check runs only while fewer than 4 checks are in
+        the password gate, otherwise it gets the same `INVALID_CREDENTIALS` (401) at once, with no audit row.
+        A locked account gets 423 before the gate unless the caller sends `totpCode`.
       security: []
       requestBody:
         required: true
@@ -314,6 +317,9 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "423":
           $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Real accounts hold every place of the password gate (two checks run and 16 wait); this sign-in of a known account is refused at once and counts no failed try (`RATE_LIMITED`, not retryable). An address with no account never gets 429. Try again in a minute.
+          $ref: "#/components/responses/ErrorResponse"
 
   /v1/auth/password-reset/request:
     post:
@@ -352,7 +358,8 @@ paths:
       summary: Set a new password with the token from the email
       description: >-
         Needs no session. The token works once and for 30 minutes. A token that is unknown, used or
-        expired gets `PASSWORD_RESET_INVALID` (400). A password the policy refuses gets
+        expired gets `PASSWORD_RESET_INVALID` (400) without a password hash, even while the password
+        gate is full; only a live token goes through the gate. A password the policy refuses gets
         `VALIDATION_ERROR` (400) and does not use the token up. On success every session of the
         account ends and two-factor authentication stays as it was. The count of wrong passwords goes
         back to zero and a lock is lifted, unless the count of two-factor attempts has reached five:
@@ -381,6 +388,9 @@ paths:
           description: Password changed
         "400":
           $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: The token is live and two password checks run and 16 wait on the server; this one is refused at once and the token stays unused (`RATE_LIMITED`, not retryable). Try again in a minute.
+          $ref: "#/components/responses/ErrorResponse"
 
   /v1/me/password:
     post:
@@ -408,6 +418,9 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "423":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Two password checks run and 16 wait on the server; this one is refused at once and counts no failed try (`RATE_LIMITED`, not retryable). Try again in a minute.
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/me/totp/setup:
@@ -485,6 +498,9 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "423":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Two password checks run and 16 wait on the server; this one is refused at once and counts no failed try (`RATE_LIMITED`, not retryable). Try again in a minute.
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/me/locale:
@@ -580,6 +596,9 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Two password checks run and 16 wait on the server; this one is refused at once (`RATE_LIMITED`, not retryable). Try again in a minute.
+          $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/administrators:
     post:
@@ -635,6 +654,9 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Two password checks run and 16 wait on the server; this one is refused at once (`RATE_LIMITED`, not retryable). Try again in a minute.
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/users/{userId}:
@@ -710,6 +732,9 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Two password checks run and 16 wait on the server; this one is refused at once (`RATE_LIMITED`, not retryable). Try again in a minute.
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/users/{userId}/reset-totp:
@@ -1627,7 +1652,14 @@ paths:
     post:
       tags: [Organizations]
       operationId: createInvitation
-      summary: Invite or add a member to the organization (organization.members.manage)
+      summary: Invite or add a member to the organization (organization.members.manage, then server administrator)
+      description: >-
+        Server administrators only (R207 addendum 4 A): the caller needs `organization.members.manage` in the organization
+        and then the server-administrator permission. A server administrator is not a member of a
+        customer organization, so on an installed server nobody passes both checks and the route
+        always refuses; it is not a feature of this release. A member of another organization, or a
+        server administrator with no support visit or a closed one, gets 404 with no audit row; a member with the
+        permission who is not a server administrator gets 403 `PERMISSION_DENIED`.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
       requestBody:
@@ -1653,8 +1685,15 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            `PERMISSION_DENIED`: a member who is not a server administrator, an administrator whose support visit
+            ran out, or an administrator on an open visit (reason `SUPPORT_ACCESS_PERMISSION_DENIED`).
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: The caller does not reach the organization (a customer of another organization, or an administrator without an open support visit)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "`ALREADY_EXISTS`: the user is already a member of the organization"
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/members/{memberId}:
@@ -1840,7 +1879,14 @@ paths:
     post:
       tags: [Services]
       operationId: createService
-      summary: Instantiate service with initial stack revision #1 (service.create)
+      summary: Instantiate service with initial stack revision #1 (service.create, then server administrator)
+      description: >-
+        Server administrators only (R207 addendum 4 A): the caller needs `service.create` in the organization
+        and then the server-administrator permission. A server administrator is not a member of a
+        customer organization, so on an installed server nobody passes both checks and the route
+        always refuses; it is not a feature of this release. A member of another organization, or a
+        server administrator with no support visit or a closed one, gets 404 with no audit row; a member with the
+        permission who is not a server administrator gets 403 `PERMISSION_DENIED`.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/SiteIdParam"
@@ -1872,14 +1918,19 @@ paths:
                       revision:
                         $ref: "#/components/schemas/StackRevisionDto"
         "400":
-          description: Plaintext secrets detected in configuration (F1-012)
+          description: >-
+            `VALIDATION_ERROR`: plaintext secrets in the configuration (F1-012), or resource limits above
+            the ceiling (memory above 64 GiB, CPU above 64000 milli).
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
-          description: Forbidden Docker input attributes detected (AC-F1-04)
+          description: >-
+            `PERMISSION_DENIED`: a member who is not a server administrator, an administrator whose support visit
+            ran out, or an administrator on an open visit (reason `SUPPORT_ACCESS_PERMISSION_DENIED`). `HOST_POLICY_DENIED`: forbidden Docker input attributes (AC-F1-04).
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: The caller does not reach the organization (a customer of another organization, or an administrator without an open support visit)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/services/{serviceId}/revisions:
@@ -1919,7 +1970,14 @@ paths:
     post:
       tags: [Services]
       operationId: appendServiceRevision
-      summary: Append immutable revision N+1 (service.configuration.manage)
+      summary: Append immutable revision N+1 (service.configuration.manage, then server administrator)
+      description: >-
+        Server administrators only (R207 addendum 4 A): the caller needs `service.configuration.manage` in the organization
+        and then the server-administrator permission. A server administrator is not a member of a
+        customer organization, so on an installed server nobody passes both checks and the route
+        always refuses; it is not a feature of this release. A member of another organization, or a
+        server administrator with no support visit or a closed one, gets 404 with no audit row; a member with the
+        permission who is not a server administrator gets 403 `PERMISSION_DENIED`.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/ServiceIdParam"
@@ -1945,14 +2003,19 @@ paths:
                   data:
                     $ref: "#/components/schemas/StackRevisionDto"
         "400":
-          description: Plaintext secrets detected (F1-012)
+          description: >-
+            `VALIDATION_ERROR`: plaintext secrets in the configuration (F1-012), or resource limits above
+            the ceiling (memory above 64 GiB, CPU above 64000 milli).
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
-          description: Forbidden Docker input attributes (AC-F1-04)
+          description: >-
+            `PERMISSION_DENIED`: a member who is not a server administrator, an administrator whose support visit
+            ran out, or an administrator on an open visit (reason `SUPPORT_ACCESS_PERMISSION_DENIED`). `HOST_POLICY_DENIED`: forbidden Docker input attributes (AC-F1-04).
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: The caller does not reach the organization (a customer of another organization, or an administrator without an open support visit)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/services/{serviceId}/lifecycle:
@@ -2001,6 +2064,10 @@ paths:
       tags: [Operations]
       operationId: listOperations
       summary: List asynchronous operations for organization (operation.read)
+      description: >-
+        Newest first: by `submittedAt` descending, then by `id` descending. `meta.total` counts every
+        operation of the organization, not the page. The cursor is the `id` of the last operation of
+        the previous page; an unknown cursor gives an empty page.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/CursorQuery"
@@ -3098,6 +3165,9 @@ paths:
         "422":
           description: SFTP unavailable on the active runtime backend (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Twelve changes that restart the shared SFTP server were made for this organization in the last hour; refused before anything changes (`RATE_LIMITED`). Only the site's first account restarts the server. Try again later.
+          $ref: "#/components/responses/ErrorResponse"
         "503":
           description: >-
             Executor or `hp_sftp` container unavailable, or the SFTP queue was busy for
@@ -3142,6 +3212,9 @@ paths:
         "422":
           description: SFTP unavailable on the active runtime backend (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Twelve changes that restart the shared SFTP server were made for this organization in the last hour; refused before anything changes (`RATE_LIMITED`). Try again later.
+          $ref: "#/components/responses/ErrorResponse"
         "503":
           description: >-
             Executor or `hp_sftp` container unavailable, or the SFTP queue was busy for
@@ -3175,6 +3248,9 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: SFTP unavailable on the active runtime backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Twelve changes that restart the shared SFTP server were made for this organization in the last hour; refused before anything changes (`RATE_LIMITED`). Try again later.
           $ref: "#/components/responses/ErrorResponse"
         "503":
           description: >-
@@ -6215,6 +6291,7 @@ components:
             - PANEL_CONTAINER_ABSENT
             - FIREWALL_BASE_RULES_NOT_CURRENT
             - HOST_JOB_FAILED
+            - RATE_LIMITED
             - NOT_SUPPORTED
             - OPERATION_INTERRUPTED
             - OPERATION_AMBIGUOUS
@@ -8000,6 +8077,10 @@ components:
           maxLength: 80
         domain:
           type: string
+        includeWww:
+          type: boolean
+          default: false
+          description: Also add `www.<domain>` as a second address of the site.
         phpVersion:
           type: string
           enum: ["8.3", "8.4", "8.5"]
@@ -9516,6 +9597,10 @@ components:
             - service.restart
             - service.stop
             - site.deploy
+            - site.provision
+            - site.delete
+            - site.reassign
+            - site.domains
             - site.files.archive
             - site.files.extract
             - site.backups.create

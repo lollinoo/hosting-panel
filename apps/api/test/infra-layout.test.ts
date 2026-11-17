@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { MAIL_RELAY_IMAGE } from "@hosting-panel/contracts";
+import { createPlatformCapabilities, ERROR_CODES, MAIL_RELAY_IMAGE, OPERATION_KINDS } from "@hosting-panel/contracts";
 
 const root = resolve(__dirname, "../../..");
 const hasHost = existsSync("/sys/fs/cgroup/cgroup.controllers") && spawnSync("bash", ["-c", "command -v docker"]).status === 0;
@@ -574,5 +574,86 @@ describe("release workflow and docs", () => {
     expect(adr).not.toContain("CreateForm");
 
     expect(read("HARNESS.md")).toContain("pinned by tag, not by digest");
+  });
+
+  // Text between two anchors; the end anchor is optional.
+  const between = (text: string, from: string, to?: string) => {
+    const start = text.indexOf(from);
+    expect(start, from).toBeGreaterThan(-1);
+    const end = to === undefined ? -1 : text.indexOf(to, start + from.length);
+    return text.slice(start, end < 0 ? undefined : end);
+  };
+
+  it("m6b the capability table of the README agrees with the flags", () => {
+    // Both daemons up, as on an installed server.
+    const caps = createPlatformCapabilities({
+      runtimeBackend: "linux-systemd",
+      dockerExecutorRuntimeAvailable: true,
+      hostAgentRuntimeAvailable: true,
+    }) as unknown as Record<string, unknown>;
+    const table = between(read("README.md"), "## 2. Stato di Implementazione", "## 3. Mappa del Monorepo");
+    let checked = 0;
+    for (const row of table.split("\n").filter((l) => l.startsWith("|"))) {
+      for (const m of row.matchAll(/`(\w+): (true|false)`/g)) {
+        expect(caps, row).toHaveProperty(m[1]!);
+        expect(caps[m[1]!], row).toBe(m[2] === "true");
+        checked += 1;
+      }
+      if (row.includes("✅")) expect(row).not.toContain("sharedHostingEnabled");
+    }
+    expect(caps.sharedHostingEnabled).toBe(false);
+    expect(checked).toBeGreaterThanOrEqual(5);
+  });
+
+  it("m6b the README names the release it ships", () => {
+    const { version } = JSON.parse(read("package.json")) as { version: string };
+    const readme = read("README.md");
+    expect(readme).toContain(`V=${version}\n`);
+    expect(readme).toContain(`hp-update --version ${version} `);
+  });
+
+  it("m6b the API description knows every operation kind and error code", () => {
+    const spec = read("docs/api/openapi.yaml");
+    // A schema ends where the next one at the same indent starts.
+    const schema = (name: string) => {
+      const block = between(spec, `\n    ${name}:\n`);
+      const next = block.slice(1).search(/\n {4}\S/);
+      return (next < 0 ? block : block.slice(0, next + 1)).split("\n").map((l) => l.trim());
+    };
+    const errors = schema("ApiErrorBody");
+    for (const code of ERROR_CODES) expect(errors, code).toContain(`- ${code}`);
+    const operation = schema("OperationDto");
+    for (const kind of OPERATION_KINDS) expect(operation, kind).toContain(`- ${kind}`);
+  });
+
+  it("m6b the README access recovery names the emergency token and its reason", () => {
+    const recovery = between(read("README.md"), "#### Recupero accessi", "\n#### ");
+    expect(recovery).toContain("emergency-token");
+    expect(recovery).toContain("--reason");
+  });
+
+  it("m6b the README update part names the connection cap of the site accounts", () => {
+    expect(between(read("README.md"), "**Dalla 0.5.0, cos'altro cambia.**", "\n\n")).toContain("MAX_USER_CONNECTIONS");
+  });
+
+  it("m6b the audit report closes every high and critical finding", () => {
+    const report = read("docs/security/audit-report.md");
+    expect(read("README.md")).toContain("docs/security/audit-report.md");
+    // [id, last cell without bold] of every finding row of a table.
+    const states = (table: string) =>
+      table
+        .split("\n")
+        .filter((l) => /^\| [A-Z]+\d+ \|/.test(l))
+        .map((l) => [l.split(" | ")[0]!.slice(2), l.split(" | ").at(-1)!.replace(/ \|$/, "").replaceAll("**", "")]);
+    const closing = between(report, "## Open high or critical findings");
+    const rows = [
+      ...states(between(report, "## Critical findings", "## High findings")),
+      ...states(between(report, "## High findings", "## H1:")),
+      ...states(closing),
+    ];
+    // C1, C2; H2 to H10; then C1, C2, H1 to H10 and DH1 again in the closing table.
+    expect(rows.length).toBeGreaterThanOrEqual(24);
+    for (const [id, state] of rows) expect(state, id).toMatch(/^(repaired|written as a limit)/);
+    expect(closing.trimEnd().endsWith("\nOpen high or critical findings: 0")).toBe(true);
   });
 });

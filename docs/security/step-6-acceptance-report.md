@@ -1,9 +1,9 @@
 # Step 6 — Accounts, Password Reset and Support Access: Acceptance Report
 
-This report grows with step 6. Every part below rests on test runs against in-process servers,
-an in-memory database (PGlite) and the executor simulator. The one exception is the M5b accept
-script, which ran against a real Docker Engine; its result was reported by the QA engineer who ran
-it and is marked as theirs. Nothing here was run on a production server.
+This report grows with step 6. Most parts below rest on test runs against in-process servers,
+an in-memory database (PGlite) and the executor simulator. A few runs used a real Docker Engine or
+a real `nft` in a throw-away container: each one is marked where it is written, with who ran it.
+Nothing here was run on a production server.
 
 ## M5a: people and access
 
@@ -1049,10 +1049,10 @@ The whole checks (`corepack pnpm run build`, `lint`, `typecheck`, `test`):
 - run `c13-r2`, on the tree after the repair of round 2 (`9e63275`): all four exit 0; 201 test
   files, 3863 passed, 43 skipped, none failed.
 
-The eleven real-Docker scripts (`accept-m1-files`, `accept-m1-sftp`, `accept-m2-databases`,
+The eleven real-Docker scripts of that time (`accept-m1-files`, `accept-m1-sftp`, `accept-m2-databases`,
 `accept-m2-phpmyadmin`, `accept-m3-backups`, `accept-m3-panel`, `accept-m4-wordpress`,
-`accept-m4-import`, `accept-m5-health`, `accept-m5-terminal`, `accept-m5-firewall`), on throw-away
-containers only, with what was left behind counted afterwards:
+`accept-m4-import`, `accept-m5-health`, `accept-m5-terminal`, `accept-m5-firewall`; the twelfth,
+`accept-m6-site-type`, came later, see M6b), on throw-away containers only, with what was left behind counted afterwards:
 - run `c13`, on the tree after the repair of R201 (`18deb98`): all eleven passed (17/17, 19/19,
   17/17, 24/24, 28/28, 13/13, 12/12, 13/13, 6/6, 11/11, and the firewall script 14/14 with its
   IPv6 steps); containers, volumes, networks and shared-memory files left behind: 0, 0, 0, 0.
@@ -1152,3 +1152,68 @@ exists in its file, and ran the two runs `c13-r2` and `c13c` above on it.
   used. Accessibility is proven only as roles, labels and names in the markup.
 - No test of this report ran a real `systemctl`, `journalctl`, `apt-get`, `unattended-upgrade` or
   Docker. The one `nft` run is named in "Test runs".
+
+## M6b: the audit and its repairs
+
+The audit of the whole tree, its findings and what became of each are in
+`docs/security/audit-report.md`. This part holds the runs of the lead on the tree after the last
+read of the cycle: 2026-11-17, Node 26.13.1, one run after another on one machine.
+
+### The four sensors
+
+Build, lint, typecheck and test each at exit 0: 229 test files, 4140 tests passed, 43 skipped,
+0 failed. The run before the last repairs (`c15-fix`, R207 addendum 4) had 7 failed tests in 3
+files; no test fails now.
+
+### The release build and its smoke
+
+`corepack pnpm run release:build` and `corepack pnpm run release:smoke` each at exit 0. The
+archive is `hosting-panel-0.5.0-linux-x64.tar.gz` (116.8 MiB); the smoke ends with `smoke: PASS`.
+
+### The twelve real-Docker scripts
+
+Each script ran alone, with throw-away containers, volumes and networks of its own. After the
+last one, none of them was left.
+
+| Script | Result |
+|---|---|
+| `infra/linux/accept-m1-files.mjs` | 17 of 17 passed |
+| `infra/linux/accept-m1-sftp.mjs` | 19 of 19 passed |
+| `infra/linux/accept-m2-databases.mjs` | 19 of 19 passed |
+| `infra/linux/accept-m2-phpmyadmin.mjs` | 24 of 24 passed |
+| `infra/linux/accept-m3-backups.mjs` | 29 of 29 passed |
+| `infra/linux/accept-m3-panel.mjs` | 13 of 13 passed |
+| `infra/linux/accept-m4-wordpress.mjs` | 12 of 12 passed |
+| `infra/linux/accept-m4-import.mjs` | 13 of 13 passed |
+| `infra/linux/accept-m5-health.mjs` | 6 of 6 passed |
+| `infra/linux/accept-m5-terminal.mjs` | 11 of 11 passed |
+| `infra/linux/accept-m5-firewall.mjs` | 19 of 19 passed (the IPv6 checks ran) |
+| `infra/linux/accept-m6-site-type.mjs` | 15 passed, 0 failed, 1 skipped |
+
+The real-Docker proofs that R207 asked for are among them:
+
+- `data.1`, the new database password of a moved site: check `owner-change-new-password` of
+  `accept-m2-databases.mjs`.
+- `data.2`, the upgrade of the database accounts that exist: check `upgrade-old-accounts` of the
+  same script.
+- `restore.1`, no restore container with the site volume and the staging volume together: checks
+  `restore-mounts-as-ruled` and `restore-planted-link-never-replayed` of `accept-m3-backups.mjs`.
+- `host.1`, the forward chain: checks `14-forward-chain-listed`, `15-press-on-a-0.5.0-table`,
+  `16-bridge-to-metadata-dropped-dns-passes`, `17-udp-dns-passes` and
+  `18-bridge-to-metadata6-dropped` of `accept-m5-firewall.mjs`, inside a throw-away container.
+
+The tree of these runs holds everything built after `c15-fix`, each with its tests (listed in the
+audit report): R207 addendum 4 A to D (`a.1`, `a.2`, `d.1` and the E7 test) and the repairs that
+the two reviews of the repairs asked for (`a.3` to `a.8`, `d.2`, `d.3`).
+
+### Not proven
+
+- The skipped check of `accept-m6-site-type.mjs` is `sftp-real-login`: the SFTP server refused the
+  login of a site whose files belong to group 1000, because its group line is fixed at 33. This is
+  limit 5 of ADR 0029. The SFTP login of a WordPress site is proven by `accept-m1-sftp.mjs`.
+- No run above tries the open medium finding of the last read (LR-M1 in the audit report).
+- These lines were written after the runs. Between the tree of the runs and the tree with these
+  lines, only this report, the audit report and one sentence of `.agents/brain/state.md` differ.
+
+Only the owner can check the base rules on a real kernel next to Docker's chains, and Ubuntu's
+`nft` reading the rules file: see "What only the owner can check" in the audit report.
