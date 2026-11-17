@@ -1,3 +1,5 @@
+import type { BackupProblem } from "@hosting-panel/contracts";
+
 export const it = {
   common: {
     save: "Salva",
@@ -17,6 +19,24 @@ export const it = {
     totpHint: "Inserisci il codice a 6 cifre generato dalla tua app di autenticazione.",
     verify: "Verifica",
     back: "Indietro",
+    forgotLink: "Password dimenticata?",
+    forgot: {
+      title: "Reimposta la password",
+      intro: "Inserisci l'indirizzo email con cui accedi. Se appartiene a un account cliente, ti invieremo un link per scegliere una nuova password.",
+      email: "Email",
+      submit: "Invia il link",
+      sent: "Se l'indirizzo appartiene a un account cliente, il link è in arrivo. Funziona una sola volta e scade dopo poco tempo.",
+      noMail: "Nessuna email entro qualche minuto? Controlla la posta indesiderata, poi chiedi all'amministratore di questo server di reimpostare la password. Gli amministratori non ricevono alcun link: reimpostano la password direttamente sul server.",
+      badEmail: "Controlla l'indirizzo email: sembra incompleto.",
+      back: "Torna all'accesso",
+    },
+    reset: {
+      title: "Scegli una nuova password",
+      submit: "Salva la nuova password",
+      done: "La password è stata cambiata. Accedi con quella nuova.",
+      signIn: "Accedi",
+      requestNew: "Chiedi un nuovo link",
+    },
   },
   account: {
     title: "Il mio account",
@@ -62,6 +82,11 @@ export const it = {
     yourSites: "I tuoi siti",
     accountMenu: "Menu account",
     account: "Account",
+    support: {
+      mark: "Vista di assistenza: stai vedendo i siti di {name} fino alle {time}.",
+      markUnassigned: "Vista di assistenza: stai vedendo i siti non assegnati a nessun cliente, fino alle {time}.",
+      leave: "Esci",
+    },
   },
   site: {
     wpAdmin: "Apri WP Admin",
@@ -105,7 +130,11 @@ export const it = {
     tabsLabel: "Sezioni del sito",
     tabs: {
       overview: "Panoramica",
+      wordpress: "WordPress",
       domains: "Indirizzi web",
+      files: "File",
+      database: "Database",
+      backups: "Backup",
       logs: "Log",
     },
     status: {
@@ -130,6 +159,15 @@ export const it = {
       activityTitle: "Attività recenti",
       noActivity: "Ancora nessuna attività.",
       activityLoadError: "Non siamo riusciti a caricare le attività recenti. Ricarica la pagina per riprovare.",
+      wordpressTitle: "Aggiornamenti di WordPress",
+      wordpressNotChecked: "Non ancora controllato.",
+      wordpressRunning: "È in corso un aggiornamento.",
+      wordpressUnknown: "Non siamo riusciti a raggiungere wordpress.org, quindi non sappiamo se esistono aggiornamenti.",
+      wordpressProblem: "Non siamo riusciti a leggere il sito. Apri WordPress per vedere il motivo.",
+      wordpressUpToDate: "Tutto aggiornato (controllo del {date}).",
+      wordpressCount: "Aggiornamenti disponibili: {count}",
+      wordpressLoadFailed: "Non siamo riusciti a caricare i dettagli di WordPress. Ricarica la pagina per riprovare.",
+      wordpressLink: "Apri WordPress",
     },
     domainStatus: {
       pending: "In collegamento",
@@ -142,6 +180,8 @@ export const it = {
       deploy: "Aggiornamento del sito",
       restart: "Riavvio del sito",
       stop: "Arresto del sito",
+      wordpressUpdate: "Aggiornamento di WordPress",
+      wordpressImport: "Importazione WordPress",
       done: "{action} completato",
       failed: "{action} non riuscito",
       running: "{action} in corso",
@@ -225,13 +265,14 @@ export const it = {
       phpVersion: "Versione PHP",
       phpApply: "Cambia versione",
       phpHint: "Il sito si riavvia per qualche secondo.",
+      phpStopped: "Avvia prima il sito, poi cambia la versione di PHP.",
       dangerTitle: "Zona pericolosa",
       dangerHint: "L'eliminazione di un sito non si può annullare.",
       delete: "Elimina il sito",
     },
     delete: {
       title: "Eliminare questo sito?",
-      body: "Stai per eliminare definitivamente {name}: tutti i suoi file, il suo database e la configurazione del suo indirizzo web. L'operazione non si può annullare. I backup arriveranno in un prossimo aggiornamento, quindi scarica prima tutto ciò che ti serve.",
+      body: "Stai per eliminare definitivamente {name}: tutti i suoi file, il suo database e la configurazione del suo indirizzo web. L'operazione non si può annullare. Anche i backup di questo sito non saranno più disponibili, quindi scarica prima tutto ciò che ti serve.",
       typeName: "Scrivi {name} per confermare",
       cancel: "Annulla",
       confirm: "Elimina il sito",
@@ -242,12 +283,909 @@ export const it = {
       errors: "Errori",
       refresh: "Aggiorna",
       loading: "Caricamento...",
+      loaded: "Log caricati.",
       empty: "Non c'è ancora nulla da mostrare.",
       unavailable: "I log non sono disponibili in questo momento. Riprova tra un minuto.",
     },
+    files: {
+      rootLabel: "File del sito",
+      breadcrumb: "Percorso della cartella",
+      loading: "Caricamento dei file...",
+      empty: "Questa cartella è vuota. Trascina qui i file oppure scegli Carica.",
+      notReady: "Il sito è ancora in preparazione. I suoi file compariranno qui appena sarà pronto.",
+      retry: "Riprova",
+      cancel: "Annulla",
+      truncated:
+        "Questa cartella contiene troppi elementi: ne mostriamo solo i primi. Sposta alcuni elementi in sottocartelle per vederli tutti.",
+      selected: "{count} selezionati",
+      nameRule: "Il nome non può essere vuoto, contenere / o essere composto solo da punti.",
+      dropHint: "Rilascia qui i file per caricarli in questa cartella",
+      folderUploadHint:
+        "Le cartelle non si possono caricare direttamente. Comprimi la cartella in uno zip sul tuo computer, carica lo zip e poi scegli Estrai.",
+      list: {
+        caption: "File e cartelle in {folder}",
+        name: "Nome",
+        size: "Dimensione",
+        changed: "Ultima modifica",
+        selectAll: "Seleziona tutto in questa cartella",
+        select: "Seleziona {name}",
+        folder: "Cartella",
+        protected: "Protetto: gestito dal pannello",
+        shortcut: "Collegamento: non si può aprire da qui",
+      },
+      actions: {
+        toolbar: "Azioni sui file",
+        upload: "Carica",
+        newFolder: "Nuova cartella",
+        download: "Scarica",
+        edit: "Modifica",
+        rename: "Rinomina",
+        move: "Sposta",
+        compress: "Comprimi in zip",
+        extract: "Estrai",
+        delete: "Elimina",
+        clear: "Annulla selezione",
+        protectedHint: "Alcuni elementi selezionati sono protetti e non si possono modificare.",
+      },
+      upload: {
+        title: "Caricamenti",
+        summary: "{done} di {total} file caricati",
+        bytes: "{sent} di {total}",
+        waiting: "In attesa",
+        uploading: "Caricamento in corso",
+        done: "Caricato",
+        failed: "Non caricato",
+        cancelled: "Annullato",
+        cancelOne: "Annulla il caricamento di {name}",
+        retryOne: "Riprova a caricare {name}",
+        cancelAll: "Annulla tutti",
+        dismiss: "Chiudi",
+        largeHint:
+          "I file molto grandi possono richiedere molto tempo per il caricamento e questa pagina deve restare aperta fino al termine.",
+        leaveWarning: "Ci sono caricamenti in corso. Se lasci questa pagina verranno interrotti.",
+        sessionEnded:
+          "La sessione è scaduta. Accedi di nuovo in un'altra scheda, poi scegli Riprova: il caricamento riparte da dove si era fermato.",
+        replaceTitle: "Sostituire i file esistenti?",
+        replaceBody:
+          "Questi file esistono già in questa cartella: {names}. Se li sostituisci, le versioni attuali andranno perse.",
+        replace: "Sostituisci",
+        skip: "Salta questi file",
+      },
+      newFolder: {
+        title: "Nuova cartella",
+        label: "Nome della cartella",
+        submit: "Crea cartella",
+        working: "Creazione in corso...",
+      },
+      rename: {
+        title: "Rinomina {name}",
+        label: "Nuovo nome",
+        submit: "Rinomina",
+        working: "Rinomina in corso...",
+        warning: "Se il sito usa questo elemento, le pagine che lo richiamano smetteranno di funzionare.",
+      },
+      move: {
+        titleOne: "Sposta {name}",
+        titleMany: "Sposta {count} elementi",
+        choose: "Scegli la cartella di destinazione",
+        here: "Sposta qui",
+        working: "Spostamento in corso...",
+        open: "Apri la cartella {name}",
+        noFolders: "Qui non ci sono cartelle.",
+        intoItself: "Una cartella non può essere spostata dentro sé stessa. Scegli un'altra cartella.",
+        sameFolder: "Questi elementi sono già in questa cartella. Scegline un'altra.",
+      },
+      delete: {
+        titleOne: "Eliminare {name}?",
+        titleMany: "Eliminare {count} elementi?",
+        bodyFile:
+          "Il file verrà eliminato definitivamente. Non si può annullare e il sito potrebbe smettere di funzionare se usa questo file.",
+        bodyFolder:
+          "La cartella e tutto il suo contenuto verranno eliminati definitivamente. Non si può annullare e il sito potrebbe smettere di funzionare se usa questi file.",
+        bodyMany:
+          "Questi {count} elementi, con tutto il contenuto delle cartelle, verranno eliminati definitivamente. Non si può annullare e il sito potrebbe smettere di funzionare se li usa.",
+        confirm: "Elimina definitivamente",
+        working: "Eliminazione in corso...",
+      },
+      compress: {
+        title: "Comprimi in zip",
+        label: "Nome del file zip",
+        hint: "Il file zip viene salvato in questa cartella. I tuoi file restano come sono.",
+        defaultName: "archivio",
+        submit: "Comprimi",
+        working:
+          "Compressione in corso... Le cartelle grandi possono richiedere qualche minuto. Puoi continuare a usare questa pagina.",
+        done: "{name} è pronto, con {count} elementi.",
+      },
+      extract: {
+        title: "Estrai {name}",
+        label: "Estrai nella cartella",
+        hint: "Se la cartella non esiste la creiamo. Lascia il campo vuoto per estrarre qui. I file già presenti non vengono mai sostituiti.",
+        submit: "Estrai",
+        working:
+          "Estrazione in corso... Gli zip grandi possono richiedere qualche minuto. Puoi continuare a usare questa pagina.",
+        done: "Estratti {count} elementi.",
+      },
+      editor: {
+        title: "Modifica {name}",
+        label: "Contenuto di {name}",
+        loading: "Apertura del file...",
+        warning: "Un errore qui può bloccare il sito. Se non sei sicuro, scarica prima una copia.",
+        mixedLineEndings: "Questo file usa fine riga diversi. Salvando verranno resi tutti uguali.",
+        save: "Salva",
+        saving: "Salvataggio in corso...",
+        saved: "Salvato.",
+        close: "Chiudi",
+        unsaved: "Hai modifiche non salvate.",
+        discard: "Chiudi senza salvare",
+        keep: "Continua a modificare",
+        changed: "Questo file è stato modificato altrove dopo che lo hai aperto.",
+        saveAnyway: "Salva comunque",
+        reload: "Ricarica il file",
+        tooBig:
+          "Questo file è troppo grande per modificarlo qui (oltre 512 KB). Scaricalo, modificalo sul tuo computer e caricalo di nuovo.",
+        tooBigNow:
+          "Il testo ora supera 512 KB e non si può salvare qui. Accorcialo oppure modifica il file sul tuo computer.",
+        notText: "Questo file non è testo semplice, quindi non si può modificare qui. Puoi invece scaricarlo.",
+      },
+      errors: {
+        NOT_FOUND:
+          "Questo file o cartella non c'è più: forse è stato spostato o eliminato. Aggiorna l'elenco e riprova.",
+        ALREADY_EXISTS: "Qui esiste già un elemento con questo nome. Scegli un altro nome.",
+        VALIDATION_ERROR:
+          "Questo nome o percorso non si può usare. Il nome non può contenere / o essere composto solo da punti. Correggilo e riprova.",
+        PERMISSION_DENIED:
+          "Questo elemento è protetto e non si può modificare da qui. Se devi cambiarlo, chiedi al tuo amministratore.",
+        NOT_SUPPORTED: "Su questo server la gestione dei file non è ancora disponibile. Contatta il tuo fornitore di hosting.",
+        DOCKER_ENGINE_UNAVAILABLE: "Al momento i file del sito non sono raggiungibili. Attendi un minuto e riprova.",
+        OPERATION_AMBIGUOUS:
+          "Abbiamo perso la connessione prima della risposta del server: la modifica potrebbe essere stata fatta oppure no. Aggiorna l'elenco per controllare.",
+        OPERATION_INTERRUPTED:
+          "L'operazione ha richiesto troppo tempo ed è stata interrotta: potrebbe essere stata completata solo in parte. Aggiorna l'elenco e riprova.",
+        UNAUTHENTICATED: "La sessione è scaduta. Accedi di nuovo per continuare.",
+        ORGANIZATION_SUSPENDED:
+          "Il tuo account è sospeso: puoi vedere i file ma non modificarli. Contatta il tuo fornitore di hosting.",
+        uploadRead: "Non è stato possibile leggere questo file dal tuo computer. Scegli di nuovo il file.",
+        uploadTooLarge: "Questo file supera il limite di 2 GB. Scegli un file più piccolo o dividilo prima di caricarlo.",
+        quotaUpload:
+          "Sul server non c'è abbastanza spazio per questo file. Elimina i file che non ti servono più e riprova.",
+        quotaZip:
+          "È troppo grande per comprimerlo o estrarlo qui, oppure lo spazio non basta. Prova con meno elementi, elimina i file che non ti servono più oppure estrai sul tuo computer e carica i file.",
+        zipValidation:
+          "Questo file non è un archivio zip valido oppure contiene elementi non consentiti. Prova a crearlo di nuovo.",
+        zipExists: "Qui esiste già un file o una cartella con questo nome. Scegli un altro nome.",
+        zipInterrupted: "L'operazione ha richiesto troppo tempo ed è stata interrotta. Prova con meno file.",
+      },
+      sftpLink: "Collegati con un programma SFTP",
+      sftp: {
+        title: "Accesso SFTP",
+        back: "Torna ai file",
+        intro:
+          "Con un programma SFTP come FileZilla o WinSCP, tu o il tuo sviluppatore potete lavorare sui file di questo sito dal computer. Ogni persona ha il proprio nome utente e la propria password e può accedere solo ai file di questo sito.",
+        unavailable:
+          "L'accesso SFTP non è ancora disponibile su questo server. Puoi comunque gestire i file nella scheda File.",
+        details: "Dati di connessione",
+        detailsUnavailable:
+          "I dati di connessione non sono ancora disponibili. Contatta il tuo fornitore di hosting.",
+        protocol: "Protocollo",
+        host: "Indirizzo del server",
+        port: "Porta",
+        usernameHint: "Nome utente: uno degli utenti qui sotto",
+        fingerprintTitle: "Verifica l'identità del server",
+        fingerprintBody:
+          "Al primo collegamento il programma mostra un'impronta e chiede se fidarti. Prosegui solo se corrisponde a questa:",
+        copyFor: "Copia {what}",
+        copied: "Copiato",
+        users: "Utenti",
+        count: "{count} di {max} utenti",
+        empty: "Non ci sono ancora utenti SFTP. Aggiungine uno per collegarti con un programma SFTP.",
+        name: "Nome utente",
+        createdAt: "Creato",
+        passwordChanged: "Password cambiata",
+        actions: "Azioni",
+        add: "Aggiungi utente",
+        limit:
+          "Questo sito ha già il numero massimo di {max} utenti SFTP. Eliminane uno che non serve più per aggiungerne un altro.",
+        create: {
+          title: "Aggiungi un utente SFTP",
+          label: "Nome",
+          hint: "Usa da 1 a 16 lettere minuscole o numeri, senza spazi. Davanti aggiungiamo un codice breve del sito. Vedrai il nome utente completo nell'elenco.",
+          submit: "Aggiungi utente",
+          working: "Aggiunta in corso...",
+        },
+        created: {
+          title: "Utente aggiunto",
+          tempFor: "Password per {name}:",
+          copy: "Copia",
+          copied: "Copiato",
+          copyUnavailable:
+            "Qui non è possibile copiare automaticamente. Seleziona la password e copiala a mano.",
+          tempNote:
+            "Inseriscila nel programma SFTP insieme a nome utente, indirizzo del server e porta.",
+          tempOnce: "La mostriamo una sola volta: copiala adesso. Se la perdi, crea una nuova password.",
+          done: "Fatto",
+        },
+        reset: {
+          action: "Nuova password",
+          title: "Creare una nuova password per {name}?",
+          body: "La password attuale smette subito di funzionare. Chi la usa avrà bisogno di quella nuova per collegarsi. Le connessioni aperte per questo utente terminano subito e gli altri utenti SFTP vengono disconnessi per un istante (possono ricollegarsi subito).",
+          confirm: "Crea nuova password",
+          working: "Creazione in corso...",
+          doneTitle: "Nuova password pronta",
+        },
+        remove: {
+          action: "Elimina",
+          title: "Eliminare l'utente {name}?",
+          body: "{name} non potrà più collegarsi. I file del sito non vengono toccati. Le connessioni aperte per questo utente terminano subito e gli altri utenti SFTP vengono disconnessi per un istante (possono ricollegarsi subito).",
+          confirm: "Elimina utente",
+          working: "Eliminazione in corso...",
+        },
+        errors: {
+          QUOTA_EXCEEDED:
+            "Questo sito ha già il numero massimo di 10 utenti SFTP. Eliminane uno che non serve più, poi riprova.",
+          ALREADY_EXISTS: "Questo nome è già usato su questo sito. Scegline un altro.",
+          VALIDATION_ERROR:
+            "Questo nome non si può usare. Usa da 1 a 16 lettere minuscole o numeri, senza spazi.",
+          DOCKER_ENGINE_UNAVAILABLE:
+            "Al momento non è stato possibile aggiornare l'accesso SFTP. Attendi un minuto e riprova.",
+          ORGANIZATION_SUSPENDED:
+            "Il tuo account è sospeso: non è possibile gestire l'accesso SFTP. Contatta il tuo fornitore di hosting.",
+        },
+      },
+    },
+    database: {
+      title: "Database",
+      intro:
+        "Il tuo sito conserva i contenuti in un database. Qui puoi aggiungere database e utenti per altri programmi, scegliere quale utente può usare quale database e aprire phpMyAdmin per lavorare sui dati.",
+      prefixNote: "Ogni nome inizia con {prefix}_ così appartiene solo a questo sito.",
+      loadFailed: "Non è stato possibile caricare i database. Attendi un minuto e ricarica la pagina.",
+      unavailable:
+        "Su questo server non è possibile gestire i database. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+      primaryBadge: "Usato dal sito",
+      primaryNote:
+        "Il sito ha bisogno di questo database e del suo utente per funzionare, quindi non puoi eliminarli né modificarli qui.",
+      name: "Nome",
+      actions: "Azioni",
+      databases: {
+        heading: "Database",
+        size: "Dimensione",
+        count: "{count} di {max} database aggiuntivi",
+        empty: "Non hai ancora aggiunto database.",
+        add: "Aggiungi database",
+        limit:
+          "Questo sito ha già il massimo di {max} database aggiuntivi. Eliminane uno che non ti serve più per aggiungerne un altro.",
+        create: {
+          title: "Aggiungi un database",
+          label: "Nome",
+          hint: "Usa da 1 a 16 lettere minuscole, numeri o trattini bassi, iniziando con una lettera o un numero.",
+          preview: "Nome completo: {name}",
+          submit: "Aggiungi database",
+          working: "Aggiunta in corso...",
+        },
+        remove: {
+          action: "Elimina",
+          title: "Eliminare il database {name}?",
+          body: "Tutte le tabelle e i dati di {name} vengono eliminati definitivamente e non si possono recuperare. Gli utenti perdono l'accesso e i programmi che lo usano smettono di funzionare.",
+          confirm: "Elimina database",
+          working: "Eliminazione in corso...",
+        },
+      },
+      users: {
+        heading: "Utenti del database",
+        access: "Può usare",
+        noAccess: "Ancora nessun database",
+        count: "{count} di {max} utenti aggiuntivi",
+        empty: "Non hai ancora aggiunto utenti del database.",
+        add: "Aggiungi utente",
+        limit:
+          "Questo sito ha già il massimo di {max} utenti del database aggiuntivi. Eliminane uno che non ti serve più per aggiungerne un altro.",
+        create: {
+          title: "Aggiungi un utente del database",
+          label: "Nome",
+          hint: "Usa da 1 a 16 lettere minuscole, numeri o trattini bassi, iniziando con una lettera o un numero.",
+          preview: "Nome utente completo: {name}",
+          submit: "Aggiungi utente",
+          working: "Aggiunta in corso...",
+        },
+        created: {
+          title: "Utente aggiunto",
+          tempFor: "Password per {name}:",
+          copy: "Copia",
+          copied: "Copiata",
+          copyUnavailable:
+            "Qui non è possibile copiare. Seleziona la password e copiala a mano.",
+          tempNote:
+            "Usala nel codice del sito insieme al nome utente. Il server del database è lo stesso che il sito usa già.",
+          tempOnce: "La mostriamo una sola volta: copiala ora. Se la perdi, crea una nuova password.",
+          done: "Fatto",
+        },
+        reset: {
+          action: "Nuova password",
+          title: "Creare una nuova password per {name}?",
+          body: "La password attuale smette subito di funzionare e le connessioni aperte di questo utente si chiudono immediatamente. Aggiorna tutti i programmi che la usano.",
+          confirm: "Crea nuova password",
+          working: "Creazione in corso...",
+          doneTitle: "Nuova password pronta",
+        },
+        remove: {
+          action: "Elimina",
+          title: "Eliminare l'utente {name}?",
+          body: "{name} non potrà più usare nessun database e le connessioni aperte di questo utente si chiudono immediatamente. I database e i loro dati non vengono toccati.",
+          confirm: "Elimina utente",
+          working: "Eliminazione in corso...",
+        },
+        grants: {
+          action: "Scegli i database",
+          title: "Database che {name} può usare",
+          hint: "{name} ottiene accesso completo a ogni database che selezioni e lo perde su quelli che deselezioni. Rimuovere l'accesso chiude subito le eventuali connessioni aperte di questo utente.",
+          noDatabases: "Aggiungi prima un database.",
+          save: "Salva",
+          working: "Salvataggio in corso...",
+          partial:
+            "Alcune modifiche non sono state salvate. L'elenco ora mostra la situazione attuale.",
+        },
+      },
+      phpmyadmin: {
+        heading: "phpMyAdmin",
+        body: "Apri phpMyAdmin per consultare le tabelle, eseguire query e importare o esportare dati. L'accesso è automatico e vedi solo i database di questo sito.",
+        warning:
+          "Le modifiche fatte in phpMyAdmin hanno effetto subito. Se elimini lì il database del sito, il sito smette di funzionare.",
+        importNote:
+          "phpMyAdmin accetta file fino a 32 MB e il caricamento deve finire entro un minuto. Per un database più grande, comprimi il file (.gz o .zip) o dividilo in parti più piccole.",
+        open: "Apri phpMyAdmin",
+        opening: "Apertura in corso...",
+        unavailable:
+          "phpMyAdmin non è disponibile su questo server. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+        popupBlocked:
+          "Il browser ha bloccato la nuova scheda. Consenti i pop-up per questo pannello e riprova.",
+        downTitle: "phpMyAdmin non è disponibile in questo momento",
+        downBody:
+          "Attendi un minuto e riprova. Se il problema continua, contatta il tuo fornitore di hosting.",
+        backToDatabases: "Torna ai database del sito",
+      },
+      errors: {
+        QUOTA_EXCEEDED:
+          "Questo sito ha già il massimo di 10 database o utenti aggiuntivi. Eliminane uno che non ti serve più e riprova.",
+        ALREADY_EXISTS: "Questo nome è già usato su questo sito. Scegline un altro.",
+        VALIDATION_ERROR:
+          "Questo nome non si può usare. Usa da 1 a 16 lettere minuscole, numeri o trattini bassi, iniziando con una lettera o un numero.",
+        NOT_FOUND:
+          "Questo database o utente non esiste più. L'elenco è stato aggiornato. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+        RESOURCE_LOCKED: "Un'altra modifica è ancora in corso. Attendi un minuto e riprova.",
+        DOCKER_ENGINE_UNAVAILABLE:
+          "Non è stato possibile aggiornare i database. Attendi un minuto e riprova.",
+        OPERATION_AMBIGUOUS:
+          "Non abbiamo potuto confermare la modifica. L'elenco è stato aggiornato: controllalo prima di riprovare.",
+        NOT_SUPPORTED:
+          "Non disponibile su questo server. Se ne hai bisogno, contatta il tuo fornitore di hosting.",
+        ORGANIZATION_SUSPENDED:
+          "Il tuo account è sospeso: non è possibile gestire i database. Contatta il tuo fornitore di hosting.",
+      },
+    },
+    backups: {
+      title: "Backup",
+      subtitle:
+        "Ogni notte salviamo una copia dei file e dei database del tuo sito in uno spazio esterno a questo server. Ogni copia resta disponibile per {days} giorni.",
+      empty:
+        "Non ci sono ancora backup di questo sito. Il primo verrà fatto stanotte, oppure puoi farne uno adesso.",
+      notAvailable:
+        "Su questo server i backup non sono disponibili. Se ti servono, contatta il tuo fornitore di hosting.",
+      notSetUp:
+        "I backup non sono ancora attivi su questo server: l'amministratore deve prima indicare dove salvarli. Contatta il tuo fornitore di hosting.",
+      loadFailed:
+        "Non riusciamo a caricare i backup in questo momento. Attendi un minuto e ricarica la pagina.",
+      backupNow: "Fai un backup adesso",
+      backupNowHint:
+        "Teniamo gli ultimi {kept} backup fatti a mano: quando uno nuovo riesce, il più vecchio fatto a mano viene eliminato.",
+      running: "Backup in corso\u2026 Il sito resta online e puoi lasciare questa pagina.",
+      columns: {
+        date: "Data",
+        kind: "Tipo",
+        size: "Dimensione",
+        status: "Stato",
+        expires: "Disponibile fino al",
+        actions: "Azioni",
+      },
+      kind: { nightly: "Notturno", manual: "Fatto a mano", pre_update: "Prima di un aggiornamento o di un'importazione" },
+      status: { running: "In corso", succeeded: "Completato", failed: "Non riuscito" },
+      keptLatest: "Finché non ne riesce uno più recente",
+      problem: {
+        unreachable:
+          "Lo spazio dove salviamo i backup non è raggiungibile. Riprova più tardi; se continua, contatta il tuo fornitore di hosting.",
+        tls_failed:
+          "La connessione sicura con lo spazio dei backup non è riuscita. Contatta il tuo fornitore di hosting.",
+        wrong_region:
+          "Lo spazio dei backup non è impostato correttamente. Contatta il tuo fornitore di hosting.",
+        auth_failed:
+          "Lo spazio dei backup ha rifiutato l'accesso. Contatta il tuo fornitore di hosting.",
+        bucket_missing:
+          "Lo spazio dei backup non esiste più. Contatta il tuo fornitore di hosting.",
+        write_denied:
+          "Non abbiamo il permesso di scrivere nello spazio dei backup. Contatta il tuo fornitore di hosting.",
+        wrong_key:
+          "Lo spazio dei backup contiene copie protette da un'altra chiave. Contatta il tuo fornitore di hosting.",
+        key_file_missing:
+          "Sul server la chiave che protegge i backup manca o non è valida. Contatta il tuo fornitore di hosting.",
+        tool_unavailable:
+          "Il server non è riuscito ad avviare il backup. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
+        no_space:
+          "Sul server non c'è abbastanza spazio libero per preparare il backup. Contatta il tuo fornitore di hosting.",
+        database_dump_failed:
+          "Non siamo riusciti a copiare i database del sito. Riprova tra qualche minuto; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        files_unreadable:
+          "Alcuni file del sito non si possono leggere, quindi il backup non è completo. Controlla i permessi nella scheda File oppure contatta il tuo fornitore di hosting.",
+        repository_locked:
+          "Era già in corso un altro backup di questo sito. Riprova tra qualche minuto.",
+        timeout:
+          "Il backup ha impiegato troppo tempo ed è stato fermato. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        interrupted:
+          "Il backup si è interrotto perché il server si è riavviato. Fanne uno nuovo con «Fai un backup adesso».",
+        other:
+          "Il backup non è riuscito. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+        restore_prepare_failed:
+          "Non è stato possibile preparare il backup per il ripristino, quindi non è cambiato nulla. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        switch_undone:
+          "L'ultimo passaggio del ripristino non è stato completato, quindi tutto è stato rimesso com'era. Può succedere quando il sito è molto occupato: riprova tra qualche minuto.",
+        undo_incomplete:
+          "Il ripristino si è fermato a metà e non è stato possibile annullarlo da solo, quindi il sito non è disponibile per i visitatori. Ripristina di nuovo un backup per ripararlo; se non funziona nemmeno così, contatta il tuo fornitore di hosting.",
+        definer_missing:
+          "Questo backup contiene viste, trigger o procedure del database che appartengono a un utente del database eliminato dopo il backup. Ricrea quell'utente con lo stesso nome nella scheda Database e riprova; se non sai quale sia, contatta il tuo fornitore di hosting.",
+        address_not_updated:
+          "Non è stato possibile reimpostare l'indirizzo del sito: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+        panel_dump_failed:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_tool_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_not_started:
+          "I file e i database del sito sono tornati, ma il sito non è ripartito. Contatta il tuo fornitore di hosting.",
+      } satisfies Record<BackupProblem, string>,
+      copyProblem: {
+        unreachable:
+          "Lo spazio dove sono salvati i backup non è raggiungibile. Riprova più tardi; se continua, contatta il tuo fornitore di hosting.",
+        tls_failed:
+          "La connessione sicura con lo spazio dei backup non è riuscita. Contatta il tuo fornitore di hosting.",
+        wrong_region:
+          "Lo spazio dei backup non è impostato correttamente. Contatta il tuo fornitore di hosting.",
+        auth_failed:
+          "Lo spazio dei backup ha rifiutato l'accesso. Contatta il tuo fornitore di hosting.",
+        bucket_missing:
+          "Lo spazio dei backup non esiste più. Contatta il tuo fornitore di hosting.",
+        write_denied:
+          "Non abbiamo il permesso di usare lo spazio dei backup. Contatta il tuo fornitore di hosting.",
+        wrong_key:
+          "Questo backup è protetto da un'altra chiave e non si può leggere. Contatta il tuo fornitore di hosting.",
+        key_file_missing:
+          "Sul server la chiave che protegge i backup manca o non è valida. Contatta il tuo fornitore di hosting.",
+        tool_unavailable:
+          "Il server non è riuscito ad avviare l'operazione. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
+        no_space:
+          "Sul server non c'è abbastanza spazio libero per farlo. Contatta il tuo fornitore di hosting.",
+        database_dump_failed:
+          "Non siamo riusciti a leggere o scrivere i database del sito. Riprova tra qualche minuto; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        files_unreadable:
+          "Alcuni file del sito non si sono potuti leggere o scrivere. Controlla i permessi nella scheda File oppure contatta il tuo fornitore di hosting.",
+        repository_locked:
+          "Era in corso un altro backup di questo sito. Riprova tra qualche minuto.",
+        timeout:
+          "Ci è voluto troppo tempo ed è stato fermato. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        interrupted: "Si è interrotto perché il server si è riavviato. Riprova.",
+        other:
+          "Qualcosa non ha funzionato. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+        restore_prepare_failed:
+          "Non è stato possibile preparare il backup per il ripristino, quindi non è cambiato nulla. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        switch_undone:
+          "L'ultimo passaggio del ripristino non è stato completato, quindi tutto è stato rimesso com'era. Può succedere quando il sito è molto occupato: riprova tra qualche minuto.",
+        undo_incomplete:
+          "Il ripristino si è fermato a metà e non è stato possibile annullarlo da solo, quindi il sito non è disponibile per i visitatori. Ripristina di nuovo un backup per ripararlo; se non funziona nemmeno così, contatta il tuo fornitore di hosting.",
+        definer_missing:
+          "Questo backup contiene viste, trigger o procedure del database che appartengono a un utente del database eliminato dopo il backup. Ricrea quell'utente con lo stesso nome nella scheda Database e riprova; se non sai quale sia, contatta il tuo fornitore di hosting.",
+        address_not_updated:
+          "Non è stato possibile reimpostare l'indirizzo del sito: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+        panel_dump_failed:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_tool_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        panel_dump_missing:
+          "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        site_not_started:
+          "I file e i database del sito sono tornati, ma il sito non è ripartito. Contatta il tuo fornitore di hosting.",
+      } satisfies Record<BackupProblem, string>,
+      restore: {
+        button: "Ripristina",
+        title: "Ripristinare il backup del {date}?",
+        body: "Tutti i file e tutti i database di questo sito tornano com'erano il {date}. Tutto ciò che è cambiato da allora (contenuti, ordini, commenti, file caricati o modificati) va perso per sempre e non si può recuperare.",
+        unavailable:
+          "Verso la fine, per qualche secondo, i visitatori vedono un messaggio che il sito è temporaneamente non disponibile.",
+        lostDatabases:
+          "Un database eliminato nel frattempo torna senza i suoi utenti: ridai l'accesso dalla scheda Database.",
+        backupFirst:
+          "Per conservare una copia del sito com'è adesso, annulla e usa prima «Fai un backup adesso».",
+        typeName: "Per confermare, scrivi il nome del sito {name}",
+        cancel: "Annulla",
+        confirm: "Ripristina questo backup",
+        starting: "Avvio\u2026",
+        wrongName: "Il nome non corrisponde a questo sito. Scrivilo esattamente come è indicato.",
+        running:
+          "Ripristino del backup del {date} in corso\u2026 Può richiedere diversi minuti; verso la fine il sito non è disponibile per qualche secondo. Puoi lasciare questa pagina.",
+        done: "Il sito è stato ripristinato al backup del {date}.",
+        doneAddressNotSet:
+          "Il sito è stato ripristinato al backup del {date}, ma non siamo riusciti a reimpostarne l'indirizzo: link e accesso potrebbero puntare a un vecchio indirizzo. Contatta il tuo fornitore di hosting.",
+        failed: "Il ripristino non è avvenuto e il sito è esattamente com'era.",
+      },
+      download: {
+        prepare: "Prepara il download",
+        preparing: "In preparazione\u2026 Puoi lasciare questa pagina.",
+        fetch: "Scarica",
+        readyUntil: "Pronto fino alle {time}",
+        warning:
+          "Questo file contiene tutti i file del sito e i suoi database, comprese le loro password. Conservalo in un posto sicuro e non condividerlo.",
+        onlyOne:
+          "Per ogni sito si tiene un solo download: prepararne un altro elimina quello pronto.",
+        gone: "Questo download non è più disponibile. Preparalo di nuovo.",
+        failed: "Non è stato possibile preparare il download.",
+        fetchFailed:
+          "Il download non è partito. Attendi un minuto e riprova; se succede di nuovo, preparalo di nuovo.",
+      },
+      errors: {
+        notReady: "Il sito non è ancora pronto: riprova quando la sua configurazione è finita.",
+        ORGANIZATION_SUSPENDED:
+          "Il tuo account è sospeso: non è possibile fare backup. Contatta il tuo fornitore di hosting.",
+        stillRunning:
+          "Il backup sta richiedendo più tempo del solito e continua da solo. Il sito resta online; ricarica questa pagina più tardi per vedere il risultato.",
+        uncertain:
+          "Non abbiamo potuto confermare l'avvio del backup. Attendi un minuto e ricarica questa pagina prima di riprovare.",
+        tooMany:
+          "Nell'ultima ora sono state avviate troppe azioni pesanti (backup, ripristini, download o aggiornamenti), su questo sito o sull'insieme dei tuoi siti. Puoi avviarne un'altra alle {time}.",
+        uncertainAction:
+          "Non abbiamo potuto confermare che la richiesta sia arrivata. Attendi un minuto e ricarica questa pagina prima di riprovare.",
+        stillWorking:
+          "Ci vuole più tempo del solito e prosegue da solo. Ricarica questa pagina più tardi per vedere il risultato.",
+      },
+    },
+    wordpress: {
+      title: "WordPress",
+      notAvailable: "Gli strumenti per WordPress non sono disponibili su questo server. Chiedi al tuo amministratore.",
+      loadFailed: "Non siamo riusciti a caricare i dettagli di WordPress. Ricarica la pagina tra poco.",
+      header: {
+        version: "WordPress {version}",
+        versionUnknown: "Versione di WordPress non nota",
+        checkedAt: "Ultimo controllo: {date}",
+        notChecked: "Non ancora controllato",
+        checkNow: "Controlla ora",
+        checking: "Controllo in corso…",
+      },
+      notices: {
+        notCheckedYet:
+          "Non abbiamo ancora controllato questo sito. Premi «Controlla ora» per vedere le versioni e gli aggiornamenti disponibili.",
+        checking: "Stiamo controllando gli aggiornamenti di WordPress, dei plugin e dei temi…",
+        updatesUnknown:
+          "Non siamo riusciti a raggiungere wordpress.org, quindi non sappiamo se esistono aggiornamenti. Le versioni qui sotto sono quelle installate. Premi «Controlla ora» più tardi.",
+        upToDate: "È tutto aggiornato.",
+        checkFailed: "Il controllo non è terminato. Premi «Controlla ora» per riprovare.",
+        slow: "Ci vuole più tempo del solito. Prosegue da solo: ricarica la pagina più tardi per vedere il risultato.",
+      },
+      problem: {
+        configBroken:
+          "Il file delle impostazioni di WordPress (wp-config.php) non si carica, quindi non siamo riusciti a leggere il sito. Correggi il file nella scheda File o ripristina una copia da Backup, poi premi «Controlla ora».",
+        databaseUnreachable:
+          "Il database del sito non risponde, quindi non siamo riusciti a leggere il sito. Controlla la scheda Database, poi premi «Controlla ora».",
+        notInstalled:
+          "Non abbiamo trovato WordPress nei file del sito. Se l'hai spostato o rimosso, ripristina una copia da Backup, poi premi «Controlla ora».",
+        other: "Questa volta non siamo riusciti a leggere il sito. Premi «Controlla ora» per riprovare.",
+      },
+      tables: {
+        core: "WordPress",
+        plugins: "Plugin",
+        themes: "Temi",
+        name: "Nome",
+        status: "Stato",
+        installed: "Installata",
+        available: "Nuova versione",
+        actions: "Azioni",
+        current: "Aggiornato",
+        unknown: "Non nota",
+        emptyPlugins: "Nessun plugin installato.",
+        emptyThemes: "Nessun tema installato.",
+        update: "Aggiorna",
+        updateLabel: "Aggiorna {name} alla versione {version}",
+        updateAll: "Aggiorna tutto ({count})",
+      },
+      status: {
+        active: "Attivo",
+        inactive: "Non attivo",
+        activeNetwork: "Attivo su tutti i siti",
+        mustUse: "Sempre attivo",
+        dropin: "Drop-in",
+        parent: "Tema genitore",
+      },
+      admins: {
+        title: "Amministratori",
+        login: "Nome utente",
+        empty: "Nessun amministratore trovato.",
+        reset: "Reimposta password",
+        resetLabel: "Reimposta la password di {login}",
+      },
+      update: {
+        titleOne: "Aggiornare {name}?",
+        titleCore: "Aggiornare WordPress?",
+        titleAll: "Aggiornare tutto?",
+        bodyOne: "{name} passa dalla versione {from} alla {to}.",
+        bodyAll: "Verranno installati {count} aggiornamenti: prima WordPress, poi i plugin, poi i temi.",
+        downtime: "Durante l'aggiornamento il sito potrebbe non essere raggiungibile per qualche istante.",
+        backupTaken: "Prima viene fatta una copia del sito. Se qualcosa va storto, puoi ripristinarla dalla scheda Backup.",
+        backupNone:
+          "I backup non sono configurati su questo server, quindi prima non verrà fatta nessuna copia del sito. Se qualcosa va storto, non ci sarà una copia da ripristinare.",
+        noAutoRestore: "Il pannello non annulla mai da solo un aggiornamento.",
+        confirm: "Aggiorna",
+        confirmAll: "Aggiorna tutto",
+        cancel: "Annulla",
+        starting: "Avvio in corso…",
+      },
+      progress: {
+        title: "Aggiornamento in corso",
+        backup: "Copia del sito in corso",
+        backupSkipped: "Nessuna copia: i backup non sono configurati su questo server",
+        update: "Installazione degli aggiornamenti",
+        settle: "Chiusura e nuova lettura delle versioni",
+        inspect: "Controllo degli aggiornamenti",
+      },
+      step: {
+        done: "completato",
+        running: "in corso",
+        waiting: "in attesa",
+        skipped: "saltato",
+        failed: "non riuscito",
+      },
+      outcome: {
+        title: "Ultimo aggiornamento",
+        finishedAt: "Terminato il {date}",
+        succeeded: "Aggiornamento terminato: tutto ciò che hai chiesto è stato aggiornato.",
+        nothingToDo: "Non c'era niente da aggiornare.",
+        orgUnreachable: "Non siamo riusciti a raggiungere wordpress.org, quindi non è stato aggiornato niente. Riprova più tardi.",
+        configBroken:
+          "Il file delle impostazioni di WordPress (wp-config.php) non si carica, quindi non è stato aggiornato niente. Correggilo nella scheda File, poi riprova.",
+        databaseUnreachable:
+          "Il database del sito non rispondeva, quindi non è stato aggiornato niente. Controlla la scheda Database, poi riprova.",
+        notInstalled: "Non abbiamo trovato WordPress nei file del sito, quindi non è stato aggiornato niente.",
+        backupFailed:
+          "La copia del sito prima dell'aggiornamento non è riuscita, quindi non è stato aggiornato niente. Riprova più tardi; se succede ancora, chiedi al tuo amministratore.",
+        itemsFailed: "Alcuni elementi non sono stati aggiornati: vedi l'elenco qui sotto. Controlla che il sito funzioni ancora.",
+        itemUnknown:
+          "Questo plugin o tema non è più presente sul sito. Non è stato modificato nulla. Premi «Controlla ora» per vedere l'elenco aggiornato.",
+        interrupted: "L'aggiornamento è stato interrotto prima di qualsiasi modifica. Riprova.",
+        outcomeUnknown:
+          "Non sappiamo come è terminato l'aggiornamento. Controlla le versioni qui sotto e che il sito funzioni ancora.",
+        failed: "L'aggiornamento non è riuscito. Controlla le versioni qui sotto, poi riprova.",
+        backupTaken: "Nella scheda Backup c'è una copia di poco prima dell'aggiornamento, se devi tornare indietro.",
+        backupSkipped: "Prima non è stata fatta nessuna copia, perché i backup non sono configurati su questo server.",
+        item: "Elemento",
+        before: "Prima",
+        after: "Dopo",
+        result: "Esito",
+        updated: "Aggiornato",
+        notUpdated: "Non aggiornato",
+        type: { core: "WordPress", plugin: "Plugin", theme: "Tema" },
+      },
+      reset: {
+        title: "Reimpostare la password di {login}?",
+        body: "La password attuale smette subito di funzionare e {login} viene disconnesso da WordPress su tutti i dispositivi.",
+        once: "La nuova password viene mostrata una sola volta.",
+        confirm: "Reimposta password",
+        cancel: "Annulla",
+        resetting: "Reimpostazione in corso…",
+        doneTitle: "Password reimpostata",
+        done: "Fatto",
+        created: {
+          tempFor: "Password per {name}:",
+          copy: "Copia",
+          copied: "Copiata",
+          copyUnavailable: "Qui non è possibile copiare. Seleziona la password e copiala a mano.",
+          tempNote: "Consegnala alla persona che usa questo account. Potrà sceglierne una nuova in WordPress, alla voce Profilo.",
+          tempOnce: "La mostriamo una sola volta: copiala ora. Se la perdi, reimposta di nuovo la password.",
+        },
+        failed: {
+          configBroken:
+            "La password non è stata cambiata: il file delle impostazioni di WordPress (wp-config.php) non si carica. Correggilo nella scheda File, poi riprova.",
+          databaseUnreachable:
+            "La password non è stata cambiata: il database del sito non risponde. Controlla la scheda Database, poi riprova.",
+          notInstalled: "La password non è stata cambiata: non abbiamo trovato WordPress nei file del sito.",
+          unknown:
+            "Non siamo riusciti a confermare se la password è cambiata. Se la vecchia password non funziona più, reimpostala di nuovo.",
+        },
+      },
+      errors: {
+        notReady: "Il sito è in fase di preparazione o modifica. Riprova quando è pronto.",
+        itemUnknown: "Questo elemento non è più presente sul sito. Premi «Controlla ora» per vedere l'elenco aggiornato.",
+        adminUnknown:
+          "Questa persona non è più un amministratore del sito. Premi «Controlla ora» per vedere l'elenco aggiornato.",
+        uncertain: "Non siamo riusciti a confermare l'avvio. Aspetta un minuto e ricarica la pagina prima di riprovare.",
+        suspended: "Il tuo account è sospeso: non è possibile controllare o modificare WordPress. Contatta il tuo fornitore di hosting.",
+      },
+      import: {
+        title: "Importa un sito WordPress",
+        loadFailed: "Non è stato possibile caricare la pagina di importazione. Ricarica la pagina tra poco.",
+        filesUnknown: "Al momento non è possibile leggere i file inviati per l'importazione. Ricarica la pagina tra poco.",
+        backupsLink: "Vai a Backup",
+        card: {
+          title: "Importa un sito",
+          body: "Sposta qui un sito WordPress da un altro hosting: i suoi file (.zip) e l'esportazione del database.",
+          start: "Avvia un'importazione",
+          running: "È in corso un'importazione. Gli altri strumenti WordPress tornano disponibili al termine.",
+          follow: "Segui l'importazione",
+          last: "Ultima importazione ({date}): {result}",
+          result: {
+            imported: "il sito è stato importato.",
+            nothing_changed: "si è fermata, non è cambiato nulla.",
+            site_restored: "non è riuscita, il sito è stato riportato com'era.",
+            undo_incomplete: "non è riuscita e il sito non è stato riportato del tutto com'era.",
+          },
+        },
+        stepOf: "Passo {n} di 5",
+        steps: {
+          intro: "Prima di iniziare",
+          archive: "File del sito (.zip)",
+          dump: "Esportazione del database (.sql o .sql.gz)",
+          confirm: "Controlla e conferma",
+          run: "Importazione",
+        },
+        intro: {
+          body: "L'importazione sostituisce file e database di questo sito con quelli che invii. Accessi, indirizzo, SFTP e backup restano invariati.",
+          what: "Servono due file dal vecchio hosting: uno .zip della cartella del sito e un'esportazione .sql o .sql.gz del database. Ogni file può arrivare a 2 GB.",
+        },
+        slot: {
+          empty: "Nessun file ancora.",
+          choose: "Scegli un file",
+          partial:
+            "Una parte di questo file è stata ricevuta ({received}). Scegli di nuovo lo stesso file per riprendere da dove si è fermato, oppure un altro file per ricominciare.",
+          filled: "Ricevuto: {size}.",
+          replace: "Scegli un altro file per sostituirlo",
+          wrongType: { archive: "Scegli un file .zip.", dump: "Scegli un file .sql o .sql.gz." },
+        },
+        pick: {
+          label: "Oppure usa un file già presente sul sito (il suo percorso dalla cartella del sito)",
+          use: "Usa questo file",
+          invalid: "Scrivi un percorso dentro la cartella del sito, per esempio uploads/site.zip.",
+          notFound: "Non c'è alcun file in quel percorso. Controlla il nome nella scheda File.",
+          notAFile:
+            "Quel percorso non è un file: non si possono usare una cartella o un collegamento. Scrivi il percorso del file stesso.",
+          sftpWarning:
+            "Un file caricato con SFTP può essere scaricato da chiunque ne conosca l'indirizzo finché non lo usi qui. Usandolo viene spostato fuori dalla cartella del sito: non compare più in File e «Scarta i file» lo elimina.",
+        },
+        discard: "Scarta i file",
+        discardBusy: "Attendi che il file in invio sia arrivato, poi scarta i file.",
+        discardDone: "Entrambi i file sono stati rimossi.",
+        confirm: {
+          replaces: "File e database del sito saranno sostituiti da quelli che hai inviato.",
+          downtime: "Il sito non è disponibile per qualche minuto durante la sostituzione.",
+          backupTaken: "Prima viene salvata una copia del sito. Puoi ripristinarla da Backup.",
+          backupNone: "Non verrà salvata alcuna copia: i backup non sono configurati su questo server.",
+          oldestCopy:
+            "Questa copia rientra tra le tre copie conservate prima di un aggiornamento o di un'importazione, quindi la più vecchia potrebbe essere rimossa.",
+          address: "L'indirizzo del sito importato viene cambiato con l'indirizzo di questo sito.",
+          leftOut: "Questi file non vengono presi dallo .zip; il sito mantiene i propri: {list}.",
+          undo: "Se l'importazione non riesce, il sito viene riportato com'era.",
+          typeLabel: "Scrivi {name} per confermare",
+          typeHint: "Scrivi il nome del sito per attivare questo pulsante.",
+          go: "Sostituisci il mio sito",
+          starting: "Avvio…",
+          filesIncomplete: "Prima entrambi i file devono essere ricevuti completamente.",
+        },
+        progress: {
+          title: "Importazione in corso… puoi lasciare questa pagina, l'importazione continua.",
+          check: "Controlla i due file",
+          backup: "Salva una copia del sito",
+          backupSkipped: "Nessuna copia salvata: i backup non sono configurati su questo server",
+          unpack: "Estrai i file del sito",
+          database: "Carica l'esportazione del database",
+          switch: "Sostituisci il sito",
+          finish: "Pulisci e controlla il sito",
+          unsettled: "L'importazione è in fase di completamento o di annullamento. Ricontrolla tra qualche minuto.",
+          slow: "L'importazione è ancora in corso. Ricarica la pagina più tardi per vedere il risultato.",
+        },
+        outcome: {
+          title: "Ultima importazione",
+          finishedAt: "Terminata il {date}",
+          imported: "Il sito è stato importato.",
+          oldAddress: "Il vecchio indirizzo {address} è stato sostituito con l'indirizzo di questo sito.",
+          tables: "Tabelle caricate: {count}.",
+          leftOut: "Mantenuti da questo sito, non presi dallo .zip: {list}.",
+          nothingChanged: "L'importazione si è fermata. Non è stato cambiato nulla: il sito è com'era.",
+          siteRestored: "L'importazione non è riuscita durante la sostituzione. Il sito è com'era prima dell'importazione.",
+          undoTaken:
+            "Il {date} l'importazione non è riuscita e il sito non è stato riportato del tutto com'era. Per tornare indietro, ripristina da Backup la copia salvata subito prima di quell'importazione. Se da allora hai già ripristinato una copia, non serve altro.",
+          undoNoCopy:
+            "Il {date} l'importazione non è riuscita e il sito non è stato riportato del tutto com'era. Quell'importazione non aveva salvato una copia: ripristina una copia precedente da Backup oppure chiedi al tuo amministratore. Se da allora hai già ripristinato una copia, non serve altro.",
+          errorNumber: "Numero di errore: {number}.",
+          backup: {
+            taken: "Prima dell'importazione è stata salvata una copia; la trovi in Backup.",
+            skipped: "Prima di questa importazione non è stata salvata alcuna copia del sito.",
+            failed: "Non è stato possibile salvare la copia prima dell'importazione.",
+          },
+        },
+        reasons: {
+          files_missing: "I file non erano più presenti. Inviali di nuovo.",
+          earlier_import_unfinished:
+            "Un'importazione precedente di questo sito non è riuscita e ha lasciato qui alcuni suoi resti. Ripristina una copia da Backup (questo li rimuove), poi importa di nuovo.",
+          backup_failed:
+            "Non è stato possibile salvare la copia prima dell'importazione. Riprova più tardi.",
+          interrupted: "L'importazione è stata interrotta. Riprova.",
+          timed_out:
+            "L'importazione ha richiesto troppo tempo ed è stata fermata. Riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          unavailable: "Il server non è riuscito a eseguire l'importazione ora. Riprova tra qualche minuto.",
+          other: "Qualcosa non ha funzionato. Riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          archive_not_zip: "I file del sito non sono uno .zip valido. Crea di nuovo l'archivio e invialo.",
+          dump_not_sql: "L'esportazione del database non è un file di testo .sql (o .sql.gz). Esportala di nuovo in formato SQL.",
+          archive_unsafe:
+            "Lo .zip contiene collegamenti o percorsi che puntano fuori dalla cartella del sito. Crealo di nuovo solo dalla cartella del sito.",
+          archive_limit:
+            "Lo .zip contiene troppi file o è troppo grande una volta estratto. Rimuovi backup o cache dall'archivio e riprova.",
+          archive_not_wordpress:
+            "Nello .zip non è stato trovato un sito WordPress (mancano wp-includes e wp-admin). Comprimi la cartella che contiene wp-config.php.",
+          disk_full: "Non c'è spazio sufficiente per l'importazione. Libera spazio o chiedi al tuo amministratore.",
+          staging_unsafe:
+            "L'importazione non è riuscita a preparare il suo spazio di lavoro tra i file del sito. Scarta entrambi i file e inviali di nuovo.",
+          dump_unsafe:
+            "Non è stato possibile leggere l'esportazione del database in modo sicuro. Scarta entrambi i file e inviali di nuovo.",
+          dump_too_large:
+            "L'esportazione del database è troppo grande una volta caricata. Elimina vecchie bozze e log dal vecchio sito ed esportalo di nuovo.",
+          dump_incomplete: "L'esportazione del database è incompleta. Esportala di nuovo e invia il file intero.",
+          dump_statement_unsupported:
+            "Non è stato possibile caricare l'esportazione del database: sembra contenere un comando non consentito (come modifiche a utenti o permessi), oppure il caricamento si è interrotto. Esporta solo le tabelle e riprova.",
+          dump_load_failed:
+            "Non è stato possibile caricare l'esportazione del database. Il file potrebbe contenere un errore, oppure il caricamento si è interrotto. Esportala di nuovo e riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          dump_not_wordpress: "L'esportazione non contiene tabelle WordPress. Esporta il database del sito WordPress.",
+          dump_ambiguous: "L'esportazione contiene più di un sito WordPress. Esporta solo quello che vuoi.",
+          multisite_unsupported: "Le installazioni WordPress multisito non possono essere importate.",
+          address_unsupported:
+            "Non è stato possibile ricavare il vecchio indirizzo del sito dall'esportazione. Un'importazione richiede il vecchio sito alla radice del suo indirizzo, non in una sottocartella, e lo stesso dominio in «Indirizzo WordPress (URL)» e «Indirizzo sito (URL)» in Impostazioni, Generali. L'esportazione deve comprendere gli utenti del sito. Configura così il vecchio sito ed esporta di nuovo.",
+          dump_objects_unsupported:
+            "L'esportazione contiene procedure, trigger, viste o eventi, che non possono essere importati. Esporta solo le tabelle.",
+          dump_names_unsupported:
+            "L'esportazione usa nomi di tabelle o database che non possono essere importati. Esporta solo le tabelle di questo sito.",
+          dump_too_many_tables:
+            "L'esportazione del database contiene più di 1.000 tabelle, più di quante un'importazione possa accettarne. Esporta solo le tabelle di questo sito.",
+          site_objects_unsupported:
+            "Il database attuale di questo sito contiene elementi che un'importazione non può mettere da parte (viste, trigger, procedure o eventi). Rimuovili, per esempio dalla scheda Database, poi importa di nuovo.",
+          address_rewrite_failed:
+            "Non è stato possibile sostituire il vecchio indirizzo nei dati importati. Riprova; se succede di nuovo, chiedi al tuo amministratore.",
+          site_check_failed:
+            "Il sito importato non ha risposto correttamente. Verifica che il vecchio sito funzioni ed esporta di nuovo.",
+        },
+        reasonsAtLine: {
+          dump_statement_unsupported:
+            "Non è stato possibile caricare l'esportazione del database alla riga {line}: sembra contenere un comando non consentito (come modifiche a utenti o permessi), oppure il caricamento si è interrotto. Esporta solo le tabelle e riprova.",
+          dump_load_failed:
+            "Non è stato possibile caricare l'esportazione del database alla riga {line}. Il file potrebbe contenere un errore in quel punto, oppure il caricamento si è interrotto. Esportala di nuovo e riprova; se succede di nuovo, chiedi al tuo amministratore.",
+        },
+        errors: {
+          importRunning: "È già in corso un'importazione di questo sito. Attendi che finisca.",
+          uncertain: "Non abbiamo potuto confermare che sia stato fatto. Ricarica la pagina per vedere a che punto è prima di riprovare.",
+          permission:
+            "Puoi seguire questa pagina ma non modificarla. Chiedi a un proprietario dell'account il permesso di modificare il sito.",
+          tooMany:
+            "Sono state avviate troppe azioni pesanti (copie, ripristini, aggiornamenti o importazioni) in poco tempo, su questo sito o sull'insieme dei tuoi siti. Puoi avviare l'importazione alle {time}.",
+        },
+      },
+    },
   },
   admin: {
-    nav: { label: "Amministrazione", server: "Server", sites: "Siti", users: "Utenti", mail: "Email", audit: "Registro attività" },
+    nav: {
+      label: "Amministrazione",
+      server: "Server",
+      sites: "Siti",
+      users: "Utenti",
+      mail: "Email",
+      backups: "Backup",
+      audit: "Registro attività",
+      health: "Stato",
+      logs: "Log",
+      firewall: "Firewall",
+      updates: "Aggiornamenti",
+    },
     hosts: {
       title: "Server",
       subtitle: "Server dedicati registrati e relativo stato.",
@@ -346,6 +1284,405 @@ export const it = {
       colDetails: "Dettagli",
       empty: "Nessun evento corrisponde ai filtri.",
       system: "sistema",
+      from: "Dal", to: "Al (escluso)", apply: "Applica", clear: "Togli i filtri",
+      previous: "Pagina precedente", next: "Pagina successiva", pageOf: "Pagina {n}", pages: "Pagine del registro attività",
+      filtersInvalid: "Non è stato possibile usare i filtri: una data non è valida o Dal non viene prima di Al. Correggili e usa Applica.",
+      loadFailed: "Non è stato possibile caricare il registro attività. Ricarica la pagina; se non funziona ancora, controlla l'API sul server: journalctl -u hp-api.",
+      narrow: "Sono già state aperte 100 pagine: per vedere eventi più vecchi, usa Dal e Al per scegliere un intervallo più stretto.",
+    },
+    alertLine: {
+      some: "Avvisi aperti: {n}. Livello più alto: {severity}.",
+      link: "Vedili nella pagina Stato",
+      failed: "Non è stato possibile caricare gli avvisi, quindi questa pagina non può dire se va tutto bene. Ricarica la pagina; se non funziona ancora, controlla l'API sul server: systemctl status hp-api.",
+      severity: { warning: "attenzione", critical: "critico" },
+    },
+    health: {
+      title: "Stato",
+      subtitle: "Cosa funziona ora su questo server: avvisi, parti del pannello, container di ogni sito e dischi.",
+      checkedAt: "Controllato alle {time}. Ricarica la pagina per controllare di nuovo.",
+      loadFailed: "Non è stato possibile caricare lo stato del server. Ricarica la pagina; se non funziona ancora, controlla l'API sul server: systemctl status hp-api e journalctl -u hp-api.",
+      alertsFailed: "Non è stato possibile caricare gli avvisi. Ricarica la pagina; se non funziona ancora, controlla l'API sul server: journalctl -u hp-api.",
+      alertsTitle: "Avvisi", noAlerts: "Nessun avviso aperto.",
+      partsTitle: "Parti del pannello", sitesTitle: "Container dei siti", noSites: "Nessun sito ha ancora un container.",
+      disksTitle: "Dischi",
+      noDisks: "Nessuna misura dei dischi è ancora arrivata. L'agente host le invia regolarmente: se resta vuoto, controllalo sul server: systemctl status hp-host-agent.",
+      colPart: "Parte", colState: "Stato", colWhy: "Motivo", colSeen: "Ultimo rilevamento", colSite: "Sito", colOwner: "Cliente",
+      colWanted: "Dovrebbe essere", colObserved: "È", colDrift: "Differenza", colRestarts: "Riavvii", colLog: "Log", colDisk: "Contiene", colUsed: "Usato", colActions: "Azioni",
+      unassigned: "Non assegnato", never: "Mai", noDrift: "Nessuna", unknownDate: "una data sconosciuta",
+      stale: "Non rilevato di recente: questo stato potrebbe essere vecchio.",
+      usedPercent: "{percent}% usato",
+      openLog: "Apri log", openLogOf: "Apri il log di {name}", openDomains: "Apri i domini del sito", openBackups: "Apri Backup",
+      certificateProblem: " Ultimo tentativo: {problem}.",
+      operationOn: "{kind} su {site}",
+      unknownAlert: "Un avviso di un tipo che questa pagina non conosce ancora: probabilmente il pannello web è più vecchio dell'API. Ricarica la pagina; se resta, aggiorna il pannello perché hp-web e hp-api usino la stessa versione.",
+      components: {
+        api: "API (hp-api)", web: "Pannello web (hp-web)", database: "Database del pannello (PostgreSQL)",
+        executor: "Esecutore (hp-docker-executor)", host_agent: "Agente host (hp-host-agent)", docker_engine: "Docker Engine",
+        ingress_proxy: "Proxy (Traefik, hp_ingress_proxy)", shared_database: "Database dei siti (MariaDB, hp_mariadb)",
+        phpmyadmin: "phpMyAdmin (hp_phpmyadmin)", sftp: "Server SFTP (hp_sftp)", mail_relay: "Relay della posta in uscita (hp_mail_relay)",
+      },
+      states: { ok: "Funziona", degraded: "Degradato", down: "Non funziona", not_in_use: "Non in uso", unknown: "Sconosciuto" },
+      reasons: {
+        not_reporting: "Ha smesso di inviare segnali",
+        runtime_disabled: "Questo server funziona senza Docker (modalità simulatore): non viene misurato nulla",
+        engine_unreachable: "L'esecutore non raggiunge il Docker Engine",
+        stopped: "Il container è fermo",
+        restarting: "Il container continua a riavviarsi o si è bloccato",
+        missing: "Il container non esiste",
+      },
+      wanted: { running: "Attivo", stopped: "Fermo" },
+      siteContainerMissing: "{site}: il sito dovrebbe essere attivo, ma il suo container non c'è più. Usa Riavvia nella sua riga in Container dei siti: il pannello lo ricrea dalle impostazioni del sito. Se sparisce di nuovo, controlla il log del sito nella pagina Log.",
+      seen: { running: "Attivo", stopped: "Fermo", degraded: "In riavvio o bloccato", missing: "Mancante", unknown: "Sconosciuto" },
+      drift: { out_of_band_modified: "Modificato fuori dal pannello", status_mismatch: "Non nello stato voluto", revision_mismatch: "Usa una configurazione precedente" },
+      disks: { panel_data: "dati del pannello (/var/lib/hosting-panel)", docker_data: "dati di Docker (/var/lib/docker)", database_data: "database del pannello (/var/lib/postgresql)", root: "sistema (/)" },
+      fix: {
+        api: "Controllalo sul server: systemctl status hp-api e journalctl -u hp-api.",
+        web: "Controllalo sul server: systemctl status hp-web e journalctl -u hp-web.",
+        database: "Controlla PostgreSQL sul server: systemctl status postgresql.",
+        executor: "Controllalo sul server: systemctl status hp-docker-executor e journalctl -u hp-docker-executor.",
+        host_agent: "Controllalo sul server: systemctl status hp-host-agent e journalctl -u hp-host-agent.",
+        docker_engine: "Controllalo sul server: systemctl status docker; quando torna attivo, l'esecutore si ricollega da solo.",
+        ingress_proxy: "Se è fermo o manca, sul server sudo systemctl restart hp-docker-executor lo avvia di nuovo o lo ricrea. Se continua a riavviarsi, questo non basta: il suo log nella pagina Log dice perché.",
+        shared_database: "Se è fermo o manca, sul server sudo systemctl restart hp-docker-executor lo avvia di nuovo o lo ricrea. Se continua a riavviarsi, questo non basta: il suo log nella pagina Log dice perché.",
+        sftp: "Se è fermo o manca, sul server sudo systemctl restart hp-docker-executor lo avvia di nuovo o lo ricrea. Se continua a riavviarsi, questo non basta: il suo log nella pagina Log dice perché.",
+        phpmyadmin: "Controlla il suo log nella pagina Log. Viene ricreato la prossima volta che qualcuno apre phpMyAdmin dai database di un sito.",
+        mail_relay: "Controlla il suo log nella pagina Log. L'API lo rimette in funzione da sola dopo alcuni tentativi; per farlo subito: sudo systemctl restart hp-api.",
+      },
+      alerts: {
+        disk_high: "Il disco che contiene {paths} è pieno al {percent}%. Libera spazio: sul server df -h mostra ogni disco e sudo du -xhd1 / | sort -h mostra cosa occupa di più.",
+        certificate_expiring: "{host} ({site}): il certificato scade il {date} e non è ancora stato rinnovato. Controlla che {host} punti ancora a questo server e che la porta 80 sia aperta, poi usa Controlla ora nella pagina Domini del sito.",
+        certificate_not_issued: "{host} ({site}) non ha un certificato: {problem}. Correggi la causa, poi usa Controlla ora nella pagina Domini del sito.",
+        panel_certificate_expiring: "L'indirizzo del pannello {host}: il certificato scade il {date}. Controlla che {host} punti a questo server e che la porta 80 sia aperta: il proxy lo rinnova da solo. Il suo log è nella pagina Log.",
+        backup_failed: "{site}: l'ultimo backup non è riuscito il {date}. Apri Backup per vedere il motivo, poi usa Riprova nella riga del sito.",
+        panel_backup_failed: "L'ultimo backup del pannello non è riuscito il {date}. Apri Backup per vedere il motivo e controlla lì lo spazio di backup; viene ritentato la notte successiva.",
+        backup_storage_test_failed: "L'ultima prova dello spazio di backup non è riuscita il {date}. Apri Backup, controlla le impostazioni dello spazio, poi usa di nuovo Prova la connessione.",
+        component_down: "{part}: {state}. {reason}. {fix}",
+        site_container_down: "{site}: il sito dovrebbe essere attivo, ma il suo container è \"{observed}\". Controlla il suo log nella pagina Log, poi usa Riavvia nella sua riga in Container dei siti.",
+        restore_undo_incomplete: "{site}: un ripristino non è riuscito il {date} e il sito non è stato rimesso com'era, quindi potrebbe non funzionare. Un ripristino del sito che riesce lo ripara: usa Ripristina nella pagina Backup.",
+        restore_stuck: "{site}: un ripristino avviato il {date} non è ancora finito dopo 6 ore. Controlla l'esecutore sul server (systemctl status hp-docker-executor), poi usa sudo systemctl restart hp-docker-executor: all'avvio porta a termine il ripristino, e il pannello ne mostra l'esito entro un minuto.",
+        operation_unknown: "L'operazione {id} ({what}) è in uno stato indeterminato dal {date}: il pannello non sa se è finita. Riprova da solo ogni pochi secondi; se resta, controlla che l'esecutore sia attivo (systemctl status hp-docker-executor), poi segnala l'operazione come non riuscita sul server: sudo hp-break-glass unlock --operation-id {id} --reason \"<motivo>\".",
+        operation_stuck: "L'operazione {id} ({what}) è ferma dal {date}. Controlla che hp-api sia attivo sul server (systemctl status hp-api), poi usa sudo systemctl restart hp-api: all'avvio il pannello la riprende; se poi qui compare come indeterminata, segui quell'avviso.",
+      },
+      services: {
+        title: "Servizi del server",
+        colSince: "Dal",
+        running: "In funzione",
+        stopped: "Fermo ({state})",
+        unreadable: "Lo stato dei servizi non si può leggere ora: l'agente host non risponde. Se persiste: systemctl status hp-host-agent.",
+      },
+      restart: {
+        button: "Riavvia",
+        buttonLabel: "Riavvia {name}",
+        title: "Riavvia {name}",
+        reasonLabel: "Motivo (registrato nel registro attività)",
+        reasonHint: "Scrivi perché, in massimo 500 caratteri. I clienti non lo vedono mai.",
+        confirm: "Riavvia ora",
+        working: "Riavvio in corso...",
+        accepted: "Riavvio richiesto. In attesa che finisca...",
+        done: "{name} è stato riavviato.",
+        failed: "{name} non è ripartito dopo il riavvio. Controlla il suo stato in questa pagina e il suo log nella pagina Log, poi riprova.",
+        unknown: "Il pannello non sa se {name} è ripartito: nessuna risposta per 3 minuti. Ricarica questa pagina per vedere il suo stato attuale.",
+        signedOut: "La sessione è scaduta, quindi il pannello ha smesso di seguire il riavvio di {name}. Accedi di nuovo, poi ricarica questa pagina per vedere il suo stato.",
+        reasonRequired: "Inserisci un motivo: il riavvio viene registrato insieme a esso.",
+        absent: "{name} ora non ha un container: non è in uso o è stato rimosso, quindi non c'è niente da riavviare. Controlla la sua riga in questa pagina, che dice cosa fare.",
+        locked: "{name} è occupato da un'altra operazione. Aspetta che finisca, poi riprova.",
+        notFound: "{name} non esiste più. Ricarica questa pagina.",
+        warn: {
+          site: "{name} smette di rispondere mentre il suo container si riavvia, di solito per pochi secondi; una pagina in caricamento o un upload in corso falliscono e vanno ripetuti.",
+          siteStopped: "{name} è stato fermato di proposito: riavviarlo lo fa ripartire, e resta attivo finché qualcuno non lo ferma.",
+          ingress_proxy: "Tutti i siti di questo server e questo pannello smettono di rispondere mentre il proxy si riavvia, di solito per pochi secondi: questa pagina perde la connessione e si ricollega da sola.",
+          shared_database: "Il database di ogni sito si ferma mentre MariaDB si riavvia, di solito per meno di un minuto: nel frattempo i siti mostrano un errore di database, e un backup o un ripristino di database in corso fallisce e va avviato di nuovo.",
+          phpmyadmin: "phpMyAdmin si ferma per pochi secondi: chi lo sta usando deve riaprirlo dalla pagina Database del sito.",
+          sftp: "SFTP si ferma per pochi secondi: le connessioni SFTP aperte vengono chiuse e un trasferimento in corso va avviato di nuovo.",
+          mail_relay: "La posta in uscita si ferma per pochi secondi: la posta che un sito invia in quei secondi può fallire e non viene rinviata da sola.",
+          api: "L'API si ferma per qualche secondo: le richieste in corso, anche di altri amministratori e dei clienti, falliscono e vanno ripetute; le operazioni in coda riprendono da sole.",
+          web: "Il pannello web si ferma per qualche secondo: questa pagina e quelle di tutti gli altri utenti non rispondono finché non riparte.",
+          executor: "L'esecutore si ferma per qualche secondo: i terminali aperti si chiudono e le modifiche ai siti aspettano che riparta.",
+          host_agent: "L'agente host si ferma per qualche secondo: in quel tempo Stato, Firewall e Aggiornamenti non leggono il server.",
+        },
+        siteWork: "È in corso un backup, un ripristino o un'importazione: riavvia l'esecutore quando è finito.",
+        hostJob: "Un altro lavoro del server è in corso: riprova quando è finito.",
+      },
+    },
+    terminal: {
+      title: "Terminale: {site}",
+      linkLabel: "Terminale",
+      linkAria: "Apri il terminale di {site}",
+      back: "Torna ai siti",
+      intro: "Una shell dentro il sito, come utente del web server (non root), nella cartella del sito. Chi l'ha aperta, su quale sito, quando e per quanto è registrato nel registro attività; ciò che viene digitato e stampato no.",
+      limits: "Solo testo semplice: i programmi a schermo intero come editor, pager o top non funzionano. Una sessione per sito e quattro sul server; una sessione finisce dopo 30 minuti, o 60 secondi dopo che questa pagina smette di leggere.",
+      codeOnce: "Ogni codice vale una volta sola: un codice già usato per accedere o per aprire un'altra sessione viene rifiutato. Aspetta il prossimo nella tua app.",
+      open: "Apri il terminale",
+      opening: "Apertura in corso...",
+      outputLabel: "Output del terminale",
+      inputLabel: "Comando",
+      inputHint: "Invio manda la riga. Ctrl-C ferma il comando in corso quando nessun testo è selezionato; Ctrl-D chiude la shell.",
+      send: "Invia",
+      ctrlC: "Ctrl-C",
+      ctrlCLabel: "Invia Ctrl-C: ferma il comando in corso",
+      ctrlD: "Ctrl-D",
+      ctrlDLabel: "Invia Ctrl-D: chiudi la shell",
+      close: "Chiudi la sessione",
+      ends: "Questa sessione finisce da sola alle {time}.",
+      reconnecting: "Connessione persa, nuovo tentativo...",
+      dropped: "L'output precedente è stato scartato: viene tenuta solo l'ultima parte.",
+      tooLong: "Quella riga supera i 4096 byte: mandala in parti più corte.",
+      writeFailed: "La riga non è stata inviata. Controlla la connessione e inviala di nuovo.",
+      errors: {
+        TOTP_INVALID: "Il codice è errato o è già stato usato. Inserisci il prossimo codice della tua app.",
+        ACCOUNT_LOCKED: "Troppi codici errati: il tuo account è bloccato per un po'. Riprova più tardi.",
+        ACCOUNT_SETUP_INCOMPLETE: "Il terminale richiede l'accesso in due passaggi. Configuralo nella pagina Account, poi torna qui.",
+        VALIDATION_ERROR: "Inserisci il codice a 6 cifre della tua app di autenticazione.",
+        container_down: "Il sito non è attivo, quindi non c'è niente da aprire. Usa Riavvia nella sua riga della pagina Stato, poi riprova.",
+        site_changing: "Il sito è in modifica da parte di un'altra operazione. Aspetta che finisca, poi riprova.",
+        site_busy: "Su questo sito c'è già una sessione di terminale aperta. Chiudila prima, o aspetta 60 secondi dopo la chiusura della sua pagina, poi riprova.",
+        server_full: "Su questo server sono già aperte quattro sessioni. Chiudine una, poi riprova.",
+        session_ended: "Questa sessione è già finita. Per continuare, inserisci un nuovo codice.",
+        DOCKER_ENGINE_UNAVAILABLE: "Il server ora non può eseguire i siti. Controlla la pagina Stato, poi riprova.",
+        NOT_FOUND: "Questo sito o questa sessione non esiste più. Torna ai siti e ricarica.",
+        signedOut: "La tua sessione di accesso è scaduta. Accedi di nuovo, poi apri una nuova sessione.",
+        generic: "Non è stato possibile aprire la sessione. Riprova; se continua a non riuscire, controlla la pagina Stato.",
+      },
+      ended: {
+        closed: "Hai chiuso la sessione. Per continuare, inserisci un nuovo codice.",
+        shell_exited: "La shell è terminata. Per continuare, inserisci un nuovo codice.",
+        idle: "La sessione è finita perché questa pagina non ha letto per 60 secondi. Per continuare, inserisci un nuovo codice.",
+        time_limit: "La sessione ha raggiunto il limite di 30 minuti. Per continuare, inserisci un nuovo codice.",
+        container_gone: "Il sito si è fermato mentre la sessione era aperta. Per continuare, inserisci un nuovo codice.",
+        executor_gone: "Il server ha perso la sessione. Per continuare, inserisci un nuovo codice.",
+        not_started: "La shell non è riuscita ad avviarsi. Per continuare, inserisci un nuovo codice.",
+        lost: "Nessuna risposta dal server per 40 secondi, quindi la sessione è considerata finita. Per continuare, inserisci un nuovo codice.",
+      },
+    },
+    logs: {
+      title: "Log",
+      subtitle: "Le ultime righe scritte dai container del pannello e dal container di ogni sito.",
+      services: "Qui ci sono anche i giornali dei quattro servizi del pannello e dei lavori del server (aggiornamento, pacchetti); leggerli non è registrato.",
+      hostGroup: "Servizi e lavori del server",
+      units: {
+        "hp-panel-update": "Aggiornamento del pannello (hp-panel-update)",
+        "hp-os-refresh": "Controllo dei pacchetti (hp-os-refresh)",
+        "hp-os-upgrade": "Aggiornamenti di sicurezza (hp-os-upgrade)",
+      },
+      siteNote: "La lettura del log di un sito viene registrata nel Registro attività.",
+      auditLink: "Chi ha fatto cosa nel pannello è nel Registro attività.",
+      source: "Origine", tail: "Righe", show: "Mostra", panelGroup: "Parti del pannello", sitesGroup: "Siti", siteOption: "{name} ({owner})",
+      choose: "Scegli un'origine per vederne le ultime righe.",
+      sitesFailed: "Non è stato possibile caricare l'elenco dei siti, quindi si possono scegliere solo le parti del pannello. Ricarica la pagina per riprovare.",
+      viewer: {
+        visits: "Uscita (stdout)", errors: "Errori (stderr)", refresh: "Aggiorna", loading: "Caricamento...", loaded: "Log caricato.", empty: "Ancora nessuna riga.",
+        unavailable: "Il log non si può leggere ora: l'esecutore o il Docker Engine non risponde. Controlla entrambi nella pagina Stato; sul server: systemctl status hp-docker-executor docker.",
+        notFound: "Questa origine ora non ha un container: non è in uso o è stato rimosso. Controlla il suo stato nella pagina Stato.",
+        journal: "Giornale",
+        journalUnavailable: "Il giornale non si può leggere ora: l'agente host non risponde. Se persiste: systemctl status hp-host-agent.",
+      },
+    },
+    firewall: {
+      title: "Firewall",
+      subtitle: "Quali porte di questo server sono aperte e quali indirizzi sono bloccati.",
+      loadFailed: "Non è stato possibile caricare il firewall. Ricarica la pagina; se persiste, scrivi sul server, via SSH: systemctl status hp-api.",
+      base: {
+        absent: "Le regole di base del firewall non sono caricate su questo server: finché non le applichi nessuna porta si apre o si chiude e nessun indirizzo si blocca. Applicandole restano aperte alle connessioni in ingresso solo le porte 22 (SSH), 80 e 443, insieme alle porte aperte in questa pagina, e tutto il resto in ingresso si chiude, tranne l'SFTP dei siti sulla porta 2222, che va a un container e non passa da queste regole. Se SSH su questo server ascolta su un'altra porta, non applicarle: lo perderesti.",
+        unmanaged: "Il pannello non gestisce il firewall di questo server: il server è stato installato con l'opzione che lascia il firewall all'amministratore (--skip-firewall). Le porte e i blocchi salvati in questa pagina non sono attivi. Per affidare il firewall al pannello, controlla che SSH ascolti sulla porta 22, poi esegui di nuovo l'installazione sul server, via SSH, con --version e la versione installata che mostra la pagina Aggiornamenti, le altre opzioni come all'installazione, senza --skip-firewall. Il pannello si riavvia e resta assente per circa un minuto.",
+        outdated: "Le regole di base caricate vengono da una versione precedente del pannello e non hanno una regola che questa versione aggiunge. Le porte aperte e gli indirizzi bloccati prima restano attivi finché non le applichi di nuovo. Applica le regole di base per aggiungere la regola e per cambiare porte e blocchi.",
+        unregistered: "Questo server non è ancora registrato nel pannello (lo fa l'installazione, nel suo passo di setup), quindi da qui non si possono applicare le regole di base. Entra via SSH ed esegui sudo hp-accounts setup --name NOME --hostname NOME --ipv4 INDIRIZZO (il nome di questo server e il suo indirizzo IPv4 pubblico), poi ricarica questa pagina.",
+        unreadable: "Il firewall del server non si può leggere ora: qui sotto ci sono le liste salvate, senza sapere se sono attive. Ricarica la pagina tra un minuto; se persiste, scrivi sul server, via SSH: systemctl status hp-host-agent.",
+        disabled: "Su questo server il pannello non gestisce il firewall.",
+        current: "Le regole di base sono caricate e aggiornate.",
+        apply: "Applica le regole di base",
+        applyTitle: "Applicare le regole di base e chiudere le altre porte in ingresso?",
+        applyBody: "Restano aperte alle connessioni in ingresso solo le porte 22 (SSH), 80 e 443, insieme alle porte aperte in questa pagina; tutto il resto in ingresso si chiude, tranne l'SFTP dei siti sulla porta 2222, che va a un container e non passa da queste regole. Se SSH su questo server ascolta su un'altra porta, non applicare: lo perderesti. Poi il server carica i blocchi salvati qui. Di solito basta meno di un minuto.",
+        applyConfirm: "Applica",
+        applying: "Applicazione in corso…",
+        applyDone: "Regole di base applicate.",
+        applyFailed: "Le regole di base non sono state applicate. Riprova; se persiste, scrivi sul server, via SSH: journalctl -u hp-host-agent.",
+        applyUnknown: "Non sappiamo ancora se le regole di base sono state applicate: ricarica la pagina tra un minuto.",
+      },
+      static: {
+        title: "Sempre aperto",
+        ssh: "SSH (porta {ports}): per entrare nel server anche quando il pannello non risponde.",
+        web: "Web (porte {ports}): i siti e i loro certificati.",
+        panel: "Pannello (porta {ports}): solo dai container del server stesso; questa console si raggiunge dalle porte web.",
+        icmp: "Ping e i messaggi di rete che servono alle connessioni.",
+        replies: "Le risposte alle connessioni che il server stesso apre.",
+        why: "SSH e il pannello non si possono chiudere da qui, e un blocco non vale mai per SSH: è la strada per rimediare a un errore. Se un blocco ti chiude fuori dal pannello, entra via SSH e segui la sezione Firewall del README.",
+      },
+      ports: {
+        http_alt: "HTTP alternativo (porta {port}): un sito o uno strumento servito fuori dal proxy.",
+        https_alt: "HTTPS alternativo (porta {port}): come sopra, cifrato.",
+        node_exporter: "Prometheus node exporter (porta {port}): le misure del server per un monitoraggio esterno.",
+        zabbix_agent: "Agente Zabbix (porta {port}): il monitoraggio con Zabbix.",
+        checkmk_agent: "Agente Checkmk (porta {port}): il monitoraggio con Checkmk.",
+        nrpe: "NRPE (porta {port}): i controlli di Nagios o Icinga.",
+      },
+      portsCard: {
+        title: "Porte che puoi aprire",
+        intro: "Solo queste porte si aprono e si chiudono dal pannello.",
+        switchLabel: "Porta {port} aperta",
+        closeTitle: "Chiudere la porta {port}?",
+        closeBody: "Chi raggiunge questo server sulla porta {port} non ci arriva più: per esempio un monitoraggio esterno smette di ricevere dati.",
+        closeConfirm: "Chiudi la porta",
+        open: "Aperta",
+        closed: "Chiusa",
+      },
+      blocks: {
+        title: "Indirizzi bloccati",
+        intro: "Un indirizzo bloccato non raggiunge più i siti né il pannello; SSH resta raggiungibile. Una rete si scrive come 203.0.113.0/24.",
+        address: "Indirizzo o rete",
+        note: "Nota (facoltativa, al massimo {max} caratteri)",
+        noteHint: "La vedono solo gli amministratori.",
+        add: "Blocca",
+        confirmTitle: "Bloccare {address}?",
+        confirmBody: "Da subito {address} non raggiunge più i siti né il pannello di questo server. Se qualcuno del tuo gruppo lavora da lì, resta fuori anche lui. Anche il server e i siti smettono di ricevere risposte da {address}.",
+        confirm: "Blocca",
+        colWhat: "Indirizzo o rete",
+        colNote: "Nota",
+        colSince: "Dal",
+        colState: "Stato",
+        colActions: "Azioni",
+        empty: "Nessun indirizzo bloccato.",
+        unblock: "Sblocca",
+        unblockLabel: "Sblocca {address}",
+      },
+      state: {
+        inForce: "Attivo",
+        notInForce: "Salvato, non attivo",
+        unknown: "Non verificato",
+      },
+      notInForce: {
+        banner: "Alcune voci sono salvate ma il server non le applica: succede dopo un comando dato sul server via SSH o dopo un errore. Applicale di nuovo, oppure rimuovi la voce. Se un blocco ti ha chiuso fuori, prima sbloccalo e solo dopo scegli Applica di nuovo.",
+        again: "Applica di nuovo",
+      },
+      refusals: {
+        invalid: "Non è un indirizzo IPv4 o IPv6, né una rete scritta come 203.0.113.0/24. Controlla cosa hai scritto e inserisci un indirizzo o una rete.",
+        ipv4_mapped: "Scrivi l'indirizzo IPv4 nella sua forma normale, per esempio 192.0.2.10.",
+        host_bits: "La rete deve cominciare dal suo primo indirizzo: scrivi per esempio 203.0.113.0/24, non 203.0.113.5/24.",
+        too_wide: "La rete è troppo ampia: al massimo /{v4} per IPv4 e /{v6} per IPv6. Inserisci una rete più piccola (un numero più alto dopo la barra) o un solo indirizzo.",
+        reserved: "Questo indirizzo non si blocca: appartiene al server stesso o a nessuna macchina in particolare. Controlla di aver scritto l'indirizzo della macchina che vuoi bloccare.",
+        own_address: "Il blocco comprende l'indirizzo da cui stai usando il pannello: ti chiuderebbe fuori. Controlla l'indirizzo, o inserisci una rete più piccola che lasci fuori il tuo.",
+        overlaps: "Si sovrappone a un indirizzo o una rete già bloccati: sblocca prima quella voce.",
+        limit: "Ci sono già {max} blocchi per questa famiglia di indirizzi: sblocca una voce prima di aggiungerne un'altra.",
+        note_invalid: "La nota è troppo lunga (al massimo {max} caratteri) o contiene una tabulazione, un a capo o un carattere invisibile. Scrivila più corta, su una riga, e riprova.",
+        unknown_port: "Questa porta non è tra quelle che il pannello apre. Ricarica la pagina e scegli una delle porte elencate.",
+      },
+      errors: {
+        notCurrent: "Le regole di base non sono aggiornate su questo server: non è stato salvato niente. Ricarica la pagina, che dice cosa fare.",
+        notFound: "Questo blocco non c'è più: ricarica la pagina.",
+        locked: "Un'altra modifica del server è in corso. Attendi un minuto e riprova.",
+        agentDown: "Il pannello non riesce a raggiungere ora il firewall del server. Aspetta un minuto, ricarica la pagina e riprova; se continua, guarda la pagina Stato.",
+        hostGone: "Questo server non è più registrato nel pannello, quindi le regole di base non si possono applicare. Ricarica la pagina: dice come registrarlo di nuovo.",
+        session: "La sessione è scaduta. Accedi di nuovo, poi ricarica questa pagina.",
+        noAnswer: "Il pannello non ha risposto in tempo, quindi non sappiamo se la modifica è stata fatta. Ricarica la pagina tra un minuto per vederlo; se non è stata fatta, riprova.",
+      },
+    },
+    updates: {
+      title: "Aggiornamenti",
+      subtitle: "La versione del pannello, le immagini che usa e i pacchetti del sistema operativo.",
+      loadFailed: "Non è stato possibile caricare gli aggiornamenti. Ricarica la pagina; se persiste, scrivi sul server, via SSH: systemctl status hp-api.",
+      pins: "Le immagini dei container e dei siti sono quelle fissate da questa versione del pannello: non si interroga nessun registro. Immagini più nuove arrivano con una nuova versione del pannello.",
+      errors: {
+        siteWork: "È in corso il backup, il ripristino, l'aggiornamento di WordPress o l'importazione di un sito, e questo lavoro non deve partire nello stesso momento. Aspetta che finisca, poi riprova.",
+        busy: "Questo elemento sta già cambiando per un'altra operazione, per esempio un riavvio o un aggiornamento precedente. Aspetta che finisca, ricarica la pagina e riprova.",
+        alreadyCurrent: "Questo sito usa già l'immagine di questa versione: non c'è niente da aggiornare. Ricarica la pagina per vedere l'elenco attuale.",
+        stopped: "Questo sito è fermo, e un aggiornamento lo avvierebbe di nuovo. Chiedi al suo proprietario di avviarlo dalla pagina del sito, poi aggiornalo qui.",
+        absent: "Questo container non è installato su questo server, quindi non c'è niente da aggiornare. Ricarica la pagina; la pagina Stato mostra quali container del pannello sono installati.",
+        notSupported: "Su questo server il pannello funziona senza il servizio che fa questo lavoro, quindi non si può fare da qui. Eseguilo via SSH, come spiega il README.",
+        notFound: "Questo sito non esiste più o non è ancora stato messo online. Ricarica la pagina per vedere l'elenco attuale.",
+        agentDown: "Il pannello non riesce a raggiungere ora l'agente del server. Aspetta un minuto e riprova; se continua, guarda la pagina Stato.",
+        session: "La sessione è scaduta. Accedi di nuovo, poi ricarica questa pagina.",
+        noAnswer: "Il pannello non ha potuto completare la richiesta, quindi non sappiamo se è stata eseguita. Ricarica la pagina tra un minuto per vederlo; se non lo è stata, riprova.",
+        other: "Il pannello ha rifiutato questa richiesta. Ricarica la pagina e riprova; se succede di nuovo, guarda le righe del pannello nella pagina Log.",
+      },
+      panel: {
+        title: "Pannello",
+        installed: "Versione installata: {version}",
+        check: "Cerca una nuova versione",
+        checking: "Controllo…",
+        states: {
+          never_checked: "Non ancora controllato.",
+          up_to_date: "Aggiornato: {latest} è l'ultima versione pubblicata (controllato {time}).",
+          newer: "È disponibile la versione {latest} (controllato {time}).",
+          no_release: "Il progetto non ha ancora pubblicato una versione (controllato {time}).",
+          failed: "Il controllo non è riuscito ({time}): GitHub non ha risposto o la risposta non era valida. Riprova più tardi.",
+        },
+        update: "Aggiorna il pannello",
+        updateTitle: "Aggiornare il pannello alla versione {latest}?",
+        updateFacts: "Il pannello, compresa questa pagina, resta irraggiungibile per circa un minuto e mezzo; i siti continuano a rispondere. Se la nuova versione cambia l'immagine del database dei siti o del proxy, questi si riavviano una volta e i siti si fermano per pochi secondi. Se la nuova versione non parte, il server torna da solo a quella installata ora; se il database o il proxy si erano riavviati, si riavviano un'altra volta e i siti si fermano di nuovo per pochi secondi.",
+        confirm: "Aggiorna ora",
+        running: "Aggiornamento in corso. Mentre il pannello si aggiorna questa pagina può non rispondere: è previsto, e si ricarica da sola quando il pannello torna.",
+        unknown: "Non sappiamo ancora come è finito l'aggiornamento: ricarica la pagina tra qualche minuto. Le righe qui sotto dicono a che punto è.",
+        results: {
+          updated: "Ultimo aggiornamento: riuscito ({time}).",
+          already_current: "Ultimo aggiornamento: la versione installata era già l'ultima ({time}).",
+          rolled_back: "Ultimo aggiornamento: la nuova versione non partiva e il server è tornato alla precedente ({time}).",
+          rollback_unhealthy: "Ultimo aggiornamento: la nuova versione non partiva e anche la precedente non risponde bene ({time}). Controlla sul server, via SSH: systemctl status hp-api hp-web.",
+          failed: "Ultimo aggiornamento: non riuscito ({time}); le righe qui sotto dicono perché.",
+          not_started: "Ultimo aggiornamento: non è partito ({time}).",
+        },
+        linesTitle: "Ultime righe dell'aggiornamento",
+        locked: "Un altro lavoro del server è in corso (un aggiornamento del pannello, un lavoro sui pacchetti o il riavvio di uno dei servizi del pannello). Attendi che finisca e riprova.",
+      },
+      components: {
+        title: "Container del pannello",
+        colComponent: "Container",
+        colState: "Stato",
+        current: "Aggiornato",
+        behind: "Usa un'immagine diversa da questa versione",
+        unknown: "Non verificato",
+        apply: "Applica",
+        applyLabel: "Applica l'immagine di {name}",
+        applyTitle: "Portare {name} all'immagine di questa versione?",
+        applyExtra: "Il container viene ricreato con l'immagine voluta.",
+        running: "In corso…",
+        done: "{name} usa l'immagine di questa versione.",
+        failed: "{name} non è stato aggiornato. Riprova; se persiste, scrivi sul server, via SSH: journalctl -u hp-docker-executor.",
+        unknown2: "Non sappiamo ancora se {name} è stato aggiornato: ricarica la pagina tra un minuto.",
+      },
+      sites: {
+        title: "Siti su un'immagine precedente",
+        intro: "Un sito resta sull'immagine con cui è stato distribuito finché non lo aggiorni qui: nulla aggiorna un sito da solo.",
+        none: "Tutti i siti usano l'immagine di questa versione.",
+        more: "E altri {count} siti: aggiorna questi e ricarica la pagina per vederli.",
+        colSite: "Sito",
+        colOwner: "Proprietario",
+        colPhp: "Versione PHP",
+        update: "Aggiorna",
+        updateLabel: "Aggiorna {name}",
+        updateTitle: "Aggiornare l'immagine di {name}?",
+        updateBody: "{name} viene distribuito di nuovo con la stessa versione di PHP ({php}) e l'immagine di questa versione del pannello: per qualche secondo non risponde. File e database restano come sono.",
+        stopped: "Fermo: avvialo prima di aggiornarlo.",
+        running: "In corso…",
+        done: "{name} usa l'immagine di questa versione.",
+        failed: "{name} non è stato aggiornato: apri la pagina del sito per vedere l'errore.",
+        unknown: "Non sappiamo ancora se {name} è stato aggiornato: ricarica la pagina tra un minuto.",
+      },
+      packages: {
+        title: "Pacchetti del sistema operativo",
+        count: "{count} pacchetti da aggiornare, di cui {security} di sicurezza.",
+        none: "Nessun pacchetto da aggiornare.",
+        listsAt: "Elenco dei pacchetti del server aggiornato il {time}.",
+        listsNever: "Il server non ha ancora scaricato l'elenco dei pacchetti: aggiornalo con il pulsante qui sotto.",
+        check: "Aggiorna l'elenco dei pacchetti",
+        install: "Installa gli aggiornamenti di sicurezza",
+        installTitle: "Installare gli aggiornamenti di sicurezza?",
+        installBody: "Il server installa solo ciò che la configurazione della distribuzione permette di installare da solo (su Ubuntu: sicurezza). Di solito bastano pochi minuti; un programma aggiornato può essere riavviato dal sistema. Gli altri pacchetti restano come sono.",
+        confirm: "Installa",
+        cannotUpgrade: "Su questo server manca il programma che installa gli aggiornamenti di sicurezza (unattended-upgrade): installali via SSH.",
+        security: "Sicurezza",
+        colName: "Pacchetto",
+        colInstalled: "Installata",
+        colNew: "Nuova",
+        otherTitle: "Da aggiornare via SSH",
+        otherIntro: "Questi pacchetti vengono da altre fonti (per esempio Docker, PostgreSQL, Node.js): il pannello non li aggiorna, aggiornali via SSH.",
+        reboot: "Il server va riavviato per completare un aggiornamento già installato. I riavvii si fanno via SSH, in un momento in cui i siti possono fermarsi.",
+        running: "Lavoro in corso…",
+        refreshDone: "Elenco aggiornato.",
+        installDone: "Aggiornamenti di sicurezza installati.",
+        failed: "Il lavoro non è riuscito: le righe sono nella pagina Log.",
+        unknown: "Non sappiamo ancora come è finito il lavoro: ricarica la pagina tra qualche minuto.",
+        unreadable: "L'elenco dei pacchetti non si può leggere ora. Ricarica la pagina tra un minuto; se persiste, scrivi sul server, via SSH: systemctl status hp-host-agent.",
+        logLink: "Vedi le righe nella pagina Log",
+      },
     },
     actions: {
       networkError: "Errore di comunicazione con il server.",
@@ -468,6 +1805,10 @@ export const it = {
       alertsNotIssued: "{host} ({site}): nessun certificato \u2014 {problem}",
       alertsPanelExpiring: "Indirizzo del pannello {host}: il certificato scade il {date}",
       alertsProblem: { rate_limited: "limite di Let's Encrypt raggiunto", port_80_blocked: "porta 80 non raggiungibile da internet", not_pointing: "il nome raggiunge un altro server", caa_blocked: "un record CAA blocca Let's Encrypt", other: "emissione non riuscita" },
+      support: {
+        open: "Apri la vista di assistenza",
+        ended: "Non c'è nessuna visita di assistenza aperta. Aprine una da questo elenco.",
+      },
     },
     mail: {
       title: "Posta in uscita",
@@ -535,9 +1876,193 @@ export const it = {
         other: "Qualcosa è andato storto durante l'invio. Leggi il dettaglio; se si ripete, contatta il tuo fornitore di posta.",
       },
     },
+    backups: {
+      title: "Backup",
+      subtitle: "Dove e quando salvare i backup notturni dei siti.",
+      keyWarning:
+        "La chiave che cifra i backup è il file /etc/hosting-panel/backup.key su questo server. Copiala subito in un posto sicuro fuori dal server: se il server va perso senza questa chiave, nessun backup potrà più essere letto, da nessuno. Anche la copia del pannello è cifrata con questa chiave: senza di essa il pannello non può essere riportato su un nuovo server. La copia del pannello contiene anche la chiave di tutte le password salvate: chi ha questo file e l'accesso allo storage può leggerle, quindi tieni il file segreto come una password.",
+      panel: {
+        never: "Copia del pannello (account, siti e impostazioni): non ancora fatta. Viene fatta ogni notte dopo i backup dei siti.",
+        made: 'Copia del pannello (account, siti e impostazioni): fatta il {date}. Se questo server va perso, la sezione "Il server è perso" del README spiega come riportare il pannello con questa copia.',
+        failed: "Copia del pannello (account, siti e impostazioni): l'ultimo tentativo ({date}) non è riuscito.",
+      },
+      panelProblem: {
+        interrupted:
+          "La copia si è interrotta perché l'executor si è riavviato; viene rifatta da sola la notte successiva e, se si interrompe di nuovo, controlla journalctl -u hp-docker-executor.",
+        other:
+          "Qualcosa non ha funzionato durante la copia; viene rifatta da sola la notte successiva e, se non riesce di nuovo, usa «Prova la connessione» in questa pagina e controlla journalctl -u hp-docker-executor.",
+        repository_locked:
+          "Lo storage era bloccato da un altro backup ancora in corso; la copia viene rifatta da sola la notte successiva e, se non riesce di nuovo, controlla journalctl -u hp-docker-executor.",
+        timeout:
+          "La copia ha superato il tempo massimo ed è stata fermata; viene rifatta da sola la notte successiva e, se non riesce di nuovo, controlla la velocità verso lo storage con «Prova la connessione» in questa pagina.",
+        files_unreadable:
+          "La copia non è riuscita a leggere il file del database del pannello; viene rifatta da sola la notte successiva e, se non riesce di nuovo, controlla lo spazio libero su disco e journalctl -u hp-docker-executor.",
+        no_space:
+          "Durante la copia sul server è finito lo spazio libero su disco; viene rifatta da sola la notte successiva, quindi libera spazio sul disco prima di allora (df -h).",
+      },
+      state: {
+        notAvailable:
+          "I backup non sono disponibili su questo tipo di installazione: servono un server installato con l'installer Linux (systemd).",
+        neverSetUp:
+          "Nessuna destinazione configurata: i backup non vengono fatti. Inserisci i dati del bucket S3 e salva.",
+        working:
+          "Destinazione configurata. I backup notturni partono alle {utc} UTC ({local} nel tuo fuso orario). Ultimo giro notturno: {date}.",
+        nightlyNever: "non ancora partito",
+        lastTestFailed: "L'ultima prova della connessione ({when}) non è riuscita:",
+      },
+      endpoint: "Endpoint S3",
+      endpointHint:
+        "Ad esempio https://s3.eu-central-1.amazonaws.com. Con http:// i backup restano cifrati, ma il traffico verso lo storage non è protetto: usalo solo in una rete privata.",
+      region: "Regione",
+      regionHint: "Per molti storage compatibili S3 va bene «us-east-1».",
+      bucket: "Bucket",
+      prefix: "Percorso nel bucket (facoltativo)",
+      prefixHint: "Ad esempio «pannello/server1». Lascia vuoto per usare la radice del bucket.",
+      accessKeyId: "Access key ID",
+      secretAccessKey: "Secret access key",
+      secretKeep: "Lascia vuoto per mantenere quella salvata",
+      secretIs: "Secret access key salvata: {state}",
+      secretSet: "sì",
+      secretNotSet: "no",
+      hour: "Ora del backup notturno",
+      hourOption: "{utc} UTC ({local} nel tuo fuso orario)",
+      retention: "Giorni di conservazione",
+      retentionHint: "Da 1 a 365. Il backup riuscito più recente di ogni sito viene sempre tenuto.",
+      changeWarning:
+        "Cambiando endpoint, bucket o percorso il pannello dimentica i backup registrati finora e i clienti non li vedranno più. Nel bucket non viene cancellato nulla.",
+      save: "Salva",
+      saving: "Salvataggio\u2026",
+      saved: "Impostazioni salvate.",
+      field: {
+        endpoint_invalid:
+          "Inserisci un indirizzo http:// o https:// senza percorso, ad esempio https://s3.example.com. Non si può usare un indirizzo di questo stesso server (localhost).",
+        region_invalid: "Usa solo lettere minuscole, numeri e trattini (massimo 64).",
+        bucket_invalid:
+          "Inserisci un nome del bucket di 3-63 caratteri: lettere minuscole, numeri, punti e trattini, senza due punti consecutivi.",
+        prefix_invalid:
+          "Percorso non valido: segmenti di lettere, numeri, punti, trattini e trattini bassi separati da /.",
+        access_key_id_invalid:
+          "Copia di nuovo l'access key ID dalla console del fornitore di storage, senza spazi prima o dopo.",
+        secret_access_key_invalid:
+          "Copia di nuovo la secret access key dalla console del fornitore di storage, senza spazi prima o dopo.",
+        secret_access_key_required: "Inserisci la secret access key.",
+        schedule_hour_invalid: "Scegli un'ora tra 0 e 23.",
+        retention_days_invalid: "Inserisci un numero di giorni tra 1 e 365.",
+      },
+      testTitle: "Prova la connessione",
+      testHelp:
+        "Prova la destinazione salvata: scrive e cancella un piccolo file nel percorso indicato. Può richiedere fino a 30 secondi.",
+      testButton: "Prova la connessione",
+      testing: "Prova in corso\u2026",
+      testSaveFirst: "Salva le impostazioni prima di provarle.",
+      testAmbiguous: "Non sappiamo come è finita la prova. Ricarica la pagina e riprova.",
+      outcome: { ok: "Funziona: il pannello può scrivere e cancellare nel bucket." },
+      problem: {
+        unreachable:
+          "Impossibile raggiungere l'endpoint. Controlla l'indirizzo e che il server possa uscire verso quella porta.",
+        tls_failed:
+          "La connessione HTTPS all'endpoint non è riuscita: il certificato non è valido per quell'indirizzo. Controlla l'endpoint.",
+        wrong_region:
+          "Lo storage ha rifiutato la regione. Correggi la regione e salva di nuovo.",
+        auth_failed:
+          "Le chiavi di accesso sono state rifiutate. Controlla access key ID e secret access key.",
+        bucket_missing:
+          "Il bucket non esiste. Crealo nello storage oppure correggi il nome.",
+        write_denied:
+          "Le chiavi funzionano ma non possono scrivere o cancellare in quel percorso. Dai loro i permessi di scrittura e cancellazione.",
+        wrong_key:
+          "In questo percorso ci sono backup cifrati con un'altra chiave (un altro server o un backup.key diverso). Usa un altro percorso, oppure rimetti in /etc/hosting-panel/backup.key la chiave originale.",
+        key_file_missing:
+          "/etc/hosting-panel/backup.key manca o non è valido. Rimetti la copia che hai salvato fuori dal server. Solo se non ne esiste nessuna copia: elimina il file ed esegui hp-update per crearne uno nuovo (i backup fatti con la vecchia chiave non saranno leggibili).",
+        tool_unavailable:
+          "Il server non è riuscito ad avviare lo strumento di backup. Controlla la connessione a Internet del server e i log dell'executor (journalctl -u hp-docker-executor).",
+        no_space:
+          "Sul server non c'è abbastanza spazio libero per preparare i backup. Libera spazio sul disco e riprova.",
+        database_dump_failed:
+          "La copia dei database del sito non è riuscita. Controlla che MariaDB sia attivo e riprova.",
+        files_unreadable:
+          "Alcuni file del sito non sono leggibili dal backup. Controlla i permessi nella scheda File del sito e riprova.",
+        repository_locked:
+          "Un altro backup di questo sito era in corso. Riprova tra qualche minuto.",
+        timeout:
+          "Il backup ha superato il tempo massimo ed è stato fermato. Controlla la velocità verso lo storage e riprova.",
+        interrupted:
+          "Il backup si è interrotto perché l'executor si è riavviato. Usa «Riprova».",
+        other:
+          "Qualcosa non ha funzionato. Riprova; se si ripete controlla i log dell'executor (journalctl -u hp-docker-executor).",
+        site_busy: "Il sito stava completando un'altra modifica. Riprova tra qualche minuto.",
+        restore_prepare_failed:
+          "Un ripristino non è riuscito a preparare la copia del sito; il sito non è stato toccato. Riprova il ripristino; se fallisce ancora, controlla i log dell'executor (journalctl -u hp-docker-executor).",
+        switch_undone:
+          "Un ripristino non ha completato l'ultimo passaggio e ha rimesso il sito com'era. Di solito una query lunga teneva occupato il database: riprova più tardi.",
+        undo_incomplete:
+          "Un ripristino si è fermato a metà e il sito non è stato rimesso com'era: finché un ripristino di questo sito non riesce, il sito risponde «temporaneamente non disponibile» oppure mostra il proprio errore di connessione al database. Il cliente può avviarne uno dalla scheda Backup del sito; ciò che il tentativo fallito ha lasciato viene rimosso dal primo ripristino riuscito. Se non riesce nemmeno quello, controlla journalctl -u hp-docker-executor.",
+        definer_missing:
+          "Il backup contiene viste, trigger o routine il cui utente del database non esiste più; il sito non è stato toccato. Ricrea l'utente con lo stesso nome e ripeti il ripristino.",
+        address_not_updated:
+          "Il ripristino è riuscito, ma l'impostazione dell'indirizzo del sito non è riuscita: i link potrebbero puntare a un vecchio indirizzo. Controlla i log dell'executor (journalctl -u hp-docker-executor) e reimposta il dominio principale del sito.",
+        panel_dump_failed:
+          "La copia del database del pannello non è riuscita. Controlla che PostgreSQL sia attivo (systemctl status postgresql) e i log dell'API (journalctl -u hp-api); la copia viene ritentata la notte successiva.",
+        panel_dump_tool_missing:
+          "La copia del pannello non ha potuto avviare pg_dump. Controlla che il pacchetto postgresql-18 sia installato (apt install postgresql-18); la copia viene ritentata la notte successiva.",
+        panel_dump_missing:
+          "La copia del pannello non ha potuto leggere il file del database. Controlla lo spazio libero su disco e journalctl -u hp-docker-executor; la copia viene ritentata la notte successiva.",
+        site_not_started:
+          "File e database sono tornati, ma il sito non è partito. Controlla i log dell'executor (journalctl -u hp-docker-executor) e riprova il ripristino.",
+      } satisfies Record<BackupProblem, string>,
+      removeButton: "Rimuovi destinazione",
+      removeTitle: "Rimuovere la destinazione dei backup?",
+      removeConfirm:
+        "Nel bucket non viene cancellato nulla. I backup notturni si fermano e il pannello dimentica i backup registrati: i clienti non li vedranno più.",
+      removeCancel: "Annulla",
+      removeAction: "Rimuovi",
+      removed: "Destinazione rimossa.",
+      sitesTitle: "Stato per sito",
+      sitesEmpty: "Nessun sito.",
+      sitesTotal: "Ultimi backup di tutti i siti insieme: {size}.",
+      sitesLoadFailed: "Non riusciamo a caricare lo stato dei siti. Ricarica la pagina.",
+      columns: {
+        site: "Sito",
+        owner: "Cliente",
+        lastSuccess: "Ultimo riuscito",
+        lastAttempt: "Ultimo tentativo",
+        state: "Stato",
+        action: "Azioni",
+        size: "Dimensione ultimo backup",
+      },
+      siteState: {
+        never: "Mai",
+        running: "In corso\u2026",
+        succeeded: "Riuscito",
+        failed: "Non riuscito",
+      },
+      runNow: "Fai un backup",
+      retry: "Riprova",
+      restore: {
+        button: "Ripristina",
+        title: "Ripristinare il sito dal backup del {date}?",
+        body: "Ogni file e ogni database di questo sito torna com'era il {date}. Tutto ciò che è cambiato da allora va perso per sempre. Se di questo sito non resta nulla sul server, il pannello lo ricrea da questo backup.",
+        unavailable: "Se il sito è online, verso la fine i visitatori vedono per qualche secondo che è temporaneamente non disponibile.",
+        lostDatabases: "Un database eliminato da allora torna senza i suoi utenti: il cliente ridà gli accessi dalla scheda Database.",
+        backupFirst: 'Se il sito è ancora su questo server e vuoi conservarlo com\'è ora, annulla e usa prima "Fai un backup".',
+        typeName: "Per confermare, scrivi il nome del sito {name}",
+        cancel: "Annulla",
+        confirm: "Ripristina questo backup",
+        starting: "Avvio\u2026",
+        wrongName: "Il nome non corrisponde a questo sito. Inseriscilo esattamente come è indicato.",
+        noCopy: "Questo sito non ha più un backup riuscito da ripristinare. Ricarica la pagina.",
+        running: "Ripristino del backup del {date} in corso\u2026",
+        done: "Ripristinato al backup del {date}.",
+        failed: "Il ripristino del backup del {date} non è riuscito.",
+      },
+      errors: {
+        notConfigured: "Prima configura e salva una destinazione.",
+        notReady: "Il sito non è ancora pronto: riprova quando la configurazione è finita.",
+      },
+    },
     users: {
       title: "Utenti",
-      subtitle: "Account della piattaforma: l'amministratore e il cliente.",
+      subtitle: "Account della piattaforma: gli amministratori e il cliente.",
       create: "Crea account cliente",
       colName: "Utente",
       colRole: "Ruolo",
@@ -578,6 +2103,19 @@ export const it = {
       ownerEmail: "Email del proprietario",
       createSubmit: "Crea account",
       conflict: "Esiste già un account cliente.",
+      administrators: {
+        create: "Nuovo amministratore",
+        title: "Nuovo amministratore",
+        hint: "Il nuovo amministratore riceve una password temporanea e una chiave per la verifica in due passaggi, mostrate una sola volta.",
+        name: "Nome",
+        email: "Email",
+        submit: "Crea amministratore",
+        invalid: "Controlla il nome e l'indirizzo email: l'indirizzo potrebbe essere già in uso.",
+        tempNote: "Condividila in modo sicuro; il nuovo amministratore dovrà cambiarla al primo accesso.",
+        totpTitle: "Chiave per la verifica in due passaggi",
+        totpNote: "Prima del primo accesso, il nuovo amministratore aggiunge questa chiave a un'app di autenticazione. Non verrà mostrata di nuovo.",
+        sshRepair: "La password o il secondo fattore persi di un amministratore si ripristinano dalla riga di comando del server: hp-accounts reset-password o hp-accounts reset-totp.",
+      },
     },
   },
   notFound: {
@@ -599,6 +2137,10 @@ export const it = {
     VALIDATION_ERROR: "Alcuni dati non sono validi. Controlla i campi evidenziati e riprova.",
     INTERNAL_ERROR: "Qualcosa è andato storto da parte nostra. Riprova tra qualche minuto.",
     RESOURCE_LOCKED: "Il sito sta completando un'altra modifica. Riprova tra qualche istante.",
+    RATE_LIMITED: "Troppe richieste in questo momento. Attendi un minuto e riprova; dopo molte modifiche agli account SFTP l'attesa può arrivare a un'ora.",
+    ALREADY_EXISTS: "Questo nome è già in uso. Scegline un altro.",
+    LAST_ADMINISTRATOR_PROTECTED: "È l'ultimo amministratore attivo: non può essere disattivato. Prima crea o riattiva un altro amministratore.",
+    PASSWORD_RESET_INVALID: "Questo link non è più valido: è scaduto o è già stato usato. Chiedine uno nuovo.",
     generic: "Si è verificato un errore. Riprova; se il problema continua contatta l'assistenza.",
   },
 } as const;

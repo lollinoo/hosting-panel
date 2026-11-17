@@ -10,7 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ChangeOwnerDialog, type Customers } from "@/components/admin/change-owner-dialog";
 import { DeleteSiteDialog, type ConfirmDelete } from "@/components/customer/delete-site-dialog";
 import { StatusPill } from "@/components/customer/status-pill";
-import { errorMessage } from "@/i18n";
+import { errorMessage, format } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 
@@ -32,6 +32,16 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
     setBusy(null);
     setNotice(sent.ok ? { error: false, text: t.accepted } : { error: true, text: errorMessage(m, sent.code) });
     if (sent.ok) router.refresh();
+  }
+
+  async function openSupport(site: AdminSiteDto) {
+    setBusy(site.id);
+    setNotice(null);
+    const res = await fetch(`/api/admin/sites/${site.id}/support-access`, { method: "POST", headers: { "X-CSRF-Token": csrfToken } }).catch(() => null);
+    if (res?.ok) return window.location.assign(`/sites/${site.id}`);
+    const body = (await res?.json().catch(() => null)) as { error?: { code?: string } } | null;
+    setBusy(null);
+    setNotice({ error: true, text: errorMessage(m, body?.error?.code ?? "") });
   }
 
   const confirmDelete: ConfirmDelete = async (confirmName) => {
@@ -78,9 +88,19 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
                   <Button type="button" size="sm" variant="outline" onClick={() => setMoving(s)}>
                     {t.changeOwner}
                   </Button>
+                  <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => openSupport(s)}>
+                    {t.support.open}
+                  </Button>
                   <Button asChild size="sm" variant="outline">
                     <Link href={`/admin/sites/${s.id}/domains`}>{t.domains}</Link>
                   </Button>
+                  {(s.status === "ready" || s.status === "degraded") && (
+                    <Button asChild size="sm" variant="outline">
+                      <Link href={`/admin/sites/${s.id}/terminal`} aria-label={format(m.admin.terminal.linkAria, { site: s.name })}>
+                        {m.admin.terminal.linkLabel}
+                      </Link>
+                    </Button>
+                  )}
                   {s.status === "degraded" && (
                     <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => retry(s)}>
                       {busy === s.id ? t.working : t.retry}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -118,6 +119,11 @@ export function LoginForm() {
             </Button>
           )}
         </form>
+        {!needsTotp && (
+          <Link href="/forgot-password" className="mt-4 block text-center text-sm text-primary underline underline-offset-4">
+            {m.login.forgotLink}
+          </Link>
+        )}
         <LanguageSwitch className="mt-6 justify-center" />
       </CardContent>
     </Card>

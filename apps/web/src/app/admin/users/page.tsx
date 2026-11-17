@@ -6,6 +6,7 @@ import { fetchServerAdminUsers } from "@/lib/server-api";
 import { Card, CardContent } from "@/components/ui/card";
 import { UsersTable } from "@/components/admin/users-table";
 import { CreateCustomerDialog } from "@/components/admin/create-customer-dialog";
+import { CreateAdministratorDialog } from "@/components/admin/create-administrator-dialog";
 
 export const dynamic = "force-dynamic";
 
@@ -23,11 +24,14 @@ export default async function AdminUsersPage() {
           <h1 className="text-2xl font-bold tracking-tight">{t.title}</h1>
           <p className="text-sm text-muted-foreground mt-1">{t.subtitle}</p>
         </div>
-        {!hasCustomer && <CreateCustomerDialog csrfToken={session.csrfToken} />}
+        <div className="flex flex-wrap gap-2">
+          <CreateAdministratorDialog csrfToken={session.csrfToken} />
+          {!hasCustomer && <CreateCustomerDialog csrfToken={session.csrfToken} />}
+        </div>
       </div>
       <Card>
         <CardContent className="pt-6">
-          <UsersTable users={users} csrfToken={session.csrfToken} />
+          <UsersTable users={users} csrfToken={session.csrfToken} currentUserId={session.user.id} />
         </CardContent>
       </Card>
     </div>

@@ -1,14 +1,39 @@
+import type {
+  PanelContainer,
+  SftpAccessApplyRequest,
+  SftpApplyResult,
+  SftpStatusReport,
+} from "@hosting-panel/contracts";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import type {
+  BackupsRequest,
+  BackupsResult,
   DockerExecutionResult,
   DockerExecutorPort,
+  PanelContainerStatus,
+  PinnedPanelContainer,
   ServiceLogLine,
+  SiteDatabasesRequest,
+  SiteDatabasesResult,
+  SiteFilesRequest,
+  SiteFilesResult,
   SiteRoutesRequest,
   SiteJobRequest,
   SiteJobResult,
+  TerminalEnded,
+  TerminalOpenRequest,
+  TerminalOpenResult,
+  TerminalReadResult,
+  TerminalSessionRecord,
 } from "./port.js";
 import type { CertificateStatusReport } from "./acme-status.js";
-import type { MailRelayApplyRequest, MailRelayStatusReport, MailTestResult } from "./mail-relay.js";
+import type {
+  MailRelayApplyRequest,
+  MailRelayStatusReport,
+  MailTestResult,
+  PanelMailRequest,
+  PanelMailResult,
+} from "./mail-relay.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
@@ -50,6 +75,42 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
     return this.refuse();
   }
 
+  async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    return this.refuse();
+  }
+
+  async getPanelContainerLogs(_req: { component: PanelContainer; tail: number }): Promise<readonly ServiceLogLine[]> {
+    return this.refuse();
+  }
+
+  async openTerminal(_req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    return this.refuse();
+  }
+
+  async writeTerminal(_req: { sessionId: string; input: string }): Promise<void> {
+    return this.refuse();
+  }
+
+  async readTerminal(_req: { sessionId: string; cursor: number }): Promise<TerminalReadResult> {
+    return this.refuse();
+  }
+
+  async closeTerminal(_req: { sessionId: string }): Promise<TerminalEnded> {
+    return this.refuse();
+  }
+
+  async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    return this.refuse();
+  }
+
+  async restartPanelContainer(_req: { component: PanelContainer }): Promise<{ startedAt: string | null }> {
+    return this.refuse();
+  }
+
+  async applyPanelContainerPin(_component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    return this.refuse();
+  }
+
   async applySiteRoutes(_req: SiteRoutesRequest): Promise<void> {
     return this.refuse();
   }
@@ -67,6 +128,33 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async sendTestMail(_req: { to: string; from: string }): Promise<MailTestResult> {
+    return this.refuse();
+  }
+
+  async sendPanelMail(_req: PanelMailRequest): Promise<PanelMailResult> {
+    return this.refuse();
+  }
+
+  async siteFiles<R extends SiteFilesRequest>(_req: R): Promise<SiteFilesResult<R["op"]>> {
+    return this.refuse();
+  }
+
+  async siteDatabases<R extends SiteDatabasesRequest>(req: R): Promise<SiteDatabasesResult<R["op"]>> {
+    if (req.op === "dropAll") {
+      return {} as SiteDatabasesResult<R["op"]>;
+    }
+    return this.refuse();
+  }
+
+  async applySftpAccess(_req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    return this.refuse();
+  }
+
+  async getSftpStatus(): Promise<SftpStatusReport> {
+    return this.refuse();
+  }
+
+  async backups<R extends BackupsRequest>(_req: R): Promise<BackupsResult<R["action"]>> {
     return this.refuse();
   }
 

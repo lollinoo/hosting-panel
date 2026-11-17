@@ -1,5 +1,25 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
+import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
+import { FIREWALL_MAX_BLOCKS_PER_FAMILY, FIREWALL_PORT_NAMES } from "./admin-firewall.js";
+import { TERMINAL_INPUT_MAX_BYTES, TerminalSessionIdSchema, type TerminalEndReason } from "./admin-terminal.js";
+import {
+  MYSQL_NATIVE_PASSWORD_HASH_PATTERN,
+  SITE_DATABASE_CUSTOM_NAME_PATTERN,
+  SITE_DATABASE_NAME_PATTERN,
+  SITE_DATABASE_SIGNON_USER_PATTERN,
+} from "./site-databases.js";
+import {
+  SITE_FILE_BATCH_MAX,
+  SITE_FILE_CHUNK_BYTES,
+  SITE_FILE_SEGMENT_MAX_BYTES,
+  SiteFileChunkBase64Schema,
+  SiteFileEntrySchema,
+  SiteFileItemPathSchema,
+  SiteFilePathSchema,
+  SiteFileUploadIdSchema,
+} from "./site-files.js";
+import { SiteTypeKeySchema } from "./site-types/keys.js";
 import {
   MailFailureDtoSchema,
   MailRelayHostSchema,
@@ -201,7 +221,19 @@ export type ServiceInstanceActionIpcRequest = z.infer<
 
 export const SiteJobIpcRequestSchema = z.object({
   jobId: z.string().min(1).max(128),
-  kind: z.enum(["db.provision", "db.drop", "wordpress.install", "wordpress.set-url"]),
+  kind: z.enum([
+    "db.provision",
+    "db.drop",
+    "wordpress.install",
+    "wordpress.set-url",
+    "wordpress.inspect",
+    "wordpress.update",
+    "wordpress.settle",
+    "wordpress.reset-password",
+    "db.import",
+    "db.import-load",
+    "wordpress.import-finalize",
+  ]),
   siteId: z.string().min(1).max(128),
   organizationId: z.string().min(1).max(128),
   serviceInstanceId: z.string().min(1).max(128).optional(),
@@ -304,6 +336,111 @@ export const HostSecurityIpcRequestSchema = z.object({
 });
 export type HostSecurityIpcRequest = z.infer<typeof HostSecurityIpcRequestSchema>;
 
+export const IPC_HOST_JOBS = ["restart_hp_api", "restart_hp_web", "restart_hp_docker_executor", "restart_hp_host_agent", "panel_update", "os_refresh", "os_upgrade"] as const;
+export const IPC_HOST_JOURNAL_UNITS = ["hp-api", "hp-web", "hp-docker-executor", "hp-host-agent", "hp-panel-update", "hp-os-refresh", "hp-os-upgrade"] as const;
+const isoInstant = z.string().datetime();
+export const HostJobIpcRequestSchema = z.object({ job: z.enum(IPC_HOST_JOBS) }).strict();
+export const HostFirewallSetsIpcSchema = z.object({
+  openedPorts: z.array(z.number().int().min(1).max(65535)).max(FIREWALL_PORT_NAMES.length),
+  blockedV4: z.array(z.string().min(7).max(18)).max(FIREWALL_MAX_BLOCKS_PER_FAMILY),
+  blockedV6: z.array(z.string().min(2).max(43)).max(FIREWALL_MAX_BLOCKS_PER_FAMILY),
+}).strict();
+export const HostFirewallStateWireSchema = HostFirewallSetsIpcSchema.extend({
+  baseRules: z.enum(["absent", "outdated", "current", "unmanaged"]), readAt: isoInstant,
+}).strict();
+export const HostServiceStateWireSchema = z.object({
+  unit: z.enum(["hp-api", "hp-web", "hp-docker-executor", "hp-host-agent"]),
+  active: z.boolean(), activeState: z.string().regex(/^[a-z-]{1,32}$/), since: isoInstant.nullable(), restarts: z.number().int().min(0),
+}).strict();
+export const HostJournalLineWireSchema = z.object({ at: isoInstant, message: z.string().max(4096) }).strict();
+export const HostOsPackagesWireSchema = z.object({
+  packages: z.array(z.object({
+    name: z.string().regex(/^[a-z0-9][a-z0-9+.-]{0,127}(:[a-z0-9-]{1,32})?$/),
+    installedVersion: z.string().regex(/^[A-Za-z0-9.+~:-]{1,128}$/),
+    newVersion: z.string().regex(/^[A-Za-z0-9.+~:-]{1,128}$/),
+    origin: z.enum(["security", "distribution", "other"]),
+  }).strict()).max(5000),
+  rebootRequired: z.boolean(), canUpgrade: z.boolean(), listsReadAt: isoInstant.nullable(),
+}).strict();
+export const HostJobStateWireSchema = z.object({
+  job: z.enum(IPC_HOST_JOBS), state: z.enum(["never_run", "running", "succeeded", "failed"]),
+  exitStatus: z.number().int().min(0).max(255).nullable(), startedAt: isoInstant.nullable(), endedAt: isoInstant.nullable(),
+}).strict();
+
+export const PANEL_CONTAINER_STATES = ["running", "stopped", "degraded", "missing", "unknown"] as const;
+export type PanelContainerState = (typeof PANEL_CONTAINER_STATES)[number];
+
+export const PanelContainerStatusWireSchema = z.object({
+  component: z.enum(PANEL_CONTAINERS),
+  state: z.enum(PANEL_CONTAINER_STATES),
+  expected: z.boolean(),
+  startedAt: z.string().datetime({ offset: true }).nullable(),
+  restartCount: z.number().int().nonnegative(),
+  imageCurrent: z.boolean().nullable().optional(),
+}).strict();
+export const PanelContainersDataEnvelopeSchema = z.object({
+  data: z.array(PanelContainerStatusWireSchema).length(PANEL_CONTAINERS.length),
+});
+
+export const PanelContainerLogsIpcRequestSchema = z.object({
+  component: z.enum(PANEL_CONTAINERS),
+  tail: z.number().int().min(1).max(500),
+}).strict();
+
+export const TERMINAL_EXECUTOR_END_REASONS = ["closed", "shell_exited", "idle", "time_limit", "container_gone"] as const satisfies readonly TerminalEndReason[];
+const TerminalEndedWireSchema = z.object({
+  reason: z.enum(TERMINAL_EXECUTOR_END_REASONS),
+  at: z.string().datetime({ offset: true }),
+}).strict();
+export const TerminalOpenIpcRequestSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  siteId: z.string().min(1).max(128),
+  serviceInstanceId: z.string().min(1).max(128),
+  siteType: SiteTypeKeySchema.optional(),
+}).strict();
+export const TerminalOpenWireSchema = z.object({
+  containerName: z.string().min(1).max(128),
+  openedAt: z.string().datetime({ offset: true }),
+}).strict();
+export const TerminalWriteIpcRequestSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  input: z.string().min(1).refine(
+    (s) => new TextEncoder().encode(s).length <= TERMINAL_INPUT_MAX_BYTES,
+    `Input longer than ${TERMINAL_INPUT_MAX_BYTES} bytes`,
+  ),
+}).strict();
+export const TerminalReadIpcRequestSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+export const TerminalReadWireSchema = z.object({
+  output: z.string(),
+  cursor: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  dropped: z.boolean(),
+  ended: TerminalEndedWireSchema.nullable(),
+}).strict();
+export const TerminalSessionIpcRequestSchema = z.object({ sessionId: TerminalSessionIdSchema }).strict();
+export const TerminalEndedEnvelopeSchema = z.object({ data: TerminalEndedWireSchema });
+export const TerminalSessionRecordWireSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  siteId: z.string().min(1).max(128),
+  serviceInstanceId: z.string().min(1).max(128),
+  containerName: z.string().min(1).max(128),
+  openedAt: z.string().datetime({ offset: true }),
+  ended: TerminalEndedWireSchema.nullable(),
+}).strict();
+export const TerminalSessionsEnvelopeSchema = z.object({ data: z.array(TerminalSessionRecordWireSchema).max(256) });
+export const PanelContainerRestartIpcRequestSchema = z.object({ component: z.enum(PANEL_CONTAINERS) }).strict();
+export const PanelContainerRestartWireSchema = z.object({ startedAt: z.string().datetime({ offset: true }).nullable() }).strict();
+export const EmptyDataEnvelopeSchema = z.object({ data: z.null() });
+
+export const HostDiskWireSchema = z.object({
+  paths: z.array(z.enum(HOST_DISK_PATHS)).min(1).max(HOST_DISK_PATHS.length),
+  usedBytes: z.string().regex(/^\d+$/),
+  totalBytes: z.string().regex(/^\d+$/),
+}).strict();
+export type HostDiskWire = z.infer<typeof HostDiskWireSchema>;
+
 export const HostTelemetryWireSchema = z.object({
   hostId: z.string().min(1).max(128),
   cpuUsagePercent: z.number().min(0).max(100),
@@ -315,6 +452,7 @@ export const HostTelemetryWireSchema = z.object({
   kernelVersion: z.string().min(1).optional(),
   dockerEngineReachable: z.boolean().optional(),
   collectedAt: z.string().datetime({ offset: true }),
+  disks: z.array(HostDiskWireSchema).max(HOST_DISK_PATHS.length).optional(),
 });
 export type HostTelemetryWire = z.infer<typeof HostTelemetryWireSchema>;
 
@@ -354,3 +492,542 @@ export type MailRelayStatusReport = z.infer<typeof MailRelayStatusReportWireSche
 
 export const MailTestIpcRequestSchema = z.object({ to: z.string().email(), from: z.string().email() });
 export const MailTestIpcResponseSchema = MailTestResultDtoSchema;
+
+export const PANEL_MAIL_KINDS = ["password_reset"] as const;
+export const PanelMailIpcRequestSchema = z
+  .object({
+    kind: z.enum(PANEL_MAIL_KINDS),
+    to: z.string().email().max(254),
+    from: z.string().email().max(254),
+    locale: z.enum(["it", "en"]),
+    // Printable ASCII only: no space, CR or LF can reach the mail body.
+    link: z
+      .string()
+      .max(512)
+      .regex(/^https:\/\/[\x21-\x7e]+$/)
+      .refine((u) => URL.canParse(u) && new URL(u).protocol === "https:"),
+  })
+  .strict();
+export const PanelMailIpcResponseSchema = z.object({ outcome: z.enum(["queued", "failed"]) });
+export type PanelMailRequest = z.infer<typeof PanelMailIpcRequestSchema>;
+export type PanelMailResult = z.infer<typeof PanelMailIpcResponseSchema>;
+
+export const SITE_FILES_LIST_MAX = 5_000;
+export const SITE_FILES_MAX_FILE_BYTES = 2_147_483_648;
+
+export const SiteFilesServiceIdSchema = z.string().min(1).max(128);
+export const SiteFileOffsetSchema = z.number().int().min(0).max(SITE_FILES_MAX_FILE_BYTES);
+const SiteFilesBatchSchema = z.array(SiteFileItemPathSchema).min(1).max(SITE_FILE_BATCH_MAX);
+
+/** The files operations every site type has; site-files-ipc.ts adds the type's own. */
+export const SITE_FILES_CORE_REQUESTS = [
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("list"),
+      path: SiteFilePathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("stat"),
+      path: SiteFilePathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("read"),
+      path: SiteFileItemPathSchema,
+      offset: SiteFileOffsetSchema,
+      length: z.number().int().min(1).max(SITE_FILE_CHUNK_BYTES),
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("write"),
+      path: SiteFileItemPathSchema,
+      uploadId: SiteFileUploadIdSchema,
+      offset: SiteFileOffsetSchema,
+      dataBase64: SiteFileChunkBase64Schema,
+      final: z.boolean(),
+      overwrite: z.boolean(),
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("mkdir"),
+      path: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("move"),
+      from: SiteFileItemPathSchema,
+      to: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("delete"),
+      paths: SiteFilesBatchSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("archive"),
+      paths: SiteFilesBatchSchema,
+      to: SiteFileItemPathSchema,
+    })
+    .strict(),
+  z
+    .object({
+      serviceInstanceId: SiteFilesServiceIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+      op: z.literal("extract"),
+      path: SiteFileItemPathSchema,
+      to: SiteFilePathSchema,
+    })
+    .strict(),
+] as const;
+
+const SiteFilesEmptyResultSchema = z.object({}).strict();
+const SiteFilesCountResultSchema = z.object({ entries: z.number().int().nonnegative() });
+// Root stat returns { name: "" }; directory entries in list always require non-empty names.
+const SiteFilesStatEntrySchema = z
+  .object({
+    ...SiteFileEntrySchema.shape,
+    name: z.string().max(SITE_FILE_SEGMENT_MAX_BYTES),
+  })
+  .strict();
+
+export const SITE_FILES_CORE_RESULTS = {
+  list: z.object({
+    entries: z.array(SiteFileEntrySchema).max(SITE_FILES_LIST_MAX),
+    truncated: z.boolean(),
+  }),
+  stat: z.object({ entry: SiteFilesStatEntrySchema }),
+  read: z.object({
+    dataBase64: SiteFileChunkBase64Schema,
+    size: z.number().int().nonnegative(),
+    eof: z.boolean(),
+  }),
+  write: z.object({ received: z.number().int().nonnegative() }),
+  mkdir: SiteFilesEmptyResultSchema,
+  move: SiteFilesEmptyResultSchema,
+  delete: SiteFilesEmptyResultSchema,
+  archive: SiteFilesCountResultSchema,
+  extract: SiteFilesCountResultSchema,
+} as const;
+
+export const SFTP_USERNAME_PATTERN = /^[a-z][a-z0-9]{1,14}_[a-z0-9]{1,16}$/;
+/** sha512-crypt; the charset excludes ':' and newlines, so it is safe to render into /etc/shadow. */
+export const SHA512_CRYPT_HASH_PATTERN =
+  /^\$6\$(?:rounds=[0-9]{4,9}\$)?[./0-9A-Za-z]{1,16}\$[./0-9A-Za-z]{86}$/;
+/** Ids rendered into passwd lines, chroot paths and volume names. */
+const SftpIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
+export const SFTP_MAX_USERS = 2000;
+
+export const SftpAccessUserSchema = z
+  .object({
+    username: z.string().regex(SFTP_USERNAME_PATTERN),
+    passwordHash: z.string().regex(SHA512_CRYPT_HASH_PATTERN),
+    siteId: SftpIdSchema,
+    serviceInstanceId: SftpIdSchema,
+    siteType: SiteTypeKeySchema.optional(),
+  })
+  .strict();
+
+export const SftpAccessApplyIpcRequestSchema = z
+  .object({ users: z.array(SftpAccessUserSchema).max(SFTP_MAX_USERS) })
+  .strict()
+  .superRefine(({ users }, ctx) => {
+    const names = new Set<string>();
+    const volumeOf = new Map<string, string>();
+    users.forEach((u, i) => {
+      if (names.has(u.username)) {
+        ctx.addIssue({ code: "custom", path: ["users", i, "username"], message: "duplicate username" });
+      }
+      names.add(u.username);
+      const svc = volumeOf.get(u.siteId);
+      if (svc !== undefined && svc !== u.serviceInstanceId) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["users", i, "serviceInstanceId"],
+          message: "one service per site",
+        });
+      }
+      volumeOf.set(u.siteId, u.serviceInstanceId);
+    });
+  });
+
+export const SftpApplyIpcResponseSchema = z.object({ applied: z.number().int().nonnegative() });
+
+export const SftpStatusReportWireSchema = z.object({
+  running: z.boolean(),
+  port: z.number().int().min(1).max(65535),
+  hostKeyFingerprint: z.string().regex(/^SHA256:[A-Za-z0-9+/]{43}$/).nullable(),
+});
+
+export type SftpAccessUser = z.infer<typeof SftpAccessUserSchema>;
+export type SftpAccessApplyRequest = z.infer<typeof SftpAccessApplyIpcRequestSchema>;
+export type SftpApplyResult = z.infer<typeof SftpApplyIpcResponseSchema>;
+export type SftpStatusReport = z.infer<typeof SftpStatusReportWireSchema>;
+
+const SiteDatabasesSiteIdSchema = z.string().min(1).max(128);
+const SiteDatabaseNameSchema = z.string().regex(SITE_DATABASE_NAME_PATTERN);
+const SiteDatabaseCustomNameSchema = z.string().regex(SITE_DATABASE_CUSTOM_NAME_PATTERN);
+const MysqlPasswordHashSchema = z.string().regex(MYSQL_NATIVE_PASSWORD_HASH_PATTERN);
+
+export const SiteDatabasesIpcRequestSchema = z.discriminatedUnion("op", [
+  z.object({ siteId: SiteDatabasesSiteIdSchema, op: z.literal("list") }).strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("createDatabase"),
+      database: SiteDatabaseCustomNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("deleteDatabase"),
+      database: SiteDatabaseCustomNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("createUser"),
+      user: SiteDatabaseCustomNameSchema,
+      passwordHash: MysqlPasswordHashSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("setUserPassword"),
+      user: SiteDatabaseCustomNameSchema,
+      passwordHash: MysqlPasswordHashSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("deleteUser"),
+      user: SiteDatabaseCustomNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("grant"),
+      user: SiteDatabaseCustomNameSchema,
+      database: SiteDatabaseNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("revoke"),
+      user: SiteDatabaseCustomNameSchema,
+      database: SiteDatabaseNameSchema,
+    })
+    .strict(),
+  z
+    .object({
+      siteId: SiteDatabasesSiteIdSchema,
+      op: z.literal("phpMyAdminSignOn"),
+      passwordHash: MysqlPasswordHashSchema,
+    })
+    .strict(),
+  z.object({ siteId: SiteDatabasesSiteIdSchema, op: z.literal("dropAll") }).strict(),
+]);
+export type SiteDatabasesIpcRequest = z.infer<typeof SiteDatabasesIpcRequestSchema>;
+export type SiteDatabasesOp = SiteDatabasesIpcRequest["op"];
+
+export const SiteDatabaseEntrySchema = z
+  .object({ name: SiteDatabaseNameSchema, primary: z.boolean(), sizeBytes: z.number().int().min(0) })
+  .strict();
+export const SiteDatabaseUserEntrySchema = z
+  .object({
+    name: SiteDatabaseNameSchema,
+    primary: z.boolean(),
+    databases: z.array(SiteDatabaseNameSchema),
+  })
+  .strict();
+export type SiteDatabaseEntry = z.infer<typeof SiteDatabaseEntrySchema>;
+export type SiteDatabaseUserEntry = z.infer<typeof SiteDatabaseUserEntrySchema>;
+
+const SiteDatabasesEmptyResultSchema = z.object({}).strict();
+export const SITE_DATABASES_RESULT_SCHEMAS = {
+  list: z
+    .object({
+      databases: z.array(SiteDatabaseEntrySchema),
+      users: z.array(SiteDatabaseUserEntrySchema),
+    })
+    .strict(),
+  createDatabase: SiteDatabasesEmptyResultSchema,
+  deleteDatabase: SiteDatabasesEmptyResultSchema,
+  createUser: SiteDatabasesEmptyResultSchema,
+  setUserPassword: SiteDatabasesEmptyResultSchema,
+  deleteUser: SiteDatabasesEmptyResultSchema,
+  grant: SiteDatabasesEmptyResultSchema,
+  revoke: SiteDatabasesEmptyResultSchema,
+  phpMyAdminSignOn: z.object({ username: z.string().regex(SITE_DATABASE_SIGNON_USER_PATTERN) }).strict(),
+  dropAll: SiteDatabasesEmptyResultSchema,
+} as const satisfies { [K in SiteDatabasesOp]: z.ZodType };
+export type SiteDatabasesResultByOp = {
+  [K in SiteDatabasesOp]: z.infer<(typeof SITE_DATABASES_RESULT_SCHEMAS)[K]>;
+};
+
+export const BACKUP_FAILURE_CLASSES = [
+  "unreachable",
+  "tls_failed",
+  "wrong_region",
+  "auth_failed",
+  "bucket_missing",
+  "write_denied",
+  "wrong_key",
+  "key_file_missing",
+  "tool_unavailable",
+  "no_space",
+  "database_dump_failed",
+  "files_unreadable",
+  "repository_locked",
+  "timeout",
+  "interrupted",
+  "other",
+  "restore_prepare_failed",
+  "switch_undone",
+  "undo_incomplete",
+  "definer_missing",
+  "panel_dump_missing",
+] as const;
+
+export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
+
+export const BACKUP_JOB_STATES = ["running", "succeeded", "failed", "unknown"] as const;
+export type BackupJobState = (typeof BACKUP_JOB_STATES)[number];
+
+export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-forget)?$/;
+const BackupOpJobIdSchema = z.string().regex(/^op_[0-9a-f]{32}$/);
+const BackupSnapshotIdSchema = z.string().regex(/^[0-9a-f]{64}$/);
+const BackupPathIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
+// Exclude backtick because AWS credentials INI wraps values in backticks to preserve '#' and ';'.
+const BackupKeySchema = z.string().regex(/^(?!.*`)[\x21-\x7e]{1,256}$/);
+const LOOPBACK_HOST =
+  /^(?:(?:.+\.)?localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[::1?\]|\[::ffff:(?:7f[0-9a-f]{2}:[0-9a-f]{1,4}|0:0)\])$/i;
+
+export const BackupTargetSchema = z
+  .object({
+    endpoint: z
+      .string()
+      .max(255)
+      .regex(
+        /^https?:\/\/(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/,
+      )
+      .refine((v) => {
+        try {
+          const u = new URL(v);
+          const port = u.port === "" ? 1 : Number(u.port);
+          return !LOOPBACK_HOST.test(u.hostname) && port >= 1 && port <= 65535;
+        } catch {
+          // Node WHATWG URL rejects out-of-range ports and invalid IPv6 literals by throwing.
+          return false;
+        }
+      }),
+    region: z.string().regex(/^[a-z0-9-]{1,64}$/),
+    bucket: z.string().regex(/^(?!.*\.\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/),
+    prefix: z
+      .string()
+      .max(255)
+      .regex(/^(?:[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}(?:\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}){0,7})?$/),
+    accessKeyId: BackupKeySchema,
+    secretAccessKey: BackupKeySchema,
+  })
+  .strict();
+
+export type BackupTarget = z.infer<typeof BackupTargetSchema>;
+
+export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      action: z.literal("test"),
+      target: BackupTargetSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("start"),
+      jobId: z.string().regex(/^op_[0-9a-f]{32}$/),
+      siteId: BackupPathIdSchema,
+      serviceInstanceId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      siteType: SiteTypeKeySchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("status"),
+      jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("forget"),
+      jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+      siteId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      snapshotIds: z.array(z.string().regex(/^[0-9a-f]{64}$/)).min(1).max(100),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("restore"),
+      jobId: BackupOpJobIdSchema,
+      siteId: BackupPathIdSchema,
+      serviceInstanceId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      snapshotId: BackupSnapshotIdSchema,
+      createVolume: z.literal(true).optional(),
+      siteType: SiteTypeKeySchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("archive"),
+      jobId: BackupOpJobIdSchema,
+      siteId: BackupPathIdSchema,
+      target: BackupTargetSchema,
+      snapshotId: BackupSnapshotIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("readArchive"),
+      jobId: BackupOpJobIdSchema,
+      offset: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+      length: z.number().int().min(1).max(SITE_FILE_CHUNK_BYTES),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("discardArchive"),
+      jobId: BackupOpJobIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("settle"),
+      jobId: BackupOpJobIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("panelStart"),
+      jobId: BackupOpJobIdSchema,
+      target: BackupTargetSchema,
+      masterKey: z.string().regex(/^[0-9a-f]{64}$/),
+      retentionDays: z.number().int().min(1).max(365),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("siteState"),
+      siteId: BackupPathIdSchema,
+      serviceInstanceId: BackupPathIdSchema,
+      siteType: SiteTypeKeySchema.optional(),
+    })
+    .strict(),
+]);
+
+const BackupCountSchema = z.number().int().nonnegative();
+
+export const BackupTestResultSchema = z
+  .object({
+    outcome: z.enum(["ok", "failed"]),
+    problem: z.enum(BACKUP_FAILURE_CLASSES).nullable(),
+  })
+  .strict();
+
+export type BackupTestResult = z.infer<typeof BackupTestResultSchema>;
+
+export const BackupJobStatusSchema = z
+  .object({
+    jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+    state: z.enum(BACKUP_JOB_STATES),
+    failure: z.enum(BACKUP_FAILURE_CLASSES).nullable(),
+    snapshot: z
+      .object({
+        snapshotId: z.string().regex(/^[0-9a-f]{64}$/),
+        bytesAdded: BackupCountSchema,
+        totalBytes: BackupCountSchema,
+        fileCount: BackupCountSchema,
+        durationMs: BackupCountSchema,
+      })
+      .strict()
+      .nullable(),
+    archive: z
+      .object({
+        sizeBytes: BackupCountSchema,
+        readyAt: z.string().datetime(),
+        expiresAt: z.string().datetime(),
+      })
+      .strict()
+      .nullable()
+      .optional(),
+  })
+  .strict();
+
+export type BackupJobStatus = z.infer<typeof BackupJobStatusSchema>;
+
+export const BackupArchiveChunkSchema = z
+  .object({
+    dataBase64: SiteFileChunkBase64Schema,
+    size: BackupCountSchema,
+    eof: z.boolean(),
+  })
+  .strict();
+
+export type BackupArchiveChunk = z.infer<typeof BackupArchiveChunkSchema>;
+
+export const BackupSiteStateSchema = z
+  .object({ filesVolume: z.boolean(), container: z.boolean() })
+  .strict();
+export type BackupSiteState = z.infer<typeof BackupSiteStateSchema>;
+
+export type BackupsIpcRequest = z.infer<typeof BackupsIpcRequestSchema>;
+export type BackupsAction = BackupsIpcRequest["action"];
+
+export const BACKUPS_RESULT_SCHEMAS = {
+  test: BackupTestResultSchema,
+  start: BackupJobStatusSchema,
+  status: BackupJobStatusSchema,
+  forget: BackupJobStatusSchema,
+  restore: BackupJobStatusSchema,
+  archive: BackupJobStatusSchema,
+  readArchive: BackupArchiveChunkSchema,
+  discardArchive: z.object({ discarded: z.boolean() }).strict(),
+  settle: BackupJobStatusSchema,
+  panelStart: BackupJobStatusSchema,
+  siteState: BackupSiteStateSchema,
+} as const satisfies { [K in BackupsAction]: z.ZodType };
+
+export type BackupsResultByAction = {
+  [K in BackupsAction]: z.infer<(typeof BACKUPS_RESULT_SCHEMAS)[K]>;
+};

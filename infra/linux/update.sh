@@ -3,6 +3,7 @@
 # Hosting Panel — updater with health check and automatic rollback.
 # Installed as /usr/local/sbin/hp-update (a wrapper that runs the current release's copy).
 # Never touches docker.service, containers, the ingress proxy or nftables.
+# The new release's bootstrap (step 5) installs the OS packages that release needs and the server lacks.
 # ==============================================================================
 
 usage() {
@@ -133,6 +134,22 @@ main() {
     plan "would extract into ${root}/releases/${version}"
     step 5 "Bootstrap (units, wrappers, tmpfiles) and daemon-reload"
     plan "would run ${root}/releases/${version}/infra/linux/bootstrap-dedicated.sh ${BOOTSTRAP_ARGS[*]}; systemctl daemon-reload"
+    if [[ -n "${archive}" ]]; then
+      # The archive's bootstrap runs here, so only a verified private copy is read, as in a live update.
+      DOWNLOAD_DIR="$(mktemp -d)" || die 1 "Cannot create a private download directory."
+      trap on_exit EXIT
+      archive="$(stage_release_archive "${archive}" "${DOWNLOAD_DIR}")" || die 1 "Cannot copy the archive into ${DOWNLOAD_DIR}."
+      verify_release_archive "${archive}" || die 4 "Release archive checksum verification failed: ${archive}"
+      archive_has_version "${archive}" "${version}" ||
+        die 2 "The archive does not contain hosting-panel-${version}/VERSION = ${version}; refusing a mislabelled archive."
+      tar -xzf "${archive}" -C "${DOWNLOAD_DIR}" "hosting-panel-${version}/infra" ||
+        die 1 "Cannot read hosting-panel-${version}/infra from ${archive}."
+      # A release built before the image list has no IMAGES; its bootstrap does not read it either.
+      tar -xzf "${archive}" -C "${DOWNLOAD_DIR}" "hosting-panel-${version}/IMAGES" 2>/dev/null || true
+      bash "${DOWNLOAD_DIR}/hosting-panel-${version}/infra/linux/bootstrap-dedicated.sh" --dry-run "${BOOTSTRAP_ARGS[@]}" | sed 's/^/    /'
+    else
+      plan "pass --archive to print the new release's packages, users, keys, directories, units, images and ports"
+    fi
     step 6 "Switch current"
     plan "would point ${root}/current at releases/${version}"
     step 7 "Restart services"

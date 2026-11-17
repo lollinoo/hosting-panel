@@ -8,9 +8,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { errorMessage } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 
-export function SiteLogs({ orgId, siteId }: { orgId: string; siteId: string }) {
+/** Log viewer of a site (customer) or of any source (admin texts); `url` is the BFF address it loads; a journal has one panel. */
+export function SiteLogs({ url, admin = false, journal = false }: { url: string; admin?: boolean; journal?: boolean }) {
   const m = useMessages();
-  const t = m.site.logs;
+  const t = admin ? m.admin.logs.viewer : m.site.logs;
   const locale = useLocale();
   const [lines, setLines] = useState<SiteLogLineDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -20,16 +21,23 @@ export function SiteLogs({ orgId, siteId }: { orgId: string; siteId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/bff/orgs/${orgId}/managed-sites/${siteId}/logs?tail=200`, { cache: "no-store" });
+      const res = await fetch(url, { cache: "no-store" });
       const body = await res.json().catch(() => null);
       if (res.ok && Array.isArray(body?.data)) setLines(body.data);
-      else setError(res.status === 503 ? t.unavailable : errorMessage(m, body?.error?.code ?? ""));
+      else
+        setError(
+          res.status === 503
+            ? journal ? m.admin.logs.viewer.journalUnavailable : t.unavailable
+            : admin && res.status === 404
+              ? m.admin.logs.viewer.notFound
+              : errorMessage(m, body?.error?.code ?? ""),
+        );
     } catch {
       setError(m.errors.generic);
     } finally {
       setLoading(false);
     }
-  }, [orgId, siteId, m, t.unavailable]);
+  }, [url, admin, journal, m, t.unavailable]);
 
   useEffect(() => {
     void load();
@@ -64,6 +72,9 @@ export function SiteLogs({ orgId, siteId }: { orgId: string; siteId: string }) {
 
   return (
     <div className="space-y-4">
+      <p role="status" className="sr-only">
+        {loading ? t.loading : error ? "" : t.loaded}
+      </p>
       <div className="flex justify-end">
         <Button type="button" variant="outline" size="sm" onClick={load} disabled={loading}>
           {loading ? t.loading : t.refresh}
@@ -74,7 +85,8 @@ export function SiteLogs({ orgId, siteId }: { orgId: string; siteId: string }) {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      {!error && (
+      {!error && journal && panel("stdout", m.admin.logs.viewer.journal)}
+      {!error && !journal && (
         <div className="grid gap-4 lg:grid-cols-2">
           {panel("stdout", t.visits)}
           {panel("stderr", t.errors)}

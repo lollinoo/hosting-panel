@@ -3,19 +3,41 @@ import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, unlink } from "
 import http from "node:http";
 import path from "node:path";
 import {
+  DEFAULT_PHPMYADMIN_PORT,
   DEFAULT_PHP_VERSION,
+  DEFAULT_SFTP_PORT,
+  PHPMYADMIN_IMAGE,
+  RESTIC_IMAGE,
   SECRET_KEY_PATTERN,
+  SFTP_IMAGE,
   SHARED_MARIADB_IMAGE,
+  SftpAccessApplyIpcRequestSchema,
   findPlaintextSecretKeys,
   resolveWordpressCliImage,
   resolveWordpressImage,
   MAIL_RELAY_ALIAS,
   MAIL_RELAY_CONTAINER_NAME,
   MAIL_RELAY_IMAGE,
+  PANEL_CONTAINER_STATES,
+  PANEL_CONTAINERS,
+  PINNED_PANEL_CONTAINERS,
+  PanelContainerLogsIpcRequestSchema,
+  PanelContainerRestartIpcRequestSchema,
+  type PanelContainerState,
+  type BackupsIpcRequest,
+  type BackupsResultByAction,
+  type BackupTarget,
   type MailFailureDto,
   type MailRelayApplyRequest,
   type MailTestResult,
+  type PanelContainer,
+  type PanelMailRequest,
+  type PanelMailResult,
   type PhpVersion,
+  type SftpAccessUser,
+  type SiteTypeKey,
+  LEGACY_SITE_TYPE,
+  SITE_TYPE_KEYS,
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
   type ObservedServiceStateWire,
@@ -26,11 +48,49 @@ import {
   type DockerExecutionResult,
   type DockerExecutorPort,
   type CertificateStatusReport,
+  type PanelContainerStatus,
+  type PinnedPanelContainer,
+  type ServiceLogLine,
+  type SftpAccessApplyRequest,
+  type SftpApplyResult,
+  type SftpStatusReport,
+  type SiteDatabasesRequest,
+  type SiteDatabasesResult,
   type SiteHostRoute,
+  type SiteFilesRequest,
+  type SiteFilesResult,
   type SiteJobRequest,
   type SiteJobResult,
   type SiteRoutesRequest,
+  type TerminalEnded,
+  type TerminalOpenRequest,
+  type TerminalOpenResult,
+  type TerminalReadResult,
+  type TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
+import {
+  DEFAULT_PHPMYADMIN_CONFIG_DIR,
+  PHPMYADMIN_CONTAINER_NAME,
+  PHPMYADMIN_NETWORK_NAME,
+  ensurePhpMyAdminContainer,
+  type PhpMyAdminDeps,
+} from "./phpmyadmin-platform.js";
+import type { DockerExecTarget } from "./docker-exec.js";
+import { PANEL_RESTART_STOP_SECONDS, restartContainerByName } from "./panel-restart.js";
+import { reapTerminalShells, startDockerTerminal } from "./terminal-docker.js";
+import { type TerminalLimits, TerminalSessions } from "./terminal-sessions.js";
+import { SiteDatabasesRunner, mariadbRootExec } from "./site-databases.js";
+import { SITE_FILES_ROLE, SiteFilesHelpers } from "./site-files-helper.js";
+import { resolveExecutorSiteType, type ExecutorSiteType } from "./site-types/index.js";
+import {
+  BackupRunner,
+  DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_NETWORK_NAME,
+  DEFAULT_BACKUP_WORK_DIR,
+  DEFAULT_PANEL_DUMP_DIR,
+  type PanelFetchResult,
+} from "./backup-runner.js";
+import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
 import {
   DEFAULT_MAIL_RELAY_SECRET_DIR,
@@ -41,16 +101,24 @@ import {
   buildMailRelaySaslLine,
 } from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
-import { demuxDockerLogStream } from "./docker-logs.js";
+import {
+  LOG_READ_MAX_BYTES,
+  demuxDockerLogStream,
+  maskPhpMyAdminQuery,
+  readCappedBody,
+  readJobStdout,
+} from "./docker-logs.js";
 import {
   parsePostfixDeliveries,
   summarizeMailDeliveries,
   type MailDelivery,
 } from "./mail-relay-status.js";
 import { submitLocalMail } from "./smtp-submit.js";
+import { deliverPanelMail } from "./panel-mail.js";
 import type { ObservedServiceState } from "@hosting-panel/hosting-domain";
 import {
   DEFAULT_INGRESS_HTTP_PORT,
+  DEFAULT_INGRESS_HTTPS_PORT,
   DEFAULT_INGRESS_ROOT_DIR,
   DEFAULT_TRAEFIK_IMAGE,
   ExecutorCodedError,
@@ -83,12 +151,33 @@ import {
   buildSharedDatabaseContainerPayload,
 } from "./shared-database.js";
 import {
-  DEFAULT_SITE_JOB_TIMEOUT_MS,
   SITE_JOB_ROLE,
+  SITE_JOB_SPECS,
+  WORDPRESS_RESULT_MAX_BYTES,
   assertValidSiteJobRequest,
   buildSiteJobContainerPayload,
   formatSiteJobOutputTail,
+  parseWordpressJobResult,
+  siteJobTimeoutMs,
 } from "./site-jobs.js";
+import {
+  DEFAULT_SFTP_STATE_DIR,
+  SFTP_CONFIG_SHA256_LABEL,
+  SFTP_CONTAINER_NAME,
+  SFTP_NETWORK_NAME,
+  SFTP_VOLUME_PREFIX,
+  assertSftpStateDir,
+  buildSftpContainerPayload,
+  commitSftpStatePlan,
+  hasSftpHostKey,
+  prepareSftpStatePlan,
+  readSftpHostKeyFingerprint,
+  readSftpState,
+  writeSftpState,
+  type SftpContainerCreatePayload,
+  type SftpContainerSiteMount,
+  type SftpStatePlan,
+} from "./sftp-platform.js";
 
 export function plainHostRoute(hostname: string): SiteHostRoute {
   return { hostname, tls: false, httpsRedirect: false, redirectTo: null };
@@ -143,9 +232,11 @@ export interface DockerContainerInspectPayload {
     readonly Restarting?: boolean;
     readonly OOMKilled?: boolean;
     readonly Dead?: boolean;
+    readonly StartedAt?: string;
     readonly ExitCode?: number;
     readonly Error?: string;
   };
+  readonly ExecIDs?: readonly string[] | null;
   readonly Config?: {
     readonly Image?: string;
     readonly Cmd?: readonly string[] | null;
@@ -179,6 +270,9 @@ export interface DockerContainerInspectPayload {
   };
 }
 
+/** json-file rotation of every long-lived panel container (R184 2.1). Not part of any config hash. */
+const ROTATED_LOG_CONFIG = { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } } as const;
+
 export interface HardenedContainerCreatePayload {
   readonly Image: string;
   readonly Env: readonly string[];
@@ -196,6 +290,7 @@ export interface HardenedContainerCreatePayload {
     readonly RestartPolicy: { readonly Name: "unless-stopped" };
     readonly NetworkMode: string;
     readonly Binds: readonly string[];
+    readonly LogConfig: typeof ROTATED_LOG_CONFIG;
     readonly PortBindings?: Readonly<
       Record<string, readonly { readonly HostIp: string; readonly HostPort: string }[]>
     >;
@@ -264,6 +359,22 @@ export function isServiceHttpExposed(spec: ApprovedServiceSpec): boolean {
   );
 }
 
+/** Largest limits a service may ask for, whatever the API sent (R207 exec.1). */
+export const MAX_SERVICE_MEMORY_BYTES = 64 * 1024 ** 3;
+export const MAX_SERVICE_CPU_MILLI = 64_000;
+
+/** Host ports the server itself uses: SSH, the proxy, SFTP, web, API, PostgreSQL, phpMyAdmin. */
+const RESERVED_HOST_PORTS: ReadonlySet<number> = new Set([
+  22,
+  DEFAULT_INGRESS_HTTP_PORT,
+  DEFAULT_INGRESS_HTTPS_PORT,
+  DEFAULT_SFTP_PORT,
+  3000,
+  4000,
+  5432,
+  DEFAULT_PHPMYADMIN_PORT,
+]);
+
 export function validateExecutorServiceSpec(
   input: ApprovedServiceSpec,
   reservedHosts: readonly string[] = [],
@@ -328,6 +439,14 @@ export function validateExecutorServiceSpec(
     for (const domain of input.domains) {
       assertSafeDomain(domain);
     }
+  }
+
+  const limits = input.resourceLimits;
+  if (limits && (Number(limits.memoryBytes) > MAX_SERVICE_MEMORY_BYTES || limits.cpuMilli > MAX_SERVICE_CPU_MILLI)) {
+    throw new ExecutorCodedError("Resource limits exceed the server ceiling", "VALIDATION_ERROR");
+  }
+  if (input.portBindings.some((pb) => pb.hostPort !== undefined && RESERVED_HOST_PORTS.has(pb.hostPort))) {
+    throw new ExecutorCodedError("Published host port is reserved by the server", "VALIDATION_ERROR");
   }
 
   // Refused here, before any Docker call, so a bad plan never leaves a started site without a route.
@@ -642,6 +761,7 @@ export function buildHardenedContainerCreatePayload(
       RestartPolicy: { Name: "unless-stopped" },
       NetworkMode: siteNetworkName,
       Binds: binds,
+      LogConfig: ROTATED_LOG_CONFIG,
       ...(Object.keys(portBindingsMap).length > 0 ? { PortBindings: portBindingsMap } : {}),
     },
     NetworkingConfig: {
@@ -814,12 +934,20 @@ interface DockerHttpResponse {
 }
 
 const PULL_TIMEOUT_MS = 240_000;
+/** Longest wait for a concurrent removal of the same container to finish. */
+export const REMOVAL_IN_PROGRESS_WAIT_MS = 5_000;
+/** Pause between checks while that removal finishes. */
+export const REMOVAL_IN_PROGRESS_POLL_MS = 100;
 
 class DockerSocketHttpClient {
-  private readonly socketPath: string;
+  public readonly socketPath: string;
   private readonly apiPrefix: string;
   private readonly timeoutMs: number;
   private useUnversionedFallback = false;
+
+  public get effectiveApiPrefix(): string {
+    return this.useUnversionedFallback ? "" : this.apiPrefix;
+  }
 
   public constructor(options: {
     readonly socketPath: string;
@@ -835,12 +963,13 @@ class DockerSocketHttpClient {
     method: string,
     endpointPath: string,
     jsonBody?: unknown,
-    options?: { readonly timeoutMs?: number; readonly apiPrefix?: string },
+    options?: { readonly timeoutMs?: number; readonly apiPrefix?: string; readonly maxBodyBytes?: number },
   ): Promise<DockerHttpResponse> {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    const maxBodyBytes = options?.maxBodyBytes ?? Infinity;
     if (options?.apiPrefix !== undefined) {
       // A pinned version must fail on an older engine, never fall back and drop the new fields.
-      return this.rawRequest(method, `${options.apiPrefix}${endpointPath}`, jsonBody, timeoutMs);
+      return this.rawRequest(method, `${options.apiPrefix}${endpointPath}`, jsonBody, timeoutMs, maxBodyBytes);
     }
     const primaryPrefix = this.useUnversionedFallback ? "" : this.apiPrefix;
     const response = await this.rawRequest(
@@ -848,6 +977,7 @@ class DockerSocketHttpClient {
       `${primaryPrefix}${endpointPath}`,
       jsonBody,
       timeoutMs,
+      maxBodyBytes,
     );
 
     if (
@@ -863,7 +993,7 @@ class DockerSocketHttpClient {
         text.includes("too new") ||
         text.includes("too old")
       ) {
-        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody, timeoutMs);
+        const fallbackResponse = await this.rawRequest(method, endpointPath, jsonBody, timeoutMs, maxBodyBytes);
         if (fallbackResponse.statusCode < 500 && fallbackResponse.statusCode !== 404) {
           this.useUnversionedFallback = true;
           return fallbackResponse;
@@ -879,6 +1009,7 @@ class DockerSocketHttpClient {
     fullPath: string,
     jsonBody: unknown,
     timeoutMs: number,
+    maxBodyBytes: number,
   ): Promise<DockerHttpResponse> {
     const serializedBody =
       jsonBody !== undefined ? Buffer.from(JSON.stringify(jsonBody), "utf8") : undefined;
@@ -902,24 +1033,16 @@ class DockerSocketHttpClient {
           timeout: timeoutMs,
         },
         (res) => {
-          const chunks: Buffer[] = [];
-          res.on("data", (chunk: Buffer | string) => {
-            chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-          });
-          res.on("end", () => {
-            resolve({
-              statusCode: res.statusCode ?? 500,
-              body: Buffer.concat(chunks),
-            });
-          });
-          res.on("error", () => {
-            reject(
-              new ExecutorCodedError(
-                "Failed while reading response from Docker Engine",
-                "DOCKER_ENGINE_UNAVAILABLE",
+          readCappedBody(res, maxBodyBytes).then(
+            (body) => resolve({ statusCode: res.statusCode ?? 500, body }),
+            () =>
+              reject(
+                new ExecutorCodedError(
+                  "Failed while reading response from Docker Engine",
+                  "DOCKER_ENGINE_UNAVAILABLE",
+                ),
               ),
-            );
-          });
+          );
         },
       );
 
@@ -979,6 +1102,28 @@ export interface DockerEngineSocketAdapterOptions {
   readonly mailTestWaitMs?: number;
   /** The relay's submission port on its bridge address (tests only). */
   readonly mailSubmitPort?: number;
+  readonly siteFilesDir?: string;
+  readonly filesHelperIdleMs?: number;
+  readonly sftpStateDir?: string;
+  readonly sftpPort?: number;
+  readonly sftpHostIp?: string;
+  readonly sftpContainerName?: string;
+  readonly sftpNetworkName?: string;
+  readonly sftpVolumePrefix?: string;
+  readonly sharedDbContainerName?: string;
+  readonly phpMyAdminPort?: number;
+  readonly phpMyAdminContainerName?: string;
+  readonly phpMyAdminNetworkName?: string;
+  readonly phpMyAdminConfigDir?: string;
+  readonly backupKeyFile?: string;
+  readonly backupWorkDir?: string;
+  readonly panelDumpDir?: string;
+  readonly backupNetworkName?: string;
+  readonly sharedDbNetworkName?: string;
+  /** Shorter terminal limits (tests and the real-Docker script). */
+  readonly terminalLimits?: Partial<TerminalLimits>;
+  /** Turns a request's site-type key into its definition (default: the executor's registry). */
+  readonly resolveSiteType?: (key: SiteTypeKey) => ExecutorSiteType;
 }
 
 type SharedDatabaseEnsureResult = {
@@ -1016,7 +1161,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly sharedDbAdminSubnet: string;
   private readonly executorUid: number | undefined;
   private sharedDbEnsureInFlight: Promise<SharedDatabaseEnsureResult> | null = null;
-  private readonly jobTimeoutMs: number;
+  private readonly jobTimeoutMs: number | undefined;
   /** `siteId:kind` of the site jobs running now. */
   private readonly runningSiteJobs = new Set<string>();
   private readonly mailRelaySecretDir: string;
@@ -1024,10 +1169,38 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly mailTestPollMs: number;
   private readonly mailTestWaitMs: number;
   private readonly mailSubmitPort: number;
+  private readonly siteFilesHelpers: SiteFilesHelpers;
+  private readonly databases: SiteDatabasesRunner;
+  private readonly sharedDbContainerName: string;
+  private readonly phpMyAdminPort: number;
+  private readonly phpMyAdminContainerName: string;
+  private readonly phpMyAdminNetworkName: string;
+  private readonly phpMyAdminConfigDir: string;
+  private phpMyAdminEnsureInFlight: { ifPresent: boolean; promise: Promise<void> } | null = null;
   /** Applies run strictly one after the other; two different configs are never merged. */
   private mailRelayQueue: Promise<unknown> = Promise.resolve();
+  private readonly sftpStateDir: string;
+  private readonly sftpPort: number;
+  private readonly sftpHostIp: string;
+  private readonly sftpContainerName: string;
+  private readonly sftpNetworkName: string;
+  private readonly sftpVolumePrefix: string;
+  private sftpQueue: Promise<unknown> = Promise.resolve();
+  /** Applies queued or running on the two queues above; a restart of that container waits for none. */
+  private readonly panelQueued = { mail_relay: 0, sftp: 0 };
+  /** Running panel restarts (never rejecting); an ensure of that component waits for its restart. */
+  private readonly panelRestarts = new Map<PanelContainer, Promise<void>>();
+  private readonly backupKeyFile: string;
+  private readonly backupNetworkName: string;
+  private readonly sharedDbNetworkName: string;
+  private readonly backupRunner: BackupRunner;
+  private readonly execTarget: DockerExecTarget;
+  private readonly terminals: TerminalSessions;
+  private readonly resolveSiteType: (key: SiteTypeKey) => ExecutorSiteType;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
+    this.terminals = new TerminalSessions(options?.terminalLimits);
+    this.resolveSiteType = options?.resolveSiteType ?? resolveExecutorSiteType;
     this.dockerClient = new DockerSocketHttpClient({
       socketPath: options?.dockerSocketPath ?? DEFAULT_DOCKER_SOCKET_PATH,
       apiPrefix: options?.dockerApiPrefix ?? DEFAULT_DOCKER_API_PREFIX,
@@ -1044,13 +1217,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.ingressHttpsPort = options?.ingressHttpsPort;
     this.panel = options?.panel ?? null;
     this.pullMissingImages = options?.pullMissingImages ?? true;
+    this.sharedDbContainerName = options?.sharedDbContainerName ?? SHARED_DB_CONTAINER_NAME;
+    assertSafeIdentifier(this.sharedDbContainerName, "sharedDbContainerName");
     this.sharedDbDataDir = path.resolve(options?.sharedDbDataDir ?? DEFAULT_SHARED_DB_DATA_DIR);
     this.sharedDbRootKeyFile = path.resolve(
       options?.sharedDbRootKeyFile ?? DEFAULT_SHARED_DB_ROOT_KEY_FILE,
     );
     this.sharedDbAdminSubnet = options?.sharedDbAdminSubnet ?? DEFAULT_SHARED_DB_ADMIN_SUBNET;
     this.executorUid = options?.executorUid ?? process.getuid?.();
-    this.jobTimeoutMs = options?.jobTimeoutMs ?? DEFAULT_SITE_JOB_TIMEOUT_MS;
+    this.jobTimeoutMs = options?.jobTimeoutMs;
     this.mailRelaySecretDir = path.resolve(
       options?.mailRelaySecretDir ?? DEFAULT_MAIL_RELAY_SECRET_DIR,
     );
@@ -1058,6 +1233,84 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.mailTestPollMs = options?.mailTestPollMs ?? 1_000;
     this.mailTestWaitMs = options?.mailTestWaitMs ?? 20_000;
     this.mailSubmitPort = options?.mailSubmitPort ?? 587;
+    this.phpMyAdminPort = options?.phpMyAdminPort ?? DEFAULT_PHPMYADMIN_PORT;
+    if (!Number.isInteger(this.phpMyAdminPort) || this.phpMyAdminPort < 1 || this.phpMyAdminPort > 65535) {
+      throw new ExecutorCodedError(
+        "phpMyAdminPort must be an integer between 1 and 65535",
+        "VALIDATION_ERROR",
+      );
+    }
+    this.phpMyAdminContainerName = options?.phpMyAdminContainerName ?? PHPMYADMIN_CONTAINER_NAME;
+    this.phpMyAdminNetworkName = options?.phpMyAdminNetworkName ?? PHPMYADMIN_NETWORK_NAME;
+    this.phpMyAdminConfigDir = path.resolve(
+      options?.phpMyAdminConfigDir ?? DEFAULT_PHPMYADMIN_CONFIG_DIR,
+    );
+    assertSafeIdentifier(this.phpMyAdminContainerName, "phpMyAdminContainerName");
+    assertSafeIdentifier(this.phpMyAdminNetworkName, "phpMyAdminNetworkName");
+    const dockerClient = this.dockerClient;
+    const execTarget = (this.execTarget = {
+      request: (m: string, p: string, b?: unknown, o?: { readonly timeoutMs?: number }) =>
+        this.dockerClient.request(m, p, b, o),
+      socketPath: this.dockerClient.socketPath,
+      get apiPrefix() {
+        return dockerClient.effectiveApiPrefix;
+      },
+    });
+    this.siteFilesHelpers = new SiteFilesHelpers({
+      target: execTarget,
+      programDir: path.resolve(options?.siteFilesDir ?? DEFAULT_SITE_FILES_DIR),
+      ...(options?.filesHelperIdleMs !== undefined ? { idleMs: options.filesHelperIdleMs } : {}),
+      resolveSiteType: this.resolveSiteType,
+    });
+    this.databases = new SiteDatabasesRunner({
+      runSql: mariadbRootExec(execTarget, this.sharedDbContainerName),
+      ensurePhpMyAdmin: () => this.ensurePhpMyAdmin(),
+    });
+    this.sftpStateDir = path.resolve(options?.sftpStateDir ?? DEFAULT_SFTP_STATE_DIR);
+    this.sftpPort = options?.sftpPort ?? DEFAULT_SFTP_PORT;
+    if (!Number.isInteger(this.sftpPort) || this.sftpPort < 1 || this.sftpPort > 65535) {
+      throw new ExecutorCodedError(
+        "sftpPort must be an integer between 1 and 65535",
+        "VALIDATION_ERROR",
+      );
+    }
+    this.sftpHostIp = options?.sftpHostIp ?? "0.0.0.0";
+    this.sftpContainerName = options?.sftpContainerName ?? SFTP_CONTAINER_NAME;
+    this.sftpNetworkName = options?.sftpNetworkName ?? SFTP_NETWORK_NAME;
+    this.sftpVolumePrefix = options?.sftpVolumePrefix ?? SFTP_VOLUME_PREFIX;
+    assertSafeIdentifier(this.sftpContainerName, "sftpContainerName");
+    assertSafeIdentifier(this.sftpNetworkName, "sftpNetworkName");
+    assertSafeIdentifier(this.sftpVolumePrefix, "sftpVolumePrefix");
+    this.backupKeyFile = path.resolve(options?.backupKeyFile ?? DEFAULT_BACKUP_KEY_FILE);
+    this.backupNetworkName = options?.backupNetworkName ?? DEFAULT_BACKUP_NETWORK_NAME;
+    this.sharedDbNetworkName = options?.sharedDbNetworkName ?? SHARED_DB_NETWORK_NAME;
+    assertSafeIdentifier(this.backupNetworkName, "backupNetworkName");
+    assertSafeIdentifier(this.sharedDbNetworkName, "sharedDbNetworkName");
+    this.backupRunner = new BackupRunner({
+      resolveSiteType: this.resolveSiteType,
+      request: (method, endpointPath, body, opts) =>
+        this.dockerClient.request(method, endpointPath, body, opts),
+      ensureImage: (image) => this.ensureImageAvailable(image),
+      ensureBackupNetwork: () =>
+        this.ensureNetwork(this.backupNetworkName, {
+          internal: false,
+          labels: {
+            [MANAGED_DOCKER_LABELS.managed]: "true",
+            "io.hostingpanel.network_role": "backup",
+          },
+        }),
+      listSiteDatabases: async (siteId) =>
+        (await this.databases.run({ siteId, op: "list" })).databases,
+      secretsRootDir: this.secretsRootDir,
+      backupKeyFile: this.backupKeyFile,
+      sharedDbRootKeyFile: this.sharedDbRootKeyFile,
+      sharedDbDataDir: this.sharedDbDataDir,
+      sharedDbNetworkName: this.sharedDbNetworkName,
+      backupNetworkName: this.backupNetworkName,
+      executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
+      backupWorkDir: path.resolve(options?.backupWorkDir ?? DEFAULT_BACKUP_WORK_DIR),
+      panelDumpDir: path.resolve(options?.panelDumpDir ?? DEFAULT_PANEL_DUMP_DIR),
+    });
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1078,6 +1331,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   private async ensureIngressProxyOnce(): Promise<IngressEnsureResult> {
+    await this.panelRestarts.get("ingress_proxy");
     const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256 } =
       await this.ingressManager.ensureStaticConfig(this.panel);
 
@@ -1202,7 +1456,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
   /** Applies run one after the other (a queue, not de-dup: two configs are never merged). */
   public applyMailRelay(req: MailRelayApplyRequest | null): Promise<void> {
-    const run = this.mailRelayQueue.then(() => this.applyMailRelayNow(req));
+    this.panelQueued.mail_relay += 1;
+    const run = this.mailRelayQueue
+      .then(() => this.panelRestarts.get("mail_relay"))
+      .then(() => this.applyMailRelayNow(req))
+      .finally(() => (this.panelQueued.mail_relay -= 1));
     this.mailRelayQueue = run.catch(() => undefined);
     return run;
   }
@@ -1289,12 +1547,27 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
-  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+  /** The relay's bridge address, or null when it is not running. */
+  async #mailRelayIp(): Promise<string | null> {
     const relay = await this.inspectContainerByNameOrId(MAIL_RELAY_CONTAINER_NAME);
     const ip = (relay?.NetworkSettings?.Networks?.[MAIL_RELAY_NETWORK_NAME] as
       | { IPAddress?: string }
       | undefined)?.IPAddress;
-    if (relay?.State?.Running !== true || !ip) {
+    return relay?.State?.Running === true && ip ? ip : null;
+  }
+
+  public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
+    return deliverPanelMail(
+      await this.#mailRelayIp(),
+      this.mailSubmitPort,
+      this.panel?.hostname ?? "hp-mail.localdomain",
+      req,
+    );
+  }
+
+  public async sendTestMail(req: { to: string; from: string }): Promise<MailTestResult> {
+    const ip = await this.#mailRelayIp();
+    if (!ip) {
       throw new ExecutorCodedError("Mail relay is not running", "MAIL_RELAY_UNAVAILABLE");
     }
     const startedMs = Date.now();
@@ -1506,6 +1779,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   private async ensureSharedDatabaseOnce(): Promise<SharedDatabaseEnsureResult> {
+    await this.panelRestarts.get("shared_database");
     // Docker Binds would create a missing source as a root-owned directory: insist on bootstrap's.
     const keyStat = await stat(this.sharedDbRootKeyFile).catch(() => null);
     const dataStat = await stat(this.sharedDbDataDir).catch(() => null);
@@ -1553,7 +1827,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       const createRes = await this.dockerClient.request(
         "POST",
         `/containers/create?name=${encodeURIComponent(SHARED_DB_CONTAINER_NAME)}`,
-        payload,
+        { ...payload, HostConfig: { ...payload.HostConfig, LogConfig: ROTATED_LOG_CONFIG } },
       );
       if (createRes.statusCode !== 201) {
         throw new ExecutorCodedError(
@@ -1745,7 +2019,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     };
   }
 
-  /** Worst case: pull 240 s + wait 240 s + ~20 s of create, logs and remove, inside the client's 510 s. */
+  /** Worst case: pull 240 s + the kind's wait (240 s, or its own limit) + ~20 s of create, logs and remove, inside the client's wait (510 s, or limit + 300 s). */
   public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
     assertValidSiteJobRequest(req); // jobId, ids, params and secrets, before anything touches Docker
     const lockKey = `${req.siteId}:${req.kind}`;
@@ -1755,8 +2029,20 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.runningSiteJobs.add(lockKey);
     let containerId: string | null = null;
     try {
-      if (req.kind === "wordpress.install" || req.kind === "wordpress.set-url") {
-        await this.ensureImageAvailable(resolveWordpressCliImage(req.params.phpVersion as PhpVersion));
+      if (req.kind.startsWith("wordpress.")) {
+        const image = resolveWordpressCliImage(req.params.phpVersion as PhpVersion);
+        if (req.kind === "wordpress.reset-password") {
+          // Never pull here: the reset must answer inside the client's 75 s.
+          const imageRes = await this.dockerClient.request("GET", `/images/${encodeURIComponent(image)}/json`);
+          if (imageRes.statusCode !== 200) {
+            throw new ExecutorCodedError(
+              "The site tools are not ready yet. Retry in a few minutes",
+              "DOCKER_ENGINE_UNAVAILABLE",
+            );
+          }
+        } else {
+          await this.ensureImageAvailable(image);
+        }
         // set-url works on the existing html volume and must never create an empty one.
         if (req.kind === "wordpress.install") {
           await this.ensureVolume(
@@ -1797,6 +2083,24 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       }
       const id = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
       containerId = id;
+      const spec = SITE_JOB_SPECS[req.kind];
+      if (spec.edgeNetwork) {
+        // A missing edge network is not an error: the job runs offline and reports updates as unknown.
+        // Look first: the engine accepts a connect of a created container to a missing network, then fails the start.
+        const edge = getSiteEdgeNetworkName(req.siteId);
+        const edgeRes = await this.dockerClient.request("GET", `/networks/${encodeURIComponent(edge)}`);
+        const edgeFailed = new ExecutorCodedError(
+          "Could not connect the site tools to the internet",
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+        if (edgeRes.statusCode === 200) {
+          await this.connectContainerToNetwork(edge, id, undefined, { skipMissingNetwork: true }).catch(() => {
+            throw edgeFailed;
+          });
+        } else if (edgeRes.statusCode !== 404) {
+          throw edgeFailed;
+        }
+      }
       const startRes = await this.dockerClient.request("POST", `/containers/${id}/start`);
       if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
         throw new ExecutorCodedError(
@@ -1805,14 +2109,21 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         );
       }
 
-      const exitCode = await this.waitForSiteJob(id);
+      const exitCode = await this.waitForSiteJob(id, Math.min(siteJobTimeoutMs(req.kind), this.jobTimeoutMs ?? Infinity));
+      // A kind with a result keeps stdout for it alone; the tail then comes from stderr.
       const logsRes = await this.dockerClient.request(
         "GET",
-        `/containers/${id}/logs?stdout=1&stderr=1&tail=50`,
+        `/containers/${id}/logs?stdout=${spec.result ? "0" : "1"}&stderr=1&tail=50`,
       );
       const outputTail =
         logsRes.statusCode === 200 ? formatSiteJobOutputTail(logsRes.body, req.resolvedSecrets) : "";
-      return { jobId: req.jobId, exitCode, outputTail };
+      if (!spec.result) {
+        return { jobId: req.jobId, exitCode, outputTail };
+      }
+      const outRes = await this.dockerClient.request("GET", `/containers/${id}/logs?stdout=1&stderr=0`);
+      const stdout = outRes.statusCode === 200 ? readJobStdout(outRes.body, WORDPRESS_RESULT_MAX_BYTES) : null;
+      const result = stdout === null ? undefined : parseWordpressJobResult(req.kind, stdout);
+      return { jobId: req.jobId, exitCode, outputTail, ...(result ? { result } : {}) };
     } finally {
       try {
         if (containerId) {
@@ -1828,16 +2139,16 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
   }
 
-  private async waitForSiteJob(containerId: string): Promise<number> {
+  private async waitForSiteJob(containerId: string, limitMs: number): Promise<number> {
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), this.jobTimeoutMs);
+      timer = setTimeout(() => resolve(null), limitMs);
     });
     try {
       // Our own timer decides the timeout: a socket timeout would read as DOCKER_ENGINE_UNAVAILABLE.
       const res = await Promise.race([
         this.dockerClient.request("POST", `/containers/${containerId}/wait`, undefined, {
-          timeoutMs: this.jobTimeoutMs + 15_000,
+          timeoutMs: limitMs + 15_000,
         }),
         expired,
       ]);
@@ -1857,6 +2168,285 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       return body.StatusCode;
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  public siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
+    return this.siteFilesHelpers.run(req);
+  }
+
+  public siteDatabases<R extends SiteDatabasesRequest>(
+    req: R,
+  ): Promise<SiteDatabasesResult<R["op"]>> {
+    return this.databases.run(req);
+  }
+
+  /** One pass over old site database accounts (R207 data.2); main.ts calls it once the shared database is ready. */
+  public upgradeDatabaseAccounts(): ReturnType<SiteDatabasesRunner["upgradeAccounts"]> {
+    return this.databases.upgradeAccounts();
+  }
+
+  public backups<R extends BackupsIpcRequest>(
+    req: R,
+  ): Promise<BackupsResultByAction[R["action"]]> {
+    return this.backupRunner.run(req);
+  }
+
+  /** Fetches the newest panel copy into `panelDumpDir` (used by the panel-fetch CLI). */
+  public fetchPanelCopy(target: BackupTarget, panelDumpDir: string, signal?: AbortSignal): Promise<PanelFetchResult> {
+    return this.backupRunner.fetchPanelCopy(target, panelDumpDir, signal);
+  }
+
+  /** Settles non-ended restore notes left behind by an interrupted executor before accepting IPC traffic. */
+  public settleRestores(): Promise<void> {
+    return this.backupRunner.settleRestores();
+  }
+
+  /** Clears leftover download archives from before a restart so stale bytes are never served. */
+  public emptyArchives(): Promise<void> {
+    return this.backupRunner.emptyArchives();
+  }
+
+  public ensurePhpMyAdmin(opts?: { ifPresent?: boolean }): Promise<void> {
+    const ifPresent = opts?.ifPresent === true;
+    const inFlight = this.phpMyAdminEnsureInFlight;
+    if (inFlight && (ifPresent || !inFlight.ifPresent)) {
+      return inFlight.promise;
+    }
+
+    const deps: PhpMyAdminDeps = {
+      containerName: this.phpMyAdminContainerName,
+      networkName: this.phpMyAdminNetworkName,
+      configDir: this.phpMyAdminConfigDir,
+      port: this.phpMyAdminPort,
+      sharedDbContainerName: this.sharedDbContainerName,
+      ensureImageAvailable: (image) => this.ensureImageAvailable(image),
+      ensureNetwork: (name, o) => this.ensureNetwork(name, o),
+      connectContainerToNetwork: (net, ref, aliases) =>
+        this.connectContainerToNetwork(net, ref, aliases),
+      inspectContainerByNameOrId: async (ref) => {
+        const inspected = await this.inspectContainerByNameOrId(ref);
+        if (!inspected) {
+          return null;
+        }
+        return {
+          Id: inspected.Id,
+          State: { Running: inspected.State?.Running === true },
+          Config: {
+            ...(inspected.Config?.Labels ? { Labels: { ...inspected.Config.Labels } } : {}),
+          },
+        };
+      },
+      stopAndRemoveContainer: (id) => this.stopAndRemoveContainer(id),
+      request: (method, endpointPath, body, o) =>
+        this.dockerClient.request(method, endpointPath, body, o),
+    };
+
+    const run = async (): Promise<void> => {
+      await this.panelRestarts.get("phpmyadmin");
+      return ensurePhpMyAdminContainer(deps, opts);
+    };
+    // Serialize behind an in-flight ifPresent check instead of sharing its early return.
+    const promise = (inFlight ? inFlight.promise.catch(() => undefined).then(run) : run()).finally(
+      () => {
+        if (this.phpMyAdminEnsureInFlight?.promise === promise) {
+          this.phpMyAdminEnsureInFlight = null;
+        }
+      },
+    );
+    this.phpMyAdminEnsureInFlight = { ifPresent, promise };
+    return promise;
+  }
+
+  public applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    this.panelQueued.sftp += 1;
+    const run = this.sftpQueue
+      .then(() => this.panelRestarts.get("sftp"))
+      .then(() => this.applySftpAccessNow(req))
+      .finally(() => (this.panelQueued.sftp -= 1));
+    this.sftpQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Reconciles the platform SFTP container from persisted `state.json` on startup without touching site containers. */
+  public ensureSftpFromState(): Promise<SftpApplyResult | null> {
+    this.panelQueued.sftp += 1;
+    const run = this.sftpQueue
+      .then(() => this.panelRestarts.get("sftp"))
+      .then(() => this.ensureSftpFromStateNow())
+      .finally(() => (this.panelQueued.sftp -= 1));
+    this.sftpQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  public async getSftpStatus(): Promise<SftpStatusReport> {
+    const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
+    const hostKeyFingerprint = await readSftpHostKeyFingerprint(this.sftpStateDir);
+    return {
+      running: existing?.State?.Running === true,
+      port: this.sftpPort,
+      hostKeyFingerprint,
+    };
+  }
+
+  private async ensureSftpFromStateNow(): Promise<SftpApplyResult | null> {
+    const state = await readSftpState(this.sftpStateDir);
+    if (state === null) {
+      return null;
+    }
+    return this.applySftpAccessNow(state);
+  }
+
+  private async applySftpAccessNow(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const parsed = SftpAccessApplyIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid SFTP access configuration", "VALIDATION_ERROR");
+    }
+    const validReq = parsed.data;
+    // The edge: an absent key is the legacy type (an older API or a state file written before it).
+    const typeOf = (user: SftpAccessUser): ExecutorSiteType => this.resolveSiteType(user.siteType ?? LEGACY_SITE_TYPE);
+    await assertSftpStateDir(this.sftpStateDir, this.executorUid);
+
+    const checkedSites = new Map<string, SftpContainerSiteMount | null>();
+    for (const user of validReq.users) {
+      if (checkedSites.has(user.siteId)) {
+        continue;
+      }
+      const volumeName = `${this.sftpVolumePrefix}${user.serviceInstanceId}_${typeOf(user).def.files.volumeSuffix}`;
+      assertSafeIdentifier(volumeName, "sftpVolume");
+      const volumeRes = await this.dockerClient.request(
+        "GET",
+        `/volumes/${encodeURIComponent(volumeName)}`,
+      );
+      if (volumeRes.statusCode === 200) {
+        checkedSites.set(user.siteId, { siteId: user.siteId, volume: volumeName });
+      } else if (volumeRes.statusCode === 404) {
+        checkedSites.set(user.siteId, null);
+      } else {
+        throw new ExecutorCodedError(
+          `Failed to inspect SFTP site volume (HTTP ${String(volumeRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+    }
+
+    const activeSites: SftpContainerSiteMount[] = [];
+    for (const mount of checkedSites.values()) {
+      if (mount !== null) {
+        activeSites.push(mount);
+      }
+    }
+    const renderedUsers: SftpAccessUser[] = validReq.users.filter(
+      (user) => checkedSites.get(user.siteId) !== null,
+    );
+
+    if (renderedUsers.length === 0) {
+      const emptyPlan = (await hasSftpHostKey(this.sftpStateDir))
+        ? await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, [], typeOf)
+        : null;
+      const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
+      if (existing) {
+        // Stop sshd before changing user files so open sessions of deleted or re-passworded users end and sshd never reads a half-written user/site line.
+        await this.stopAndRemoveContainer(existing.Id);
+      }
+      if (emptyPlan) {
+        await commitSftpStatePlan(emptyPlan, { writeState: false });
+      }
+      await writeSftpState(this.sftpStateDir, validReq.users);
+      return { applied: 0 };
+    }
+
+    const plan = await prepareSftpStatePlan(this.sftpStateDir, this.executorUid, renderedUsers, typeOf);
+    const { payload, configSha256 } = buildSftpContainerPayload({
+      image: SFTP_IMAGE,
+      stateDir: this.sftpStateDir,
+      hostIp: this.sftpHostIp,
+      port: this.sftpPort,
+      network: this.sftpNetworkName,
+      sites: activeSites,
+    });
+    await this.applySftpPlanAndContainer(plan, payload, configSha256);
+    await writeSftpState(this.sftpStateDir, validReq.users);
+    return { applied: renderedUsers.length };
+  }
+
+  private async stopSftpContainer(containerId: string): Promise<void> {
+    const stopRes = await this.dockerClient.request(
+      "POST",
+      `/containers/${encodeURIComponent(containerId)}/stop?t=5`,
+    );
+    if (stopRes.statusCode !== 204 && stopRes.statusCode !== 304) {
+      throw new ExecutorCodedError(
+        `Failed to stop SFTP container (HTTP ${String(stopRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+  }
+
+  private async applySftpPlanAndContainer(
+    plan: SftpStatePlan,
+    payload: SftpContainerCreatePayload,
+    configSha256: string,
+  ): Promise<void> {
+    const existing = await this.inspectContainerByNameOrId(this.sftpContainerName);
+    const needsRecreate =
+      existing !== null && existing.Config?.Labels?.[SFTP_CONFIG_SHA256_LABEL] !== configSha256;
+    const isRunningSameConfig =
+      existing !== null && !needsRecreate && existing.State?.Running === true;
+
+    if (isRunningSameConfig && plan.etcReady && plan.userChangeKind === "unchanged") {
+      return;
+    }
+
+    if (isRunningSameConfig && plan.etcReady && plan.userChangeKind === "append") {
+      await commitSftpStatePlan(plan);
+      return;
+    }
+
+    if (existing && needsRecreate) {
+      // Stop sshd before changing user files so open sessions of deleted or re-passworded users end and sshd never reads a half-written user/site line.
+      await this.stopAndRemoveContainer(existing.Id);
+    } else if (existing && existing.State?.Running === true) {
+      // Stop sshd before changing user files so open sessions of deleted or re-passworded users end and sshd never reads a half-written user/site line.
+      await this.stopSftpContainer(existing.Id);
+    }
+
+    await commitSftpStatePlan(plan);
+
+    await this.ensureNetwork(this.sftpNetworkName, {
+      internal: false,
+      labels: {
+        [MANAGED_DOCKER_LABELS.managed]: "true",
+        "io.hostingpanel.network_role": "sftp",
+      },
+    });
+
+    let containerId = existing?.Id ?? "";
+    if (!existing || needsRecreate) {
+      await this.ensureImageAvailable(payload.Image);
+      const createRes = await this.dockerClient.request(
+        "POST",
+        `/containers/create?name=${encodeURIComponent(this.sftpContainerName)}`,
+        payload,
+      );
+      if (createRes.statusCode !== 201) {
+        throw new ExecutorCodedError(
+          `Failed to create SFTP container (HTTP ${String(createRes.statusCode)})`,
+          "DOCKER_ENGINE_UNAVAILABLE",
+        );
+      }
+      containerId = (JSON.parse(createRes.body.toString("utf8")) as { Id: string }).Id;
+    }
+
+    const startRes = await this.dockerClient.request(
+      "POST",
+      `/containers/${encodeURIComponent(containerId)}/start`,
+    );
+    if (startRes.statusCode !== 204 && startRes.statusCode !== 304) {
+      throw new ExecutorCodedError(
+        `Failed to start SFTP container (HTTP ${String(startRes.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
     }
   }
 
@@ -1882,6 +2472,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         await purgeServiceSecrets(this.secretsRootDir, entry.name);
       }
     }
+    await this.siteFilesHelpers.removeAll();
+    await this.backupRunner.removeOrphans();
   }
 
   /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */
@@ -1903,11 +2495,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       "/containers/json?all=true&",
       siteLabel,
     );
-    const isJob = (c: DockerContainerListSummary): boolean =>
-      c.Labels?.["io.hostingpanel.role"] === SITE_JOB_ROLE;
+    const isJob = (c: DockerContainerListSummary): boolean => {
+      const role = c.Labels?.["io.hostingpanel.role"];
+      return role === SITE_JOB_ROLE || role === SITE_FILES_ROLE;
+    };
     if (all.some((c) => !isJob(c))) {
       throw new ExecutorCodedError("The site still has a running service", "RESOURCE_LOCKED");
     }
+    // Check restore settlement before deleting containers, volumes, or routes so purge never leaves orphaned state.
+    await this.backupRunner.forgetSite(siteId);
     for (const job of all) {
       await this.stopAndRemoveContainer(job.Id);
     }
@@ -1948,6 +2544,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       resolveWordpressCliImage(DEFAULT_PHP_VERSION),
       SHARED_MARIADB_IMAGE,
       MAIL_RELAY_IMAGE,
+      SFTP_IMAGE,
+      PHPMYADMIN_IMAGE,
+      RESTIC_IMAGE,
     ];
     for (const image of images) {
       await this.ensureImageAvailable(image).catch((err: unknown) => {
@@ -2036,11 +2635,22 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     if (!summary) {
       throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
     }
+    return this.readContainerLogs(summary.Id, tail);
+  }
+
+  /** Last lines of one container by name or id (tail clamped to 1..500); NOT_FOUND on 404. */
+  public async readContainerLogs(nameOrId: string, tail: number): Promise<ServiceLogLine[]> {
     const n = Math.min(500, Math.max(1, Math.trunc(tail) || 1));
     const res = await this.dockerClient.request(
       "GET",
-      `/containers/${summary.Id}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
+      `/containers/${encodeURIComponent(nameOrId)}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(n)}`,
+      undefined,
+      // shortcut: past the cap the newest lines of the tail are cut, read again with a smaller tail if customers ask.
+      { maxBodyBytes: LOG_READ_MAX_BYTES },
     );
+    if (res.statusCode === 404) {
+      throw new ExecutorCodedError("Container not found", "NOT_FOUND");
+    }
     if (res.statusCode !== 200) {
       throw new ExecutorCodedError(
         `Failed to read service logs (HTTP ${String(res.statusCode)})`,
@@ -2048,6 +2658,159 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       );
     }
     return demuxDockerLogStream(res.body);
+  }
+
+  /** State of one container by name, in the closed panel words; a 404 is `missing`. */
+  public async inspectPanelContainer(
+    name: string,
+    pin: string,
+  ): Promise<{ state: PanelContainerState; startedAt: string | null; restartCount: number; imageCurrent: boolean | null }> {
+    const inspect = await this.inspectContainerByNameOrId(name);
+    if (!inspect) {
+      return { state: "missing", startedAt: null, restartCount: 0, imageCurrent: null };
+    }
+    const mapped = mapContainerStateToObservedStatus(inspect.State);
+    const state = PANEL_CONTAINER_STATES.find((s) => s === mapped && s !== "missing") ?? "unknown";
+    // Docker writes 0001-01-01T00:00:00Z for a container that never started.
+    const started = Date.parse(inspect.State?.StartedAt ?? "");
+    return {
+      state,
+      startedAt: started > 0 ? new Date(started).toISOString() : null,
+      restartCount: inspect.RestartCount ?? 0,
+      imageCurrent: inspect.Config?.Image === pin,
+    };
+  }
+
+  public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    const [seen, sftpState, relaySecret] = await Promise.all([
+      Promise.all(PANEL_CONTAINERS.map((c) => this.inspectPanelContainer(this.panelContainerName(c), this.panelContainerPin(c)))),
+      readSftpState(this.sftpStateDir).catch(() => "unreadable" as const),
+      stat(path.join(this.mailRelaySecretDir, MAIL_RELAY_SASL_FILE)).then(() => true, () => false),
+    ]);
+    return PANEL_CONTAINERS.map((component, i) => {
+      const status = seen[i]!;
+      const exists = status.state !== "missing";
+      const expected = {
+        ingress_proxy: this.panel !== null || exists,
+        shared_database: true,
+        phpmyadmin: exists,
+        sftp: sftpState === "unreadable" || (sftpState?.users.length ?? 0) > 0,
+        mail_relay: relaySecret,
+      }[component];
+      return { component, ...status, expected };
+    });
+  }
+
+  public async getPanelContainerLogs(req: {
+    readonly component: PanelContainer;
+    readonly tail: number;
+  }): Promise<readonly ServiceLogLine[]> {
+    const parsed = PanelContainerLogsIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid panel logs request", "VALIDATION_ERROR");
+    }
+    const lines = await this.readContainerLogs(this.panelContainerName(parsed.data.component), parsed.data.tail);
+    return parsed.data.component === "phpmyadmin"
+      ? lines.map((line) => ({ ...line, text: maskPhpMyAdminQuery(line.text) }))
+      : lines;
+  }
+
+  /** Restarts one existing panel container by its fixed name; refused while that component is busy. */
+  public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
+    const parsed = PanelContainerRestartIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid panel restart request", "VALIDATION_ERROR");
+    }
+    const c = parsed.data.component;
+    const busy = {
+      ingress_proxy: this.ingressEnsureInFlight !== null,
+      shared_database: this.sharedDbEnsureInFlight !== null,
+      phpmyadmin: this.phpMyAdminEnsureInFlight !== null,
+      sftp: this.panelQueued.sftp > 0,
+      mail_relay: this.panelQueued.mail_relay > 0,
+    }[c];
+    if (busy || this.panelRestarts.has(c)) {
+      throw new ExecutorCodedError("This panel container is busy; try again shortly", "RESOURCE_LOCKED");
+    }
+    const run = restartContainerByName(this.execTarget, this.panelContainerName(c), PANEL_RESTART_STOP_SECONDS[c]);
+    const done = run.then(() => undefined, () => undefined);
+    this.panelRestarts.set(c, done);
+    void done.then(() => this.panelRestarts.delete(c));
+    return run;
+  }
+
+  /** Re-ensures one existing pinned panel container through its shipped ensure, which recreates it on an image change. */
+  public async applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    if (!(PINNED_PANEL_CONTAINERS as readonly string[]).includes(component)) {
+      throw new ExecutorCodedError("Invalid panel apply request", "VALIDATION_ERROR");
+    }
+    if (!(await this.inspectContainerByNameOrId(this.panelContainerName(component)))) {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    await {
+      ingress_proxy: () => this.ensureIngressProxy(),
+      shared_database: () => this.ensureSharedDatabase(),
+      phpmyadmin: () => this.ensurePhpMyAdmin({ ifPresent: true }),
+      sftp: () => this.ensureSftpFromState(),
+    }[component]();
+    return (await this.getPanelContainers()).find((row) => row.component === component)!;
+  }
+
+  /** /bin/sh as the type's file owner in the site's own container; the site label is checked, not trusted. */
+  public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    const t = this.resolveSiteType(req.siteType ?? LEGACY_SITE_TYPE); // the edge: absent is the legacy type
+    return this.terminals.open(req, async (sink) => {
+      const summary = await this.findContainerSummaryByServiceId(req.serviceInstanceId);
+      if (!summary || summary.Labels?.[MANAGED_DOCKER_LABELS.siteId] !== req.siteId) {
+        throw new ExecutorCodedError("The site container is not running", "NOT_FOUND");
+      }
+      return startDockerTerminal(this.execTarget, summary.Id, req.sessionId, sink, t);
+    });
+  }
+
+  public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
+    this.terminals.write(req);
+  }
+
+  public readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult> {
+    return this.terminals.read(req);
+  }
+
+  public closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
+    return this.terminals.close(req);
+  }
+
+  public async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    return this.terminals.list();
+  }
+
+  /** At start: ends the shells a previous executor left in site containers, as each type's file owner. */
+  public async reapTerminalShells(): Promise<void> {
+    // A site container does not carry its type, so each type's user ends the shells it owns.
+    for (const key of SITE_TYPE_KEYS) await reapTerminalShells(this.execTarget, this.resolveSiteType(key));
+  }
+
+  /** The image each panel container is pinned to. */
+  private panelContainerPin(component: PanelContainer): string {
+    return {
+      ingress_proxy: this.traefikImage,
+      shared_database: SHARED_MARIADB_IMAGE,
+      phpmyadmin: PHPMYADMIN_IMAGE,
+      sftp: SFTP_IMAGE,
+      mail_relay: MAIL_RELAY_IMAGE,
+    }[component];
+  }
+
+  /** The closed map from panel component to container name. */
+  private panelContainerName(component: PanelContainer): string {
+    return {
+      ingress_proxy: INGRESS_PROXY_CONTAINER_NAME,
+      shared_database: SHARED_DB_CONTAINER_NAME,
+      phpmyadmin: this.phpMyAdminContainerName,
+      sftp: this.sftpContainerName,
+      mail_relay: MAIL_RELAY_CONTAINER_NAME,
+    }[component];
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
@@ -2423,6 +3186,18 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       // v=true drops only anonymous volumes (an image VOLUME); named volumes are never removed.
       `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
     );
+    if (rmRes.statusCode === 409) {
+      // With force=true Docker answers 409 only while another removal of this container runs; wait for it.
+      for (let waited = 0; ; waited += REMOVAL_IN_PROGRESS_POLL_MS) {
+        if ((await this.inspectContainerByNameOrId(containerId)) === null) {
+          return;
+        }
+        if (waited >= REMOVAL_IN_PROGRESS_WAIT_MS) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, REMOVAL_IN_PROGRESS_POLL_MS));
+      }
+    }
     if (rmRes.statusCode !== 204 && rmRes.statusCode !== 404) {
       throw new ExecutorCodedError(
         `Failed to remove previous container instance (HTTP ${String(rmRes.statusCode)})`,

@@ -5,7 +5,7 @@ import { z } from "zod";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
 import { OidcService } from "../auth/oidc.service.js";
 import { reservePasswordAttempt, reserveTotpAttempt } from "../auth/attempt-limits.js";
-import { assertPasswordPolicy, hashPassword, verifyPassword } from "../auth/password.js";
+import { assertPasswordGateOpen, assertPasswordPolicy, hashPassword, verifyPassword } from "../auth/password.js";
 import { generateTotpSecret, buildOtpauthUri } from "../auth/totp.js";
 import { checkUserTotp, saveTotpStep } from "../auth/totp-secret.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
@@ -37,14 +37,16 @@ export class AccountController {
   public async changePassword(@Req() req: FastifyRequest, @Body() raw: unknown): Promise<void> {
     const { auth, user } = await this.load(req);
     const body = PasswordBody.parse(raw ?? {});
+    // A full gate refuses here, before the try is counted (as at sign-in).
+    assertPasswordGateOpen();
     await this.reservePassword(auth, req, "account.password.change", user.id);
-    if (!user.passwordHash || !(await verifyPassword(body.currentPassword, user.passwordHash))) {
+    if (!user.passwordHash || !(await verifyPassword(body.currentPassword, user.passwordHash, true))) {
       await this.fail(auth, req, "account.password.change", "INVALID_CREDENTIALS", BAD_PASSWORD);
     }
     assertPasswordPolicy(body.newPassword);
     await this.dbClient.db
       .update(users)
-      .set({ passwordHash: await hashPassword(body.newPassword), mustChangePassword: false, failedLoginCount: 0, lockedUntil: null })
+      .set({ passwordHash: await hashPassword(body.newPassword, true), mustChangePassword: false, failedLoginCount: 0, lockedUntil: null })
       .where(eq(users.id, user.id));
     await this.oidc.revokeAllSessionsForUser(user.id, auth.claims.jti);
     await this.authz.recordAudit(auth, req, { action: "account.password.change", targetType: "user", targetId: user.id });
@@ -112,8 +114,9 @@ export class AccountController {
     if (user.platformRole === "infrastructure_admin") {
       await this.fail(auth, req, "account.totp.disable", "PERMISSION_DENIED", "Gli amministratori devono mantenere l'autenticazione a due fattori.");
     }
+    assertPasswordGateOpen();
     await this.reservePassword(auth, req, "account.totp.disable", user.id);
-    if (!user.passwordHash || !(await verifyPassword(body.password, user.passwordHash))) {
+    if (!user.passwordHash || !(await verifyPassword(body.password, user.passwordHash, true))) {
       await this.fail(auth, req, "account.totp.disable", "INVALID_CREDENTIALS", BAD_PASSWORD);
     }
     // Correct password: give the reserved attempt back, then count the code guess.

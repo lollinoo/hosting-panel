@@ -15,14 +15,25 @@ import {
   eq,
   failOutboxEvent,
   generateSecretsMasterKeyHex,
+  getSiteWordpressState,
+  saveSiteWordpressLastImport,
   listEncryptedSecretsMetadata,
   listHostAgentHeartbeats,
+  listUnsettledOperations,
   markExpiredOperationsUnknownTransactional,
+  operations,
+  outboxEvents,
   recordObservedStateReconciliationTransactional,
   resolveDecryptedSecretRefs,
+  saveSiteWordpressLastUpdate,
+  saveSiteWordpressState,
   schemaMigrations,
   seedPhase1Dataset,
+  sql,
   serviceInstances,
+  siteBackups,
+  inArray,
+  sites,
   stackRevisions,
   transitionOperation,
   unlockOperationBreakGlassTransactional,
@@ -47,6 +58,18 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0005_allow_revision_cascade_delete.sql",
       "0006_domains_dns_tls.sql",
       "0007_mail_relay.sql",
+      "0008_site_sftp_users.sql",
+      "0009_backups.sql",
+      "0010_backup_restore.sql",
+      "0011_panel_backup.sql",
+      "0012_wordpress_tools.sql",
+      "0013_wordpress_import.sql",
+      "0014_password_reset_tokens.sql",
+      "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
+      "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
+      "0019_operation_step_indexes.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -65,6 +88,18 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0005_allow_revision_cascade_delete.sql",
       "0006_domains_dns_tls.sql",
       "0007_mail_relay.sql",
+      "0008_site_sftp_users.sql",
+      "0009_backups.sql",
+      "0010_backup_restore.sql",
+      "0011_panel_backup.sql",
+      "0012_wordpress_tools.sql",
+      "0013_wordpress_import.sql",
+      "0014_password_reset_tokens.sql",
+      "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
+      "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
+      "0019_operation_step_indexes.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -79,10 +114,81 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0005_allow_revision_cascade_delete.sql",
       "0006_domains_dns_tls.sql",
       "0007_mail_relay.sql",
+      "0008_site_sftp_users.sql",
+      "0009_backups.sql",
+      "0010_backup_restore.sql",
+      "0011_panel_backup.sql",
+      "0012_wordpress_tools.sql",
+      "0013_wordpress_import.sql",
+      "0014_password_reset_tokens.sql",
+      "0015_operations_audit_indexes.sql",
+      "0016_admin_terminal_sessions.sql",
+      "0017_m5d_firewall.sql",
+      "0018_site_type.sql",
+      "0019_operation_step_indexes.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
     expect(secondRows.map((r) => r.appliedAt.getTime())).toEqual(firstTimestamps);
+  });
+
+  it("1c. 0017 refuses an unknown firewall family and a second row with the same cidr", async () => {
+    await expect(
+      client.db.execute(sql`INSERT INTO firewall_blocks (id, family, cidr) VALUES ('fwb_x1', 'ipv5', '192.0.2.0/24')`),
+    ).rejects.toThrow();
+    await client.db.execute(sql`INSERT INTO firewall_blocks (id, family, cidr) VALUES ('fwb_x2', 'ipv4', '198.51.100.0/24')`);
+    await expect(
+      client.db.execute(sql`INSERT INTO firewall_blocks (id, family, cidr) VALUES ('fwb_x3', 'ipv4', '198.51.100.0/24')`),
+    ).rejects.toThrow();
+    await client.db.execute(sql`DELETE FROM firewall_blocks`);
+  });
+
+  it("1b. 0011 adds the panel copy outcome columns and refuses an unknown status", async () => {
+    const cols = await client.db.execute(
+      sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'backup_settings' AND column_name LIKE 'last_panel_backup%' ORDER BY column_name`,
+    );
+    expect(cols.rows.map((r) => (r as { column_name: string }).column_name)).toEqual([
+      "last_panel_backup_at",
+      "last_panel_backup_problem",
+      "last_panel_backup_status",
+    ]);
+    const check = await client.db.execute(
+      sql`SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'backup_settings'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%last_panel_backup_status%'`,
+    );
+    expect(String((check.rows[0] as { def: string }).def)).toMatch(/succeeded.*failed/);
+  });
+
+  it("1c. 0012 accepts pre_update copies and keeps one WordPress state row per site", async () => {
+    const db = client.db;
+    await db.insert(siteBackups).values({ id: "bk_0012_pre", siteId: DEMO_IDS.sites.acmeShop, kind: "pre_update", status: "running" });
+    await expect(
+      db.execute(sql`INSERT INTO site_backups (id, site_id, kind, status) VALUES ('bk_0012_bad', 'x', 'other', 'running')`),
+    ).rejects.toThrow();
+
+    const acme = { organizationId: DEMO_IDS.organizations.acme, siteId: "site_0012_wp" };
+    await db.insert(sites).values({ id: acme.siteId, organizationId: acme.organizationId, hostAllocationId: DEMO_IDS.allocations.acme, name: "WP", slug: "wp-0012" });
+    expect(await getSiteWordpressState(db, acme)).toBeNull();
+
+    await saveSiteWordpressState(db, { ...acme, state: { v: 1 } });
+    await saveSiteWordpressState(db, { ...acme, state: { v: 2 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: null, lastImport: null });
+    await saveSiteWordpressLastUpdate(db, { ...acme, lastUpdate: { u: 1 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 2 }, lastUpdate: { u: 1 }, lastImport: null });
+    await saveSiteWordpressState(db, { ...acme, state: { v: 3 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 3 }, lastUpdate: { u: 1 }, lastImport: null });
+
+    expect(await getSiteWordpressState(db, { ...acme, organizationId: DEMO_IDS.organizations.beta })).toBeNull();
+
+    // 0013: the last import is stored and replaced without touching state and last update.
+    await saveSiteWordpressLastImport(db, { ...acme, lastImport: { i: 1 } });
+    await saveSiteWordpressLastImport(db, { ...acme, lastImport: { i: 2 } });
+    expect(await getSiteWordpressState(db, acme)).toEqual({ state: { v: 3 }, lastUpdate: { u: 1 }, lastImport: { i: 2 } });
+    await saveSiteWordpressLastImport(db, { ...acme, organizationId: DEMO_IDS.organizations.beta, lastImport: { i: 3 } });
+    expect((await getSiteWordpressState(db, acme))?.lastImport).toEqual({ i: 2 });
+    expect(await getSiteWordpressState(db, { ...acme, organizationId: DEMO_IDS.organizations.beta })).toBeNull();
+
+    await db.delete(sites).where(eq(sites.id, acme.siteId));
+    expect((await db.execute(sql`SELECT count(*)::int AS n FROM site_wordpress_state`)).rows[0]).toEqual({ n: 0 });
   });
 
   it("2. encrypts and decrypts secrets with AES-256-GCM + tenant/site/key AAD binding (AC-F2-05)", () => {
@@ -569,5 +675,223 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       .from(auditEvents)
       .where(eq(auditEvents.targetId, DEMO_IDS.services.betaPortalNode));
     expect(allAudits.some((a) => a.action === "service.drift.detected")).toBe(true);
+  });
+
+  it("7. claimPendingOutboxEvents filters by operation kind without claiming other lanes", async () => {
+    const fileKinds = ["site.files.archive", "site.files.extract"] as const;
+
+    const opArchive = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.files.archive",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeShop,
+      idempotencyKey: "idem-claim-filter-arch-1",
+      lockKey: "site:claim-filter-1",
+      outboxPayload: { op: "archive", paths: ["index.php"], to: "out.zip" },
+    });
+    const opExtract = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.files.extract",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeBlog,
+      idempotencyKey: "idem-claim-filter-ext-1",
+      lockKey: "site:claim-filter-2",
+      outboxPayload: { op: "extract", path: "out.zip", to: "dest" },
+    });
+    const opMain = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.beta,
+      kind: "site.provision",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.betaPortal,
+      idempotencyKey: "idem-claim-filter-main-1",
+      lockKey: "site:claim-filter-3",
+    });
+
+    // includeKinds claims only archive/extract and leaves site.provision pending
+    const fileClaimed = await claimPendingOutboxEvents(client.db, 10, 60_000, {
+      includeKinds: fileKinds,
+    });
+    expect(fileClaimed.map((e) => e.id)).toEqual([
+      opArchive.outbox!.id,
+      opExtract.outbox!.id,
+    ]);
+    const [mainPending] = await client.db
+      .select()
+      .from(outboxEvents)
+      .where(eq(outboxEvents.id, opMain.outbox!.id));
+    expect(mainPending?.status).toBe("pending");
+
+    // excludeKinds now claims the remaining site.provision event (and any earlier non-file rows)
+    const mainClaimed = await claimPendingOutboxEvents(client.db, 50, 60_000, {
+      excludeKinds: fileKinds,
+    });
+    expect(mainClaimed.map((e) => e.id)).toContain(opMain.outbox!.id);
+    expect(mainClaimed.map((e) => e.id)).not.toContain(opArchive.outbox!.id);
+    expect(mainClaimed.map((e) => e.id)).not.toContain(opExtract.outbox!.id);
+
+    // Reverse order: excludeKinds claims main work first and leaves file jobs pending
+    const opArchive2 = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.files.archive",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeShop,
+      idempotencyKey: "idem-claim-filter-arch-2",
+      lockKey: "site:claim-filter-4",
+      outboxPayload: { op: "archive", paths: ["index.php"], to: "out2.zip" },
+    });
+    const opDomains2 = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.beta,
+      kind: "site.domains",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.betaPortal,
+      idempotencyKey: "idem-claim-filter-dom-2",
+      lockKey: "site:claim-filter-5",
+    });
+
+    const mainFirst = await claimPendingOutboxEvents(client.db, 50, 60_000, {
+      excludeKinds: fileKinds,
+    });
+    expect(mainFirst.map((e) => e.id)).toEqual([opDomains2.outbox!.id]);
+    const [arch2Pending] = await client.db
+      .select()
+      .from(outboxEvents)
+      .where(eq(outboxEvents.id, opArchive2.outbox!.id));
+    expect(arch2Pending?.status).toBe("pending");
+
+    const fileAfter = await claimPendingOutboxEvents(client.db, 10, 60_000, {
+      includeKinds: fileKinds,
+    });
+    expect(fileAfter.map((e) => e.id)).toEqual([opArchive2.outbox!.id]);
+
+    for (const enq of [opArchive, opExtract, opMain, opArchive2, opDomains2]) {
+      await completeOutboxEvent(client.db, enq.outbox!.id);
+      await transitionOperation(client.db, enq.operation.id, "cancelled");
+    }
+  });
+
+  it("8. hides the panel_containers and panel_certificate rows from the heartbeat list", async () => {
+    for (const component of ["panel_containers", "panel_certificate"] as const) {
+      await upsertHostAgentHeartbeat(client.db, {
+        hostId: DEMO_IDS.hosts.acme,
+        component,
+        status: "online",
+        version: "1",
+        telemetrySnapshot: {},
+      });
+    }
+    const daemons = ["docker_executor", "host_agent"];
+    for (const rows of [
+      await listHostAgentHeartbeats(client.db, DEMO_IDS.hosts.acme),
+      await listHostAgentHeartbeats(client.db),
+    ]) {
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((row) => daemons.includes(row.component))).toBe(true);
+    }
+  });
+
+  it("9. sets notRunningSince at the first observation that is not running, keeps it, drops it at running", async () => {
+    const first = new Date("2026-11-16T10:00:00.000Z");
+    const record = (observedStatus: string, observedAt: Date) =>
+      recordObservedStateReconciliationTransactional(client.db, {
+        serviceInstanceId: DEMO_IDS.services.acmeBlogWp,
+        observedStatus,
+        rawState: { restartCount: 2 },
+        observedAt,
+      });
+    const stopped = await record("stopped", first);
+    expect(stopped.observedState.rawState).toEqual({ restartCount: 2, notRunningSince: first.toISOString() });
+    const degraded = await record("degraded", new Date(first.getTime() + 60_000));
+    expect(degraded.observedState.rawState).toEqual({ restartCount: 2, notRunningSince: first.toISOString() });
+    const running = await record("running", new Date(first.getTime() + 120_000));
+    expect(running.observedState.rawState).toEqual({ restartCount: 2 });
+  });
+
+  it("10. remembers a restart count rise for two minutes of look time, forgets it on a lower count", async () => {
+    const t0 = new Date("2026-11-16T10:00:00.000Z");
+    const record = (restartCount: number, seconds: number) =>
+      recordObservedStateReconciliationTransactional(client.db, {
+        serviceInstanceId: DEMO_IDS.services.acmeBlogWp,
+        observedStatus: "running",
+        rawState: { restartCount },
+        observedAt: new Date(t0.getTime() + seconds * 1000),
+      });
+    await record(0, 0);
+    const rise = new Date(t0.getTime() + 15_000).toISOString();
+    expect((await record(1, 15)).observedState.rawState).toEqual({ restartCount: 1, notRunningSince: rise, lastRestartAt: rise });
+    expect((await record(1, 134)).observedState.rawState).toEqual({ restartCount: 1, notRunningSince: rise, lastRestartAt: rise });
+    expect((await record(1, 135)).observedState.rawState).toEqual({ restartCount: 1 });
+    await record(2, 150);
+    expect((await record(0, 165)).observedState.rawState).toEqual({ restartCount: 0 });
+  });
+
+  it("10b. forgets a remembered rise when the container is seen missing (R191 1.3)", async () => {
+    const t0 = new Date("2026-11-16T11:00:00.000Z");
+    const record = (observedStatus: string, seconds: number, rawState: Record<string, unknown>) =>
+      recordObservedStateReconciliationTransactional(client.db, {
+        serviceInstanceId: DEMO_IDS.services.acmeBlogWp,
+        observedStatus,
+        rawState,
+        observedAt: new Date(t0.getTime() + seconds * 1000),
+      });
+    await record("running", 0, { restartCount: 0 });
+    await record("running", 15, { restartCount: 1 });
+    await record("missing", 30, {});
+    expect((await record("running", 45, { restartCount: 0 })).observedState.rawState).toEqual({ restartCount: 0 });
+  });
+
+  const makeOperation = async (patch: Partial<typeof operations.$inferInsert>) => {
+    const enq = await enqueueOperationTransactional(client.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "site.deploy",
+      resourceType: "site",
+      resourceId: DEMO_IDS.sites.acmeShop,
+    });
+    await client.db.update(operations).set(patch).where(eq(operations.id, enq.operation.id));
+    return enq.operation.id;
+  };
+  const statusesOf = async (ids: string[]) =>
+    Object.fromEntries(
+      (await client.db.select({ id: operations.id, status: operations.status }).from(operations).where(inArray(operations.id, ids)))
+        .map((row) => [row.id, row.status]),
+    );
+
+  it("10. sweeps reconciling with an expired or a null lease to unknown and leaves a live lease alone", async () => {
+    const now = new Date();
+    const expired = await makeOperation({ status: "reconciling", leaseExpiresAt: new Date(now.getTime() - 1_000) });
+    const nullLease = await makeOperation({ status: "reconciling", leaseExpiresAt: null });
+    const live = await makeOperation({ status: "reconciling", leaseExpiresAt: new Date(now.getTime() + 60_000) });
+    await markExpiredOperationsUnknownTransactional(client.db, now);
+    expect(await statusesOf([expired, nullLease, live])).toEqual({
+      [expired]: "unknown",
+      [nullLease]: "unknown",
+      [live]: "reconciling",
+    });
+  });
+
+  it("11. lists unknown operations after 15 minutes and stuck ones 5 minutes after the lease, with the site name", async () => {
+    const now = new Date();
+    const ago = (ms: number) => new Date(now.getTime() - ms);
+    const unknownOld = await makeOperation({ status: "unknown", updatedAt: ago(15 * 60_000 + 1_000) });
+    const unknownNew = await makeOperation({ status: "unknown", updatedAt: ago(14 * 60_000) });
+    const stuckLease = await makeOperation({ status: "processing", leaseExpiresAt: ago(5 * 60_000 + 1_000), updatedAt: ago(20 * 60_000) });
+    const liveLease = await makeOperation({ status: "processing", leaseExpiresAt: ago(4 * 60_000), updatedAt: ago(20 * 60_000) });
+    const stuckNoLease = await makeOperation({ status: "reconciling", leaseExpiresAt: null, updatedAt: ago(6 * 60_000) });
+    const [site] = await client.db.select({ name: sites.name }).from(sites).where(eq(sites.id, DEMO_IDS.sites.acmeShop));
+    const mine = [unknownOld, unknownNew, stuckLease, liveLease, stuckNoLease];
+    const rows = (await listUnsettledOperations(client.db, now)).filter((row) => mine.includes(row.operationId));
+    const expected = (operationId: string, status: string, alert: string, since: Date) => ({
+      operationId,
+      kind: "site.deploy",
+      status,
+      alert,
+      siteId: DEMO_IDS.sites.acmeShop,
+      siteName: site!.name,
+      since,
+    });
+    expect(rows).toEqual([
+      expected(unknownOld, "unknown", "operation_unknown", ago(15 * 60_000 + 1_000)),
+      expected(stuckNoLease, "reconciling", "operation_stuck", ago(6 * 60_000)),
+      expected(stuckLease, "processing", "operation_stuck", ago(5 * 60_000 + 1_000)),
+    ]);
   });
 });

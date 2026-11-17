@@ -1,0 +1,63 @@
+{
+  "configSha256": "73ab09ff98bbf7bf615cc1cf466f422632407abe6d1831426a76ae231f9e9375",
+  "payload": {
+    "Image": "phpmyadmin@sha256:e4b3eb5305cd42d21512bb55def2bab52625d56df927ad4ee1864a9354c84d40",
+    "User": "33:33",
+    "ExposedPorts": {
+      "80/tcp": {}
+    },
+    "Env": [
+      "UPLOAD_LIMIT=32M",
+      "MEMORY_LIMIT=64M",
+      "MAX_EXECUTION_TIME=300"
+    ],
+    "Labels": {
+      "io.hostingpanel.managed": "true",
+      "io.hostingpanel.role": "phpmyadmin",
+      "io.hostingpanel.config_sha256": "73ab09ff98bbf7bf615cc1cf466f422632407abe6d1831426a76ae231f9e9375"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "CapDrop": [
+        "ALL"
+      ],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "ReadonlyRootfs": true,
+      "Memory": 536870912,
+      "MemorySwap": 536870912,
+      "PidsLimit": 100,
+      "NanoCpus": 500000000,
+      "RestartPolicy": {
+        "Name": "unless-stopped"
+      },
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      },
+      "Tmpfs": {
+        "/var/run/apache2": "rw,nosuid,nodev,noexec,uid=33,gid=33,mode=0755,size=1m",
+        "/sessions": "rw,nosuid,nodev,noexec,uid=33,gid=33,mode=0700,size=8m",
+        "/var/www/html/tmp": "rw,nosuid,nodev,noexec,uid=33,gid=33,mode=0700,size=16m",
+        "/tmp": "rw,nosuid,nodev,noexec,uid=33,gid=33,mode=1777,size=48m"
+      },
+      "NetworkMode": "hp_pma_net",
+      "PortBindings": {
+        "80/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "8306"
+          }
+        ]
+      },
+      "Binds": [
+        "/var/lib/hosting-panel/phpmyadmin/config.inc.php:/etc/phpmyadmin/config.inc.php:ro",
+        "/var/lib/hosting-panel/phpmyadmin/hp-mpm.conf:/etc/apache2/conf-enabled/hp-mpm.conf:ro"
+      ]
+    }
+  }
+}

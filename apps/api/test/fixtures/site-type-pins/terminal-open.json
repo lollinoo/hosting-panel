@@ -1,0 +1,14 @@
+{
+  "calls": [
+    {
+      "args": [
+        {
+          "serviceInstanceId": "svc_<id:1>",
+          "sessionId": "term_<id:2>",
+          "siteId": "site_<id:3>"
+        }
+      ],
+      "method": "openTerminal"
+    }
+  ]
+}

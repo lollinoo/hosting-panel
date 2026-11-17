@@ -3,6 +3,11 @@ import { z } from "zod";
 import {
   ApiErrorEnvelopeSchema,
   HostAgentHealthResponseSchema,
+  HostFirewallStateWireSchema,
+  HostJobStateWireSchema,
+  HostJournalLineWireSchema,
+  HostOsPackagesWireSchema,
+  HostServiceStateWireSchema,
   HostTelemetryWireSchema,
   signIpcRequest,
   type ErrorCode,
@@ -15,6 +20,14 @@ import {
   type ApprovedHostMaintenanceCommand,
   type ApprovedHostSecurityCommand,
   type HostAgentPort,
+  type HostFirewallSets,
+  type HostFirewallState,
+  type HostJob,
+  type HostJobState,
+  type HostJournalLine,
+  type HostJournalUnit,
+  type HostOsPackages,
+  type HostServiceState,
   type HostMaintenanceResult,
   type HostSecurityResult,
   type HostTelemetry,
@@ -415,5 +428,41 @@ export class SignedHostAgentIpcClient implements HostAgentPort {
 
     const parsed = HostSecurityResultEnvelopeSchema.parse(JSON.parse(bodyText));
     return parsed.data;
+  }
+
+  /** One signed call whose 200 answer is `{ data }` checked against the wire schema. */
+  private async call<T>(schema: z.ZodType<T>, method: "GET" | "POST", pathWithQuery: string, body?: unknown): Promise<T> {
+    const { statusCode, bodyText } = await this.requestJson(method, pathWithQuery, body);
+    if (statusCode !== 200) this.parseOrThrowError(statusCode, bodyText);
+    return z.object({ data: schema }).parse(JSON.parse(bodyText)).data;
+  }
+
+  public async readFirewall(): Promise<HostFirewallState> {
+    return this.call(HostFirewallStateWireSchema, "GET", "/v1/firewall");
+  }
+
+  public async replaceFirewallSets(sets: HostFirewallSets): Promise<HostFirewallState> {
+    return this.call(HostFirewallStateWireSchema, "POST", "/v1/firewall/sets", sets);
+  }
+
+  public async readHostServices(): Promise<readonly HostServiceState[]> {
+    return this.call(z.array(HostServiceStateWireSchema), "GET", "/v1/host-services");
+  }
+
+  public async readHostJournal(unit: HostJournalUnit, lines: number): Promise<readonly HostJournalLine[]> {
+    const query = new URLSearchParams({ unit, lines: String(lines) }).toString();
+    return this.call(z.array(HostJournalLineWireSchema), "GET", `/v1/host-journal?${query}`);
+  }
+
+  public async readOsPackages(): Promise<HostOsPackages> {
+    return this.call(HostOsPackagesWireSchema, "GET", "/v1/os-packages");
+  }
+
+  public async requestHostJob(job: HostJob): Promise<HostJobState> {
+    return this.call(HostJobStateWireSchema, "POST", "/v1/host-jobs", { job });
+  }
+
+  public async readHostJob(job: HostJob): Promise<HostJobState> {
+    return this.call(HostJobStateWireSchema, "GET", `/v1/host-jobs?${new URLSearchParams({ job }).toString()}`);
   }
 }

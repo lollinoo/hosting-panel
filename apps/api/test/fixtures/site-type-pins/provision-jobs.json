@@ -1,0 +1,141 @@
+{
+  "calls": [
+    {
+      "args": [
+        {
+          "jobId": "job_<id:1>_db",
+          "kind": "db.provision",
+          "organizationId": "org_<id:2>",
+          "params": {
+            "dbName": "wp_<site-sha12>",
+            "dbUser": "wp_<site-sha12>"
+          },
+          "resolvedSecrets": {
+            "HP_DB_PASSWORD": "<present>"
+          },
+          "siteId": "site_<id:3>"
+        }
+      ],
+      "method": "runSiteJob"
+    },
+    {
+      "args": [
+        {
+          "__brand": "ApprovedServiceSpec",
+          "approvedAt": "<time>",
+          "containerName": "hp_svc_svc_<id:4>",
+          "domains": [],
+          "env": {},
+          "exposeHttp": true,
+          "hostRoutes": [],
+          "image": "wordpress:7.1.4-php8.3-apache",
+          "internalPort": 80,
+          "organizationId": "org_<id:2>",
+          "portBindings": [],
+          "resourceLimits": {
+            "cpuMilli": 1000,
+            "memoryBytes": "536870912"
+          },
+          "revisionNumber": 1,
+          "serviceInstanceId": "svc_<id:4>",
+          "siteId": "site_<id:3>",
+          "siteMail": true,
+          "specHash": "758bc24348d0bb5a534f7145e2fdca0377dce0f8756a979bbf1e3e7f17a8b6e3",
+          "volumeMounts": [
+            {
+              "containerPath": "/var/www/html",
+              "volumeSuffix": "html"
+            }
+          ]
+        }
+      ],
+      "method": "deployService"
+    },
+    {
+      "args": [
+        "svc_<id:4>"
+      ],
+      "method": "getObservedState"
+    },
+    {
+      "args": [
+        {
+          "jobId": "job_<id:1>_wp",
+          "kind": "wordpress.install",
+          "organizationId": "org_<id:2>",
+          "params": {
+            "adminEmail": "admin@example.test",
+            "adminUser": "siteadmin",
+            "dbName": "wp_<site-sha12>",
+            "dbUser": "wp_<site-sha12>",
+            "phpVersion": "8.3",
+            "siteUrl": "http://wp-a.example.test",
+            "title": "Site A"
+          },
+          "resolvedSecrets": {
+            "HP_ADMIN_PASSWORD": "<present>",
+            "HP_DB_PASSWORD": "<present>"
+          },
+          "serviceInstanceId": "svc_<id:4>",
+          "siteId": "site_<id:3>"
+        }
+      ],
+      "method": "runSiteJob"
+    },
+    {
+      "args": [
+        {
+          "__brand": "ApprovedServiceSpec",
+          "approvedAt": "<time>",
+          "containerName": "hp_svc_svc_<id:4>",
+          "domains": [
+            "wp-a.example.test",
+            "www.wp-a.example.test"
+          ],
+          "env": {},
+          "exposeHttp": true,
+          "hostRoutes": [
+            {
+              "hostname": "wp-a.example.test",
+              "httpsRedirect": false,
+              "redirectTo": null,
+              "tls": false
+            },
+            {
+              "hostname": "www.wp-a.example.test",
+              "httpsRedirect": false,
+              "redirectTo": "http://wp-a.example.test",
+              "tls": false
+            }
+          ],
+          "image": "wordpress:7.1.4-php8.3-apache",
+          "internalPort": 80,
+          "organizationId": "org_<id:2>",
+          "portBindings": [],
+          "resourceLimits": {
+            "cpuMilli": 1000,
+            "memoryBytes": "536870912"
+          },
+          "revisionNumber": 1,
+          "serviceInstanceId": "svc_<id:4>",
+          "siteId": "site_<id:3>",
+          "siteMail": true,
+          "specHash": "758bc24348d0bb5a534f7145e2fdca0377dce0f8756a979bbf1e3e7f17a8b6e3",
+          "volumeMounts": [
+            {
+              "containerPath": "/var/www/html",
+              "volumeSuffix": "html"
+            }
+          ]
+        }
+      ],
+      "method": "deployService"
+    },
+    {
+      "args": [
+        "svc_<id:4>"
+      ],
+      "method": "getObservedState"
+    }
+  ]
+}

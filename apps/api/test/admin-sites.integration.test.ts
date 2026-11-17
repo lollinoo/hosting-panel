@@ -6,6 +6,7 @@ import {
   operationSteps,
   operations,
   resolveDecryptedSecretRefs,
+  serviceInstances,
   sites,
   type DatabaseClient,
 } from "@hosting-panel/database";
@@ -189,6 +190,23 @@ describe("server administrator site API", () => {
         masterKey: KEY,
       });
       expect(secrets["HP_DB_PASSWORD"]).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("an owner change deploys a stopped site again and leaves it stopped", async () => {
+      const { siteId } = await createAndRun(orgId);
+      expect((await call("POST", org(`/managed-sites/${siteId}/actions`), token, { action: "stop" })).status).toBe(202);
+      await run();
+      const deploys = sim.deployedSpecs.length;
+      const moved = await reassign(siteId, null);
+      await run();
+      expect((await opRow(moved.body.data.operationId as string)).status).toBe("succeeded");
+      expect(sim.deployedSpecs).toHaveLength(deploys + 1);
+      expect(lastSpec(siteId).organizationId).toBe(OPS);
+      const [svc] = await dbClient.db.select().from(serviceInstances).where(eq(serviceInstances.siteId, siteId));
+      expect(svc!.desiredStatus).toBe("stopped");
+      expect(sim.getSimulatedContainerInspect(svc!.id)?.State?.Running).toBe(false);
+      const listed = (await call("GET", "/v1/admin/sites", adminToken)).body.data.sites as Json[];
+      expect(listed.find((s) => s.id === siteId)!.status).toBe("stopped");
     });
 
     it("customer cannot call admin site endpoints", async () => {

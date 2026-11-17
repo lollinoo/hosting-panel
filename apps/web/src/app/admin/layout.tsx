@@ -3,6 +3,7 @@ import { getServerSession } from "@/lib/server-session";
 import { fetchServerMe } from "@/lib/server-api";
 import { Header } from "@/components/layout/header";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
+import { AlertLine } from "@/components/admin/alert-line";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       <Header userName={session.user.name} email={session.user.email} csrfToken={session.csrfToken} />
       <div className="flex flex-1">
         <SidebarNav />
-        <main className="flex-1 p-8 overflow-y-auto">{children}</main>
+        <main className="flex-1 p-8 overflow-y-auto"><AlertLine />{children}</main>
       </div>
     </div>
   );

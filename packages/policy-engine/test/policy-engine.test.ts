@@ -4,6 +4,8 @@ import {
   evaluateHostAllocationAdmission,
   evaluateHostModeTransition,
   evaluateQuotaAdmission,
+  MAX_SERVICE_CPU_MILLI,
+  MAX_SERVICE_MEMORY_BYTES,
   validateDeclarativeServiceInput,
   type ExistingAllocationSnapshot,
   type HostAdmissionTarget,
@@ -204,6 +206,24 @@ describe("@hosting-panel/policy-engine — Declarative Service Validation (AC-F1
     );
     expect(memLow.valid).toBe(false);
     expect(memLow.errorCode).toBe("VALIDATION_ERROR");
+  });
+
+  it("rejects resource limits above the ceiling and accepts the ceiling itself", () => {
+    expect(MAX_SERVICE_MEMORY_BYTES).toBe(64n * 1024n ** 3n);
+    expect(MAX_SERVICE_CPU_MILLI).toBe(64_000);
+    const atCeiling = { cpuMilli: MAX_SERVICE_CPU_MILLI, memoryBytes: String(MAX_SERVICE_MEMORY_BYTES) };
+    expect(validateDeclarativeServiceInput(wpTemplate, "dedicated", {}, atCeiling).valid).toBe(true);
+
+    const cpuHigh = validateDeclarativeServiceInput(wpTemplate, "dedicated", {}, { ...atCeiling, cpuMilli: MAX_SERVICE_CPU_MILLI + 1 });
+    expect(cpuHigh.valid).toBe(false);
+    expect(cpuHigh.errorCode).toBe("VALIDATION_ERROR");
+
+    const memHigh = validateDeclarativeServiceInput(wpTemplate, "dedicated", {}, {
+      ...atCeiling,
+      memoryBytes: String(MAX_SERVICE_MEMORY_BYTES + 1n),
+    });
+    expect(memHigh.valid).toBe(false);
+    expect(memHigh.errorCode).toBe("VALIDATION_ERROR");
   });
 });
 

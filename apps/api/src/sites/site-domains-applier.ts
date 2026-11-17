@@ -16,6 +16,7 @@ import {
   operations,
   renewOperationLease,
   serviceInstances,
+  settleOperation,
   sites,
   transitionOperation,
   updateOperationStepTransactional,
@@ -26,6 +27,7 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { buildApprovedServiceSpec } from "../runtime/service-spec.js";
 import { SITE_STEP_LEASE_MS, SiteJobFailedError } from "../runtime/site-provisioner.js";
+import { findApiSiteType } from "../site-types/index.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -75,7 +77,7 @@ export class SiteDomainsApplier {
   ) {}
 
   /**
-   * Publishes the site's route plan. When WordPress must change address, every host first serves
+   * Publishes the site's route plan. When the site must change address, every host first serves
    * without redirects, then the address switches, then the final plan goes out: no redirect loop.
    * On failure the site keeps its status; the reconciler re-enqueues.
    */
@@ -107,7 +109,8 @@ export class SiteDomainsApplier {
         .from(serviceInstances)
         .where(and(eq(serviceInstances.siteId, siteId), eq(serviceInstances.organizationId, organizationId)))
         .limit(1);
-      if (!site?.phpVersion || !svc) {
+      const type = site ? findApiSiteType(site.siteType) : null;
+      if (!site || !type || !svc) {
         throw new ControlPlaneError("NOT_FOUND", `Managed site '${siteId}' is incomplete`);
       }
 
@@ -116,10 +119,12 @@ export class SiteDomainsApplier {
       const spec = await buildApprovedServiceSpec(db, this.config, { organizationId, serviceInstanceId: svc.id });
       const { acmeEnabled } = await this.executor.getCertificateStatus({ failuresSince: now.toISOString() });
       const primary = rows.find((r) => r.isPrimary && r.status === "active");
-      const currentUrl = site.wordpressUrl ?? (primary ? `http://${primary.hostname}` : null);
+      const currentUrl = site.siteUrl ?? (primary ? `http://${primary.hostname}` : null);
       const wanted = desiredWordpressUrl(rows, now, currentUrl, acmeEnabled);
-      const wpInstalled = (await latestSiteOperation(db, { siteId, kind: "site.provision" }))?.status === "succeeded";
-      const switchUrl = wpInstalled && wanted !== null && currentUrl !== null && wanted !== currentUrl;
+      const provisioned = (await latestSiteOperation(db, { siteId, kind: "site.provision" }))?.status === "succeeded";
+      const switchUrl = provisioned && wanted !== null && currentUrl !== null && wanted !== currentUrl;
+      // A type with no address job is skipped like a site that needs no switch.
+      const addressJob = switchUrl ? type.addressJob(site, wanted, currentUrl) : null;
       const publish = (hosts: readonly SiteHostRoute[]) =>
         this.executor.applySiteRoutes({
           siteId,
@@ -130,27 +135,27 @@ export class SiteDomainsApplier {
         });
 
       const transition = buildSiteHostRoutes(rows, now, { transition: true, acmeEnabled });
-      await step("prepare", switchUrl ? () => publish(transition) : null);
+      await step("prepare", addressJob ? () => publish(transition) : null);
 
       await step(
         "update_address",
-        switchUrl
+        addressJob
           ? async () => {
               const result = await this.executor.runSiteJob({
                 jobId: `job_${op.id.replace(/^op_/, "")}_url`,
-                kind: "wordpress.set-url",
+                kind: addressJob.kind,
                 siteId,
                 organizationId,
                 serviceInstanceId: svc.id,
-                params: { phpVersion: site.phpVersion!, siteUrl: wanted, previousUrl: currentUrl },
+                params: addressJob.params,
               });
               if (result.exitCode !== 0) throw new SiteJobFailedError(result.exitCode, result.outputTail);
-              // WordPress is on the new address now: a restart before publish must re-publish the
+              // The site is on the new address now: a restart before publish must re-publish the
               // safe transition plan, and a retry must not run the switch again from a stale address.
               await db
                 .update(sites)
                 .set({
-                  wordpressUrl: wanted,
+                  siteUrl: wanted,
                   appliedRoutes: transition,
                   appliedRoutesHash: routePlanHash(transition, wanted),
                   updatedAt: new Date(),
@@ -160,12 +165,12 @@ export class SiteDomainsApplier {
           : null,
       );
 
-      await step("publish", async () => {
-        const final = buildSiteHostRoutes(rows, now, { acmeEnabled });
-        await publish(final);
-        // Every executor call is done; what is left is bookkeeping (processing cannot go straight to succeeded).
-        await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-        await db
+      const final = buildSiteHostRoutes(rows, now, { acmeEnabled });
+      await step("publish", () => publish(final));
+
+      // The routes are recorded as published only together with the operation's end.
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        await tx
           .update(sites)
           .set({
             appliedRoutes: final,
@@ -173,17 +178,15 @@ export class SiteDomainsApplier {
             updatedAt: new Date(),
           })
           .where(eq(sites.id, siteId));
-      });
-
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId,
-        action: "site.domains.applied",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id, wordpressUrl: switchUrl ? wanted : null },
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId,
+          action: "site.domains.applied",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id, wordpressUrl: addressJob ? wanted : null },
+        });
       });
     } catch (err) {
       await this.#settleFailure(op, current, err);

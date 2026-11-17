@@ -109,6 +109,14 @@ REQUIRED_UNITS=(
   "hp-api.service"
   "hp-docker-executor.service"
   "hp-host-agent.service"
+  "hp-unit-restart@.path"
+  "hp-unit-restart@.service"
+  "hp-panel-update.path"
+  "hp-panel-update.service"
+  "hp-os-refresh.path"
+  "hp-os-refresh.service"
+  "hp-os-upgrade.path"
+  "hp-os-upgrade.service"
 )
 
 for unit_name in "${REQUIRED_UNITS[@]}"; do
@@ -129,23 +137,33 @@ if [[ ! -x "${NOLOGIN_SHELL}" && -x "/sbin/nologin" ]]; then
 fi
 
 if [[ "${DRY_RUN}" -eq 1 ]]; then
+  log_dry "Would install with apt-get, before anything else, those of these OS packages that are missing: ${HP_OS_PACKAGES[*]}"
   log_dry "Would ensure system group: hp-ipc"
   log_dry "Would ensure system users (${NOLOGIN_SHELL}): hp-web, hp-api (hp-ipc), hp-executor (docker,hp-ipc), hp-agent (hp-ipc), hp-mariadb (no supplementary groups)"
   log_dry "Would ensure directory /etc/hosting-panel (0750 root:hp-ipc)"
   log_dry "Would install /etc/hosting-panel/nftables-dedicated.conf (0640 root:hp-ipc)"
+  log_dry "Would refresh /etc/nftables.d/hosting-panel.nft (0644 root:root) only if it exists"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/ipc.key (0440 root:hp-ipc)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/secrets-master.key (0400 hp-api:root)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/breakglass-jwt.key (0400 hp-api:root)"
   log_dry "Would idempotently generate RSA-3072 JWT signing key /etc/hosting-panel/jwt-signing.pem (0400 hp-api:root)"
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/mariadb-root.key (0440 hp-mariadb:hp-executor)"
+  log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/backup.key (0440 root:hp-executor)"
   log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
-  log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass and /usr/local/sbin/hp-update (0750 root:root)"
-  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb), and /var/lib/hosting-panel/site-mail (0755 hp-executor:hp-executor)"
-  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor) + /run/hosting-panel/mail-relay (0755 hp-executor:hp-executor)"
+  log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass, /usr/local/sbin/hp-update and /usr/local/sbin/hp-restore-panel (0750 root:root)"
+  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb), /var/lib/hosting-panel/site-mail (0755 hp-executor:hp-executor), /var/lib/hosting-panel/sftp (0700 hp-executor:hp-executor), /var/lib/hosting-panel/phpmyadmin (0755 hp-executor:hp-executor), and /var/lib/hosting-panel/backups (0700 hp-executor:hp-executor), and /var/lib/hosting-panel/panel-dump (2770 root:hp-ipc)"
+  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor) + /run/hosting-panel/mail-relay (0755 hp-executor:hp-executor) + /run/hosting-panel/host-jobs (0700 hp-agent:hp-agent)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
   done
   log_dry "Would run: systemctl daemon-reload"
+  log_dry "Would run: systemctl enable --now hp-unit-restart@hp-api.path hp-unit-restart@hp-web.path hp-unit-restart@hp-docker-executor.path hp-unit-restart@hp-host-agent.path hp-panel-update.path hp-os-refresh.path hp-os-upgrade.path"
+  if [[ -r "${REPO_ROOT}/IMAGES" ]]; then
+    while IFS= read -r image; do log_dry "Image (pulled by hp-docker-executor, never by this script): ${image}"; done <"${REPO_ROOT}/IMAGES"
+  else
+    log_dry "No image list: ${REPO_ROOT}/IMAGES is missing (a source tree, not a release)"
+  fi
+  log_dry "Ports: 22, 80, 443 accepted in the input chain of the base rules; 3000 (web console) from the Docker bridges only; 80, 443 (Traefik) and 2222 (site SFTP) published by Docker on all addresses, where of the base rules only the block list filters them; ports of a generic service published by Docker on 127.0.0.1 only; 127.0.0.1:4000 (API), 127.0.0.1:5432 (PostgreSQL), 127.0.0.1:8306 (phpMyAdmin) on loopback"
   log_info "Bootstrap dry-run completed successfully."
   exit 0
 fi
@@ -153,6 +171,16 @@ fi
 # Live provisioning requires root privileges
 if [[ "${EUID}" -ne 0 ]]; then
   fail "Live provisioning requires root privileges (re-run as root or pass --dry-run)."
+fi
+
+# 5b. OS packages this version needs and an older server lacks: only the missing ones, before anything changes.
+MISSING_PACKAGES="$(missing_os_packages)"
+if [[ -n "${MISSING_PACKAGES}" ]]; then
+  log_info "Installing missing OS packages: ${MISSING_PACKAGES}"
+  # shellcheck disable=SC2086 # a list of package names
+  { DEBIAN_FRONTEND=noninteractive apt-get update -q &&
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ${MISSING_PACKAGES}; } ||
+    fail "Could not install the OS packages ${MISSING_PACKAGES}; nothing else was changed. Check the apt sources and the network, then run the update again."
 fi
 
 # 6. Provision hp-ipc group & dedicated non-root system users
@@ -197,6 +225,13 @@ ensure_system_user "hp-mariadb" ""
 # 7. Provision /etc/hosting-panel & idempotent cryptographic keys
 install -d -m 0750 -o root -g hp-ipc /etc/hosting-panel
 install -m 0640 -o root -g hp-ipc "${NFTABLES_SRC_FILE}" /etc/hosting-panel/nftables-dedicated.conf
+# The boot copy exists only where install.sh set the firewall up; an update keeps it current but never loads it.
+if [[ -e /etc/nftables.d/hosting-panel.nft ]] && ! cmp -s "${NFTABLES_SRC_FILE}" /etc/nftables.d/hosting-panel.nft; then
+  log_info "The base firewall rules changed in this version and are not loaded yet: on Administration > Firewall use Apply base rules."
+fi
+if [[ -e /etc/nftables.d/hosting-panel.nft ]]; then
+  install -m 0644 -o root -g root "${NFTABLES_SRC_FILE}" /etc/nftables.d/hosting-panel.nft
+fi
 
 generate_32_byte_hex_key() {
   od -An -tx1 -N32 /dev/urandom | tr -d ' \n'
@@ -277,6 +312,22 @@ else
   log_info "Preserved existing MariaDB root key at ${MARIADB_ROOT_KEY_PATH} (0440)"
 fi
 
+# Restic repository password: read by the executor for backup jobs (group). Never regenerated: a new key makes every existing backup unreadable.
+BACKUP_KEY_PATH="/etc/hosting-panel/backup.key"
+if [[ ! -s "${BACKUP_KEY_PATH}" ]]; then
+  tmp_backup_key="$(mktemp /etc/hosting-panel/.backup.key.XXXXXX)"
+  chmod 0400 "${tmp_backup_key}"
+  printf '%s' "$(generate_32_byte_hex_key)" > "${tmp_backup_key}"
+  chown root:hp-executor "${tmp_backup_key}"
+  chmod 0440 "${tmp_backup_key}"
+  mv -f "${tmp_backup_key}" "${BACKUP_KEY_PATH}"
+  log_info "Generated new 32-byte backup encryption key at ${BACKUP_KEY_PATH}"
+else
+  chown root:hp-executor "${BACKUP_KEY_PATH}"
+  chmod 0440 "${BACKUP_KEY_PATH}"
+  log_info "Preserved existing backup encryption key at ${BACKUP_KEY_PATH} (0440)"
+fi
+
 # Per-service env files (0400 root:root; systemd reads them as root). Created only if absent, from a temp file.
 write_env_file() {
   local path="$1" content="$2" tmp
@@ -307,6 +358,7 @@ HP_PANEL_UPSTREAM_PORT=3000"
 install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-accounts" /usr/local/sbin/hp-accounts
 install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-break-glass" /usr/local/sbin/hp-break-glass
 install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-update" /usr/local/sbin/hp-update
+install -m 0750 -o root -g root "${SCRIPT_DIR}/hp-restore-panel" /usr/local/sbin/hp-restore-panel
 
 # 8. Provision /var/lib/hosting-panel data hierarchy & /run/hosting-panel tmpfs (setgid+sticky 3770 root:hp-ipc)
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
@@ -318,6 +370,12 @@ install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/sites
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/mariadb
 install -d -m 0700 -o hp-mariadb -g hp-mariadb /var/lib/hosting-panel/mariadb/data
 install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/site-mail
+install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/sftp
+install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/phpmyadmin
+install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/backups
+# The API writes the panel copy here, the executor reads it (group hp-ipc via setgid).
+install -d -m 2770 -o root -g hp-ipc /var/lib/hosting-panel/panel-dump
+chmod 2770 /var/lib/hosting-panel/panel-dump
 
 install -m 0644 -o root -g root "${SYSTEMD_SRC_DIR}/hosting-panel-tmpfiles.conf" /etc/tmpfiles.d/hosting-panel.conf
 install -d -m 3770 -o root -g hp-ipc /run/hosting-panel
@@ -325,6 +383,8 @@ chmod 3770 /run/hosting-panel
 install -d -m 0700 -o hp-executor -g hp-executor /run/hosting-panel/secrets
 # 00755: a plain 0755 keeps the setgid bit inherited from the 3770 parent (GNU install).
 install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay
+# Host job trigger files: only the agent writes them; root path units watch them (ADR 0028).
+install -d -m 00700 -o hp-agent -g hp-agent /run/hosting-panel/host-jobs
 
 # 9. Install and reload systemd units
 for unit_name in "${REQUIRED_UNITS[@]}"; do
@@ -332,6 +392,8 @@ for unit_name in "${REQUIRED_UNITS[@]}"; do
 done
 
 systemctl daemon-reload
+# Before the quiet exit: an updated server gets the path units too. The services stay disabled.
+systemctl enable --now hp-unit-restart@hp-api.path hp-unit-restart@hp-web.path hp-unit-restart@hp-docker-executor.path hp-unit-restart@hp-host-agent.path hp-panel-update.path hp-os-refresh.path hp-os-upgrade.path
 log_info "Installed systemd units and reloaded systemd daemon successfully."
 
 # The updater re-runs bootstrap on every update; the first-run hints are noise there.

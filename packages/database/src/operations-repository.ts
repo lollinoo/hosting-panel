@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, not, sql } from "drizzle-orm";
 import {
   canTransitionOperation,
   findForbiddenPublicDtoKeys,
@@ -15,6 +15,7 @@ import {
   type PhpVersion,
   type ServiceDesiredStatus,
   type SiteStatus,
+  type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
   buildImmutableStackRevision,
@@ -412,6 +413,7 @@ export interface CreateSiteInput {
   readonly actorId?: string;
   readonly status?: SiteStatus;
   readonly phpVersion?: PhpVersion | null;
+  readonly siteType?: SiteTypeKey | null;
   readonly initialDomainStatus?: DomainStatus;
 }
 
@@ -450,6 +452,7 @@ export async function createSiteTransactional(
         slug: input.slug,
         status: input.status ?? "ready",
         phpVersion: input.phpVersion ?? null,
+        siteType: input.siteType ?? null,
       })
       .returning();
 
@@ -1077,16 +1080,89 @@ export async function transitionOperation(
   });
 }
 
+export type OperationOutcome =
+  | { readonly status: "succeeded" }
+  | { readonly status: "failed"; readonly errorCode: ErrorCode; readonly errorMessage: string };
+
+/** Settles an operation in one transaction: row locked, caller's writes, end state. False when missing or already ended. */
+export async function settleOperation(
+  db: HostingPanelDatabase,
+  operationId: string,
+  outcome: OperationOutcome,
+  write?: (tx: HostingPanelDatabase) => Promise<void>,
+): Promise<boolean> {
+  try {
+    return await db.transaction(async (tx) => {
+      const t = tx as unknown as HostingPanelDatabase;
+      const [row] = await tx
+        .select({ status: operations.status })
+        .from(operations)
+        .where(eq(operations.id, operationId))
+        .for("update");
+      if (!row || isTerminalOperationStatus(row.status)) return false;
+      if (outcome.status === "failed" && !canTransitionOperation(row.status, "failed")) return false;
+      await write?.(t);
+      if (outcome.status === "succeeded") {
+        if (row.status !== "reconciling") await transitionOperation(t, operationId, "reconciling");
+        await transitionOperation(t, operationId, "succeeded", { errorCode: null, errorMessage: null });
+      } else {
+        await transitionOperation(t, operationId, "failed", {
+          errorCode: outcome.errorCode,
+          errorMessage: outcome.errorMessage,
+        });
+      }
+      return true;
+    });
+  } catch (err) {
+    // The work is done and only its record failed: recovery reads what was recorded (R104).
+    if (outcome.status === "succeeded" && typeof err === "object" && err !== null) {
+      Object.assign(err, { ambiguousOutcome: true });
+    }
+    throw err;
+  }
+}
+
+export interface ClaimPendingOutboxFilter {
+  readonly includeKinds?: readonly OperationKind[];
+  readonly excludeKinds?: readonly OperationKind[];
+}
+
 export async function claimPendingOutboxEvents(
   db: HostingPanelDatabase,
   batchSize: number = 10,
   leaseDurationMs: number = DEFAULT_OPERATION_LEASE_DURATION_MS,
+  filter?: ClaimPendingOutboxFilter,
 ) {
+  if (filter?.includeKinds && filter.includeKinds.length === 0) {
+    return [];
+  }
+
   return db.transaction(async (tx) => {
+    const hasOperationKindIn = (kinds: readonly OperationKind[]) =>
+      exists(
+        tx
+          .select({ one: sql`1` })
+          .from(operations)
+          .where(
+            and(
+              eq(operations.id, sql`${outboxEvents.payload}->>'operationId'`),
+              inArray(operations.kind, [...kinds]),
+            ),
+          ),
+      );
+
+    const conditions = [eq(outboxEvents.status, "pending")];
+    if (filter?.includeKinds && filter.includeKinds.length > 0) {
+      conditions.push(hasOperationKindIn(filter.includeKinds));
+    }
+    if (filter?.excludeKinds && filter.excludeKinds.length > 0) {
+      conditions.push(not(hasOperationKindIn(filter.excludeKinds)));
+    }
+
     const pending = await tx
       .select()
       .from(outboxEvents)
-      .where(eq(outboxEvents.status, "pending"))
+      .where(and(...conditions))
       .orderBy(asc(outboxEvents.createdAt))
       .limit(batchSize)
       .for("update", { skipLocked: true });

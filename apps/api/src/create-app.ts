@@ -2,21 +2,28 @@ import "reflect-metadata";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { isAbsolute } from "node:path";
 import { NestFactory } from "@nestjs/core";
 import {
   FastifyAdapter,
   type NestFastifyApplication,
 } from "@nestjs/platform-fastify";
 import {
+  LEGACY_SITE_TYPE,
   findForbiddenPublicDtoKeys,
   type IpcSigningKey,
   type RuntimeBackend,
 } from "@hosting-panel/contracts";
 import {
+  and,
   createDatabaseClient,
+  ensurePresetRolesAndPermissions,
   ensureWordpressTemplate,
+  isNotNull,
+  isNull,
   parseSecretsMasterKey,
   seedPhase1Dataset,
+  sites,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import {
@@ -31,7 +38,10 @@ import {
 } from "@hosting-panel/host-agent";
 import type { DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
+import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
+import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
+import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
@@ -47,6 +57,8 @@ import {
   resolveRequestId,
 } from "./common/control-plane.error.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
+import { AdminTerminalService, TERMINAL_SWEEP_INTERVAL_MS } from "./terminal/admin-terminal.service.js";
+import { FirewallService } from "./firewall/firewall.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import type { ControlPlaneRuntimeConfig } from "./tokens.js";
 
@@ -217,6 +229,10 @@ export interface CreateControlPlaneAppOptions {
   readonly driftReconcileIntervalMs?: number | null;
   readonly domainReconcileIntervalMs?: number | null;
   readonly mailRelayRetryIntervalMs?: number | null;
+  readonly sftpRetryIntervalMs?: number | null;
+  readonly backupScheduleIntervalMs?: number | null;
+  readonly terminalSweepIntervalMs?: number | null;
+  readonly panelDump?: ControlPlaneRuntimeConfig["panelDump"];
   readonly recoverUnknownOnStart?: boolean;
   readonly oidcIssuer?: string;
   readonly oidcAudience?: string;
@@ -239,6 +255,8 @@ export interface ControlPlaneAppHandle {
   readonly driftReconciler: DriftReconcilerService;
   readonly domainReconciler: DomainReconcilerService;
   readonly mailRelay: MailRelayService;
+  readonly siteSftp: SiteSftpService;
+  readonly backupScheduler: BackupSchedulerService;
   close(): Promise<void>;
 }
 
@@ -326,7 +344,10 @@ export async function createControlPlaneApp(
   if (ownsDatabaseClient) {
     await dbClient.migrate();
     await ensureWordpressTemplate(dbClient.db);
+    await ensurePresetRolesAndPermissions(dbClient.db);
   }
+  // A release rolled back by hp-update writes sites with a PHP version and no type: give them the legacy one.
+  await dbClient.db.update(sites).set({ siteType: LEGACY_SITE_TYPE }).where(and(isNotNull(sites.phpVersion), isNull(sites.siteType)));
 
   const oidcIssuer =
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";
@@ -375,6 +396,34 @@ export async function createControlPlaneApp(
             : 60_000)
         : null;
 
+  const envSftpIntervalRaw = process.env["HP_SFTP_RETRY_INTERVAL_MS"]?.trim();
+  const sftpRetryIntervalMs =
+    options?.sftpRetryIntervalMs !== undefined
+      ? options.sftpRetryIntervalMs
+      : shouldListen && runtimeBackend === "linux-systemd"
+        ? (envSftpIntervalRaw && /^\d+$/.test(envSftpIntervalRaw)
+            ? Number.parseInt(envSftpIntervalRaw, 10)
+            : 60_000)
+        : null;
+
+  const envBackupScheduleRaw = process.env["HP_BACKUP_SCHEDULE_INTERVAL_MS"]?.trim();
+  const backupScheduleIntervalMs =
+    options?.backupScheduleIntervalMs !== undefined
+      ? options.backupScheduleIntervalMs
+      : shouldListen && runtimeBackend === "linux-systemd"
+        ? (envBackupScheduleRaw && /^\d+$/.test(envBackupScheduleRaw)
+            ? Number.parseInt(envBackupScheduleRaw, 10)
+            : 5_000)
+        : null;
+
+  const panelDumpDir = process.env["HP_PANEL_DUMP_DIR"]?.trim();
+  const panelDump =
+    options?.panelDump !== undefined
+      ? options.panelDump
+      : panelDumpDir && isAbsolute(panelDumpDir) && databaseUrl?.trim()
+        ? { dir: panelDumpDir, databaseUrl: databaseUrl.trim() }
+        : null;
+
   const runtimeConfig: ControlPlaneRuntimeConfig = {
     oidcIssuer,
     oidcAudience,
@@ -388,6 +437,9 @@ export async function createControlPlaneApp(
     driftReconcileIntervalMs,
     domainReconcileIntervalMs,
     mailRelayRetryIntervalMs,
+    sftpRetryIntervalMs,
+    backupScheduleIntervalMs,
+    panelDump,
   };
 
   const fastifyAdapter = new FastifyAdapter({
@@ -488,9 +540,14 @@ export async function createControlPlaneApp(
   const driftReconciler = nestApp.get(DriftReconcilerService);
   const domainReconciler = nestApp.get(DomainReconcilerService);
   const mailRelay = nestApp.get(MailRelayService);
+  const siteSftp = nestApp.get(SiteSftpService);
+  const backupScheduler = nestApp.get(BackupSchedulerService);
+  const terminal = nestApp.get(AdminTerminalService);
+  const firewall = nestApp.get(FirewallService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
     await outboxWorker.recoverUnknownOperations().catch(() => undefined);
+    await nestApp.get(SiteBackupsApplier).panel.sweepStaleDumps().catch(() => undefined);
   }
 
   outboxWorker.startBackgroundLoop();
@@ -500,6 +557,10 @@ export async function createControlPlaneApp(
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
   mailRelay.startBackgroundLoop();
+  if (runtimeBackend !== "disabled") void firewall.syncAtStart();
+  siteSftp.startBackgroundLoop();
+  backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
+  terminal.startBackgroundLoop(options?.terminalSweepIntervalMs !== undefined ? options.terminalSweepIntervalMs : TERMINAL_SWEEP_INTERVAL_MS);
 
   let isClosed = false;
 
@@ -518,16 +579,22 @@ export async function createControlPlaneApp(
     driftReconciler,
     domainReconciler,
     mailRelay,
+    siteSftp,
+    backupScheduler,
     async close(): Promise<void> {
       if (isClosed) {
         return;
       }
       isClosed = true;
 
+      await terminal.stop();
+      await firewall.stop();
+      await backupScheduler.stop();
       await outboxWorker.stop();
       await driftReconciler.stop();
       await domainReconciler.stop();
       await mailRelay.stop();
+      await siteSftp.stop();
       await nestApp.close();
       if (ownsDatabaseClient) {
         await dbClient.close();

@@ -18,6 +18,7 @@ Environment=HP_IPC_TRANSPORT=uds
 Environment=HP_EXECUTOR_SOCKET_PATH=/run/hosting-panel/executor.sock
 Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_SECRETS_ROOT_DIR=/run/hosting-panel/secrets
+Environment=HP_PANEL_DUMP_DIR=/var/lib/hosting-panel/panel-dump
 Environment=HP_INGRESS_ROOT_DIR=/var/lib/hosting-panel/ingress
 ExecStartPre=/usr/bin/install -d -m 0700 /run/hosting-panel/secrets
 ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/docker-executor/dist/main.js

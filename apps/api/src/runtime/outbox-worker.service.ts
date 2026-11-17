@@ -1,6 +1,10 @@
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   ERROR_CODES,
+  HOST_JOB_KIND,
+  PANEL_CONTAINER_APPLY_KIND,
+  WORDPRESS_IMPORT_KIND,
+  WORDPRESS_OPERATION_KINDS,
   canTransitionOperation,
   isTerminalOperationStatus,
   redactSensitiveString,
@@ -17,21 +21,28 @@ import {
   eq,
   failOutboxEvent,
   inArray,
+  isNull,
+  latestSiteOperation,
+  lte,
   markExpiredOperationsUnknownTransactional,
   operationSteps,
   operations,
+  or,
   outboxEvents,
   rebindDockerResourceTransactional,
   recordObservedStateReconciliationTransactional,
   renewOperationLease,
   serviceInstances,
+  settleOperation,
   sites,
+  sql,
   stackRevisions,
   transitionOperation,
   updateOperationStepTransactional,
+  type ClaimPendingOutboxFilter,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { DockerExecutionResult, DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import {
   createApprovedHostMaintenanceCommand,
   createApprovedHostSecurityCommand,
@@ -49,8 +60,15 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
+import { executePanelContainerRestart, recoverPanelContainerRestart } from "../health/panel-restart.js";
+import { executePanelContainerApply, recoverPanelContainerApply } from "../updates/panel-container-apply.js";
+import { FirewallService } from "../firewall/firewall.service.js";
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
-import { SiteProvisioner } from "./site-provisioner.js";
+import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
+import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
+import { SITE_WORDPRESS_INTERRUPTED, SiteWordpressApplier } from "../sites/site-wordpress-applier.js";
+import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-applier.js";
+import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -65,6 +83,29 @@ const SITE_OPERATION_KINDS: ReadonlySet<OperationKind> = new Set([
   "site.delete",
   "site.reassign",
 ]);
+const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
+  "site.files.archive",
+  "site.files.extract",
+];
+// The import runs in the WordPress lane: its copy step is the update's own.
+const WORDPRESS_LANE_KINDS = [...WORDPRESS_OPERATION_KINDS, WORDPRESS_IMPORT_KIND] as const satisfies readonly OperationKind[];
+const HOST_LANE_KINDS = [HOST_JOB_KIND, PANEL_CONTAINER_APPLY_KIND] as const satisfies readonly OperationKind[];
+// host-jobs.ts imports this file for the backup kinds, so a static import back would be an ESM cycle.
+const hostJobs = () => import("../host/host-jobs.js");
+export const BACKUP_OPERATION_KINDS = [
+  "site.backups.create",
+  "site.backups.prune",
+  "site.backups.restore",
+  "site.backups.download",
+  "panel.backups.create",
+] as const satisfies readonly OperationKind[];
+
+interface OutboxLaneState {
+  readonly filter: ClaimPendingOutboxFilter;
+  activePromise: Promise<OutboxProcessResult> | null;
+  scheduledImmediate: NodeJS.Immediate | null;
+  pendingTrigger: boolean;
+}
 
 export interface OutboxProcessResult {
   readonly claimed: number;
@@ -76,7 +117,11 @@ export interface UnknownRecoveryResult {
   readonly markedUnknown: number;
   readonly convergedSucceeded: number;
   readonly convergedFailed: number;
+  /** Operations whose recovery threw this pass; they stay unknown. Present only when not empty. */
+  readonly recoveryErrors?: readonly RecoveryError[];
 }
+
+type RecoveryError = { readonly kind: string; readonly operationId: string; readonly errorCode: ErrorCode };
 
 function extractErrorCode(err: unknown, fallback: ErrorCode = "INTERNAL_ERROR"): ErrorCode {
   if (
@@ -106,11 +151,51 @@ function extractRestartCount(obs: unknown): number {
 @Injectable()
 export class OutboxWorkerService {
   #stopped = false;
-  #scheduledImmediate: NodeJS.Immediate | null = null;
+  readonly #stopping = new AbortController(); // tells a running host-job follow to let go (R201 1.1)
   #pollTimer: NodeJS.Timeout | null = null;
-  #activeRunPromise: Promise<OutboxProcessResult> | null = null;
   #activeRecoveryPromise: Promise<UnknownRecoveryResult> | null = null;
-  #pendingTrigger = false;
+  readonly #mainLane: OutboxLaneState = {
+    filter: {
+      excludeKinds: [
+        ...FILE_ARCHIVE_OPERATION_KINDS,
+        ...BACKUP_OPERATION_KINDS,
+        ...WORDPRESS_LANE_KINDS,
+        ...HOST_LANE_KINDS,
+      ],
+    },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  readonly #fileLane: OutboxLaneState = {
+    filter: { includeKinds: FILE_ARCHIVE_OPERATION_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  readonly #backupLane: OutboxLaneState = {
+    filter: { includeKinds: BACKUP_OPERATION_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  readonly #wordpressLane: OutboxLaneState = {
+    filter: { includeKinds: WORDPRESS_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+  // An hour-long system upgrade never holds up deploys or backups.
+  readonly #hostLane: OutboxLaneState = {
+    filter: { includeKinds: HOST_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
+
+  readonly #backupsApplier: SiteBackupsApplier;
+  readonly #wordpressApplier: SiteWordpressApplier;
+  readonly #wordpressImportApplier: SiteWordpressImportApplier;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -119,7 +204,26 @@ export class OutboxWorkerService {
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(SiteProvisioner) private readonly siteProvisioner: SiteProvisioner,
     @Inject(SiteDomainsApplier) private readonly siteDomainsApplier: SiteDomainsApplier,
-  ) {}
+    @Inject(SiteFilesApplier) private readonly siteFilesApplier: SiteFilesApplier,
+    @Optional() @Inject(SiteBackupsApplier) siteBackupsApplier?: SiteBackupsApplier,
+    @Optional() @Inject(FirewallService) private readonly firewall?: FirewallService,
+  ) {
+    this.#backupsApplier =
+      siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
+    this.#wordpressApplier = new SiteWordpressApplier(
+      this.#backupsApplier,
+      dbClient,
+      dockerExecutor,
+      config,
+    );
+    this.#wordpressImportApplier = new SiteWordpressImportApplier(
+      this.#backupsApplier,
+      this.#wordpressApplier,
+      dbClient,
+      dockerExecutor,
+      config,
+    );
+  }
 
   public startBackgroundLoop(): void {
     const intervalMs = this.config.outboxPollIntervalMs;
@@ -142,31 +246,23 @@ export class OutboxWorkerService {
       return;
     }
 
-    if (this.#activeRunPromise !== null) {
-      this.#pendingTrigger = true;
-      return;
-    }
-
-    if (this.#scheduledImmediate !== null) {
-      return;
-    }
-
-    this.#scheduledImmediate = setImmediate(() => {
-      this.#scheduledImmediate = null;
-      if (this.#stopped) {
-        return;
-      }
-      void this.#drainPendingTriggers();
-    });
+    this.#triggerLane(this.#mainLane);
+    this.#triggerLane(this.#fileLane);
+    this.#triggerLane(this.#backupLane);
+    this.#triggerLane(this.#wordpressLane);
+    this.#triggerLane(this.#hostLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
-    this.#pendingTrigger = false;
+    this.#stopping.abort();
 
-    if (this.#scheduledImmediate !== null) {
-      clearImmediate(this.#scheduledImmediate);
-      this.#scheduledImmediate = null;
+    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane, this.#hostLane]) {
+      lane.pendingTrigger = false;
+      if (lane.scheduledImmediate !== null) {
+        clearImmediate(lane.scheduledImmediate);
+        lane.scheduledImmediate = null;
+      }
     }
 
     if (this.#pollTimer !== null) {
@@ -174,39 +270,79 @@ export class OutboxWorkerService {
       this.#pollTimer = null;
     }
 
-    if (this.#activeRunPromise !== null) {
-      await this.#activeRunPromise.catch(() => undefined);
-    }
-
-    if (this.#activeRecoveryPromise !== null) {
-      await this.#activeRecoveryPromise.catch(() => undefined);
-    }
+    await Promise.all([
+      this.#mainLane.activePromise?.catch(() => undefined),
+      this.#fileLane.activePromise?.catch(() => undefined),
+      this.#backupLane.activePromise?.catch(() => undefined),
+      this.#wordpressLane.activePromise?.catch(() => undefined),
+      this.#hostLane.activePromise?.catch(() => undefined),
+      this.#activeRecoveryPromise?.catch(() => undefined),
+    ]);
   }
 
-  async #drainPendingTriggers(): Promise<void> {
+  #triggerLane(lane: OutboxLaneState): void {
+    if (lane.activePromise !== null) {
+      lane.pendingTrigger = true;
+      return;
+    }
+
+    if (lane.scheduledImmediate !== null) {
+      return;
+    }
+
+    lane.scheduledImmediate = setImmediate(() => {
+      lane.scheduledImmediate = null;
+      if (this.#stopped) {
+        return;
+      }
+      void this.#drainLane(lane);
+    });
+  }
+
+  async #drainLane(lane: OutboxLaneState): Promise<void> {
     do {
-      this.#pendingTrigger = false;
-      await this.processPendingOnce().catch(() => undefined);
-    } while (this.#pendingTrigger && !this.#stopped);
+      lane.pendingTrigger = false;
+      await this.#runLane(lane, 10).catch(() => undefined);
+    } while (lane.pendingTrigger && !this.#stopped);
   }
 
-  public async processPendingOnce(batchSize: number = 10): Promise<OutboxProcessResult> {
-    if (this.#activeRunPromise !== null) {
-      return this.#activeRunPromise;
+  async #runLane(lane: OutboxLaneState, batchSize: number): Promise<OutboxProcessResult> {
+    if (lane.activePromise !== null) {
+      return lane.activePromise;
     }
 
-    const promise = this.#executeBatch(batchSize);
-    this.#activeRunPromise = promise;
+    const promise = this.#executeBatch(batchSize, lane.filter);
+    lane.activePromise = promise;
     try {
       return await promise;
     } finally {
-      this.#activeRunPromise = null;
+      if (lane.activePromise === promise) {
+        lane.activePromise = null;
+      }
     }
   }
 
-  async #executeBatch(batchSize: number): Promise<OutboxProcessResult> {
+  public async processPendingOnce(batchSize: number = 10): Promise<OutboxProcessResult> {
+    const results = await Promise.all([
+      this.#runLane(this.#mainLane, batchSize),
+      this.#runLane(this.#fileLane, batchSize),
+      this.#runLane(this.#backupLane, batchSize),
+      this.#runLane(this.#wordpressLane, batchSize),
+      this.#runLane(this.#hostLane, batchSize),
+    ]);
+    return {
+      claimed: results.reduce((n, r) => n + r.claimed, 0),
+      succeeded: results.reduce((n, r) => n + r.succeeded, 0),
+      failed: results.reduce((n, r) => n + r.failed, 0),
+    };
+  }
+
+  async #executeBatch(
+    batchSize: number,
+    filter: ClaimPendingOutboxFilter,
+  ): Promise<OutboxProcessResult> {
     const db = this.dbClient.db;
-    const claimedEvents = await claimPendingOutboxEvents(db, batchSize);
+    const claimedEvents = await claimPendingOutboxEvents(db, batchSize, undefined, filter);
     if (claimedEvents.length === 0) {
       return { claimed: 0, succeeded: 0, failed: 0 };
     }
@@ -265,8 +401,8 @@ export class OutboxWorkerService {
       return "skipped";
     }
 
-    // Operations on a managed site are shown to customers: fixed friendly step texts only.
-    const siteOp = op.lockKey?.startsWith("site:") === true;
+    // Customer-visible operations (a site's or a generic service's): fixed friendly step texts only.
+    const siteOp = /^(site|svc):/.test(op.lockKey ?? "");
     if (siteOp) this.#siteOperationIds.add(op.id);
     try {
       await transitionOperation(db, op.id, "processing");
@@ -281,6 +417,12 @@ export class OutboxWorkerService {
         await this.#executeServiceDeploy(op);
       } else if (op.kind === "service.restart" || op.kind === "service.stop") {
         await this.#executeServiceLifecycleAction(op, op.kind);
+      } else if (op.kind === "panel.container.restart") {
+        await executePanelContainerRestart(db, this.dockerExecutor, op);
+      } else if (op.kind === PANEL_CONTAINER_APPLY_KIND) {
+        await executePanelContainerApply(db, this.dockerExecutor, op);
+      } else if (op.kind === HOST_JOB_KIND) {
+        await (await hostJobs()).executeHostJob(db, this.hostAgent, op, undefined, this.#stopping.signal);
       } else if (op.kind === "host.maintenance") {
         await this.#executeHostMaintenance(op, payload);
       } else if (op.kind === "host.security") {
@@ -293,6 +435,14 @@ export class OutboxWorkerService {
         await this.siteProvisioner.reassign(op, payload);
       } else if (op.kind === "site.domains") {
         await this.siteDomainsApplier.apply(op);
+      } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
+        await this.siteFilesApplier.apply(op, payload);
+      } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
+        await this.#backupsApplier.apply(op);
+      } else if (op.kind === WORDPRESS_IMPORT_KIND) {
+        await this.#wordpressImportApplier.apply(op);
+      } else if ((WORDPRESS_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
+        await this.#wordpressApplier.apply(op);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -304,13 +454,7 @@ export class OutboxWorkerService {
       return "succeeded";
     } catch (err) {
       const errorCode = extractErrorCode(err, "INTERNAL_ERROR");
-      const explicitAmbiguous =
-        errorCode === "OPERATION_AMBIGUOUS" ||
-        Boolean(
-          err !== null &&
-            typeof err === "object" &&
-            (err as { ambiguousOutcome?: unknown }).ambiguousOutcome === true,
-        );
+      const explicitAmbiguous = isAmbiguousFailure(err);
       const rawMessage = err instanceof Error ? err.message : "Operation execution failed";
       const sanitizedMessage = sanitizePublicErrorMessage(rawMessage).slice(0, 1024);
 
@@ -358,15 +502,34 @@ export class OutboxWorkerService {
       const stepMessage = siteOp ? SITE_ACTION_FAILED : sanitizedMessage;
       await this.#failRemainingSteps(op.id, stepMessage);
 
+      // A stop that failed for sure before the runtime accepted it left the container running (R195 1.1).
+      const stopNotDone =
+        op.kind === "service.stop" && !explicitAmbiguous && ["queued", "processing"].includes(latestOp?.status ?? "");
+      const keepRunning = async (tx: typeof db): Promise<void> => {
+        if (!stopNotDone) return;
+        await tx
+          .update(serviceInstances)
+          .set({ desiredStatus: "running", updatedAt: new Date() })
+          .where(eq(serviceInstances.id, op.resourceId));
+      };
+
+      if (latestOp?.status === "queued") {
+        // queued -> failed is not allowed: cancel it with the event's failure, or its site stays locked (R189 3.2).
+        await db.transaction(async (tx) => {
+          const t = tx as unknown as typeof db;
+          await keepRunning(t);
+          await transitionOperation(t, op.id, "cancelled", { errorCode, errorMessage: stepMessage });
+          await failOutboxEvent(t, event.id, sanitizedMessage);
+        });
+        return "failed";
+      }
+
       if (
         latestOp &&
         !isTerminalOperationStatus(latestOp.status) &&
         canTransitionOperation(latestOp.status, "failed")
       ) {
-        await transitionOperation(db, op.id, "failed", {
-          errorCode,
-          errorMessage: stepMessage,
-        });
+        await settleOperation(db, op.id, { status: "failed", errorCode, errorMessage: stepMessage }, keepRunning);
       }
 
       await failOutboxEvent(db, event.id, sanitizedMessage);
@@ -416,7 +579,7 @@ export class OutboxWorkerService {
       "Runtime accepted container deployment",
     );
 
-    await transitionOperation(db, op.id, "reconciling");
+    await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: DEPLOY_LEASE_MS });
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -432,24 +595,21 @@ export class OutboxWorkerService {
       "succeeded",
       `Service state converged (${observedStatus})`,
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
-
-    await appendAuditEvent(db, {
-      actorId: null,
-      actorType: "system",
-      organizationId: op.organizationId,
-      action: "service.deploy.succeeded",
-      targetType: "service_instance",
-      targetId: spec.serviceInstanceId,
-      details: {
-        operationId: op.id,
-        siteId: spec.siteId,
-        revisionNumber,
-        specHash: spec.specHash,
-      },
+    await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+      await appendAuditEvent(tx, {
+        actorId: null,
+        actorType: "system",
+        organizationId: op.organizationId,
+        action: "service.deploy.succeeded",
+        targetType: "service_instance",
+        targetId: spec.serviceInstanceId,
+        details: {
+          operationId: op.id,
+          siteId: spec.siteId,
+          revisionNumber,
+          specHash: spec.specHash,
+        },
+      });
     });
   }
 
@@ -504,10 +664,16 @@ export class OutboxWorkerService {
       `Dispatching ${kind} over signed IPC`,
     );
 
+    let gone = false;
     const execResult =
       kind === "service.restart"
-        ? await this.dockerExecutor.restartService(svc.id)
-        : await this.dockerExecutor.stopService(svc.id);
+        ? await this.#restartOrRecreate(op, svc)
+        : await this.dockerExecutor.stopService(svc.id).catch((err: unknown): DockerExecutionResult => {
+            // D8: a container that is gone is already stopped; it is recorded missing and nothing is created.
+            if (extractErrorCode(err) !== "NOT_FOUND") throw err;
+            gone = true;
+            return { operationId: op.id, status: "succeeded" };
+          });
 
     await transitionOperation(db, op.id, "accepted");
     await this.#safeUpdateStep(
@@ -517,7 +683,7 @@ export class OutboxWorkerService {
       `Runtime ${kind} completed`,
     );
 
-    await transitionOperation(db, op.id, "reconciling");
+    await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: DEPLOY_LEASE_MS });
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -527,8 +693,9 @@ export class OutboxWorkerService {
 
     const obs = await this.dockerExecutor.getObservedState(svc.id);
     const expectedFallbackStatus = kind === "service.stop" ? "stopped" : "running";
-    const observedStatus =
-      obs?.observedStatus ?? execResult.containerStatus ?? expectedFallbackStatus;
+    const observedStatus = gone
+      ? "missing"
+      : obs?.observedStatus ?? execResult.containerStatus ?? expectedFallbackStatus;
     const dockerRef =
       execResult.internalDockerRef ??
       (obs as { internalDockerRef?: string } | null)?.internalDockerRef;
@@ -554,10 +721,31 @@ export class OutboxWorkerService {
       "succeeded",
       `Service state converged (${observedStatus})`,
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    await settleOperation(db, op.id, { status: "succeeded" });
+  }
+
+  /** D8: a restart of a gone container creates it again from the stored revision, only after a set-up that succeeded. */
+  async #restartOrRecreate(
+    op: typeof operations.$inferSelect,
+    svc: typeof serviceInstances.$inferSelect,
+  ): Promise<DockerExecutionResult> {
+    try {
+      return await this.dockerExecutor.restartService(svc.id);
+    } catch (err) {
+      if (extractErrorCode(err) !== "NOT_FOUND") throw err;
+      const db = this.dbClient.db;
+      const provision = await latestSiteOperation(db, { siteId: svc.siteId, kind: "site.provision" });
+      // A site whose delete ever started is not rebuilt, even when the delete failed halfway (R195 1.2).
+      if (provision?.status !== "succeeded" || (await latestSiteOperation(db, { siteId: svc.siteId, kind: "site.delete" }))) throw err;
+      const spec = await buildApprovedServiceSpec(db, this.config, {
+        organizationId: op.organizationId,
+        serviceInstanceId: svc.id,
+      });
+      await renewOperationLease(db, op.id, DEPLOY_LEASE_MS);
+      const result = await this.dockerExecutor.deployService(spec);
+      await recordDeployedState(db, this.dockerExecutor, spec, result);
+      return result;
+    }
   }
 
   async #executeHostMaintenance(
@@ -616,7 +804,6 @@ export class OutboxWorkerService {
       "succeeded",
       `Maintenance action '${command.action}' completed`,
     );
-    await transitionOperation(db, op.id, "reconciling");
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -625,10 +812,7 @@ export class OutboxWorkerService {
         ? redactSensitiveString(result.output.slice(0, 500))
         : "Host maintenance verified",
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    await settleOperation(db, op.id, { status: "succeeded" });
   }
 
   async #executeHostSecurity(
@@ -687,7 +871,6 @@ export class OutboxWorkerService {
       "succeeded",
       `Security policy '${command.policyRef}' completed`,
     );
-    await transitionOperation(db, op.id, "reconciling");
     await this.#safeUpdateStep(
       op.id,
       "reconcile_state",
@@ -696,10 +879,8 @@ export class OutboxWorkerService {
         ? redactSensitiveString(result.output.slice(0, 500))
         : "Host security posture verified",
     );
-    await transitionOperation(db, op.id, "succeeded", {
-      errorCode: null,
-      errorMessage: null,
-    });
+    if (command.policyRef === "apply_dedicated_nftables_22_80_443") await this.firewall?.sync();
+    await settleOperation(db, op.id, { status: "succeeded" });
   }
 
   /**
@@ -724,6 +905,37 @@ export class OutboxWorkerService {
 
   async #executeUnknownRecovery(now: Date): Promise<UnknownRecoveryResult> {
     const db = this.dbClient.db;
+    // Requeue stale claims left by a stopped worker while the operation is still queued.
+    await db.transaction(async (tx) => {
+      const staleEvents = await tx
+        .select({ id: outboxEvents.id })
+        .from(outboxEvents)
+        .innerJoin(
+          operations,
+          eq(operations.id, sql`${outboxEvents.payload}->>'operationId'`),
+        )
+        .where(
+          and(
+            eq(outboxEvents.status, "processing"),
+            eq(operations.status, "queued"),
+            or(isNull(operations.leaseExpiresAt), lte(operations.leaseExpiresAt, now)),
+          ),
+        )
+        .for("update");
+
+      if (staleEvents.length > 0) {
+        await tx
+          .update(outboxEvents)
+          .set({ status: "pending", lockedAt: null })
+          .where(
+            inArray(
+              outboxEvents.id,
+              staleEvents.map((row) => row.id),
+            ),
+          );
+      }
+    });
+
     const newlyMarked = await markExpiredOperationsUnknownTransactional(db, now);
 
     const unknownOps = await db
@@ -734,132 +946,209 @@ export class OutboxWorkerService {
 
     let convergedSucceeded = 0;
     let convergedFailed = 0;
+    const recoveryErrors: RecoveryError[] = [];
 
     for (const op of unknownOps) {
-      if (op.kind === "site.domains") {
-        // Only routes changed: the site keeps its status and the reconciler re-enqueues.
-        await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
-        convergedFailed += 1;
-      } else if (SITE_OPERATION_KINDS.has(op.kind)) {
-        // Site steps are not safely replayable mid-way: fail and let the customer retry.
-        await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");
-        await db
-          .update(sites)
-          .set({ status: "degraded", updatedAt: now })
-          .where(eq(sites.id, op.resourceId));
-        convergedFailed += 1;
-      } else if (
-        op.kind === "service.deploy" ||
-        op.kind === "service.restart" ||
-        op.kind === "service.stop"
-      ) {
-        if (!this.dockerExecutor.isRuntimeAvailable) {
-          await this.#convergeUnknownToFailed(
-            op,
-            "Operation interrupted while Docker executor runtime was unavailable; read-only recovery could not verify target state",
-          );
+      try {
+        if (op.kind === "site.domains") {
+          // Only routes changed: the site keeps its status and the reconciler re-enqueues.
+          await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
           convergedFailed += 1;
-          continue;
-        }
-
-        const [svc] = await db
-          .select()
-          .from(serviceInstances)
-          .where(eq(serviceInstances.id, op.resourceId))
-          .limit(1);
-
-        const [currentRev] =
-          svc?.currentRevisionId
-            ? await db
-                .select()
-                .from(stackRevisions)
-                .where(eq(stackRevisions.id, svc.currentRevisionId))
-                .limit(1)
-            : [undefined];
-
-        // Strictly read-only inspection (AC-F2-07)
-        let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
-        try {
-          obs = await this.dockerExecutor.getObservedState(op.resourceId);
-        } catch {
-          // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
-          continue;
-        }
-
-        const targetMatched =
-          op.kind === "service.stop"
-            ? obs !== null && obs.observedStatus === "stopped"
-            : obs !== null &&
-              obs.observedStatus === "running" &&
-              Boolean(currentRev?.specHash) &&
-              obs.observedRevisionHash === currentRev?.specHash &&
-              !obs.outOfBandModified;
-
-        if (targetMatched && obs !== null) {
-          await transitionOperation(db, op.id, "reconciling", {
-            errorCode: null,
-            errorMessage: null,
-          });
-
-          if (svc) {
-            await recordObservedStateReconciliationTransactional(db, {
-              serviceInstanceId: svc.id,
-              observedStatus: obs.observedStatus,
-              observedRevisionHash: obs.observedRevisionHash ?? null,
-              outOfBandModified: Boolean(obs.outOfBandModified),
-              rawState: {
-                restartCount: extractRestartCount(obs),
-                recoveredFromUnknown: true,
+        } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
+          // File archive/extract operations never leave the site degraded and are never blindly replayed.
+          await this.#convergeUnknownToFailed(op, SITE_FILES_INTERRUPTED);
+          convergedFailed += 1;
+        } else if (op.kind === "site.wordpress.inspect") {
+          // A check changes nothing on the site: fail it and let the customer ask again.
+          await this.#convergeUnknownToFailed(op, SITE_WORDPRESS_INTERRUPTED);
+          convergedFailed += 1;
+        } else if (
+          (BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind) ||
+          op.kind === "site.wordpress.update" ||
+          op.kind === WORDPRESS_IMPORT_KIND ||
+          op.kind === HOST_JOB_KIND
+        ) {
+          // Backup, update, import and host job recovery never replay a change; each settles what it can.
+          const outcome =
+            op.kind === HOST_JOB_KIND
+              ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)
+              : op.kind === "site.wordpress.update"
+              ? await this.#wordpressApplier.recover(op)
+              : op.kind === WORDPRESS_IMPORT_KIND
+                ? await this.#wordpressImportApplier.recover(op)
+                : await this.#backupsApplier.recover(op);
+          if (outcome === "pending") {
+            continue;
+          }
+          const [settled] = await db
+            .select({
+              status: operations.status,
+              errorCode: operations.errorCode,
+              errorMessage: operations.errorMessage,
+            })
+            .from(operations)
+            .where(eq(operations.id, op.id))
+            .limit(1);
+          if (settled?.status === "succeeded") {
+            await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+            await appendAuditEvent(db, {
+              actorId: null,
+              actorType: "system",
+              organizationId: op.organizationId,
+              action: "operation.recovered.succeeded",
+              targetType: "operation",
+              targetId: op.id,
+              details: {
+                kind: op.kind,
+                resourceType: op.resourceType,
+                resourceId: op.resourceId,
               },
-              observedAt: obs.observedAt ? new Date(obs.observedAt) : now,
             });
+            convergedSucceeded += 1;
+          } else {
+            const reason = settled?.errorMessage ?? SITE_BACKUPS_INTERRUPTED;
+            const errorCode = settled?.errorCode ?? "OPERATION_INTERRUPTED";
+            await this.#settleAssociatedOutboxEvents(op.id, "failed", reason);
+            await appendAuditEvent(db, {
+              actorId: null,
+              actorType: "system",
+              organizationId: op.organizationId,
+              action: "operation.recovered.failed",
+              targetType: "operation",
+              targetId: op.id,
+              details: {
+                kind: op.kind,
+                resourceType: op.resourceType,
+                resourceId: op.resourceId,
+                errorCode,
+                reason,
+              },
+            });
+            convergedFailed += 1;
+          }
+        } else if (SITE_OPERATION_KINDS.has(op.kind)) {
+          // Site steps are not safely replayable mid-way: fail and let the customer retry.
+          await this.#convergeUnknownToFailed(op, "This operation was interrupted before it finished.");
+          await db
+            .update(sites)
+            .set({ status: "degraded", updatedAt: now })
+            .where(eq(sites.id, op.resourceId));
+          convergedFailed += 1;
+        } else if (
+          op.kind === "service.deploy" ||
+          op.kind === "service.restart" ||
+          op.kind === "service.stop"
+        ) {
+          if (!this.dockerExecutor.isRuntimeAvailable) {
+            await this.#convergeUnknownToFailed(
+              op,
+              "Operation interrupted while Docker executor runtime was unavailable; read-only recovery could not verify target state",
+            );
+            convergedFailed += 1;
+            continue;
           }
 
-          await this.#settleNonTerminalSteps(
-            op.id,
-            "succeeded",
-            "Verified via read-only crash recovery reconciliation (TH-08)",
-          );
+          const [svc] = await db
+            .select()
+            .from(serviceInstances)
+            .where(eq(serviceInstances.id, op.resourceId))
+            .limit(1);
 
-          await transitionOperation(db, op.id, "succeeded", {
-            errorCode: null,
-            errorMessage: null,
-          });
+          const [currentRev] =
+            svc?.currentRevisionId
+              ? await db
+                  .select()
+                  .from(stackRevisions)
+                  .where(eq(stackRevisions.id, svc.currentRevisionId))
+                  .limit(1)
+              : [undefined];
 
-          await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+          // Strictly read-only inspection (AC-F2-07)
+          let obs: Awaited<ReturnType<DockerExecutorPort["getObservedState"]>>;
+          try {
+            obs = await this.dockerExecutor.getObservedState(op.resourceId);
+          } catch {
+            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
+            continue;
+          }
 
-          await appendAuditEvent(db, {
-            actorId: null,
-            actorType: "system",
-            organizationId: op.organizationId,
-            action: "operation.recovered.succeeded",
-            targetType: "operation",
-            targetId: op.id,
-            details: {
-              kind: op.kind,
-              resourceType: op.resourceType,
-              resourceId: op.resourceId,
-            },
-          });
+          const targetMatched =
+            op.kind === "service.stop"
+              ? obs !== null && obs.observedStatus === "stopped"
+              : obs !== null &&
+                obs.observedStatus === "running" &&
+                Boolean(currentRev?.specHash) &&
+                obs.observedRevisionHash === currentRev?.specHash &&
+                !obs.outOfBandModified;
 
-          convergedSucceeded += 1;
+          if (targetMatched && obs !== null) {
+            if (svc) {
+              await recordObservedStateReconciliationTransactional(db, {
+                serviceInstanceId: svc.id,
+                observedStatus: obs.observedStatus,
+                observedRevisionHash: obs.observedRevisionHash ?? null,
+                outOfBandModified: Boolean(obs.outOfBandModified),
+                rawState: {
+                  restartCount: extractRestartCount(obs),
+                  recoveredFromUnknown: true,
+                },
+                observedAt: obs.observedAt ? new Date(obs.observedAt) : now,
+              });
+            }
+
+            await this.#settleNonTerminalSteps(
+              op.id,
+              "succeeded",
+              "Verified via read-only crash recovery reconciliation (TH-08)",
+            );
+
+            await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+              await appendAuditEvent(tx, {
+                actorId: null,
+                actorType: "system",
+                organizationId: op.organizationId,
+                action: "operation.recovered.succeeded",
+                targetType: "operation",
+                targetId: op.id,
+                details: {
+                  kind: op.kind,
+                  resourceType: op.resourceType,
+                  resourceId: op.resourceId,
+                },
+              });
+            });
+
+            await this.#settleAssociatedOutboxEvents(op.id, "succeeded");
+
+            convergedSucceeded += 1;
+          } else {
+            const mismatchDetail =
+              obs === null
+                ? "target container was absent during read-only recovery"
+                : `observed container status '${obs.observedStatus}' (hash=${String(obs.observedRevisionHash)}) did not match desired target`;
+            await this.#convergeUnknownToFailed(
+              op,
+              `Operation interrupted before convergence: ${mismatchDetail} (TH-08)`,
+              op.kind === "service.stop" && obs?.observedStatus === "running",
+            );
+            convergedFailed += 1;
+          }
+        } else if (op.kind === "panel.container.restart" || op.kind === PANEL_CONTAINER_APPLY_KIND) {
+          // Docker may have finished the restart; Health shows the truth, the operation says interrupted.
+          await this.#settleNonTerminalSteps(op.id, "failed", "The restart was interrupted.");
+          await (op.kind === PANEL_CONTAINER_APPLY_KIND ? recoverPanelContainerApply(db, op) : recoverPanelContainerRestart(db, op));
+          await this.#settleAssociatedOutboxEvents(op.id, "failed", "The restart was interrupted.");
+          convergedFailed += 1;
         } else {
-          const mismatchDetail =
-            obs === null
-              ? "target container was absent during read-only recovery"
-              : `observed container status '${obs.observedStatus}' (hash=${String(obs.observedRevisionHash)}) did not match desired target`;
           await this.#convergeUnknownToFailed(
             op,
-            `Operation interrupted before convergence: ${mismatchDetail} (TH-08)`,
+            `Host operation '${op.kind}' was interrupted in flight; automatic replay is prohibited (TH-08)`,
           );
           convergedFailed += 1;
         }
-      } else {
-        await this.#convergeUnknownToFailed(
-          op,
-          `Host operation '${op.kind}' was interrupted in flight; automatic replay is prohibited (TH-08)`,
-        );
-        convergedFailed += 1;
+      } catch (err) {
+        // One recovery that throws leaves its operation as it is and never blocks the next (R141).
+        recoveryErrors.push({ kind: op.kind, operationId: op.id, errorCode: extractErrorCode(err) });
       }
     }
 
@@ -867,21 +1156,32 @@ export class OutboxWorkerService {
       markedUnknown: newlyMarked.length,
       convergedSucceeded,
       convergedFailed,
+      ...(recoveryErrors.length > 0 ? { recoveryErrors } : {}),
     };
   }
 
   async #convergeUnknownToFailed(
     op: typeof operations.$inferSelect,
     reasonMessage: string,
+    stopNotDone = false,
   ): Promise<void> {
     const db = this.dbClient.db;
     const sanitizedReason = redactSensitiveString(reasonMessage);
 
     await this.#settleNonTerminalSteps(op.id, "failed", sanitizedReason);
 
-    await transitionOperation(db, op.id, "failed", {
-      errorCode: "OPERATION_INTERRUPTED",
-      errorMessage: sanitizedReason,
+    await db.transaction(async (tx) => {
+      const t = tx as unknown as typeof db;
+      await transitionOperation(t, op.id, "failed", {
+        errorCode: "OPERATION_INTERRUPTED",
+        errorMessage: sanitizedReason,
+      });
+      // The container still runs after a Stop left in doubt: it is wanted running again (R196 1.1).
+      if (!stopNotDone) return;
+      await t
+        .update(serviceInstances)
+        .set({ desiredStatus: "running", updatedAt: new Date() })
+        .where(eq(serviceInstances.id, op.resourceId));
     });
 
     await this.#settleAssociatedOutboxEvents(op.id, "failed", sanitizedReason);

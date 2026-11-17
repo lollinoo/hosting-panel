@@ -6,6 +6,8 @@ import {
   Phase1DisabledDockerExecutor,
   ServiceInstanceActionIpcRequestSchema,
   createApprovedServiceSpec,
+  type BackupsRequest,
+  type SiteDatabasesRequest,
 } from "../src/index.js";
 
 describe("@hosting-panel/executor-contracts — ApprovedServiceSpec Factory (AC-F1-04 & AC-F2-03)", () => {
@@ -274,6 +276,29 @@ describe("Phase1DisabledDockerExecutor site capabilities", () => {
     await expect(executor.getServiceLogs("svc", 10)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });
 
+  it("phase1 executor refuses the panel container calls with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    await expect(executor.getPanelContainers()).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    await expect(executor.getPanelContainerLogs({ component: "sftp", tail: 10 })).rejects.toMatchObject({
+      code: "NOT_SUPPORTED",
+    });
+  });
+
+  it("phase1 executor refuses the terminal and panel restart calls with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const sessionId = `term_${"0".repeat(32)}`;
+    const calls = [
+      executor.openTerminal({ sessionId, siteId: "s", serviceInstanceId: "svc" }),
+      executor.writeTerminal({ sessionId, input: "id\n" }),
+      executor.readTerminal({ sessionId, cursor: 0 }),
+      executor.closeTerminal({ sessionId }),
+      executor.listTerminals(),
+      executor.restartPanelContainer({ component: "sftp" }),
+      executor.applyPanelContainerPin("phpmyadmin"),
+    ];
+    for (const call of calls) await expect(call).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+  });
+
   it("phase1 executor refuses routes and certificates with NOT_SUPPORTED", async () => {
     const executor = new Phase1DisabledDockerExecutor();
     await expect(
@@ -301,5 +326,72 @@ describe("Phase1DisabledDockerExecutor mail", () => {
     await expect(executor.sendTestMail({ to: "a@b.it", from: "c@d.it" })).rejects.toMatchObject({
       code: "NOT_SUPPORTED",
     });
+    await expect(
+      executor.sendPanelMail({
+        kind: "password_reset",
+        to: "customer@example.test",
+        from: "panel@example.test",
+        locale: "en",
+        link: "https://panel.example.test/reset-password#sentinel",
+      }),
+    ).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+  });
+});
+
+describe("Phase1DisabledDockerExecutor siteDatabases", () => {
+  it("returns {} for dropAll and refuses every other operation with NOT_SUPPORTED", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const siteId = "site_1";
+    const db = "wp_0123456789ab_shop";
+    const user = "wp_0123456789ab_app";
+    const passwordHash = "*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19";
+
+    await expect(executor.siteDatabases({ siteId, op: "dropAll" })).resolves.toEqual({});
+
+    const refusedOps: SiteDatabasesRequest[] = [
+      { siteId, op: "list" },
+      { siteId, op: "createDatabase", database: db },
+      { siteId, op: "deleteDatabase", database: db },
+      { siteId, op: "createUser", user, passwordHash },
+      { siteId, op: "setUserPassword", user, passwordHash },
+      { siteId, op: "deleteUser", user },
+      { siteId, op: "grant", user, database: db },
+      { siteId, op: "revoke", user, database: db },
+      { siteId, op: "phpMyAdminSignOn", passwordHash },
+    ];
+
+    for (const req of refusedOps) {
+      await expect(executor.siteDatabases(req)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    }
+  });
+
+  it("refuses backups calls across all four actions", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    const jobId = `op_${"a".repeat(32)}`;
+    const snapshotId = "b".repeat(64);
+    const target = {
+      endpoint: "https://s3.example.com",
+      region: "us-east-1",
+      bucket: "panel-backups",
+      prefix: "sites",
+      accessKeyId: "AKIAEXAMPLE123",
+      secretAccessKey: "super-secret-value-123",
+    };
+    const requests: BackupsRequest[] = [
+      { action: "test", target },
+      { action: "start", siteId: "site_1", serviceInstanceId: "svc_1", jobId, target },
+      { action: "status", jobId },
+      {
+        action: "forget",
+        siteId: "site_1",
+        jobId: `${jobId}-forget`,
+        snapshotIds: [snapshotId],
+        target,
+      },
+    ];
+
+    for (const req of requests) {
+      await expect(executor.backups(req)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+    }
   });
 });

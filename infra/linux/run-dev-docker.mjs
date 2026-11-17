@@ -23,11 +23,16 @@ const RUNTIME_DIR = process.env["HP_LIVE_DIR"]?.trim() || "/tmp/hp-live";
 const SOCKETS_DIR = path.join(RUNTIME_DIR, "sockets");
 const SECRETS_DIR = path.join(RUNTIME_DIR, "secrets");
 const INGRESS_DIR = path.join(RUNTIME_DIR, "ingress");
+const SFTP_STATE_DIR = path.join(RUNTIME_DIR, "sftp");
+const PMA_CONFIG_DIR = path.join(RUNTIME_DIR, "phpmyadmin");
+const BACKUP_WORK_DIR = path.join(RUNTIME_DIR, "backups");
+const PANEL_DUMP_DIR = path.join(RUNTIME_DIR, "panel-dump");
 
 const IPC_KEY_FILE = path.join(RUNTIME_DIR, "ipc.key");
 const MASTER_KEY_FILE = path.join(RUNTIME_DIR, "secrets-master.key");
 const BREAKGLASS_KEY_FILE = path.join(RUNTIME_DIR, "breakglass-jwt.key");
 const JWT_KEY_FILE = path.join(RUNTIME_DIR, "jwt-signing.pem");
+const BACKUP_KEY_FILE = path.join(RUNTIME_DIR, "backup.key");
 const ENV_SH_FILE = path.join(RUNTIME_DIR, "env.sh");
 
 const EXECUTOR_SOCK = path.join(SOCKETS_DIR, "executor.sock");
@@ -36,6 +41,8 @@ const HOST_AGENT_SOCK = path.join(SOCKETS_DIR, "host-agent.sock");
 const API_PORT = process.env["API_PORT"]?.trim() || "4000";
 const WEB_PORT = process.env["WEB_PORT"]?.trim() || "3000";
 const INGRESS_HTTP_PORT = process.env["HP_INGRESS_HTTP_PORT"]?.trim() || "18080";
+const SFTP_PORT = process.env["HP_SFTP_PORT"]?.trim() || "2222";
+const PMA_PORT = process.env["HP_PHPMYADMIN_PORT"]?.trim() || "8306";
 
 /** Dev-only temporary RSA key (PKCS#8) for the API JWT signing key; reused while the file exists. */
 async function ensureJwtKeyFile(filePath) {
@@ -119,6 +126,14 @@ async function main() {
   await mkdir(SOCKETS_DIR, { recursive: true, mode: 0o700 });
   await mkdir(SECRETS_DIR, { recursive: true, mode: 0o700 });
   await chmod(SECRETS_DIR, 0o700);
+  await mkdir(SFTP_STATE_DIR, { recursive: true, mode: 0o700 });
+  await chmod(SFTP_STATE_DIR, 0o700);
+  await mkdir(PMA_CONFIG_DIR, { recursive: true, mode: 0o755 });
+  await chmod(PMA_CONFIG_DIR, 0o755);
+  await mkdir(BACKUP_WORK_DIR, { recursive: true, mode: 0o700 });
+  await chmod(BACKUP_WORK_DIR, 0o700);
+await mkdir(PANEL_DUMP_DIR, { recursive: true, mode: 0o700 });
+await chmod(PANEL_DUMP_DIR, 0o700);
 
   const ingressStaticDir = path.join(INGRESS_DIR, "static");
   const ingressDynamicDir = path.join(INGRESS_DIR, "dynamic");
@@ -161,6 +176,8 @@ async function main() {
   const masterKey = await ensureSecretKeyFile(MASTER_KEY_FILE);
   const breakglassKey = await ensureSecretKeyFile(BREAKGLASS_KEY_FILE);
   await ensureJwtKeyFile(JWT_KEY_FILE);
+  await ensureSecretKeyFile(BACKUP_KEY_FILE);
+  await chmod(BACKUP_KEY_FILE, 0o640); // Executor reads the key file and stages it into job secrets tmpfs
 
   const nftablesRulesetPath = path.join(REPO_ROOT, "infra/linux/nftables-dedicated.conf");
 
@@ -175,6 +192,9 @@ async function main() {
     `export HP_BREAKGLASS_KEY_FILE="${BREAKGLASS_KEY_FILE}"`,
     `export HP_BREAKGLASS_KEY="${breakglassKey}"`,
     `export HP_JWT_SIGNING_KEY_FILE="${JWT_KEY_FILE}"`,
+    `export HP_BACKUP_KEY_FILE="${BACKUP_KEY_FILE}"`,
+    `export HP_BACKUP_WORK_DIR="${BACKUP_WORK_DIR}"`,
+    `export HP_PANEL_DUMP_DIR="${PANEL_DUMP_DIR}"`,
     `export ENABLE_DEV_OIDC="true"`,
     `export HP_SEED_DEMO="true"`,
     `export HP_EXECUTOR_SOCKET_PATH="${EXECUTOR_SOCK}"`,
@@ -182,6 +202,10 @@ async function main() {
     `export HP_SECRETS_ROOT_DIR="${SECRETS_DIR}"`,
     `export HP_INGRESS_ROOT_DIR="${INGRESS_DIR}"`,
     `export HP_INGRESS_HTTP_PORT="${INGRESS_HTTP_PORT}"`,
+    `export HP_SFTP_STATE_DIR="${SFTP_STATE_DIR}"`,
+    `export HP_SFTP_PORT="${SFTP_PORT}"`,
+    `export HP_PHPMYADMIN_CONFIG_DIR="${PMA_CONFIG_DIR}"`,
+    `export HP_PHPMYADMIN_PORT="${PMA_PORT}"`,
     `export HP_NFTABLES_RULESET_PATH="${nftablesRulesetPath}"`,
     "",
   ].join("\n");
@@ -197,6 +221,9 @@ async function main() {
     HP_BREAKGLASS_KEY_FILE: BREAKGLASS_KEY_FILE,
     HP_BREAKGLASS_KEY: breakglassKey,
     HP_JWT_SIGNING_KEY_FILE: JWT_KEY_FILE,
+    HP_BACKUP_KEY_FILE: BACKUP_KEY_FILE,
+    HP_BACKUP_WORK_DIR: BACKUP_WORK_DIR,
+    HP_PANEL_DUMP_DIR: PANEL_DUMP_DIR,
     // Dev launcher only: explicit opt-in to dev OIDC and the demo dataset.
     ENABLE_DEV_OIDC: "true",
     HP_SEED_DEMO: "true",
@@ -205,6 +232,10 @@ async function main() {
     HP_SECRETS_ROOT_DIR: SECRETS_DIR,
     HP_INGRESS_ROOT_DIR: INGRESS_DIR,
     HP_INGRESS_HTTP_PORT: INGRESS_HTTP_PORT,
+    HP_SFTP_STATE_DIR: SFTP_STATE_DIR,
+    HP_SFTP_PORT: SFTP_PORT,
+    HP_PHPMYADMIN_CONFIG_DIR: PMA_CONFIG_DIR,
+    HP_PHPMYADMIN_PORT: PMA_PORT,
     HP_NFTABLES_RULESET_PATH: nftablesRulesetPath,
     API_HOST: "127.0.0.1",
     API_PORT,
@@ -277,7 +308,7 @@ async function main() {
   );
 
   console.log(
-    `[dev:docker] Stack starting -> Web UI: http://127.0.0.1:${WEB_PORT} | API: http://127.0.0.1:${API_PORT} | Traefik HTTP: :${INGRESS_HTTP_PORT} (Ctrl+C to stop)`,
+    `[dev:docker] Stack starting -> Web UI: http://127.0.0.1:${WEB_PORT} | API: http://127.0.0.1:${API_PORT} | Traefik HTTP: :${INGRESS_HTTP_PORT} | SFTP: :${SFTP_PORT} | phpMyAdmin: 127.0.0.1:${PMA_PORT} (Ctrl+C to stop)`,
   );
 }
 

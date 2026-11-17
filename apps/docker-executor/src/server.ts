@@ -4,6 +4,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
+  BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
   ERROR_CODE_HTTP_STATUS,
@@ -13,12 +14,23 @@ import {
   MailRelayApplyIpcRequestSchema,
   MailRelayStatusIpcRequestSchema,
   MailTestIpcRequestSchema,
+  PanelContainerLogsIpcRequestSchema,
+  PanelContainerRestartIpcRequestSchema,
+  PanelContainerStatusWireSchema,
+  PINNED_PANEL_CONTAINERS,
+  PanelMailIpcRequestSchema,
   ObservedServiceStateWireSchema,
   ServiceInstanceActionIpcRequestSchema,
   ServiceLogsIpcRequestSchema,
+  SftpAccessApplyIpcRequestSchema,
+  SiteDatabasesIpcRequestSchema,
   SiteJobIpcRequestSchema,
   SitePurgeIpcRequestSchema,
   SiteRoutesIpcRequestSchema,
+  TerminalOpenIpcRequestSchema,
+  TerminalReadIpcRequestSchema,
+  TerminalSessionIpcRequestSchema,
+  TerminalWriteIpcRequestSchema,
   createErrorEnvelope,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
@@ -37,6 +49,7 @@ import {
   type DockerExecutorPort,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
+import { parseSiteFilesRequest } from "./site-files-helper.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
 export const DEFAULT_EXECUTOR_SOCKET_PATH = "/run/hosting-panel/executor.sock" as const;
@@ -44,6 +57,9 @@ export const DEFAULT_EXECUTOR_SOCKET_MODE = 0o660 as const;
 export const DEFAULT_EXECUTOR_VERSION = "0.2.0" as const;
 const MAX_IPC_BODY_BYTES = 1_048_576;
 const WINDOWS_NAMED_PIPE_PATTERN = /^\\\\\.\\pipe\\[a-zA-Z0-9._-]+$/;
+const EmptyObjectIpcRequestSchema = z.object({}).strict();
+// Only the closed name: no image, tag or option comes from a request.
+const PanelContainerApplyIpcRequestSchema = z.object({ component: z.enum(PINNED_PANEL_CONTAINERS) }).strict();
 
 export type IpcTransportMode = "uds" | "pipe" | "loopback-test";
 
@@ -496,6 +512,43 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/v1/mail-relay/panel") {
+        const req = this.parseBody(PanelMailIpcRequestSchema, rawBody, "panel email");
+        writeJson(res, 200, { data: await this.executor.sendPanelMail(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sites/files") {
+        const req = parseSiteFilesRequest(this.parseJsonBody(rawBody));
+        writeJson(res, 200, { data: await this.executor.siteFiles(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sites/databases") {
+        const req = this.parseBody(SiteDatabasesIpcRequestSchema, rawBody, "site databases");
+        writeJson(res, 200, { data: await this.executor.siteDatabases(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sftp/apply") {
+        const req = this.parseBody(SftpAccessApplyIpcRequestSchema, rawBody, "sftp access");
+        const { applied } = await this.executor.applySftpAccess(req);
+        writeJson(res, 200, { data: { applied } });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/sftp/status") {
+        this.parseBody(EmptyObjectIpcRequestSchema, rawBody, "sftp status");
+        writeJson(res, 200, { data: await this.executor.getSftpStatus() });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/backups") {
+        const req = this.parseBody(BackupsIpcRequestSchema, rawBody, "backups");
+        writeJson(res, 200, { data: await this.executor.backups(req) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/services/logs") {
         const { serviceInstanceId, tail } = this.parseBody(
           ServiceLogsIpcRequestSchema,
@@ -505,6 +558,73 @@ export class DockerExecutorIpcServer {
         assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
         const lines = await this.executor.getServiceLogs(serviceInstanceId, tail);
         writeJson(res, 200, { data: lines });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/panel/containers") {
+        writeJson(res, 200, { data: await this.executor.getPanelContainers() });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/panel/logs") {
+        // A name given twice reaches the schema as an array, which it refuses.
+        const param = (name: string) => {
+          const all = parsedUrl.searchParams.getAll(name);
+          return all.length > 1 ? all : (all[0] ?? null);
+        };
+        const tail = param("tail");
+        const req = this.parseValue(
+          PanelContainerLogsIpcRequestSchema,
+          {
+            component: param("component"),
+            tail: Array.isArray(tail) ? tail : Number(tail),
+          },
+          "panel logs",
+        );
+        writeJson(res, 200, { data: await this.executor.getPanelContainerLogs(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/panel/restart") {
+        const req = this.parseBody(PanelContainerRestartIpcRequestSchema, rawBody, "panel restart");
+        writeJson(res, 200, { data: await this.executor.restartPanelContainer(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/panel/apply") {
+        const req = this.parseBody(PanelContainerApplyIpcRequestSchema, rawBody, "panel apply");
+        writeJson(res, 200, { data: PanelContainerStatusWireSchema.parse(await this.executor.applyPanelContainerPin(req.component)) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/open") {
+        const req = this.parseBody(TerminalOpenIpcRequestSchema, rawBody, "terminal open");
+        writeJson(res, 200, { data: await this.executor.openTerminal(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/write") {
+        // The schema's messages are fixed sentences, so a refusal never carries the input.
+        const req = this.parseBody(TerminalWriteIpcRequestSchema, rawBody, "terminal write");
+        await this.executor.writeTerminal(req);
+        writeJson(res, 200, { data: null });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/read") {
+        const req = this.parseBody(TerminalReadIpcRequestSchema, rawBody, "terminal read");
+        writeJson(res, 200, { data: await this.executor.readTerminal(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/terminal/close") {
+        const req = this.parseBody(TerminalSessionIpcRequestSchema, rawBody, "terminal close");
+        writeJson(res, 200, { data: await this.executor.closeTerminal(req) });
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/terminal/sessions") {
+        writeJson(res, 200, { data: await this.executor.listTerminals() });
         return;
       }
 
@@ -604,7 +724,11 @@ export class DockerExecutorIpcServer {
   }
 
   private parseBody<S extends z.ZodType>(schema: S, rawBody: Buffer, what: string): z.infer<S> {
-    const parsed = schema.safeParse(this.parseJsonBody(rawBody));
+    return this.parseValue(schema, this.parseJsonBody(rawBody), what);
+  }
+
+  private parseValue<S extends z.ZodType>(schema: S, value: unknown, what: string): z.infer<S> {
+    const parsed = schema.safeParse(value);
     if (!parsed.success) {
       const firstIssue = parsed.error.issues[0];
       throw new ExecutorCodedError(

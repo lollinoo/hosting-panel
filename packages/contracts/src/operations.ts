@@ -43,12 +43,30 @@ export const OPERATION_KINDS = [
   "site.delete",
   "site.reassign",
   "site.domains",
+  "site.files.archive",
+  "site.files.extract",
   "host.maintenance",
   "host.security",
   "host.allocate",
+  "site.backups.create",
+  "site.backups.prune",
+  "site.backups.restore",
+  "site.backups.download",
+  "panel.backups.create",
+  "panel.container.restart",
+  "site.wordpress.inspect",
+  "site.wordpress.update",
+  "site.wordpress.import",
+  "host.job",
+  "panel.container.apply",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);
+
+/** An operation still unknown this long after its last change raises operation_unknown. */
+export const OPERATION_UNKNOWN_ALERT_AFTER_MS = 15 * 60_000;
+/** A running operation whose lease ran out this long ago raises operation_stuck. */
+export const OPERATION_STUCK_ALERT_AFTER_MS = 5 * 60_000;
 export type OperationKind = z.infer<typeof OperationKindSchema>;
 
 export const ALLOWED_OPERATION_TRANSITIONS: Readonly<

@@ -112,6 +112,17 @@ export async function createServerAdmin(
   key: Buffer,
   input: { email: string; name: string; password: string },
 ): Promise<{ userId: string; totpSecretBase32: string; otpauthUri: string }> {
+  const created = await insertServerAdmin(db, key, { ...input, mustChangePassword: false });
+  await audit(db, "accounts.admin.created", "user", created.userId);
+  return created;
+}
+
+/** Inserts a server admin with TOTP enrolled; the caller writes the audit row. */
+export async function insertServerAdmin(
+  db: HostingPanelDatabase,
+  key: Buffer,
+  input: { email: string; name: string; password: string; mustChangePassword: boolean },
+): Promise<{ userId: string; totpSecretBase32: string; otpauthUri: string }> {
   assertPasswordPolicy(input.password);
   const email = normEmail(input.email);
   const [dup] = await db.select({ id: users.id }).from(users).where(eq(users.email, email)).limit(1);
@@ -125,9 +136,9 @@ export async function createServerAdmin(
     name: input.name,
     passwordHash: await hashPassword(input.password),
     platformRole: "infrastructure_admin",
+    mustChangePassword: input.mustChangePassword,
     ...encryptTotp(secret, userId, key),
   });
-  await audit(db, "accounts.admin.created", "user", userId);
   return { userId, totpSecretBase32: secret, otpauthUri: buildOtpauthUri(secret, email, "Hosting Panel") };
 }
 

@@ -5,22 +5,28 @@ import {
   desc,
   eq,
   inArray,
-  isNotNull,
   isNull,
   lte,
   or,
   sql,
 } from "drizzle-orm";
 import {
+  HOST_DAEMON_COMPONENTS,
+  OPERATION_STUCK_ALERT_AFTER_MS,
+  OPERATION_UNKNOWN_ALERT_AFTER_MS,
   SECRET_KEY_PATTERN,
+  SITE_RESTART_QUIET_MS,
   canTransitionOperation,
   redactSensitiveString,
   redactSensitiveValue,
   type EncryptedSecretMetadataDto,
   type ErrorCode,
+  type HeartbeatRowComponent,
   type HostDaemonComponent,
   type HostDaemonHeartbeatDto,
   type HostDaemonStatus,
+  type OperationKind,
+  type OperationStatus,
   type OperationStepStatus,
 } from "@hosting-panel/contracts";
 import {
@@ -169,9 +175,11 @@ export async function markExpiredOperationsUnknownTransactional(
       .from(operations)
       .where(
         and(
-          inArray(operations.status, ["processing", "accepted"]),
-          isNotNull(operations.leaseExpiresAt),
-          lte(operations.leaseExpiresAt, now),
+          inArray(operations.status, ["processing", "accepted", "reconciling"]),
+          or(
+            lte(operations.leaseExpiresAt, now),
+            and(eq(operations.status, "reconciling"), isNull(operations.leaseExpiresAt)),
+          ),
         ),
       )
       .for("update");
@@ -698,7 +706,7 @@ export async function resolveDecryptedSecretRefs(
 // Host Agent Heartbeats
 export interface UpsertHostAgentHeartbeatInput {
   readonly hostId: string;
-  readonly component: HostDaemonComponent;
+  readonly component: HeartbeatRowComponent;
   readonly status: HostDaemonStatus;
   readonly version: string;
   readonly telemetrySnapshot?: Record<string, unknown>;
@@ -707,7 +715,7 @@ export interface UpsertHostAgentHeartbeatInput {
 
 function toHeartbeatDto(row: {
   hostId: string;
-  component: HostDaemonComponent;
+  component: HeartbeatRowComponent;
   status: HostDaemonStatus;
   version: string;
   lastSeenAt: Date;
@@ -715,7 +723,8 @@ function toHeartbeatDto(row: {
 }): HostDaemonHeartbeatDto {
   return Object.freeze({
     hostId: row.hostId,
-    component: row.component,
+    // Only daemon rows reach the list (see listHostAgentHeartbeats).
+    component: row.component as HostDaemonComponent,
     status: row.status,
     version: row.version,
     lastSeenAt: row.lastSeenAt.toISOString(),
@@ -771,15 +780,17 @@ export async function listHostAgentHeartbeats(
   executor: DatabaseExecutor,
   hostId?: string,
 ): Promise<HostDaemonHeartbeatDto[]> {
+  const daemonsOnly = inArray(hostAgentHeartbeats.component, [...HOST_DAEMON_COMPONENTS]);
   const query = hostId
     ? executor
         .select()
         .from(hostAgentHeartbeats)
-        .where(eq(hostAgentHeartbeats.hostId, hostId))
+        .where(and(daemonsOnly, eq(hostAgentHeartbeats.hostId, hostId)))
         .orderBy(asc(hostAgentHeartbeats.component))
     : executor
         .select()
         .from(hostAgentHeartbeats)
+        .where(daemonsOnly)
         .orderBy(asc(hostAgentHeartbeats.hostId), asc(hostAgentHeartbeats.component));
 
   const rows = await query;
@@ -883,7 +894,18 @@ export async function recordObservedStateReconciliationTransactional(
       { now: observedAt },
     );
 
-    const sanitizedRawState = redactSensitiveValue(input.rawState ?? {});
+    // R190 1.1: Docker raises the restart count on exit, so a rise is remembered for SITE_RESTART_QUIET_MS; a lower count is a new start.
+    const prev = (existingObs?.rawState ?? {}) as { notRunningSince?: unknown; restartCount?: unknown; lastRestartAt?: unknown };
+    const count = input.rawState?.restartCount;
+    const change = typeof count === "number" && typeof prev.restartCount === "number" ? Math.sign(count - prev.restartCount) : 0;
+    const wanted = service.desiredStatus === "running";
+    let lastRestartAt = !wanted || change < 0 || input.observedStatus === "missing" ? null
+      : change > 0 ? observedAt.toISOString()
+      : typeof prev.lastRestartAt === "string" ? prev.lastRestartAt : null;
+    if (input.observedStatus === "running" && (lastRestartAt === null || observedAt.getTime() - Date.parse(lastRestartAt) >= SITE_RESTART_QUIET_MS)) lastRestartAt = null;
+    const notRunningSince = !wanted || (input.observedStatus === "running" && lastRestartAt === null) ? null
+      : typeof prev.notRunningSince === "string" ? prev.notRunningSince : observedAt.toISOString();
+    const sanitizedRawState = redactSensitiveValue({ ...(input.rawState ?? {}), ...(notRunningSince ? { notRunningSince } : {}), ...(lastRestartAt ? { lastRestartAt } : {}) });
     const now = new Date();
 
     let savedObserved: typeof observedStates.$inferSelect;
@@ -972,4 +994,33 @@ export async function renewOperationLease(
         inArray(operations.status, ["processing", "accepted", "reconciling"]),
       ),
     );
+}
+
+export interface UnsettledOperation {
+  readonly operationId: string;
+  readonly kind: OperationKind;
+  readonly status: OperationStatus;
+  readonly alert: "operation_unknown" | "operation_stuck";
+  readonly siteId: string | null;
+  readonly siteName: string | null;
+  readonly since: Date;
+}
+
+/** Operations recovery has not settled in time, for the admin alerts. */
+export async function listUnsettledOperations(db: HostingPanelDatabase, now: Date): Promise<readonly UnsettledOperation[]> {
+  const unknownBefore = new Date(now.getTime() - OPERATION_UNKNOWN_ALERT_AFTER_MS);
+  const stuckBefore = new Date(now.getTime() - OPERATION_STUCK_ALERT_AFTER_MS);
+  const leaseOrChange = sql`COALESCE(${operations.leaseExpiresAt}, ${operations.updatedAt})`;
+  const since = sql<string>`CASE WHEN ${operations.status} = 'unknown' THEN ${operations.updatedAt} ELSE ${leaseOrChange} END`;
+  const rows = await db
+    .select({ operationId: operations.id, kind: operations.kind, status: operations.status, siteId: sites.id, siteName: sites.name, since })
+    .from(operations)
+    .leftJoin(sites, and(eq(operations.resourceType, "site"), eq(sites.id, operations.resourceId)))
+    .where(or(
+      and(eq(operations.status, "unknown"), lte(operations.updatedAt, unknownBefore)),
+      and(inArray(operations.status, ["processing", "accepted", "reconciling"]), sql`${leaseOrChange} <= ${stuckBefore}`),
+    ))
+    .orderBy(asc(since))
+    .limit(50);
+  return rows.map((r) => ({ ...r, alert: r.status === "unknown" ? "operation_unknown" : "operation_stuck", since: new Date(r.since) }));
 }

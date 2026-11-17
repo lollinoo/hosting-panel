@@ -1,17 +1,18 @@
 import { Inject, Injectable } from "@nestjs/common";
-import { isTerminalOperationStatus, redactSensitiveString, type CertProblem, type DnsStatus } from "@hosting-panel/contracts";
+import { SITE_TYPE_KEYS, isTerminalOperationStatus, redactSensitiveString, type CertProblem, type DnsStatus } from "@hosting-panel/contracts";
 import {
   and,
   appendAuditEvent,
   domains,
   eq,
+  hostAgentHeartbeats,
   hostAllocations,
   hosts,
   inArray,
-  isNotNull,
   latestSiteOperation,
   listSiteDomains,
   sites,
+  upsertHostAgentHeartbeat,
   type DatabaseClient,
   type DomainRow,
 } from "@hosting-panel/database";
@@ -108,12 +109,11 @@ export class DomainReconcilerService {
       .innerJoin(hosts, eq(hosts.id, hostAllocations.hostId))
       .where(
         and(
-          isNotNull(sites.phpVersion),
+          inArray(sites.siteType, [...SITE_TYPE_KEYS]),
           ...(onlySiteId ? [eq(sites.id, onlySiteId)] : []),
         ),
       );
     const managed: ManagedSite[] = rows.map(({ status, ...r }) => ({ ...r, busy: status === "deploying" || status === "maintenance" }));
-    if (managed.length === 0) return;
 
     for (const site of managed.filter((s) => !s.busy)) {
       if (onlySiteId) await this.#checkDns(site, now, forceDns);
@@ -121,10 +121,12 @@ export class DomainReconcilerService {
     }
 
     const requestedAt = (
-      await db
-        .select({ at: domains.certRequestedAt })
-        .from(domains)
-        .where(and(inArray(domains.siteId, managed.map((s) => s.id)), eq(domains.certStatus, "requested")))
+      managed.length === 0
+        ? []
+        : await db
+            .select({ at: domains.certRequestedAt })
+            .from(domains)
+            .where(and(inArray(domains.siteId, managed.map((s) => s.id)), eq(domains.certStatus, "requested")))
     )
       .map((r) => r.at?.getTime())
       .filter((t): t is number => t !== undefined);
@@ -133,8 +135,14 @@ export class DomainReconcilerService {
     try {
       report = await this.executor.getCertificateStatus({ failuresSince: failuresSince.toISOString() });
     } catch {
-      return; // Steps 3 and 4 wait for the next pass.
+      // Steps 3 and 4 wait for the next pass; the stored panel certificate keeps its date.
+      if (onlySiteId === null) {
+        await db.update(hostAgentHeartbeats).set({ status: "offline", updatedAt: now }).where(eq(hostAgentHeartbeats.component, "panel_certificate"));
+      }
+      return;
     }
+    if (onlySiteId === null && report.readable) await this.#storePanelCertificate(report);
+    if (managed.length === 0) return;
 
     let enqueued = false;
     for (const site of managed) {
@@ -147,6 +155,20 @@ export class DomainReconcilerService {
       else await work().catch(() => undefined);
     }
     if (enqueued) this.outboxWorker.triggerAsync();
+  }
+
+  /** Stores the panel certificate's end date, read on every full pass, also with no site. */
+  async #storePanelCertificate(report: CertificateStatusReport): Promise<void> {
+    const db = this.dbClient.db;
+    const [host] = await db.select({ id: hosts.id, hostname: hosts.hostname }).from(hosts).limit(1);
+    if (!host) return;
+    await upsertHostAgentHeartbeat(db, {
+      hostId: host.id,
+      component: "panel_certificate",
+      status: "online",
+      version: "1",
+      telemetrySnapshot: { hostname: host.hostname, notAfter: report.certificates.find((c) => c.hostname === host.hostname)?.notAfter ?? null },
+    });
   }
 
   async #checkDns(site: ManagedSite, now: Date, force: (domainId: string) => boolean): Promise<void> {

@@ -12,6 +12,7 @@ import {
 import { readAcmeCertificates } from "./acme-status.js";
 
 export const INGRESS_PROXY_CONTAINER_NAME = "hp_ingress_proxy" as const;
+export const SITE_JOB_ROLE = "site_job" as const;
 export const INGRESS_BRIDGE_NETWORK_NAME = "hp_ingress_net" as const;
 export const DEFAULT_TRAEFIK_IMAGE = "traefik:v3.7" as const;
 export const DEFAULT_INGRESS_ROOT_DIR = "/var/lib/hosting-panel/ingress" as const;

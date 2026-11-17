@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  HostTelemetryWireSchema,
   findForbiddenPublicDtoKeys,
   generateEd25519IpcKeyPair,
   signIpcRequest,
@@ -460,7 +461,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
     it("rejects non-allowlisted maintenance actions and policyRef values with 403 HOST_POLICY_DENIED", async () => {
       const dir = await createShortTempDir();
       const socketPath = join(dir, "host-agent.sock");
-      const adapter = new LinuxSystemHostAdapter();
+      const adapter = new LinuxSystemHostAdapter({ nftablesInstalledPath: join(dir, "hosting-panel.nft") });
 
       const server = new HostAgentIpcServer({
         adapter,
@@ -579,6 +580,9 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         "/usr/bin/nft",
         "/usr/bin/uname",
         "/usr/bin/df",
+        "/usr/bin/systemctl",
+        "/usr/bin/journalctl",
+        "/usr/bin/apt-get",
       ]);
     });
   });
@@ -706,6 +710,62 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
     });
   });
 
+  describe("D8: disk figures by filesystem", () => {
+    it("groups places on one filesystem into one row, skips a missing place, and sends no path", async () => {
+      const panelDir = await createShortTempDir();
+      const dockerDir = join(panelDir, "docker");
+      await mkdir(dockerDir);
+      const missingDir = join(panelDir, "missing");
+      const adapter = new LinuxSystemHostAdapter({
+        cpuSampleDelayMs: 15,
+        storagePath: panelDir,
+        diskPaths: { panel_data: panelDir, docker_data: dockerDir, database_data: missingDir, root: "/" },
+      });
+
+      const telemetry = await adapter.getHostTelemetry("host_disks");
+      const sameAsRoot = (await stat(panelDir)).dev === (await stat("/")).dev;
+      expect(telemetry!.disks!.map((d) => d.paths)).toEqual(
+        sameAsRoot
+          ? [["panel_data", "docker_data", "root"]]
+          : [["panel_data", "docker_data"], ["root"]],
+      );
+      for (const disk of telemetry!.disks!) {
+        expect(BigInt(disk.totalBytes)).toBeGreaterThan(0n);
+        expect(BigInt(disk.usedBytes)).toBeLessThanOrEqual(BigInt(disk.totalBytes));
+      }
+      expect(HostTelemetryWireSchema.parse(telemetry)).toEqual(telemetry);
+      const serialised = JSON.stringify(telemetry);
+      for (const folder of [panelDir, dockerDir, missingDir, os.tmpdir()]) {
+        expect(serialised).not.toContain(folder);
+      }
+    });
+
+    it("still answers when no place can be measured", async () => {
+      const missingDir = join(await createShortTempDir(), "missing");
+      const adapter = new LinuxSystemHostAdapter({
+        cpuSampleDelayMs: 15,
+        diskPaths: { panel_data: missingDir, docker_data: missingDir, database_data: missingDir, root: missingDir },
+      });
+      const telemetry = await adapter.getHostTelemetry("host_disks_none");
+      expect(telemetry!.disks).toEqual([]);
+    });
+
+    it("simulator sends one default row with all four places, overridable", async () => {
+      const sim = new InMemoryHostSimulatorAdapter();
+      expect((await sim.getHostTelemetry("host_sim"))!.disks).toEqual([
+        {
+          paths: ["panel_data", "docker_data", "database_data", "root"],
+          usedBytes: "10737418240",
+          totalBytes: "107374182400",
+        },
+      ]);
+      const full = [{ paths: ["root" as const], usedBytes: "95", totalBytes: "100" }];
+      expect((await new InMemoryHostSimulatorAdapter({ defaultTelemetry: { disks: full } }).getHostTelemetry("host_sim"))!.disks).toEqual(full);
+      sim.setTelemetryOverride("host_sim", { disks: full });
+      expect((await sim.getHostTelemetry("host_sim"))!.disks).toEqual(full);
+    });
+  });
+
   describe("Static nftables ruleset SHA-256 verification & tamper rejection", () => {
     it("pins infra/linux/nftables-dedicated.conf to DEDICATED_NFTABLES_RULESET_SHA256 and enforces 22/80/443 baseline", async () => {
       const rawBytes = await readFile(REPO_DEDICATED_NFTABLES_RULESET_PATH);
@@ -719,6 +779,13 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       expect(text).toContain("ip6 nexthdr ipv6-icmp accept");
       expect(text).toContain("tcp dport { 22, 80, 443 }");
       expect(text).toContain("policy drop;");
+      // M5d: the panel lists, and the drop runs before the input chain, with SSH first.
+      expect(text).toContain("type filter hook prerouting priority raw; policy accept;");
+      expect(text).toContain("tcp dport 22 accept");
+      expect(text).toContain("ip saddr @blocked_v4 drop");
+      expect(text).toContain("ip6 saddr @blocked_v6 drop");
+      expect(text).toContain("tcp dport @opened_tcp_ports ct state new accept");
+      expect(text.indexOf("tcp dport 22 accept")).toBeLessThan(text.indexOf("ip saddr @blocked_v4 drop"));
     });
 
     it("baseline allows 3000 only from docker bridges", async () => {
@@ -743,6 +810,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       const invocations: Array<{ binary: string; args: readonly string[] }> = [];
       const adapter = new LinuxSystemHostAdapter({
         nftablesRulesetPath: tamperedPath,
+        nftablesInstalledPath: join(dir, "hosting-panel.nft"),
         execFileRunner: async (binary, args) => {
           invocations.push({ binary, args });
           return { stdout: "", stderr: "" };
@@ -799,9 +867,12 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
     });
 
     it("invokes nft with static argument arrays once SHA-256 verification succeeds and handles unprivileged verify gracefully", async () => {
+      const installedPath = join(await createShortTempDir(), "hosting-panel.nft");
+      await writeFile(installedPath, "# installer copy\n", "utf8");
       const invocations: Array<{ binary: string; args: readonly string[] }> = [];
       const mockedAdapter = new LinuxSystemHostAdapter({
         nftablesRulesetPath: REPO_DEDICATED_NFTABLES_RULESET_PATH,
+        nftablesInstalledPath: installedPath,
         execFileRunner: async (binary, args) => {
           invocations.push({ binary, args });
           return { stdout: "", stderr: "" };
@@ -831,6 +902,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
       // Real unprivileged host verification
       const realAdapter = new LinuxSystemHostAdapter({
         nftablesRulesetPath: REPO_DEDICATED_NFTABLES_RULESET_PATH,
+        nftablesInstalledPath: installedPath,
       });
       const liveVerify = await realAdapter.executeSecurityPolicy(
         createApprovedHostSecurityCommand({
@@ -874,7 +946,7 @@ describe("@hosting-panel/host-agent & Linux/systemd infrastructure (HCP-SPEC-003
         {
           file: "hp-host-agent.service",
           user: "hp-agent",
-          supplementaryGroups: "hp-ipc",
+          supplementaryGroups: "hp-ipc systemd-journal",
           capBoundingSet: "CAP_NET_ADMIN CAP_DAC_READ_SEARCH",
           ambientCaps: "CAP_NET_ADMIN CAP_DAC_READ_SEARCH",
           inaccessibleDockerSock: true,

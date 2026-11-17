@@ -2,13 +2,25 @@ import dns from "node:dns";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getWorkspaceMetadata } from "@hosting-panel/config";
-import type { IpcVerificationKey, RuntimeBackend } from "@hosting-panel/contracts";
+import {
+  DEFAULT_PHPMYADMIN_PORT,
+  type IpcVerificationKey,
+  type RuntimeBackend,
+} from "@hosting-panel/contracts";
 import { isInvokedDirectly } from "@hosting-panel/contracts/invoked-directly";
 import {
   DEFAULT_DOCKER_SOCKET_PATH,
   DEFAULT_SECRETS_ROOT_DIR,
   DockerEngineSocketAdapter,
 } from "./docker-engine-adapter.js";
+import {
+  DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_WORK_DIR,
+  DEFAULT_PANEL_DUMP_DIR,
+} from "./backup-runner.js";
+import { DEFAULT_PHPMYADMIN_CONFIG_DIR } from "./phpmyadmin-platform.js";
+import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
+import { ensureSiteFilesProgram } from "./site-types/index.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles } from "./site-mail.js";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
@@ -31,6 +43,60 @@ import {
 const PANEL_INGRESS_RETRY_MS = 60_000;
 const PANEL_CERTIFICATE_GATE_MS = 5 * 60_000;
 const SHARED_DATABASE_RETRY_MS = 60_000;
+const SFTP_ENSURE_RETRY_MS = 60_000;
+const REFUSED_SFTP_PORTS = new Set([22, 80, 443]);
+const REFUSED_PHPMYADMIN_PORTS = new Set([22, 80, 443, 2222, 3000, 4000, 5432]);
+
+function parsePortFromEnv(
+  env: NodeJS.ProcessEnv,
+  envKey: string,
+  refusedPorts: ReadonlySet<number>,
+  refusedLabel: string,
+): number | undefined {
+  const raw = env[envKey]?.trim();
+  if (!raw) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(raw)) {
+    throw new ExecutorCodedError(
+      `${envKey} must be an integer between 1 and 65535`,
+      "VALIDATION_ERROR",
+    );
+  }
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ExecutorCodedError(
+      `${envKey} must be an integer between 1 and 65535`,
+      "VALIDATION_ERROR",
+    );
+  }
+  if (refusedPorts.has(port)) {
+    throw new ExecutorCodedError(
+      `${envKey} cannot be ${refusedLabel}`,
+      "VALIDATION_ERROR",
+    );
+  }
+  return port;
+}
+
+export function parseSftpPortFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): number | undefined {
+  return parsePortFromEnv(env, "HP_SFTP_PORT", REFUSED_SFTP_PORTS, "22, 80, or 443");
+}
+
+export function parsePhpMyAdminPortFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  return (
+    parsePortFromEnv(
+      env,
+      "HP_PHPMYADMIN_PORT",
+      REFUSED_PHPMYADMIN_PORTS,
+      "22, 80, 443, 2222, 3000, 4000, or 5432",
+    ) ?? DEFAULT_PHPMYADMIN_PORT
+  );
+}
 
 /** Empty HP_PANEL_HOSTNAME ⇒ null (panel ingress disabled). Invalid values are logged and disable it too. */
 export function parsePanelIngressConfigFromEnv(
@@ -182,7 +248,16 @@ export async function bootstrapDockerExecutorDaemon(
   const panel = parsePanelIngressConfigFromEnv(env);
   // One value for both the adapter's drift check and the files the binds point at.
   const siteMailDir = env.HP_SITE_MAIL_DIR?.trim() || DEFAULT_SITE_MAIL_DIR;
+  const siteFilesDir = env.HP_SITE_FILES_DIR?.trim() || DEFAULT_SITE_FILES_DIR;
   const mailRelaySecretDir = env.HP_MAIL_RELAY_SECRET_DIR?.trim();
+  const sftpStateDir = env.HP_SFTP_STATE_DIR?.trim();
+  const sftpPort = parseSftpPortFromEnv(env);
+  const phpMyAdminConfigDir =
+    env.HP_PHPMYADMIN_CONFIG_DIR?.trim() || DEFAULT_PHPMYADMIN_CONFIG_DIR;
+  const phpMyAdminPort = parsePhpMyAdminPortFromEnv(env);
+  const backupKeyFile = env.HP_BACKUP_KEY_FILE?.trim() || DEFAULT_BACKUP_KEY_FILE;
+  const backupWorkDir = env.HP_BACKUP_WORK_DIR?.trim() || DEFAULT_BACKUP_WORK_DIR;
+  const panelDumpDir = env.HP_PANEL_DUMP_DIR?.trim() || DEFAULT_PANEL_DUMP_DIR;
 
   const dockerAdapter = useSimulator
     ? null
@@ -195,7 +270,15 @@ export async function bootstrapDockerExecutorDaemon(
         ...(ingressHttpsPort !== undefined ? { ingressHttpsPort } : {}),
         panel,
         siteMailDir,
+        siteFilesDir,
         ...(mailRelaySecretDir ? { mailRelaySecretDir } : {}),
+        ...(sftpStateDir ? { sftpStateDir } : {}),
+        ...(sftpPort !== undefined ? { sftpPort } : {}),
+        phpMyAdminConfigDir,
+        phpMyAdminPort,
+        backupKeyFile,
+        backupWorkDir,
+        panelDumpDir,
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
           : {}),
@@ -240,12 +323,53 @@ export async function bootstrapDockerExecutorDaemon(
         }),
       );
     });
-    // No job survives a restart; clear leftovers before accepting new ones.
+    await ensureSiteFilesProgram(siteFilesDir).catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "site_files_program_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    // No job survives a restart; clear leftovers before accepting new ones (R82: orphans -> settle -> archives).
     await dockerAdapter.cleanupOrphanJobs().catch((err: unknown) => {
       console.error(
         JSON.stringify({
           component: "hp-docker-executor",
           event: "orphan_job_cleanup_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    // Shells a previous executor left behind end before new sessions open (only {event, code} is logged).
+    await dockerAdapter.reapTerminalShells().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "terminal_reap_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    await dockerAdapter.settleRestores().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "restore_settle_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
+    await dockerAdapter.emptyArchives().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "archive_cleanup_failed",
           code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
           timestamp: new Date().toISOString(),
         }),
@@ -274,6 +398,13 @@ export async function bootstrapDockerExecutorDaemon(
         console.info(
           JSON.stringify({ component: "hp-docker-executor", event: "shared_database_ready" }),
         );
+        // Accounts made before the cap and the escaped grant (H4); a failure never stops startup, the next start retries.
+        try {
+          const counts = await dockerAdapter.upgradeDatabaseAccounts();
+          console.info(JSON.stringify({ component: "hp-docker-executor", event: "database_accounts_upgraded", ...counts }));
+        } catch {
+          console.error(JSON.stringify({ component: "hp-docker-executor", event: "database_accounts_upgrade_failed" }));
+        }
       } catch (err) {
         console.error(
           JSON.stringify({
@@ -288,6 +419,39 @@ export async function bootstrapDockerExecutorDaemon(
       }
     };
     void ensureSharedDatabase();
+    const ensureSftp = async (): Promise<void> => {
+      try {
+        const res = await dockerAdapter.ensureSftpFromState();
+        if (res !== null) {
+          console.info(JSON.stringify({ component: "hp-docker-executor", event: "sftp_ready" }));
+        }
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "sftp_ensure_failed",
+            code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+            retryInMs: SFTP_ENSURE_RETRY_MS,
+            timestamp: new Date().toISOString(),
+          }),
+        );
+        setTimeout(() => void ensureSftp(), SFTP_ENSURE_RETRY_MS).unref();
+      }
+    };
+    void ensureSftp();
+    void dockerAdapter.ensurePhpMyAdmin({ ifPresent: true }).catch((err: unknown) => {
+      if ((err as { code?: string } | null)?.code === "NOT_SUPPORTED") {
+        return;
+      }
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "phpmyadmin_ensure_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
     void dockerAdapter.prewarmSiteImages();
   }
 

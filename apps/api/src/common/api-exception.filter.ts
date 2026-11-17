@@ -100,6 +100,17 @@ export class ApiExceptionFilter implements ExceptionFilter {
       code = "VALIDATION_ERROR";
       message = "Malformed request payload.";
       retryable = false;
+    } else if (hasSqlState(exception, "22021")) {
+      // Drizzle/PGlite rejects NUL bytes in UTF-8 text parameters with SQLSTATE 22021.
+      const requestPath = (request.raw?.url ?? request.url ?? "").split("?")[0] ?? "";
+      if (requestPath.includes("%00")) {
+        code = "NOT_FOUND";
+        message = "Requested organization or resource was not found.";
+      } else {
+        code = "VALIDATION_ERROR";
+        message = "The request contains a character that is not allowed. Remove it and try again.";
+      }
+      retryable = false;
     }
 
     const statusCode = ERROR_CODE_HTTP_STATUS[code] ?? 500;
@@ -118,4 +129,16 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
     void reply.status(statusCode).send(envelope);
   }
+}
+
+// Walk nested causes (e.g. DrizzleQueryError -> pg/PGlite error) for a matching PostgreSQL SQLSTATE.
+function hasSqlState(error: unknown, sqlState: string): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5 && current !== null && typeof current === "object"; depth += 1) {
+    if ("code" in current && (current as { readonly code?: unknown }).code === sqlState) {
+      return true;
+    }
+    current = "cause" in current ? (current as { readonly cause?: unknown }).cause : null;
+  }
+  return false;
 }

@@ -1,9 +1,10 @@
+import { SITE_TYPE_KEYS } from "@hosting-panel/contracts";
 import {
   and,
   appendStackRevisionTransactional,
   enqueueOperationTransactional,
   eq,
-  isNotNull,
+  inArray,
   serviceInstances,
   sites,
   sql,
@@ -26,7 +27,7 @@ export async function upgradeSitesToSiteMail(db: HostingPanelDatabase): Promise<
     .innerJoin(stackRevisions, eq(stackRevisions.id, serviceInstances.currentRevisionId))
     .where(
       and(
-        isNotNull(sites.phpVersion),
+        inArray(sites.siteType, [...SITE_TYPE_KEYS]),
         eq(sites.status, "ready"),
         // A deploy starts the container: a site stopped on purpose waits until it is started again.
         eq(serviceInstances.desiredStatus, "running"),

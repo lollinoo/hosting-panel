@@ -1,0 +1,19 @@
+{
+  "calls": [
+    {
+      "args": [
+        {
+          "users": [
+            {
+              "passwordHash": "<secret:1>",
+              "serviceInstanceId": "svc_<id:1>",
+              "siteId": "site_<id:2>",
+              "username": "s<site-sha8>_dev1"
+            }
+          ]
+        }
+      ],
+      "method": "applySftpAccess"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+[Unit]
+Description=Hosting panel: panel update request
+
+[Path]
+PathExists=/run/hosting-panel/host-jobs/hp-panel-update
+
+[Install]
+WantedBy=paths.target

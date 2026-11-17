@@ -1,0 +1,32 @@
+{
+  "calls": [
+    {
+      "args": [
+        {
+          "action": "start",
+          "jobId": "op_<id:1>",
+          "serviceInstanceId": "svc_<id:2>",
+          "siteId": "site_<id:3>",
+          "target": {
+            "accessKeyId": "<secret:1>",
+            "bucket": "pins-bucket",
+            "endpoint": "https://s3.example.test",
+            "prefix": "panel/pins",
+            "region": "eu-south-1",
+            "secretAccessKey": "<secret:2>"
+          }
+        }
+      ],
+      "method": "backups"
+    },
+    {
+      "args": [
+        {
+          "action": "status",
+          "jobId": "op_<id:1>"
+        }
+      ],
+      "method": "backups"
+    }
+  ]
+}

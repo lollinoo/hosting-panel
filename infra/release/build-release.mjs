@@ -6,11 +6,18 @@ import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir, readlink } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+// Every migration of the tree must ship; read from the directory, never typed again.
+function migrationPaths() {
+  const dir = fileURLToPath(new URL("../../packages/database/migrations", import.meta.url));
+  return readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((f) => `packages/database/dist/migrations/${f}`);
+}
 
 export const REQUIRED_RELEASE_PATHS = [
   "VERSION",
   "RELEASE.json",
+  "IMAGES",
   "apps/api/dist/main.js",
   "apps/api/dist/cli/accounts.js",
   "apps/api/dist/cli/break-glass.js",
@@ -18,11 +25,19 @@ export const REQUIRED_RELEASE_PATHS = [
   "apps/host-agent/dist/main.js",
   "apps/web/node_modules/next/dist/bin/next",
   "apps/web/.next/BUILD_ID",
-  "packages/database/dist/migrations/0001_phase1_docker_native.sql",
+  ...migrationPaths(),
   "infra/systemd/hp-api.service",
   "infra/systemd/hp-docker-executor.service",
   "infra/systemd/hp-host-agent.service",
   "infra/systemd/hp-web.service",
+  "infra/systemd/hp-unit-restart@.path",
+  "infra/systemd/hp-unit-restart@.service",
+  "infra/systemd/hp-panel-update.path",
+  "infra/systemd/hp-panel-update.service",
+  "infra/systemd/hp-os-refresh.path",
+  "infra/systemd/hp-os-refresh.service",
+  "infra/systemd/hp-os-upgrade.path",
+  "infra/systemd/hp-os-upgrade.service",
   "infra/systemd/hosting-panel-tmpfiles.conf",
   "infra/linux/bootstrap-dedicated.sh",
   "infra/linux/install.sh",
@@ -33,7 +48,11 @@ export const REQUIRED_RELEASE_PATHS = [
   "infra/linux/nftables-dedicated.conf",
   "infra/linux/hp-accounts",
   "infra/linux/hp-break-glass",
-  "infra/linux/hp-update"
+  "infra/linux/hp-update",
+  "infra/linux/hp-restore-panel",
+  "infra/linux/restore-panel.sh",
+  "infra/linux/hp-restore-panel.sql",
+  "apps/docker-executor/dist/cli/panel-fetch.js"
 ];
 
 function forbidden(rel) {
@@ -47,6 +66,9 @@ function forbidden(rel) {
   if (name.endsWith(".ts") && parts.slice(0, -1).includes("src")) return true;
   return name === ".env" || (name.startsWith(".env.") && name !== ".env.example");
 }
+
+/** Copy filter of apps/web/.next: the build cache, the dev build and the trace stay out. */
+export const keepWebBuildPath = (src) => !/[/\\]\.next[/\\](cache|dev|trace)([/\\]|$)/.test(src);
 
 /** @param {string} dir @returns {Promise<string[]>} */
 export async function listReleaseViolations(dir) {
@@ -84,6 +106,16 @@ export function releaseNodeVersion(nodeVersionFile, runningVersion) {
     throw new Error(`building with node ${running} but .node-version requires major ${wanted}`);
   }
   return running;
+}
+
+// The images a release names (D17), from the built constants: sorted, each once.
+export function releaseImages(contracts, traefikImage) {
+  const images = [
+    contracts.SHARED_MARIADB_IMAGE, contracts.SFTP_IMAGE, contracts.PHPMYADMIN_IMAGE,
+    contracts.RESTIC_IMAGE, contracts.MAIL_RELAY_IMAGE, traefikImage,
+    ...contracts.SUPPORTED_PHP_VERSIONS.flatMap((php) => [contracts.resolveWordpressImage(php), contracts.resolveWordpressCliImage(php)])
+  ];
+  return [...new Set(images)].sort();
 }
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
@@ -124,7 +156,7 @@ async function main() {
     }
   }
   copy("apps/web/next.config.mjs");
-  copy("apps/web/.next", (src) => !/[/\\]\.next[/\\](cache|dev)([/\\]|$)/.test(src));
+  copy("apps/web/.next", keepWebBuildPath);
   copy("infra/systemd");
   copy("infra/linux", (src) => !src.endsWith(".mjs") && !src.endsWith(".test.ts"));
 
@@ -139,6 +171,9 @@ async function main() {
     path.join(stage, "RELEASE.json"),
     `${JSON.stringify({ version, gitCommit, builtAt: new Date().toISOString(), node }, null, 2)}\n`
   );
+  const contracts = await import(pathToFileURL(path.join(repo, "packages/contracts/dist/index.js")).href);
+  const { DEFAULT_TRAEFIK_IMAGE } = await import(pathToFileURL(path.join(repo, "apps/docker-executor/dist/traefik-config.js")).href);
+  writeFileSync(path.join(stage, "IMAGES"), `${releaseImages(contracts, DEFAULT_TRAEFIK_IMAGE).join("\n")}\n`);
 
   const violations = await listReleaseViolations(stage);
   if (violations.length > 0) {

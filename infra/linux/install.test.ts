@@ -1,11 +1,21 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+// @ts-expect-error -- plain ESM helper without type declarations
+import { writeReleaseTree } from "./test-release-tree.mjs";
+// @ts-expect-error -- plain ESM script without type declarations
+import { releaseImages } from "../release/build-release.mjs";
+import * as contracts from "../../packages/contracts/src/index.js";
+import { DEFAULT_TRAEFIK_IMAGE } from "../../apps/docker-executor/src/traefik-config.js";
 
 const SCRIPT = resolve(__dirname, "install.sh");
+const OS_LIB = resolve(__dirname, "lib/os.sh");
+const hasHost = existsSync("/sys/fs/cgroup/cgroup.controllers") && spawnSync("bash", ["-c", "command -v docker"]).status === 0;
 const CANARY = "canary-pass-123456";
+const PORTS_LINE =
+  "Ports: 22, 80, 443 accepted in the input chain of the base rules; 3000 (web console) from the Docker bridges only; 80, 443 (Traefik) and 2222 (site SFTP) published by Docker on all addresses, where of the base rules only the block list filters them; ports of a generic service published by Docker on 127.0.0.1 only; 127.0.0.1:4000 (API), 127.0.0.1:5432 (PostgreSQL), 127.0.0.1:8306 (phpMyAdmin) on loopback";
 const dirs: string[] = [];
 function tmp() {
   const d = mkdtempSync(join(tmpdir(), "hp-install-"));
@@ -23,23 +33,35 @@ function osRelease(id: string, codename: string) {
 }
 const ARGS = ["--hostname", "panel.example.com", "--admin-email", "admin@acme-hosting.it", "--admin-name", "Ada Admin"];
 
-function install(args: string[], env: Record<string, string> = {}) {
-  const r = spawnSync("bash", [SCRIPT, ...args], {
+/** A temp dir holding a fake dpkg-query that reports only `installed` as installed. */
+function fakeDpkg(installed: string[] = []) {
+  const bin = tmp();
+  writeFileSync(join(bin, "dpkg-query"), `#!/usr/bin/env bash\ncase " ${installed.join(" ")} " in *" \${@: -1} "*) printf 'install ok installed' ;; *) exit 1 ;; esac\n`, { mode: 0o755 });
+  return bin;
+}
+function install(args: string[], env: Record<string, string> = {}, script = SCRIPT) {
+  const r = spawnSync("bash", [script, ...args], {
     encoding: "utf8",
     env: {
       ...process.env,
       HP_OS_RELEASE_FILE: osRelease("debian", "trixie"),
       HP_INSTALL_STATE_DIR: join(tmp(), "empty-state"),
+      // No case reads this machine's /opt/hosting-panel (R203 2.2).
+      HP_INSTALL_ROOT: join(tmp(), "empty-root"),
       HP_ADMIN_PASSWORD: CANARY,
       // Host-independent defaults (honoured only in --dry-run).
       HP_SSHD_PORTS: "22",
       HP_DOCKER0_IPV4: "172.17.0.1",
+      // No case asks this machine's dpkg.
+      PATH: `${fakeDpkg()}:${process.env.PATH}`,
       ...env
     }
   });
   return { code: r.status, out: r.stdout, err: r.stderr };
 }
-const dry = (env: Record<string, string> = {}, extra: string[] = []) => install([...ARGS, ...extra, "--dry-run"], env);
+// No case reads this machine's firewall sign file.
+const dry = (env: Record<string, string> = {}, extra: string[] = []) =>
+  install([...ARGS, ...extra, "--dry-run"], { HP_NFT_SIGN_FILE: join(tmp(), "absent.nft"), ...env });
 
 describe("install.sh arguments", () => {
   it("rejects missing --hostname with exit 2", () => {
@@ -175,6 +197,24 @@ describe("install.sh SSH-safe firewall", () => {
     const r = dry({ HP_SSHD_PORTS: "2222" }, ["--skip-firewall"]);
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/\[STEP 10\/12\][^\n]*\n\s*\S*\s*skip/i);
+    expect(r.out).toContain("skip: --skip-firewall given; manage the firewall yourself");
+  });
+
+  it("--skip-firewall on a server whose firewall the panel manages warns, naming the file and the table", () => {
+    const sign = join(tmp(), "hosting-panel.nft");
+    writeFileSync(sign, "");
+    const r = dry({ HP_NFT_SIGN_FILE: sign }, ["--skip-firewall"]);
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain(`warning: --skip-firewall given, but ${sign} is there`);
+    expect(r.out).toContain("the panel still manages the firewall");
+    expect(r.out).toContain("nft delete table inet hp_dedicated_filter");
+    expect(r.out).not.toContain("skip: --skip-firewall given");
+  });
+
+  it("refuses HP_NFT_SIGN_FILE outside a dry run", () => {
+    const r = install(ARGS, { HP_NFT_SIGN_FILE: join(tmp(), "absent.nft") });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("HP_NFT_SIGN_FILE is only for --dry-run tests");
   });
 
   it("an active ufw gets a rule letting the docker bridges reach the panel on 3000 (live 504 case)", () => {
@@ -269,8 +309,125 @@ describe("install.sh --archive", () => {
     expect(r.err).toContain("mislabelled");
   });
 
+  // R203 2.1: the installer never puts an older release over a newer one.
+  function installedRoot(current?: string) {
+    const root = tmp();
+    mkdirSync(join(root, "releases", "0.3.1"), { recursive: true });
+    if (current) symlinkSync(join("releases", current), join(root, "current"));
+    return root;
+  }
+  const listing = (root: string) => readdirSync(root, { recursive: true }).map(String).sort();
+
+  it("refuses --version 0.3.0 over an installed 0.3.1 with exit 2, naming both, and changes nothing", () => {
+    const root = installedRoot("0.3.1");
+    const before = listing(root);
+    const r = dry({ HP_INSTALL_ROOT: root }, ["--version", "0.3.0"]);
+    expect(r.code, r.out).toBe(2);
+    expect(r.err).toMatch(/0\.3\.0.*0\.3\.1/);
+    expect(r.err).toContain("--version 0.3.1");
+    expect(r.out).not.toContain("[STEP 2/12]");
+    expect([listing(root), readlinkSync(join(root, "current"))]).toEqual([before, "releases/0.3.1"]);
+  });
+
+  it("refuses an older --archive over an installed release", () => {
+    const r = dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") }, ["--archive", archive("0.3.0")]);
+    expect(r.code, r.out).toBe(2);
+    expect(r.out).not.toContain("Release 0.3.0 verified");
+  });
+
+  it("refuses --version 0.4.0 over an installed 0.3.1 with exit 2, naming hp-update, and changes nothing", () => {
+    const root = installedRoot("0.3.1");
+    const before = listing(root);
+    const r = dry({ HP_INSTALL_ROOT: root }, ["--version", "0.4.0"]);
+    expect(r.code, r.out).toBe(2);
+    expect(r.err).toContain("sudo hp-update --version 0.4.0");
+    expect(r.err).toContain("--version 0.3.1");
+    expect(r.out).not.toContain("[STEP 2/12]");
+    expect([listing(root), readlinkSync(join(root, "current"))]).toEqual([before, "releases/0.3.1"]);
+  });
+
+  it("refuses a newer --archive over an installed release", () => {
+    const r = dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") }, ["--archive", archive("0.4.0")]);
+    expect(r.code, r.out).toBe(2);
+    expect(r.err).toContain("sudo hp-update --version 0.4.0");
+    expect(r.out).not.toContain("Release 0.4.0 verified");
+  });
+
+  it("goes on with the same version, or no installed release", () => {
+    expect(dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") }, ["--version", "0.3.1"]).code).toBe(0);
+    expect(dry({ HP_INSTALL_ROOT: installedRoot() }, ["--version", "0.3.0"]).code).toBe(0);
+  });
+
+  it("without --version or --archive the dry run says the check waits for the lookup", () => {
+    const r = dry({ HP_INSTALL_ROOT: installedRoot("0.3.1") });
+    expect(r.code, r.err).toBe(0);
+    expect(r.out).toContain("would refuse the latest release unless it is the installed one (exit 2)");
+  });
+
+  it("refuses HP_INSTALL_ROOT outside a dry run", () => {
+    const r = install(ARGS, { HP_INSTALL_ROOT: installedRoot("0.3.1") });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain("HP_INSTALL_ROOT is only for --dry-run tests");
+  });
+
+  it("step 2 installs the one package list of lib/os.sh", () => {
+    const list = spawnSync("bash", ["-c", `. "${OS_LIB}"; printf '%s' "\${HP_OS_PACKAGES[*]}"`], { encoding: "utf8" }).stdout;
+    expect(list).toContain("unattended-upgrades");
+    expect(dry().out).toContain(`[DRY-RUN] apt-get install -y ${list}\n`);
+  });
+
+  it("missing_os_packages prints only the packages dpkg does not report installed", () => {
+    const run = (installed: string[]) =>
+      spawnSync("bash", ["-c", `. "${OS_LIB}"; missing_os_packages; printf '|%s' "\${HP_OS_PACKAGES[*]}"`], {
+        encoding: "utf8",
+        env: { ...process.env, PATH: `${fakeDpkg(installed)}:${process.env.PATH}` }
+      }).stdout.split("|");
+    const [, all] = run([]);
+    const list = all!.split(" ");
+    expect(list).toEqual(expect.arrayContaining(["curl", "tar", "unattended-upgrades"]));
+    expect(run([])[0]).toBe(all);
+    expect(run(["curl", "tar"])[0]).toBe(list.filter((p) => p !== "curl" && p !== "tar").join(" "));
+    expect(run(list)[0]).toBe("");
+  });
+
+  it.skipIf(!hasHost)("the dry run of a release prints what its bootstrap provisions", () => {
+    const images: string[] = releaseImages(contracts, DEFAULT_TRAEFIK_IMAGE);
+    const rel = writeReleaseTree(tmp(), "0.9.0", images) as string;
+    const r = install([...ARGS, "--dry-run"], { HP_NFT_SIGN_FILE: join(tmp(), "absent.nft") }, join(rel, "infra/linux/install.sh"));
+    expect(r.code, r.err).toBe(0);
+    const step7 = r.out.slice(r.out.indexOf("[STEP 7/12]"), r.out.indexOf("[STEP 8/12]"));
+    const units = readdirSync(resolve(__dirname, "../systemd")).filter((f) => /\.(service|path)$/.test(f));
+    const packages = spawnSync("bash", ["-c", `. "${OS_LIB}"; printf '%s' "\${HP_OS_PACKAGES[*]}"`], { encoding: "utf8" }).stdout;
+    const line = (i: string) => `Image (pulled by hp-docker-executor, never by this script): ${i}`;
+    const printed = step7.split("\n").filter((l) => l.includes("Image (pulled by")).map((l) => l.slice(l.indexOf("Image (")));
+    expect(printed).toEqual(images.map(line));
+    for (const i of [contracts.SFTP_IMAGE, contracts.PHPMYADMIN_IMAGE, contracts.RESTIC_IMAGE]) expect(step7).toContain(line(i));
+    const pkgLine = step7.indexOf("[DRY-RUN] Would install with apt-get, before anything else");
+    expect(pkgLine).toBeGreaterThan(-1);
+    expect(pkgLine).toBeLessThan(step7.indexOf("[DRY-RUN] Would ensure system group: hp-ipc"));
+    expect(step7).toContain(`[DRY-RUN] ${PORTS_LINE}\n`);
+    for (const s of [
+      ...units.map((u) => `/etc/systemd/system/${u}`),
+      "hp-panel-update.path hp-os-refresh.path hp-os-upgrade.path",
+      ...["sftp", "phpmyadmin", "backups", "panel-dump"].map((d) => `/var/lib/hosting-panel/${d}`),
+      "/run/hosting-panel/host-jobs",
+      "backup.key",
+      "hp-restore-panel",
+      "2222",
+      "3000",
+      "8306",
+      packages
+    ]) {
+      expect(step7).toContain(s);
+    }
+  });
+
   it("lists libatomic1 among the apt prerequisites (Node 26 needs it)", () => {
     expect(dry().out).toMatch(/apt-get install -y .*\blibatomic1\b/);
+  });
+
+  it("lists unattended-upgrades among the apt prerequisites (the security upgrade job runs it)", () => {
+    expect(dry().out).toMatch(/apt-get install -y .*\bunattended-upgrades\b/);
   });
 });
 
@@ -342,6 +499,59 @@ describe("set_env_keys", () => {
   });
 });
 
+describe("panel_has_admin", () => {
+  const PW = "0123456789abcdef".repeat(4);
+  const run = (psqlRc: number) => {
+    const d = tmp();
+    const bin = join(d, "bin");
+    mkdirSync(bin);
+    const log = '"$(basename "$0") $*" >> "$D/calls.log"; env >> "$D/env.log"; [[ -n "${PGPASSWORD+x}" ]] && echo "$PGPASSWORD" >> "$D/pgpw.log"';
+    writeFileSync(join(bin, "psql"), `#!/usr/bin/env bash\necho ${log}\n((${psqlRc} == 0)) || { echo 'relation does not exist' >&2; exit ${psqlRc}; }\necho 1\n`, { mode: 0o755 });
+    writeFileSync(join(bin, "runuser"), `#!/usr/bin/env bash\necho ${log}\nexit 1\n`, { mode: 0o755 });
+    const env = join(d, "api.env");
+    writeFileSync(env, `NODE_ENV=production\nDATABASE_URL=postgresql://hosting_panel:${PW}@127.0.0.1:5432/hosting_panel\n`);
+    for (const f of ["calls.log", "env.log", "pgpw.log"]) writeFileSync(join(d, f), "");
+    const r = spawnSync("bash", ["-c", `source "${SCRIPT}"; set -euo pipefail; has="$(panel_has_admin "${env}")"; echo "got:$has"`], {
+      encoding: "utf8",
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, D: d }
+    });
+    const file = (n: string) => readFileSync(join(d, n), "utf8");
+    return { code: r.status, out: r.stdout + r.stderr, calls: file("calls.log"), env: file("env.log"), pgpw: file("pgpw.log") };
+  };
+
+  it("asks public.users as hosting_panel over 127.0.0.1, the password only in that child's environment", () => {
+    const r = run(0);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("got:1");
+    expect(r.calls).toBe(
+      "psql -X -qtA -h 127.0.0.1 -U hosting_panel -d hosting_panel -c select 1 from public.users where platform_role = 'infrastructure_admin' limit 1\n"
+    );
+    expect(r.pgpw).toBe(`${PW}\n`);
+    expect(r.calls + r.out).not.toContain(PW);
+  });
+
+  it("a failed query means no administrator, as before", () => {
+    const r = run(2);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("got:\n");
+  });
+
+  it("the installer never opens the panel database as the superuser", () => {
+    expect(readFileSync(SCRIPT, "utf8")).not.toMatch(/runuser -u postgres[^\n]*(\\\n[^\n]*)?-d hosting_panel/);
+  });
+});
+
 it("reads the apt candidate in the C locale (a localized apt prints 'Candidato:')", () => {
   expect(readFileSync(SCRIPT, "utf8")).toMatch(/LC_ALL=C apt-cache policy "\$5" \| awk '\/Candidate:\//);
+});
+
+it("closing warning box names backup.key, carries the bilingual warning, and keeps every line at 78 columns", () => {
+  const src = readFileSync(SCRIPT, "utf8");
+  expect(src).toContain("backup.key cifra i backup");
+  expect(src).toContain("backup.key encrypts the site backups");
+  const match = /^#{78}\n[\s\S]*?^#{78}$/m.exec(src);
+  expect(match).not.toBeNull();
+  for (const line of match![0].split("\n")) {
+    expect([...line].length, line).toBe(78);
+  }
 });

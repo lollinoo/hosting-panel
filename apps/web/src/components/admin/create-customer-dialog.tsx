@@ -15,12 +15,26 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
-import { errorMessage, format } from "@/i18n";
+import { errorMessage, format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 
+export type TempPasswordTexts = Pick<
+  Messages["admin"]["users"],
+  "tempFor" | "copy" | "copied" | "copyUnavailable" | "tempNote" | "tempOnce"
+>;
+
 /** Shows a temporary password once. It lives only in the caller's state: never logged or stored. */
-export function TempPasswordBody({ password, who }: { password: string; who: string }) {
-  const t = useMessages().admin.users;
+export function TempPasswordBody({
+  password,
+  who,
+  t: customT,
+}: {
+  password: string;
+  who: string;
+  t?: TempPasswordTexts;
+}) {
+  const defaultT = useMessages().admin.users;
+  const t = customT ?? defaultT;
   const [copy, setCopy] = React.useState<"idle" | "done" | "unavailable">("idle");
 
   async function copyPassword() {

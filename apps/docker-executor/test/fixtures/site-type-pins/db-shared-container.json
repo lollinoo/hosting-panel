@@ -1,0 +1,49 @@
+{
+  "Image": "mariadb:12.3.3",
+  "Cmd": [
+    "--innodb-buffer-pool-size=256M",
+    "--max-connections=150",
+    "--skip-name-resolve"
+  ],
+  "User": "998:998",
+  "Env": [
+    "MARIADB_ROOT_PASSWORD_FILE=/run/secrets/mariadb-root",
+    "MARIADB_AUTO_UPGRADE=1",
+    "MARIADB_ROOT_HOST=172.30.250.%"
+  ],
+  "Labels": {
+    "io.hostingpanel.managed": "true",
+    "io.hostingpanel.role": "shared_database",
+    "io.hostingpanel.config_sha256": "8dee76a038cfc52b1614f1949d64fb774b07bf7db9ca321ad8fd618b33bbba01"
+  },
+  "HostConfig": {
+    "Privileged": false,
+    "CapDrop": [
+      "ALL"
+    ],
+    "SecurityOpt": [
+      "no-new-privileges:true"
+    ],
+    "PidsLimit": 512,
+    "NanoCpus": 1000000000,
+    "Memory": 1073741824,
+    "MemorySwap": 1073741824,
+    "RestartPolicy": {
+      "Name": "unless-stopped"
+    },
+    "NetworkMode": "hp_mariadb_net",
+    "Binds": [
+      "/var/lib/hosting-panel/mariadb/data:/var/lib/mysql",
+      "/etc/hosting-panel/mariadb-root.key:/run/secrets/mariadb-root:ro"
+    ]
+  },
+  "NetworkingConfig": {
+    "EndpointsConfig": {
+      "hp_mariadb_net": {
+        "Aliases": [
+          "hp-mariadb"
+        ]
+      }
+    }
+  }
+}

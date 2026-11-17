@@ -138,7 +138,7 @@ function sortOperationSteps(
   });
 }
 
-function mapOperationToDto(
+export function mapOperationToDto(
   op: typeof operations.$inferSelect,
   steps: (typeof operationSteps.$inferSelect)[],
 ): OperationDto {

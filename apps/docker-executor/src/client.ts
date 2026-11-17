@@ -1,19 +1,37 @@
 import http from "node:http";
 import {
   ApiErrorEnvelopeSchema,
+  BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
   CertificateStatusReportWireSchema,
+  EmptyDataEnvelopeSchema,
   ExecutorHealthResponseSchema,
   MailRelayStatusReportWireSchema,
   MailTestIpcResponseSchema,
+  PanelMailIpcResponseSchema,
   ObservedServiceStateWireSchema,
+  SftpApplyIpcResponseSchema,
+  SftpStatusReportWireSchema,
+  SITE_DATABASES_RESULT_SCHEMAS,
+  SITE_FILES_RESULT_SCHEMAS,
+  SITE_JOB_LIMIT_MS,
   signIpcRequest,
+  siteJobClientWaitMs,
+  WORDPRESS_RESET_CLIENT_WAIT_MS,
   type CertificateStatusIpcRequest,
   type DeployServiceIpcRequest,
   type ErrorCode,
   type ExecutorHealthResponse,
   type IpcSigningKey,
   type ObservedServiceStateWire,
+  type PanelContainer,
+  PanelContainerRestartWireSchema,
+  PanelContainerStatusWireSchema,
+  PanelContainersDataEnvelopeSchema,
+  TerminalEndedEnvelopeSchema,
+  TerminalOpenWireSchema,
+  TerminalReadWireSchema,
+  TerminalSessionsEnvelopeSchema,
   type ServiceInstanceActionIpcRequest,
   type ServiceLogsIpcRequest,
   type SiteJobIpcRequest,
@@ -22,22 +40,41 @@ import {
 } from "@hosting-panel/contracts";
 import type {
   ApprovedServiceSpec,
+  BackupsRequest,
+  BackupsResult,
   DockerExecutionResult,
   DockerExecutorPort,
   CertificateStatusReport,
   MailRelayApplyRequest,
   MailRelayStatusReport,
   MailTestResult,
+  PanelMailRequest,
+  PanelMailResult,
+  PanelContainerStatus,
+  PinnedPanelContainer,
   ServiceLogLine,
+  SftpAccessApplyRequest,
+  SftpApplyResult,
+  SftpStatusReport,
+  SiteDatabasesRequest,
+  SiteDatabasesResult,
+  SiteFilesRequest,
+  SiteFilesResult,
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  TerminalEnded,
+  TerminalOpenRequest,
+  TerminalOpenResult,
+  TerminalReadResult,
+  TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
   type IpcTransportMode,
 } from "./server.js";
+import { SITE_JOB_SPECS } from "./site-jobs.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
 const ExecutionResultDataEnvelopeSchema = z.object({
@@ -65,6 +102,7 @@ const SiteJobResultDataEnvelopeSchema = z.object({
     jobId: z.string().min(1),
     exitCode: z.number().int(),
     outputTail: z.string(),
+    result: z.unknown().optional(),
   }),
 });
 
@@ -83,6 +121,30 @@ export const DEPLOY_TIMEOUT_MS = 300_000;
 export const SITE_JOB_TIMEOUT_MS = 510_000;
 export const SITE_PURGE_TIMEOUT_MS = 120_000;
 export const MAIL_RELAY_APPLY_TIMEOUT_MS = 300_000;
+export const SITE_FILES_TIMEOUT_MS = 60_000;
+
+/** Kinds with their own limit wait limit + 300 s; the rest keep the shipped waits. */
+function siteJobWaitMs(kind: SiteJobIpcRequest["kind"]): number {
+  if (Object.hasOwn(SITE_JOB_LIMIT_MS, kind)) return siteJobClientWaitMs(kind as keyof typeof SITE_JOB_LIMIT_MS);
+  return kind === "wordpress.reset-password" ? WORDPRESS_RESET_CLIENT_WAIT_MS : SITE_JOB_TIMEOUT_MS;
+}
+export const SITE_FILES_DELETE_TIMEOUT_MS = 100_000;
+export const SITE_FILES_ARCHIVE_TIMEOUT_MS = 600_000;
+export const SFTP_APPLY_TIMEOUT_MS = 120_000;
+export const SFTP_STATUS_TIMEOUT_MS = 10_000;
+export const SITE_DATABASES_TIMEOUT_MS = 75_000;
+export const SITE_DATABASES_SIGNON_TIMEOUT_MS = 120_000;
+export const BACKUPS_TEST_TIMEOUT_MS = 40_000;
+export const BACKUPS_TIMEOUT_MS = 30_000;
+export const PANEL_CONTAINERS_TIMEOUT_MS = 10_000;
+export const PANEL_LOGS_TIMEOUT_MS = 35_000;
+export const TERMINAL_OPEN_TIMEOUT_MS = 20_000;
+export const TERMINAL_WRITE_TIMEOUT_MS = 10_000;
+export const TERMINAL_READ_TIMEOUT_MS = 35_000;
+export const TERMINAL_CLOSE_TIMEOUT_MS = 20_000;
+export const TERMINAL_LIST_TIMEOUT_MS = 10_000;
+export const PANEL_RESTART_TIMEOUT_MS = 35_000;
+export const PANEL_APPLY_TIMEOUT_MS = 900_000; // an image pull can take minutes
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -124,6 +186,8 @@ export interface SignedDockerExecutorIpcClientOptions {
   readonly timeoutMs?: number;
   readonly isRuntimeAvailable?: boolean;
 }
+
+const handledIpcSockets = new WeakSet<object>();
 
 export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   public readonly isRuntimeAvailable: boolean;
@@ -273,9 +337,12 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       "POST",
       "/v1/jobs/run",
       payload,
-      SITE_JOB_TIMEOUT_MS,
+      siteJobWaitMs(req.kind),
     );
-    return SiteJobResultDataEnvelopeSchema.parse(json).data;
+    const { result, ...data } = SiteJobResultDataEnvelopeSchema.parse(json).data;
+    // Checked again on this side against the kind's own schema; a result that fails is dropped (result_unreadable).
+    const checked = result === undefined ? undefined : SITE_JOB_SPECS[req.kind].result?.safeParse(result);
+    return checked?.success === true ? { ...data, result: checked.data } : data;
   }
 
   public async purgeSite(siteId: string): Promise<void> {
@@ -325,6 +392,69 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     return z.object({ data: MailTestIpcResponseSchema }).parse(json).data;
   }
 
+  public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/panel", req);
+    return z.object({ data: PanelMailIpcResponseSchema }).parse(json).data;
+  }
+
+  public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
+    assertSafeIdentifier(req.serviceInstanceId, "serviceInstanceId");
+    const timeoutMs =
+      req.op === "archive" ||
+      req.op === "extract" ||
+      req.op === "import.unpack" ||
+      req.op === "import.discard" ||
+      req.op === "import.undo" ||
+      req.op === "import.finish"
+        ? SITE_FILES_ARCHIVE_TIMEOUT_MS
+        : req.op === "delete"
+          ? SITE_FILES_DELETE_TIMEOUT_MS
+          : SITE_FILES_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/sites/files", req, timeoutMs);
+    const schema = SITE_FILES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as SiteFilesResult<R["op"]>;
+  }
+
+  public async siteDatabases<R extends SiteDatabasesRequest>(
+    req: R,
+  ): Promise<SiteDatabasesResult<R["op"]>> {
+    const timeoutMs =
+      req.op === "phpMyAdminSignOn"
+        ? SITE_DATABASES_SIGNON_TIMEOUT_MS
+        : SITE_DATABASES_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/sites/databases", req, timeoutMs);
+    const schema = SITE_DATABASES_RESULT_SCHEMAS[req.op] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as SiteDatabasesResult<R["op"]>;
+  }
+
+  public async applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const json = await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/sftp/apply",
+      req,
+      SFTP_APPLY_TIMEOUT_MS,
+    );
+    return z.object({ data: SftpApplyIpcResponseSchema }).parse(json).data;
+  }
+
+  public async getSftpStatus(): Promise<SftpStatusReport> {
+    const json = await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/sftp/status",
+      {},
+      SFTP_STATUS_TIMEOUT_MS,
+    );
+    return z.object({ data: SftpStatusReportWireSchema }).parse(json).data;
+  }
+
+  public async backups<R extends BackupsRequest>(req: R): Promise<BackupsResult<R["action"]>> {
+    const timeoutMs =
+      req.action === "test" ? BACKUPS_TEST_TIMEOUT_MS : BACKUPS_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
+    const schema = BACKUPS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as BackupsResult<R["action"]>;
+  }
+
   public async getServiceLogs(
     serviceInstanceId: string,
     tail: number,
@@ -333,6 +463,54 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     const payload: ServiceLogsIpcRequest = { serviceInstanceId, tail };
     const json = await this.sendSignedJsonRequest("POST", "/v1/services/logs", payload);
     return ServiceLogsDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    const json = await this.sendSignedJsonRequest("GET", "/v1/panel/containers", undefined, PANEL_CONTAINERS_TIMEOUT_MS);
+    return PanelContainersDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async getPanelContainerLogs(req: {
+    readonly component: PanelContainer;
+    readonly tail: number;
+  }): Promise<readonly ServiceLogLine[]> {
+    const query = new URLSearchParams({ component: req.component, tail: String(req.tail) });
+    const json = await this.sendSignedJsonRequest("GET", `/v1/panel/logs?${query}`, undefined, PANEL_LOGS_TIMEOUT_MS);
+    return ServiceLogsDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/open", req, TERMINAL_OPEN_TIMEOUT_MS);
+    return z.object({ data: TerminalOpenWireSchema }).parse(json).data;
+  }
+
+  public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
+    EmptyDataEnvelopeSchema.parse(await this.sendSignedJsonRequest("POST", "/v1/terminal/write", req, TERMINAL_WRITE_TIMEOUT_MS));
+  }
+
+  public async readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/read", req, TERMINAL_READ_TIMEOUT_MS);
+    return z.object({ data: TerminalReadWireSchema }).parse(json).data;
+  }
+
+  public async closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/terminal/close", req, TERMINAL_CLOSE_TIMEOUT_MS);
+    return TerminalEndedEnvelopeSchema.parse(json).data;
+  }
+
+  public async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    const json = await this.sendSignedJsonRequest("GET", "/v1/terminal/sessions", undefined, TERMINAL_LIST_TIMEOUT_MS);
+    return TerminalSessionsEnvelopeSchema.parse(json).data;
+  }
+
+  public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/panel/restart", req, PANEL_RESTART_TIMEOUT_MS);
+    return z.object({ data: PanelContainerRestartWireSchema }).parse(json).data;
+  }
+
+  public async applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/panel/apply", { component }, PANEL_APPLY_TIMEOUT_MS);
+    return z.object({ data: PanelContainerStatusWireSchema }).parse(json).data;
   }
 
   public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
@@ -464,6 +642,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
       });
 
       req.on("socket", (sock) => {
+        if (!handledIpcSockets.has(sock)) {
+          handledIpcSockets.add(sock);
+          // Swallow post-settlement socket errors (e.g. write EPIPE after an early server reply).
+          sock.on("error", () => undefined);
+        }
         if (!sock.connecting) {
           socketConnected = true;
         } else {

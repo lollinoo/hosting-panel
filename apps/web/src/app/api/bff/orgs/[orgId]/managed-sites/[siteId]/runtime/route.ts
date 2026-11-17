@@ -3,6 +3,7 @@ import { getSessionFromRequest } from "@/lib/server-session";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
 import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
 import { fetchUpstream } from "@/lib/upstream";
+import { readBoundedJsonBody } from "@/lib/bff-proxy";
 
 export async function PATCH(req: Request, context: { params: Promise<{ orgId: string; siteId: string }> }) {
   const { orgId, siteId } = await context.params;
@@ -20,12 +21,9 @@ export async function PATCH(req: Request, context: { params: Promise<{ orgId: st
     ]);
   }
 
-  let raw: unknown;
-  try {
-    raw = await req.json();
-  } catch {
-    return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400);
-  }
+  const read = await readBoundedJsonBody(req, { requireJsonBody: true });
+  if (!read.ok) return read.response;
+  const raw = read.body;
   const body = ChangeSiteRuntimeInputSchema.safeParse(raw);
   if (!body.success) {
     return bffErrorResponse("VALIDATION_ERROR", "Versione PHP non supportata", 400, [

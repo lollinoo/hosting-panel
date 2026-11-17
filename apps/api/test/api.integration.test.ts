@@ -14,7 +14,7 @@ import {
   type SiteDetailDto,
   type StackRevisionDto,
 } from "@hosting-panel/contracts";
-import { DEMO_IDS } from "@hosting-panel/database";
+import { DEMO_IDS, eq, membershipRoles, memberships } from "@hosting-panel/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createControlPlaneApp,
@@ -121,6 +121,15 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
     await app.close();
   });
 
+  // R207 addendum 4 A: the generic service routes need a server administrator who is also an owner of the organisation.
+  const makeInfraOwnerOfAcme = async () => {
+    await app.dbClient.db.insert(memberships).values({ id: "mem_infra_acme", organizationId: DEMO_IDS.organizations.acme, userId: DEMO_IDS.users.infra });
+    await app.dbClient.db
+      .insert(membershipRoles)
+      .values({ id: "mr_infra_acme_owner", membershipId: "mem_infra_acme", roleId: DEMO_IDS.roles.customer_owner });
+  };
+  const dropInfraFromAcme = () => app.dbClient.db.delete(memberships).where(eq(memberships.id, "mem_infra_acme"));
+
   // 1. Health Probes
   describe("Health Probes", () => {
     it("GET /health/live returns ok with HCP-SPEC-002 phase-1 metadata", async () => {
@@ -226,6 +235,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
       expect(caps.hostAgentRuntimeAvailable).toBe(false);
       expect(caps.acmeTlsRuntimeAvailable).toBe(false);
       expect(caps.sftpAvailable).toBe(false);
+      expect(caps.phpMyAdminAvailable).toBe(false);
       expect(caps.productionBackupRuntimeAvailable).toBe(false);
     });
 
@@ -422,6 +432,9 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
 
   // 7. AC-F1-04 & F1-012: Declarative Stack Security & Plaintext Secret Rejection
   describe("AC-F1-04 & F1-012: Declarative Stack Security & Secret Scrubber", () => {
+    beforeAll(makeInfraOwnerOfAcme);
+    afterAll(dropInfraFromAcme);
+
     it("rejects forbidden Docker attributes (privileged, hostPath, dockerSocket, networkMode: host) with 403 HOST_POLICY_DENIED", async () => {
       const siteId = DEMO_IDS.sites.acmeShop;
       const orgId = DEMO_IDS.organizations.acme;
@@ -431,7 +444,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
         `/v1/organizations/${orgId}/sites/${siteId}/services`,
         {
           method: "POST",
-          token: tokens[DEMO_IDS.users.elena],
+          token: tokens[DEMO_IDS.users.infra],
           headers: { "Idempotency-Key": `idemp_priv_${Date.now()}` },
           body: {
             serviceTemplateId: DEMO_IDS.templates.nodejs,
@@ -448,7 +461,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
         `/v1/organizations/${orgId}/sites/${siteId}/services`,
         {
           method: "POST",
-          token: tokens[DEMO_IDS.users.elena],
+          token: tokens[DEMO_IDS.users.infra],
           headers: { "Idempotency-Key": `idemp_sock_${Date.now()}` },
           body: {
             serviceTemplateId: DEMO_IDS.templates.nodejs,
@@ -465,7 +478,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
         `/v1/organizations/${orgId}/sites/${siteId}/services`,
         {
           method: "POST",
-          token: tokens[DEMO_IDS.users.elena],
+          token: tokens[DEMO_IDS.users.infra],
           headers: { "Idempotency-Key": `idemp_net_${Date.now()}` },
           body: {
             serviceTemplateId: DEMO_IDS.templates.nodejs,
@@ -486,7 +499,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
         `/v1/organizations/${orgId}/sites/${siteId}/services`,
         {
           method: "POST",
-          token: tokens[DEMO_IDS.users.elena],
+          token: tokens[DEMO_IDS.users.infra],
           headers: { "Idempotency-Key": `idemp_sec_${Date.now()}` },
           body: {
             serviceTemplateId: DEMO_IDS.templates.mariadb,
@@ -503,6 +516,9 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
 
   // 8. AC-F1-05, F1-004 & F1-005: Multi-Service Aggregation & Drift Reporting
   describe("AC-F1-05, F1-004 & F1-005: Site Aggregation & Non-Destructive Drift", () => {
+    beforeAll(makeInfraOwnerOfAcme);
+    afterAll(dropInfraFromAcme);
+
     it("aggregates multi-service site_acme_shop into composite detail with in_sync drift summary (F1-004)", async () => {
       const res = await requestJson<{ data: SiteDetailDto }>(
         `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}`,
@@ -554,7 +570,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
         `/v1/organizations/${orgId}/services/${svcId}/revisions`,
         {
           method: "POST",
-          token: tokens[DEMO_IDS.users.elena],
+          token: tokens[DEMO_IDS.users.infra],
           headers: { "Idempotency-Key": `idemp_rev_${Date.now()}` },
           body: {
             declarativeConfig: {
@@ -682,6 +698,7 @@ describe("Control-Plane /v1 API Phase 1 Docker-Native Integration Suite (Unit B)
       expect(res.body.data.hostAgentRuntimeAvailable).toBe(false);
       expect(res.body.data.acmeTlsRuntimeAvailable).toBe(false);
       expect(res.body.data.sftpAvailable).toBe(false);
+      expect(res.body.data.phpMyAdminAvailable).toBe(false);
       expect(res.body.data.productionBackupRuntimeAvailable).toBe(false);
     });
 

@@ -5,6 +5,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { releaseImages } from "./build-release.mjs";
 
 const archive = process.argv[2];
 if (!archive) {
@@ -71,6 +73,12 @@ try {
     throw new Error(`archive must contain exactly one top-level dir ${topName}, found: ${entries.join(", ")}`);
   }
   const root = path.join(tmp, topName);
+  // The image list must be the one the archive's own built code names (D17).
+  const contracts = await import(pathToFileURL(path.join(root, "packages/contracts/dist/index.js")).href);
+  const { DEFAULT_TRAEFIK_IMAGE } = await import(pathToFileURL(path.join(root, "apps/docker-executor/dist/traefik-config.js")).href);
+  if (readFileSync(path.join(root, "IMAGES"), "utf8") !== `${releaseImages(contracts, DEFAULT_TRAEFIK_IMAGE).join("\n")}\n`) {
+    throw new Error("IMAGES does not list the images of the built code in the archive");
+  }
   // Strip the caller's env down so nothing from a dev shell (DATABASE_URL, dev flags) leaks in.
   const baseEnv = { PATH: process.env.PATH, HOME: tmp, NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1" };
   const start = (label, args, cwd, env) => {

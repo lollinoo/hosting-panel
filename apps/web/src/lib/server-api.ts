@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { getServerSession } from "./server-session";
 import { fetchUpstream } from "./upstream";
+import { FIREWALL_BFF_TIMEOUT_MS } from "./admin-firewall";
 import type {
   HostDto,
   HostAllocationDto,
@@ -21,6 +22,13 @@ import type {
   HostDaemonHeartbeatDto,
   RuntimeBackend,
   MailRelaySettingsDto,
+  BackupSettingsDto,
+  AdminSiteBackupStatusDto,
+  AdminHealthDto,
+  AdminAlertDto,
+  FirewallDto,
+  UpdatesDto,
+  OsPackagesDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -39,20 +47,37 @@ export function classifyUpstream(res: { ok: boolean; status: number }): Upstream
   return res.status === 404 ? "notFound" : "error";
 }
 
-export type ServerResult<T> = { ok: true; data: T } | { ok: false; outcome: "notFound" | "error" };
+export type ServerResult<T> =
+  | { ok: true; data: T; page?: { nextCursor: string | null; hasMore: boolean } }
+  | { ok: false; outcome: "notFound" | "error"; status?: number; code?: string };
 
 /**
  * GET for server components. A dead API session never renders misleading empty UI:
  * it goes through /api/session/expired, which clears the cookie and lands on /login.
  */
-export async function serverGet<T>(path: string): Promise<ServerResult<T>> {
+export async function serverGet<T>(
+  path: string,
+  opts?: { timeoutMs?: number },
+): Promise<ServerResult<T>> {
   const session = await getServerSession();
   if (!session) redirect("/login");
-  const res = await fetchUpstream<{ data: T }>(path, { accessToken: session.accessToken });
+  const upstreamOpts =
+    opts?.timeoutMs !== undefined
+      ? { accessToken: session.accessToken, timeoutMs: opts.timeoutMs }
+      : { accessToken: session.accessToken };
+  const res = await fetchUpstream<{ data: T; page?: { nextCursor: string | null; hasMore: boolean } }>(path, upstreamOpts);
   const outcome = classifyUpstream(res);
   if (outcome === "expired") redirect("/api/session/expired");
-  if (outcome === "ok" && res.data?.data !== undefined) return { ok: true, data: res.data.data };
-  return { ok: false, outcome: outcome === "notFound" ? "notFound" : "error" };
+  if (outcome === "ok" && res.data?.data !== undefined)
+    return { ok: true, data: res.data.data, ...(res.data.page ? { page: res.data.page } : {}) };
+  const errObj = res.error as { error?: { code?: unknown } } | null | undefined;
+  const code = typeof errObj?.error?.code === "string" ? errObj.error.code : undefined;
+  return {
+    ok: false,
+    outcome: outcome === "notFound" ? "notFound" : "error",
+    status: res.status,
+    ...(code !== undefined ? { code } : {}),
+  };
 }
 
 const orNull = <T>(r: ServerResult<T>): T | null => (r.ok ? r.data : null);
@@ -83,9 +108,28 @@ export async function fetchServerTemplates(): Promise<ServiceTemplateDto[]> {
   return orEmpty(await serverGet<ServiceTemplateDto[]>("v1/service-templates"));
 }
 
-export async function fetchServerAudit(): Promise<AuditEventDto[]> {
-  return orEmpty(await serverGet<AuditEventDto[]>("v1/admin/audit"));
+export type AuditQuery = { organizationId?: string; action?: string; from?: string; to?: string; cursor?: string };
+
+/** One page of 50 audit events; the envelope's page carries the next cursor. */
+export async function fetchServerAudit(query: AuditQuery = {}): Promise<ServerResult<AuditEventDto[]>> {
+  const qs = new URLSearchParams({ limit: "50" });
+  for (const [k, v] of Object.entries(query)) if (v) qs.set(k, v);
+  return serverGet<AuditEventDto[]>(`v1/admin/audit?${qs}`);
 }
+
+/** null = the health snapshot could not be loaded. */
+export async function fetchServerAdminHealth(): Promise<AdminHealthDto | null> {
+  return orNull(await serverGet<AdminHealthDto>("v1/admin/health"));
+}
+
+/** null = the alerts could not be loaded (not "no alerts"). */
+export async function fetchServerAdminAlerts(): Promise<AdminAlertDto[] | null> {
+  return orNull(await serverGet<AdminAlertDto[]>("v1/admin/alerts"));
+}
+
+export async function fetchServerAdminFirewall(): Promise<FirewallDto | null> { return orNull(await serverGet<FirewallDto>("v1/admin/firewall", { timeoutMs: FIREWALL_BFF_TIMEOUT_MS })); }
+export async function fetchServerAdminUpdates(): Promise<UpdatesDto | null> { return orNull(await serverGet<UpdatesDto>("v1/admin/updates")); }
+export async function fetchServerAdminOsPackages(): Promise<OsPackagesDto | null> { return orNull(await serverGet<OsPackagesDto>("v1/admin/os-packages")); }
 
 export async function fetchServerOrg(orgId: string): Promise<OrganizationDetailDto | null> {
   return orNull(await serverGet<OrganizationDetailDto>(`v1/organizations/${orgId}`));
@@ -143,4 +187,14 @@ export async function fetchServerSiteDomains(orgId: string, siteId: string): Pro
 
 export async function fetchServerAdminMailRelay(): Promise<MailRelaySettingsDto | null> {
   return orNull(await serverGet<MailRelaySettingsDto>("v1/admin/mail-relay"));
+}
+
+/** Loads the administrator's backup destination and schedule settings, or null on request failure. */
+export async function fetchServerAdminBackups(): Promise<BackupSettingsDto | null> {
+  return orNull(await serverGet<BackupSettingsDto>("v1/admin/backups", { timeoutMs: 20_000 }));
+}
+
+/** Loads per-site backup status rows for the administrator table, or null on request failure. */
+export async function fetchServerAdminBackupSites(): Promise<AdminSiteBackupStatusDto[] | null> {
+  return orNull(await serverGet<AdminSiteBackupStatusDto[]>("v1/admin/backups/sites", { timeoutMs: 20_000 }));
 }

@@ -1,6 +1,15 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  HostFirewallSetsIpcSchema,
+  HostFirewallStateWireSchema,
+  HostJobIpcRequestSchema,
+  HostJournalLineWireSchema,
+  IPC_HOST_JOBS,
+  PanelContainerStatusWireSchema,
+  RestartInputSchema,
   ApiErrorEnvelopeSchema,
+  CreateSiteSftpUserRequestSchema,
   DEFAULT_PLATFORM_CAPABILITIES,
   ERROR_CODES,
   ERROR_CODE_HTTP_STATUS,
@@ -13,14 +22,42 @@ import {
   OPERATION_KINDS,
   OPERATION_STATUSES,
   OperationDtoSchema,
+  PANEL_MAIL_KINDS,
+  PanelMailIpcRequestSchema,
+  OrganizationCapabilitiesDtoSchema,
   PERMISSION_KEYS,
   PRESET_ROLE_NAMES,
   PRESET_ROLE_PERMISSIONS,
   PermissionKeySchema,
   PlatformCapabilitiesDtoSchema,
   RUNTIME_BACKENDS,
+  SITE_FILE_BATCH_MAX,
+  SITE_FILE_CHUNK_BYTES,
+  SITE_FILE_ERROR_REASONS,
+  SITE_FILE_REASON_CODES,
+  SITE_FILES_RESULT_SCHEMAS,
+  SITE_SFTP_MAX_USERS,
   ServiceTemplateDtoSchema,
+  SftpUserNameSchema,
   SiteDetailDtoSchema,
+  SiteFileArchiveRequestSchema,
+  SiteFileChunkBase64Schema,
+  SiteFileDeleteRequestSchema,
+  SiteFileEntrySchema,
+  SiteFileExtractRequestSchema,
+  SiteFileItemPathSchema,
+  SiteFileListDtoSchema,
+  SiteFileListQuerySchema,
+  SiteFileMoveRequestSchema,
+  SiteFilePathSchema,
+  SiteFileReadQuerySchema,
+  SiteFileUploadIdSchema,
+  SiteFileWriteResultDtoSchema,
+  SiteFilesIpcRequestSchema,
+  SiteSftpDtoSchema,
+  SiteSftpPasswordResetDtoSchema,
+  SiteSftpUserCreatedDtoSchema,
+  SiteSftpUserDtoSchema,
   UpsertEncryptedSecretInputSchema,
   canTransitionOperation,
   createErrorEnvelope,
@@ -29,18 +66,46 @@ import {
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
   isDefaultRetryableErrorCode,
+  isBackupAvailable,
+  isWordpressToolsAvailable,
+  isWordpressSite,
+  BACKUP_KINDS,
+  HEAVY_BACKUP_OPERATION_KINDS,
+  WORDPRESS_OPERATION_KINDS,
+  SiteWordpressUpdateRequestSchema,
+  SiteWordpressStateDtoSchema,
+  SiteWordpressLastUpdateDtoSchema,
+  SiteWordpressPasswordResetDtoSchema,
   isMutatingPermission,
+  isPhpMyAdminAvailable,
+  isSftpAvailable,
   isTerminalOperationStatus,
   redactSensitiveString,
   redactSensitiveValue,
+  ALERT_KINDS,
+  ALERT_SEVERITY,
+  AdminAlertDtoSchema,
+  HOST_DISK_PATHS,
+  HostDiskWireSchema,
+  PANEL_COMPONENTS,
+  PANEL_CONTAINERS,
+  PanelContainerLogsIpcRequestSchema,
+  SITE_DATABASE_PREFIX_PATTERN,
+  SITE_DATABASE_NAME_PATTERN,
+  SITE_DATABASE_CUSTOM_NAME_PATTERN,
+  siteDatabasePrefix,
+  resolveWordpressRuntime,
+  SiteSummaryDtoSchema,
+  ManagedSiteDtoSchema,
+  AdminSiteDtoSchema,
 } from "../src/index.js";
 
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 33 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(33);
-    expect(new Set(PERMISSION_KEYS).size).toBe(33);
+  it("defines exactly 38 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(38);
+    expect(new Set(PERMISSION_KEYS).size).toBe(38);
 
     for (const key of PERMISSION_KEYS) {
       expect(PermissionKeySchema.parse(key)).toBe(key);
@@ -84,6 +149,11 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(hostingPerms).toContain("allocation.create");
     expect(hostingPerms).toContain("template.manage");
     expect(hostingPerms).toContain("site.create");
+    expect(hostingPerms).toContain("site.files.read");
+    expect(hostingPerms).toContain("site.files.write");
+    expect(hostingPerms).toContain("site.sftp.manage");
+    expect(hostingPerms).toContain("site.databases.manage");
+    expect(hostingPerms).toContain("site.backups.manage");
     expect(hostingPerms).toContain("service.deploy");
     expect(hostingPerms).toContain("quota.manage");
 
@@ -100,6 +170,11 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(ownerPerms).toContain("organization.read");
     expect(ownerPerms).toContain("organization.members.manage");
     expect(ownerPerms).toContain("site.create");
+    expect(ownerPerms).toContain("site.files.read");
+    expect(ownerPerms).toContain("site.files.write");
+    expect(ownerPerms).toContain("site.sftp.manage");
+    expect(ownerPerms).toContain("site.databases.manage");
+    expect(ownerPerms).toContain("site.backups.manage");
     expect(ownerPerms).toContain("service.create");
     expect(ownerPerms).not.toContain("host.maintenance.execute");
     expect(ownerPerms).not.toContain("template.manage");
@@ -116,8 +191,13 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
   it("correctly identifies mutating vs read-only permissions", () => {
     expect(isMutatingPermission("host.read")).toBe(false);
     expect(isMutatingPermission("site.read")).toBe(false);
+    expect(isMutatingPermission("site.files.read")).toBe(false);
     expect(isMutatingPermission("service.read")).toBe(false);
     expect(isMutatingPermission("site.create")).toBe(true);
+    expect(isMutatingPermission("site.files.write")).toBe(true);
+    expect(isMutatingPermission("site.sftp.manage")).toBe(true);
+    expect(isMutatingPermission("site.databases.manage")).toBe(true);
+    expect(isMutatingPermission("site.backups.manage")).toBe(true);
     expect(isMutatingPermission("service.deploy")).toBe(true);
     expect(isMutatingPermission("host.maintenance.execute")).toBe(true);
   });
@@ -144,6 +224,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "DEDICATED_HOST_OCCUPIED",
       "SHARED_MODE_GATED",
       "DOMAIN_CONFLICT",
+      "ALREADY_EXISTS",
       "LAST_OWNER_PROTECTED",
       "NOT_SUPPORTED",
       "OPERATION_INTERRUPTED",
@@ -156,6 +237,12 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "ACCOUNT_LOCKED",
       "TOTP_INVALID",
       "ACCOUNT_SETUP_INCOMPLETE",
+      "LAST_ADMINISTRATOR_PROTECTED",
+      "PASSWORD_RESET_INVALID",
+      "PANEL_CONTAINER_ABSENT",
+      "FIREWALL_BASE_RULES_NOT_CURRENT",
+      "HOST_JOB_FAILED",
+      "RATE_LIMITED",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -165,6 +252,13 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     }
     expect(ERROR_CODE_HTTP_STATUS.OPERATION_INTERRUPTED).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.ACCOUNT_LOCKED).toBe(423);
+    expect(ERROR_CODE_HTTP_STATUS.LAST_ADMINISTRATOR_PROTECTED).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.PASSWORD_RESET_INVALID).toBe(400);
+    expect(ERROR_CODE_HTTP_STATUS.PANEL_CONTAINER_ABSENT).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.FIREWALL_BASE_RULES_NOT_CURRENT).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.HOST_JOB_FAILED).toBe(502);
+    expect(ERROR_CODE_HTTP_STATUS.RATE_LIMITED).toBe(429);
+    expect(ERROR_CODES).not.toContain("UPDATE_CHECK_FAILED");
   });
 
   it("maps status codes accurately", () => {
@@ -176,6 +270,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.VALIDATION_ERROR).toBe(400);
     expect(ERROR_CODE_HTTP_STATUS.DEDICATED_HOST_OCCUPIED).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.SHARED_MODE_GATED).toBe(409);
+    expect(ERROR_CODE_HTTP_STATUS.ALREADY_EXISTS).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.NOT_SUPPORTED).toBe(422);
     expect(ERROR_CODE_HTTP_STATUS.OPERATION_AMBIGUOUS).toBe(502);
     expect(ERROR_CODE_HTTP_STATUS.DOCKER_ENGINE_UNAVAILABLE).toBe(503);
@@ -188,6 +283,8 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(isDefaultRetryableErrorCode("HOST_AGENT_UNAVAILABLE")).toBe(true);
     expect(isDefaultRetryableErrorCode("VALIDATION_ERROR")).toBe(false);
     expect(isDefaultRetryableErrorCode("NOT_FOUND")).toBe(false);
+    expect(isDefaultRetryableErrorCode("ALREADY_EXISTS")).toBe(false);
+    expect(isDefaultRetryableErrorCode("RATE_LIMITED")).toBe(false);
   });
 
   it("creates structured ApiErrorEnvelope", () => {
@@ -393,12 +490,30 @@ describe("@hosting-panel/contracts — Security Guards & Redaction", () => {
 
     expect(redactSensitiveString("Bearer super-secret-jwt-token")).toBe("Bearer [REDACTED]");
   });
+
+  it("treats a nested masterKey as a plaintext secret (R113)", () => {
+    const payload = { job: { masterKey: "ab".repeat(32), jobId: "op_1" } };
+    expect(redactSensitiveValue(payload).job).toEqual({ masterKey: "[REDACTED]", jobId: "op_1" });
+    expect(findPlaintextSecretKeys(payload)).toEqual(["job.masterKey"]);
+  });
 });
 
 describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
   it("validates PlatformCapabilitiesDto with truthful Phase 1 defaults & Phase 2 runtime factory", () => {
     expect(RUNTIME_BACKENDS).toEqual(["linux-systemd", "local-simulator", "disabled"]);
     expect(OPERATION_KINDS).toContain("host.security");
+    expect(OPERATION_KINDS).toContain("site.files.archive");
+    expect(OPERATION_KINDS).toContain("site.files.extract");
+    expect(OPERATION_KINDS).toContain("site.backups.create");
+    expect(OPERATION_KINDS).toContain("site.backups.prune");
+    expect(OPERATION_KINDS).toContain("site.backups.restore");
+    expect(OPERATION_KINDS).toContain("site.backups.download");
+    expect(OPERATION_KINDS).toContain("panel.backups.create");
+    expect(OPERATION_KINDS).toContain("panel.container.restart");
+    expect(OPERATION_KINDS).toContain("site.wordpress.inspect");
+    expect(OPERATION_KINDS).toContain("site.wordpress.update");
+    expect(OPERATION_KINDS).toContain("host.job");
+    expect(OPERATION_KINDS).toContain("panel.container.apply");
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,
@@ -419,7 +534,9 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       hostAgentRuntimeAvailable: false,
       acmeTlsRuntimeAvailable: false,
       sftpAvailable: false,
+      phpMyAdminAvailable: false,
       productionBackupRuntimeAvailable: false,
+      wordpressToolsAvailable: false,
     });
     expect(legacyParsed.runtimeBackend).toBe("disabled");
 
@@ -435,8 +552,22 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
     });
+    expect(isSftpAvailable("linux-systemd")).toBe(true);
+    expect(isPhpMyAdminAvailable("linux-systemd")).toBe(true);
+    expect(isBackupAvailable("linux-systemd")).toBe(true);
+    expect(isWordpressToolsAvailable("linux-systemd")).toBe(true);
     for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
       expect(createPlatformCapabilities({ runtimeBackend }).acmeTlsRuntimeAvailable).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).sftpAvailable).toBe(false);
+      expect(isSftpAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).phpMyAdminAvailable).toBe(false);
+      expect(isPhpMyAdminAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).productionBackupRuntimeAvailable).toBe(
+        false,
+      );
+      expect(isBackupAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).wordpressToolsAvailable).toBe(false);
+      expect(isWordpressToolsAvailable(runtimeBackend)).toBe(false);
     }
     expect(p2Caps).toEqual({
       phase: "phase-2",
@@ -446,12 +577,27 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
-      sftpAvailable: false,
-      productionBackupRuntimeAvailable: false,
+      sftpAvailable: true,
+      phpMyAdminAvailable: true,
+      productionBackupRuntimeAvailable: true,
+      wordpressToolsAvailable: true,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
+    expect(
+      OrganizationCapabilitiesDtoSchema.parse({
+        hostingMode: "dedicated",
+        sharedHostingEnabled: false,
+        dockerExecutorRuntimeAvailable: true,
+        hostAgentRuntimeAvailable: true,
+        acmeTlsRuntimeAvailable: true,
+        sftpAvailable: true,
+        phpMyAdminAvailable: true,
+        productionBackupRuntimeAvailable: true,
+        wordpressToolsAvailable: true,
+      }).productionBackupRuntimeAvailable,
+    ).toBe(true);
 
-    // Shared / ACME / SFTP / Backups MUST remain strictly gated false (AC-F2-10)
+    // Shared hosting remains strictly gated false (AC-F2-10)
     expect(
       PlatformCapabilitiesDtoSchema.safeParse({
         ...p2Caps,
@@ -604,6 +750,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
         },
       ],
       phpVersion: null,
+      siteType: null,
       driftSummary: {
         totalServices: 1,
         inSyncCount: 1,
@@ -613,5 +760,445 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       },
     };
     expect(SiteDetailDtoSchema.parse(siteDetail)).toEqual(siteDetail);
+  });
+});
+
+describe("@hosting-panel/contracts — Site Files Schemas & Reasons", () => {
+  it("validates SiteFilePathSchema normalization and invalid segment refusals", () => {
+    expect(SiteFilePathSchema.parse("")).toBe("");
+    expect(SiteFilePathSchema.parse("a/b")).toBe("a/b");
+    expect(SiteFilePathSchema.parse("a/b/")).toBe("a/b");
+    expect(SiteFilePathSchema.parse("a//b/")).toBe("a/b");
+    expect(SiteFilePathSchema.parse("a".repeat(255))).toBe("a".repeat(255));
+    expect(SiteFilePathSchema.parse(".htaccess")).toBe(".htaccess");
+
+    const invalidPaths = [
+      "/a/b",
+      "/",
+      ".",
+      "a/./b",
+      "..",
+      "a/../b",
+      `a/${String.fromCharCode(0)}b`,
+      "a/\nb",
+      `a/${String.fromCharCode(0x7f)}b`,
+      "a".repeat(256),
+      "é".repeat(128),
+      ".htpanel-x",
+      "wp-content/.htpanel-upload-0123456789abcdef.part",
+    ];
+    for (const candidate of invalidPaths) {
+      const res = SiteFilePathSchema.safeParse(candidate);
+      expect(res.success, `expected '${candidate}' to fail`).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]?.message).toBe("invalid_path");
+      }
+    }
+
+    expect(SiteFileItemPathSchema.safeParse("").success).toBe(false);
+    expect(SiteFileListQuerySchema.parse({})).toEqual({ path: "" });
+    expect(SiteFileReadQuerySchema.parse({ path: "index.php" })).toEqual({
+      path: "index.php",
+      offset: 0,
+      length: SITE_FILE_CHUNK_BYTES,
+    });
+  });
+
+  it("enforces base64 chunk bounds and upload id format", () => {
+    expect(SiteFileChunkBase64Schema.parse("")).toBe("");
+    const exactLimit = Buffer.alloc(SITE_FILE_CHUNK_BYTES).toString("base64");
+    expect(SiteFileChunkBase64Schema.safeParse(exactLimit).success).toBe(true);
+
+    const overLimit = Buffer.alloc(SITE_FILE_CHUNK_BYTES + 1).toString("base64");
+    const overRes = SiteFileChunkBase64Schema.safeParse(overLimit);
+    expect(overRes.success).toBe(false);
+    expect(overRes.success ? undefined : overRes.error.issues[0]?.message).toBe("too_large");
+
+    expect(SiteFileChunkBase64Schema.safeParse("abc").success).toBe(false);
+    expect(SiteFileChunkBase64Schema.safeParse("A=AA").success).toBe(false);
+
+    expect(SiteFileUploadIdSchema.safeParse("upload_0123456789").success).toBe(true);
+    expect(SiteFileUploadIdSchema.safeParse("a".repeat(64)).success).toBe(true);
+    expect(SiteFileUploadIdSchema.safeParse("short_123456789").success).toBe(false);
+    expect(SiteFileUploadIdSchema.safeParse("a".repeat(65)).success).toBe(false);
+    expect(SiteFileUploadIdSchema.safeParse("bad/id_1234567890").success).toBe(false);
+  });
+
+  it("maps every SITE_FILE_ERROR_REASONS token to an ErrorCode in SITE_FILE_REASON_CODES", () => {
+    expect(new Set(SITE_FILE_ERROR_REASONS).size).toBe(SITE_FILE_ERROR_REASONS.length);
+    expect(Object.keys(SITE_FILE_REASON_CODES).sort()).toEqual([...SITE_FILE_ERROR_REASONS].sort());
+
+    const errorCodeSet = new Set<string>(ERROR_CODES);
+    for (const reason of SITE_FILE_ERROR_REASONS) {
+      expect(errorCodeSet.has(SITE_FILE_REASON_CODES[reason])).toBe(true);
+    }
+    expect(SITE_FILE_REASON_CODES.exists).toBe("ALREADY_EXISTS");
+    expect(SITE_FILE_REASON_CODES.zip_unavailable).toBe("NOT_SUPPORTED");
+    expect(SITE_FILE_REASON_CODES.not_ready).toBe("RESOURCE_LOCKED");
+    expect(SITE_FILE_REASON_CODES.protected).toBe("PERMISSION_DENIED");
+  });
+
+  it("enforces batch bounds, move constraints, DTO security, and IPC schemas", () => {
+    const validBatch = Array.from({ length: SITE_FILE_BATCH_MAX }, (_, i) => `file-${String(i)}.txt`);
+    expect(SiteFileDeleteRequestSchema.safeParse({ paths: validBatch }).success).toBe(true);
+    expect(
+      SiteFileDeleteRequestSchema.safeParse({ paths: [...validBatch, "extra.txt"] }).success,
+    ).toBe(false);
+
+    expect(SiteFileMoveRequestSchema.safeParse({ from: "dir", to: "dir" }).success).toBe(false);
+    expect(SiteFileMoveRequestSchema.safeParse({ from: "dir", to: "dir/sub" }).success).toBe(false);
+    expect(SiteFileMoveRequestSchema.safeParse({ from: "dir", to: "dir2" }).success).toBe(true);
+
+    expect(SiteFileArchiveRequestSchema.safeParse({ paths: ["a"], to: "out.txt" }).success).toBe(
+      false,
+    );
+    expect(SiteFileArchiveRequestSchema.safeParse({ paths: ["a"], to: "out.zip" }).success).toBe(
+      true,
+    );
+    expect(SiteFileExtractRequestSchema.safeParse({ path: "out.zip", to: "" }).success).toBe(true);
+
+    const listDto = {
+      entries: [
+        {
+          name: "index.php",
+          kind: "file" as const,
+          size: 42,
+          modifiedAt: SAMPLE_TIMESTAMP,
+          writable: true,
+        },
+      ],
+      truncated: false,
+    };
+    expect(SiteFileListDtoSchema.parse(listDto)).toEqual(listDto);
+    expect(findForbiddenPublicDtoKeys(listDto)).toEqual([]);
+    expect(
+      findForbiddenPublicDtoKeys({ dataBase64: "YQ==", size: 1, eof: true }),
+    ).toEqual([]);
+    expect(SiteFileWriteResultDtoSchema.parse({ received: 10 })).toEqual({ received: 10 });
+
+    expect(
+      SiteFilesIpcRequestSchema.parse({
+        serviceInstanceId: "svc_1",
+        op: "list",
+        path: "",
+      }),
+    ).toEqual({ serviceInstanceId: "svc_1", op: "list", path: "" });
+
+    expect(SiteFileEntrySchema.safeParse({ ...listDto.entries[0], name: "" }).success).toBe(false);
+    expect(
+      SITE_FILES_RESULT_SCHEMAS.stat.parse({
+        entry: { ...listDto.entries[0], name: "", kind: "dir", size: 0 },
+      }),
+    ).toEqual({
+      entry: {
+        name: "",
+        kind: "dir",
+        size: 0,
+        modifiedAt: SAMPLE_TIMESTAMP,
+        writable: true,
+      },
+    });
+  });
+});
+
+describe("@hosting-panel/contracts — Site SFTP Schemas & DTO Security", () => {
+  it("normalizes and validates SftpUserNameSchema and CreateSiteSftpUserRequestSchema", () => {
+    expect(SITE_SFTP_MAX_USERS).toBe(10);
+    expect(SftpUserNameSchema.parse(" Dev1 ")).toBe("dev1");
+    expect(CreateSiteSftpUserRequestSchema.parse({ name: " Dev1 " })).toEqual({ name: "dev1" });
+
+    for (const bad of ["", "   ", "a_b", "a-b", "a".repeat(17), "dev.1"]) {
+      const res = SftpUserNameSchema.safeParse(bad);
+      expect(res.success, `expected '${bad}' to fail`).toBe(false);
+      if (!res.success) {
+        expect(res.error.issues[0]?.message).toBe("invalid_name");
+      }
+    }
+  });
+
+  it("validates every new SFTP DTO and rejects forbidden public DTO keys", () => {
+    const userDto = SiteSftpUserDtoSchema.parse({
+      id: "sftp_usr_01",
+      username: "s01234567_dev1",
+      createdAt: SAMPLE_TIMESTAMP,
+      passwordChangedAt: SAMPLE_TIMESTAMP,
+    });
+    const sftpDto = SiteSftpDtoSchema.parse({
+      available: true,
+      host: "203.0.113.10",
+      port: 2222,
+      hostKeyFingerprint: "SHA256:abcdef0123456789abcdef0123456789abcdef01234",
+      users: [userDto],
+    });
+    const createdDto = SiteSftpUserCreatedDtoSchema.parse({
+      user: userDto,
+      temporaryPassword: "a".repeat(24),
+    });
+    const resetDto = SiteSftpPasswordResetDtoSchema.parse({
+      temporaryPassword: "b".repeat(24),
+    });
+
+    for (const dto of [userDto, sftpDto, createdDto, resetDto]) {
+      expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);
+    }
+    expect(findForbiddenPublicDtoKeys({ passwordHash: "$6$salt$hash" })).toEqual(["passwordHash"]);
+  });
+});
+
+describe("@hosting-panel/contracts — WordPress tools DTOs", () => {
+  const plugin = { name: "akismet", title: "Akismet", status: "active", version: "5.0", updateVersion: null };
+  const state = {
+    coreVersion: "6.8",
+    coreUpdate: null,
+    updatesKnown: true,
+    plugins: [plugin],
+    themes: [],
+    administrators: [{ id: 1, login: "admin" }],
+    checkedAt: "2026-11-15T10:00:00.000Z",
+    problem: null,
+  };
+  const item = { type: "plugin", name: "akismet", oldVersion: "5.0", newVersion: "5.1", status: "updated" };
+  const lastUpdate = {
+    operationId: "op_1",
+    target: { scope: "all" },
+    status: "succeeded",
+    finishedAt: "2026-11-15T10:00:00.000Z",
+    problem: null,
+    backup: "taken",
+    items: [item],
+  };
+
+  it("isWordpressSite reads the site type", () => {
+    expect(isWordpressSite({ siteType: "wordpress" })).toBe(true);
+    expect(isWordpressSite({ siteType: null })).toBe(false);
+    expect(isWordpressSite({ siteType: "x" })).toBe(false);
+  });
+
+  it("kinds and backup lists grow", () => {
+    expect(WORDPRESS_OPERATION_KINDS).toEqual(["site.wordpress.inspect", "site.wordpress.update"]);
+    expect(BACKUP_KINDS).toContain("pre_update");
+    expect(HEAVY_BACKUP_OPERATION_KINDS).toContain("site.wordpress.update");
+  });
+
+  it("the update request is closed", () => {
+    const ok = (v: unknown) => SiteWordpressUpdateRequestSchema.safeParse(v).success;
+    expect(ok({ scope: "all" })).toBe(true);
+    expect(ok({ scope: "core" })).toBe(true);
+    expect(ok({ scope: "plugin", name: "akismet" })).toBe(true);
+    expect(ok({ scope: "theme", name: "twentytwentyfive" })).toBe(true);
+    expect(ok({ scope: "all", name: "akismet" })).toBe(false);
+    expect(ok({ scope: "core", extra: 1 })).toBe(false);
+    expect(ok({ scope: "plugin" })).toBe(false);
+    expect(ok({ scope: "plugin", name: "-rf" })).toBe(false);
+    expect(ok({ scope: "theme", name: "a b" })).toBe(false);
+    expect(ok({ scope: "plugin", name: "../x" })).toBe(false);
+  });
+
+  it("the DTOs are bounded", () => {
+    expect(SiteWordpressStateDtoSchema.safeParse(state).success).toBe(true);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, coreVersion: null, problem: "config_broken" }).success).toBe(true);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, plugins: Array(501).fill(plugin) }).success).toBe(false);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, problem: "site_stopped" }).success).toBe(false);
+    expect(SiteWordpressStateDtoSchema.safeParse({ ...state, extra: 1 }).success).toBe(false);
+    expect(SiteWordpressLastUpdateDtoSchema.safeParse(lastUpdate).success).toBe(true);
+    expect(SiteWordpressLastUpdateDtoSchema.safeParse({ ...lastUpdate, items: Array(702).fill(item) }).success).toBe(false);
+  });
+
+  it("the reset answer holds only the temporary password", () => {
+    const pw = "A".repeat(24);
+    expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: pw }).success).toBe(true);
+    expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: pw, password: pw }).success).toBe(false);
+    expect(SiteWordpressPasswordResetDtoSchema.safeParse({ temporaryPassword: "short" }).success).toBe(false);
+  });
+});
+
+describe("@hosting-panel/contracts — Panel mail IPC", () => {
+  const valid = {
+    kind: "password_reset",
+    to: "customer@example.test",
+    from: "panel@example.test",
+    locale: "it",
+    link: `https://panel.example.test/reset-password#${"A1b2-_".repeat(7)}x`,
+  };
+
+  it("accepts a reset link of 43 url-safe characters", () => {
+    expect(PANEL_MAIL_KINDS).toEqual(["password_reset"]);
+    expect(PanelMailIpcRequestSchema.parse(valid)).toEqual(valid);
+  });
+
+  it.each([
+    ["an http link", { link: "http://panel.example.test/reset-password#abc" }],
+    ["a link with a space", { link: "https://panel.example.test/reset password#abc" }],
+    ["a link with a line break", { link: "https://panel.example.test/reset-password#abc\nBcc: x@example.test" }],
+    ["an unknown kind", { kind: "welcome" }],
+    ["an unknown locale", { locale: "de" }],
+    ["an extra key", { subject: "Hello" }],
+  ])("refuses %s", (_name, patch) => {
+    expect(PanelMailIpcRequestSchema.safeParse({ ...valid, ...patch }).success).toBe(false);
+  });
+});
+
+describe("@hosting-panel/contracts — Admin health and alerts", () => {
+  it("pins the alert kinds, panel components and panel containers in order", () => {
+    expect(ALERT_KINDS).toEqual([
+      "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
+      "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
+      "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
+    ]);
+    expect(PANEL_COMPONENTS).toEqual([
+      "api", "web", "database", "executor", "host_agent", "docker_engine",
+      "ingress_proxy", "shared_database", "phpmyadmin", "sftp", "mail_relay",
+    ]);
+    expect(PANEL_CONTAINERS).toEqual(["ingress_proxy", "shared_database", "phpmyadmin", "sftp", "mail_relay"]);
+  });
+
+  it("gives every alert kind a severity", () => {
+    expect(Object.keys(ALERT_SEVERITY).sort()).toEqual([...ALERT_KINDS].sort());
+  });
+
+  const diskAlert = {
+    kind: "disk_high",
+    severity: "critical",
+    subject: "panel_data",
+    since: null,
+    details: { paths: ["panel_data"], usedPercent: 91 },
+  };
+
+  it("accepts a disk alert and refuses an unknown kind or an extra detail key", () => {
+    expect(AdminAlertDtoSchema.safeParse(diskAlert).success).toBe(true);
+    expect(AdminAlertDtoSchema.safeParse({ ...diskAlert, kind: "disk_full" }).success).toBe(false);
+    expect(
+      AdminAlertDtoSchema.safeParse({ ...diskAlert, details: { ...diskAlert.details, path: "/var/lib/docker" } }).success,
+    ).toBe(false);
+  });
+
+  it("bounds the panel log request", () => {
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 1 }).success).toBe(true);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 500 }).success).toBe(true);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 0 }).success).toBe(false);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "sftp", tail: 501 }).success).toBe(false);
+    expect(PanelContainerLogsIpcRequestSchema.safeParse({ component: "hp_sftp", tail: 10 }).success).toBe(false);
+  });
+
+  it("names a disk only by the closed list, never by a path", () => {
+    expect(HOST_DISK_PATHS).toEqual(["panel_data", "docker_data", "database_data", "root"]);
+    const disk = { paths: ["panel_data", "root"], usedBytes: "10", totalBytes: "100" };
+    expect(HostDiskWireSchema.safeParse(disk).success).toBe(true);
+    expect(HostDiskWireSchema.safeParse({ ...disk, paths: ["/var/lib/docker"] }).success).toBe(false);
+  });
+});
+
+describe("@hosting-panel/contracts — M5d host agent wire", () => {
+  const v4 = (n: number) => Array.from({ length: n }, (_, i) => `192.0.${2 + (i >> 8)}.${i & 255}`);
+
+  it("bounds the firewall lists", () => {
+    const sets = { openedPorts: [8080, 8443, 9100, 10050, 6556, 5666], blockedV4: v4(500), blockedV6: ["2001:db8::/32"] };
+    expect(HostFirewallSetsIpcSchema.safeParse(sets).success).toBe(true);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, openedPorts: [...sets.openedPorts, 8081] }).success).toBe(false);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, blockedV4: v4(501) }).success).toBe(false);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, blockedV6: Array.from({ length: 501 }, (_, i) => `2001:db8::${(i + 1).toString(16)}`) }).success).toBe(false);
+    expect(HostFirewallSetsIpcSchema.safeParse({ ...sets, extra: 1 }).success).toBe(false);
+  });
+
+  it("carries the four base rule states the agent reads, unmanaged among them (R202 1.3)", () => {
+    const state = { openedPorts: [], blockedV4: [], blockedV6: [], readAt: "2026-11-17T06:00:00.000Z" };
+    for (const baseRules of ["absent", "outdated", "current", "unmanaged"]) expect(HostFirewallStateWireSchema.safeParse({ ...state, baseRules }).success, baseRules).toBe(true);
+    expect(HostFirewallStateWireSchema.safeParse({ ...state, baseRules: "disabled" }).success).toBe(false);
+  });
+
+  it("takes one of the seven jobs and nothing else", () => {
+    expect(IPC_HOST_JOBS).toHaveLength(7);
+    for (const job of IPC_HOST_JOBS) expect(HostJobIpcRequestSchema.safeParse({ job }).success).toBe(true);
+    expect(HostJobIpcRequestSchema.safeParse({ job: "reboot" }).success).toBe(false);
+    expect(HostJobIpcRequestSchema.safeParse({ job: "os_refresh", extra: 1 }).success).toBe(false);
+  });
+
+  it("refuses a journal line over 4096 characters", () => {
+    const at = "2026-11-17T10:00:00.000Z";
+    expect(HostJournalLineWireSchema.safeParse({ at, message: "x".repeat(4096) }).success).toBe(true);
+    expect(HostJournalLineWireSchema.safeParse({ at, message: "x".repeat(4097) }).success).toBe(false);
+  });
+
+  it("parses a panel container with and without imageCurrent", () => {
+    const row = { component: "sftp", state: "running", expected: true, startedAt: null, restartCount: 0 };
+    expect(PanelContainerStatusWireSchema.safeParse(row).success).toBe(true);
+    expect(PanelContainerStatusWireSchema.safeParse({ ...row, imageCurrent: false }).success).toBe(true);
+    expect(PanelContainerStatusWireSchema.safeParse({ ...row, imageCurrent: null }).success).toBe(true);
+  });
+});
+
+describe("RestartInputSchema (R201 1.3)", () => {
+  it("refuses a reason holding U+0000 anywhere; a line break stays accepted", () => {
+    for (const reason of ["\u0000disk full", "disk\u0000full", "disk full\u0000"]) {
+      expect(RestartInputSchema.safeParse({ reason }).success).toBe(false);
+    }
+    expect(RestartInputSchema.parse({ reason: "disk full\nsee ticket" })).toEqual({ reason: "disk full\nsee ticket" });
+  });
+});
+
+describe("@hosting-panel/contracts — values read from the site-type definition", () => {
+  const hex = "0123456789ab";
+
+  it("the database patterns accept and refuse the same strings as before", () => {
+    expect(SITE_DATABASE_PREFIX_PATTERN.source).toBe("^(?:wp)_[0-9a-f]{12}$");
+    expect(SITE_DATABASE_PREFIX_PATTERN.test(`wp_${hex}`)).toBe(true);
+    expect(SITE_DATABASE_PREFIX_PATTERN.test(`xx_${hex}`)).toBe(false);
+    expect(SITE_DATABASE_PREFIX_PATTERN.test(`wp_${hex}_shop`)).toBe(false);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`wp_${hex}`)).toBe(true);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`wp_${hex}_shop_1`)).toBe(true);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`xx_${hex}_shop`)).toBe(false);
+    expect(SITE_DATABASE_NAME_PATTERN.test(`wp_${hex}_Shop`)).toBe(false);
+    expect(SITE_DATABASE_CUSTOM_NAME_PATTERN.test(`wp_${hex}_shop`)).toBe(true);
+    expect(SITE_DATABASE_CUSTOM_NAME_PATTERN.test(`wp_${hex}`)).toBe(false);
+    expect(SITE_DATABASE_CUSTOM_NAME_PATTERN.test(`xx_${hex}_shop`)).toBe(false);
+  });
+
+  it("siteDatabasePrefix gives the same string as before", () => {
+    expect(siteDatabasePrefix("site_1")).toBe(`wp_${createHash("sha256").update("site_1").digest("hex").slice(0, 12)}`);
+  });
+
+  it("the heavy kinds keep their five values in order", () => {
+    expect(HEAVY_BACKUP_OPERATION_KINDS).toEqual([
+      "site.backups.create",
+      "site.backups.restore",
+      "site.backups.download",
+      "site.wordpress.update",
+      "site.wordpress.import",
+    ]);
+  });
+
+  it("the WordPress runtime keeps its path and volume suffix", () => {
+    expect(resolveWordpressRuntime("8.4")).toEqual({
+      image: "wordpress:7.1.4-php8.4-apache",
+      internalPort: 80,
+      contentPath: "/var/www/html",
+      volumeSuffix: "html",
+      resourceLimits: { cpuMilli: 1000, memoryBytes: "536870912" },
+    });
+  });
+});
+
+describe("@hosting-panel/contracts — the site DTOs carry the site type", () => {
+  const site = {
+    id: "site_1",
+    organizationId: "org_1",
+    hostAllocationId: "alloc_1",
+    name: "Shop",
+    slug: "shop",
+    status: "ready",
+    phpVersion: "8.4",
+    siteType: "wordpress",
+    createdAt: SAMPLE_TIMESTAMP,
+    updatedAt: SAMPLE_TIMESTAMP,
+  };
+
+  it("siteType is a known key or null, and required", () => {
+    expect(SiteSummaryDtoSchema.parse(site).siteType).toBe("wordpress");
+    expect(SiteSummaryDtoSchema.parse({ ...site, phpVersion: null, siteType: null }).siteType).toBeNull();
+    expect(SiteSummaryDtoSchema.safeParse({ ...site, siteType: "x" }).success).toBe(false);
+    const { siteType: _omitted, ...withoutType } = site;
+    expect(SiteSummaryDtoSchema.safeParse(withoutType).success).toBe(false);
+    expect(ManagedSiteDtoSchema.parse({ ...site, primaryDomain: null }).siteType).toBe("wordpress");
+    expect(AdminSiteDtoSchema.parse({ ...site, primaryDomain: null, owner: null }).siteType).toBe("wordpress");
   });
 });

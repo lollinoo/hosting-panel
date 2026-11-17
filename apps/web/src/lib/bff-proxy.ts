@@ -5,6 +5,78 @@ import { bffErrorResponse, bffJsonResponse } from "./bff-response";
 import { fetchUpstream, type UpstreamResponse } from "./upstream";
 import type { SessionData } from "./session";
 
+export const MAX_BFF_BODY_BYTES = 1_048_576;
+
+export type BoundedJsonBodyResult =
+  | { ok: true; body: unknown }
+  | { ok: false; response: NextResponse };
+
+// Read request text incrementally so oversized streams abort once above maxBytes.
+export async function readBoundedText(req: Request, maxBytes: number): Promise<string | null> {
+  if (!req.body || typeof req.body.getReader !== "function") {
+    const raw = await req.text();
+    return Buffer.byteLength(raw, "utf8") > maxBytes ? null : raw;
+  }
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+// Check Content-Length, stream size (1 MiB cap), and JSON syntax before calling upstream.
+export async function readBoundedJsonBody(
+  req: Request,
+  opts?: { requireJsonBody?: boolean },
+): Promise<BoundedJsonBodyResult> {
+  const contentLengthHeader = req.headers.get("content-length");
+  if (contentLengthHeader !== null) {
+    const contentLength = Number(contentLengthHeader);
+    if (Number.isFinite(contentLength) && contentLength > MAX_BFF_BODY_BYTES) {
+      return {
+        ok: false,
+        response: bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta troppo grande", 413),
+      };
+    }
+  }
+
+  const raw = await readBoundedText(req, MAX_BFF_BODY_BYTES);
+  if (raw === null) {
+    return {
+      ok: false,
+      response: bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta troppo grande", 413),
+    };
+  }
+
+  if (!raw) {
+    if (opts?.requireJsonBody) {
+      return {
+        ok: false,
+        response: bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400),
+      };
+    }
+    return { ok: true, body: undefined };
+  }
+
+  try {
+    return { ok: true, body: JSON.parse(raw) };
+  } catch {
+    return {
+      ok: false,
+      response: bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400),
+    };
+  }
+}
+
 /** Upstream result → browser response; upstream error code and status pass through. */
 export function bffUpstreamResponse(upstreamRes: UpstreamResponse): NextResponse {
   if (!upstreamRes.ok) {
@@ -37,12 +109,9 @@ export async function forwardToUpstream(
 
   let body: unknown;
   if (method !== "GET") {
-    const raw = await req.text();
-    try {
-      body = raw ? JSON.parse(raw) : undefined;
-    } catch {
-      return bffErrorResponse("VALIDATION_ERROR", "Corpo della richiesta JSON non valido", 400);
-    }
+    const parsed = await readBoundedJsonBody(req);
+    if (!parsed.ok) return parsed.response;
+    body = parsed.body;
   }
 
   const upstreamRes = await fetchUpstream(upstreamPath, {

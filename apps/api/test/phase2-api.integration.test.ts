@@ -23,8 +23,12 @@ import {
 import {
   DEMO_IDS,
   eq,
+  hostAgentHeartbeats,
+  membershipRoles,
+  memberships,
   operations,
   outboxEvents,
+  sql,
   stackRevisions,
 } from "@hosting-panel/database";
 import {
@@ -79,6 +83,61 @@ async function listTypeScriptFiles(dirPath: string): Promise<string[]> {
     }
   }
   return collected;
+}
+
+const PANEL_DUMP_FILE = "backups/panel-dump.ts";
+
+// Violations of AC-F2-01 / R118 in one apps/api/src file; only panel-dump.ts may run pg_dump.
+function apiSourceViolations(relPath: string, content: string): string[] {
+  const v: string[] = [];
+  if (content.includes("/var/run/docker.sock")) v.push("docker.sock");
+  if (content.includes("sh -c")) v.push("sh -c");
+  if (relPath !== PANEL_DUMP_FILE) {
+    if (content.includes("child_process")) v.push("child_process");
+    return v;
+  }
+  if (content.split("child_process").length !== 2 || !content.includes('import { execFile } from "node:child_process";')) {
+    v.push("child_process import other than execFile");
+  }
+  for (const bad of ["exec(", "execSync", "execFileSync", "spawn", "fork(", "shell: true"]) {
+    if (content.includes(bad)) v.push(bad);
+  }
+  if (!content.includes("shell: false")) v.push("no shell: false");
+  if (content.replace('import { execFile } from "node:child_process";', "").replace("promisify(execFile)", "").includes("execFile")) {
+    v.push("execFile used outside the runner");
+  }
+  const programs = [...content.matchAll(/\brun\(\s*([^,)]*)/g)].map((m) => m[1]);
+  if (programs.length === 0 || programs.some((p) => p !== "PG_DUMP_PATH")) v.push("program is not PG_DUMP_PATH");
+  if (!content.includes('export const PG_DUMP_PATH = "/usr/lib/postgresql/18/bin/pg_dump";')) v.push("PG_DUMP_PATH changed");
+  return v;
+}
+
+describe("AC-F2-01 guard (R118) fails on forbidden process use", () => {
+  it("accepts the real panel-dump.ts and rejects each forged content", async () => {
+    const real = await readFile(path.join(API_SRC_DIR, PANEL_DUMP_FILE), "utf8");
+    expect(apiSourceViolations(PANEL_DUMP_FILE, real)).toEqual([]);
+    const cases: [string, string][] = [
+      ["other.ts", 'import { spawn } from "node:child_process";'],
+      ["other.ts", 'const cp = require("child_process");'],
+      ["other.ts", 'const cp = await import("node:child_process");'],
+      [PANEL_DUMP_FILE, `${real}\nspawn(PG_DUMP_PATH, []);`],
+      [PANEL_DUMP_FILE, `${real}\nexec("pg_dump");`],
+      [PANEL_DUMP_FILE, real.replace("shell: false", "shell: true")],
+      [PANEL_DUMP_FILE, `import { spawn } from "node:child_process";\n${real}`],
+      [PANEL_DUMP_FILE, real.replace("run(PG_DUMP_PATH", "run(cmd.file")],
+      [PANEL_DUMP_FILE, `${real}\nexecFile("/bin/sh", ["-c", "id"]);`],
+      [PANEL_DUMP_FILE, `${real}\n// sh -c`],
+    ];
+    for (const [rel, content] of cases) expect(apiSourceViolations(rel, content), content.slice(-60)).not.toEqual([]);
+  });
+});
+
+/** R207 addendum 4 A: the generic service routes need a server administrator who is also an owner of the organisation. */
+async function makeInfraOwnerOfAcme(handle: ControlPlaneAppHandle): Promise<void> {
+  await handle.dbClient.db.insert(memberships).values({ id: "mem_infra_acme", organizationId: DEMO_IDS.organizations.acme, userId: DEMO_IDS.users.infra });
+  await handle.dbClient.db
+    .insert(membershipRoles)
+    .values({ id: "mr_infra_acme_owner", membershipId: "mem_infra_acme", roleId: DEMO_IDS.roles.customer_owner });
 }
 
 describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets & Reconciler Suite (HCP-SPEC-003)", () => {
@@ -224,6 +283,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
 
     expect(app.baseUrl).not.toBeNull();
     baseUrl = app.baseUrl!;
+    await makeInfraOwnerOfAcme(app);
 
     const personas = ["usr_infra", "usr_hosting", "usr_elena", "usr_marco", "usr_giulia"];
     for (const personaId of personas) {
@@ -262,15 +322,13 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     }
   });
 
-  it("1. AC-F2-01 & OpenAPI alignment: apps/api has zero docker.sock or child_process usage and OpenAPI documents Phase 2 routes", async () => {
+  it("1. AC-F2-01 & OpenAPI alignment: apps/api has zero docker.sock usage, runs no program but pg_dump from panel-dump.ts, and OpenAPI documents Phase 2 routes", async () => {
     const srcFiles = await listTypeScriptFiles(API_SRC_DIR);
     expect(srcFiles.length).toBeGreaterThan(5);
 
     for (const filePath of srcFiles) {
-      const content = await readFile(filePath, "utf8");
-      expect(content).not.toContain("/var/run/docker.sock");
-      expect(content).not.toMatch(/from\s+["'](?:node:)?child_process["']/);
-      expect(content).not.toContain("sh -c");
+      const rel = path.relative(API_SRC_DIR, filePath).split(path.sep).join("/");
+      expect(apiSourceViolations(rel, await readFile(filePath, "utf8")), rel).toEqual([]);
     }
 
     const openApiRaw = await readFile(OPENAPI_YAML_PATH, "utf8");
@@ -309,8 +367,10 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
-      sftpAvailable: false,
-      productionBackupRuntimeAvailable: false,
+      sftpAvailable: true,
+      phpMyAdminAvailable: true,
+      productionBackupRuntimeAvailable: true,
+      wordpressToolsAvailable: true,
     });
 
     const orgRes = await requestJson<{ data: OrganizationDetailDto }>(
@@ -324,8 +384,10 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       dockerExecutorRuntimeAvailable: true,
       hostAgentRuntimeAvailable: true,
       acmeTlsRuntimeAvailable: true,
-      sftpAvailable: false,
-      productionBackupRuntimeAvailable: false,
+      sftpAvailable: true,
+      phpMyAdminAvailable: true,
+      productionBackupRuntimeAvailable: true,
+      wordpressToolsAvailable: true,
     });
 
     const capRes = await requestJson<{ data: OrganizationCapabilitiesDto }>(
@@ -585,7 +647,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
       {
         method: "POST",
-        token: tokens["usr_elena"],
+        token: tokens["usr_infra"],
         headers: { "Idempotency-Key": "idem-create-shop-app" },
         body: {
           serviceTemplateId: DEMO_IDS.templates.wordpress,
@@ -761,7 +823,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
       {
         method: "POST",
-        token: tokens["usr_elena"],
+        token: tokens["usr_infra"],
         headers: { "Idempotency-Key": "idem-create-recovery-svc-a" },
         body: {
           serviceTemplateId: DEMO_IDS.templates.wordpress,
@@ -818,7 +880,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       `/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
       {
         method: "POST",
-        token: tokens["usr_elena"],
+        token: tokens["usr_infra"],
         headers: { "Idempotency-Key": "idem-create-recovery-svc-b" },
         body: {
           serviceTemplateId: DEMO_IDS.templates.wordpress,
@@ -1276,6 +1338,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     });
 
     try {
+      await makeInfraOwnerOfAcme(f03App);
       const tokRes = await fetch(`${f03App.baseUrl}/v1/dev/auth/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1283,13 +1346,20 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       });
       const elenaJwt = ((await tokRes.json()) as { data: { accessToken: string } }).data
         .accessToken;
+      const infraTokRes = await fetch(`${f03App.baseUrl}/v1/dev/auth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: "usr_infra" }),
+      });
+      const infraJwt = ((await infraTokRes.json()) as { data: { accessToken: string } }).data
+        .accessToken;
 
       const createSvcRes = await fetch(
         `${f03App.baseUrl}/v1/organizations/${DEMO_IDS.organizations.acme}/sites/${DEMO_IDS.sites.acmeShop}/services`,
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${elenaJwt}`,
+            Authorization: `Bearer ${infraJwt}`,
             "Content-Type": "application/json",
             "Idempotency-Key": "idem-f03-svc-create",
           },
@@ -1436,6 +1506,29 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       expect(telBody.data.telemetry.dockerEngineReachable).toBe(true);
     } finally {
       await f05App.close();
+    }
+  });
+
+  it("11b. Host telemetry answers 200 when the docker_executor snapshot is JSON null", async () => {
+    await app.driftReconciler.reconcileAllOnce();
+    try {
+      await app.dbClient.db.execute(
+        sql`UPDATE host_agent_heartbeats SET telemetry_snapshot = 'null'::jsonb WHERE component = 'docker_executor'`,
+      );
+      const [row] = await app.dbClient.db
+        .select({ snap: hostAgentHeartbeats.telemetrySnapshot })
+        .from(hostAgentHeartbeats)
+        .where(eq(hostAgentHeartbeats.component, "docker_executor"));
+      expect(row?.snap).toBeNull();
+      const res = await requestJson<{ data: { telemetry: HostTelemetryDto | null } }>(
+        `/v1/hosts/${DEMO_IDS.hosts.acme}/telemetry`,
+        { token: tokens["usr_infra"] },
+      );
+      expect(res.status).toBe(200);
+      // A null snapshot reads as an empty one: an online executor counts as reachable.
+      expect(res.body.data.telemetry?.dockerEngineReachable).toBe(true);
+    } finally {
+      await app.driftReconciler.reconcileAllOnce();
     }
   });
 

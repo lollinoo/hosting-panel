@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
-import type { SiteDomainDto, SiteDomainsDto } from "@hosting-panel/contracts";
+import { BACKUP_PROBLEMS, type SiteDomainDto, type SiteDomainsDto } from "@hosting-panel/contracts";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 import { I18nProvider } from "@/i18n/provider";
@@ -10,6 +10,7 @@ const fetchUpstream = vi.fn();
 vi.mock("@/lib/upstream", () => ({ fetchUpstream: (...a: unknown[]) => fetchUpstream(...a) }));
 vi.mock("@/lib/server-session", () => ({
   getSessionFromRequest: async () => ({ accessToken: "tok", csrfToken: "csrf" }),
+  getServerSession: async () => ({ accessToken: "tok", csrfToken: "csrf" }),
 }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), refresh: vi.fn() }),
@@ -20,10 +21,13 @@ import { GET as listDomains, POST as addDomain } from "@/app/api/bff/orgs/[orgId
 import { DELETE as removeDomain } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/route";
 import { POST as setPrimary } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/primary/route";
 import { POST as checkNow } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/domains/[domainId]/check/route";
-import { SITE_TABS } from "@/components/customer/site-tabs";
+import { SITE_TABS, SiteTabs } from "@/components/customer/site-tabs";
+import { WEB_SITE_TYPES } from "@/site-types";
+import { SidebarNav } from "@/components/layout/sidebar-nav";
 import { DomainsPanel, domainView } from "@/components/customer/domains-panel";
 import { domainErrorText } from "@/lib/domain-view";
 import { SiteForm } from "@/components/customer/site-form";
+import { fetchServerAdminBackups, fetchServerAdminBackupSites } from "@/lib/server-api";
 
 const base = "v1/organizations/org-1/managed-sites/s1/domains";
 const sp = { params: Promise.resolve({ orgId: "org-1", siteId: "s1" }) };
@@ -200,9 +204,26 @@ describe("domains UI", () => {
     expect(en.site.domains.conflict).toMatch(/Remove it from the other site first, or ask your administrator\.$/);
   });
 
-  it("site tabs include domains between overview and logs", () => {
-    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "logs"]);
+  it("site tabs include domains, files, and database between overview and logs, backups after database", () => {
+    expect(SITE_TABS.map((t) => t.key)).toEqual(["overview", "domains", "files", "database", "backups", "logs"]);
     expect(SITE_TABS[1]!.href("s1")).toBe("/sites/s1/domains");
+  });
+
+  it("the WordPress tab shows only when the site runs WordPress, second after overview", () => {
+    const links = (html: string) => [...html.matchAll(/href="([^"]+)"/g)].map((x) => x[1]);
+    const plain = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1" })));
+    expect(plain).not.toContain("WordPress");
+    expect(links(plain)).not.toContain("/sites/s1/wordpress");
+    const wp = renderToStaticMarkup(wrap(en, createElement(SiteTabs, { siteId: "s1", typeTabs: WEB_SITE_TYPES.wordpress.tabs })));
+    expect(links(wp).slice(0, 3)).toEqual(["/sites/s1", "/sites/s1/wordpress", "/sites/s1/domains"]);
+    expect(wp).toContain(">WordPress<");
+  });
+
+  it("both catalogs name the WordPress tab and the before-update copy", () => {
+    expect(en.site.tabs.wordpress).toBe("WordPress");
+    expect(itMsgs.site.tabs.wordpress).toBe("WordPress");
+    expect(en.site.backups.kind.pre_update).toBe("Before an update or an import");
+    expect(itMsgs.site.backups.kind.pre_update).toBe("Prima di un aggiornamento o di un'importazione");
   });
 
   it("port 80 hint says the administrator was alerted", () => {
@@ -247,5 +268,88 @@ describe("domains UI", () => {
       const html = renderToStaticMarkup(wrap(m, createElement(DomainsPanel, { basePath: "/b", csrfToken: "c", initial })));
       for (const h of ["hotel.it", "www.hotel.it"]) expect(html).toContain(`aria-label="${esc(m.site.domains.copyFor.replace("{host}", h))}"`);
     }
+  });
+});
+
+describe("backups shared base", () => {
+  beforeEach(() => fetchUpstream.mockReset());
+
+  it("adds Backups to the admin sidebar and sites tab bar in the designed positions", () => {
+    const dbIndex = SITE_TABS.findIndex((t) => t.key === "database");
+    expect(dbIndex).toBeGreaterThan(-1);
+    expect(SITE_TABS[dbIndex + 1]?.key).toBe("backups");
+    expect(SITE_TABS[dbIndex + 1]?.href("s1")).toBe("/sites/s1/backups");
+
+    for (const m of [en, itMsgs]) {
+      const html = renderToStaticMarkup(wrap(m, createElement(SidebarNav)));
+      expect(html).toContain('href="/admin/backups"');
+      expect(html).toContain(m.admin.nav.backups);
+    }
+  });
+
+  it("maps every BACKUP_PROBLEMS key with no missing or extra keys in both catalogs", () => {
+    const expected = [...BACKUP_PROBLEMS].sort();
+    for (const [lang, m] of [["en", en], ["it", itMsgs]] as const) {
+      for (const [label, problemMap] of [
+        [`${lang}.admin.backups.problem`, m.admin.backups.problem],
+        [`${lang}.site.backups.problem`, m.site.backups.problem],
+      ] as const) {
+        expect(Object.keys(problemMap).sort(), label).toEqual(expected);
+        for (const key of BACKUP_PROBLEMS) {
+          expect(problemMap[key].trim().length, `${label}.${key}`).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  it("has all R56 validation field keys and R64 customer-safe copy in both catalogs", () => {
+    const expectedFields = [
+      "endpoint_invalid",
+      "region_invalid",
+      "bucket_invalid",
+      "prefix_invalid",
+      "access_key_id_invalid",
+      "secret_access_key_invalid",
+      "schedule_hour_invalid",
+      "retention_days_invalid",
+      "secret_access_key_required",
+    ].sort();
+    const customerBanned =
+      /\b(restic|s3|snapshot|bucket|repository|repo|container|docker|image|volume|network|service|template|mariadb|job|organization|revision|drift|allocation|outbox|relay|smtp|postfix|spf|dkim)\b|HCP-SPEC|AC-F|ADR-/i;
+
+    for (const m of [en, itMsgs]) {
+      expect(Object.keys(m.admin.backups.field).sort()).toEqual(expectedFields);
+      for (const v of Object.values(m.admin.backups.field)) {
+        expect(v.trim().length).toBeGreaterThan(0);
+      }
+      expect(m.admin.backups.field.endpoint_invalid).toContain("localhost");
+
+      const customerCopy = JSON.stringify([m.site.backups, m.site.tabs.backups, m.site.delete.body]);
+      expect(customerCopy).not.toMatch(customerBanned);
+      expect(m.site.delete.body).toContain("{name}");
+      expect(m.site.delete.body).not.toMatch(/later update|prossimo aggiornamento/i);
+    }
+  });
+
+  it("provides fetchServerAdminBackups and fetchServerAdminBackupSites", async () => {
+    fetchUpstream.mockResolvedValueOnce({ ok: true, status: 200, data: { data: { available: true, configured: false } } });
+    fetchUpstream.mockResolvedValueOnce({ ok: true, status: 200, data: { data: [{ siteId: "s1" }] } });
+
+    const settings = await fetchServerAdminBackups();
+    const sites = await fetchServerAdminBackupSites();
+
+    expect(settings).toEqual({ available: true, configured: false });
+    expect(sites).toEqual([{ siteId: "s1" }]);
+    expect(fetchUpstream).toHaveBeenNthCalledWith(1, "v1/admin/backups", {
+      accessToken: "tok",
+      timeoutMs: 20_000,
+    });
+    expect(fetchUpstream).toHaveBeenNthCalledWith(2, "v1/admin/backups/sites", {
+      accessToken: "tok",
+      timeoutMs: 20_000,
+    });
+
+    fetchUpstream.mockResolvedValueOnce({ ok: false, status: 503 });
+    expect(await fetchServerAdminBackups()).toBeNull();
   });
 });

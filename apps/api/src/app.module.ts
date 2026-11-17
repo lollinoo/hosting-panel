@@ -8,25 +8,57 @@ import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
+import { PasswordResetService } from "./auth/password-reset.service.js";
+import { SupportAccessService } from "./auth/support-access.service.js";
 import { ApiExceptionFilter } from "./common/api-exception.filter.js";
 import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
+import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
+import { AdminHealthController } from "./controllers/admin-health.controller.js";
+import { AdminLogsController } from "./controllers/admin-logs.controller.js";
+import { AdminTerminalController } from "./controllers/admin-terminal.controller.js";
+import { AdminFirewallController } from "./controllers/admin-firewall.controller.js";
+import { AdminHostController } from "./controllers/admin-host.controller.js";
+import { AdminUpdatesController } from "./controllers/admin-updates.controller.js";
+import { FirewallService } from "./firewall/firewall.service.js";
+import { UpdatesService } from "./updates/updates.service.js";
+import { AdminHealthService } from "./health/admin-health.service.js";
 import { AuthController } from "./controllers/auth.controller.js";
 import { HealthController } from "./controllers/health.controller.js";
 import { HostsController } from "./controllers/hosts.controller.js";
 import { ManagedSitesController } from "./controllers/managed-sites.controller.js";
 import { MeController } from "./controllers/me.controller.js";
 import { OrganizationsController } from "./controllers/organizations.controller.js";
+import { PasswordResetController } from "./controllers/password-reset.controller.js";
 import { ServiceTemplatesController } from "./controllers/service-templates.controller.js";
 import { SiteDomainsController } from "./controllers/site-domains.controller.js";
+import { SiteDatabasesController } from "./controllers/site-databases.controller.js";
+import { SiteBackupsController } from "./controllers/site-backups.controller.js";
+import { SiteFilesController } from "./controllers/site-files.controller.js";
+import { SiteSftpController } from "./controllers/site-sftp.controller.js";
+import { SiteWordpressController } from "./controllers/site-wordpress.controller.js";
+import { SiteWordpressImportController } from "./controllers/site-wordpress-import.controller.js";
+import { SupportAccessController } from "./controllers/support-access.controller.js";
 import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
+import { AdminTerminalService } from "./terminal/admin-terminal.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
+import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
+import { BackupSettingsService } from "./backups/backup-settings.service.js";
+import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
+import { SiteBackupsService } from "./backups/site-backups.service.js";
+import { SiteRestoreService } from "./backups/site-restore.service.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
+import { SiteFilesApplier } from "./sites/site-files-applier.js";
+import { SiteDatabasesService } from "./sites/site-databases.service.js";
+import { SiteFilesService } from "./sites/site-files.service.js";
+import { SiteSftpService } from "./sites/site-sftp.service.js";
+import { SiteWordpressService } from "./sites/site-wordpress.service.js";
+import { SiteWordpressImportService } from "./sites/site-wordpress-import.service.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -69,7 +101,22 @@ export class AppModule {
         OrganizationsController,
         ManagedSitesController,
         SiteDomainsController,
+        SiteFilesController,
+        SiteSftpController,
+        SiteDatabasesController,
+        SiteBackupsController,
+        SiteWordpressController,
+        SiteWordpressImportController,
         AdminMailRelayController,
+        AdminBackupsController,
+        PasswordResetController,
+        SupportAccessController,
+        AdminHealthController,
+        AdminLogsController,
+        AdminTerminalController,
+        AdminFirewallController,
+        AdminHostController,
+        AdminUpdatesController,
       ],
       providers: [
         {
@@ -98,11 +145,28 @@ export class AppModule {
         OutboxWorkerService,
         SiteProvisioner,
         SiteDomainsApplier,
+        SiteFilesApplier,
+        SiteBackupsApplier,
         ManagedSitesService,
         SiteDomainsService,
+        SiteFilesService,
+        SiteSftpService,
+        SiteDatabasesService,
+        SiteBackupsService,
+        SiteRestoreService,
+        SiteWordpressService,
+        SiteWordpressImportService,
+        BackupSettingsService,
+        BackupSchedulerService,
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
+        PasswordResetService,
+        SupportAccessService,
+        AdminHealthService,
+        AdminTerminalService,
+        FirewallService,
+        UpdatesService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,
@@ -119,6 +183,12 @@ export class AppModule {
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
+        SiteSftpService,
+        SiteDatabasesService,
+        SiteBackupsService,
+        SiteRestoreService,
+        SiteWordpressService,
+        BackupSchedulerService,
       ],
     };
   }

@@ -1,0 +1,8 @@
+[Unit]
+Description=Hosting panel: operating-system security upgrade request
+
+[Path]
+PathExists=/run/hosting-panel/host-jobs/hp-os-upgrade
+
+[Install]
+WantedBy=paths.target

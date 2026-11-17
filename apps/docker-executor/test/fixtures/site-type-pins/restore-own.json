@@ -1,0 +1,54 @@
+{
+  "containerName": "hp_bk_op_c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0_rs_own",
+  "payload": {
+    "Image": "restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510",
+    "Entrypoint": [
+      "/bin/sh",
+      "-c",
+      "chown 33:33 /v && chmod 0755 /v"
+    ],
+    "User": "0:0",
+    "Env": [],
+    "Labels": {
+      "io.hostingpanel.managed": "true",
+      "io.hostingpanel.role": "site_job",
+      "io.hostingpanel.site_id": "site_pin_a",
+      "io.hostingpanel.job_id": "op_c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "ReadonlyRootfs": true,
+      "CapDrop": [
+        "ALL"
+      ],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "PidsLimit": 128,
+      "NanoCpus": 1000000000,
+      "Memory": 536870912,
+      "MemorySwap": 536870912,
+      "RestartPolicy": {
+        "Name": "no"
+      },
+      "Tmpfs": {
+        "/tmp": "rw,nosuid,nodev,noexec,size=128m,mode=1777"
+      },
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {
+          "max-size": "1m",
+          "max-file": "1"
+        }
+      },
+      "NetworkMode": "none",
+      "Binds": [
+        "hp_vol_svc_pin_a_html:/v"
+      ],
+      "CapAdd": [
+        "CHOWN",
+        "FOWNER"
+      ]
+    }
+  }
+}

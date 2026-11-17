@@ -19,13 +19,15 @@ Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_SECRETS_MASTER_KEY_FILE=/etc/hosting-panel/secrets-master.key
 Environment=HP_BREAKGLASS_KEY_FILE=/etc/hosting-panel/breakglass-jwt.key
 Environment=HP_JWT_SIGNING_KEY_FILE=/etc/hosting-panel/jwt-signing.pem
+Environment=HP_PANEL_DUMP_DIR=/var/lib/hosting-panel/panel-dump
 ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/api/dist/main.js
 Restart=on-failure
 RestartSec=5s
 UMask=0027
 
-# Shared UDS IPC directory (/run/hosting-panel 3770 root:hp-ipc managed via tmpfiles.d)
-ReadWritePaths=/run/hosting-panel
+# Shared UDS IPC directory (/run/hosting-panel 3770 root:hp-ipc managed via tmpfiles.d) and the
+# hand-over directory of the panel copy (2770 root:hp-ipc, made by bootstrap)
+ReadWritePaths=/run/hosting-panel /var/lib/hosting-panel/panel-dump
 
 # HCP-SPEC-003 §5.2 Mandatory Hardening Matrix
 NoNewPrivileges=yes

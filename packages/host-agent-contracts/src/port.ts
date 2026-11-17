@@ -1,5 +1,16 @@
+import type { HostDiskPath } from "@hosting-panel/contracts";
 import type { ApprovedHostMaintenanceCommand } from "./maintenance.js";
 import type { ApprovedHostSecurityCommand } from "./security.js";
+import type {
+  HostFirewallSets,
+  HostFirewallState,
+  HostJob,
+  HostJobState,
+  HostJournalLine,
+  HostJournalUnit,
+  HostOsPackages,
+  HostServiceState,
+} from "./host-jobs.js";
 
 export interface HostMaintenanceResult {
   readonly operationId: string;
@@ -28,6 +39,13 @@ export interface HostTelemetry {
   readonly kernelVersion?: string;
   readonly dockerEngineReachable?: boolean;
   readonly collectedAt: string;
+  readonly disks?: readonly HostDisk[];
+}
+
+export interface HostDisk {
+  readonly paths: readonly HostDiskPath[];
+  readonly usedBytes: string;
+  readonly totalBytes: string;
 }
 
 export interface HostAgentPort {
@@ -39,4 +57,11 @@ export interface HostAgentPort {
     command: ApprovedHostSecurityCommand,
   ): Promise<HostSecurityResult>;
   getHostTelemetry(hostId: string): Promise<HostTelemetry | null>;
+  readFirewall(): Promise<HostFirewallState>;
+  replaceFirewallSets(sets: HostFirewallSets): Promise<HostFirewallState>;
+  readHostServices(): Promise<readonly HostServiceState[]>;
+  readHostJournal(unit: HostJournalUnit, lines: number): Promise<readonly HostJournalLine[]>;
+  readOsPackages(): Promise<HostOsPackages>;
+  requestHostJob(job: HostJob): Promise<HostJobState>;
+  readHostJob(job: HostJob): Promise<HostJobState>;
 }

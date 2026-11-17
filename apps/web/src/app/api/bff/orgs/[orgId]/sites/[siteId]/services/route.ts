@@ -2,6 +2,7 @@ import { getSessionFromRequest } from "@/lib/server-session";
 import { validateCsrfAndOrigin, validatePathSegments } from "@/lib/bff-guard";
 import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
 import { fetchUpstream } from "@/lib/upstream";
+import { readBoundedJsonBody } from "@/lib/bff-proxy";
 
 export async function POST(
   req: Request,
@@ -25,16 +26,9 @@ export async function POST(
     );
   }
 
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return bffErrorResponse(
-      "VALIDATION_ERROR",
-      "Corpo della richiesta JSON non valido",
-      400
-    );
-  }
+  const read = await readBoundedJsonBody(req, { requireJsonBody: true });
+  if (!read.ok) return read.response;
+  const body = read.body;
 
   const upstreamRes = await fetchUpstream(
     `v1/organizations/${orgId}/sites/${siteId}/services`,

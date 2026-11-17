@@ -1,0 +1,8 @@
+[Unit]
+Description=Hosting panel: restart %i on request
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/rm -f /run/hosting-panel/host-jobs/hp-unit-restart@%i
+ExecStart=/usr/bin/systemctl restart %i.service
+TimeoutStartSec=5min

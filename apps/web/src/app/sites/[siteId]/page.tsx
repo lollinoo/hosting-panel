@@ -8,6 +8,7 @@ import { SiteProgress } from "@/components/customer/site-progress";
 import { StatusPill, toSiteStatusView } from "@/components/customer/status-pill";
 import { SiteActions } from "@/components/customer/site-actions";
 import { showSetupProgress } from "@/lib/site-setup";
+import { findWebSiteType } from "@/site-types";
 import { getCustomerContext, getSite } from "../data";
 
 // Only operations a site owner would recognise; anything else is not shown.
@@ -18,6 +19,8 @@ const ACTIVITY: Partial<Record<OperationKind, keyof Messages["site"]["activity"]
   "service.restart": "restart",
   "service.stop": "stop",
   "site.domains": "domains",
+  "site.wordpress.update": "wordpressUpdate",
+  "site.wordpress.import": "wordpressImport",
 };
 
 const outcome = (s: OperationStatus) =>
@@ -25,7 +28,7 @@ const outcome = (s: OperationStatus) =>
 
 export default async function SiteOverviewPage({ params }: { params: Promise<{ siteId: string }> }) {
   const { siteId } = await params;
-  const { orgId, session } = await getCustomerContext();
+  const { orgId, session, capabilities } = await getCustomerContext();
   const result = await getSite(orgId, siteId);
   if (!result.ok || !orgId) return null; // the layout shows the 404 or the load error
   const site = result.data;
@@ -41,10 +44,12 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
   const provision = (operations ?? [])
     .filter((op: OperationDto) => op.kind === "site.provision" && op.resourceId === site.id)
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))[0];
+  const type = findWebSiteType(site.siteType);
   // Only the setup shows here; restarts and PHP changes report through the Manage card.
-  const showProgress = site.phpVersion !== null && showSetupProgress(site.status, provision?.status);
+  const showProgress = type !== null && showSetupProgress(site.status, provision?.status);
   const when = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const { labelKey } = toSiteStatusView(site.status, site.driftSummary);
+  const card = type?.OverviewCard && type.available(capabilities) ? await type.OverviewCard({ orgId, siteId: site.id, m, when }) : null;
 
   return (
     <div className="grid gap-6 md:grid-cols-2">
@@ -55,6 +60,7 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
             siteId={site.id}
             csrfToken={session.csrfToken}
             initial={provision ? { id: provision.id, status: provision.status, steps: provision.steps } : null}
+            steps={type.progressSteps}
           />
         </div>
       )}
@@ -103,6 +109,7 @@ export default async function SiteOverviewPage({ params }: { params: Promise<{ s
         </CardContent>
       </Card>
 
+      {card}
       <Card className="md:col-span-2">
         <CardHeader>
           <CardTitle className="text-base">{m.site.overview.activityTitle}</CardTitle>

@@ -1,6 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import type { CertProblem, MailRelayApplyRequest } from "@hosting-panel/contracts";
+import {
+  DEFAULT_SFTP_PORT,
+  LEGACY_SITE_TYPE,
+  SITE_TYPE_KEYS,
+  SftpAccessApplyIpcRequestSchema,
+  type BackupsIpcRequest,
+  type BackupsResultByAction,
+  type CertProblem,
+  type MailRelayApplyRequest,
+  PANEL_CONTAINERS,
+  PINNED_PANEL_CONTAINERS,
+  type PanelContainer,
+  PanelMailIpcRequestSchema,
+  type PanelMailRequest,
+  type PanelMailResult,
+  type SiteTypeKey,
+  type WordpressImportLoadResult,
+  type WordpressStateResult,
+  type WordpressUpdateResult,
+} from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
   ApprovedServiceSpec,
@@ -9,15 +28,37 @@ import type {
   DockerExecutorPort,
   MailRelayStatusReport,
   MailTestResult,
+  PanelContainerStatus,
+  PinnedPanelContainer,
   ServiceLogLine,
+  SftpAccessApplyRequest,
+  SftpAccessUser,
+  SftpApplyResult,
+  SftpStatusReport,
+  SiteDatabasesRequest,
+  SiteDatabasesResult,
+  SiteFilesRequest,
+  SiteFilesResult,
   SiteHostRoute,
   SiteJobKind,
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
   StoredCertificate,
+  TerminalEnded,
+  TerminalOpenRequest,
+  TerminalOpenResult,
+  TerminalReadResult,
+  TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
-import { assertValidSiteJobRequest } from "./site-jobs.js";
+import { SimulatedSiteDatabases } from "./simulator-databases.js";
+import { SimulatedBackups } from "./simulator-backups.js";
+import { SimulatedSiteFiles } from "./simulator-files.js";
+import { resolveSimulatorSiteType, type SimulatorSiteType } from "./simulator-site-types.js";
+import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
+import { maskPhpMyAdminQuery } from "./docker-logs.js";
+import { startSimulatedShell } from "./simulator-terminal.js";
+import { TerminalSessions, type TerminalLimits, type TerminalShellSink } from "./terminal-sessions.js";
 import {
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
@@ -78,6 +119,10 @@ export interface InMemoryDockerSimulatorAdapterOptions {
   readonly ingressHttpPort?: number;
   readonly panel?: PanelIngressConfig | null;
   readonly dockerEngineReachable?: boolean;
+  /** Short terminal limits for tests. */
+  readonly terminalLimits?: Partial<TerminalLimits>;
+  /** The simulator's type for a key; tests set their own type here. */
+  readonly resolveSiteType?: (key: SiteTypeKey) => SimulatorSiteType;
 }
 
 interface MutableSimulatedContainer {
@@ -112,6 +157,22 @@ function buildDeterministicSimRef(prefix: string, seed: string): string {
   return hex;
 }
 
+/** What every simulated db.import-load answers. */
+export const SIMULATED_IMPORT_LOAD_RESULT: WordpressImportLoadResult = { prefix: "wp_", oldUrl: "http://old.example.test", tables: 12 };
+
+/** The state every simulated WordPress site starts with. */
+export const SIMULATED_WORDPRESS_STATE: WordpressStateResult = {
+  coreVersion: "7.1.4",
+  coreUpdate: null,
+  updatesKnown: true,
+  plugins: [
+    { name: "akismet", title: "Akismet Anti-spam", status: "inactive", version: "5.7.2", updateVersion: null },
+    { name: "classic-editor", title: "Classic Editor", status: "active", version: "1.6.0", updateVersion: "1.7.0" },
+  ],
+  themes: [{ name: "twentytwentyfive", title: "Twenty Twenty-Five", status: "active", version: "1.5", updateVersion: null }],
+  administrators: [{ id: 1, login: "admin" }],
+};
+
 export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
@@ -127,6 +188,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly virtualSecretFiles = new Map<string, Set<string>>();
   private readonly virtualSiteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
+  private readonly siteServices = new Map<string, Set<string>>();
+  public readonly files: SimulatedSiteFiles;
+  public readonly databases = new SimulatedSiteDatabases();
+  public readonly backupState = new SimulatedBackups();
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
@@ -142,16 +207,31 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public onJob?: (req: SiteJobRequest) => Promise<void>;
   /** Test hook awaited inside deployService. */
   public onDeploy?: (spec: ApprovedServiceSpec) => Promise<void>;
-  private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string }[] = [];
+  private readonly failingJobs: { kind: SiteJobKind; exitCode: number; outputTail: string; stdout?: string }[] = [];
+  /** Per site, seeded from SIMULATED_WORDPRESS_STATE on first use. */
+  public readonly wordpressSites = new Map<string, WordpressStateResult>();
+  /** false: wordpress.org is unreachable (inspect says unknown, update exits 30). */
+  public wordpressOnline = true;
   private failDeployOnce = false;
   public mailRelay: SimulatedMailRelayState | null = null;
   /** Every apply in order, null for a disable. */
   public readonly mailRelayApplies: Array<MailRelayApplyRequest | null> = [];
   public readonly mailDeliveries: SimulatedMailDelivery[] = [];
   public nextTestMailResult: MailTestResult = { outcome: "sent", problem: null, detail: null };
+  /** Every panel mail request in order. */
+  public readonly panelMails: PanelMailRequest[] = [];
   private failingMailApplies = 0;
+  public sftpUsers: SftpAccessUser[] = [];
+  /** Every SFTP apply request in order. */
+  public readonly sftpApplies: SftpAccessApplyRequest[] = [];
+  private failingSftpApplies = 0;
   private readonly serviceLogs = new Map<string, ServiceLogLine[]>();
+  private readonly panelContainerOverrides = new Map<PanelContainer, Partial<Omit<PanelContainerStatus, "component">>>();
+  private readonly panelContainerLogs = new Map<PanelContainer, ServiceLogLine[]>();
   private staticTraefikYaml: string | null = null;
+  private readonly terminals: TerminalSessions;
+  private readonly resolveSiteType: (key: SiteTypeKey) => SimulatorSiteType;
+  private readonly terminalSinks = new Map<string, TerminalShellSink>();
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
     this.secretsRootDir = options?.secretsRootDir ? path.resolve(options.secretsRootDir) : null;
@@ -163,6 +243,9 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
     this.panel = options?.panel ?? null;
     this.engineReachable = options?.dockerEngineReachable ?? true;
+    this.terminals = new TerminalSessions(options?.terminalLimits);
+    this.resolveSiteType = options?.resolveSiteType ?? resolveSimulatorSiteType;
+    this.files = new SimulatedSiteFiles(this.resolveSiteType);
   }
 
   public setEngineReachable(reachable: boolean): void {
@@ -239,8 +322,9 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     };
   }
 
-  public failNextJob(kind: SiteJobKind, exitCode: number, outputTail = ""): void {
-    this.failingJobs.push({ kind, exitCode, outputTail });
+  /** stdout: the raw result text, checked by the same parser as the real adapter. */
+  public failNextJob(kind: SiteJobKind, exitCode: number, outputTail = "", stdout?: string): void {
+    this.failingJobs.push({ kind, exitCode, outputTail, ...(stdout !== undefined ? { stdout } : {}) });
   }
 
   public failNextMailRelayApply(n = 1): void {
@@ -270,12 +354,54 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     return result;
   }
 
+  public async sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult> {
+    const parsed = PanelMailIpcRequestSchema.safeParse(req);
+    if (!parsed.success) throw new ExecutorCodedError("Invalid panel mail", "VALIDATION_ERROR");
+    this.panelMails.push(parsed.data);
+    return { outcome: this.mailRelay ? "queued" : "failed" };
+  }
+
+  public failNextSftpApply(n = 1): void {
+    this.failingSftpApplies = n;
+  }
+
+  public async applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult> {
+    const parsed = SftpAccessApplyIpcRequestSchema.safeParse(req);
+    if (!parsed.success) {
+      throw new ExecutorCodedError("Invalid SFTP access configuration", "VALIDATION_ERROR");
+    }
+    if (this.failingSftpApplies > 0) {
+      this.failingSftpApplies -= 1;
+      throw new ExecutorCodedError("Simulated SFTP apply failure", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    const copy: SftpAccessApplyRequest = {
+      users: parsed.data.users.map((u) => ({ ...u })),
+    };
+    this.sftpApplies.push(copy);
+    this.sftpUsers = parsed.data.users.map((u) => ({ ...u }));
+    return { applied: copy.users.length };
+  }
+
+  public async getSftpStatus(): Promise<SftpStatusReport> {
+    return { running: false, port: DEFAULT_SFTP_PORT, hostKeyFingerprint: null };
+  }
+
   public failNextDeploy(): void {
     this.failDeployOnce = true;
   }
 
   public setServiceLogs(serviceInstanceId: string, lines: ServiceLogLine[]): void {
     this.serviceLogs.set(serviceInstanceId, lines);
+  }
+
+  /** Overrides fields of one panel container's status over the defaults. */
+  public setPanelContainer(component: PanelContainer, partial: Partial<Omit<PanelContainerStatus, "component">>): void {
+    this.panelContainerOverrides.set(component, { ...this.panelContainerOverrides.get(component), ...partial });
+  }
+
+  /** Sets the log lines one panel container returns. */
+  public setPanelContainerLogs(component: PanelContainer, lines: ServiceLogLine[]): void {
+    this.panelContainerLogs.set(component, lines);
   }
 
   public async runSiteJob(req: SiteJobRequest): Promise<SiteJobResult> {
@@ -285,11 +411,84 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     await this.onJob?.(req);
     const idx = this.failingJobs.findIndex((f) => f.kind === req.kind);
     const failure = idx >= 0 ? this.failingJobs.splice(idx, 1)[0] : undefined;
+    const run = failure ?? { exitCode: 0, outputTail: "", ...this.simulateWordpressJob(req) };
+    const exitCode = run.exitCode;
+    if (exitCode === 0) {
+      if (req.kind === "db.provision") {
+        this.databases.provision(req.siteId);
+      } else if (req.kind === "db.drop") {
+        this.databases.drop(req.siteId);
+      }
+    }
+    const result = run.stdout === undefined ? undefined : parseWordpressJobResult(req.kind, run.stdout);
     return {
       jobId: req.jobId,
-      exitCode: failure?.exitCode ?? 0,
-      outputTail: failure?.outputTail ?? "",
+      exitCode,
+      outputTail: run.outputTail,
+      ...(result !== undefined ? { result } : {}),
     };
+  }
+
+  /** The effect and stdout of inspect, update and reset on the site's stored state, and the import load's answer. */
+  private simulateWordpressJob(req: SiteJobRequest): { exitCode?: number; stdout?: string } {
+    if (req.kind === "db.import-load") return { stdout: `${JSON.stringify(SIMULATED_IMPORT_LOAD_RESULT)}\n` };
+    if (req.kind !== "wordpress.inspect" && req.kind !== "wordpress.update" && req.kind !== "wordpress.reset-password") {
+      return {};
+    }
+    let site = this.wordpressSites.get(req.siteId);
+    if (site === undefined) {
+      site = structuredClone(SIMULATED_WORDPRESS_STATE);
+      this.wordpressSites.set(req.siteId, site);
+    }
+    const line = (v: unknown) => `${JSON.stringify(v)}\n`;
+    if (req.kind === "wordpress.reset-password") {
+      return { exitCode: site.administrators.some((a) => String(a.id) === req.params.userId) ? 0 : 40 };
+    }
+    if (req.kind === "wordpress.inspect") {
+      if (this.wordpressOnline) return { stdout: line(site) };
+      const unknown = <T>(i: T) => ({ ...i, updateVersion: null });
+      return {
+        stdout: line({ ...site, coreUpdate: null, updatesKnown: false, plugins: site.plugins.map(unknown), themes: site.themes.map(unknown) }),
+      };
+    }
+    if (!this.wordpressOnline) return { exitCode: 30 };
+    const target = req.params.target ?? "";
+    const items: WordpressUpdateResult["items"] = [];
+    if ((target === "core" || target === "all") && site.coreUpdate !== null) {
+      items.push({ type: "core", name: "wordpress", oldVersion: site.coreVersion, newVersion: site.coreUpdate, status: "updated" });
+      site.coreVersion = site.coreUpdate;
+      site.coreUpdate = null;
+    }
+    for (const [type, list] of [["plugin", site.plugins], ["theme", site.themes]] as const) {
+      if (target.startsWith(`${type}:`) && !list.some((i) => `${type}:${i.name}` === target)) return { exitCode: 31 };
+      for (const item of list) {
+        if ((target === "all" || target === `${type}:${item.name}`) && item.updateVersion !== null) {
+          items.push({ type, name: item.name, oldVersion: item.version, newVersion: item.updateVersion, status: "updated" });
+          item.version = item.updateVersion;
+          item.updateVersion = null;
+        }
+      }
+    }
+    return { stdout: line({ items }) };
+  }
+
+  public async siteFiles<R extends SiteFilesRequest>(req: R): Promise<SiteFilesResult<R["op"]>> {
+    this.assertEngineAvailable();
+    return this.files.handle(req);
+  }
+
+  public async siteDatabases<R extends SiteDatabasesRequest>(
+    req: R,
+  ): Promise<SiteDatabasesResult<R["op"]>> {
+    this.assertEngineAvailable();
+    return this.databases.handle(req);
+  }
+
+  public async backups<R extends BackupsIpcRequest>(
+    req: R,
+  ): Promise<BackupsResultByAction[R["action"]]> {
+    this.assertEngineAvailable();
+    return this.backupState.handle(req);
   }
 
   public async purgeSite(siteId: string): Promise<void> {
@@ -300,6 +499,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
         await this.deleteService(serviceId);
       }
     }
+    for (const serviceId of this.siteServices.get(siteId) ?? []) {
+      this.files.drop(serviceId);
+    }
+    this.siteServices.delete(siteId);
   }
 
   public async applySiteRoutes(req: SiteRoutesRequest): Promise<void> {
@@ -384,6 +587,110 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   ): Promise<readonly ServiceLogLine[]> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     return (this.serviceLogs.get(serviceInstanceId) ?? []).slice(-Math.max(1, tail));
+  }
+
+  public async getPanelContainers(): Promise<readonly PanelContainerStatus[]> {
+    this.assertEngineAvailable();
+    return PANEL_CONTAINERS.map((component) => this.panelContainerStatus(component));
+  }
+
+  public async getPanelContainerLogs(req: {
+    readonly component: PanelContainer;
+    readonly tail: number;
+  }): Promise<readonly ServiceLogLine[]> {
+    this.assertEngineAvailable();
+    if (this.panelContainerStatus(req.component).state === "missing") {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    const lines = (this.panelContainerLogs.get(req.component) ?? []).slice(-Math.max(1, req.tail));
+    return req.component === "phpmyadmin" ? lines.map((line) => ({ ...line, text: maskPhpMyAdminQuery(line.text) })) : lines;
+  }
+
+  /** Restarts an existing panel container: a new start time and a restart count of 0. */
+  public async restartPanelContainer(req: { readonly component: PanelContainer }): Promise<{ readonly startedAt: string | null }> {
+    this.assertEngineAvailable();
+    if (this.panelContainerStatus(req.component).state === "missing") {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    const startedAt = new Date().toISOString();
+    this.setPanelContainer(req.component, { state: "running", startedAt, restartCount: 0 });
+    return { startedAt };
+  }
+
+  /** Moves an existing pinned panel container to its pin; answers as the real one. */
+  public async applyPanelContainerPin(component: PinnedPanelContainer): Promise<PanelContainerStatus> {
+    this.assertEngineAvailable();
+    if (!(PINNED_PANEL_CONTAINERS as readonly string[]).includes(component)) {
+      throw new ExecutorCodedError("Invalid panel apply request", "VALIDATION_ERROR");
+    }
+    if (this.panelContainerStatus(component).state === "missing") {
+      throw new ExecutorCodedError("Panel container not found", "NOT_FOUND");
+    }
+    this.setPanelContainer(component, { imageCurrent: true });
+    return this.panelContainerStatus(component);
+  }
+
+  /** A fake shell in a running container of that site. */
+  public async openTerminal(req: TerminalOpenRequest): Promise<TerminalOpenResult> {
+    this.assertEngineAvailable();
+    const type = this.resolveSiteType(req.siteType ?? LEGACY_SITE_TYPE);
+    return this.terminals.open(req, async (sink) => {
+      const container = this.containersByServiceId.get(req.serviceInstanceId);
+      if (!container?.running || this.expectedByServiceId.get(req.serviceInstanceId)?.siteId !== req.siteId) {
+        throw new ExecutorCodedError("Site container not found", "NOT_FOUND");
+      }
+      this.terminalSinks.set(req.sessionId, sink);
+      // The sink holds the session's output: let go of it however the session ends.
+      const forget = () => this.terminalSinks.delete(req.sessionId);
+      const shell = startSimulatedShell({ data: sink.data, exit: (reason) => { forget(); sink.exit(reason); } }, type);
+      return { shell: { write: (bytes) => shell.write(bytes), kill: () => { forget(); return shell.kill(); } }, containerName: container.name.slice(1) };
+    });
+  }
+
+  public async writeTerminal(req: { readonly sessionId: string; readonly input: string }): Promise<void> {
+    this.assertEngineAvailable();
+    this.terminals.write(req);
+  }
+
+  public async readTerminal(req: { readonly sessionId: string; readonly cursor: number }): Promise<TerminalReadResult> {
+    this.assertEngineAvailable();
+    return this.terminals.read(req);
+  }
+
+  public async closeTerminal(req: { readonly sessionId: string }): Promise<TerminalEnded> {
+    this.assertEngineAvailable();
+    return this.terminals.close(req);
+  }
+
+  public async listTerminals(): Promise<readonly TerminalSessionRecord[]> {
+    this.assertEngineAvailable();
+    return this.terminals.list();
+  }
+
+  /** Test hook: output from the shell of that session, as if it printed it. */
+  public emitTerminalOutput(sessionId: string, text: string): void {
+    this.terminalSinks.get(sessionId)?.data(Buffer.from(text, "utf8"));
+  }
+
+  /** Test hook: forgets every session, as an executor restart does. */
+  public forgetTerminalSessions(): void {
+    this.terminals.forgetAll();
+  }
+
+  private panelContainerStatus(component: PanelContainer): PanelContainerStatus {
+    const on = (expected: boolean) => ({ state: expected ? "running" : "missing", expected }) as const;
+    const base =
+      component === "ingress_proxy"
+        ? { state: "running", expected: this.panel !== null } as const
+        : component === "shared_database"
+          ? on(true)
+          : component === "phpmyadmin"
+            ? on(false)
+            : component === "sftp"
+              ? on(this.sftpUsers.length > 0)
+              : on(this.mailRelay !== null);
+    const status = { component, ...base, startedAt: null, restartCount: 0, imageCurrent: true, ...this.panelContainerOverrides.get(component) };
+    return status.state === "missing" ? { ...status, imageCurrent: null } : status;
   }
 
   public async deployService(rawSpec: ApprovedServiceSpec): Promise<DockerExecutionResult> {
@@ -472,6 +779,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       networks,
     };
 
+    this.terminals.endService(spec.serviceInstanceId, "container_gone");
     this.containersByServiceId.set(spec.serviceInstanceId, simulated);
     this.expectedByServiceId.set(spec.serviceInstanceId, {
       serviceInstanceId: spec.serviceInstanceId,
@@ -483,6 +791,18 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       revisionNumber: spec.revisionNumber ?? 1,
       expectedEnv: createPayload.Env,
     });
+    let svcs = this.siteServices.get(spec.siteId);
+    if (!svcs) {
+      svcs = new Set();
+      this.siteServices.set(spec.siteId, svcs);
+    }
+    svcs.add(spec.serviceInstanceId);
+    const filesType = SITE_TYPE_KEYS.map((k) => this.resolveSiteType(k)).find((t) =>
+      spec.volumeMounts?.some((m) => m.volumeSuffix === t.def.files.volumeSuffix),
+    );
+    if (filesType) {
+      this.files.create(spec.serviceInstanceId, filesType);
+    }
 
     const hosts: readonly SiteHostRoute[] =
       spec.hostRoutes ?? (spec.domains ?? []).map(plainHostRoute);
@@ -537,6 +857,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     container.running = true;
     container.status = "running";
     container.dead = false;
+    this.terminals.endService(serviceInstanceId, "container_gone");
 
     return {
       operationId: `sim_op_${randomUUID()}`,
@@ -558,6 +879,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
     container.running = false;
     container.status = "exited";
+    this.terminals.endService(serviceInstanceId, "container_gone");
     await this.cleanupSecrets(serviceInstanceId);
 
     return {
@@ -579,6 +901,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
     this.containersByServiceId.delete(serviceInstanceId);
     this.expectedByServiceId.delete(serviceInstanceId);
+    this.terminals.endService(serviceInstanceId, "container_gone");
     await this.cleanupSecrets(serviceInstanceId);
 
     const remaining = this.removeVirtualRoute(serviceInstanceId);

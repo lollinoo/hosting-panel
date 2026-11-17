@@ -4,6 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import {
+  RESTIC_IMAGE,
   generateEd25519IpcKeyPair,
   signIpcRequest,
   type IpcSigningKey,
@@ -17,6 +18,11 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type DockerContainerInspectPayload,
+  BACKUPS_TEST_TIMEOUT_MS,
+  BackupRunner,
+  BACKUPS_TIMEOUT_MS,
+  DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_WORK_DIR,
   buildHardenedContainerCreatePayload,
   detectOutOfBandContainerModification,
   siteMailBinds,
@@ -27,15 +33,22 @@ import {
   InMemoryDockerSimulatorAdapter,
   MANAGED_DOCKER_LABELS,
   SignedDockerExecutorIpcClient,
+  SimulatedBackups,
   bootstrapDockerExecutorDaemon,
   parsePanelIngressConfigFromEnv,
   buildIngressProxyContainerPayload,
   buildPanelDynamicYaml,
   buildTraefikStaticYaml,
+  readRestoreNote,
   validateCertifiedCapabilities,
   type PanelIngressConfig,
 } from "../src/index.js";
-import { startMockDockerDaemon } from "./mock-docker-daemon.js";
+import { writeRestoreNote } from "../src/restore-jobs.js";
+import {
+  REMOVAL_IN_PROGRESS_POLL_MS,
+  REMOVAL_IN_PROGRESS_WAIT_MS,
+} from "../src/docker-engine-adapter.js";
+import { type MockDockerDaemon, startMockDockerDaemon } from "./mock-docker-daemon.js";
 
 const HMAC_SECRET = "0123456789abcdef0123456789abcdef-phase2-ipc-key";
 const HMAC_SIGNING_KEY: IpcSigningKey = {
@@ -777,6 +790,10 @@ describe("panel ingress", () => {
     expect(disabled).not.toContain("certificatesResolvers");
 
     expect(buildTraefikStaticYaml({ ...panel, acmeStaging: true })).toContain("acme-staging-v02");
+    // The proxy sits on every site's edge network: its API and dashboard stay off.
+    for (const yaml of [withEmail, noEmail, disabled]) {
+      expect(yaml).toContain("api:\n  dashboard: false\n  insecure: false\n");
+    }
   });
 
   it("panel route matches hostname and server IP", () => {
@@ -1210,6 +1227,192 @@ describe("purge site", () => {
     await adapter.purgeSite("A");
     expect(mockDaemon.containers.size).toBe(0);
     expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+  });
+
+  it("stopAndRemoveContainer treats HTTP 409 followed by 404 inspect as already removed", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("f1", {
+      id: "f1",
+      name: "hp_files_svc_a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_files" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    mockDaemon.deleteConflicts.remaining = 1;
+    mockDaemon.deleteConflicts.removeFromMap = true;
+
+    await expect(adapter.purgeSite("A")).resolves.toBeUndefined();
+    expect(mockDaemon.containers.size).toBe(0);
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+    expect(mockDaemon.requestedPaths).toContain("/v1.45/containers/f1/json");
+  });
+
+  // Skips the poll pause; the container leaves the mock after `goneAfter` looks (never when null).
+  function removalInProgress(mockDaemon: MockDockerDaemon, id: string, goneAfter: number | null) {
+    const realSetTimeout = globalThis.setTimeout;
+    const pauses: number[] = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      if (ms === REMOVAL_IN_PROGRESS_POLL_MS) {
+        pauses.push(ms);
+        return realSetTimeout(fn, 0);
+      }
+      return realSetTimeout(fn, ms);
+    }) as typeof setTimeout);
+    cleanupTasks.push(async () => {
+      vi.restoreAllMocks();
+    });
+    let looks = 0;
+    const push = mockDaemon.requestedPaths.push.bind(mockDaemon.requestedPaths);
+    mockDaemon.requestedPaths.push = (...paths: string[]) => {
+      for (const p of paths) {
+        if (p === `/v1.45/containers/${id}/json` && ++looks > (goneAfter ?? Infinity)) {
+          mockDaemon.containers.delete(id);
+        }
+      }
+      return push(...paths);
+    };
+    return { pauses, looks: () => looks };
+  }
+
+  it("stopAndRemoveContainer waits after HTTP 409 until the concurrent removal is done", async () => {
+    const { adapter, mockDaemon } = await setup();
+    mockDaemon.containers.set("f3", {
+      id: "f3",
+      name: "hp_files_svc_a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_files" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    mockDaemon.deleteConflicts.remaining = 1;
+    mockDaemon.deleteConflicts.removeFromMap = false;
+    const probe = removalInProgress(mockDaemon, "f3", 2);
+
+    await expect(adapter.purgeSite("A")).resolves.toBeUndefined();
+    expect(probe.looks()).toBe(3);
+    expect(probe.pauses).toHaveLength(2);
+    expect(mockDaemon.containers.size).toBe(0);
+    expect(mockDaemon.deletedVolumes).toEqual(["hp_vol_A"]);
+  });
+
+  it("stopAndRemoveContainer still fails when HTTP 409 is followed by 200 inspect", async () => {
+    const { adapter, mockDaemon } = await setup();
+    const probe = removalInProgress(mockDaemon, "f2", null);
+    mockDaemon.containers.set("f2", {
+      id: "f2",
+      name: "hp_files_svc_a",
+      image: "x",
+      env: [],
+      labels: { "io.hostingpanel.site_id": "A", "io.hostingpanel.role": "site_files" },
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: {},
+      networks: {},
+    });
+    mockDaemon.deleteConflicts.remaining = 1;
+    mockDaemon.deleteConflicts.removeFromMap = false;
+
+    await expect(adapter.purgeSite("A")).rejects.toMatchObject({
+      code: "DOCKER_ENGINE_UNAVAILABLE",
+    });
+    expect(probe.pauses).toHaveLength(REMOVAL_IN_PROGRESS_WAIT_MS / REMOVAL_IN_PROGRESS_POLL_MS);
+    expect(probe.looks()).toBe(REMOVAL_IN_PROGRESS_WAIT_MS / REMOVAL_IN_PROGRESS_POLL_MS + 1);
+    expect(mockDaemon.deletedVolumes).toEqual([]);
+  });
+
+  it("purgeSite blocks on unsettled restore notes before touching site resources and clears ended notes and staging volumes once settled", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-purge-restore-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const mockDaemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => mockDaemon.close());
+    const ingressRootDir = path.join(tmp, "ingress");
+    const backupWorkDir = path.join(tmp, "backups");
+    const restoresDir = path.join(backupWorkDir, "restores");
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: mockDaemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir,
+      backupWorkDir,
+    });
+    const dynamic = path.join(ingressRootDir, "dynamic");
+    await mkdir(dynamic, { recursive: true });
+    for (const id of ["A", "B"]) {
+      await writeFile(path.join(dynamic, `site_${id}.yml`), "x");
+      mockDaemon.volumeLabels.set(`hp_vol_${id}`, { "io.hostingpanel.site_id": id });
+      for (const net of [`hp_site_${id}_net`, `hp_edge_${id}_net`]) {
+        await fetchNetwork(mockDaemon.socketPath, net);
+      }
+    }
+
+    const jobAPending = `op_${"1".repeat(32)}`;
+    const jobAUndo = `op_${"2".repeat(32)}`;
+    const jobBUndo = `op_${"3".repeat(32)}`;
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobAPending,
+      siteId: "A",
+      serviceInstanceId: "svc_A",
+      stage: "switched",
+    });
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobAUndo,
+      siteId: "A",
+      serviceInstanceId: "svc_A",
+      stage: "ended",
+      state: "failed",
+      failure: "undo_incomplete",
+      endedAt: "2026-11-15T01:00:00.000Z",
+    });
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobBUndo,
+      siteId: "B",
+      serviceInstanceId: "svc_B",
+      stage: "ended",
+      state: "failed",
+      failure: "undo_incomplete",
+      endedAt: "2026-11-15T01:00:00.000Z",
+    });
+    mockDaemon.volumeLabels.set(`hp_bk_${jobAUndo}`, { "io.hostingpanel.role": "backup_staging" });
+    mockDaemon.volumeLabels.set(`hp_bk_${jobBUndo}`, { "io.hostingpanel.role": "backup_staging" });
+
+    await expect(adapter.purgeSite("A")).rejects.toMatchObject({
+      code: "RESOURCE_LOCKED",
+    });
+    expect(mockDaemon.deletedVolumes).toEqual([]);
+    expect(await readdir(dynamic)).toContain("site_A.yml");
+
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobAPending,
+      siteId: "A",
+      serviceInstanceId: "svc_A",
+      stage: "ended",
+      state: "succeeded",
+      failure: null,
+      endedAt: "2026-11-15T02:00:00.000Z",
+    });
+
+    await expect(adapter.purgeSite("A")).resolves.toBeUndefined();
+    expect(mockDaemon.deletedVolumes).toContain(`hp_bk_${jobAUndo}`);
+    expect(mockDaemon.deletedVolumes).toContain("hp_vol_A");
+    expect(mockDaemon.deletedVolumes).not.toContain(`hp_bk_${jobBUndo}`);
+    expect(mockDaemon.deletedVolumes).not.toContain("hp_vol_B");
+    expect(await readRestoreNote(restoresDir, jobAPending)).toBeNull();
+    expect(await readRestoreNote(restoresDir, jobAUndo)).toBeNull();
+    expect(await readRestoreNote(restoresDir, jobBUndo)).not.toBeNull();
+    expect(await readdir(dynamic)).toEqual(["site_B.yml"]);
   });
 });
 
@@ -1877,6 +2080,25 @@ describe("mail relay IPC", () => {
     });
   });
 
+  it("panel mail round-trips unchanged into the simulator and the server refuses an http link", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client, raw } = await serve(simulator);
+    const req = {
+      kind: "password_reset" as const,
+      to: "customer@example.test",
+      from: "noreply@mail.example.test",
+      locale: "it" as const,
+      link: "https://panel.example.test/reset-password#sentinel-token",
+    };
+    expect(await client.sendPanelMail(req)).toEqual({ outcome: "failed" });
+    await client.applyMailRelay(config);
+    expect(await client.sendPanelMail(req)).toEqual({ outcome: "queued" });
+    expect(simulator.panelMails).toEqual([req, req]);
+    const res = await raw("/v1/mail-relay/panel", { ...req, link: "http://panel.example.test/reset-password#x" });
+    expect(res.status).toBe(400);
+    expect(simulator.panelMails).toHaveLength(2);
+  });
+
   it("client uses 300 s for mail apply and 35 s for status and test", async () => {
     const { client } = await serve(new InMemoryDockerSimulatorAdapter());
     const timeouts: Array<number | undefined> = [];
@@ -1903,5 +2125,444 @@ describe("mail relay IPC", () => {
       }),
     );
     expect(simulator.deployedSpecs[0]?.siteMail).toBe(true);
+  });
+});
+
+describe("backups shared base and IPC", () => {
+  const cleanupTasks: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    while (cleanupTasks.length > 0) {
+      await cleanupTasks.pop()?.();
+    }
+  });
+
+  const validJobId = `op_${"a".repeat(32)}`;
+  const validForgetJobId = `${validJobId}-forget`;
+  const validSnapshotId = "b".repeat(64);
+  const validTarget = {
+    endpoint: "https://s3.example.com:9000",
+    region: "us-east-1",
+    bucket: "panel-backups",
+    prefix: "prod",
+    accessKeyId: "AKIAEXAMPLE123",
+    secretAccessKey: "sentinel-s3-secret-value-999",
+  };
+
+  async function serve(executor: ConstructorParameters<typeof DockerExecutorIpcServer>[0]["executor"]) {
+    const server = new DockerExecutorIpcServer({
+      executor,
+      keyring: { "hmac-v1": HMAC_VERIFICATION_KEY },
+      transport: "loopback-test",
+    });
+    cleanupTasks.push(() => server.stop());
+    const bound = await server.start();
+    const client = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: bound.port,
+    });
+    const raw = async (pathname: string, body: unknown) => {
+      const text = JSON.stringify(body);
+      const headers = signIpcRequest({
+        method: "POST",
+        pathWithQuery: pathname,
+        body: text,
+        key: HMAC_SIGNING_KEY,
+        nonce: randomBytes(8).toString("hex"),
+      });
+      const res = await fetch(`http://127.0.0.1:${String(bound.port)}${pathname}`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: text,
+      });
+      return { status: res.status, text: await res.text() };
+    };
+    return { client, raw, port: bound.port };
+  }
+
+  it("POST /v1/backups never logs or echoes sentinel secrets when validation fails", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { raw } = await serve(simulator);
+    const sentinel = "sentinel-s3-secret-do-not-leak";
+
+    const captured: string[] = [];
+    const grab = (...args: unknown[]): boolean => {
+      captured.push(args.map(String).join(" "));
+      return true;
+    };
+    vi.spyOn(console, "log").mockImplementation(grab);
+    vi.spyOn(console, "error").mockImplementation(grab);
+    vi.spyOn(console, "warn").mockImplementation(grab);
+    vi.spyOn(process.stdout, "write").mockImplementation(grab);
+    vi.spyOn(process.stderr, "write").mockImplementation(grab);
+
+    const invalidCases = [
+      {
+        action: "test",
+        target: { ...validTarget, endpoint: "http://127.0.0.1:9000", secretAccessKey: sentinel },
+      },
+      {
+        action: "test",
+        target: { ...validTarget, region: "US-EAST-1", secretAccessKey: sentinel },
+      },
+      {
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: "bad job",
+        target: { ...validTarget, secretAccessKey: sentinel },
+        extraUnknownField: sentinel,
+      },
+    ];
+
+    for (const body of invalidCases) {
+      const res = await raw("/v1/backups", body);
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.text).error.code).toBe("VALIDATION_ERROR");
+      expect(res.text).not.toContain(sentinel);
+    }
+    expect(captured.join("\n")).not.toContain(sentinel);
+  });
+
+  it("SignedDockerExecutorIpcClient uses 40s for test, 30s for other actions, parses results, and never replays dropped POST", async () => {
+    expect(BACKUPS_TEST_TIMEOUT_MS).toBe(40_000);
+    expect(BACKUPS_TIMEOUT_MS).toBe(30_000);
+
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    vi.spyOn(simulator, "backups").mockImplementation(async (req) => {
+      if (req.action === "test") {
+        return { outcome: "ok", problem: null } as never;
+      }
+      if (req.action === "start") {
+        return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
+      }
+      if (req.action === "status") {
+        return { jobId: req.jobId, state: "succeeded", failure: null, snapshot: null } as never;
+      }
+      if (req.action === "siteState") {
+        return { filesVolume: false, container: false } as never;
+      }
+      return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
+    });
+
+    const { client } = await serve(simulator);
+    await expect(client.backups({ action: "test", target: validTarget })).resolves.toEqual({
+      outcome: "ok",
+      problem: null,
+    });
+    await expect(
+      client.backups({
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: validJobId,
+        target: validTarget,
+      }),
+    ).resolves.toEqual({ jobId: validJobId, state: "running", failure: null, snapshot: null });
+    await expect(client.backups({ action: "status", jobId: validJobId })).resolves.toEqual({
+      jobId: validJobId,
+      state: "succeeded",
+      failure: null,
+      snapshot: null,
+    });
+    await expect(
+      client.backups({
+        action: "forget",
+        siteId: "site_1",
+        jobId: validForgetJobId,
+        snapshotIds: [validSnapshotId],
+        target: validTarget,
+      }),
+    ).resolves.toEqual({ jobId: validForgetJobId, state: "running", failure: null, snapshot: null });
+
+    // Verify per-action socket timeouts.
+    const timeouts: Array<number | undefined> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      timeouts.push(opts.timeout);
+      throw new Error("stop");
+    }) as never);
+    await client.backups({ action: "test", target: validTarget }).catch(() => undefined);
+    await client
+      .backups({
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: validJobId,
+        target: validTarget,
+      })
+      .catch(() => undefined);
+    await client.backups({ action: "status", jobId: validJobId }).catch(() => undefined);
+    await client
+      .backups({
+        action: "forget",
+        siteId: "site_1",
+        jobId: validForgetJobId,
+        snapshotIds: [validSnapshotId],
+        target: validTarget,
+      })
+      .catch(() => undefined);
+    expect(timeouts).toEqual([40_000, 30_000, 30_000, 30_000]);
+
+    vi.restoreAllMocks();
+
+    // Verify POST /v1/backups is never replayed when the server drops the connection mid-flight.
+    let hits = 0;
+    const dropServer = http.createServer((_req, res) => {
+      hits += 1;
+      res.socket?.destroy();
+    });
+    await new Promise<void>((resolve) => dropServer.listen(0, "127.0.0.1", () => resolve()));
+    cleanupTasks.push(() => new Promise<void>((resolve) => dropServer.close(() => resolve())));
+    const addr = dropServer.address();
+    if (!addr || typeof addr === "string") {
+      throw new Error("Expected TCP address");
+    }
+    const dropClient = new SignedDockerExecutorIpcClient({
+      signingKey: HMAC_SIGNING_KEY,
+      transport: "loopback-test",
+      port: addr.port,
+    });
+    const dropErr = await dropClient
+      .backups({
+        action: "start",
+        siteId: "site_1",
+        serviceInstanceId: "svc_1",
+        jobId: validJobId,
+        target: validTarget,
+      })
+      .catch((e: unknown) => e);
+    expect(dropErr).toBeInstanceOf(ExecutorIpcClientError);
+    expect((dropErr as ExecutorIpcClientError).code).toBe("OPERATION_AMBIGUOUS");
+    expect(hits).toBe(1);
+  });
+
+  it("wires default backup key file, simulator adapter state, unknown status, and RESTIC_IMAGE prewarm", async () => {
+    expect(DEFAULT_BACKUP_KEY_FILE).toBe("/etc/hosting-panel/backup.key");
+
+    const simAdapter = new InMemoryDockerSimulatorAdapter();
+    expect(simAdapter.backupState).toBeInstanceOf(SimulatedBackups);
+    await expect(
+      simAdapter.backups({ action: "status", jobId: validJobId }),
+    ).resolves.toEqual({
+      jobId: validJobId,
+      state: "unknown",
+      failure: null,
+      snapshot: null,
+    });
+    simAdapter.setEngineReachable(false);
+    await expect(
+      simAdapter.backups({ action: "status", jobId: validJobId }),
+    ).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-backup-adapter-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon({ pullBody: '{"status":"Pulling"}\n' });
+    cleanupTasks.push(() => daemon.close());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    await expect(
+      adapter.backups({ action: "status", jobId: validJobId }),
+    ).resolves.toEqual({
+      jobId: validJobId,
+      state: "unknown",
+      failure: null,
+      snapshot: null,
+    });
+    await adapter.cleanupOrphanJobs();
+    await adapter.prewarmSiteImages();
+    expect(
+      daemon.requestedPaths.some(
+        (p) => p.includes("/images/create") && p.includes(encodeURIComponent(RESTIC_IMAGE)),
+      ),
+    ).toBe(true);
+  });
+
+  it("wires backupWorkDir, settleRestores, and emptyArchives through DockerEngineSocketAdapter", async () => {
+    expect(DEFAULT_BACKUP_WORK_DIR).toBe("/var/lib/hosting-panel/backups");
+
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-adapter-m3b-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => daemon.close());
+    const backupWorkDir = path.join(tmp, "custom-backups");
+    const restoresDir = path.join(backupWorkDir, "restores");
+    const archivesDir = path.join(backupWorkDir, "archives");
+    const jobPrepare = `op_${"4".repeat(32)}`;
+
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: jobPrepare,
+      siteId: "site_a",
+      serviceInstanceId: "svc_a",
+      stage: "prepare",
+    });
+    daemon.volumeLabels.set(`hp_bk_${jobPrepare}`, { "io.hostingpanel.role": "backup_staging" });
+    await mkdir(archivesDir, { recursive: true });
+    await writeFile(path.join(archivesDir, `op_${"5".repeat(32)}.zip`), "PK");
+
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      backupWorkDir,
+      sharedDbDataDir: path.join(tmp, "mariadb"),
+    });
+
+    await adapter.settleRestores();
+    expect(daemon.deletedVolumes).toContain(`hp_bk_${jobPrepare}`);
+    expect(await readRestoreNote(restoresDir, jobPrepare)).toMatchObject({
+      stage: "ended",
+      state: "failed",
+      failure: "interrupted",
+    });
+    await expect(adapter.backups({ action: "status", jobId: jobPrepare })).resolves.toEqual({
+      jobId: jobPrepare,
+      state: "failed",
+      failure: "interrupted",
+      snapshot: null,
+    });
+
+    await adapter.emptyArchives();
+    expect(await readdir(archivesDir)).toEqual([]);
+    await expect(
+      adapter.backups({ action: "readArchive", jobId: jobPrepare, offset: 0, length: 16 }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", message: "archive_gone" });
+  });
+
+  it("hands the panel-fetch stop signal on to the runner", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-adapter-fetch-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const spy = vi
+      .spyOn(BackupRunner.prototype, "fetchPanelCopy")
+      .mockResolvedValue({ ok: false, problem: "other" });
+    cleanupTasks.push(async () => spy.mockRestore());
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: path.join(tmp, "docker.sock"),
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+    });
+    const target = { endpoint: "https://s3.example.test" } as unknown as Parameters<typeof adapter.fetchPanelCopy>[0];
+    const signal = new AbortController().signal;
+    await adapter.fetchPanelCopy(target, path.join(tmp, "dump"), signal);
+    expect(spy).toHaveBeenCalledWith(target, path.join(tmp, "dump"), signal);
+  });
+
+  it("bootstrapDockerExecutorDaemon reads HP_BACKUP_WORK_DIR and runs cleanupOrphanJobs -> settleRestores -> emptyArchives before listening, surviving settle failures", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-boot-r82-"));
+    cleanupTasks.push(() => rm(tmp, { recursive: true, force: true }));
+    const daemon = await startMockDockerDaemon();
+    cleanupTasks.push(() => daemon.close());
+
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "ensureSharedDatabase").mockResolvedValue({
+      component: "shared_database",
+      status: "running",
+    });
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "ensureSftpFromState").mockResolvedValue(null);
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "ensurePhpMyAdmin").mockResolvedValue(undefined);
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "prewarmSiteImages").mockResolvedValue();
+
+    const backupWorkDir = path.join(tmp, "backups");
+    const restoresDir = path.join(backupWorkDir, "restores");
+    const archivesDir = path.join(backupWorkDir, "archives");
+    const orphanJob = `op_${"6".repeat(32)}`;
+    const prepareJob = `op_${"7".repeat(32)}`;
+
+    await writeRestoreNote(restoresDir, {
+      v: 1,
+      jobId: prepareJob,
+      siteId: "site_r82",
+      serviceInstanceId: "svc_r82",
+      stage: "prepare",
+    });
+    daemon.volumeLabels.set(`hp_bk_${orphanJob}`, { "io.hostingpanel.role": "backup_staging" });
+    daemon.volumeLabels.set(`hp_bk_${prepareJob}`, { "io.hostingpanel.role": "backup_staging" });
+    await mkdir(archivesDir, { recursive: true });
+    await writeFile(path.join(archivesDir, `op_${"8".repeat(32)}.zip`), "PK");
+
+    const order: string[] = [];
+    let orphanExistsAtStart = true;
+    let prepareVolExistsAtStart = true;
+    let prepareNoteAtStart: unknown = null;
+    let archivesAtStart: string[] = ["not-checked"];
+
+    const origCleanup = DockerEngineSocketAdapter.prototype.cleanupOrphanJobs;
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "cleanupOrphanJobs").mockImplementation(
+      async function (this: DockerEngineSocketAdapter) {
+        order.push("cleanupOrphanJobs");
+        return origCleanup.call(this);
+      },
+    );
+    const origSettle = DockerEngineSocketAdapter.prototype.settleRestores;
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "settleRestores").mockImplementation(
+      async function (this: DockerEngineSocketAdapter) {
+        order.push("settleRestores");
+        return origSettle.call(this);
+      },
+    );
+    const origEmptyArchives = DockerEngineSocketAdapter.prototype.emptyArchives;
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "emptyArchives").mockImplementation(
+      async function (this: DockerEngineSocketAdapter) {
+        order.push("emptyArchives");
+        return origEmptyArchives.call(this);
+      },
+    );
+    const origStart = DockerExecutorIpcServer.prototype.start;
+    vi.spyOn(DockerExecutorIpcServer.prototype, "start").mockImplementation(
+      async function (this: DockerExecutorIpcServer) {
+        order.push("server.start");
+        orphanExistsAtStart = daemon.volumeLabels.has(`hp_bk_${orphanJob}`);
+        prepareVolExistsAtStart = daemon.volumeLabels.has(`hp_bk_${prepareJob}`);
+        prepareNoteAtStart = await readRestoreNote(restoresDir, prepareJob);
+        archivesAtStart = await readdir(archivesDir);
+        return origStart.call(this);
+      },
+    );
+
+    const baseEnv = {
+      HP_IPC_KEY: HMAC_SECRET,
+      HP_IPC_KEY_ID: "hmac-v1",
+      HP_IPC_TRANSPORT: "loopback-test",
+      HP_EXECUTOR_BACKEND: "linux-systemd",
+      HP_DOCKER_SOCKET_PATH: daemon.socketPath,
+      HP_SECRETS_ROOT_DIR: path.join(tmp, "secrets"),
+      HP_INGRESS_ROOT_DIR: path.join(tmp, "ingress"),
+      HP_SITE_MAIL_DIR: path.join(tmp, "mail"),
+      HP_SITE_FILES_DIR: path.join(tmp, "site-files"),
+      HP_SFTP_STATE_DIR: path.join(tmp, "sftp"),
+      HP_PHPMYADMIN_CONFIG_DIR: path.join(tmp, "pma"),
+      HP_BACKUP_KEY_FILE: path.join(tmp, "backup.key"),
+      HP_BACKUP_WORK_DIR: backupWorkDir,
+    };
+
+    const booted = await bootstrapDockerExecutorDaemon(baseEnv);
+    cleanupTasks.push(() => booted.stop());
+
+    expect(order).toEqual(["cleanupOrphanJobs", "settleRestores", "emptyArchives", "server.start"]);
+    expect(orphanExistsAtStart).toBe(false);
+    expect(prepareVolExistsAtStart).toBe(false);
+    expect(prepareNoteAtStart).toMatchObject({
+      stage: "ended",
+      state: "failed",
+      failure: "interrupted",
+    });
+    expect(archivesAtStart).toEqual([]);
+
+    // Startup still succeeds if settleRestores throws: logs event and still empties archives.
+    await writeFile(path.join(archivesDir, `op_${"9".repeat(32)}.zip`), "PK");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(DockerEngineSocketAdapter.prototype, "settleRestores").mockRejectedValueOnce(
+      new Error("boom"),
+    );
+
+    const booted2 = await bootstrapDockerExecutorDaemon(baseEnv);
+    cleanupTasks.push(() => booted2.stop());
+    expect(await readdir(archivesDir)).toEqual([]);
+    expect(
+      errSpy.mock.calls.some((call) => String(call[0]).includes('"event":"restore_settle_failed"')),
+    ).toBe(true);
   });
 });

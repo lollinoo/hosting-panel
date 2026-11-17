@@ -20,7 +20,15 @@ import { TempPasswordBody } from "./create-customer-dialog";
 
 type Pending = { user: AdminUserDto; kind: "resetPassword" | "resetTotp" | "disable" };
 
-export function UsersTable({ users, csrfToken }: { users: AdminUserDto[]; csrfToken: string }) {
+export function UsersTable({
+  users,
+  csrfToken,
+  currentUserId,
+}: {
+  users: AdminUserDto[];
+  csrfToken: string;
+  currentUserId: string;
+}) {
   const m = useMessages();
   const t = m.admin.users;
   const router = useRouter();
@@ -59,6 +67,17 @@ export function UsersTable({ users, csrfToken }: { users: AdminUserDto[]; csrfTo
     }
   }
 
+  const statusButton = (u: AdminUserDto) =>
+    u.status === "active" ? (
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => setPending({ user: u, kind: "disable" })}>
+        {t.disable}
+      </Button>
+    ) : (
+      <Button size="sm" variant="outline" disabled={busy} onClick={() => run(u, "enable")}>
+        {t.enable}
+      </Button>
+    );
+
   const confirmText = pending
     ? format(
         pending.kind === "resetPassword"
@@ -93,6 +112,7 @@ export function UsersTable({ users, csrfToken }: { users: AdminUserDto[]; csrfTo
             users.map((u) => {
               const locked = u.lockedUntil && new Date(u.lockedUntil) > new Date();
               const isCustomer = u.role === "customer";
+              const isOtherAdmin = !isCustomer && u.id !== currentUserId;
               return (
                 <TableRow key={u.id}>
                   <TableCell>
@@ -125,16 +145,16 @@ export function UsersTable({ users, csrfToken }: { users: AdminUserDto[]; csrfTo
                             {t.resetTotp}
                           </Button>
                         )}
-                        {u.status === "active" ? (
-                          <Button size="sm" variant="outline" disabled={busy} onClick={() => setPending({ user: u, kind: "disable" })}>
-                            {t.disable}
-                          </Button>
-                        ) : (
-                          <Button size="sm" variant="outline" disabled={busy} onClick={() => run(u, "enable")}>
-                            {t.enable}
-                          </Button>
-                        )}
+                        {statusButton(u)}
                       </div>
+                    )}
+                    {isOtherAdmin && (
+                      <>
+                        <div role="group" aria-label={format(t.actionsFor, { name: u.name })} className="flex justify-end">
+                          {statusButton(u)}
+                        </div>
+                        <p className="mt-2 text-right text-xs text-muted-foreground">{t.administrators.sshRepair}</p>
+                      </>
                     )}
                   </TableCell>
                 </TableRow>

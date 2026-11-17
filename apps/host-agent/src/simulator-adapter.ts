@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import {
   HostAgentHealthResponseSchema,
+  HostFirewallStateWireSchema,
+  HostJobStateWireSchema,
+  HostJournalLineWireSchema,
+  HostOsPackagesWireSchema,
+  HostServiceStateWireSchema,
   HostTelemetryWireSchema,
   redactSensitiveValue,
   type HostAgentHealthResponse,
@@ -8,20 +14,66 @@ import {
 import {
   createApprovedHostMaintenanceCommand,
   createApprovedHostSecurityCommand,
+  HOST_JOURNAL_MAX_LINES,
+  HOST_JOURNAL_UNITS,
+  hostAgentError,
   type ApprovedHostMaintenanceCommand,
   type ApprovedHostSecurityCommand,
   type HostAgentPort,
+  type HostDisk,
+  type HostFirewallBaseState,
+  type HostFirewallSets,
+  type HostFirewallState,
+  type HostJob,
+  type HostJobState,
+  type HostJournalLine,
+  type HostJournalUnit,
   type HostMaintenanceResult,
+  type HostOsPackages,
+  type HostServiceState,
   type HostSecurityResult,
   type HostTelemetry,
 } from "@hosting-panel/host-agent-contracts";
+import { validateFirewallSets } from "./firewall-sets.js";
 import { HOST_AGENT_VERSION } from "./linux-adapter.js";
 import {
   DEDICATED_NFTABLES_RULESET_SHA256,
+  HostPolicyDeniedError,
   verifyStaticNftablesRuleset,
 } from "./nftables-baseline.js";
 
+const DEFAULT_DISKS: readonly HostDisk[] = [
+  { paths: ["panel_data", "docker_data", "database_data", "root"], usedBytes: "10737418240", totalBytes: "107374182400" },
+];
+
+const EMPTY_SETS: HostFirewallSets = { openedPorts: [], blockedV4: [], blockedV6: [] };
+const SINCE = "2026-11-17T08:00:00.000Z";
+const DEFAULT_HOST_SERVICES: readonly HostServiceState[] = (["hp-api", "hp-web", "hp-docker-executor", "hp-host-agent"] as const)
+  .map((unit) => ({ unit, active: true, activeState: "active", since: SINCE, restarts: 0 }));
+const DEFAULT_JOURNAL: readonly HostJournalLine[] = [
+  { at: SINCE, message: "Started unit (simulated)." },
+  { at: "2026-11-17T08:00:01.000Z", message: "Ready (simulated)." },
+];
+const DEFAULT_OS_PACKAGES: HostOsPackages = {
+  packages: [
+    { name: "examplelib", installedVersion: "1.0-1", newVersion: "1.0-2", origin: "security" },
+    { name: "sample-tool", installedVersion: "2.1-1", newVersion: "2.2-1", origin: "distribution" },
+  ],
+  rebootRequired: false,
+  canUpgrade: true,
+  listsReadAt: SINCE,
+};
+
+interface SimulatedJob {
+  state: HostJobState;
+  exitStatus: number;
+  held: boolean;
+  due: boolean;
+}
+
 export interface InMemoryHostSimulatorOptions {
+  /** How long a requested host job runs before it ends (default 50 ms). */
+  readonly jobEndDelayMs?: number;
   readonly defaultTelemetry?: Partial<Omit<HostTelemetry, "hostId" | "collectedAt">>;
   readonly nftablesRulesetPath?: string;
   readonly expectedRulesetSha256?: string;
@@ -41,8 +93,17 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
   >();
   private readonly maintenanceHistory: HostMaintenanceResult[] = [];
   private readonly securityHistory: HostSecurityResult[] = [];
+  private readonly jobEndDelayMs: number;
+  private unavailable = false;
+  private baseRules: HostFirewallBaseState = "current";
+  private firewallSets: HostFirewallSets = EMPTY_SETS;
+  private hostServices: readonly HostServiceState[] = DEFAULT_HOST_SERVICES;
+  private readonly journals = new Map<HostJournalUnit, readonly HostJournalLine[]>();
+  private osPackages: HostOsPackages = DEFAULT_OS_PACKAGES;
+  private readonly jobs = new Map<HostJob, SimulatedJob>();
 
   public constructor(options?: InMemoryHostSimulatorOptions) {
+    this.jobEndDelayMs = options?.jobEndDelayMs ?? 50;
     this.defaultTelemetry = options?.defaultTelemetry ?? {};
     this.nftablesRulesetPath = options?.nftablesRulesetPath;
     this.expectedRulesetSha256 =
@@ -55,6 +116,49 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
     override: Partial<Omit<HostTelemetry, "hostId">> | null,
   ): void {
     this.telemetryOverrides.set(hostId, override);
+  }
+
+  /** Makes each of the seven M5d calls throw HOST_AGENT_UNAVAILABLE. */
+  public setUnavailable(unavailable: boolean): void {
+    this.unavailable = unavailable;
+  }
+
+  /** Sets the state of the base table; a table that is not current holds no sets. */
+  public setFirewallBaseRules(state: HostFirewallBaseState): void {
+    this.baseRules = state;
+    if (state !== "current") this.firewallSets = EMPTY_SETS;
+  }
+
+  /** Writes the kernel side with no check, as a change made over SSH would. */
+  public overwriteFirewallSets(sets: HostFirewallSets): void {
+    this.firewallSets = sets;
+  }
+
+  public setHostJobExitStatus(job: HostJob, exitStatus: number): void {
+    this.job(job).exitStatus = exitStatus;
+  }
+
+  /** Keeps the job running past its end until releaseHostJob. */
+  public holdHostJob(job: HostJob): void {
+    this.job(job).held = true;
+  }
+
+  public releaseHostJob(job: HostJob): void {
+    const entry = this.job(job);
+    entry.held = false;
+    if (entry.due) this.endJob(entry);
+  }
+
+  public setHostServices(services: readonly HostServiceState[]): void {
+    this.hostServices = services;
+  }
+
+  public setHostJournal(unit: HostJournalUnit, lines: readonly HostJournalLine[]): void {
+    this.journals.set(unit, lines);
+  }
+
+  public setOsPackages(value: HostOsPackages): void {
+    this.osPackages = value;
   }
 
   public getExecutedMaintenanceHistory(): readonly HostMaintenanceResult[] {
@@ -103,6 +207,7 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
         dockerEngineReachable:
           custom?.dockerEngineReachable ?? this.defaultTelemetry.dockerEngineReachable ?? true,
         collectedAt: custom?.collectedAt ?? this.nowProvider().toISOString(),
+        disks: custom?.disks ?? this.defaultTelemetry.disks ?? DEFAULT_DISKS,
       });
     }
 
@@ -117,6 +222,7 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
       kernelVersion: this.defaultTelemetry.kernelVersion ?? "6.8.0-simulator",
       dockerEngineReachable: this.defaultTelemetry.dockerEngineReachable ?? true,
       collectedAt: this.nowProvider().toISOString(),
+      disks: this.defaultTelemetry.disks ?? DEFAULT_DISKS,
     });
   }
 
@@ -215,24 +321,116 @@ export class InMemoryHostSimulatorAdapter implements HostAgentPort {
 
     const nowIso = this.nowProvider().toISOString();
     const operationId = `sim_sec_${randomUUID()}`;
+    const apply = approved.policyRef === "apply_dedicated_nftables_22_80_443";
+    // R203 3.2: as the real agent, no apply where the installer left the firewall to the administrator.
+    const refused = apply && this.baseRules === "unmanaged";
     const output = redactSensitiveValue({
       policyRef: approved.policyRef,
       simulator: true,
       rulesetId: "nftables-dedicated-22-80-443",
       rulesetSha256: verifiedSha256,
       rulesetSha256Verified: true,
-      applied: approved.policyRef === "apply_dedicated_nftables_22_80_443",
+      ...(refused ? { reason: "panel firewall not installed on this server" } : { applied: apply }),
       checkedAt: nowIso,
     });
+    // The real apply deletes the table and loads the file: the three sets come back empty.
+    if (apply && !refused) {
+      this.baseRules = "current";
+      this.firewallSets = EMPTY_SETS;
+    }
 
     const result: HostSecurityResult = {
       operationId,
       hostId: approved.hostId,
       policyRef: approved.policyRef,
-      status: "succeeded",
+      status: refused ? "failed" : "succeeded",
       output: JSON.stringify(output),
     };
     this.securityHistory.push(result);
     return result;
+  }
+
+  public async readFirewall(): Promise<HostFirewallState> {
+    this.assertAvailable();
+    const { openedPorts, blockedV4, blockedV6 } = this.firewallSets;
+    return HostFirewallStateWireSchema.parse({
+      baseRules: this.baseRules,
+      openedPorts: [...openedPorts].sort((a, b) => a - b),
+      blockedV4: [...blockedV4].sort(),
+      blockedV6: [...blockedV6].sort(),
+      readAt: this.nowProvider().toISOString(),
+    });
+  }
+
+  public async replaceFirewallSets(sets: HostFirewallSets): Promise<HostFirewallState> {
+    this.assertAvailable();
+    const valid = validateFirewallSets(sets);
+    if (this.baseRules !== "current") throw hostAgentError("RESOURCE_LOCKED", "Firewall base rules are not current");
+    this.firewallSets = valid;
+    return this.readFirewall();
+  }
+
+  public async readHostServices(): Promise<readonly HostServiceState[]> {
+    this.assertAvailable();
+    return z.array(HostServiceStateWireSchema).parse(this.hostServices);
+  }
+
+  public async readHostJournal(unit: HostJournalUnit, lines: number): Promise<readonly HostJournalLine[]> {
+    this.assertAvailable();
+    if (!HOST_JOURNAL_UNITS.includes(unit) || !Number.isInteger(lines) || lines < 1 || lines > HOST_JOURNAL_MAX_LINES)
+      throw new HostPolicyDeniedError("Journal request refused");
+    return z.array(HostJournalLineWireSchema).parse((this.journals.get(unit) ?? DEFAULT_JOURNAL).slice(-lines));
+  }
+
+  public async readOsPackages(): Promise<HostOsPackages> {
+    this.assertAvailable();
+    return HostOsPackagesWireSchema.parse(this.osPackages);
+  }
+
+  public async requestHostJob(job: HostJob): Promise<HostJobState> {
+    this.assertAvailable();
+    const entry = this.job(job);
+    if (entry.state.state === "running") throw hostAgentError("RESOURCE_LOCKED", "Host job is already running");
+    entry.state = { job, state: "running", exitStatus: null, startedAt: this.wholeSecond(), endedAt: null };
+    entry.due = false;
+    setTimeout(() => {
+      entry.due = true;
+      if (!entry.held) this.endJob(entry);
+    }, this.jobEndDelayMs).unref();
+    return HostJobStateWireSchema.parse(entry.state);
+  }
+
+  public async readHostJob(job: HostJob): Promise<HostJobState> {
+    this.assertAvailable();
+    return HostJobStateWireSchema.parse(this.job(job).state);
+  }
+
+  private job(job: HostJob): SimulatedJob {
+    let entry = this.jobs.get(job);
+    if (!entry) {
+      entry = { state: { job, state: "never_run", exitStatus: null, startedAt: null, endedAt: null }, exitStatus: 0, held: false, due: false };
+      this.jobs.set(job, entry);
+    }
+    return entry;
+  }
+
+  private endJob(entry: SimulatedJob): void {
+    if (entry.state.state !== "running") return;
+    entry.due = false;
+    entry.state = {
+      ...entry.state,
+      state: entry.exitStatus === 0 ? "succeeded" : "failed",
+      exitStatus: entry.exitStatus,
+      endedAt: this.wholeSecond(),
+    };
+  }
+
+  // systemd gives job times in whole seconds.
+  private wholeSecond(): string {
+    return new Date(Math.floor(this.nowProvider().getTime() / 1000) * 1000).toISOString();
+  }
+
+  private assertAvailable(): void {
+    if (this.unavailable) throw hostAgentError("HOST_AGENT_UNAVAILABLE", "Host agent is unavailable");
   }
 }

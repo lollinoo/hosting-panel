@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { HOST_SERVICE_UNIT, IPC_HOST_JOBS, IPC_HOST_JOURNAL_UNITS } from "@hosting-panel/contracts";
 import {
+  HOST_JOBS,
+  HOST_JOB_UNITS,
+  HOST_JOURNAL_UNITS,
+  HOST_SERVICE_UNITS,
   ALLOWLISTED_HOST_MAINTENANCE_ACTIONS,
   ALLOWLISTED_HOST_SECURITY_POLICIES,
   HostAgentHealthResponseSchema,
@@ -163,5 +168,36 @@ describe("@hosting-panel/host-agent-contracts — Phase1DisabledHostAgent", () =
 
     const telemetry = await agent.getHostTelemetry("hst-01");
     expect(telemetry).toBeNull();
+  });
+});
+
+describe("@hosting-panel/host-agent-contracts — M5d host jobs", () => {
+  it("takes the closed lists from the wire schemas, not copies", () => {
+    expect(HOST_JOBS).toBe(IPC_HOST_JOBS);
+    expect(HOST_JOURNAL_UNITS).toBe(IPC_HOST_JOURNAL_UNITS);
+  });
+
+  it("names the four services as the public contract and the journal list do", () => {
+    expect(HOST_SERVICE_UNITS).toEqual(Object.values(HOST_SERVICE_UNIT));
+    expect(HOST_SERVICE_UNITS).toEqual(HOST_JOURNAL_UNITS.slice(0, 4));
+  });
+
+  it("gives every job its unit", () => {
+    expect(Object.keys(HOST_JOB_UNITS).sort()).toEqual([...HOST_JOBS].sort());
+    for (const job of HOST_JOBS) expect(HOST_JOB_UNITS[job]).toMatch(/^hp-[a-z@-]+$/);
+  });
+
+  it("refuses each of the seven calls when the agent is disabled", async () => {
+    const agent = new Phase1DisabledHostAgent();
+    const calls = [
+      () => agent.readFirewall(),
+      () => agent.replaceFirewallSets({ openedPorts: [], blockedV4: [], blockedV6: [] }),
+      () => agent.readHostServices(),
+      () => agent.readHostJournal("hp-api", 10),
+      () => agent.readOsPackages(),
+      () => agent.requestHostJob("os_refresh"),
+      () => agent.readHostJob("os_refresh"),
+    ];
+    for (const call of calls) await expect(call()).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
   });
 });

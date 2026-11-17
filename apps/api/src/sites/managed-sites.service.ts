@@ -1,21 +1,23 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  LEGACY_SITE_TYPE,
+  siteTypeKeyOf,
+  SITE_TYPE_KEYS,
   PLATFORM_OPS_ORG_ID,
-  resolveWordpressImage,
+  siteDatabasePrefix,
   type AdminSitesListDto,
   type CertificateAlertDto,
   type CertProblem,
-  resolveWordpressRuntime,
   type CreateManagedSiteInput,
   type ManagedSiteDto,
   type PhpVersion,
   type SiteActionInput,
   type SiteLogLineDto,
+  type SiteStatus,
   wwwPartner,
 } from "@hosting-panel/contracts";
 import {
-  WORDPRESS_TEMPLATE_ID,
   allocateHostTransactional,
   and,
   appendStackRevisionTransactional,
@@ -26,6 +28,7 @@ import {
   domains,
   enqueueOperationTransactional,
   eq,
+  hostAgentHeartbeats,
   hostAllocations,
   hosts,
   inArray,
@@ -56,10 +59,10 @@ import { ControlPlaneError } from "../common/control-plane.error.js";
 import {
   SERVICE_STEPS,
   SITE_DELETE_STEPS,
-  SITE_PROVISION_STEPS,
   SITE_REASSIGN_STEPS,
-  siteDatabaseIdentifier,
+  siteProvisionSteps,
 } from "../runtime/site-provisioner.js";
+import { findApiSiteType, getApiSiteType, type ApiSiteType } from "../site-types/index.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -79,6 +82,23 @@ const isUniqueViolation = (err: unknown): boolean => {
 export interface ManagedSiteAccepted {
   readonly siteId: string;
   readonly operationId: string;
+}
+
+/** A stored ready site whose services are all wanted stopped shows as stopped. */
+export function shownSiteStatus(status: SiteStatus, allStopped: boolean): SiteStatus {
+  return status === "ready" && allStopped ? "stopped" : status;
+}
+
+/** Ids of the given sites whose every service is wanted stopped. */
+export async function stoppedSiteIds(db: HostingPanelDatabase, siteIds: readonly string[]): Promise<Set<string>> {
+  if (siteIds.length === 0) return new Set();
+  const rows = await db
+    .select({ siteId: serviceInstances.siteId })
+    .from(serviceInstances)
+    .where(inArray(serviceInstances.siteId, [...siteIds]))
+    .groupBy(serviceInstances.siteId)
+    .having(sql`bool_and(${serviceInstances.desiredStatus} = 'stopped')`);
+  return new Set(rows.map((r) => r.siteId));
 }
 
 function slugify(name: string): string {
@@ -152,7 +172,10 @@ export class ManagedSitesService {
       );
     }
 
-    const runtime = resolveWordpressRuntime(body.phpVersion);
+    // shortcut: creation takes the legacy type's form only; a type chooser comes with a second type (ADR 0029).
+    const type = getApiSiteType(LEGACY_SITE_TYPE);
+    const { database } = type.definition;
+    const adminSecretKey = type.install?.adminSecretKey ?? null;
     const masterKey = this.config.secretsMasterKey;
 
     try {
@@ -168,6 +191,7 @@ export class ManagedSitesService {
           initialDomainStatus: "pending",
           status: "deploying",
           phpVersion: body.phpVersion,
+          siteType: LEGACY_SITE_TYPE,
           actorId,
         });
 
@@ -179,53 +203,59 @@ export class ManagedSitesService {
         await createServiceWithRevisionTransactional(t, {
           siteId: site.id,
           organizationId,
-          serviceTemplateId: WORDPRESS_TEMPLATE_ID,
+          serviceTemplateId: type.definition.templateId,
           name: "web",
-          // No WORDPRESS_* env: the image would write its own wp-config.php, which the install job refuses.
+          // No env from the type: the image would write its own configuration, which the install job refuses.
           configuration: {
-            image: runtime.image,
-            internalPort: runtime.internalPort,
+            image: type.image(body.phpVersion),
+            internalPort: 80,
             exposeHttp: true,
             siteMail: true,
             volumeMounts: [
               {
-                volumeSuffix: runtime.volumeSuffix,
-                containerPath: runtime.contentPath,
+                volumeSuffix: type.definition.files.volumeSuffix,
+                containerPath: type.definition.files.mountPath,
               },
             ],
           },
-          resourceLimits: { ...runtime.resourceLimits },
+          resourceLimits: { cpuMilli: 1000, memoryBytes: "536870912" },
           actorId,
         });
 
-        const dbPassword = await upsertEncryptedSecretTransactional(t, {
-          organizationId,
-          siteId: site.id,
-          secretKey: "SITE_DB_PASSWORD",
-          value: randomBytes(32).toString("hex"),
-          masterKey,
-          actorId,
-        });
-        await upsertEncryptedSecretTransactional(t, {
-          organizationId,
-          siteId: site.id,
-          secretKey: "WP_ADMIN_PASSWORD_INITIAL",
-          value: body.adminPassword,
-          masterKey,
-          actorId,
-        });
+        const dbPassword = database
+          ? await upsertEncryptedSecretTransactional(t, {
+              organizationId,
+              siteId: site.id,
+              secretKey: "SITE_DB_PASSWORD",
+              value: randomBytes(32).toString("hex"),
+              masterKey,
+              actorId,
+            })
+          : null;
+        if (adminSecretKey) {
+          await upsertEncryptedSecretTransactional(t, {
+            organizationId,
+            siteId: site.id,
+            secretKey: adminSecretKey,
+            value: body.adminPassword,
+            masterKey,
+            actorId,
+          });
+        }
 
-        const identifier = siteDatabaseIdentifier(site.id);
-        await insertSiteDatabase(tx, {
-          id: `sdb_${randomUUID().replace(/-/g, "")}`,
-          organizationId,
-          siteId: site.id,
-          dbName: identifier,
-          dbUser: identifier,
-          passwordSecretId: dbPassword.id,
-        });
+        if (database && dbPassword) {
+          const identifier = siteDatabasePrefix(site.id, database.namePrefix);
+          await insertSiteDatabase(tx, {
+            id: `sdb_${randomUUID().replace(/-/g, "")}`,
+            organizationId,
+            siteId: site.id,
+            dbName: identifier,
+            dbUser: identifier,
+            passwordSecretId: dbPassword.id,
+          });
+        }
 
-        const operationId = await this.#enqueueProvision(t, {
+        const operationId = await this.#enqueueProvision(t, type, {
           organizationId,
           siteId: site.id,
           actorId,
@@ -268,8 +298,9 @@ export class ManagedSitesService {
       hostAllocationId: site.hostAllocationId,
       name: site.name,
       slug: site.slug,
-      status: site.status,
+      status: shownSiteStatus(site.status, (await stoppedSiteIds(this.dbClient.db, [site.id])).has(site.id)),
       phpVersion: site.phpVersion,
+      siteType: siteTypeKeyOf(site.siteType),
       primaryDomain: primary?.hostname ?? null,
       createdAt: site.createdAt.toISOString(),
       updatedAt: site.updatedAt.toISOString(),
@@ -282,10 +313,11 @@ export class ManagedSitesService {
     action: SiteActionInput["action"],
     actorId: string,
     idempotencyKey?: string,
+    write?: (tx: HostingPanelDatabase, operationId: string) => Promise<void>,
   ): Promise<ManagedSiteAccepted> {
     const site = await this.#loadSite(siteId, organizationId);
     if (action !== "retry") {
-      return this.#power(site, action, actorId, idempotencyKey);
+      return this.#power(site, action, actorId, idempotencyKey, write);
     }
     const replay = idempotencyKey
       ? await this.#replay(organizationId, idempotencyKey, siteId)
@@ -293,11 +325,12 @@ export class ManagedSitesService {
     if (replay) return replay;
 
     const db = this.dbClient.db;
+    const type = findApiSiteType(site.siteType);
     const latest = await latestSiteOperation(db, {
       siteId,
       kind: "site.provision",
     });
-    if (site.status !== "degraded" || latest?.status !== "failed") {
+    if (!type || site.status !== "degraded" || latest?.status !== "failed") {
       throw new ControlPlaneError(
         "VALIDATION_ERROR",
         "There is nothing to retry.",
@@ -319,7 +352,7 @@ export class ManagedSitesService {
 
     return db.transaction(async (tx) => {
       const t = tx as unknown as HostingPanelDatabase;
-      const operationId = await this.#enqueueProvision(t, {
+      const operationId = await this.#enqueueProvision(t, type, {
         organizationId,
         siteId,
         actorId,
@@ -338,12 +371,13 @@ export class ManagedSitesService {
     });
   }
 
-  /** start, stop and restart all enqueue the existing service operations under the site lock. */
+  /** start, stop and restart all enqueue the existing service operations under the site lock; `write` joins that transaction. */
   async #power(
     site: typeof sites.$inferSelect,
     action: "start" | "stop" | "restart",
     actorId: string,
     idempotencyKey?: string,
+    write?: (tx: HostingPanelDatabase, operationId: string) => Promise<void>,
   ): Promise<ManagedSiteAccepted> {
     const svc = await this.#webService(site);
     return this.dbClient.db.transaction(async (tx) => {
@@ -358,7 +392,7 @@ export class ManagedSitesService {
         lockKey: `site:${site.id}`,
         steps: SERVICE_STEPS,
       });
-      if (!enqueued.idempotentReplay && action !== "restart") {
+      if (!enqueued.idempotentReplay) {
         await tx
           .update(serviceInstances)
           .set({
@@ -366,6 +400,7 @@ export class ManagedSitesService {
             updatedAt: new Date(),
           })
           .where(eq(serviceInstances.id, svc.id));
+        await write?.(t, enqueued.operation.id);
       }
       return { siteId: site.id, operationId: enqueued.operation.id };
     });
@@ -378,9 +413,21 @@ export class ManagedSitesService {
     phpVersion: PhpVersion,
     actorId: string,
     idempotencyKey?: string,
+    onNew?: (tx: HostingPanelDatabase, operationId: string) => Promise<unknown>,
   ): Promise<ManagedSiteAccepted> {
     const site = await this.#loadSite(siteId, organizationId);
+    const type = findApiSiteType(site.siteType);
+    if (!type) {
+      throw new ControlPlaneError(
+        "NOT_FOUND",
+        "Requested organization or resource was not found.",
+      );
+    }
     const svc = await this.#webService(site);
+    // A deploy would start a site its owner stopped.
+    if (svc.desiredStatus === "stopped") {
+      throw new ControlPlaneError("VALIDATION_ERROR", "Start the site first, then change the PHP version.");
+    }
     const [current] = svc.currentRevisionId
       ? await this.dbClient.db
           .select()
@@ -414,7 +461,7 @@ export class ManagedSitesService {
           organizationId,
           declarativeConfig: {
             ...(current.declarativeConfig as Record<string, unknown>),
-            image: resolveWordpressImage(phpVersion),
+            image: type.image(phpVersion),
           },
           secretRefs: current.secretRefs as Record<string, string>,
           ...(current.resourceLimits
@@ -431,6 +478,7 @@ export class ManagedSitesService {
           .update(sites)
           .set({ phpVersion, updatedAt: new Date() })
           .where(eq(sites.id, siteId));
+        await onNew?.(t, enqueued.operation.id);
       }
       return { siteId, operationId: enqueued.operation.id };
     });
@@ -484,6 +532,8 @@ export class ManagedSitesService {
     siteId: string,
     organizationId: string,
     rawTail: number,
+    // An administrator is told the container is gone; a customer only that the logs are not there now.
+    containerGoneIsNotFound = false,
   ): Promise<SiteLogLineDto[]> {
     const site = await this.#loadSite(siteId, organizationId);
     const svc = await this.#webService(site);
@@ -501,9 +551,10 @@ export class ManagedSitesService {
       return lines.map((l) => ({ at: l.at, stream: l.stream, text: l.text }));
     } catch (err) {
       const code = (err as { code?: string } | null)?.code;
-      if (code === "NOT_SUPPORTED" || code === "DOCKER_ENGINE_UNAVAILABLE")
-        throw unavailable;
-      throw err;
+      // NOT_FOUND here is the site's container gone, not the site: never "does not exist".
+      if (code === "NOT_FOUND" && containerGoneIsNotFound) throw err;
+      // What the executor said never reaches the caller (ADR 0026 2.3).
+      throw unavailable;
     }
   }
 
@@ -563,7 +614,7 @@ export class ManagedSitesService {
     const [site] = await this.dbClient.db
       .select({ organizationId: sites.organizationId })
       .from(sites)
-      .where(and(eq(sites.id, siteId), isNotNull(sites.phpVersion)))
+      .where(and(eq(sites.id, siteId), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
       .limit(1);
     if (!site) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
     return site.organizationId;
@@ -576,8 +627,9 @@ export class ManagedSitesService {
       .from(sites)
       .innerJoin(organizations, eq(organizations.id, sites.organizationId))
       .leftJoin(domains, and(eq(domains.siteId, sites.id), eq(domains.isPrimary, true)))
-      .where(isNotNull(sites.phpVersion))
+      .where(inArray(sites.siteType, [...SITE_TYPE_KEYS]))
       .orderBy(asc(sites.name), asc(sites.id));
+    const stopped = await stoppedSiteIds(db, rows.map(({ site }) => site.id));
     const customers = await db
       .selectDistinct({ organizationId: organizations.id, name: organizations.name, ownerEmail: users.email })
       .from(hostAllocations)
@@ -597,19 +649,21 @@ export class ManagedSitesService {
         hostAllocationId: site.hostAllocationId,
         name: site.name,
         slug: site.slug,
-        status: site.status,
+        status: shownSiteStatus(site.status, stopped.has(site.id)),
         phpVersion: site.phpVersion,
+        siteType: siteTypeKeyOf(site.siteType),
         primaryDomain: primaryDomain ?? null,
         owner: site.organizationId === PLATFORM_OPS_ORG_ID ? null : { organizationId: site.organizationId, name: orgName },
         createdAt: site.createdAt.toISOString(),
         updatedAt: site.updatedAt.toISOString(),
       })),
       customers,
-      certificateAlerts: await this.#certificateAlerts(),
+      certificateAlerts: await this.certificateAlerts(),
     };
   }
 
-  async #certificateAlerts(): Promise<CertificateAlertDto[]> {
+  /** The certificate banner: site certificates, and the panel's as the last domain pass stored it. */
+  public async certificateAlerts(): Promise<CertificateAlertDto[]> {
     const db = this.dbClient.db;
     const now = Date.now();
     const soon = (at: Date | null) => at !== null && at.getTime() < now + ALERT_WINDOW_MS;
@@ -640,17 +694,16 @@ export class ManagedSitesService {
         });
       }
     }
-    const [host] = await db.select({ hostname: hosts.hostname }).from(hosts).limit(1);
-    if (host && this.executor.isRuntimeAvailable) {
-      try {
-        const report = await this.executor.getCertificateStatus({ failuresSince: new Date(now).toISOString() });
-        const panel = report.certificates.find((c) => c.hostname === host.hostname);
-        if (panel && soon(new Date(panel.notAfter))) {
-          alerts.push({ kind: "panel_expiring", siteId: null, siteName: null, hostname: host.hostname, expiresAt: new Date(panel.notAfter).toISOString(), problem: null });
-        }
-      } catch {
-        // The executor is unavailable: the site alerts above still show.
-      }
+    const [row] = await db
+      .select({ snap: hostAgentHeartbeats.telemetrySnapshot })
+      .from(hostAgentHeartbeats)
+      .where(eq(hostAgentHeartbeats.component, "panel_certificate"))
+      .orderBy(desc(hostAgentHeartbeats.lastSeenAt))
+      .limit(1);
+    const snap = row?.snap as { hostname?: unknown; notAfter?: unknown } | undefined;
+    const notAfter = typeof snap?.notAfter === "string" ? new Date(snap.notAfter) : null;
+    if (typeof snap?.hostname === "string" && notAfter && !Number.isNaN(notAfter.getTime()) && soon(notAfter)) {
+      alerts.push({ kind: "panel_expiring", siteId: null, siteName: null, hostname: snap.hostname, expiresAt: notAfter.toISOString(), problem: null });
     }
     return alerts;
   }
@@ -766,6 +819,7 @@ export class ManagedSitesService {
 
   async #enqueueProvision(
     db: HostingPanelDatabase,
+    type: ApiSiteType,
     input: {
       organizationId: string;
       siteId: string;
@@ -782,7 +836,7 @@ export class ManagedSitesService {
       requestedByUserId: input.actorId,
       ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {}),
       lockKey: `site:${input.siteId}`,
-      steps: SITE_PROVISION_STEPS,
+      steps: siteProvisionSteps(type),
       // Not secrets: the enqueue check rejects secret keys anyway.
       outboxPayload: input.payload,
     });

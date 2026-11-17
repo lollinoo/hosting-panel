@@ -26,3 +26,16 @@ detect_supported_os() {
   esac
   printf '%s %s\n' "${id}" "${codename}"
 }
+
+# OS packages the panel needs: install.sh installs them all, the bootstrap adds the missing ones on an update.
+# libatomic1: the official Node 26 linux-x64 binary links against it; minimal images lack it.
+HP_OS_PACKAGES=(curl ca-certificates gnupg nftables openssl tar xz-utils iproute2 libatomic1 unattended-upgrades)
+
+pkg_installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
+
+# Prints the packages of HP_OS_PACKAGES that are not installed, space separated (empty when none).
+missing_os_packages() {
+  local p missing=()
+  for p in "${HP_OS_PACKAGES[@]}"; do pkg_installed "${p}" || missing+=("${p}"); done
+  printf '%s' "${missing[*]}"
+}

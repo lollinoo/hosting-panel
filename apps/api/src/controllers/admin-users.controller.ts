@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post, Req } from "@nestjs/common";
 import {
+  CreateAdministratorInputSchema,
   CreateCustomerAccountInputSchema,
   type AdminUserDto,
+  type CreateAdministratorResultDto,
   type ErrorCode,
 } from "@hosting-panel/contracts";
 import {
@@ -23,7 +25,7 @@ import { AuthzContextService } from "../auth/authz-context.service.js";
 import { OidcService } from "../auth/oidc.service.js";
 import { requireServerAdmin } from "../auth/server-admin.guard.js";
 import { generateTemporaryPassword, hashPassword } from "../auth/password.js";
-import { resetUserPassword, resetUserTotp } from "../cli/accounts.js";
+import { insertServerAdmin, resetUserPassword, resetUserTotp } from "../cli/accounts.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 
@@ -136,6 +138,30 @@ export class AdminUsersController {
     return { data: { organizationId, userId, temporaryPassword } };
   }
 
+  @Post("administrators")
+  @HttpCode(HttpStatus.CREATED)
+  public async createAdministrator(
+    @Req() req: FastifyRequest,
+    @Body() raw: unknown,
+  ): Promise<{ data: CreateAdministratorResultDto }> {
+    const auth = await this.#guard(req, null);
+    const { email, name } = CreateAdministratorInputSchema.parse(raw ?? {});
+    const temporaryPassword = generateTemporaryPassword();
+    const created = await insertServerAdmin(this.dbClient.db, this.config.secretsMasterKey, {
+      email,
+      name,
+      password: temporaryPassword,
+      mustChangePassword: true,
+    });
+    await this.authz.recordAudit(auth, req, {
+      action: "admin.administrator.create",
+      targetType: "user",
+      targetId: created.userId,
+      details: { email },
+    });
+    return { data: { ...created, email, temporaryPassword } };
+  }
+
   @Post("users/:userId/reset-password")
   @HttpCode(HttpStatus.OK)
   public async resetPassword(
@@ -176,11 +202,28 @@ export class AdminUsersController {
       throw new ControlPlaneError("PERMISSION_DENIED", "You cannot disable your own account.");
     }
     await this.#findUser(userId);
-    const [updated] = await this.dbClient.db
-      .update(users)
-      .set({ userStatus: status, updatedAt: new Date() })
-      .where(eq(users.id, userId))
-      .returning();
+    const updated = await this.dbClient.db.transaction(async (tx) => {
+      // Fixed lock order: two admins disabling each other serialize here and the second sees the first.
+      const admins = await tx
+        .select({ id: users.id, userStatus: users.userStatus })
+        .from(users)
+        .where(eq(users.platformRole, "infrastructure_admin"))
+        .orderBy(asc(users.id))
+        .for("update");
+      if (
+        status === "disabled" &&
+        admins.some((a) => a.id === userId) &&
+        !admins.some((a) => a.id !== userId && a.userStatus === "active")
+      ) {
+        throw new ControlPlaneError("LAST_ADMINISTRATOR_PROTECTED", "At least one active server administrator must remain.");
+      }
+      const [row] = await tx
+        .update(users)
+        .set({ userStatus: status, updatedAt: new Date() })
+        .where(eq(users.id, userId))
+        .returning();
+      return row;
+    });
     if (status === "disabled") await this.oidc.revokeAllSessionsForUser(userId);
     await this.authz.recordAudit(auth, req, {
       action: "admin.user.status",

@@ -13,6 +13,24 @@ type Setup = { secretBase32: string; otpauthUri: string };
 
 const digits = (v: string) => v.replace(/\D/g, "").slice(0, 6);
 
+/** The authenticator link and the key grouped by 4; also shown once to a new administrator. */
+export function TotpKey({ secretBase32, otpauthUri }: Setup) {
+  const m = useMessages();
+  return (
+    <>
+      <p className="mt-2">
+        <a href={otpauthUri} className="font-medium text-primary underline underline-offset-4">
+          {m.account.totpOpenLink}
+        </a>
+      </p>
+      <p className="mt-2 text-muted-foreground">{m.account.totpManual}</p>
+      <p className="mt-1 font-mono text-base tracking-wider select-all break-all">
+        {secretBase32.match(/.{1,4}/g)?.join(" ")}
+      </p>
+    </>
+  );
+}
+
 export function TotpCard({
   csrfToken,
   enabled,
@@ -140,15 +158,7 @@ export function TotpCard({
             <ol className="list-decimal space-y-3 pl-5 text-sm">
               <li>
                 <p>{m.account.totpStep1}</p>
-                <p className="mt-2">
-                  <a href={setup.otpauthUri} className="font-medium text-primary underline underline-offset-4">
-                    {m.account.totpOpenLink}
-                  </a>
-                </p>
-                <p className="mt-2 text-muted-foreground">{m.account.totpManual}</p>
-                <p className="mt-1 font-mono text-base tracking-wider select-all break-all">
-                  {setup.secretBase32.match(/.{1,4}/g)?.join(" ")}
-                </p>
+                <TotpKey secretBase32={setup.secretBase32} otpauthUri={setup.otpauthUri} />
               </li>
               <li>{m.account.totpStep2}</li>
             </ol>

@@ -1,0 +1,54 @@
+{
+  "containerName": "hp_bk_op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0_dump",
+  "payload": {
+    "Image": "mariadb:12.3.3",
+    "Cmd": [
+      "sh",
+      "-c",
+      "set -eu\nfree=$(df -Pk /run/mysqld | awk 'NR==2{print $4}'); [ \"$free\" -ge \"$HP_NEED_KB\" ] || exit 75\nMYSQL_PWD=\"$(cat /run/secrets/mariadb-root)\"; export MYSQL_PWD\nfor db in $HP_DBS; do\n  mariadb-dump -h hp-mariadb -u root --default-character-set=utf8mb4 --single-transaction --skip-lock-tables --routines --triggers --events --hex-blob --skip-dump-date --result-file=\"/run/mysqld/$db.sql\" \"$db\" 2>/tmp/err || { grep -q 'errno 28' /tmp/err && exit 75; cat /tmp/err >&2; exit 76; }\ndone"
+    ],
+    "User": "990:990",
+    "Env": [
+      "HP_DBS=wp_a9a7ce0f2a3a wp_a9a7ce0f2a3a_shop",
+      "HP_NEED_KB=1048588"
+    ],
+    "Labels": {
+      "io.hostingpanel.managed": "true",
+      "io.hostingpanel.role": "site_job",
+      "io.hostingpanel.site_id": "site_pin_a",
+      "io.hostingpanel.job_id": "op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+    },
+    "HostConfig": {
+      "Privileged": false,
+      "ReadonlyRootfs": true,
+      "CapDrop": [
+        "ALL"
+      ],
+      "SecurityOpt": [
+        "no-new-privileges:true"
+      ],
+      "PidsLimit": 128,
+      "NanoCpus": 1000000000,
+      "Memory": 536870912,
+      "MemorySwap": 536870912,
+      "RestartPolicy": {
+        "Name": "no"
+      },
+      "Tmpfs": {
+        "/tmp": "rw,nosuid,nodev,noexec,size=128m,mode=1777"
+      },
+      "LogConfig": {
+        "Type": "json-file",
+        "Config": {
+          "max-size": "1m",
+          "max-file": "1"
+        }
+      },
+      "NetworkMode": "hp_mariadb_net",
+      "Binds": [
+        "/etc/hosting-panel/mariadb-root.key:/run/secrets/mariadb-root:ro",
+        "hp_bk_op_b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0:/run/mysqld"
+      ]
+    }
+  }
+}

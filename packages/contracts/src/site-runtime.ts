@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WORDPRESS_SITE_TYPE } from "./site-types/wordpress.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
 const EntityIdSchema = z.string().min(1).max(128);
@@ -8,6 +9,17 @@ export type PhpVersion = (typeof SUPPORTED_PHP_VERSIONS)[number];
 export const DEFAULT_PHP_VERSION: PhpVersion = "8.4";
 
 export const SHARED_MARIADB_IMAGE = "mariadb:12.3.3";
+// 10.3_p1-r2-ls243 (OpenSSH 10.3p1, Alpine 3.24). Update: docker buildx imagetools inspect linuxserver/openssh-server:<tag>
+export const SFTP_IMAGE =
+  "linuxserver/openssh-server@sha256:161e0b670b31d9539ca1718bc5943e981779331b4e1c9d32e8929d7652a1f22f" as const;
+export const DEFAULT_SFTP_PORT = 2222 as const;
+// Update: docker buildx imagetools inspect phpmyadmin:5.2.3-apache
+export const PHPMYADMIN_IMAGE =
+  "phpmyadmin@sha256:e4b3eb5305cd42d21512bb55def2bab52625d56df927ad4ee1864a9354c84d40" as const;
+export const RESTIC_IMAGE =
+  "restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510" as const;
+export const DEFAULT_PHPMYADMIN_PORT = 8306 as const;
+export const PHPMYADMIN_UPLOAD_LIMIT_MB = 32 as const;
 export const resolveWordpressImage = (php: PhpVersion): string => `wordpress:7.1.4-php${php}-apache`;
 export const resolveWordpressCliImage = (php: PhpVersion): string => `wordpress:cli-2.12.0-php${php}`;
 
@@ -15,8 +27,8 @@ export function resolveWordpressRuntime(php: PhpVersion) {
   return {
     image: resolveWordpressImage(php),
     internalPort: 80 as const,
-    contentPath: "/var/www/html" as const,
-    volumeSuffix: "html" as const,
+    contentPath: WORDPRESS_SITE_TYPE.files.mountPath,
+    volumeSuffix: WORDPRESS_SITE_TYPE.files.volumeSuffix,
     resourceLimits: { cpuMilli: 1000 as const, memoryBytes: "536870912" as const },
   };
 }

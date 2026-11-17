@@ -1,9 +1,11 @@
-import { createHash } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { randomBytes } from "node:crypto";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   canTransitionOperation,
   isTerminalOperationStatus,
+  mysqlNativePasswordHash,
   redactSensitiveString,
+  siteDatabasePrefix,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -21,9 +23,11 @@ import {
   renewOperationLease,
   resolveDecryptedSecretRefs,
   serviceInstances,
+  settleOperation,
   sites,
   transitionOperation,
   updateOperationStepTransactional,
+  upsertEncryptedSecretTransactional,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort, SiteJobRequest } from "@hosting-panel/executor-contracts";
@@ -34,7 +38,10 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { findApiSiteType, type ApiSiteType } from "../site-types/index.js";
 import { routePlanHash } from "../sites/domain-policy.js";
+import { generateDatabasePassword } from "../sites/site-databases.service.js";
+import { SiteSftpService } from "../sites/site-sftp.service.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 
 /** The claim sets a 60 s lease; one site job may take up to 510 s, so each step renews it first. */
@@ -47,13 +54,16 @@ export const SERVICE_STEPS = [
   { key: "reconcile_state", label: "Check the site" },
 ] as const;
 
-export const SITE_PROVISION_STEPS = [
-  { key: "create_database", label: "Prepare the database" },
-  { key: "deploy_site", label: "Start the site" },
-  { key: "install_wordpress", label: "Install WordPress" },
-  { key: "publish_site", label: "Publish the site" },
-  { key: "finish", label: "Finish" },
-] as const;
+/** The steps of a site.provision: the database and install steps only when the type has them. */
+export function siteProvisionSteps(type: ApiSiteType): { key: string; label: string }[] {
+  return [
+    ...(type.definition.database ? [{ key: "create_database", label: "Prepare the database" }] : []),
+    { key: "deploy_site", label: "Start the site" },
+    ...(type.install ? [{ key: type.install.step, label: type.install.label }] : []),
+    { key: "publish_site", label: "Publish the site" },
+    { key: "finish", label: "Finish" },
+  ];
+}
 
 export const SITE_DELETE_STEPS = [
   { key: "drop_database", label: "Remove the database" },
@@ -66,7 +76,6 @@ export const SITE_REASSIGN_STEPS = [
   { key: "redeploy", label: "Restart the site" },
 ] as const;
 
-type SiteProvisionStep = (typeof SITE_PROVISION_STEPS)[number]["key"];
 type SiteDeleteStep = (typeof SITE_DELETE_STEPS)[number]["key"];
 type SiteReassignStep = (typeof SITE_REASSIGN_STEPS)[number]["key"];
 
@@ -83,11 +92,16 @@ const DELETE_STEP_DONE: Readonly<Record<SiteDeleteStep, string>> = {
 };
 export const SITE_DELETE_FAILED = "Site could not be deleted";
 
+/** True when a failure may have taken effect; any other failure did not happen for sure. */
+export function isAmbiguousFailure(err: unknown): boolean {
+  const e = err as { code?: unknown; ambiguousOutcome?: unknown } | null | undefined;
+  return e?.code === "OPERATION_AMBIGUOUS" || e?.ambiguousOutcome === true;
+}
+
 // Step and operation messages are shown to every org member: fixed texts only.
-const STEP_DONE: Readonly<Record<SiteProvisionStep, string>> = {
+const STEP_DONE: Readonly<Record<string, string>> = {
   create_database: "Database ready",
   deploy_site: "Site started",
-  install_wordpress: "WordPress installed",
   publish_site: "Site published",
   finish: "Your site is ready",
 };
@@ -96,9 +110,9 @@ const STEP_FAILED = "Could not finish this step";
 const STEP_SKIPPED = "Skipped due to prior step failure";
 export const SITE_SETUP_FAILED = "Site setup did not finish";
 
-/** Database name and user of a site's WordPress database. */
+/** Database name and user of a site's database. */
 export function siteDatabaseIdentifier(siteId: string): string {
-  return `wp_${createHash("sha256").update(siteId).digest("hex").slice(0, 12)}`;
+  return siteDatabasePrefix(siteId);
 }
 
 export class SiteJobFailedError extends Error {
@@ -116,6 +130,9 @@ export class SiteProvisioner {
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly executor: DockerExecutorPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
+    @Inject(SiteSftpService) private readonly sftp: SiteSftpService,
+    // A stored type in, its definition or null out; the seam tests pass a type that is in no registry.
+    @Optional() private readonly resolveSiteType: (value: string | null | undefined) => ApiSiteType | null = findApiSiteType,
   ) {}
 
   /** Runs the site.provision steps; on failure settles the operation and the site, then rethrows. */
@@ -126,14 +143,14 @@ export class SiteProvisioner {
     const db = this.dbClient.db;
     const organizationId = op.organizationId;
     const siteId = op.resourceId;
-    let current: SiteProvisionStep = "create_database";
+    let current = "create_database";
 
-    const step = async (key: SiteProvisionStep, work: () => Promise<void>): Promise<void> => {
+    const step = async (key: string, work: () => Promise<void>, done = STEP_DONE[key]!): Promise<void> => {
       current = key;
       await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
       await updateOperationStepTransactional(db, op.id, key, "running", STEP_RUNNING);
       await work();
-      await updateOperationStepTransactional(db, op.id, key, "succeeded", STEP_DONE[key]);
+      await updateOperationStepTransactional(db, op.id, key, "succeeded", done);
     };
 
     try {
@@ -153,12 +170,14 @@ export class SiteProvisioner {
         .from(domains)
         .where(and(eq(domains.siteId, siteId), eq(domains.isPrimary, true)))
         .limit(1);
-      if (!site?.phpVersion || !svc || !siteDb || !primary) {
+      const type = site ? this.resolveSiteType(site.siteType) : null;
+      if (!site || !type || !svc || (type.definition.database && !siteDb) || !primary) {
         throw new ControlPlaneError("NOT_FOUND", `Managed site '${siteId}' is incomplete`);
       }
 
       const jobId = (suffix: string) => `job_${op.id.replace(/^op_/, "")}_${suffix}`;
-      const dbParams = { dbName: siteDb.dbName, dbUser: siteDb.dbUser };
+      const dbParams = siteDb ? { dbName: siteDb.dbName, dbUser: siteDb.dbUser } : null;
+      const install = type.install;
       const deploy = async () => {
         const spec = await buildApprovedServiceSpec(db, this.config, {
           organizationId,
@@ -168,48 +187,52 @@ export class SiteProvisioner {
         return spec;
       };
 
-      await step("create_database", async () => {
-        await this.#runJob({
-          jobId: jobId("db"),
-          kind: "db.provision",
-          siteId,
-          organizationId,
-          params: dbParams,
-          resolvedSecrets: await this.#secrets(op, { HP_DB_PASSWORD: "SITE_DB_PASSWORD" }),
+      if (dbParams) {
+        await step("create_database", async () => {
+          await this.#runJob({
+            jobId: jobId("db"),
+            kind: "db.provision",
+            siteId,
+            organizationId,
+            params: dbParams,
+            resolvedSecrets: await this.#secrets(op, { HP_DB_PASSWORD: "SITE_DB_PASSWORD" }),
+          });
         });
-      });
+      }
 
       await step("deploy_site", async () => {
         await deploy();
       });
 
-      await step("install_wordpress", async () => {
-        if (await this.#installedByEarlierAttempt(siteId)) return;
-        const [adminSecret] = await db
-          .select({ id: encryptedSecrets.id })
-          .from(encryptedSecrets)
-          .where(and(eq(encryptedSecrets.siteId, siteId), eq(encryptedSecrets.secretKey, "WP_ADMIN_PASSWORD_INITIAL")))
-          .limit(1);
-        await this.#runJob({
-          jobId: jobId("wp"),
-          kind: "wordpress.install",
-          siteId,
-          organizationId,
-          serviceInstanceId: svc.id,
-          params: {
-            ...dbParams,
-            phpVersion: site.phpVersion!,
+      if (install) {
+        await step(install.step, async () => {
+          if (await this.#installedByEarlierAttempt(siteId, install.step)) return;
+          const [adminSecret] = install.adminSecretKey
+            ? await db
+                .select({ id: encryptedSecrets.id })
+                .from(encryptedSecrets)
+                .where(and(eq(encryptedSecrets.siteId, siteId), eq(encryptedSecrets.secretKey, install.adminSecretKey)))
+                .limit(1)
+            : [];
+          const job = install.job({
+            phpVersion: site.phpVersion,
             siteUrl: `http://${primary.hostname}`,
-            title: stringField(payload, "title"),
-            adminUser: stringField(payload, "adminUser"),
-            adminEmail: stringField(payload, "adminEmail"),
-          },
-          resolvedSecrets: await this.#secrets(op, {
-            HP_DB_PASSWORD: "SITE_DB_PASSWORD",
-            ...(adminSecret ? { HP_ADMIN_PASSWORD: "WP_ADMIN_PASSWORD_INITIAL" } : {}),
-          }),
-        });
-      });
+            database: dbParams,
+            hasAdminSecret: adminSecret !== undefined,
+            field: (key) => stringField(payload, key),
+          });
+          // The suffix is part of the job id the executor has always seen: kept for every type.
+          await this.#runJob({
+            jobId: jobId("wp"),
+            kind: job.kind,
+            siteId,
+            organizationId,
+            serviceInstanceId: svc.id,
+            params: job.params,
+            ...(job.secrets ? { resolvedSecrets: await this.#secrets(op, job.secrets) } : {}),
+          });
+        }, install.done);
+      }
 
       await step("publish_site", async () => {
         await db
@@ -218,40 +241,43 @@ export class SiteProvisioner {
           .where(eq(domains.siteId, siteId));
         const hosts = (await deploy()).hostRoutes ?? [];
         // A retry never moves an address already switched to https back to http.
-        const wordpressUrl = site.wordpressUrl ?? `http://${primary.hostname}`;
+        const siteUrl = site.siteUrl ?? `http://${primary.hostname}`;
         await db
           .update(sites)
           .set({
             appliedRoutes: [...hosts],
-            appliedRoutesHash: routePlanHash(hosts, wordpressUrl),
-            wordpressUrl,
+            appliedRoutesHash: routePlanHash(hosts, siteUrl),
+            siteUrl,
             updatedAt: new Date(),
           })
           .where(eq(sites.id, siteId));
       });
 
-      // Every executor step is done; what is left is bookkeeping (processing cannot go straight to succeeded).
-      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      await step("finish", async () => {
-        const adminSecrets = await db
-          .select({ id: encryptedSecrets.id })
-          .from(encryptedSecrets)
-          .where(and(eq(encryptedSecrets.siteId, siteId), eq(encryptedSecrets.secretKey, "WP_ADMIN_PASSWORD_INITIAL")));
+      // Every executor step is done; the bookkeeping commits with the operation's end.
+      current = "finish";
+      await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+      await updateOperationStepTransactional(db, op.id, "finish", "running", STEP_RUNNING);
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        const adminSecrets = install?.adminSecretKey
+          ? await tx
+              .select({ id: encryptedSecrets.id })
+              .from(encryptedSecrets)
+              .where(and(eq(encryptedSecrets.siteId, siteId), eq(encryptedSecrets.secretKey, install.adminSecretKey)))
+          : [];
         for (const secret of adminSecrets) {
-          await deleteEncryptedSecretTransactional(db, { organizationId, secretId: secret.id, actorId: null });
+          await deleteEncryptedSecretTransactional(tx, { organizationId, secretId: secret.id, actorId: null });
         }
-        await db.update(sites).set({ status: "ready", updatedAt: new Date() }).where(eq(sites.id, siteId));
-      });
-
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId,
-        action: "site.provision.succeeded",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id },
+        await tx.update(sites).set({ status: "ready", updatedAt: new Date() }).where(eq(sites.id, siteId));
+        await updateOperationStepTransactional(tx, op.id, "finish", "succeeded", STEP_DONE["finish"]!);
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId,
+          action: "site.provision.succeeded",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id },
+        });
       });
     } catch (err) {
       await this.#settleFailure(op, current, err, SITE_SETUP_FAILED, "site.provision.failed");
@@ -294,28 +320,37 @@ export class SiteProvisioner {
             params: { dbName: siteDb.dbName, dbUser: siteDb.dbUser },
           });
         }
+        try {
+          await this.executor.siteDatabases({ siteId, op: "dropAll" });
+        } catch (err) {
+          if ((err as { code?: unknown } | null)?.code !== "NOT_SUPPORTED") {
+            throw err;
+          }
+        }
       });
 
       await step("remove_site", async () => {
+        await this.sftp.removeSite(op.organizationId, siteId);
         for (const svc of services) await this.executor.deleteService(svc.id);
         await this.executor.purgeSite(siteId);
       });
 
-      // Every executor step is done; what is left is bookkeeping (processing cannot go straight to succeeded).
-      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      await step("finish", async () => {
-        await db.delete(sites).where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)));
-      });
-
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId,
-        action: "site.delete.succeeded",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id },
+      // Every executor step is done; the bookkeeping commits with the operation's end.
+      current = "finish";
+      await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
+      await updateOperationStepTransactional(db, op.id, "finish", "running", STEP_RUNNING);
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        await tx.delete(sites).where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)));
+        await updateOperationStepTransactional(tx, op.id, "finish", "succeeded", DELETE_STEP_DONE.finish);
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId,
+          action: "site.delete.succeeded",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id },
+        });
       });
     } catch (err) {
       await this.#settleFailure(op, current, err, SITE_DELETE_FAILED, "site.delete.failed");
@@ -357,59 +392,136 @@ export class SiteProvisioner {
       // "skipped" at enqueue: the same owner change is re-issued to finish a half-done move.
       if (moveStep?.status !== "skipped") {
         await step("move_ownership", async () => {
-          if (from === to) return;
-          const [allocation] = await db
-            .select({ id: hostAllocations.id })
-            .from(hostAllocations)
-            .where(and(eq(hostAllocations.organizationId, to), eq(hostAllocations.status, "active")))
-            .limit(1);
-          if (!allocation) throw new ControlPlaneError("NOT_FOUND", `Organization '${to}' has no active allocation`);
-          await moveSiteToOrganizationTransactional(db, {
-            siteId,
-            fromOrganizationId: from,
-            toOrganizationId: to,
-            toHostAllocationId: allocation.id,
-            masterKey: this.config.secretsMasterKey.toString("hex"),
-          });
-          owner = to;
+          if (from !== to) {
+            const [allocation] = await db
+              .select({ id: hostAllocations.id })
+              .from(hostAllocations)
+              .where(and(eq(hostAllocations.organizationId, to), eq(hostAllocations.status, "active")))
+              .limit(1);
+            if (!allocation) throw new ControlPlaneError("NOT_FOUND", `Organization '${to}' has no active allocation`);
+            await moveSiteToOrganizationTransactional(db, {
+              siteId,
+              fromOrganizationId: from,
+              toOrganizationId: to,
+              toHostAllocationId: allocation.id,
+              masterKey: this.config.secretsMasterKey.toString("hex"),
+            });
+            owner = to;
+          }
+          // Best-effort: failed apply marks SFTP dirty for the periodic loop without failing or repeating the move.
+          await this.sftp.ensureApplied().catch(() => undefined);
         });
       } else if (from !== to) {
         throw new ControlPlaneError("VALIDATION_ERROR", `Site '${siteId}' is not owned by '${to}'`);
       }
 
       await step("redeploy", async () => {
+        // The former owner knows every database password of the site: all of them change (C1).
+        await this.#rotateSiteDatabasePassword(op, site, to);
+        await rotateExtraDatabaseUsers(this.executor, siteId);
         const services = await db
-          .select({ id: serviceInstances.id })
+          .select({ id: serviceInstances.id, desiredStatus: serviceInstances.desiredStatus })
           .from(serviceInstances)
           .where(and(eq(serviceInstances.siteId, siteId), eq(serviceInstances.organizationId, to)));
         for (const svc of services) {
           const spec = await buildApprovedServiceSpec(db, this.config, { organizationId: to, serviceInstanceId: svc.id });
           await recordDeployedState(db, this.executor, spec, await this.executor.deployService(spec));
+          // The new owner needs a new container, but a service its owner stopped stays stopped.
+          if (svc.desiredStatus === "stopped") {
+            await this.executor.stopService(svc.id).catch(async (err: unknown) => {
+              // The container serves: the wanted state says so (R195 1.3).
+              if (!isAmbiguousFailure(err)) {
+                await db
+                  .update(serviceInstances)
+                  .set({ desiredStatus: "running", updatedAt: new Date() })
+                  .where(eq(serviceInstances.id, svc.id));
+              }
+              throw err;
+            });
+          }
         }
       });
 
-      await transitionOperation(db, op.id, "reconciling", { leaseDurationMs: SITE_STEP_LEASE_MS });
-      // A failed setup stays degraded, so its Try again survives the owner change.
-      if ((await latestSiteOperation(db, { siteId, kind: "site.provision" }))?.status === "succeeded") {
-        await db
-          .update(sites)
-          .set({ status: "ready", updatedAt: new Date() })
-          .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
-      }
-      await transitionOperation(db, op.id, "succeeded", { errorCode: null, errorMessage: null });
-      await appendAuditEvent(db, {
-        actorId: null,
-        actorType: "system",
-        organizationId: to,
-        action: "admin.site.reassign.succeeded",
-        targetType: "site",
-        targetId: siteId,
-        details: { operationId: op.id, from, to },
+      await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        // A failed setup stays degraded, so its Try again survives the owner change.
+        if ((await latestSiteOperation(tx, { siteId, kind: "site.provision" }))?.status === "succeeded") {
+          await tx
+            .update(sites)
+            .set({ status: "ready", updatedAt: new Date() })
+            .where(and(eq(sites.id, siteId), eq(sites.status, "degraded")));
+        }
+        await appendAuditEvent(tx, {
+          actorId: null,
+          actorType: "system",
+          organizationId: to,
+          action: "admin.site.reassign.succeeded",
+          targetType: "site",
+          targetId: siteId,
+          details: { operationId: op.id, from, to },
+        });
       });
     } catch (err) {
       await this.#settleFailure({ ...op, organizationId: owner }, current, err, SITE_REASSIGN_FAILED, "admin.site.reassign.failed");
       throw err;
     }
+  }
+
+  /**
+   * C1: a new SITE_DB_PASSWORD, written first into the configuration the site keeps in its own files
+   * (one it cannot rewrite stops here, before MariaDB changes), then set by db.provision, which also
+   * cuts the account's connections. A rerun picks another password and converges the same way.
+   */
+  async #rotateSiteDatabasePassword(
+    op: typeof operations.$inferSelect,
+    site: typeof sites.$inferSelect,
+    organizationId: string,
+  ): Promise<void> {
+    const db = this.dbClient.db;
+    const [siteDb] = await listSiteDatabases(db, { organizationId, siteId: site.id });
+    const [svc] = await db
+      .select({ id: serviceInstances.id })
+      .from(serviceInstances)
+      .where(and(eq(serviceInstances.siteId, site.id), eq(serviceInstances.organizationId, organizationId)))
+      .limit(1);
+    const writer = findApiSiteType(site.siteType)?.databasePasswordJob ?? null;
+    if (!siteDb || (writer && !svc)) return;
+    // Stored only once the site holds it, so a failed job leaves the stored secret as MariaDB and the site have it.
+    const password = randomBytes(32).toString("hex");
+    const secrets = (refs: Record<string, string>) =>
+      resolveDecryptedSecretRefs(db, { organizationId, siteId: site.id, secretRefs: refs, masterKey: this.config.secretsMasterKey });
+    const jobId = (suffix: string) => `job_${op.id.replace(/^op_/, "")}_${suffix}`;
+    if (writer && svc) {
+      const job = writer.job(site);
+      const resolved = job.secrets ? { ...(await secrets(job.secrets)) } : undefined;
+      for (const [name, ref] of Object.entries(job.secrets ?? {})) {
+        if (ref === "SITE_DB_PASSWORD" && resolved) resolved[name] = password;
+      }
+      await this.#runJob({
+        jobId: jobId("dbpw"),
+        kind: job.kind,
+        siteId: site.id,
+        organizationId,
+        serviceInstanceId: svc.id,
+        params: job.params,
+        ...(resolved ? { resolvedSecrets: resolved } : {}),
+      });
+    }
+    await upsertEncryptedSecretTransactional(db, {
+      organizationId,
+      siteId: site.id,
+      secretKey: "SITE_DB_PASSWORD",
+      value: password,
+      masterKey: this.config.secretsMasterKey,
+      actorId: null,
+    });
+    await this.#runJob({
+      jobId: jobId("db"),
+      kind: "db.provision",
+      siteId: site.id,
+      organizationId,
+      params: { dbName: siteDb.dbName, dbUser: siteDb.dbUser },
+      resolvedSecrets: await secrets({ HP_DB_PASSWORD: "SITE_DB_PASSWORD" }),
+    });
   }
 
   async #runJob(req: SiteJobRequest): Promise<void> {
@@ -431,8 +543,8 @@ export class SiteProvisioner {
     });
   }
 
-  /** A retry after a later step failed finds WordPress installed and skips the job. */
-  async #installedByEarlierAttempt(siteId: string): Promise<boolean> {
+  /** A retry after a later step failed finds the install done and skips the job. */
+  async #installedByEarlierAttempt(siteId: string, stepKey: string): Promise<boolean> {
     const rows = await this.dbClient.db
       .select({ id: operationSteps.id })
       .from(operationSteps)
@@ -441,7 +553,7 @@ export class SiteProvisioner {
         and(
           eq(operations.resourceId, siteId),
           eq(operations.kind, "site.provision"),
-          eq(operationSteps.key, "install_wordpress"),
+          eq(operationSteps.key, stepKey),
           eq(operationSteps.status, "succeeded"),
         ),
       )
@@ -451,7 +563,7 @@ export class SiteProvisioner {
 
   async #settleFailure(
     op: typeof operations.$inferSelect,
-    failedStep: SiteProvisionStep | SiteDeleteStep | SiteReassignStep,
+    failedStep: string,
     err: unknown,
     publicMessage: string,
     auditAction: string,
@@ -493,6 +605,29 @@ export class SiteProvisioner {
           : redactSensitiveString(err instanceof Error ? err.message : String(err)).slice(0, 4096),
       },
     });
+  }
+}
+
+// Rotate every extra MariaDB user's password on site transfer while ignoring backends without database support.
+async function rotateExtraDatabaseUsers(executor: DockerExecutorPort, siteId: string): Promise<void> {
+  const primaryUser = siteDatabasePrefix(siteId);
+  try {
+    const listed = await executor.siteDatabases({ siteId, op: "list" });
+    for (const user of listed.users) {
+      if (user.primary || user.name === primaryUser) {
+        continue;
+      }
+      await executor.siteDatabases({
+        siteId,
+        op: "setUserPassword",
+        user: user.name,
+        passwordHash: mysqlNativePasswordHash(generateDatabasePassword()),
+      });
+    }
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code !== "NOT_SUPPORTED") {
+      throw err;
+    }
   }
 }
 

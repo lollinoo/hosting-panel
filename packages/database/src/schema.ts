@@ -1,6 +1,7 @@
 import {
   bigint,
   boolean,
+  date,
   foreignKey,
   index,
   integer,
@@ -15,14 +16,18 @@ import {
 import { sql } from "drizzle-orm";
 import type {
   AuditActorType,
+  BackupKind,
+  BackupProblem,
+  BackupStatus,
   CertProblem,
   CertStatus,
   DnsStatus,
   DomainStatus,
   ErrorCode,
+  FirewallFamily,
   GrantEffect,
   HostAllocationStatus,
-  HostDaemonComponent,
+  HeartbeatRowComponent,
   HostDaemonStatus,
   HostStatus,
   HostingMode,
@@ -38,6 +43,7 @@ import type {
   ServiceDesiredStatus,
   SiteHostRoute,
   SiteStatus,
+  TerminalEndReason,
 } from "@hosting-panel/contracts";
 
 export const platformInstallations = pgTable("platform_installations", {
@@ -125,6 +131,17 @@ export const userSessions = pgTable(
   },
   (t) => [index("idx_user_sessions_user_id").on(t.userId)],
 );
+
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: text("id").primaryKey(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  usedAt: timestamp("used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const roles = pgTable("roles", {
   id: text("id").primaryKey(),
@@ -284,7 +301,8 @@ export const sites = pgTable(
     phpVersion: text("php_version").$type<PhpVersion>(),
     appliedRoutesHash: text("applied_routes_hash"),
     appliedRoutes: jsonb("applied_routes").$type<SiteHostRoute[] | null>(),
-    wordpressUrl: text("wordpress_url"),
+    siteUrl: text("wordpress_url"),
+    siteType: text("site_type"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -521,21 +539,27 @@ export const operations = pgTable(
   (t) => [
     index("idx_operations_org_status").on(t.organizationId, t.status),
     index("idx_operations_lock_key").on(t.lockKey),
+    index("idx_operations_resource_submitted").on(t.resourceId, t.submittedAt),
+    index("idx_operations_org_submitted").on(t.organizationId, t.submittedAt),
   ],
 );
 
-export const operationSteps = pgTable("operation_steps", {
-  id: text("id").primaryKey(),
-  operationId: text("operation_id")
-    .notNull()
-    .references(() => operations.id, { onDelete: "cascade" }),
-  key: text("key").notNull(),
-  label: text("label").notNull(),
-  status: text("status").$type<OperationStepStatus>().notNull().default("pending"),
-  message: text("message"),
-  startedAt: timestamp("started_at", { withTimezone: true }),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-});
+export const operationSteps = pgTable(
+  "operation_steps",
+  {
+    id: text("id").primaryKey(),
+    operationId: text("operation_id")
+      .notNull()
+      .references(() => operations.id, { onDelete: "cascade" }),
+    key: text("key").notNull(),
+    label: text("label").notNull(),
+    status: text("status").$type<OperationStepStatus>().notNull().default("pending"),
+    message: text("message"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [index("idx_operation_steps_operation").on(t.operationId)],
+);
 
 export const outboxEvents = pgTable(
   "outbox_events",
@@ -598,7 +622,7 @@ export const hostAgentHeartbeats = pgTable(
     hostId: text("host_id")
       .notNull()
       .references(() => hosts.id, { onDelete: "cascade" }),
-    component: text("component").$type<HostDaemonComponent>().notNull(),
+    component: text("component").$type<HeartbeatRowComponent>().notNull(),
     status: text("status").$type<HostDaemonStatus>().notNull(),
     version: text("version").notNull(),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
@@ -628,7 +652,10 @@ export const auditEvents = pgTable(
     details: jsonb("details").notNull().default({}),
     timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("idx_audit_events_org_timestamp").on(t.organizationId, t.timestamp)],
+  (t) => [
+    index("idx_audit_events_org_timestamp").on(t.organizationId, t.timestamp),
+    index("idx_audit_events_timestamp_id").on(t.timestamp, t.id),
+  ],
 );
 
 export const siteDatabases = pgTable(
@@ -654,6 +681,29 @@ export const siteDatabases = pgTable(
   ],
 );
 
+export const siteSftpUsers = pgTable(
+  "site_sftp_users",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    siteId: text("site_id").notNull(),
+    username: text("username").notNull().unique(),
+    passwordHash: text("password_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    passwordChangedAt: timestamp("password_changed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_site_sftp_users_site_org",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+    index("idx_site_sftp_users_site").on(t.organizationId, t.siteId),
+  ],
+);
+
 export const mailRelaySettings = pgTable("mail_relay_settings", {
   id: text("id").primaryKey(),
   host: text("host").notNull(),
@@ -666,4 +716,102 @@ export const mailRelaySettings = pgTable("mail_relay_settings", {
   passwordKeyVersion: text("password_key_version").notNull().default("v1"),
   updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const backupSettings = pgTable("backup_settings", {
+  id: text("id").primaryKey(),
+  endpoint: text("endpoint").notNull(),
+  region: text("region").notNull(),
+  bucket: text("bucket").notNull(),
+  prefix: text("prefix").notNull().default(""),
+  accessKeyId: text("access_key_id").notNull(),
+  secretAccessKeyCiphertextBase64: text("secret_access_key_ciphertext_base64").notNull(),
+  secretAccessKeyIvBase64: text("secret_access_key_iv_base64").notNull(),
+  secretAccessKeyAuthTagBase64: text("secret_access_key_auth_tag_base64").notNull(),
+  secretAccessKeyKeyVersion: text("secret_access_key_key_version").notNull().default("v1"),
+  scheduleHourUtc: integer("schedule_hour_utc").notNull().default(2),
+  retentionDays: integer("retention_days").notNull().default(14),
+  lastNightlyRunOn: date("last_nightly_run_on", { mode: "string" }),
+  nightlyRunStartedAt: timestamp("nightly_run_started_at", { withTimezone: true }),
+  lastTestAt: timestamp("last_test_at", { withTimezone: true }),
+  lastTestOutcome: text("last_test_outcome").$type<"ok" | "failed">(),
+  lastTestProblem: text("last_test_problem").$type<BackupProblem>(),
+  lastPanelBackupAt: timestamp("last_panel_backup_at", { withTimezone: true }),
+  lastPanelBackupStatus: text("last_panel_backup_status").$type<"succeeded" | "failed">(),
+  lastPanelBackupProblem: text("last_panel_backup_problem").$type<BackupProblem>(),
+  updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const siteBackups = pgTable(
+  "site_backups",
+  {
+    id: text("id").primaryKey(),
+    siteId: text("site_id").notNull(),
+    kind: text("kind").$type<BackupKind>().notNull(),
+    status: text("status").$type<BackupStatus>().notNull(),
+    operationId: text("operation_id").unique(),
+    snapshotId: text("snapshot_id"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    problem: text("problem").$type<BackupProblem>(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    siteUrl: text("site_url"),
+    restoreOperationId: text("restore_operation_id"),
+    restoreStatus: text("restore_status").$type<"running" | "succeeded" | "failed">(),
+    restoreProblem: text("restore_problem").$type<BackupProblem>(),
+    restoredAt: timestamp("restored_at", { withTimezone: true }),
+    archiveOperationId: text("archive_operation_id"),
+    archiveStatus: text("archive_status").$type<"preparing" | "ready" | "failed">(),
+    archiveProblem: text("archive_problem").$type<BackupProblem>(),
+    archiveReadyUntil: timestamp("archive_ready_until", { withTimezone: true }),
+  },
+  (t) => [index("idx_site_backups_site_started").on(t.siteId, t.startedAt)],
+);
+
+export const siteWordpressState = pgTable(
+  "site_wordpress_state",
+  {
+    siteId: text("site_id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    state: jsonb("state").$type<unknown>(),
+    lastUpdate: jsonb("last_update").$type<unknown>(),
+    lastImport: jsonb("last_import").$type<unknown>(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    foreignKey({
+      columns: [t.siteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_site_wordpress_state_site_org",
+    })
+      .onUpdate("cascade")
+      .onDelete("cascade"),
+  ],
+);
+
+// No foreign keys: the row and its audit outlive the site and the user.
+export const adminTerminalSessions = pgTable(
+  "admin_terminal_sessions",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    siteId: text("site_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    containerName: text("container_name").notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    closeReason: text("close_reason").$type<TerminalEndReason>(),
+  },
+  (t) => [index("idx_admin_terminal_sessions_open").on(t.openedAt).where(sql`${t.closedAt} IS NULL`)],
+);
+
+// No CHECK on name: the safe list lives in the contracts and may change without a migration.
+export const firewallOpenPorts = pgTable("firewall_open_ports", { name: text("name").primaryKey() });
+export const firewallBlocks = pgTable("firewall_blocks", {
+  id: text("id").primaryKey(),
+  family: text("family").notNull().$type<FirewallFamily>(),
+  cidr: text("cidr").notNull().unique(),
+  note: text("note"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });

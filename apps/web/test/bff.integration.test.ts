@@ -27,6 +27,7 @@ import { POST as postCustomerAccount } from "../src/app/api/admin/customer-accou
 import { PATCH as patchAdminUser } from "../src/app/api/admin/users/[userId]/route";
 import { POST as postAdminResetPassword } from "../src/app/api/admin/users/[userId]/reset-password/route";
 import { POST as postAdminResetTotp } from "../src/app/api/admin/users/[userId]/reset-totp/route";
+import { POST as postAdminSiteBackupRun } from "../src/app/api/admin/backups/sites/[siteId]/run/route";
 import { PATCH as patchHostMode } from "../src/app/api/bff/hosts/[hostId]/mode/route";
 import { POST as postHostMaintenance } from "../src/app/api/bff/hosts/[hostId]/maintenance/route";
 import { POST as postHostSecurity } from "../src/app/api/bff/hosts/[hostId]/security/route";
@@ -74,6 +75,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
   let mockRuntimeBackend: RuntimeBackend = "disabled";
   let lastReceivedIdempotencyKey: string | undefined;
   let lastLoginBody: Record<string, unknown> = {};
+  const upstreamRequests: Array<{ method: string; path: string }> = [];
   const storedSecrets = new Map<
     string,
     {
@@ -98,6 +100,7 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     server = http.createServer((req, res) => {
       const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
       const method = req.method || "GET";
+      upstreamRequests.push({ method, path: url.pathname });
       lastReceivedIdempotencyKey =
         typeof req.headers["idempotency-key"] === "string"
           ? req.headers["idempotency-key"]
@@ -214,7 +217,9 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
                 hostAgentRuntimeAvailable: isPhase2,
                 acmeTlsRuntimeAvailable: false,
                 sftpAvailable: false,
+                phpMyAdminAvailable: false,
                 productionBackupRuntimeAvailable: false,
+                wordpressToolsAvailable: false,
               },
             },
           };
@@ -723,6 +728,25 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
           return;
         }
 
+        if (method === "POST" && /^\/v1\/admin\/backups\/sites\/[^/]+\/run$/.test(url.pathname)) {
+          if (!req.headers["idempotency-key"]) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(
+              JSON.stringify(
+                createErrorEnvelope({
+                  code: "VALIDATION_ERROR",
+                  message: "Idempotency-Key mancante",
+                  requestId: "req-backup-run-idem",
+                })
+              )
+            );
+            return;
+          }
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ data: { operationId: "op_backup_run_1", status: "queued" } }));
+          return;
+        }
+
         // Fallback
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { code: "NOT_FOUND", message: "Not found", requestId: "404" } }));
@@ -1152,7 +1176,9 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       expect(caps.sharedHostingEnabled).toBe(false);
       expect(caps.acmeTlsRuntimeAvailable).toBe(false);
       expect(caps.sftpAvailable).toBe(false);
+      expect(caps.phpMyAdminAvailable).toBe(false);
       expect(caps.productionBackupRuntimeAvailable).toBe(false);
+      expect(caps.wordpressToolsAvailable).toBe(false);
 
       // Missing CSRF on lifecycle must fail with 403
       const noCsrfRes = await postOrgLifecycle(
@@ -1614,5 +1640,128 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
     const updated = await decryptSession(extractRawCookieValue(res));
     expect(updated?.user.locale).toBe("en");
     expect(updated?.accessToken).toBe("mock-customer-token-jwt-secret-val");
+  });
+
+  it("16. forwardToUpstream and forwardIdempotent reject 2 MiB bodies with 413 without hitting upstream while normal bodies pass", async () => {
+    const cookiePair = extractCookiePair(await loginAs("admin@platform.local"));
+    const sessionRes = await getSession(
+      new Request("http://localhost:3000/api/session", {
+        headers: { Host: "localhost:3000", Cookie: cookiePair },
+      })
+    );
+    const { csrfToken } = (await sessionRes.json()) as { csrfToken: string };
+    const twoMibJson = JSON.stringify({ locale: "en", padding: "x".repeat(2 * 1024 * 1024) });
+    const hitsBefore = upstreamRequests.length;
+
+    // 1) forwardToUpstream rejects 2 MiB body (no Content-Length) with 413 and never hits upstream
+    const proxyOversized = await patchAccountLocale(
+      new Request("http://localhost:3000/api/account/locale", {
+        method: "PATCH",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Content-Type": "application/json",
+        },
+        body: twoMibJson,
+      })
+    );
+    expect(proxyOversized.status).toBe(413);
+    expect(upstreamRequests.length).toBe(hitsBefore);
+
+    // 2) forwardToUpstream rejects declared Content-Length > 1 MiB with 413 and never hits upstream
+    const proxyDeclaredLarge = await patchAccountLocale(
+      new Request("http://localhost:3000/api/account/locale", {
+        method: "PATCH",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Content-Type": "application/json",
+          "Content-Length": String(2 * 1024 * 1024),
+        },
+        body: JSON.stringify({ locale: "en" }),
+      })
+    );
+    expect(proxyDeclaredLarge.status).toBe(413);
+    expect(upstreamRequests.length).toBe(hitsBefore);
+
+    // 3) forwardIdempotent rejects 2 MiB body and declared Content-Length > 1 MiB with 413 without hitting upstream
+    const siteCtx = { params: Promise.resolve({ siteId: "site_1" }) };
+    const idemOversized = await postAdminSiteBackupRun(
+      new Request("http://localhost:3000/api/admin/backups/sites/site_1/run", {
+        method: "POST",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Idempotency-Key": "idem-too-big-1",
+          "Content-Type": "application/json",
+        },
+        body: twoMibJson,
+      }),
+      siteCtx
+    );
+    expect(idemOversized.status).toBe(413);
+    expect(upstreamRequests.length).toBe(hitsBefore);
+
+    const idemDeclaredLarge = await postAdminSiteBackupRun(
+      new Request("http://localhost:3000/api/admin/backups/sites/site_1/run", {
+        method: "POST",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Idempotency-Key": "idem-too-big-2",
+          "Content-Type": "application/json",
+          "Content-Length": String(2 * 1024 * 1024),
+        },
+        body: "{}",
+      }),
+      siteCtx
+    );
+    expect(idemDeclaredLarge.status).toBe(413);
+    expect(upstreamRequests.length).toBe(hitsBefore);
+
+    // 4) Normal bodies still reach upstream cleanly
+    const proxyOk = await patchAccountLocale(
+      new Request("http://localhost:3000/api/account/locale", {
+        method: "PATCH",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ locale: "it" }),
+      })
+    );
+    expect(proxyOk.status).toBe(204);
+
+    const idemOk = await postAdminSiteBackupRun(
+      new Request("http://localhost:3000/api/admin/backups/sites/site_1/run", {
+        method: "POST",
+        headers: {
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+          Cookie: cookiePair,
+          "X-CSRF-Token": csrfToken,
+          "Idempotency-Key": "idem-normal-1",
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      }),
+      siteCtx
+    );
+    expect(idemOk.status).toBe(202);
+    expect(upstreamRequests.slice(hitsBefore)).toEqual([
+      { method: "PATCH", path: "/v1/me/locale" },
+      { method: "POST", path: "/v1/admin/backups/sites/site_1/run" },
+    ]);
   });
 });

@@ -1,0 +1,17 @@
+CREATE INDEX IF NOT EXISTS idx_operation_steps_operation ON operation_steps (operation_id);
+CREATE INDEX IF NOT EXISTS idx_hosts_status_mode ON hosts (status, hosting_mode);
+CREATE INDEX IF NOT EXISTS idx_organizations_slug ON organizations (slug);
+CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships (user_id);
+CREATE INDEX IF NOT EXISTS idx_membership_roles_membership ON membership_roles (membership_id);
+CREATE INDEX IF NOT EXISTS idx_hosting_admin_scopes_user ON hosting_admin_scopes (user_id);
+CREATE INDEX IF NOT EXISTS idx_support_grants_org_operator ON support_access_grants (organization_id, operator_user_id);
+CREATE INDEX IF NOT EXISTS idx_resource_grants_lookup ON resource_grants (organization_id, principal_user_id, resource_id);
+CREATE INDEX IF NOT EXISTS idx_host_allocations_host_status ON host_allocations (host_id, status);
+CREATE INDEX IF NOT EXISTS idx_docker_resources_service ON docker_resources (service_instance_id);
+CREATE INDEX IF NOT EXISTS idx_docker_resources_site ON docker_resources (site_id);
+CREATE INDEX IF NOT EXISTS idx_resource_quotas_org ON resource_quotas (organization_id);
+CREATE INDEX IF NOT EXISTS idx_quota_reservations_quota_status ON quota_reservations (resource_quota_id, status);
+CREATE INDEX IF NOT EXISTS idx_operations_org_status ON operations (organization_id, status);
+CREATE INDEX IF NOT EXISTS idx_operations_lock_key ON operations (lock_key);
+CREATE INDEX IF NOT EXISTS idx_outbox_events_status ON outbox_events (status);
+CREATE INDEX IF NOT EXISTS idx_audit_events_org_timestamp ON audit_events (organization_id, timestamp);

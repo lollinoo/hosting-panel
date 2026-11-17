@@ -1,0 +1,44 @@
+{
+  "afterCreate": {
+    "hashOf": {
+      "hosts": [
+        [
+          "wp-a.example.test",
+          false,
+          false,
+          null
+        ],
+        [
+          "www.wp-a.example.test",
+          false,
+          false,
+          "http://wp-a.example.test"
+        ]
+      ],
+      "wordpressUrl": "http://wp-a.example.test"
+    },
+    "recomputed": "e4cbda981de34e071b8873988afcb67d4ecdccf7be539260d5d9ecf5e9e64e36",
+    "routePlanHash": "e4cbda981de34e071b8873988afcb67d4ecdccf7be539260d5d9ecf5e9e64e36"
+  },
+  "afterPrimaryChange": {
+    "hashOf": {
+      "hosts": [
+        [
+          "wp-a.example.test",
+          true,
+          true,
+          "https://www.wp-a.example.test"
+        ],
+        [
+          "www.wp-a.example.test",
+          true,
+          true,
+          null
+        ]
+      ],
+      "wordpressUrl": "https://www.wp-a.example.test"
+    },
+    "recomputed": "3b53a564941746f1307de56fb49c058cab28021c2f31a6fccaba0904312d4c95",
+    "routePlanHash": "3b53a564941746f1307de56fb49c058cab28021c2f31a6fccaba0904312d4c95"
+  }
+}

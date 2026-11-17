@@ -2,6 +2,7 @@ import { z } from "zod";
 import { PresetRoleNameSchema } from "./permissions.js";
 import { SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
 import { CertificateAlertDtoSchema } from "./site-domains.js";
+import { SiteTypeKeySchema } from "./site-types/keys.js";
 
 export const PLATFORM_OPS_ORG_ID = "org_platform_ops";
 
@@ -131,7 +132,7 @@ export function findUnsafeDockerInputFields(value: unknown): string[] {
 }
 
 const PLAINTEXT_SECRET_KEY_PATTERN =
-  /^(password|secret|apiKey|privateKey|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
+  /^(password|secret|masterKey|apiKey|privateKey|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
 
 export function findPlaintextSecretKeys(value: unknown): string[] {
   const violations: string[] = [];
@@ -222,6 +223,26 @@ export const RUNTIME_BACKENDS = ["linux-systemd", "local-simulator", "disabled"]
 export const RuntimeBackendSchema = z.enum(RUNTIME_BACKENDS);
 export type RuntimeBackend = z.infer<typeof RuntimeBackendSchema>;
 
+/** SFTP is available only when the control plane runs on the Linux systemd backend. */
+export function isSftpAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
+/** phpMyAdmin runs only on the Linux systemd backend. */
+export function isPhpMyAdminAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
+/** Site backups run only on the Linux systemd backend. */
+export function isBackupAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
+/** WordPress tools run only on the Linux systemd backend. */
+export function isWordpressToolsAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
+}
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -230,8 +251,10 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.boolean(),
-  sftpAvailable: z.literal(false),
-  productionBackupRuntimeAvailable: z.literal(false),
+  sftpAvailable: z.boolean(),
+  phpMyAdminAvailable: z.boolean(),
+  productionBackupRuntimeAvailable: z.boolean(),
+  wordpressToolsAvailable: z.boolean(),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
 
@@ -244,7 +267,9 @@ export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.fre
   hostAgentRuntimeAvailable: false,
   acmeTlsRuntimeAvailable: false,
   sftpAvailable: false,
+  phpMyAdminAvailable: false,
   productionBackupRuntimeAvailable: false,
+  wordpressToolsAvailable: false,
 });
 
 export interface CreatePlatformCapabilitiesOptions {
@@ -270,8 +295,10 @@ export function createPlatformCapabilities(
         ? false
         : Boolean(options.hostAgentRuntimeAvailable),
       acmeTlsRuntimeAvailable: options.runtimeBackend === "linux-systemd",
-      sftpAvailable: false,
-      productionBackupRuntimeAvailable: false,
+      sftpAvailable: isSftpAvailable(options.runtimeBackend),
+      phpMyAdminAvailable: isPhpMyAdminAvailable(options.runtimeBackend),
+      productionBackupRuntimeAvailable: isBackupAvailable(options.runtimeBackend),
+      wordpressToolsAvailable: isWordpressToolsAvailable(options.runtimeBackend),
     }),
   );
 }
@@ -282,8 +309,10 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   dockerExecutorRuntimeAvailable: z.boolean(),
   hostAgentRuntimeAvailable: z.boolean(),
   acmeTlsRuntimeAvailable: z.boolean(),
-  sftpAvailable: z.literal(false),
-  productionBackupRuntimeAvailable: z.literal(false),
+  sftpAvailable: z.boolean(),
+  phpMyAdminAvailable: z.boolean(),
+  productionBackupRuntimeAvailable: z.boolean(),
+  wordpressToolsAvailable: z.boolean(),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;
 
@@ -313,6 +342,13 @@ export const MeMembershipDtoSchema = z.object({
 });
 export type MeMembershipDto = z.infer<typeof MeMembershipDtoSchema>;
 
+export const SupportAccessDtoSchema = z.object({
+  organizationId: EntityIdSchema,
+  organizationName: z.string().min(1),
+  expiresAt: IsoDateTimeSchema,
+});
+export type SupportAccessDto = z.infer<typeof SupportAccessDtoSchema>;
+
 export const MeDtoSchema = z.object({
   user: z.object({
     id: EntityIdSchema,
@@ -327,6 +363,7 @@ export const MeDtoSchema = z.object({
   hostingAdminOrgIds: z.array(EntityIdSchema),
   memberships: z.array(MeMembershipDtoSchema),
   platformCapabilities: PlatformCapabilitiesDtoSchema,
+  supportAccess: SupportAccessDtoSchema.optional(),
 });
 export type MeDto = z.infer<typeof MeDtoSchema>;
 
@@ -600,6 +637,8 @@ export const SiteSummaryDtoSchema = z.object({
   status: SiteStatusSchema,
   // null marks a pre-Step-2 row that is not a managed WordPress site
   phpVersion: z.enum(SUPPORTED_PHP_VERSIONS).nullable(),
+  // null: not a managed site (made through the generic service routes)
+  siteType: SiteTypeKeySchema.nullable(),
   createdAt: IsoDateTimeSchema,
   updatedAt: IsoDateTimeSchema,
 });
@@ -791,3 +830,29 @@ export const CreateCustomerAccountInputSchema = z.object({
   ownerName: z.string().trim().min(1).max(120),
 });
 export type CreateCustomerAccountInput = z.infer<typeof CreateCustomerAccountInputSchema>;
+
+export const CreateAdministratorInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+  name: z.string().trim().min(1).max(200),
+});
+export type CreateAdministratorInput = z.infer<typeof CreateAdministratorInputSchema>;
+
+export const CreateAdministratorResultDtoSchema = z.object({
+  userId: EntityIdSchema,
+  email: z.string().email(),
+  temporaryPassword: z.string().min(12),
+  totpSecretBase32: z.string().min(16),
+  otpauthUri: z.string().startsWith("otpauth://"),
+});
+export type CreateAdministratorResultDto = z.infer<typeof CreateAdministratorResultDtoSchema>;
+
+export const PasswordResetRequestInputSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+});
+export type PasswordResetRequestInput = z.infer<typeof PasswordResetRequestInputSchema>;
+
+export const PasswordResetConfirmInputSchema = z.object({
+  token: z.string().min(1).max(128),
+  newPassword: z.string().max(1024),
+});
+export type PasswordResetConfirmInput = z.infer<typeof PasswordResetConfirmInputSchema>;
