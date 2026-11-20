@@ -338,6 +338,13 @@ describe("Phase1DisabledDockerExecutor mail", () => {
   });
 });
 
+describe("Phase1DisabledDockerExecutor DNS provider", () => {
+  it("applyDnsProvider is refused with NOT_SUPPORTED on the disabled executor", async () => {
+    const executor = new Phase1DisabledDockerExecutor();
+    await expect(executor.applyDnsProvider(null)).rejects.toMatchObject({ code: "NOT_SUPPORTED" });
+  });
+});
+
 describe("Phase1DisabledDockerExecutor siteDatabases", () => {
   it("returns {} for dropAll and refuses every other operation with NOT_SUPPORTED", async () => {
     const executor = new Phase1DisabledDockerExecutor();

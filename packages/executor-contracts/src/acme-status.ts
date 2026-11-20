@@ -27,4 +27,6 @@ export interface CertificateStatusReport {
   readonly readable: boolean;
   readonly certificates: readonly StoredCertificate[];
   readonly failures: readonly AcmeFailure[];
+  /** The proxy has the le-dns resolver (a DNS provider is applied and ACME is on). */
+  readonly dnsChallenge?: boolean;
 }
