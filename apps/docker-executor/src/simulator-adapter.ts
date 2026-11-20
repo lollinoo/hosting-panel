@@ -8,6 +8,7 @@ import {
   type BackupsIpcRequest,
   type BackupsResultByAction,
   type CertProblem,
+  type DnsProviderApplyRequest,
   type MailRelayApplyRequest,
   PANEL_CONTAINERS,
   PINNED_PANEL_CONTAINERS,
@@ -221,6 +222,9 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   /** Every panel mail request in order. */
   public readonly panelMails: PanelMailRequest[] = [];
   private failingMailApplies = 0;
+  public dnsProvider: DnsProviderApplyRequest | null = null;
+  public dnsProviderApplies = 0;
+  private failDnsProviderApplyOnce = false;
   public sftpUsers: SftpAccessUser[] = [];
   /** Every SFTP apply request in order. */
   public readonly sftpApplies: SftpAccessApplyRequest[] = [];
@@ -338,6 +342,19 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     }
     this.mailRelayApplies.push(req === null ? null : { ...req });
     this.mailRelay = req === null ? null : { ...req };
+  }
+
+  public failNextDnsProviderApply(): void {
+    this.failDnsProviderApplyOnce = true;
+  }
+
+  public async applyDnsProvider(req: DnsProviderApplyRequest | null): Promise<void> {
+    if (this.failDnsProviderApplyOnce) {
+      this.failDnsProviderApplyOnce = false;
+      throw new ExecutorCodedError("Simulated DNS provider apply failure", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    this.dnsProviderApplies += 1;
+    this.dnsProvider = req === null ? null : structuredClone(req);
   }
 
   public async getMailRelayStatus(_req: { since: string }): Promise<MailRelayStatusReport> {
@@ -523,6 +540,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     const since = Date.parse(req.failuresSince);
     return {
       acmeEnabled: this.acmeEnabled,
+      dnsChallenge: this.acmeEnabled && this.dnsProvider !== null,
       trusted: true,
       readable: this.certStoreReadable,
       certificates: this.certStoreReadable ? [...this.certificates.values()] : [],
@@ -856,6 +874,17 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     if (!container) {
       throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
     }
+    if (resolvedSecrets && Object.keys(resolvedSecrets).length > 0) {
+      if (this.secretsRootDir) {
+        await writeServiceSecrets(this.secretsRootDir, serviceInstanceId, resolvedSecrets, { additive: true });
+      } else {
+        const names = this.virtualSecretFiles.get(serviceInstanceId) ?? new Set<string>();
+        for (const name of Object.keys(resolvedSecrets)) {
+          names.add(name);
+        }
+        this.virtualSecretFiles.set(serviceInstanceId, names);
+      }
+    }
 
     container.running = true;
     container.status = "running";
@@ -874,17 +903,6 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public async stopService(serviceInstanceId: string): Promise<DockerExecutionResult> {
     this.assertEngineAvailable();
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
-    if (resolvedSecrets && Object.keys(resolvedSecrets).length > 0) {
-      if (this.secretsRootDir) {
-        await writeServiceSecrets(this.secretsRootDir, serviceInstanceId, resolvedSecrets, { additive: true });
-      } else {
-        const names = this.virtualSecretFiles.get(serviceInstanceId) ?? new Set<string>();
-        for (const name of Object.keys(resolvedSecrets)) {
-          names.add(name);
-        }
-        this.virtualSecretFiles.set(serviceInstanceId, names);
-      }
-    }
     const container = this.containersByServiceId.get(serviceInstanceId);
     if (!container) {
       await this.cleanupSecrets(serviceInstanceId);

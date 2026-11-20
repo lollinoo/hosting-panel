@@ -120,6 +120,18 @@ export {
 } from "./traefik-config.js";
 
 export {
+  ACME_DNS_SECRET_MOUNT,
+  DEFAULT_ACME_DNS_SECRET_DIR,
+  DNS_PROVIDER_STATE_FILE,
+  DNS_RESOLVER_NAME,
+  assertDnsProviderApplyRequest,
+  dnsProviderFileEnv,
+  dnsProviderState,
+  parseDnsProviderState,
+  type DnsProviderState,
+} from "./dns-provider.js";
+
+export {
   DEFAULT_EXECUTOR_SOCKET_MODE,
   DEFAULT_EXECUTOR_SOCKET_PATH,
   DEFAULT_EXECUTOR_VERSION,

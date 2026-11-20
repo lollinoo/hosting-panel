@@ -1666,6 +1666,7 @@ describe("site routes and certificates", () => {
       trusted: true,
       readable: false,
       certificates: [],
+      dnsChallenge: false,
       failures: [],
     });
   });
@@ -1740,7 +1741,11 @@ describe("site routes and certificates", () => {
       trusted: true,
       readable: true,
       failures: [],
-      certificates: [{ hostname: "hotel.it", notAfter: "2036-11-06T04:46:29.000Z" }],
+      // One entry per SAN of the stored certificate.
+      certificates: [
+        { hostname: "hotel.it", notAfter: "2036-11-06T04:46:29.000Z" },
+        { hostname: "www.hotel.it", notAfter: "2036-11-06T04:46:29.000Z" },
+      ],
     });
     const body = JSON.stringify(report);
     expect(body).not.toContain('"key"');

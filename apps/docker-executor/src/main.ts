@@ -250,6 +250,7 @@ export async function bootstrapDockerExecutorDaemon(
   const siteMailDir = env.HP_SITE_MAIL_DIR?.trim() || DEFAULT_SITE_MAIL_DIR;
   const siteFilesDir = env.HP_SITE_FILES_DIR?.trim() || DEFAULT_SITE_FILES_DIR;
   const mailRelaySecretDir = env.HP_MAIL_RELAY_SECRET_DIR?.trim();
+  const acmeDnsSecretDir = env.HP_ACME_DNS_SECRET_DIR?.trim();
   const sftpStateDir = env.HP_SFTP_STATE_DIR?.trim();
   const sftpPort = parseSftpPortFromEnv(env);
   const phpMyAdminConfigDir =
@@ -272,6 +273,7 @@ export async function bootstrapDockerExecutorDaemon(
         siteMailDir,
         siteFilesDir,
         ...(mailRelaySecretDir ? { mailRelaySecretDir } : {}),
+        ...(acmeDnsSecretDir ? { acmeDnsSecretDir } : {}),
         ...(sftpStateDir ? { sftpStateDir } : {}),
         ...(sftpPort !== undefined ? { sftpPort } : {}),
         phpMyAdminConfigDir,

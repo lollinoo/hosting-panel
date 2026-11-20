@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
 import path from "node:path";
 import {
@@ -10,6 +10,13 @@ import {
   type SiteHostRoute,
 } from "@hosting-panel/contracts";
 import { readAcmeCertificates } from "./acme-status.js";
+import {
+  ACME_DNS_SECRET_MOUNT,
+  DNS_PROVIDER_STATE_FILE,
+  DNS_RESOLVER_NAME,
+  parseDnsProviderState,
+  type DnsProviderState,
+} from "./dns-provider.js";
 
 export const INGRESS_PROXY_CONTAINER_NAME = "hp_ingress_proxy" as const;
 export const SITE_JOB_ROLE = "site_job" as const;
@@ -156,13 +163,19 @@ export interface SiteIngressRouteEntry {
 
 export interface SiteRouteOptions {
   readonly acmeEnabled: boolean;
+  /** The static config has the le-dns resolver. */
+  readonly dnsChallenge: boolean;
   /** Panel hostname and IPv4: never routable to a site. */
   readonly reservedHosts: readonly string[];
 }
 
-export function siteRouteOptions(panel: PanelIngressConfig | null): SiteRouteOptions {
+export function siteRouteOptions(
+  panel: PanelIngressConfig | null,
+  dns: DnsProviderState | null = null,
+): SiteRouteOptions {
   return {
     acmeEnabled: Boolean(panel?.acmeEmail),
+    dnsChallenge: Boolean(panel?.acmeEmail && dns),
     reservedHosts: panel ? [panel.hostname.trim().toLowerCase(), panel.ipv4.trim()] : [],
   };
 }
@@ -209,7 +222,10 @@ function assertAcmeCaServer(url: string): string {
   return url;
 }
 
-export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string {
+export function buildTraefikStaticYaml(
+  panel: PanelIngressConfig | null,
+  dns: DnsProviderState | null = null,
+): string {
   const lines = [
     "# Managed by hp-docker-executor — Zero-Sock Static Configuration (HCP-SPEC-003 §4.2)",
     "api:",
@@ -237,9 +253,8 @@ export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string
       ? ACME_STAGING_URL
       : null;
   if (panel?.acmeEmail) {
-    lines.push(
-      "certificatesResolvers:",
-      "  le:",
+    // Both resolvers share one store and one CA, so a host switching challenge keeps its certificate.
+    const acme = [
       "    acme:",
       `      email: ${JSON.stringify(assertAcmeEmail(panel.acmeEmail))}`,
       `      storage: /etc/traefik/acme/${acmeStorageFileName(panel)}`,
@@ -247,8 +262,16 @@ export function buildTraefikStaticYaml(panel: PanelIngressConfig | null): string
       ...(panel.acmeCaServer && panel.acmeCaCertFile
         ? ["      caCertificates:", `        - /etc/traefik/acme/${CUSTOM_CA_FILE_NAME}`]
         : []),
+    ];
+    lines.push(
+      "certificatesResolvers:",
+      "  le:",
+      ...acme,
       "      httpChallenge:",
       "        entryPoint: web",
+      ...(dns
+        ? [`  ${DNS_RESOLVER_NAME}:`, ...acme, "      dnsChallenge:", `        provider: ${dns.provider}`]
+        : []),
       "",
     );
   }
@@ -320,12 +343,14 @@ function assertSiteHostRoute(host: SiteHostRoute, reserved: ReadonlySet<string>)
     if (!isSiteOrigin(host.redirectTo)) hostPolicyDenied("redirect origin");
     if (reserved.has(host.redirectTo.replace(/^https?:\/\//, ""))) hostPolicyDenied("redirect origin");
   }
-  return {
+  const base = {
     hostname: host.hostname,
     tls: host.tls === true,
     httpsRedirect: host.httpsRedirect === true,
     redirectTo: host.redirectTo,
   };
+  // http-01 stays implicit, so its route files and @hp-route lines stay byte-identical.
+  return host.challenge === "dns-01" ? { ...base, challenge: "dns-01" } : base;
 }
 
 /** Every host and redirect passes policy; a redirect lands on another non-redirecting host of the set. */
@@ -421,10 +446,13 @@ export function buildSiteDynamicTraefikYaml(
       ];
       routers.push(...router(`router_${key}_${i}`, "web", httpMiddleware));
       if (host.tls && opts.acmeEnabled) {
+        const dns01 = host.challenge === "dns-01";
         routers.push(
           ...router(`router_${key}_${i}_tls`, "websecure", canon),
-          "      tls:",
-          "        certResolver: le",
+          // Without le-dns a dns-01 host serves the default certificate instead of failing.
+          ...(dns01 && !opts.dnsChallenge
+            ? ["      tls: {}"]
+            : ["      tls:", `        certResolver: ${dns01 ? DNS_RESOLVER_NAME : "le"}`]),
         );
       }
       if (canon !== null) {
@@ -472,7 +500,8 @@ function isSiteHostRouteShape(value: unknown): value is SiteHostRoute {
     typeof h?.hostname === "string" &&
     typeof h.tls === "boolean" &&
     typeof h.httpsRedirect === "boolean" &&
-    (h.redirectTo === null || typeof h.redirectTo === "string")
+    (h.redirectTo === null || typeof h.redirectTo === "string") &&
+    (h.challenge === undefined || h.challenge === "http-01" || h.challenge === "dns-01")
   );
 }
 
@@ -527,12 +556,15 @@ export interface IngressProxyContainerConfigInput {
   readonly staticSha256?: string;
   /** "uid:gid" the proxy runs as; with CapDrop ALL, container root cannot read hp-executor-owned dirs. */
   readonly user?: string;
+  /** DNS-01 provider credentials: a read-only dir of files, and only `<NAME>_FILE` paths in Env. */
+  readonly acmeDns?: { readonly secretDirHostPath: string; readonly env: readonly string[] };
 }
 
 export interface DockerIngressProxyCreatePayload {
   readonly Image: string;
   readonly Cmd: readonly string[];
   readonly User?: string;
+  readonly Env?: readonly string[];
   readonly Labels: Readonly<Record<string, string>>;
   readonly ExposedPorts: Readonly<Record<string, Record<string, never>>>;
   readonly HostConfig: {
@@ -568,9 +600,12 @@ export function buildIngressProxyContainerPayload(
   assertValidPort(httpsPort, "Ingress HTTPS host port");
 
   if (
-    [input.staticConfigHostPath, input.dynamicDirHostPath, input.acmeDirHostPath].some((p) =>
-      p.includes("docker.sock"),
-    )
+    [
+      input.staticConfigHostPath,
+      input.dynamicDirHostPath,
+      input.acmeDirHostPath,
+      ...(input.acmeDns ? [input.acmeDns.secretDirHostPath] : []),
+    ].some((p) => p.includes("docker.sock"))
   ) {
     throw new ExecutorCodedError(
       "Mounting docker.sock into ingress proxy is strictly forbidden (TH-02)",
@@ -582,6 +617,7 @@ export function buildIngressProxyContainerPayload(
     Image: image,
     Cmd: ["--configFile=/etc/traefik/traefik.yml"],
     ...(input.user ? { User: input.user } : {}),
+    ...(input.acmeDns ? { Env: [...input.acmeDns.env] } : {}),
     Labels: {
       "io.hostingpanel.managed": "true",
       "io.hostingpanel.role": "ingress_proxy",
@@ -608,6 +644,7 @@ export function buildIngressProxyContainerPayload(
         `${input.dynamicDirHostPath}:/etc/traefik/dynamic:ro`,
         // The only read-write mount: Traefik persists ACME account + certificates here.
         `${input.acmeDirHostPath}:/etc/traefik/acme`,
+        ...(input.acmeDns ? [`${input.acmeDns.secretDirHostPath}:${ACME_DNS_SECRET_MOUNT}:ro`] : []),
       ],
       ExtraHosts: ["host.docker.internal:host-gateway"],
       // The executor reads ACME failures from this log, so it must stay bounded.
@@ -625,22 +662,82 @@ export class TraefikIngressFileManager {
   public readonly staticConfigPath: string;
   public readonly dynamicDirPath: string;
   public readonly acmeDirPath: string;
+  public readonly dnsProviderStatePath: string;
   private readonly siteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
-  private readonly routeOptions: SiteRouteOptions;
+  private readonly panel: PanelIngressConfig | null;
+  private routeOptions: SiteRouteOptions;
+  /** undefined until loaded from disk. */
+  private dnsState: DnsProviderState | null | undefined;
   // Until gatePanelCertificate runs (the executor runs it before the first ensure), keep the resolver.
   private panelRequestCertificate = true;
   private panelGateDecided = false;
+  /** One writer of dynamic/site_*.yml at a time: the DNS re-render rewrites every site file. */
+  private siteFileLine: Promise<unknown> = Promise.resolve();
 
   public constructor(
     ingressRootDir: string = DEFAULT_INGRESS_ROOT_DIR,
     panel: PanelIngressConfig | null = null,
   ) {
+    this.panel = panel;
     this.routeOptions = siteRouteOptions(panel);
     this.ingressRootDir = path.resolve(ingressRootDir);
     this.staticConfigPath = path.join(this.ingressRootDir, "static", "traefik.yml");
     this.dynamicDirPath = path.join(this.ingressRootDir, "dynamic");
     this.acmeDirPath = path.join(this.ingressRootDir, "acme");
+    this.dnsProviderStatePath = path.join(this.ingressRootDir, DNS_PROVIDER_STATE_FILE);
+  }
+
+  private inSiteFileLine<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.siteFileLine.then(work);
+    this.siteFileLine = run.catch(() => undefined);
+    return run;
+  }
+
+  private rememberDnsState(state: DnsProviderState | null): DnsProviderState | null {
+    this.dnsState = state;
+    this.routeOptions = siteRouteOptions(this.panel, state);
+    return state;
+  }
+
+  /** The provider survives restarts in a names-only file; missing or invalid means none. */
+  public async loadDnsProviderState(): Promise<DnsProviderState | null> {
+    if (this.dnsState !== undefined) return this.dnsState;
+    const text = await readFile(this.dnsProviderStatePath, "utf8").catch(() => null);
+    return this.rememberDnsState(text === null ? null : parseDnsProviderState(text));
+  }
+
+  /** Returns whether the persisted state changed. */
+  public setDnsProviderState(state: DnsProviderState | null): Promise<boolean> {
+    return this.inSiteFileLine(() => this.applyDnsProviderState(state));
+  }
+
+  private async applyDnsProviderState(state: DnsProviderState | null): Promise<boolean> {
+    const previous = await this.loadDnsProviderState();
+    const changed = JSON.stringify(previous) !== JSON.stringify(state);
+    if (state) {
+      await mkdir(this.ingressRootDir, { recursive: true, mode: 0o755 });
+      await writeFileIfChanged(this.dnsProviderStatePath, JSON.stringify(state), 0o600);
+    } else {
+      await rm(this.dnsProviderStatePath, { force: true });
+    }
+    this.rememberDnsState(state);
+    if (changed) await this.rerenderSiteFiles();
+    return changed;
+  }
+
+  /** dns-01 hosts follow the resolver choice; files that would not change are not rewritten. */
+  private async rerenderSiteFiles(): Promise<void> {
+    const names = await readdir(this.dynamicDirPath).catch(() => [] as string[]);
+    for (const name of names) {
+      const siteId = /^site_(.+)\.yml$/.exec(name)?.[1];
+      if (!siteId || siteId.includes("..") || !SAFE_IDENTIFIER_PATTERN.test(siteId)) continue;
+      const siteMap = await this.getOrHydrateSiteMap(siteId);
+      // A file without @hp-route lines is not ours to rewrite or delete.
+      if (siteMap.size === 0) continue;
+      // One bad file must not stop the others: the state is already saved, so no retry would reach them.
+      await this.flushSiteDynamicFile(siteId, siteMap).catch(() => undefined);
+    }
   }
 
   /**
@@ -662,7 +759,7 @@ export class TraefikIngressFileManager {
       // The last decision: in memory, or after a restart the file already on disk (fresh install: no).
       const previous = this.panelGateDecided
         ? this.panelRequestCertificate
-        : (await readFile(panelFile, "utf8").catch(() => "")).includes("certResolver: le");
+        : /^\s*certResolver: le$/m.test(await readFile(panelFile, "utf8").catch(() => ""));
       wanted = store.certificates.some((c) => c.hostname === hostname && Date.parse(c.notAfter) > now);
       if (!wanted) {
         try {
@@ -694,6 +791,8 @@ export class TraefikIngressFileManager {
     readonly dynamicDirPath: string;
     readonly acmeDirPath: string;
     readonly staticSha256: string;
+    /** The provider the proxy container must mount; null without le-dns. */
+    readonly acmeDns: DnsProviderState | null;
   }> {
     await mkdir(path.dirname(this.staticConfigPath), { recursive: true, mode: 0o755 });
     await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
@@ -720,7 +819,8 @@ export class TraefikIngressFileManager {
       await rm(panelFilePath, { force: true });
     }
 
-    const staticYaml = buildTraefikStaticYaml(panel);
+    const dnsState = await this.loadDnsProviderState();
+    const staticYaml = buildTraefikStaticYaml(panel, dnsState);
 
     let needsWrite = true;
     try {
@@ -748,6 +848,7 @@ export class TraefikIngressFileManager {
       dynamicDirPath: this.dynamicDirPath,
       acmeDirPath: this.acmeDirPath,
       staticSha256: createHash("sha256").update(staticYaml).digest("hex"),
+      acmeDns: panel?.acmeEmail ? dnsState : null,
     };
   }
 
@@ -773,16 +874,24 @@ export class TraefikIngressFileManager {
     return existing;
   }
 
-  public async upsertServiceRoute(
+  public upsertServiceRoute(
+    siteId: string,
+    route: SiteIngressRouteEntry,
+  ): Promise<{ readonly configured: boolean; readonly remainingSiteRoutes: number }> {
+    return this.inSiteFileLine(() => this.upsertServiceRouteNow(siteId, route));
+  }
+
+  private async upsertServiceRouteNow(
     siteId: string,
     route: SiteIngressRouteEntry,
   ): Promise<{ readonly configured: boolean; readonly remainingSiteRoutes: number }> {
     assertSafeIdentifier(siteId, "siteId");
     assertSafeIdentifier(route.serviceInstanceId, "serviceInstanceId");
+    await this.loadDnsProviderState();
 
     const previousSiteId = this.serviceToSite.get(route.serviceInstanceId);
     if (previousSiteId && previousSiteId !== siteId) {
-      await this.removeServiceRoute(route.serviceInstanceId, previousSiteId);
+      await this.removeServiceRouteNow(route.serviceInstanceId, previousSiteId);
     }
 
     const siteMap = await this.getOrHydrateSiteMap(siteId);
@@ -808,7 +917,14 @@ export class TraefikIngressFileManager {
     return { configured: true, remainingSiteRoutes: next.size };
   }
 
-  public async removeServiceRoute(
+  public removeServiceRoute(
+    serviceInstanceId: string,
+    knownSiteId?: string,
+  ): Promise<{ readonly siteId: string | null; readonly remainingSiteRoutes: number }> {
+    return this.inSiteFileLine(() => this.removeServiceRouteNow(serviceInstanceId, knownSiteId));
+  }
+
+  private async removeServiceRouteNow(
     serviceInstanceId: string,
     knownSiteId?: string,
   ): Promise<{ readonly siteId: string | null; readonly remainingSiteRoutes: number }> {
@@ -817,6 +933,7 @@ export class TraefikIngressFileManager {
     if (!siteId) {
       return { siteId: null, remainingSiteRoutes: 0 };
     }
+    await this.loadDnsProviderState();
 
     const siteMap = await this.getOrHydrateSiteMap(siteId);
     siteMap.delete(serviceInstanceId);
@@ -825,8 +942,13 @@ export class TraefikIngressFileManager {
     return { siteId, remainingSiteRoutes: siteMap.size };
   }
 
-  public async removeSiteRoutes(siteId: string): Promise<void> {
+  public removeSiteRoutes(siteId: string): Promise<void> {
+    return this.inSiteFileLine(() => this.removeSiteRoutesNow(siteId));
+  }
+
+  private async removeSiteRoutesNow(siteId: string): Promise<void> {
     const filePath = this.getSiteDynamicFilePath(siteId);
+    await this.loadDnsProviderState();
     for (const serviceId of (await this.getOrHydrateSiteMap(siteId)).keys()) {
       this.serviceToSite.delete(serviceId);
     }

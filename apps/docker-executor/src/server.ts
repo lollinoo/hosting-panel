@@ -7,6 +7,7 @@ import {
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
+  DnsProviderApplyIpcRequestSchema,
   ERROR_CODE_HTTP_STATUS,
   ErrorCodeSchema,
   ExecutorHealthResponseSchema,
@@ -490,6 +491,13 @@ export class DockerExecutorIpcServer {
       if (method === "POST" && pathname === "/v1/ingress/certificates") {
         const req = this.parseBody(CertificateStatusIpcRequestSchema, rawBody, "certificate status");
         writeJson(res, 200, { data: await this.executor.getCertificateStatus(req) });
+        return;
+      }
+
+      if (method === "POST" && pathname === "/v1/ingress/dns-provider/apply") {
+        const { config } = this.parseBody(DnsProviderApplyIpcRequestSchema, rawBody, "DNS provider");
+        await this.executor.applyDnsProvider(config);
+        writeJson(res, 200, { data: { applied: config !== null } });
         return;
       }
 
