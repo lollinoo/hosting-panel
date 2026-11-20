@@ -57,6 +57,54 @@ function extractRestartCount(obs: unknown): number {
   return 0;
 }
 
+/** Decrypts a revision's secretRefs; undefined when none resolves. Deploy and restart (#7) use it. */
+export async function resolveRevisionSecrets(
+  db: HostingPanelDatabase,
+  config: Pick<ControlPlaneRuntimeConfig, "secretsMasterKey">,
+  input: { organizationId: string; siteId: string; secretRefs: Record<string, string> },
+): Promise<Readonly<Record<string, string>> | undefined> {
+  const { organizationId, siteId, secretRefs: rawSecretRefs } = input;
+  let resolvedSecrets: Readonly<Record<string, string>> | undefined;
+
+  if (Object.keys(rawSecretRefs).length > 0) {
+    const metadataRows = await listEncryptedSecretsMetadata(db, {
+      organizationId,
+      siteId,
+      includeOrganizationScope: true,
+    });
+    const knownRefs = new Set<string>();
+    for (const row of metadataRows) {
+      knownRefs.add(row.id);
+      knownRefs.add(row.secretKey);
+    }
+
+    const refsToResolve: Record<string, string> = {};
+    for (const [envVarName, refValue] of Object.entries(rawSecretRefs)) {
+      if (refValue.startsWith("vault://")) {
+        if (knownRefs.has(refValue)) {
+          refsToResolve[envVarName] = refValue;
+        } else if (knownRefs.has(envVarName)) {
+          // Map Phase 1 demo vault:// placeholder to the encrypted secret matching envVarName
+          refsToResolve[envVarName] = envVarName;
+        }
+        // Otherwise skip legacy Phase 1 demo placeholder with no backing encrypted_secrets row
+        continue;
+      }
+      refsToResolve[envVarName] = refValue;
+    }
+
+    if (Object.keys(refsToResolve).length > 0) {
+      resolvedSecrets = await resolveDecryptedSecretRefs(db, {
+        organizationId,
+        siteId,
+        secretRefs: refsToResolve,
+        masterKey: config.secretsMasterKey,
+      });
+    }
+  }
+  return resolvedSecrets;
+}
+
 /** Builds the deploy spec of a service from its current revision, its site's routes and its secrets. */
 export async function buildApprovedServiceSpec(
   db: HostingPanelDatabase,
@@ -139,45 +187,11 @@ export async function buildApprovedServiceSpec(
 
   const domainHostnames = activeDomains.map((d) => d.hostname);
 
-  const rawSecretRefs = (rev.secretRefs ?? {}) as Record<string, string>;
-  let resolvedSecrets: Readonly<Record<string, string>> | undefined;
-
-  if (Object.keys(rawSecretRefs).length > 0) {
-    const metadataRows = await listEncryptedSecretsMetadata(db, {
-      organizationId,
-      siteId: site.id,
-      includeOrganizationScope: true,
-    });
-    const knownRefs = new Set<string>();
-    for (const row of metadataRows) {
-      knownRefs.add(row.id);
-      knownRefs.add(row.secretKey);
-    }
-
-    const refsToResolve: Record<string, string> = {};
-    for (const [envVarName, refValue] of Object.entries(rawSecretRefs)) {
-      if (refValue.startsWith("vault://")) {
-        if (knownRefs.has(refValue)) {
-          refsToResolve[envVarName] = refValue;
-        } else if (knownRefs.has(envVarName)) {
-          // Map Phase 1 demo vault:// placeholder to the encrypted secret matching envVarName
-          refsToResolve[envVarName] = envVarName;
-        }
-        // Otherwise skip legacy Phase 1 demo placeholder with no backing encrypted_secrets row
-        continue;
-      }
-      refsToResolve[envVarName] = refValue;
-    }
-
-    if (Object.keys(refsToResolve).length > 0) {
-      resolvedSecrets = await resolveDecryptedSecretRefs(db, {
-        organizationId,
-        siteId: site.id,
-        secretRefs: refsToResolve,
-        masterKey: config.secretsMasterKey,
-      });
-    }
-  }
+  const resolvedSecrets = await resolveRevisionSecrets(db, config, {
+    organizationId,
+    siteId: site.id,
+    secretRefs: (rev.secretRefs ?? {}) as Record<string, string>,
+  });
 
   const cfg = (rev.declarativeConfig ?? {}) as Record<string, unknown>;
   const secretEnvNames = new Set(Object.keys(resolvedSecrets ?? {}));

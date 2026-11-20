@@ -59,7 +59,7 @@ import {
   HOST_AGENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
-import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
+import { buildApprovedServiceSpec, recordDeployedState, resolveRevisionSecrets } from "./service-spec.js";
 import { executePanelContainerRestart, recoverPanelContainerRestart } from "../health/panel-restart.js";
 import { executePanelContainerApply, recoverPanelContainerApply } from "../updates/panel-container-apply.js";
 import { FirewallService } from "../firewall/firewall.service.js";
@@ -667,7 +667,7 @@ export class OutboxWorkerService {
     let gone = false;
     const execResult =
       kind === "service.restart"
-        ? await this.#restartOrRecreate(op, svc)
+        ? await this.#restartOrRecreate(op, svc, rev)
         : await this.dockerExecutor.stopService(svc.id).catch((err: unknown): DockerExecutionResult => {
             // D8: a container that is gone is already stopped; it is recorded missing and nothing is created.
             if (extractErrorCode(err) !== "NOT_FOUND") throw err;
@@ -728,9 +728,20 @@ export class OutboxWorkerService {
   async #restartOrRecreate(
     op: typeof operations.$inferSelect,
     svc: typeof serviceInstances.$inferSelect,
+    rev: typeof stackRevisions.$inferSelect | undefined,
   ): Promise<DockerExecutionResult> {
+    // #7: the secret files are on tmpfs, gone after a reboot or a stop; the executor writes them again.
+    const secrets = rev
+      ? await resolveRevisionSecrets(this.dbClient.db, this.config, {
+          organizationId: op.organizationId,
+          siteId: svc.siteId,
+          secretRefs: (rev.secretRefs ?? {}) as Record<string, string>,
+        })
+      : undefined;
     try {
-      return await this.dockerExecutor.restartService(svc.id);
+      return await (secrets && Object.keys(secrets).length > 0
+        ? this.dockerExecutor.restartService(svc.id, secrets)
+        : this.dockerExecutor.restartService(svc.id));
     } catch (err) {
       if (extractErrorCode(err) !== "NOT_FOUND") throw err;
       const db = this.dbClient.db;
