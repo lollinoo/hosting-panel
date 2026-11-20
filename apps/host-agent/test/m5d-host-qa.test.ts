@@ -1,5 +1,6 @@
 // M5d "the host": independent QA (qa-host, qa-c13). A fake runner and temp dirs only; no program, no container.
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -94,13 +95,18 @@ afterEach(async () => {
   for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 
-interface Call { readonly binary: AllowedLinuxBinary; readonly args: readonly string[]; readonly input?: string }
+interface Call { readonly binary: AllowedLinuxBinary; readonly args: readonly string[]; readonly program?: string }
+
+// The sets program is a file the agent writes for this one nft call and removes after it.
+const isSetsProgramFile = (path: string | undefined): path is string =>
+  path !== undefined && dirname(path).startsWith(join(os.tmpdir(), "hp-nft-")) && path.endsWith("/sets.nft");
 
 // A recording runner; every call must be a closed form, as the real runner would demand.
 function adapterWith(answer: (c: Call) => { stdout: string; stderr?: string } | string | Error, dir: string, extra: object = {}) {
   const calls: Call[] = [];
-  const runner: ExecFileRunner = async (binary, args, options) => {
-    const call: Call = { binary, args: [...args], ...(options?.input === undefined ? {} : { input: options.input }) };
+  const runner: ExecFileRunner = async (binary, args) => {
+    const program = binary.endsWith("/nft") && args[0] === "-f" && isSetsProgramFile(args[1]) ? readFileSync(args[1], "utf8") : undefined;
+    const call: Call = { binary, args: [...args], ...(program === undefined ? {} : { program }) };
     calls.push(call);
     expect(isClosedArgumentForm(binary, args)).toBe(true);
     const out = answer(call);
@@ -333,12 +339,14 @@ function raw(socketPath: string, method: "GET" | "POST", path: string, body?: un
 }
 
 function expectNftCallsClosed(calls: readonly Call[], rulesetPath: string): void {
-  const forms = [["-c", "-f", rulesetPath], ["-f", rulesetPath], NFT_LIST, ["-f", "-"]].map((f) => JSON.stringify(f));
+  const forms = [["-c", "-f", rulesetPath], ["-f", rulesetPath], NFT_LIST].map((f) => JSON.stringify(f));
   for (const c of calls.filter((x) => x.binary.endsWith("/nft"))) {
     expect(["/usr/sbin/nft", "/usr/bin/nft"]).toContain(c.binary);
-    expect(forms, JSON.stringify(c.args)).toContain(JSON.stringify(c.args));
-    if (c.args[1] === "-") readProgram(c.input!);
-    else expect(c.input).toBeUndefined();
+    if (c.program === undefined) expect(forms, JSON.stringify(c.args)).toContain(JSON.stringify(c.args));
+    else {
+      expect(c.args).toHaveLength(2);
+      readProgram(c.program);
+    }
   }
 }
 
@@ -354,9 +362,9 @@ describe("P2 every nft call is one of four argument lists", () => {
     for (const bad of [{ ...SETS, blockedV4: ["192.0.2.7 } ; flush ruleset"] }, { ...SETS, extra: 1 }, "x", null])
       expect(await codeOf(adapter.replaceFirewallSets(bad as HostFirewallSets))).toBe("HOST_POLICY_DENIED");
     const nft = calls.filter((c) => c.binary.endsWith("/nft"));
-    expect(nft.map((c) => c.args.join(" "))).toEqual([
+    expect(nft.map((c) => (c.program === undefined ? c.args.join(" ") : "-f <sets program>"))).toEqual([
       `-c -f ${REPO_DEDICATED_NFTABLES_RULESET_PATH}`, `-f ${REPO_DEDICATED_NFTABLES_RULESET_PATH}`,
-      NFT_LIST.join(" "), NFT_LIST.join(" "), "-f -", NFT_LIST.join(" "), NFT_LIST.join(" "), "-f -", NFT_LIST.join(" "),
+      NFT_LIST.join(" "), NFT_LIST.join(" "), "-f <sets program>", NFT_LIST.join(" "), NFT_LIST.join(" "), "-f <sets program>", NFT_LIST.join(" "),
     ]);
     expectNftCallsClosed(calls, REPO_DEDICATED_NFTABLES_RULESET_PATH);
   });
@@ -391,7 +399,7 @@ describe("P2 every nft call is one of four argument lists", () => {
       { openedPorts: [8080] },
     ]) expect((await raw(sock, "POST", "/v1/firewall/sets", body)).status).toBe(403);
     expect((await raw(sock, "POST", "/v1/firewall/sets", SETS)).status).toBe(200);
-    expect(calls.filter((c) => c.args[1] === "-")).toHaveLength(1);
+    expect(calls.filter((c) => c.program !== undefined)).toHaveLength(1);
     expectNftCallsClosed(calls, REPO_DEDICATED_NFTABLES_RULESET_PATH);
     expect(JSON.stringify(calls)).not.toContain(evil);
   });

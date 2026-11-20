@@ -1,7 +1,8 @@
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
@@ -44,6 +45,7 @@ const {
   REPO_DEDICATED_NFTABLES_RULESET_PATH,
   LinuxSystemHostAdapter,
   SignedHostAgentIpcClient,
+  buildFirewallSetsProgram,
   isClosedArgumentForm,
   parseAptUpgradeSimulation,
   parseFirewallListing,
@@ -120,16 +122,16 @@ describe("closed argument forms (R198 2.1)", () => {
     expect(execFile).not.toHaveBeenCalled();
   });
 
-  it("starts an accepted form with execFile, no shell, the fixed environment and the input on stdin", async () => {
+  it("starts an accepted form with execFile, no shell, the fixed environment and stdin closed with nothing on it", async () => {
     const end = vi.fn();
     execFileCustom.mockImplementationOnce(() =>
       Object.assign(Promise.resolve({ stdout: "out", stderr: "" }), { child: { stdin: { on: vi.fn(), end } } }),
     );
-    await expect(runAllowlistedBinary("/usr/sbin/nft", ["-f", "-"], { input: "flush set x\n" })).resolves.toEqual({ stdout: "out", stderr: "" });
-    expect(execFileCustom).toHaveBeenCalledWith("/usr/sbin/nft", ["-f", "-"], expect.objectContaining({
+    await expect(runAllowlistedBinary("/usr/sbin/nft", ["-f", "/tmp/hp-nft-x/sets.nft"])).resolves.toEqual({ stdout: "out", stderr: "" });
+    expect(execFileCustom).toHaveBeenCalledWith("/usr/sbin/nft", ["-f", "/tmp/hp-nft-x/sets.nft"], expect.objectContaining({
       shell: false, timeout: 10_000, maxBuffer: 256 * 1024, env: { PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LC_ALL: "C" },
     }));
-    expect(end).toHaveBeenCalledWith("flush set x\n");
+    expect(end).toHaveBeenCalledWith();
     execFileCustom.mockClear();
   });
 });
@@ -353,7 +355,7 @@ describe("parseFirewallListing", () => {
 
 // ---- the Linux adapter with the program runner mocked -----------------------------------------
 
-interface Call { readonly binary: AllowedLinuxBinary; readonly args: readonly string[]; readonly input?: string; readonly maxBuffer?: number }
+interface Call { readonly binary: AllowedLinuxBinary; readonly args: readonly string[]; readonly maxBuffer?: number }
 
 const tempDirs: string[] = [];
 async function tempDir(): Promise<string> {
@@ -417,22 +419,59 @@ describe("Linux adapter: firewall", () => {
     await expect(adapter.readFirewall()).rejects.toMatchObject({ code: "NOT_SUPPORTED", message: "A host tool failed or gave an answer the agent cannot read" });
   });
 
-  it("replaces the sets through nft -f - on standard input and answers a fresh read", async () => {
-    const { adapter, calls } = adapterWith((c) => (c.args[0] === "-f" ? "" : CURRENT), dir);
+  // nft 1.0.9 refuses "-f -" when stdin is the socket Node gives a child ("Not a regular file"),
+  // so the program goes to a regular file of the agent's own; this is what nft finds at call time.
+  const seeProgram = (path: string) => {
+    try {
+      const file = lstatSync(path);
+      return { path, isFile: file.isFile(), mode: file.mode & 0o777, dirMode: lstatSync(dirname(path)).mode & 0o777, text: readFileSync(path, "utf8") };
+    } catch {
+      return { path };
+    }
+  };
+  const PROGRAM = [
+    "flush set inet hp_dedicated_filter opened_tcp_ports",
+    "flush set inet hp_dedicated_filter blocked_v4",
+    "flush set inet hp_dedicated_filter blocked_v6",
+    "add element inet hp_dedicated_filter opened_tcp_ports { 9100, 8080 }",
+    "add element inet hp_dedicated_filter blocked_v4 { 198.51.100.0/24, 192.0.2.1 }",
+    "add element inet hp_dedicated_filter blocked_v6 { 2001:db8::2 }",
+    "",
+  ].join("\n");
+
+  it("replaces the sets through nft -f on a 0600 file of its own, removes the file and answers a fresh read", async () => {
+    let seen: ReturnType<typeof seeProgram> | undefined;
+    const { adapter, calls } = adapterWith((c) => {
+      if (c.args[0] !== "-f") return CURRENT;
+      seen = seeProgram(c.args[1]!);
+      return "";
+    }, dir);
     const state = await adapter.replaceFirewallSets(SETS);
+    expect(seen).toEqual({ path: expect.any(String), isFile: true, mode: 0o600, dirMode: 0o700, text: PROGRAM });
+    expect(PROGRAM).toBe(buildFirewallSetsProgram(SETS));
+    const path = seen!.path;
+    expect(isAbsolute(path)).toBe(true);
+    expect(dirname(path).startsWith(join(os.tmpdir(), "hp-nft-"))).toBe(true);
     expect(calls.map((c) => c.args.join(" "))).toEqual([
-      "-j list table inet hp_dedicated_filter", "-f -", "-j list table inet hp_dedicated_filter",
+      "-j list table inet hp_dedicated_filter", `-f ${path}`, "-j list table inet hp_dedicated_filter",
     ]);
-    expect(calls[1]!.input).toBe([
-      "flush set inet hp_dedicated_filter opened_tcp_ports",
-      "flush set inet hp_dedicated_filter blocked_v4",
-      "flush set inet hp_dedicated_filter blocked_v6",
-      "add element inet hp_dedicated_filter opened_tcp_ports { 9100, 8080 }",
-      "add element inet hp_dedicated_filter blocked_v4 { 198.51.100.0/24, 192.0.2.1 }",
-      "add element inet hp_dedicated_filter blocked_v6 { 2001:db8::2 }",
-      "",
-    ].join("\n"));
+    expect(calls[1]).toEqual({ binary: calls[0]!.binary, args: ["-f", path] });
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(dirname(path))).toBe(false);
     expect(state).toMatchObject({ baseRules: "current", blockedV4: ["192.0.2.1", "198.51.100.0/24"] });
+  });
+
+  it("removes the program file and its folder when nft fails, and answers the fixed sentence", async () => {
+    let seen: ReturnType<typeof seeProgram> | undefined;
+    const { adapter } = adapterWith((c) => {
+      if (c.args[0] !== "-f") return CURRENT;
+      seen = seeProgram(c.args[1]!);
+      return nftError('internal:0:0-0: Error: Not a regular file: "/dev/stdin"');
+    }, dir);
+    await expect(adapter.replaceFirewallSets(SETS)).rejects.toMatchObject({ code: "NOT_SUPPORTED", message: "A host tool failed or gave an answer the agent cannot read" });
+    expect(seen).toEqual({ path: expect.any(String), isFile: true, mode: 0o600, dirMode: 0o700, text: PROGRAM });
+    expect(existsSync(seen!.path)).toBe(false);
+    expect(existsSync(dirname(seen!.path))).toBe(false);
   });
 
   it.each([
