@@ -11,7 +11,11 @@ info:
     signed Unix Domain Socket IPC (`docker-executor` and `host-agent`), `unknown`
     crash recovery, and observe-only drift reconciliation. Shared hosting remains
     gated (`false`); ACME TLS, site SFTP, and site backups are available when
-    `runtimeBackend` is `linux-systemd`.
+    `runtimeBackend` is `linux-systemd`. While an account must change its
+    temporary password (`mustChangePassword`), every route with a session
+    answers 403 `PASSWORD_CHANGE_REQUIRED`, except `GET /v1/me`,
+    `POST /v1/me/password` and `POST /v1/auth/revoke`; break-glass tokens are
+    not refused.
 servers:
   - url: http://127.0.0.1:4000
     description: Local embedded control-plane development server
@@ -259,7 +263,9 @@ paths:
       summary: Email and password login (TOTP code required for accounts with 2FA)
       description: >-
         Returns `totp_required` when the account has 2FA enabled and no `totpCode` was sent.
-        5 failures in 15 minutes lock the account (`ACCOUNT_LOCKED`, 423); TOTP guesses have a separate counter.
+        5 wrong passwords lock the account for 15 minutes: the fifth still answers 401, later tries answer `ACCOUNT_LOCKED` (423).
+        An address with no account is counted the same way, in memory, so six wrong sign-ins give the same answers for both.
+        TOTP guesses have a separate counter. Sign-ins of one address run one at a time.
         Server administrators without enrolled 2FA get `ACCOUNT_SETUP_INCOMPLETE` (403).
         An address with no account never gets 429: its check runs only while fewer than 4 checks are in
         the password gate, otherwise it gets the same `INVALID_CREDENTIALS` (401) at once, with no audit row.
@@ -276,6 +282,7 @@ paths:
                 email:
                   type: string
                   format: email
+                  maxLength: 254
                 password:
                   type: string
                 totpCode:
@@ -2529,6 +2536,38 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Admin Sites]
+      operationId: adminSetDomainChallenge
+      summary: Choose how the certificate of this domain is obtained; dns-01 needs a DNS provider (VALIDATION_ERROR reason dns_provider_missing)
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteDomainChallengeInput"
+      responses:
+        "200":
+          description: Current domains of the site
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/domains/{domainId}/primary:
     post:
@@ -2621,6 +2660,9 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Two log reads of this organization, or eight in all, are already in flight; refused before the executor is called (`RATE_LIMITED`, "Too many log reads right now. Try again in a minute."). Try again shortly.
           $ref: "#/components/responses/ErrorResponse"
         "503":
           description: >-
@@ -3970,6 +4012,83 @@ paths:
                 properties:
                   data:
                     $ref: "#/components/schemas/MailRelaySettingsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/dns-provider:
+    get:
+      tags: [Admin Certificates]
+      operationId: adminGetDnsProvider
+      summary: DNS provider for DNS-01 certificates (server administrator only; never returns credential values)
+      responses:
+        "200":
+          description: DNS provider settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DnsProviderSettingsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Admin Certificates]
+      operationId: adminSaveDnsProvider
+      summary: Save the provider; applied asynchronously. A credential left out keeps the stored value while the provider is unchanged
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DnsProviderSettingsInput"
+      responses:
+        "200":
+          description: DNS provider settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DnsProviderSettingsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Admin Certificates]
+      operationId: adminClearDnsProvider
+      summary: Remove the provider and its stored credentials; refused with VALIDATION_ERROR reason dns_challenge_in_use while a domain uses dns-01
+      responses:
+        "200":
+          description: DNS provider settings
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/DnsProviderSettingsDto"
         "400":
           $ref: "#/components/responses/ErrorResponse"
         "401":
@@ -6273,6 +6392,7 @@ components:
             - ACCOUNT_LOCKED
             - TOTP_INVALID
             - ACCOUNT_SETUP_INCOMPLETE
+            - PASSWORD_CHANGE_REQUIRED
             - PASSWORD_RESET_INVALID
             - PERMISSION_DENIED
             - HOST_POLICY_DENIED
@@ -7141,12 +7261,12 @@ components:
           nullable: true
         problem:
           type: string
-          enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other]
+          enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, dns_provider, other]
           nullable: true
 
     SiteDomainDto:
       type: object
-      required: [id, hostname, isPrimary, routed, dns, certificate]
+      required: [id, hostname, isPrimary, routed, challenge, dns, certificate]
       properties:
         id:
           type: string
@@ -7156,6 +7276,9 @@ components:
           type: boolean
         routed:
           type: boolean
+        challenge:
+          type: string
+          enum: [http-01, dns-01]
         dns:
           type: object
           required: [status, checkedAt, nextCheckAt, observedA, observedAaaa]
@@ -7187,7 +7310,7 @@ components:
               enum: [none, requested, active, failed]
             problem:
               type: string
-              enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other]
+              enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, dns_provider, other]
               nullable: true
             expiresAt:
               type: string
@@ -7274,6 +7397,51 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/MailFailureDto"
+
+    DnsProviderSettingsInput:
+      type: object
+      required: [provider]
+      properties:
+        provider:
+          type: string
+          enum: [cloudflare, digitalocean, gandiv5, hetzner, httpreq, ionos, ovh]
+        credentials:
+          type: object
+          additionalProperties:
+            type: string
+          description: Write-only. Keys are the lego variable names of the provider (e.g. CLOUDFLARE_DNS_API_TOKEN)
+
+    DnsProviderSettingsDto:
+      type: object
+      required: [provider, fieldsSet, updatedAt, applied, ready]
+      properties:
+        provider:
+          type: string
+          enum: [cloudflare, digitalocean, gandiv5, hetzner, httpreq, ionos, ovh]
+          nullable: true
+        fieldsSet:
+          type: array
+          description: Names of the stored fields, never their values
+          items:
+            type: string
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        applied:
+          type: boolean
+        ready:
+          type: boolean
+          nullable: true
+          description: The proxy has the le-dns resolver; false without an ACME email; null when the executor does not answer
+
+    SiteDomainChallengeInput:
+      type: object
+      required: [challenge]
+      properties:
+        challenge:
+          type: string
+          enum: [http-01, dns-01]
 
     MailTestResult:
       type: object
@@ -8886,7 +9054,7 @@ components:
             restore_stuck `{operationId, siteId|null, siteName|null, startedAt}`;
             operation_unknown and operation_stuck `{operationId, kind, siteId|null, siteName|null}`.
             `problem` is one of `rate_limited`, `port_80_blocked`, `not_pointing`, `caa_blocked`,
-            `other`; `kind` inside `details` is an operation kind.
+            `dns_provider`, `other`; `kind` inside `details` is an operation kind.
           oneOf:
             - title: disk_high
               type: object
@@ -8904,7 +9072,7 @@ components:
                 siteName: { type: string }
                 hostname: { type: string }
                 expiresAt: { type: string, format: date-time, nullable: true }
-                problem: { type: string, nullable: true, enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other] }
+                problem: { type: string, nullable: true, enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, dns_provider, other] }
             - title: certificate_not_issued
               type: object
               additionalProperties: false
@@ -8913,7 +9081,7 @@ components:
                 siteId: { type: string }
                 siteName: { type: string }
                 hostname: { type: string }
-                problem: { type: string, nullable: true, enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, other] }
+                problem: { type: string, nullable: true, enum: [rate_limited, port_80_blocked, not_pointing, caa_blocked, dns_provider, other] }
             - title: panel_certificate_expiring
               type: object
               additionalProperties: false

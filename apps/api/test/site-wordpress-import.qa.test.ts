@@ -24,6 +24,7 @@ import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 
 const KEY = Buffer.alloc(32, 7);
@@ -206,6 +207,7 @@ describe("qa-api: what an import writes, the reasons it stores and the answers i
     });
     expect(created.status).toBe(201);
     orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "admin@example.test");
     token = await login("admin@example.test", created.body.data.temporaryPassword as string);
     const site = await call("POST", `/v1/organizations/${orgId}/managed-sites`, token, SITE);
     expect(site.status).toBe(202);

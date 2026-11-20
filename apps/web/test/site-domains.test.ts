@@ -44,6 +44,7 @@ const dom = (over: {
   hostname?: string;
   isPrimary?: boolean;
   routed?: boolean;
+  challenge?: SiteDomainDto["challenge"];
   dns?: Partial<SiteDomainDto["dns"]>;
   certificate?: Partial<SiteDomainDto["certificate"]>;
 }): SiteDomainDto => ({
@@ -51,6 +52,7 @@ const dom = (over: {
   hostname: over.hostname ?? "hotel.it",
   isPrimary: over.isPrimary ?? true,
   routed: over.routed ?? true,
+  challenge: over.challenge ?? "http-01",
   dns: { status: "ok", checkedAt: null, nextCheckAt: "2026-11-09T13:00:00Z", observedA: [], observedAaaa: [], ...over.dns },
   certificate: { status: "none", problem: null, expiresAt: null, retryAt: null, trusted: true, ...over.certificate },
 });
@@ -145,7 +147,7 @@ describe("domains UI", () => {
   });
 
   it("every domain hint exists in both languages and names a next step", () => {
-    const keys = ["not_found", "points_elsewhere", "ipv6_conflict", "lookup_failed", "rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "other"];
+    const keys = ["not_found", "points_elsewhere", "ipv6_conflict", "lookup_failed", "rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "dns_provider", "other"];
     for (const m of [en, itMsgs]) expect(Object.keys(m.site.domains.hint).sort()).toEqual([...keys].sort());
     const h = (m: typeof en) => m.site.domains.hint;
     expect(h(en).not_found).toBe("This address doesn't point anywhere yet. At your domain provider, create an A record for {host} with the value {ip}. Changes can take a few hours; we check automatically.");
@@ -166,6 +168,16 @@ describe("domains UI", () => {
     expect(h(itMsgs).caa_blocked).toContain("letsencrypt.org");
     expect(h(itMsgs).other).toContain("amministratore");
     for (const m of [en, itMsgs]) for (const t of Object.values(m.site.domains.hint)) expect(t.length).toBeGreaterThan(20);
+  });
+
+  it("hint and hintNoTime cover dns_provider in both languages", () => {
+    for (const k of ["hint", "hintNoTime"] as const) {
+      const e = en.site.domains[k].dns_provider;
+      const i = itMsgs.site.domains[k].dns_provider;
+      expect(e.trim().length).toBeGreaterThan(0);
+      expect(i.trim().length).toBeGreaterThan(0);
+      expect(i).not.toBe(e);
+    }
   });
 
   it("domain API errors map to next-step copy in both languages", () => {

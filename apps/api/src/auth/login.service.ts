@@ -14,8 +14,14 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { OidcService } from "./oidc.service.js";
-import { assertPasswordGateOpen, hashPassword, passwordGateLoad, verifyPassword } from "./password.js";
-import { reservePasswordAttempt, reserveTotpAttempt } from "./attempt-limits.js";
+import {
+  assertPasswordGateOpen,
+  hashPassword,
+  oneCheckPerAccount,
+  passwordGateLoad,
+  verifyPassword,
+} from "./password.js";
+import { LOCK_MS, MAX_FAILURES, reservePasswordAttempt, reserveTotpAttempt } from "./attempt-limits.js";
 import { checkUserTotp, saveTotpStep } from "./totp-secret.js";
 
 const INVALID_CREDENTIALS_MESSAGE = "Email o password non corretti.";
@@ -29,11 +35,16 @@ const MESSAGES: Record<"ACCOUNT_LOCKED" | "TOTP_INVALID" | "ACCOUNT_SETUP_INCOMP
 let dummyHash: Promise<string> | undefined;
 // Places of the password gate that unknown addresses may hold, so a flood of them never keeps real accounts out.
 const UNKNOWN_ADDRESS_SHARE = 4;
+// Unknown addresses counted in memory; the oldest goes first.
+const UNKNOWN_ADDRESSES_MAX = 10_000;
 
 type UserRow = typeof users.$inferSelect;
 
 @Injectable()
 export class LoginService {
+  // shortcut: counted in this process only (a restart empties it), enough while one API process runs.
+  private readonly unknownTries = new Map<string, { count: number; lockedUntil: number }>();
+
   public constructor(
     @Inject(CONTROL_PLANE_CONFIG_TOKEN)
     private readonly config: ControlPlaneRuntimeConfig,
@@ -43,15 +54,23 @@ export class LoginService {
     private readonly oidcService: OidcService,
   ) {}
 
-  public async login(input: LoginInput, ip: string | null): Promise<LoginResultDto> {
+  public login(input: LoginInput, ip: string | null): Promise<LoginResultDto> {
+    // One password check at a time per address, sign-in and account routes together (LR-M1).
+    return oneCheckPerAccount(input.email, () => this.loginNow(input, ip));
+  }
+
+  private async loginNow(input: LoginInput, ip: string | null): Promise<LoginResultDto> {
     const [user] = await this.dbClient.db.select().from(users).where(eq(users.email, input.email)).limit(1);
+    const now = Date.now();
     if (!user) {
+      const entry = this.unknownTries.get(input.email);
+      if (entry && entry.lockedUntil > now) return this.fail(undefined, ip, "ACCOUNT_LOCKED", "locked");
+      this.countUnknownTry(input.email, entry, now);
       const dummy = await getDummyHash();
       // The test and the entry run in the same tick, so a burst cannot pass the test together.
       if (passwordGateLoad() < UNKNOWN_ADDRESS_SHARE) await verifyPassword(input.password, dummy);
       return this.fail(undefined, ip, "INVALID_CREDENTIALS", "unknown_user");
     }
-    const now = Date.now();
     let locked = user.lockedUntil !== null && user.lockedUntil.getTime() > now;
     // Only password + TOTP may bypass a lock, so other requests to a locked account stop before any check.
     const canBypass = input.totpCode !== undefined && user.totpEnabledAt !== null;
@@ -109,6 +128,20 @@ export class LoginService {
       return this.fail(user, ip, locked ? "ACCOUNT_LOCKED" : "TOTP_INVALID", "totp_reused");
     }
     return this.succeed(user, ip);
+  }
+
+  /** As reservePasswordAttempt: the 5th try locks for 15 minutes and sets the count back to 0. */
+  private countUnknownTry(email: string, entry: { count: number; lockedUntil: number } | undefined, now: number): void {
+    if (!entry) {
+      if (this.unknownTries.size >= UNKNOWN_ADDRESSES_MAX) this.unknownTries.delete(this.unknownTries.keys().next().value!);
+      entry = { count: 0, lockedUntil: 0 };
+      this.unknownTries.set(email, entry);
+    }
+    entry.count += 1;
+    if (entry.count >= MAX_FAILURES) {
+      entry.count = 0;
+      entry.lockedUntil = now + LOCK_MS;
+    }
   }
 
   private async succeed(user: UserRow, ip: string | null): Promise<LoginResultDto> {

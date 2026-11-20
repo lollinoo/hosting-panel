@@ -18,6 +18,7 @@ import { z } from "zod";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "sentinel-password-0002";
@@ -275,6 +276,7 @@ describe("health, alerts and logs while the runtime is down", () => {
       await start();
       const created = await call("POST", "/v1/admin/customer-account", adminToken, { organizationName: "Org A", ownerEmail: "owner@example.test", ownerName: "Owner" });
       expect(created.status).toBe(201);
+      await skipPasswordChange(dbClient.db, "owner@example.test");
       const orgId = created.body.data.organizationId as string;
       const res = await call("POST", "/v1/admin/sites", adminToken, { ...SITE, ownerOrganizationId: orgId });
       expect(res.status).toBe(202);

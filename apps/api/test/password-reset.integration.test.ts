@@ -19,6 +19,7 @@ import { PasswordResetService } from "../src/auth/password-reset.service.js";
 import { hashPassword } from "../src/auth/password.js";
 import { generateTotpSecret, totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 vi.mock("node:crypto", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:crypto")>();
@@ -141,6 +142,7 @@ describe("password reset by mail", () => {
       adminToken,
     );
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, CUSTOMER);
     customerPassword = created.body.data.temporaryPassword as string;
     customerId = await userId(CUSTOMER);
     await addUser(EN, { locale: "en" });

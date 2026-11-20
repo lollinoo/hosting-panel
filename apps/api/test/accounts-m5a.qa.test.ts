@@ -13,6 +13,7 @@ import { PasswordResetService } from "../src/auth/password-reset.service.js";
 import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "sentinel-admin-pass";
@@ -115,6 +116,7 @@ describe("M5a accounts QA", () => {
     adminToken = (await login(ADMIN, PW, adminTotp)).body.data.accessToken as string;
     const created = await call("POST", "/v1/admin/customer-account", { organizationName: "Customer Org", ownerEmail: CUSTOMER, ownerName: "Customer" }, adminToken);
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, CUSTOMER);
     customerPassword = created.body.data.temporaryPassword as string;
     customerId = created.body.data.userId as string;
   });

@@ -22,6 +22,7 @@ import type {
   HostDaemonHeartbeatDto,
   RuntimeBackend,
   MailRelaySettingsDto,
+  DnsProviderSettingsDto,
   BackupSettingsDto,
   AdminSiteBackupStatusDto,
   AdminHealthDto,
@@ -72,6 +73,8 @@ export async function serverGet<T>(
     return { ok: true, data: res.data.data, ...(res.data.page ? { page: res.data.page } : {}) };
   const errObj = res.error as { error?: { code?: unknown } } | null | undefined;
   const code = typeof errObj?.error?.code === "string" ? errObj.error.code : undefined;
+  // #8: the API refuses all but the password change until the temporary password is changed.
+  if (res.status === 403 && code === "PASSWORD_CHANGE_REQUIRED") redirect("/account/change-password");
   return {
     ok: false,
     outcome: outcome === "notFound" ? "notFound" : "error",
@@ -187,6 +190,10 @@ export async function fetchServerSiteDomains(orgId: string, siteId: string): Pro
 
 export async function fetchServerAdminMailRelay(): Promise<MailRelaySettingsDto | null> {
   return orNull(await serverGet<MailRelaySettingsDto>("v1/admin/mail-relay"));
+}
+
+export async function fetchServerAdminDnsProvider(): Promise<DnsProviderSettingsDto | null> {
+  return orNull(await serverGet<DnsProviderSettingsDto>("v1/admin/dns-provider"));
 }
 
 /** Loads the administrator's backup destination and schedule settings, or null on request failure. */

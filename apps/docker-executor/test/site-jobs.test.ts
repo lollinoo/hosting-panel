@@ -991,6 +991,8 @@ async function setup(options?: Parameters<typeof startMockDockerDaemon>[0] & { j
     ingressRootDir: path.join(tmpBaseDir, "ingress"),
     pullMissingImages: false,
     sharedDbRootKeyFile: path.join(tmpBaseDir, "mariadb-root.key"),
+    // cleanupOrphanJobs reads restore notes: never the host's real backup folder.
+    backupWorkDir: path.join(tmpBaseDir, "backups"),
     ...(options?.jobTimeoutMs !== undefined ? { jobTimeoutMs: options.jobTimeoutMs } : {}),
   });
   const addRunningMariadb = () =>

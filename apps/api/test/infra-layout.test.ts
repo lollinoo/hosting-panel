@@ -117,6 +117,11 @@ describe("per-service env files and wrappers", () => {
     expect(boot).toContain("install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay\n");
   });
 
+  it("tmpfiles creates the DNS provider credential directory", () => {
+    expect(read("infra/systemd/hosting-panel-tmpfiles.conf").split("\n")).toContain("d /run/hosting-panel/acme-dns 0700 hp-executor hp-executor -");
+    expect(read("infra/linux/bootstrap-dedicated.sh")).toContain("install -d -m 00700 -o hp-executor -g hp-executor /run/hosting-panel/acme-dns\n");
+  });
+
   it.skipIf(!hasHost)("bootstrap dry-run creates the mail directories", () => {
     const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
     expect(r.status).toBe(0);
@@ -208,6 +213,21 @@ describe("release workflow and docs", () => {
     for (const s of ["CP-01", "postqueue"]) expect(adr).toContain(s);
     expect(JSON.parse(read("package.json")).version).toMatch(/^\d+\.\d+\.\d+$/);
     expect(MAIL_RELAY_IMAGE).toBe("boky/postfix:5.2.1-alpine");
+  });
+
+  it("m5 dns-01 docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["DNS-01", "docs/architecture/adr/0030-dns-01-certificates.md"]) expect(readme).toContain(s);
+    const api = read("docs/api/openapi.yaml");
+    for (const s of ["/v1/admin/dns-provider", "DnsProviderSettingsDto", "dns_provider"]) expect(api).toContain(s);
+    const adr = read("docs/architecture/adr/0030-dns-01-certificates.md");
+    for (const s of ["CP-01", "le-dns", "_FILE"]) expect(adr).toContain(s);
+    // Every repo path the ADR writes in backticks exists (a trailing :line is dropped).
+    const paths = [...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, ""));
+    expect(paths.length).toBeGreaterThanOrEqual(5);
+    for (const p of paths) expect(existsSync(join(root, p)), p).toBe(true);
+    const harness = read("HARNESS.md");
+    for (const s of ["0030", "accept-acme-pebble.mjs"]) expect(harness).toContain(s);
   });
 
   it("m1a file manager docs are consistent", () => {

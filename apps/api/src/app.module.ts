@@ -17,6 +17,7 @@ import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
+import { AdminDnsProviderController } from "./controllers/admin-dns-provider.controller.js";
 import { AdminHealthController } from "./controllers/admin-health.controller.js";
 import { AdminLogsController } from "./controllers/admin-logs.controller.js";
 import { AdminTerminalController } from "./controllers/admin-terminal.controller.js";
@@ -71,6 +72,7 @@ import { createNodeDnsLookup, parseDnsResolvers, type DnsLookup } from "./sites/
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteDomainsService } from "./sites/site-domains.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
+import { DnsProviderService } from "./certificates/dns-provider.service.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
@@ -108,6 +110,7 @@ export class AppModule {
         SiteWordpressController,
         SiteWordpressImportController,
         AdminMailRelayController,
+        AdminDnsProviderController,
         AdminBackupsController,
         PasswordResetController,
         SupportAccessController,
@@ -161,6 +164,7 @@ export class AppModule {
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
+        DnsProviderService,
         PasswordResetService,
         SupportAccessService,
         AdminHealthService,

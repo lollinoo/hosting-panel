@@ -186,7 +186,7 @@ export class AuthController {
   public async revokeToken(
     @Req() req: FastifyRequest,
   ): Promise<{ data: { revoked: boolean; revokedAt: string } }> {
-    const auth = await this.authzService.authenticateRequest(req);
+    const auth = await this.authzService.authenticateRequest(req, { allowPasswordChangePending: true });
     const jti = auth.claims.jti;
 
     await this.oidcService.revokeSession(jti);

@@ -1,4 +1,5 @@
 import type {
+  DnsProviderApplyRequest,
   PanelContainer,
   SftpAccessApplyRequest,
   SftpApplyResult,
@@ -124,6 +125,10 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async getMailRelayStatus(_req: { since: string }): Promise<MailRelayStatusReport> {
+    return this.refuse();
+  }
+
+  async applyDnsProvider(_req: DnsProviderApplyRequest | null): Promise<void> {
     return this.refuse();
   }
 

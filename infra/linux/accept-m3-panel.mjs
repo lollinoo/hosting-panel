@@ -50,7 +50,12 @@ const HELPER_IMAGE = "busybox:latest";
 const RUSTFS_IMAGE =
   "rustfs/rustfs:1.0.5@sha256:b81d16a90ee25bd9511280127ca1471788c6e874cf0f0da759645f46b2dc1d74";
 const WORDPRESS_IMAGE = resolveWordpressImage(DEFAULT_PHP_VERSION);
-const HANDOVER_GID = 30; // a supplementary group of the user running this script (dip), not 0
+// A supplementary group of the user running this script, not 0 and not its primary group (the stand-in for hp-ipc).
+const HANDOVER_GID = process.getgroups().find((g) => g !== 0 && g !== process.getgid());
+if (HANDOVER_GID === undefined) {
+  console.error("accept-m3-panel: the running user needs a supplementary group other than root and its primary group");
+  process.exit(1);
+}
 const DUMP_OWNER_UID = 4001; // "another uid": the stand-in for the API user that writes the dump
 
 const runHex = randomBytes(3).toString("hex");
@@ -504,7 +509,7 @@ async function main() {
         const mariaKey = path.join(tmpRoot, "mariadb-root.key");
         await writeFile(mariaKey, mariaRootPw, { mode: 0o400 });
 
-        // Hand-over directory: root-owned, group 30, mode 2770 — set by a root container of this run.
+        // Hand-over directory: root-owned, group HANDOVER_GID, mode 2770 — set by a root container of this run.
         const ownName = `${runId}_own`;
         createdContainers.add(ownName);
         const own = await docker([
@@ -514,9 +519,9 @@ async function main() {
           "sh", "-c", `chown 0:${String(HANDOVER_GID)} /h && chmod 2770 /h`,
         ]);
         createdContainers.delete(ownName);
-        assert(own.ok, "hand-over directory set to root:30 2770", own.stderr);
+        assert(own.ok, `hand-over directory set to root:${String(HANDOVER_GID)} 2770`, own.stderr);
         const hs = await stat(handoverDir);
-        assert(hs.uid === 0 && hs.gid === HANDOVER_GID && (hs.mode & 0o7777) === 0o2770, "hand-over root:30 2770", `${String(hs.uid)}:${String(hs.gid)} ${(hs.mode & 0o7777).toString(8)}`);
+        assert(hs.uid === 0 && hs.gid === HANDOVER_GID && (hs.mode & 0o7777) === 0o2770, `hand-over root:${String(HANDOVER_GID)} 2770`, `${String(hs.uid)}:${String(hs.gid)} ${(hs.mode & 0o7777).toString(8)}`);
 
         const subnet = pickFreeSubnet(await dockerJson("GET", "/networks"));
         assert(subnet !== null, "free /24 subnet found", "none");
@@ -718,7 +723,7 @@ INSERT INTO backup_settings (id, endpoint, region, bucket, prefix, access_key_id
       dumpBytes = await readFile(dumpPath);
       measured.dumpSize = st.size;
       assert(dumpBytes.subarray(0, 5).toString("latin1") === "PGDMP", "dump starts with PGDMP", dumpBytes.subarray(0, 5).toString("hex"));
-      assert(st.uid === DUMP_OWNER_UID && st.gid === HANDOVER_GID && (st.mode & 0o777) === 0o640, "dump 4001:30 0640", `${String(st.uid)}:${String(st.gid)} ${(st.mode & 0o777).toString(8)}`);
+      assert(st.uid === DUMP_OWNER_UID && st.gid === HANDOVER_GID && (st.mode & 0o777) === 0o640, `dump 4001:${String(HANDOVER_GID)} 0640`, `${String(st.uid)}:${String(st.gid)} ${(st.mode & 0o777).toString(8)}`);
       assert(dumpBytes.includes(Buffer.from(marker)), "uncompressed dump holds the marker (makes the bucket scan meaningful)", "marker absent");
 
       const badFile = path.join(handoverDir, `${newJobId()}.dump`);

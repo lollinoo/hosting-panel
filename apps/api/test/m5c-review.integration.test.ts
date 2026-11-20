@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 6);
 const PW = "sentinel-password-0002";
@@ -207,6 +208,7 @@ describe("1.3 owner change of a stopped site whose stop after the redeploy fails
       ownerName: "Owner B",
     });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner-b@example.test");
     const orgId = created.body.data.organizationId as string;
     const customer = await login("owner-b@example.test", created.body.data.temporaryPassword as string);
 

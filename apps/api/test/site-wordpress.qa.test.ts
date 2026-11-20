@@ -39,6 +39,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const JWT_PEM = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -161,6 +162,7 @@ describe("QA: WordPress tools through the real routes and the real outbox worker
     const created = await call("POST", "/v1/admin/customer-account", adminToken, { organizationName: name, ownerEmail: email, ownerName: name });
     expect(created.status).toBe(201);
     const orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, email);
     const token = await login(email, created.body.data.temporaryPassword as string);
     const site = await call("POST", `/v1/organizations/${orgId}/managed-sites`, token, { ...SITE, domain });
     expect(site.status).toBe(202);

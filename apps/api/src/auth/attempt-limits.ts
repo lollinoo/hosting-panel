@@ -1,7 +1,7 @@
 import { and, eq, sql, users, type DatabaseClient } from "@hosting-panel/database";
 
-const MAX_FAILURES = 5;
-const LOCK_MS = 15 * 60_000;
+export const MAX_FAILURES = 5;
+export const LOCK_MS = 15 * 60_000;
 
 /** What a password reset by mail sets: zero wrong passwords, no lock unless 5 TOTP attempts were counted (under a lock, any try with a code). */
 export const passwordResetLockFields = {

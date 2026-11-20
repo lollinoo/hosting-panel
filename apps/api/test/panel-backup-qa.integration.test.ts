@@ -41,6 +41,7 @@ import { PG_DUMP_PATH, runPanelDump, type PanelDumpCommand } from "../src/backup
 import { SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -344,6 +345,7 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     });
     expect(created.status).toBe(201);
     orgA = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner-a-qa@hotel.it");
     ownerAToken = await login("owner-a-qa@hotel.it", created.body.data.temporaryPassword as string);
     ownerAId = (await dbClient.db.select().from(users).where(eq(users.email, "owner-a-qa@hotel.it")))[0]!.id;
     ({ siteId: siteA, svcId: svcA } = await createSite("QA Alpha Site", "qa-alpha-site.it"));

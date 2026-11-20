@@ -28,6 +28,7 @@ import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { siteDatabaseIdentifier } from "../src/runtime/site-provisioner.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "correct horse battery";
@@ -144,6 +145,7 @@ describe("managed WordPress sites API", () => {
       adminToken,
     );
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     orgId = created.body.data.organizationId as string;
     token = await login("mario@hotel.it", created.body.data.temporaryPassword as string);
   });
@@ -652,6 +654,35 @@ describe("managed WordPress sites API", () => {
     await call("GET", siteUrl(siteId, "/logs?tail=0"));
     await call("GET", siteUrl(siteId, "/logs"));
     expect(spy.mock.calls.map((c) => c[1])).toEqual([2, 500, 1, 200]);
+  });
+
+  it("a third log read of one organisation at once gets 429 RATE_LIMITED without reaching the executor", async () => {
+    const { siteId } = await createAndRun();
+    type Lines = Awaited<ReturnType<typeof sim.getServiceLogs>>;
+    const held: Array<(lines: Lines) => void> = [];
+    const spy = vi.spyOn(sim, "getServiceLogs").mockImplementation(
+      () => new Promise<Lines>((resolve) => held.push(resolve)),
+    );
+    const two = [call("GET", siteUrl(siteId, "/logs")), call("GET", siteUrl(siteId, "/logs"))];
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    const third = await call("GET", siteUrl(siteId, "/logs"));
+    expect(third.status).toBe(429);
+    expect(third.body.error.code).toBe("RATE_LIMITED");
+    expect(spy).toHaveBeenCalledTimes(2);
+    // The administrator's read is not counted, so it gets through while the customer's two are held.
+    const adminRead = call("GET", `/v1/admin/sites/${siteId}/logs`, undefined, {}, adminToken);
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(3));
+    for (const resolve of held) resolve([]);
+    expect((await adminRead).status).toBe(200);
+    expect((await Promise.all(two)).map((r) => r.status)).toEqual([200, 200]);
+    spy.mockRestore();
+    expect((await call("GET", siteUrl(siteId, "/logs"))).status).toBe(200);
+    // Two failed reads would fill both slots if a failure kept its slot.
+    const off = Object.assign(new Error("off"), { code: "NOT_SUPPORTED" });
+    vi.spyOn(sim, "getServiceLogs").mockRejectedValueOnce(off).mockRejectedValueOnce(off);
+    expect((await call("GET", siteUrl(siteId, "/logs"))).status).toBe(503);
+    expect((await call("GET", siteUrl(siteId, "/logs"))).status).toBe(503);
+    expect((await call("GET", siteUrl(siteId, "/logs"))).status).toBe(200);
   });
 
   it("logs answer 503 when the executor does not support them", async () => {

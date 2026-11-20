@@ -577,4 +577,74 @@ describe("POST /v1/auth/login", () => {
       gate.release();
     }
   });
+
+  async function answer(body: unknown) {
+    const res = await login(body);
+    const json = (await res.json()) as Partial<Err>;
+    return { status: res.status, code: json.error?.code, message: json.error?.message };
+  }
+
+  const LOCKED = { status: 423, code: "ACCOUNT_LOCKED", message: "Account temporaneamente bloccato. Riprova più tardi." };
+  const WRONG = { status: 401, code: "INVALID_CREDENTIALS", message: BAD_MESSAGE };
+
+  it("six wrong sign-ins give the same answers for an existing account and for an unknown address", async () => {
+    await seedUser();
+    const answers: Record<string, unknown[]> = {};
+    for (const email of ["mario@hotel.it", "ghost@hotel.it"]) {
+      answers[email] = [];
+      for (let i = 0; i < 6; i++) answers[email].push(await answer({ email, password: "nope nope" }));
+    }
+    expect(answers["ghost@hotel.it"]).toEqual(answers["mario@hotel.it"]);
+    expect(answers["mario@hotel.it"]).toEqual([WRONG, WRONG, WRONG, WRONG, WRONG, LOCKED]);
+    for (const email of ["mario@hotel.it", "ghost@hotel.it"]) {
+      expect(await answer({ email, password: PASSWORD })).toEqual(LOCKED);
+      expect(await answer({ email, password: PASSWORD, totpCode: "123456" })).toEqual(LOCKED);
+    }
+    const rows = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "auth.login.failure"));
+    expect(rows.map((r) => r.actorId)).toEqual(Array(5).fill("usr_mario"));
+  });
+
+  it("a burst of wrong sign-ins on an unknown address locks it like an account", async () => {
+    await seedUser();
+    const statuses = async (email: string) =>
+      (await Promise.all(Array.from({ length: 10 }, () => login({ email, password: "nope nope" })))).map((r) => r.status).sort();
+    const [account, ghost] = await Promise.all([statuses("mario@hotel.it"), statuses("ghost2@hotel.it")]);
+    expect(ghost).toEqual(account);
+    expect(account).toEqual([401, 401, 401, 401, 401, 423, 423, 423, 423, 423]);
+  });
+
+  it("after the lock window an unknown address and an account answer 401 again", async () => {
+    await seedUser();
+    await passwordLock();
+    await passwordLock("ghost@hotel.it");
+    expect(await answer({ email: "ghost@hotel.it", password: "nope nope" })).toEqual(LOCKED);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 15 * 60_000 + 1_000);
+      for (const email of ["mario@hotel.it", "ghost@hotel.it"]) {
+        expect(await answer({ email, password: "nope nope" })).toEqual(WRONG);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sign-ins of a few accounts with known passwords hold one place of the gate each, so another account is served", async () => {
+    const emails = ["a", "b", "c", "d"].map((n) => `${n}@x.it`);
+    for (const email of emails) await seedUser({ id: `usr_${email[0]}`, email });
+    await seedUser({ id: "usr_own", email: "own@x.it" });
+    const gate = await holdScrypt();
+    try {
+      const flood = emails.flatMap((email) => Array.from({ length: 5 }, () => login({ email, password: PASSWORD })));
+      await vi.waitFor(() => expect(password.passwordGateLoad()).toBe(4));
+      expect(gate.held).toHaveLength(2);
+      const own = login({ email: "own@x.it", password: PASSWORD });
+      await vi.waitFor(() => expect(password.passwordGateLoad()).toBe(5));
+      gate.release();
+      expect((await own).status).toBe(200);
+      for (const r of await Promise.all(flood)) expect(r.status).toBe(200);
+    } finally {
+      gate.release();
+    }
+  }, 30_000);
 });

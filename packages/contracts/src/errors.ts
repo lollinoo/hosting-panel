@@ -32,6 +32,7 @@ export const ERROR_CODES = [
   "FIREWALL_BASE_RULES_NOT_CURRENT",
   "HOST_JOB_FAILED",
   "RATE_LIMITED",
+  "PASSWORD_CHANGE_REQUIRED",
 ] as const;
 
 export const ErrorCodeSchema = z.enum(ERROR_CODES);
@@ -69,6 +70,7 @@ export const ERROR_CODE_HTTP_STATUS: Readonly<Record<ErrorCode, number>> = Objec
   FIREWALL_BASE_RULES_NOT_CURRENT: 409,
   HOST_JOB_FAILED: 502,
   RATE_LIMITED: 429,
+  PASSWORD_CHANGE_REQUIRED: 403,
 });
 
 export const DEFAULT_RETRYABLE_ERROR_CODES = [

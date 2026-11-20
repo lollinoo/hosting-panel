@@ -152,7 +152,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
   log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass, /usr/local/sbin/hp-update and /usr/local/sbin/hp-restore-panel (0750 root:root)"
   log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb), /var/lib/hosting-panel/site-mail (0755 hp-executor:hp-executor), /var/lib/hosting-panel/sftp (0700 hp-executor:hp-executor), /var/lib/hosting-panel/phpmyadmin (0755 hp-executor:hp-executor), and /var/lib/hosting-panel/backups (0700 hp-executor:hp-executor), and /var/lib/hosting-panel/panel-dump (2770 root:hp-ipc)"
-  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor) + /run/hosting-panel/mail-relay (0755 hp-executor:hp-executor) + /run/hosting-panel/host-jobs (0700 hp-agent:hp-agent)"
+  log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor) + /run/hosting-panel/mail-relay (0755 hp-executor:hp-executor) + /run/hosting-panel/acme-dns (0700 hp-executor:hp-executor) + /run/hosting-panel/host-jobs (0700 hp-agent:hp-agent)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
   done
@@ -383,6 +383,7 @@ chmod 3770 /run/hosting-panel
 install -d -m 0700 -o hp-executor -g hp-executor /run/hosting-panel/secrets
 # 00755: a plain 0755 keeps the setgid bit inherited from the 3770 parent (GNU install).
 install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay
+install -d -m 00700 -o hp-executor -g hp-executor /run/hosting-panel/acme-dns
 # Host job trigger files: only the agent writes them; root path units watch them (ADR 0028).
 install -d -m 00700 -o hp-agent -g hp-agent /run/hosting-panel/host-jobs
 

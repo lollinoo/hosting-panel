@@ -27,6 +27,7 @@ import { SiteProvisioner } from "../src/runtime/site-provisioner.js";
 import { SiteSftpService } from "../src/sites/site-sftp.service.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { TEST_API_SITE_TYPE } from "./fixtures/test-site-type.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 interface Call { readonly method: string; readonly args: Json[] }
@@ -251,6 +252,7 @@ describe("a site that is not WordPress is never handled as one (R205 2.1) and th
     );
     expect(created.status).toBe(201);
     orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     ownerToken = await login("owner@example.test", created.body.data.temporaryPassword as string);
 
     const res = await http("POST", `/v1/organizations/${orgId}/managed-sites`, site("a"));

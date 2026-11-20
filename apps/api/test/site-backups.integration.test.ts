@@ -66,6 +66,7 @@ import { ControlPlaneError } from "../src/common/control-plane.error.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { BACKUP_OPERATION_KINDS } from "../src/runtime/outbox-worker.service.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 let beforeResolveSiteFilesServiceId: (() => Promise<void>) | null = null;
 
@@ -409,6 +410,7 @@ describe("site backups API and outbox execution", () => {
       },
     });
     expect(createdA.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario-backups@hotel.it");
     orgAId = createdA.body.data.organizationId as string;
     ownerAToken = await login(
       app.baseUrl!,
@@ -969,6 +971,7 @@ describe("site backups API and outbox execution", () => {
         },
       });
       expect(cust.status).toBe(201);
+      await skipPasswordChange(disabledDb.db, "owner-disabled@hotel.it");
       const disabledOrgId = cust.body.data.organizationId as string;
       const disabledOwnerToken = await login(
         disabledApp.baseUrl!,

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   auditEvents,
   createDatabaseClient,
+  eq,
   hosts,
   memberships,
   membershipRoles,
@@ -15,6 +16,7 @@ import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.
 import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "sentinel-admin-pass-0001";
@@ -30,6 +32,8 @@ const OPEN_ROUTES = [
   "GET /v1/dev/auth/personas",
   "POST /v1/dev/auth/token",
 ];
+// The only routes a session that must change its password may still use (#8).
+const PASSWORD_CHANGE_ROUTES = ["GET /v1/me", "POST /v1/me/password", "POST /v1/auth/revoke"];
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Route = { method: string; path: string };
@@ -141,6 +145,7 @@ describe("every administrator route refuses a customer before it does anything",
     });
     expect(created.status).toBe(201);
     const orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner-a@example.test");
     customers.owner = { id: created.body.data.userId as string, token: await login("owner-a@example.test", created.body.data.temporaryPassword as string) };
 
     // An ordinary member: no invitation route exists in M5a, so the row is written directly.
@@ -270,6 +275,26 @@ describe("every administrator route refuses a customer before it does anything",
       if (res.status !== 401) open.push(`${r.method} ${r.path}`);
     }
     expect(open.sort()).toEqual([...OPEN_ROUTES].sort());
+  });
+
+  it("a session that must change its password gets 403 PASSWORD_CHANGE_REQUIRED on every route but the three it needs, and nothing changes", async () => {
+    await dbClient.db.update(users).set({ mustChangePassword: true }).where(eq(users.id, customers.member.id));
+    try {
+      const before = await snapshot();
+      const seen = await auditIds();
+      const failures: string[] = [];
+      for (const r of routes) {
+        const key = `${r.method} ${r.path}`;
+        if (OPEN_ROUTES.includes(key) || PASSWORD_CHANGE_ROUTES.includes(key)) continue;
+        const res = await call(r.method, fill(r.path), customers.member.token);
+        if (res.status !== 403 || res.body.error?.code !== "PASSWORD_CHANGE_REQUIRED") failures.push(`${key}: ${res.status} ${res.body.error?.code ?? ""}`);
+      }
+      expect(failures).toEqual([]);
+      expect(await snapshot()).toEqual(before);
+      expect(await auditSince(seen)).toEqual([]);
+    } finally {
+      await dbClient.db.update(users).set({ mustChangePassword: false }).where(eq(users.id, customers.member.id));
+    }
   });
 
   it("a disabled administrator and a revoked session get 401 on every administrator route", async () => {

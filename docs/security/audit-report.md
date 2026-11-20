@@ -42,15 +42,15 @@ what the code does.
 |---|---|---|---|---|
 | critical | 2 | 2 | 0 | 0 |
 | high | 9 | 9 | 0 | 0 |
-| medium | 24 | 19 | 1 | 4 |
-| low | 82 | 11 | 2 | 69 |
+| medium | 24 | 23 | 1 | 0 |
+| low | 82 | 13 | 2 | 67 |
 
 How the rows are counted:
 
 - One row per finding. A finding that two auditors made is one row.
 - H1 is counted as **medium**: the auditor rated it high, the lead rated it medium (see
   "H1" below). With the auditor's rating, high would read 10 found, 9 repaired, 1 written as a limit.
-- A finding with two parts that ended in two different states is two rows (M6 and M7).
+- A finding with two parts that were repaired at different times is two rows (M6 and M7).
 - The repairs of `aud-docs`' findings in README, HARNESS, the brain notes and the API description
   were made by the documents phase (`docs-truth`). They are counted as repaired when a grep of the
   file shows the change.
@@ -102,8 +102,9 @@ How the rows are counted:
      Reason 2 holds also during a flood of sign-ins with unknown addresses: after R207 `a.8` such a flood holds at most 4 places of the password gate,
      and a real account with the right password is served (`apps/api/test/login.integration.test.ts`,
      "with the gate held by sign-ins of unknown addresses, a real account with the right password is
-     served"). It does not hold against a flood made with real accounts whose passwords are known
-     (LR-M1 below). Only an API caller (`POST /v1/auth/login` with `totpCode`) can pass a lock
+     served"). Against a flood made with real accounts whose passwords are known it holds up to
+     about 17 such accounts, because every password check of an account (sign-in, password change,
+     second-factor removal) runs one at a time (LR-M1 below). Only an API caller (`POST /v1/auth/login` with `totpCode`) can pass a lock
      with the password and the code; the panel's sign-in form cannot. `hp-break-glass
      emergency-token` prints an API token that the sign-in form does not take: it is not a way
      back into the panel.
@@ -130,9 +131,9 @@ How the rows are counted:
 | M2 | removing a member | No test proves that a removed member loses access. | `aud-access` | **repaired** (`limits.5`). Test: `apps/api/test/member-removal.integration.test.ts`, "is refused with the token they already hold on the next request to a site of that organisation". |
 | M3 | `apps/docker-executor/src/site-databases.ts`, the phpMyAdmin sign-on account | Two sites hold all phpMyAdmin workers for ever; ADR 0021 understated it. | `aud-data` | **repaired** (`data.3`). `MAX_STATEMENT_TIME 300` on the sign-on account. Test: `apps/docker-executor/test/site-databases.test.ts` (the expected `CREATE USER` and `ALTER USER` statements). ADR 0021 risk (2) corrected. |
 | M4 | `apps/api/src/backups/backup-retention.ts`, `selectExpired` | A clock jumped forward deletes every copy but the newest, with no way back. | `aud-backups` | **repaired** (`restore.3`). The newest `retentionDays` good copies of an existing site are never chosen by age. Tests: `apps/api/test/backup-retention.unit.test.ts`, "R12: old pre_update copies among the newest retentionDays good copies of the site stay" and "R13: keeps the newest retentionDays good copies when now is 400 days after the newest". ADR 0022 §2 corrected. |
-| M5 | `apps/api/src/backups/panel-backup-applier.ts` | The lease renewal during a long panel database dump has no test. | `aud-backups` | **open.** R207 §4: not repaired in the last cycle; the renewal code is in place, only the test is missing. |
+| M5 | `apps/api/src/backups/panel-backup-applier.ts` | The lease renewal during a long panel database dump has no test. | `aud-backups` | **repaired** (#10). Test: `apps/api/test/panel-backup.integration.test.ts`, "renews the operation lease every leaseMs/3 while a long panel dump runs and stops after it" and "stops renewing the lease when the panel dump fails". |
 | M6 | `apps/docker-executor/src/docker-logs.ts` | A log read held the whole Engine answer in the executor. | `aud-console` | **repaired** (`exec.3`). The read stops after 2 MiB and closes the stream. Tests: `apps/docker-executor/test/docker-logs.test.ts`, "readCappedBody returns 2 MiB of a stream that never ends and destroys it" and "readContainerLogs returns from an Engine answer that never ends and closes it". Addendum 4 C (R207 `d.1`): what was read is given. Tests: `apps/docker-executor/test/docker-logs.test.ts`, "ends a payload cut inside a multi-byte character at the last whole one"; `apps/docker-executor/test/panel-containers-qa.test.ts`, "one line of several megabytes gives an answer of one 2000-character line, without id or host path". Past 2 MiB the oldest lines of the read are kept and the newest are missing: ADR 0026 limit 9. |
-| M7 | customer log reads (`apps/api/src/sites/managed-sites.service.ts`) | No rate limit and no cap on reads at once. | `aud-console` | **open.** R207 repaired the memory of one read only. Each read now holds at most 2 MiB, so many reads at once hold many times that. |
+| M7 | customer log reads (`apps/api/src/sites/managed-sites.service.ts`) | No rate limit and no cap on reads at once. | `aud-console` | **repaired** (#10). At most 8 customer log reads in flight, 2 per organisation; more get `429` (`RATE_LIMITED`) before the executor is called; the administrator's read is not counted. Tests: `apps/api/test/log-read-gate.unit.test.ts`; `apps/api/test/managed-sites.integration.test.ts`, "a third log read of one organisation at once gets 429 RATE_LIMITED without reaching the executor". ADR 0026 limit 27. |
 | M8 | `README.md` install and update examples | They named old releases (0.3.0, 0.2.1). | `aud-docs` | **repaired** in the documents phase (`docs-truth`); the case "m6b the README names the release it ships" of `apps/api/test/infra-layout.test.ts` keeps it. |
 | M9 | `README.md` | It promised secret files `0400`; the code writes `0444` in `0700` folders. | `aud-docs` | **repaired** in the documents phase (`docs-truth`). |
 | M10 | `README.md` roles table | It listed roles and consoles that do not exist. | `aud-docs` | **repaired** in the documents phase (`docs-truth`). |
@@ -143,10 +144,10 @@ How the rows are counted:
 | M15 | `apps/docker-executor/src/docker-engine-adapter.ts`, published ports | The `127.0.0.1` publish guard has no test. | `aud-exec` | **repaired** (`exec.4`). Test: `apps/docker-executor/test/service-spec-limits.test.ts`, "publishes another port on 127.0.0.1 only". |
 | M16 | the proxy's static configuration | Nothing tests that the proxy dashboard and its insecure API stay off. | `aud-exec` | **repaired** (`exec.4`): an assertion of `dashboard: false` and `insecure: false` in `apps/docker-executor/test/docker-executor.test.ts`. |
 | M17 | the IPC body limit | The only test of the 1 MiB limit passed without the limit. | `aud-exec` | **repaired** (`exec.4`): `apps/docker-executor/test/site-files-ipc.test.ts`, "refuses an oversized IPC body (>1 MiB) before reaching the adapter", now asserts the limit's own message. |
-| M18 | the file manager's zip and unzip | The 1 GiB free-space floor has no test. | `aud-files` | **open.** R207 §4: not repaired in the last cycle; the floor is in the code, only the test is missing. |
+| M18 | the file manager's zip and unzip | The 1 GiB free-space floor has no test. | `aud-files` | **repaired** (#10). Tests: `apps/docker-executor/test/site-files-program.test.ts`, "pins the 1 GiB free-space floor and its three checks in the program", "archive refuses with disk_full one byte under the free-space floor and works at the floor" and "extract refuses with disk_full when the free space minus the declared size is one byte under the floor, and works at the floor" (the last two need PHP with ZipArchive; they run in CI). |
 | M19 | `infra/release` copy filter | Nothing fails if `.next/cache`, `.next/dev` or `.next/trace` get into the archive. | `aud-host` | **repaired** (`host.2`). Test: `infra/release/release-manifest.test.ts`, "leaves .next/cache, .next/dev and .next/trace out of the archive, and nothing else". |
 | M20 | `apps/api/src/runtime/outbox-worker.service.ts` (R189 3.2) | An operation still `queued` whose event failed keeps its site locked. | `aud-runtime` | **repaired** (`host.3`). It moves to `cancelled` with the failure, in one transaction. Test: `apps/api/test/outbox-queued-failure.unit.test.ts`, "still queued: the event fails, the operation is cancelled and the site takes a new action". ADR 0026 limit 24. |
-| M21 | the mail upgrade (`REVISION_MOVED` guard) | The guard has no test. | `aud-runtime` | **open.** R207 §4: the guard is in the code, only the test is missing. |
+| M21 | the mail upgrade (`REVISION_MOVED` guard) | The guard has no test. | `aud-runtime` | **repaired** (#10). Test: `apps/api/test/mail-relay.integration.test.ts`, "a revision added between the read and the upgrade is not overwritten; the next tick upgrades it". |
 | M22 | the web server's 413 tests | They checked the status only, not that the read stopped. | `aud-web` | **repaired** (`web.3`). Test: `apps/web/test/bff-body-bounds.test.ts`, "…: 413, the stream is cancelled after about the limit, nothing reaches the API". |
 | M23 | `apps/web/src/lib/server-session.ts` | A session cookie with a broken `%` code gives 500 on every BFF route. | `aud-web` | **repaired** (`web.4`). Test: `apps/web/test/session-expired.test.ts`, "a foreign cookie with a broken % code is skipped: the session still reads, and alone it means no session". |
 
@@ -157,7 +158,7 @@ last cycle unless a repair item names them.
 
 | id | Where | What could happen | Auditor | State |
 |---|---|---|---|---|
-| L1 | `apps/api/src/auth/login.service.ts` | After 5 wrong tries, sign-in answers 423 for an existing account and 401 for an unknown one, so it tells them apart. | `aud-access` | **open.** R207 §5 names it; changing the answer is new sign-in code in the last cycle. |
+| L1 | `apps/api/src/auth/login.service.ts` | After 5 wrong tries, sign-in answers 423 for an existing account and 401 for an unknown one, so it tells them apart. | `aud-access` | **repaired** (#9). An address with no account counts its wrong tries in memory with the same threshold and window, so six wrong sign-ins give 401 five times and then 423 for both. Test: `apps/api/test/login.integration.test.ts`, "six wrong sign-ins give the same answers for an existing account and for an unknown address". The counter is bounded and empties on a restart (ADR 0025 limit 22). |
 | L2 | `resolveSecretsMasterKey` (`apps/api/src`) | An import cycle. | `aud-access` | **open.** |
 | L3 | the audit table | A user or organisation with audit rows can never be deleted; nothing removes audit rows. | `aud-access` | **open.** R207 §5 names it. Removing audit rows is a retention policy nobody has decided. |
 | L4 | `apps/api/src/controllers/admin-health.controller.ts` | Restarting the shared database from Health is not refused while a restore runs. | `aud-backups` | **open.** |
@@ -197,7 +198,7 @@ last cycle unless a repair item names them.
 | L38 | `infra/linux/update.sh` | Its refusal of test overrides under root has no test. | `aud-host` | **open.** |
 | L39 | `apps/api/src/sites/site-domains-applier.ts` | The `wordpressUrl` audit key is not pinned by a test. | `aud-runtime` | **open.** |
 | L40 | `packages/database/src/client.ts` | The migration runner takes no advisory lock. | `aud-runtime` | **open.** |
-| L41 | `apps/docker-executor/src/docker-engine-adapter.ts` (R192 3) | Stop, then Restart, breaks `secretRefs`. | `aud-runtime` | **open.** |
+| L41 | `apps/docker-executor/src/docker-engine-adapter.ts` (R192 3) | Stop, then Restart, breaks `secretRefs`. | `aud-runtime` | **repaired** (#7). Restart sends the secrets and the executor writes the files again before Docker restarts the container. Tests: `apps/docker-executor/test/service-secrets-reboot.test.ts`, "stop, then restart, writes the secret files again (L41)"; `apps/api/test/service-restart-secrets.integration.test.ts`. ADR 0027 limit 24. |
 | L42 | `apps/api/src/runtime/outbox-worker.service.ts`, the ambiguous branch | The engine's sentence is stored in public answers. | `aud-runtime` | **open.** |
 | L43 | `createService` (`initialDomain`) | The generic service's first domain is not normalised or checked against hosts. | `aud-runtime` | **open.** With addendum 4 A built, nobody reaches the route on an installed server. |
 | L44 | `#refuseManagedSite` (E9) | An unknown `site_type` is handled as a generic service. | `aud-runtime` | **written as a limit**: ADR 0029 §2 says it is the rule ("Un sito senza tipo noto non è gestito"). |
@@ -240,9 +241,9 @@ last cycle unless a repair item names them.
 | L81 | `install.test.ts` | Port 3000 is asserted in the install case only. | `aud-host` | **open.** |
 | L82 | E4 install and update dry-run tests | They skip without cgroups v2 or Docker. | `aud-host` | **open.** |
 
-Low rows: 82. Repaired 11 (in the code with a test: L5, L18, L30, L51; in the documents: L11, L12,
-L13, L14, L17, L19, L31). Written as a limit: 2 (L36, L44). Open: 69 (L1 to L53 less the thirteen
-above, and L54 to L82).
+Low rows: 82. Repaired 13 (in the code with a test: L1, L5, L18, L30, L41, L51; in the documents:
+L11, L12, L13, L14, L17, L19, L31). Written as a limit: 2 (L36, L44). Open: 67 (L2 to L53 less the
+fourteen others above, and L54 to L82).
 
 ## Findings the lead judged not a defect
 
@@ -333,9 +334,9 @@ lead's ruling at the start of the documents phase), each in ADR 0025:
 
 | Limit | What | State |
 |---|---|---|
-| ADR 0025 limit 22 | A second timing sign of whether an address has an account. | **written as a limit.** |
+| ADR 0025 limit 22 | Signs of whether an address has an account (the 423 sign is repaired: L1); on a locked account with the second factor a sign-in with a code still runs a check, and a full gate answers `429` only to real accounts. | **written as a limit.** |
 | ADR 0025 limit 23 | During a flood a mistyped address gets "wrong e-mail or password" at once. | **written as a limit.** |
-| ADR 0025 limit 24 | A flood made of many real addresses is bounded only by each account's counters; no limit per visitor (`BLOCKED.md` row 16). | **written as a limit.** |
+| ADR 0025 limit 24 | A flood made of many real addresses is bounded by each account's counters and one password check at a time per account (sign-in, password change, second-factor removal); about 18 accounts with known passwords fill the gate; no limit per visitor (`BLOCKED.md` row 16). | **written as a limit.** |
 | ADR 0025 limit 25 | Parallel confirmations of one live reset token each run a hash. | **written as a limit.** |
 | ADR 0025 limit 26 | The token of an account disabled or made an administrator stays live until it expires. | **written as a limit.** |
 | ADR 0025 limit 27 | The share of 4 counts every check in the gate. | **written as a limit.** |
@@ -350,7 +351,7 @@ corrected by the lead as the reviewer proposed, and no reviewer read them afterw
 
 | id | Weight | What | State |
 |---|---|---|---|
-| LR-M1 | medium | `apps/api/src/auth/login.service.ts`: a right password sets the try counter back, so about five accounts whose passwords are known, each with up to five sign-ins in flight, keep the password gate full with no lock; while it lasts every other sign-in gets `429` on most tries, the administrator's and the one of an account made by `hp-accounts create-admin` included. The reviewer proved it with a test kept outside the repository; a timed flood on a server was not run. R207 addendum 6 and ADR 0025 limit 24 said such a flood takes thousands of accounts. | **open** (R207 addendum 8: needs the passwords of about five accounts the administrator made; ends with the flood; a session already open keeps working; nothing is read or lost). ADR 0025 limit 24 now says it, with what the administrator does: disable those accounts, whose tries are then counted and lock them. The repair, at most one check in flight per account or the limit per visitor of `BLOCKED.md` row 16, is not built. |
+| LR-M1 | medium | `apps/api/src/auth/login.service.ts`: a right password sets the try counter back, so about five accounts whose passwords are known, each with up to five sign-ins in flight, keep the password gate full with no lock; while it lasts every other sign-in gets `429` on most tries, the administrator's and the one of an account made by `hp-accounts create-admin` included. The reviewer proved it with a test kept outside the repository; a timed flood on a server was not run. R207 addendum 6 and ADR 0025 limit 24 said such a flood takes thousands of accounts. | **repaired**. Every password check of one account (sign-in, `POST /v1/me/password`, `POST /v1/me/totp/disable`) runs one at a time, so an account holds at most one place of the password gate. Test: `apps/api/test/login.integration.test.ts`, "sign-ins of a few accounts with known passwords hold one place of the gate each, so another account is served"; `apps/api/test/password-check-serial.integration.test.ts`, "wrong password changes, 2FA off and a sign-in of one account hold one gate place; another account is served meanwhile". About 18 accounts with known passwords can still fill the gate (ADR 0025 limit 24). |
 | LR-L1 | low | `sshRepair` in both catalogs named `hp-break-glass` as a repair for an administrator's lost password or second factor. | **repaired** (the sentence). |
 | LR-L2 | low | The "H1" block of this report kept the withdrawn break-glass sentence, and row DM1 named the wrong finding. | **repaired** (the sentences). |
 | LR-L3 | low | Row "R207 add. 4 C" named a test that was green before the repair as proof of `d.1`. | **repaired** (the sentence). |
@@ -359,7 +360,7 @@ corrected by the lead as the reviewer proposed, and no reviewer read them afterw
 | LR-L6 | low | README, on the three actions closed to everyone: wrong answer codes for a visit that ran out and for a customer of another organisation. | **repaired** (the sentence). |
 | LR-L7 | low | The administrator's two `undo_incomplete` sentences said an undo failed after a failed password step, where none runs. | **repaired** (the sentences, in both catalogs and in the alert table of ADR 0026). |
 
-Last read: 8 rows. Medium 1, open. Low 7, all repaired.
+Last read: 8 rows. Medium 1, repaired. Low 7, all repaired.
 
 Not confirmed by the last read, and by nobody since: that the owner of a generic service made on
 0.5.0 can still start it (README "Dalla 0.5.0", ADR 0029 limit 20; read in the code, no test),
@@ -403,14 +404,67 @@ tree after the last read and after the lead's corrections of its sentences.
   passed, 43 skipped, 0 failed.
 - **The release build and its smoke:** both at exit 0. The archive is
   `hosting-panel-0.5.0-linux-x64.tar.gz` (116.8 MiB) and the smoke ends with `smoke: PASS`.
-- **The twelve real-Docker scripts** (`infra/linux/accept-*.mjs`): each at exit 0 with no failed
-  check, and none of their containers, volumes or networks was left behind. One check was
-  skipped, in `accept-m6-site-type.mjs` (see L13). The result of each script is in the M6b section
-  of `docs/security/step-6-acceptance-report.md`.
+- **The twelve real-Docker scripts** (`infra/linux/accept-*.mjs` in the tree of the runs): each at
+  exit 0 with no failed check, and none of their containers, volumes or networks was left behind.
+  One check was skipped, in `accept-m6-site-type.mjs` (see L13). The result of each script is in
+  the M6b section of `docs/security/step-6-acceptance-report.md`. The thirteenth script,
+  `accept-acme-pebble.mjs` (DNS-01, ADR 0030, no Docker), came after these runs and is not one of
+  them.
 
-These lines were written after the runs. Between the tree of the runs and the tree with these
-lines, only this report, the acceptance report and one sentence of `.agents/brain/state.md`
-differ.
+These lines were written after the runs. When they were written, only this report, the
+acceptance report and one sentence of `.agents/brain/state.md` differed from the tree of the runs.
+The repairs marked #7, #9 and #10 and DNS-01 (ADR 0030) came later: these runs do not cover them,
+and the tests their rows cite did not exist in the tree of the runs.
+
+## Runs on a real server (2026-11-20)
+
+The lead ran these on a fresh Ubuntu 24.04.5 VPS (4 CPU, 7.7 GB, Docker 29.10.0, nftables 1.0.9),
+on the tree of pull request #13, with `infra/linux/install.sh --acme-staging` and the server's public
+name `45-138-202-116.sslip.io`. The findings below are not in the counts above.
+
+- **The twelve real-Docker scripts:** ten at exit 0 at once. `accept-m3-panel.mjs` and
+  `accept-m4-wordpress.mjs` failed on assumptions of the scripts, not of the product: the first
+  wanted the user in group 30, the second took the word `core` of the constant update script for a
+  value once WordPress 7.1.5 existed. After the repair of the two scripts: 13/13 and 12/12, nothing
+  left behind.
+- **`accept-m7-secrets-reboot.mjs`** (new, #7 on the real engine): 8/8. After a simulated reboot,
+  Docker answers 400 "not a directory" and leaves a root-owned folder for the service and each secret;
+  Restart and Deploy with the secrets set the folder aside and the container runs with the right
+  values. A Restart without the secrets ends in the coded error `DOCKER_ENGINE_UNAVAILABLE` (Docker
+  refuses the folder), never a crash; the API always sends them.
+- **The installer:** exit 0. Let's Encrypt staging certificates for the panel and for a site, both
+  through HTTP-01, the site's about a minute after it was made.
+- **#8:** a session with a temporary password gets `403 PASSWORD_CHANGE_REQUIRED` on GET and POST
+  routes, reads `GET /v1/me`, changes the password, then works with the same token.
+- **DNS-01** (httpreq with an endpoint that does not exist and a marker as password): the files are
+  0400 `hp-executor` in the 0700 tmpfs folder, the proxy gets only the `_FILE` entries and a read-only
+  bind; a dns-01 domain whose A record points elsewhere is ordered at once and ends `failed` with
+  `dns_provider` and a retry 15 minutes later. The marker is in no `docker inspect`, file under
+  `/var/lib/hosting-panel` or `/etc/hosting-panel`, journal line, proxy log line or `pg_dump`.
+- **SFTP on 2222** from the public address: the host key matches the one the API shows, the upload
+  works and the site serves the file.
+
+| ID | Where | What | Found by | State |
+|---|---|---|---|---|
+| RS1 | `apps/host-agent/src/linux-adapter.ts`, `replaceFirewallSets` | Every port opened or closed and every address blocked in the panel stayed "Saved, not active": `nft -f -` refuses the socket Node gives a child as stdin ("Not a regular file: /dev/stdin"). The unit tests replace the runner and `accept-m5-firewall.mjs` gives nft a pipe, so neither saw it. | lead (real server) | **repaired.** The program goes to a 0600 file in a new folder of the agent's private `/tmp`, nft reads that file, the folder is removed afterwards. Tests: `apps/host-agent/test/host-m5d.test.ts`, "replaces the sets through nft -f on a 0600 file of its own, removes the file and answers a fresh read" and "removes the program file and its folder when nft fails, and answers the fixed sentence". On the server (the installed release with the repaired file copied in): ports 8080 and 9100 opened and closed and 192.0.2.10 blocked and unblocked from the admin API reach the kernel sets at once. |
+
+**A reboot of the server**, with a port open, an address blocked and a DNS provider saved: a one-time
+check four minutes after the boot found the 35 lines of the snapshot taken before it unchanged.
+- The panel's four services came back with no restart and no error line in their journals.
+- `nftables.service` loaded the base rules. The API sent the saved lists again, through the
+  repaired path of RS1, with no `firewall_sync_failed`: the port and the address are in the kernel
+  sets, and the boot file holds none.
+- The API wrote the DNS provider's files again on the empty tmpfs, 11 s after the boot. The proxy
+  has the same `_FILE` entries, and the marker is still nowhere.
+- The containers run, and the panel and the site serve the same certificates, so nothing was
+  ordered again. The SFTP login works with the same host key.
+
+**SFTP from another network:** the owner connected to port 2222 from a client outside the server and
+confirmed that everything worked. The SFTP container's log shows the accepted login from an address
+other than the server's own.
+
+Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, `hp-update` between
+two versions.
 
 ## Open high or critical findings
 

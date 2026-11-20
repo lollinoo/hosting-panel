@@ -14,6 +14,7 @@ import { WORDPRESS_API_SITE_TYPE } from "../src/site-types/wordpress.js";
 import { siteFileReasonError } from "../src/sites/site-files.service.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { TEST_API_SITE_TYPE } from "./fixtures/test-site-type.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 interface Call { readonly method: string; readonly args: Json[] }
@@ -218,6 +219,7 @@ describe("the five subsystems name the site's type on every executor request", (
       adminToken,
     );
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     orgId = created.body.data.organizationId as string;
     ownerToken = await login("owner@example.test", created.body.data.temporaryPassword as string);
 

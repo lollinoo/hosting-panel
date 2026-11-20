@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   AddSiteDomainInputSchema,
+  CERT_PROBLEMS,
   CreateManagedSiteInputSchema,
+  SetDomainChallengeInputSchema,
+  SiteDomainDtoSchema,
+  SiteHostRouteSchema,
   isSiteOrigin,
   suggestWwwPair,
   wwwPartner,
@@ -75,6 +79,28 @@ describe("site domains", () => {
       "１２７.０.０.１",
     ]) {
       expect(AddSiteDomainInputSchema.safeParse({ hostname: bad }).success, bad).toBe(false);
+    }
+  });
+
+  it("CERT_PROBLEMS includes dns_provider", () => {
+    expect(CERT_PROBLEMS).toEqual(["rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "dns_provider", "other"]);
+  });
+
+  it("SiteHostRouteSchema keeps challenge and accepts routes without it", () => {
+    const route = { hostname: "hotel.it", tls: true, httpsRedirect: true, redirectTo: null };
+    expect(SiteHostRouteSchema.parse({ ...route, challenge: "dns-01" })).toEqual({ ...route, challenge: "dns-01" });
+    expect(SiteHostRouteSchema.parse(route)).toEqual(route);
+    expect(SiteHostRouteSchema.safeParse({ ...route, challenge: "tls-alpn-01" }).success).toBe(false);
+    expect(Object.keys(SiteDomainDtoSchema.shape)).toEqual(
+      ["id", "hostname", "isPrimary", "routed", "challenge", "dns", "certificate"],
+    );
+  });
+
+  it("SetDomainChallengeInputSchema accepts only http-01 and dns-01", () => {
+    expect(SetDomainChallengeInputSchema.parse({ challenge: "http-01" })).toEqual({ challenge: "http-01" });
+    expect(SetDomainChallengeInputSchema.parse({ challenge: "dns-01" })).toEqual({ challenge: "dns-01" });
+    for (const bad of [{ challenge: "tls-alpn-01" }, {}, { challenge: null }]) {
+      expect(SetDomainChallengeInputSchema.safeParse(bad).success).toBe(false);
     }
   });
 });

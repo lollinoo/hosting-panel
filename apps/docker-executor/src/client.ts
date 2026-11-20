@@ -20,6 +20,7 @@ import {
   WORDPRESS_RESET_CLIENT_WAIT_MS,
   type CertificateStatusIpcRequest,
   type DeployServiceIpcRequest,
+  type DnsProviderApplyRequest,
   type ErrorCode,
   type ExecutorHealthResponse,
   type IpcSigningKey,
@@ -121,6 +122,8 @@ export const DEPLOY_TIMEOUT_MS = 300_000;
 export const SITE_JOB_TIMEOUT_MS = 510_000;
 export const SITE_PURGE_TIMEOUT_MS = 120_000;
 export const MAIL_RELAY_APPLY_TIMEOUT_MS = 300_000;
+/** A proxy recreate may pull the image. */
+export const DNS_PROVIDER_APPLY_TIMEOUT_MS = 300_000;
 export const SITE_FILES_TIMEOUT_MS = 60_000;
 
 /** Kinds with their own limit wait limit + 300 s; the rest keep the shipped waits. */
@@ -379,6 +382,15 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     );
   }
 
+  public async applyDnsProvider(req: DnsProviderApplyRequest | null): Promise<void> {
+    await this.sendSignedJsonRequest(
+      "POST",
+      "/v1/ingress/dns-provider/apply",
+      { config: req },
+      DNS_PROVIDER_APPLY_TIMEOUT_MS,
+    );
+  }
+
   public async getMailRelayStatus(req: { since: string }): Promise<MailRelayStatusReport> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/mail-relay/status", { since: req.since });
     return z.object({ data: MailRelayStatusReportWireSchema }).parse(json).data;
@@ -513,8 +525,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     return z.object({ data: PanelContainerStatusWireSchema }).parse(json).data;
   }
 
-  public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
-    return this.sendServiceAction(serviceInstanceId, "restart");
+  public async restartService(
+    serviceInstanceId: string,
+    resolvedSecrets?: Readonly<Record<string, string>>,
+  ): Promise<DockerExecutionResult> {
+    return this.sendServiceAction(serviceInstanceId, "restart", resolvedSecrets);
   }
 
   public async stopService(serviceInstanceId: string): Promise<DockerExecutionResult> {
@@ -537,11 +552,13 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   private async sendServiceAction(
     serviceInstanceId: string,
     action: "restart" | "stop" | "delete",
+    resolvedSecrets?: Readonly<Record<string, string>>,
   ): Promise<DockerExecutionResult> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const payload: ServiceInstanceActionIpcRequest = {
       serviceInstanceId,
       action,
+      ...(resolvedSecrets ? { resolvedSecrets: { ...resolvedSecrets } } : {}),
     };
     const json = await this.sendSignedJsonRequest("POST", "/v1/services/action", payload);
     return ExecutionResultDataEnvelopeSchema.parse(json).data;

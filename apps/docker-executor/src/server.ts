@@ -7,6 +7,7 @@ import {
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
+  DnsProviderApplyIpcRequestSchema,
   ERROR_CODE_HTTP_STATUS,
   ErrorCodeSchema,
   ExecutorHealthResponseSchema,
@@ -493,6 +494,13 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/v1/ingress/dns-provider/apply") {
+        const { config } = this.parseBody(DnsProviderApplyIpcRequestSchema, rawBody, "DNS provider");
+        await this.executor.applyDnsProvider(config);
+        writeJson(res, 200, { data: { applied: config !== null } });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/mail-relay/apply") {
         const { config } = this.parseBody(MailRelayApplyIpcRequestSchema, rawBody, "mail relay");
         await this.executor.applyMailRelay(config);
@@ -853,7 +861,7 @@ export class DockerExecutorIpcServer {
 
     let result: DockerExecutionResult;
     if (action === "restart") {
-      result = await this.executor.restartService(serviceInstanceId);
+      result = await this.executor.restartService(serviceInstanceId, parsed.data.resolvedSecrets);
     } else if (action === "stop") {
       result = await this.executor.stopService(serviceInstanceId);
     } else {

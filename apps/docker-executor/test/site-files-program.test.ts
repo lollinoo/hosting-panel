@@ -1056,6 +1056,71 @@ describe("site files program zip operations (real php + ZipArchive)", () => {
   });
 });
 
+// The 1 GiB free-space floor (M18): a stub replaces disk_free_space so any free space can be simulated.
+const FLOOR = 1073741824;
+const FLOOR_CONST = `const HP_DISK_FREE_FLOOR = ${FLOOR};`;
+
+async function writeFloorProgram(dir: string, freeLiteral: string): Promise<string> {
+  const program = SITE_FILES_PROGRAM.replaceAll("@disk_free_space(", "hp_test_free(").replace(
+    FLOOR_CONST,
+    `${FLOOR_CONST}\nfunction hp_test_free(string $d) { return ${freeLiteral}; }`,
+  );
+  const scriptPath = path.join(dir, "hp-files.php");
+  await writeFile(scriptPath, program);
+  return scriptPath;
+}
+
+describe("free-space floor (M18)", () => {
+  it("pins the 1 GiB free-space floor and its three checks in the program", () => {
+    expect(SITE_FILES_PROGRAM.split(FLOOR_CONST)).toHaveLength(2);
+    expect(SITE_FILES_PROGRAM.split("@disk_free_space(")).toHaveLength(4);
+    expect(SITE_FILES_PROGRAM).toMatch(/\$free < HP_DISK_FREE_FLOOR/);
+    expect(SITE_FILES_PROGRAM).toMatch(/\(\$free - \$totalDeclared\) < HP_DISK_FREE_FLOOR/);
+  });
+
+  it.skipIf(!hasZip)("archive refuses with disk_full one byte under the free-space floor and works at the floor", async () => {
+    const progDir = await makeTempDir("hp-site-files-script-");
+    const root = await makeTempDir();
+    await writeFile(path.join(root, "a.txt"), "hello");
+    const req = { op: "archive", paths: ["a.txt"], to: "out.zip" };
+    const baseline = await listTreeSnapshot(root);
+
+    expectRefusal(runPhp(await writeFloorProgram(progDir, String(FLOOR - 1)), root, req), "disk_full");
+    expect((await readdir(root)).filter((n) => n.startsWith(".htpanel-archive-"))).toEqual([]);
+    expect(await listTreeSnapshot(root)).toEqual(baseline);
+
+    expect(expectOk(runPhp(await writeFloorProgram(progDir, String(FLOOR)), root, req), "archive").entries).toBe(1);
+  });
+
+  it.skipIf(!hasZip)(
+    "extract refuses with disk_full when the free space minus the declared size is one byte under the floor, and works at the floor",
+    async () => {
+      const progDir = await makeTempDir("hp-site-files-script-");
+      const root = await makeTempDir();
+      const D = 4096;
+      await writeFile(path.join(root, "in.zip"), buildTestZip([{ name: "big.bin", data: Buffer.alloc(D, 7) }]));
+      const req = { op: "extract", path: "in.zip", to: "out" };
+      const baseline = await listTreeSnapshot(root);
+
+      expectRefusal(runPhp(await writeFloorProgram(progDir, String(FLOOR + D - 1)), root, req), "disk_full");
+      expect(await listTreeSnapshot(root)).toEqual(baseline);
+      await expect(lstat(path.join(root, "out"))).rejects.toThrow();
+
+      expect(expectOk(runPhp(await writeFloorProgram(progDir, String(FLOOR + D)), root, req), "extract").entries).toBe(1);
+      expect((await stat(path.join(root, "out", "big.bin"))).size).toBe(D);
+    },
+  );
+
+  it.skipIf(!hasZip)("a free space that cannot be read lets archive and extract through", async () => {
+    const script = await writeFloorProgram(await makeTempDir("hp-site-files-script-"), "false");
+    const root = await makeTempDir();
+    await writeFile(path.join(root, "a.txt"), "hello");
+    expectOk(runPhp(script, root, { op: "archive", paths: ["a.txt"], to: "out.zip" }), "archive");
+    expect(expectOk(runPhp(script, root, { op: "extract", path: "out.zip", to: "out" }), "extract").entries).toBe(1);
+    expect(await readFile(path.join(root, "out", "a.txt"), "utf8")).toBe("hello");
+  });
+});
+
 // The WordPress import (M4b): the eight import.* operations on the real PHP program.
 const STAGING_HTACCESS =
   '# hosting-panel import staging: never served\nRequire all denied\n<Files "*">\nRequire all denied\n</Files>\n<If "true">\nRequire all denied\n</If>\n';

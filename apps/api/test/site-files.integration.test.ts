@@ -36,6 +36,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "correct horse battery";
@@ -319,6 +320,7 @@ describe("site files HTTP API integration", () => {
       adminToken,
     );
     expect(createdA.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     orgAId = createdA.body.data.organizationId as string;
     ownerAToken = await loginUser(
       app.baseUrl!,
@@ -1767,6 +1769,7 @@ describe("site files HTTP API when runtime is disabled", () => {
       body: { organizationName: "Disabled Org", ownerEmail: "owner@disabled.it", ownerName: "Owner" },
     });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner@disabled.it");
     orgId = created.body.data.organizationId as string;
     token = await loginUser(
       app.baseUrl!,

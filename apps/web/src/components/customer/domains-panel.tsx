@@ -24,10 +24,13 @@ export function DomainsPanel({
   basePath,
   csrfToken,
   initial,
+  challenge,
 }: {
   basePath: string;
   csrfToken: string;
   initial: SiteDomainsDto;
+  /** Admin only: lets the infrastructure admin pick how each certificate is obtained. */
+  challenge?: { dnsAvailable: boolean };
 }) {
   const m = useMessages();
   const t = m.site.domains;
@@ -61,7 +64,13 @@ export function DomainsPanel({
     return () => clearInterval(timer);
   }, [needsPoll, basePath]);
 
-  async function send(name: string, method: string, url: string, body?: unknown): Promise<boolean> {
+  async function send(
+    name: string,
+    method: string,
+    url: string,
+    body?: unknown,
+    errorText?: (code: string, details: { reason?: string }[]) => string | null,
+  ): Promise<boolean> {
     setBusy(name);
     setError(null);
     try {
@@ -77,7 +86,8 @@ export function DomainsPanel({
         return true;
       }
       const code: string = json?.error?.code ?? "";
-      setError(domainErrorText(t, code, json?.error?.details) ?? errorMessage(m, code));
+      const details = json?.error?.details ?? [];
+      setError(errorText?.(code, details) ?? domainErrorText(t, code, details) ?? errorMessage(m, code));
     } catch {
       setError(m.errors.generic);
     } finally {
@@ -107,6 +117,8 @@ export function DomainsPanel({
     const text = (!time && noTime[key]) || t.hint[key];
     return format(text, { host: d.hostname, ip: data.serverIpv4, seen: d.dns.observedA.join(", "), time });
   };
+  const adminError = (code: string, details: { reason?: string }[]) =>
+    code === "VALIDATION_ERROR" && details.some((x) => x.reason === "dns_provider_missing") ? m.admin.sites.challenge.noProvider : null;
   const suggested = suggestWwwPair(hostname.trim().toLowerCase());
   const includeWww = www ?? suggested;
 
@@ -155,6 +167,12 @@ export function DomainsPanel({
         </Alert>
       )}
 
+      {challenge && !challenge.dnsAvailable && (
+        <Alert role="note">
+          <AlertDescription>{m.admin.sites.challenge.noProvider}</AlertDescription>
+        </Alert>
+      )}
+
       <Card>
         <CardContent className="divide-y p-0">
           {data.domains.map((d) => {
@@ -171,6 +189,25 @@ export function DomainsPanel({
                   </span>
                 </div>
                 {hint && <p className="text-sm text-muted-foreground">{hint}</p>}
+                {challenge ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Label htmlFor={`challenge-${d.id}`}>{m.admin.sites.challenge.label}</Label>
+                    <select
+                      id={`challenge-${d.id}`}
+                      className="flex h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm"
+                      value={d.challenge}
+                      disabled={busy !== null}
+                      onChange={(e) => send(`challenge:${d.id}`, "PATCH", `${basePath}/${d.id}`, { challenge: e.target.value }, adminError)}
+                    >
+                      <option value="http-01">{m.admin.sites.challenge["http-01"]}</option>
+                      <option value="dns-01" disabled={!challenge.dnsAvailable && d.challenge !== "dns-01"}>
+                        {m.admin.sites.challenge["dns-01"]}
+                      </option>
+                    </select>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">{t.challenge[d.challenge]}</p>
+                )}
                 <div className="flex flex-wrap gap-2">
                   {canMakeMain && (
                     <Button type="button" variant="outline" size="sm" disabled={busy !== null} onClick={() => send(`primary:${d.id}`, "POST", `${basePath}/${d.id}/primary`)}>

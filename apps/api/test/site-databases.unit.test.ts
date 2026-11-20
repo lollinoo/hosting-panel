@@ -84,6 +84,7 @@ class MockDockerExecutor implements DockerExecutorPort {
   public getCertificateStatus: DockerExecutorPort["getCertificateStatus"] = (req) =>
     this.#base.getCertificateStatus(req);
   public applyMailRelay: DockerExecutorPort["applyMailRelay"] = (req) => this.#base.applyMailRelay(req);
+  public applyDnsProvider: DockerExecutorPort["applyDnsProvider"] = (req) => this.#base.applyDnsProvider(req);
   public getMailRelayStatus: DockerExecutorPort["getMailRelayStatus"] = (req) =>
     this.#base.getMailRelayStatus(req);
   public sendTestMail: DockerExecutorPort["sendTestMail"] = (req) => this.#base.sendTestMail(req);

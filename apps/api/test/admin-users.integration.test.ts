@@ -5,6 +5,7 @@ import { issueBreakGlassEmergencyToken } from "../src/cli/break-glass.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "correct horse battery";
@@ -98,6 +99,7 @@ describe("admin user management API", () => {
 
   it("customer cannot call admin endpoints", async () => {
     const { data } = (await (await createCustomer()).json()) as Created;
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     const token = (await login("mario@hotel.it", data.temporaryPassword)).data.accessToken;
     const res = await call(token, "GET", "/v1/admin/users");
     expect(res.status).toBe(403);
@@ -166,6 +168,14 @@ describe("admin user management API", () => {
     expect((await login("new@example.test", data.temporaryPassword)).data.status).toBe("totp_required");
     const l = await login("new@example.test", data.temporaryPassword, data.totpSecretBase32);
     expect(l.data.mustChangePassword).toBe(true);
+    const blocked = await call(l.data.accessToken, "GET", "/v1/admin/users");
+    expect(blocked.status).toBe(403);
+    expect(await errorCode(blocked)).toBe("PASSWORD_CHANGE_REQUIRED");
+    const changed = await call(l.data.accessToken, "POST", "/v1/me/password", {
+      currentPassword: data.temporaryPassword,
+      newPassword: "a new long password",
+    });
+    expect(changed.status).toBe(204);
     expect((await call(l.data.accessToken, "GET", "/v1/admin/users")).status).toBe(200);
 
     const [audit] = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.administrator.create"));
@@ -197,6 +207,7 @@ describe("admin user management API", () => {
     expect((await createAdmin({ email: "bad@example.test", name: " " })).status).toBe(400);
 
     const { data } = (await (await createCustomer()).json()) as Created;
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     const token = (await login("mario@hotel.it", data.temporaryPassword)).data.accessToken;
     const denied = await createAdmin({ email: "sneaky@example.test", name: "Sneaky" }, token);
     expect(denied.status).toBe(403);
@@ -223,6 +234,17 @@ describe("admin user management API", () => {
     expect((await login("second@example.test", PW)).data.status).toBe("totp_required");
     const statuses = await dbClient.db.select().from(auditEvents).where(eq(auditEvents.action, "admin.user.status"));
     expect(statuses.map((a) => (a.details as { status: string }).status)).toEqual(["disabled", "active"]);
+  });
+
+  it("a break-glass token works while the administrator must change the password", async () => {
+    const b = await createServerAdmin(dbClient.db, KEY, { email: "second@example.test", name: "Second", password: PW });
+    await dbClient.db.update(users).set({ mustChangePassword: true }).where(eq(users.id, b.userId));
+    const bg = await issueBreakGlassEmergencyToken({ dbClient, oidcService: app.oidc, userId: b.userId, reason: "test" });
+    expect((await call(bg.token.accessToken, "GET", "/v1/admin/users")).status).toBe(200);
+    const token = (await login("second@example.test", PW, b.totpSecretBase32)).data.accessToken;
+    const res = await call(token, "GET", "/v1/admin/users");
+    expect(res.status).toBe(403);
+    expect(await errorCode(res)).toBe("PASSWORD_CHANGE_REQUIRED");
   });
 
   it("the last active administrator cannot be disabled", async () => {

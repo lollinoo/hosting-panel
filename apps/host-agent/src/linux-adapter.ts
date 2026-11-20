@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, readdir, readFile, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readdir, readFile, rm, stat, statfs, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -89,7 +89,6 @@ export interface ExecFileResult {
 }
 
 export interface RunOptions {
-  readonly input?: string;
   readonly maxBuffer?: number;
 }
 
@@ -158,9 +157,9 @@ export async function runAllowlistedBinary(
     maxBuffer: options.maxBuffer ?? 256 * 1024,
     windowsHide: true,
   });
-  // stdin always closes, so no program waits on it; nft -f - reads its program from here.
+  // stdin always closes, so no program waits on it.
   pending.child?.stdin?.on("error", () => undefined);
-  pending.child?.stdin?.end(options.input ?? "");
+  pending.child?.stdin?.end();
   const { stdout, stderr } = await pending;
 
   return {
@@ -909,7 +908,16 @@ export class LinuxSystemHostAdapter implements HostAgentPort {
     const valid = validateFirewallSets(sets);
     if ((await this.readFirewall()).baseRules !== "current")
       throw hostAgentError("RESOURCE_LOCKED", "Firewall base rules are not current");
-    await this.runTool(await this.resolveNftBinaryPath(), ["-f", "-"], { input: buildFirewallSetsProgram(valid) });
+    // nft refuses "-f -" when stdin is the socket Node gives a child ("Not a regular file"), so the
+    // one-transaction program goes to a 0600 file in a fresh 0700 folder (the unit's PrivateTmp).
+    const programDir = await mkdtemp(join(os.tmpdir(), "hp-nft-"));
+    try {
+      const programPath = join(programDir, "sets.nft");
+      await writeFile(programPath, buildFirewallSetsProgram(valid), { mode: 0o600, flag: "wx" });
+      await this.runTool(await this.resolveNftBinaryPath(), ["-f", programPath]);
+    } finally {
+      await rm(programDir, { recursive: true, force: true });
+    }
     return this.readFirewall();
   }
 

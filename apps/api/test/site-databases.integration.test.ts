@@ -52,6 +52,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "correct horse battery";
@@ -130,6 +131,8 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
     this.sim.getCertificateStatus(req);
   public applyMailRelay: DockerExecutorPort["applyMailRelay"] = (req) =>
     this.sim.applyMailRelay(req);
+  public applyDnsProvider: DockerExecutorPort["applyDnsProvider"] = (req) =>
+    this.sim.applyDnsProvider(req);
   public getMailRelayStatus: DockerExecutorPort["getMailRelayStatus"] = (req) =>
     this.sim.getMailRelayStatus(req);
   public sendTestMail: DockerExecutorPort["sendTestMail"] = (req) => this.sim.sendTestMail(req);
@@ -526,6 +529,7 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     );
     expect(createdA.status).toBe(201);
     orgAId = createdA.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "mario-db@trattoria.it");
     ownerAToken = await loginUser(
       app.baseUrl!,
       "mario-db@trattoria.it",
@@ -1625,6 +1629,7 @@ describe("site databases on local-simulator backend", () => {
       body: { organizationName: "Sim DB Org", ownerEmail: "owner-db@sim.it", ownerName: "Sim" },
     });
     orgId = createdOrg.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner-db@sim.it");
     ownerToken = await loginUser(
       app.baseUrl!,
       "owner-db@sim.it",
@@ -1741,6 +1746,7 @@ describe("createControlPlaneApp boot restores site.databases.manage to customer_
       body: { organizationName: "Boot DB Org", ownerEmail: "owner@bootdb.it", ownerName: "Owner" },
     });
     const orgId = createdOrg.body.data.organizationId as string;
+    await skipPasswordChange(app.dbClient.db, "owner@bootdb.it");
     const ownerToken = await loginUser(
       app.baseUrl!,
       "owner@bootdb.it",

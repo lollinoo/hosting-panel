@@ -44,6 +44,7 @@ import {
 } from "../src/backups/site-restore-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "correct horse battery";
@@ -298,6 +299,7 @@ describe("M3b site restore & download routes and service", () => {
       },
     });
     expect(createdA.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario-restore@hotel.it");
     orgAId = createdA.body.data.organizationId as string;
     ownerAToken = await login(
       app.baseUrl!,

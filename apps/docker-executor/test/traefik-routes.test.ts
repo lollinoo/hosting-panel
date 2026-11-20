@@ -3,17 +3,49 @@ import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promise
 import os from "node:os";
 import path from "node:path";
 import type { SiteHostRoute } from "@hosting-panel/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ACME_DNS_SECRET_MOUNT,
   TraefikIngressFileManager,
   acmeStorageFileName,
   buildIngressProxyContainerPayload,
   buildSiteDynamicTraefikYaml,
   buildTraefikStaticYaml,
+  dnsProviderFileEnv,
+  parseDnsProviderState,
   parsePanelIngressConfigFromEnv,
+  type DnsProviderState,
   type PanelIngressConfig,
   type SiteIngressRouteEntry,
 } from "../src/index.js";
+
+/** Lets a test hold one rename (a slow disk) to open the window of a race. */
+const renameHook = vi.hoisted(() => ({ hold: null as null | ((to: string) => Promise<void> | undefined) }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    rename: async (from: string, to: string) => {
+      await renameHook.hold?.(to);
+      return actual.rename(from, to);
+    },
+  };
+});
+
+/** Holds the next rename onto `target` until release(); `entered` resolves when it is held. */
+function holdNextRename(target: string): { entered: Promise<void>; release: () => void } {
+  let release = (): void => undefined;
+  let enter = (): void => undefined;
+  const entered = new Promise<void>((resolve) => (enter = resolve));
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  renameHook.hold = (to) => {
+    if (to !== target) return undefined;
+    renameHook.hold = null;
+    enter();
+    return gate;
+  };
+  return { entered, release: () => release() };
+}
 
 const PANEL: PanelIngressConfig = {
   hostname: "srv12.example.it",
@@ -24,7 +56,8 @@ const PANEL: PanelIngressConfig = {
   acmeCaCertFile: null,
   upstreamPort: 3000,
 };
-const OPTS = { acmeEnabled: true, reservedHosts: [PANEL.hostname, PANEL.ipv4] };
+const OPTS = { acmeEnabled: true, dnsChallenge: false, reservedHosts: [PANEL.hostname, PANEL.ipv4] };
+const DNS: DnsProviderState = { provider: "httpreq", fields: ["HTTPREQ_ENDPOINT", "HTTPREQ_PASSWORD"] };
 
 const h = (hostname: string): string =>
   createHash("sha256").update(hostname).digest("hex").slice(0, 8);
@@ -167,6 +200,7 @@ describe("site routes per host", () => {
 
 const cleanup: string[] = [];
 afterEach(async () => {
+  renameHook.hold = null;
   for (const dir of cleanup.splice(0)) await rm(dir, { recursive: true, force: true });
 });
 async function tmp(): Promise<string> {
@@ -360,5 +394,226 @@ describe("panel certificate gate (owner decision: wait for DNS like the sites)",
       throw new Error("must not look up");
     };
     expect(await manager.gatePanelCertificate(panel, never)).toBe(false);
+  });
+});
+
+describe("DNS-01 challenge", () => {
+  const pebble = {
+    ...PANEL,
+    acmeStaging: true,
+    acmeCaServer: "https://pebble:14000/dir",
+    acmeCaCertFile: "/etc/hosting-panel/pebble.pem",
+  };
+  const proxyInput = {
+    staticConfigHostPath: "/s/traefik.yml",
+    dynamicDirHostPath: "/s/dynamic",
+    acmeDirHostPath: "/s/acme",
+  };
+
+  it("static config adds le-dns with the same store and CA as le", () => {
+    const yaml = buildTraefikStaticYaml(pebble, DNS);
+    const le = yaml.slice(yaml.indexOf("  le:\n"), yaml.indexOf("      httpChallenge:"));
+    const leDns = yaml.slice(yaml.indexOf("  le-dns:\n"), yaml.indexOf("      dnsChallenge:"));
+    expect(leDns.replace("  le-dns:", "  le:")).toBe(le);
+    expect(yaml).toContain('      storage: /etc/traefik/acme/acme-custom.json');
+    expect(yaml.endsWith("      dnsChallenge:\n        provider: httpreq\n")).toBe(true);
+    expect(yaml.indexOf("        entryPoint: web\n  le-dns:")).toBeGreaterThan(0);
+  });
+
+  it("no le-dns without an ACME email", () => {
+    expect(buildTraefikStaticYaml({ ...PANEL, acmeEmail: null }, DNS)).not.toContain("le-dns");
+    expect(buildTraefikStaticYaml(null, DNS)).not.toContain("certificatesResolvers");
+  });
+
+  it("static config without a DNS provider is unchanged", () => {
+    for (const panel of [PANEL, pebble, null]) {
+      expect(buildTraefikStaticYaml(panel, null)).toBe(buildTraefikStaticYaml(panel));
+      expect(buildTraefikStaticYaml(panel)).not.toContain("le-dns");
+    }
+    expect(buildTraefikStaticYaml(PANEL).endsWith("        entryPoint: web\n")).toBe(true);
+  });
+
+  it("a dns-01 host uses le-dns", () => {
+    const yaml = buildSiteDynamicTraefikYaml(
+      "site_1",
+      [route([host("hotel.it", { tls: true, challenge: "dns-01" }), host("b.it", { tls: true })])],
+      { ...OPTS, dnsChallenge: true },
+    );
+    expect(block(yaml, `router_svc1_${h("hotel.it")}_tls`)).toMatch(/^\s*certResolver: le-dns$/m);
+    expect(block(yaml, `router_svc1_${h("b.it")}_tls`)).toMatch(/^\s*certResolver: le$/m);
+  });
+
+  it("a dns-01 host without the DNS resolver gets tls {} and no resolver", () => {
+    const yaml = buildSiteDynamicTraefikYaml(
+      "site_1",
+      [route([host("hotel.it", { tls: true, challenge: "dns-01" })])],
+      OPTS,
+    );
+    const tls = block(yaml, `router_svc1_${h("hotel.it")}_tls`);
+    expect(tls).toContain("      tls: {}");
+    expect(yaml).not.toContain("certResolver");
+  });
+
+  it("http-01 route files and @hp-route lines carry no challenge", () => {
+    const plain = buildSiteDynamicTraefikYaml("site_1", [route(PAIR)], OPTS);
+    const explicit = buildSiteDynamicTraefikYaml(
+      "site_1",
+      [route(PAIR.map((x) => ({ ...x, challenge: "http-01" as const })))],
+      { ...OPTS, dnsChallenge: true },
+    );
+    expect(explicit).toBe(plain);
+    expect(plain).not.toContain("challenge");
+  });
+
+  it("an old @hp-route line without challenge hydrates as http-01 and dns-01 survives hydration", async () => {
+    const root = await tmp();
+    const seed = new TraefikIngressFileManager(root, PANEL);
+    await seed.setDnsProviderState(DNS);
+    await seed.upsertServiceRoute("site_1", route([host("hotel.it", { tls: true, challenge: "dns-01" })]));
+    const file = seed.getSiteDynamicFilePath("site_1");
+    const old = { ...route([host("old.it", { tls: true })]), serviceInstanceId: "svc_old" };
+    await writeFile(file, `${await readFile(file, "utf8")}# @hp-route ${JSON.stringify(old)}\n`);
+
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await manager.upsertServiceRoute("site_2", { ...route([host("x.it")]), serviceInstanceId: "svc2" });
+    await manager.removeServiceRoute("svc_none", "site_1");
+    const yaml = await readFile(file, "utf8");
+    expect(block(yaml, `router_svc1_${h("hotel.it")}_tls`)).toMatch(/^\s*certResolver: le-dns$/m);
+    expect(block(yaml, `router_svc_old_${h("old.it")}_tls`)).toMatch(/^\s*certResolver: le$/m);
+    expect(yaml).toContain('"challenge":"dns-01"');
+    expect(yaml.match(/challenge/g)).toHaveLength(1);
+  });
+
+  it("a DNS state change rewrites dns-01 site files from disk and leaves http-01 files untouched", async () => {
+    const root = await tmp();
+    const seed = new TraefikIngressFileManager(root, PANEL);
+    await seed.upsertServiceRoute("site_1", route([host("hotel.it", { tls: true, challenge: "dns-01" })]));
+    await seed.upsertServiceRoute("site_2", { ...route([host("b.it", { tls: true })]), serviceInstanceId: "svc2" });
+    const dnsFile = seed.getSiteDynamicFilePath("site_1");
+    const httpFile = seed.getSiteDynamicFilePath("site_2");
+    const tlsBlock = async () => block(await readFile(dnsFile, "utf8"), `router_svc1_${h("hotel.it")}_tls`);
+    expect(await tlsBlock()).toContain("      tls: {}");
+    const httpBefore = [await readFile(httpFile, "utf8"), (await stat(httpFile)).mtimeMs];
+
+    // A new manager: the routes are known only from the files on disk (executor restart).
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    expect(await manager.setDnsProviderState(DNS)).toBe(true);
+    expect(await tlsBlock()).toMatch(/^\s*certResolver: le-dns$/m);
+
+    expect(await manager.setDnsProviderState(null)).toBe(true);
+    expect(await tlsBlock()).toContain("      tls: {}");
+    expect(await readFile(dnsFile, "utf8")).not.toContain("certResolver");
+    expect(await readFile(dnsFile, "utf8")).toContain('"challenge":"dns-01"');
+    expect([await readFile(httpFile, "utf8"), (await stat(httpFile)).mtimeMs]).toEqual(httpBefore);
+  });
+
+  it("a site removed while the DNS re-render is held leaves no file", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await manager.upsertServiceRoute("site_1", route([host("hotel.it", { tls: true, challenge: "dns-01" })]));
+    const file = manager.getSiteDynamicFilePath("site_1");
+    const held = holdNextRename(file);
+    const rerender = manager.setDnsProviderState(DNS);
+    await held.entered;
+    const removal = manager.removeSiteRoutes("site_1");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    held.release();
+    await Promise.all([rerender, removal]);
+    await expect(stat(file)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("a route upserted while the DNS re-render is held is not lost and gets le-dns", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await manager.upsertServiceRoute("site_1", route([host("hotel.it", { tls: true, challenge: "dns-01" })]));
+    const file = manager.getSiteDynamicFilePath("site_1");
+    const held = holdNextRename(file);
+    const rerender = manager.setDnsProviderState(DNS);
+    await held.entered;
+    const upsert = manager.upsertServiceRoute("site_1", {
+      ...route([host("b.it", { tls: true, challenge: "dns-01" })]),
+      serviceInstanceId: "svc2",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    held.release();
+    await Promise.all([rerender, upsert]);
+    const yaml = await readFile(file, "utf8");
+    expect(block(yaml, `router_svc1_${h("hotel.it")}_tls`)).toMatch(/^\s*certResolver: le-dns$/m);
+    expect(block(yaml, `router_svc2_${h("b.it")}_tls`)).toMatch(/^\s*certResolver: le-dns$/m);
+  });
+
+  it("the DNS state persists: a new manager on the same root writes the same traefik.yml (same sha)", async () => {
+    const root = await tmp();
+    const first = new TraefikIngressFileManager(root, PANEL);
+    expect(await first.setDnsProviderState(DNS)).toBe(true);
+    expect(await first.setDnsProviderState(DNS)).toBe(false);
+    const a = await first.ensureStaticConfig(PANEL);
+    expect(a.acmeDns).toEqual(DNS);
+    const state = path.join(root, "dns-provider.json");
+    expect((await stat(state)).mode & 0o777).toBe(0o600);
+    expect(await readFile(state, "utf8")).not.toMatch(/https?:/);
+
+    const b = await new TraefikIngressFileManager(root, PANEL).ensureStaticConfig(PANEL);
+    expect(b.staticSha256).toBe(a.staticSha256);
+    expect(await readFile(path.join(root, "static", "traefik.yml"), "utf8")).toContain("  le-dns:");
+    expect((await new TraefikIngressFileManager(root, PANEL).ensureStaticConfig({ ...PANEL, acmeEmail: null })).acmeDns).toBeNull();
+
+    expect(await first.setDnsProviderState(null)).toBe(true);
+    await expect(stat(state)).rejects.toMatchObject({ code: "ENOENT" });
+    const c = await new TraefikIngressFileManager(root, PANEL).ensureStaticConfig(PANEL);
+    expect(c.acmeDns).toBeNull();
+    expect(c.staticSha256).toBe(createHash("sha256").update(buildTraefikStaticYaml(PANEL)).digest("hex"));
+  });
+
+  it("parseDnsProviderState refuses unknown providers, unknown fields and missing required fields", () => {
+    expect(parseDnsProviderState(JSON.stringify(DNS))).toEqual(DNS);
+    expect(parseDnsProviderState(JSON.stringify({ provider: "route53", fields: [] }))).toBeNull();
+    expect(
+      parseDnsProviderState(JSON.stringify({ provider: "httpreq", fields: ["HTTPREQ_ENDPOINT", "PATH"] })),
+    ).toBeNull();
+    expect(
+      parseDnsProviderState(JSON.stringify({ provider: "ovh", fields: ["OVH_ENDPOINT", "OVH_APPLICATION_KEY"] })),
+    ).toBeNull();
+    expect(parseDnsProviderState("not json")).toBeNull();
+    expect(parseDnsProviderState("null")).toBeNull();
+  });
+
+  it("proxy payload without a provider has no Env and no DNS bind", () => {
+    const payload = buildIngressProxyContainerPayload(proxyInput);
+    expect("Env" in payload).toBe(false);
+    expect(payload.HostConfig.Binds).toHaveLength(3);
+    expect(payload.HostConfig.Binds.join()).not.toContain(ACME_DNS_SECRET_MOUNT);
+  });
+
+  it("proxy payload with a provider binds the secret dir read-only and Env holds only _FILE paths", () => {
+    const env = dnsProviderFileEnv(DNS);
+    expect(env).toEqual([
+      `HTTPREQ_ENDPOINT_FILE=${ACME_DNS_SECRET_MOUNT}/HTTPREQ_ENDPOINT`,
+      `HTTPREQ_PASSWORD_FILE=${ACME_DNS_SECRET_MOUNT}/HTTPREQ_PASSWORD`,
+    ]);
+    const payload = buildIngressProxyContainerPayload({
+      ...proxyInput,
+      acmeDns: { secretDirHostPath: "/run/hosting-panel/acme-dns", env },
+    });
+    expect(payload.Env).toEqual(env);
+    expect(payload.HostConfig.Binds).toContain(`/run/hosting-panel/acme-dns:${ACME_DNS_SECRET_MOUNT}:ro`);
+    expect(() =>
+      buildIngressProxyContainerPayload({
+        ...proxyInput,
+        acmeDns: { secretDirHostPath: "/var/run/docker.sock", env },
+      }),
+    ).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
+  });
+
+  it("the panel gate does not read certResolver: le-dns as le", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await manager.ensureStaticConfig(PANEL);
+    const panelFile = path.join(root, "dynamic", "hp-panel.yml");
+    await writeFile(panelFile, "      tls:\n        certResolver: le-dns\n");
+    const fail = async (): Promise<never> => {
+      throw new Error("SERVFAIL");
+    };
+    expect(await manager.gatePanelCertificate(PANEL, fail)).toBe(false);
   });
 });

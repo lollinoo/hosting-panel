@@ -32,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { runBreakGlassUnlock } from "../src/cli/break-glass.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { SITE_STEP_LEASE_MS } from "../src/runtime/site-provisioner.js";
@@ -154,6 +155,7 @@ describe("WordPress import: the lane, the hand-over to recovery and the routes",
     });
     expect(created.status).toBe(201);
     const orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "admin@example.test");
     const token = await login("admin@example.test", created.body.data.temporaryPassword as string);
     const site = await call("POST", `/v1/organizations/${orgId}/managed-sites`, token, SITE);
     expect(site.status).toBe(202);
@@ -315,6 +317,7 @@ describe("qa-api: the import routes across tenants and roles, and an operation l
     const created = await call("POST", "/v1/admin/customer-account", adminToken, { organizationName: name, ownerEmail: email, ownerName: name });
     expect(created.status).toBe(201);
     const orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, email);
     const token = await login(email, created.body.data.temporaryPassword as string);
     const site = await call("POST", `/v1/organizations/${orgId}/managed-sites`, token, { ...SITE, domain });
     expect(site.status).toBe(202);

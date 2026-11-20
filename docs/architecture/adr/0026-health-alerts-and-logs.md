@@ -145,6 +145,9 @@ Questo documento descrive il codice come è stato costruito. Dove il codice fa u
    - **Mai provato:** un ciclo vero, sotto la passata vera, per cinque minuti. Le regole sono provate con osservazioni scritte nei test, ciascuna con la sua ora.
 26. **Un'operazione di un sito annullata prima di partire lascia lo stato del sito com'era quando è entrata in coda** (M6b, `host.3`, basso, aperto). Se il passaggio a `processing` fallisce per `site.delete` o per un nuovo provisioning, l'operazione finisce `cancelled` (`apps/api/src/runtime/outbox-worker.service.ts`), ma il sito resta «in manutenzione» o «in creazione» senza nulla che giri. Prima di questo ciclo l'operazione restava in coda per sempre con lo stesso stato.
    - *Cosa fa l'amministratore:* non conta sullo stato mostrato per quel sito. Il pannello non ha un'azione che lo corregga: il nuovo tentativo vale solo per un sito `degraded` con la creazione fallita (`managed-sites.service.ts`). È un difetto basso aperto.
+27. **Letture dei log del cliente: al massimo 8 alla volta in tutto il pannello e 2 per organizzazione** (M7). Ogni lettura può tenere fino a 2 MiB nell'esecutore (limite 9). Oltre il tetto la lettura è rifiutata subito con `429` (`RATE_LIMITED`), senza chiamare l'esecutore, e non aspetta in coda. Il conto è nella memoria dell'API (`apps/api/src/sites/log-read-gate.ts`) e riparte da zero a ogni avvio. La lettura dell'amministratore (pagina **Log**) non è contata.
+    - *Su cosa non si può contare:* che un cliente con molte schede aperte sulla pagina Log veda sempre le righe: le letture in più ricevono «troppe richieste».
+    - *Cosa fa l'amministratore:* niente; la lettura riesce di nuovo appena ne finisce una in corso.
 
 ## 5. Modello di fiducia
 
@@ -168,6 +171,7 @@ Questo documento descrive il codice come è stato costruito. Dove il codice fa u
 - **Test automatici di questo ciclo:**
   - le undici parti e i loro stati, i container dei siti, i dischi e ogni tipo di avviso con la sua gravità e il suo ordine: `apps/api/test/admin-health.integration.test.ts`; con l'esecutore o il motore fermi e con il runtime disattivato: `apps/api/test/admin-health-runtime-down.integration.test.ts`;
   - le due route dei log, i limiti di `tail`, le frasi fisse `404`/`503` e la riga di audit solo dopo una lettura riuscita: `apps/api/test/admin-logs.integration.test.ts`;
+  - il tetto delle letture dei log del cliente: `apps/api/test/log-read-gate.unit.test.ts` e `apps/api/test/managed-sites.integration.test.ts`;
   - le pagine del registro attività, `from`/`to` (e il `400` quando `from` non viene prima di `to`), il `400` di `limit` e un cursore sconosciuto: `apps/api/test/admin-audit-paging.integration.test.ts`;
   - la ripresa, `ambiguousOutcome` e il lease di `reconciling`: `apps/api/test/operation-recovery.unit.test.ts`; la chiusura in una transazione, con un errore fra le scritture: `packages/database/test/settle-operation.test.ts`;
   - il limite per organizzazione, che non conta gli utenti della piattaforma: `packages/database/test/backups-repository.test.ts` e `apps/api/test/admin-audit-paging.integration.test.ts`;

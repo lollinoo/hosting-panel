@@ -1155,6 +1155,8 @@ describe("purge site", () => {
       dockerSocketPath: mockDaemon.socketPath,
       secretsRootDir: path.join(tmp, "secrets"),
       ingressRootDir,
+      // purgeSite reads restore notes: never the host's real backup folder.
+      backupWorkDir: path.join(tmp, "backups"),
     });
     const dynamic = path.join(ingressRootDir, "dynamic");
     await mkdir(dynamic, { recursive: true });
@@ -1666,6 +1668,7 @@ describe("site routes and certificates", () => {
       trusted: true,
       readable: false,
       certificates: [],
+      dnsChallenge: false,
       failures: [],
     });
   });
@@ -1740,7 +1743,11 @@ describe("site routes and certificates", () => {
       trusted: true,
       readable: true,
       failures: [],
-      certificates: [{ hostname: "hotel.it", notAfter: "2036-11-06T04:46:29.000Z" }],
+      // One entry per SAN of the stored certificate.
+      certificates: [
+        { hostname: "hotel.it", notAfter: "2036-11-06T04:46:29.000Z" },
+        { hostname: "www.hotel.it", notAfter: "2036-11-06T04:46:29.000Z" },
+      ],
     });
     const body = JSON.stringify(report);
     expect(body).not.toContain('"key"');
@@ -1825,6 +1832,8 @@ describe("site mail wiring", () => {
       ingressRootDir: path.join(tmp, "ingress"),
       siteMailDir,
       pullMissingImages: false,
+      // purgeSite reads restore notes: never the host's real backup folder.
+      backupWorkDir: path.join(tmp, "backups"),
     });
     return { adapter, mockDaemon, siteMailDir, tmp };
   }
@@ -2363,6 +2372,8 @@ describe("backups shared base and IPC", () => {
       dockerSocketPath: daemon.socketPath,
       secretsRootDir: path.join(tmp, "secrets"),
       ingressRootDir: path.join(tmp, "ingress"),
+      // status and cleanupOrphanJobs read restore notes: never the host's real backup folder.
+      backupWorkDir: path.join(tmp, "backups"),
     });
     await expect(
       adapter.backups({ action: "status", jobId: validJobId }),

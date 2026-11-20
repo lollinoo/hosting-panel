@@ -37,6 +37,7 @@ import { totpCodeAt } from "../src/auth/totp.js";
 import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "qa-backups-password-123";
@@ -297,6 +298,7 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
       },
     });
     expect(createdA.status, createdA.raw).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner-a-qa@test.local");
     orgAId = createdA.body.data.organizationId as string;
     ownerAToken = await login(
       app.baseUrl!,
@@ -1178,6 +1180,7 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
           ownerName: "Owner Dis",
         },
       });
+      await skipPasswordChange(disDb.db, "owner-dis@test.local");
       const disOrgId = custAcct.body.data.organizationId as string;
       const disOwnerToken = await login(
         disApp.baseUrl!,

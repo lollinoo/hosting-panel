@@ -57,6 +57,7 @@ import { SITE_BACKUP_PRUNE_STEPS } from "../src/backups/site-backups.service.js"
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../src/tokens.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "correct horse battery";
@@ -368,6 +369,7 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
     });
     expect(createdA.status).toBe(201);
     orgAId = createdA.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "mario-admin-bak@hotel.it");
     ownerAToken = await login(
       app.baseUrl!,
       "mario-admin-bak@hotel.it",

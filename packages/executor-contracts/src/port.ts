@@ -2,6 +2,7 @@ import type {
   BackupsAction,
   BackupsIpcRequest,
   BackupsResultByAction,
+  DnsProviderApplyRequest,
   OperationStatus,
   PanelContainer,
   PanelContainerState,
@@ -53,7 +54,8 @@ export interface DockerExecutionResult {
 export interface DockerExecutorPort {
   readonly isRuntimeAvailable: boolean;
   deployService(spec: ApprovedServiceSpec): Promise<DockerExecutionResult>;
-  restartService(serviceInstanceId: string): Promise<DockerExecutionResult>;
+  /** resolvedSecrets (#7): written again, additively, before the restart. */
+  restartService(serviceInstanceId: string, resolvedSecrets?: Readonly<Record<string, string>>): Promise<DockerExecutionResult>;
   stopService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   deleteService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   getObservedState(serviceInstanceId: string): Promise<ObservedServiceState | null>;
@@ -68,6 +70,8 @@ export interface DockerExecutorPort {
   /** null disables the outgoing mail relay. The password is never logged or echoed. */
   applyMailRelay(req: MailRelayApplyRequest | null): Promise<void>;
   getMailRelayStatus(req: { since: string }): Promise<MailRelayStatusReport>;
+  /** null removes the DNS provider. Credentials are never logged or echoed. */
+  applyDnsProvider(req: DnsProviderApplyRequest | null): Promise<void>;
   sendTestMail(req: { to: string; from: string }): Promise<MailTestResult>;
   /** Fixed panel texts; the link is the only variable part and is never logged. */
   sendPanelMail(req: PanelMailRequest): Promise<PanelMailResult>;

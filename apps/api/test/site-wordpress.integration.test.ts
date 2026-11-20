@@ -34,6 +34,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { SITE_STEP_LEASE_MS } from "../src/runtime/site-provisioner.js";
@@ -114,6 +115,7 @@ describe("WordPress tools: the outbox lane, recovery and the routes", () => {
     });
     expect(created.status).toBe(201);
     const orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, email);
     const token = await login(email, created.body.data.temporaryPassword as string);
     const site = await call("POST", `/v1/organizations/${orgId}/managed-sites`, token, { ...SITE, domain });
     expect(site.status).toBe(202);

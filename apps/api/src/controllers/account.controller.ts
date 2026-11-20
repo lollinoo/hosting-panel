@@ -2,10 +2,20 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Patch, Post, Req } from
 import { and, encryptSecretAesGcm, eq, isNull, users, type DatabaseClient } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
-import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
+import {
+  AuthzContextService,
+  type AuthenticateOptions,
+  type AuthenticatedRequestContext,
+} from "../auth/authz-context.service.js";
 import { OidcService } from "../auth/oidc.service.js";
 import { reservePasswordAttempt, reserveTotpAttempt } from "../auth/attempt-limits.js";
-import { assertPasswordGateOpen, assertPasswordPolicy, hashPassword, verifyPassword } from "../auth/password.js";
+import {
+  assertPasswordGateOpen,
+  assertPasswordPolicy,
+  hashPassword,
+  oneCheckPerAccount,
+  verifyPassword,
+} from "../auth/password.js";
 import { generateTotpSecret, buildOtpauthUri } from "../auth/totp.js";
 import { checkUserTotp, saveTotpStep } from "../auth/totp-secret.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
@@ -35,19 +45,28 @@ export class AccountController {
   @Post("password")
   @HttpCode(HttpStatus.NO_CONTENT)
   public async changePassword(@Req() req: FastifyRequest, @Body() raw: unknown): Promise<void> {
-    const { auth, user } = await this.load(req);
+    const { auth, user } = await this.load(req, { allowPasswordChangePending: true });
     const body = PasswordBody.parse(raw ?? {});
-    // A full gate refuses here, before the try is counted (as at sign-in).
-    assertPasswordGateOpen();
-    await this.reservePassword(auth, req, "account.password.change", user.id);
-    if (!user.passwordHash || !(await verifyPassword(body.currentPassword, user.passwordHash, true))) {
-      await this.fail(auth, req, "account.password.change", "INVALID_CREDENTIALS", BAD_PASSWORD);
-    }
-    assertPasswordPolicy(body.newPassword);
-    await this.dbClient.db
-      .update(users)
-      .set({ passwordHash: await hashPassword(body.newPassword, true), mustChangePassword: false, failedLoginCount: 0, lockedUntil: null })
-      .where(eq(users.id, user.id));
+    // In the account's line with its sign-ins and other checks (LR-M1).
+    await oneCheckPerAccount(user.email, async () => {
+      // A full gate refuses here, before the try is counted (as at sign-in).
+      assertPasswordGateOpen();
+      await this.reservePassword(auth, req, "account.password.change", user.id);
+      const passwordHash = await this.currentPasswordHash(user.id);
+      if (!passwordHash || !(await verifyPassword(body.currentPassword, passwordHash, true))) {
+        await this.fail(auth, req, "account.password.change", "INVALID_CREDENTIALS", BAD_PASSWORD);
+      }
+      assertPasswordPolicy(body.newPassword);
+      // Only over the hash just verified, so a reset that landed meanwhile is never overwritten.
+      const written = await this.dbClient.db
+        .update(users)
+        .set({ passwordHash: await hashPassword(body.newPassword, true), mustChangePassword: false, failedLoginCount: 0, lockedUntil: null })
+        .where(and(eq(users.id, user.id), eq(users.passwordHash, passwordHash!)))
+        .returning({ id: users.id });
+      if (written.length === 0) {
+        await this.fail(auth, req, "account.password.change", "INVALID_CREDENTIALS", BAD_PASSWORD);
+      }
+    });
     await this.oidc.revokeAllSessionsForUser(user.id, auth.claims.jti);
     await this.authz.recordAudit(auth, req, { action: "account.password.change", targetType: "user", targetId: user.id });
   }
@@ -114,11 +133,15 @@ export class AccountController {
     if (user.platformRole === "infrastructure_admin") {
       await this.fail(auth, req, "account.totp.disable", "PERMISSION_DENIED", "Gli amministratori devono mantenere l'autenticazione a due fattori.");
     }
-    assertPasswordGateOpen();
-    await this.reservePassword(auth, req, "account.totp.disable", user.id);
-    if (!user.passwordHash || !(await verifyPassword(body.password, user.passwordHash, true))) {
-      await this.fail(auth, req, "account.totp.disable", "INVALID_CREDENTIALS", BAD_PASSWORD);
-    }
+    // In the account's line with its sign-ins and other checks (LR-M1).
+    await oneCheckPerAccount(user.email, async () => {
+      assertPasswordGateOpen();
+      await this.reservePassword(auth, req, "account.totp.disable", user.id);
+      const passwordHash = await this.currentPasswordHash(user.id);
+      if (!passwordHash || !(await verifyPassword(body.password, passwordHash, true))) {
+        await this.fail(auth, req, "account.totp.disable", "INVALID_CREDENTIALS", BAD_PASSWORD);
+      }
+    });
     // Correct password: give the reserved attempt back, then count the code guess.
     await this.dbClient.db.update(users).set({ failedLoginCount: 0 }).where(eq(users.id, user.id));
     await this.reserveTotp(auth, req, "account.totp.disable", user.id);
@@ -169,11 +192,23 @@ export class AccountController {
     return this.fail(auth, req, action, "ACCOUNT_LOCKED", "Account temporaneamente bloccato. Riprova più tardi.");
   }
 
-  private async load(req: FastifyRequest) {
-    const auth = await this.authz.authenticateRequest(req);
+  private async load(req: FastifyRequest, options?: AuthenticateOptions) {
+    const auth = await this.authz.authenticateRequest(req, options);
     const [user] = await this.dbClient.db.select().from(users).where(eq(users.id, auth.user.id)).limit(1);
     if (!user) throw new ControlPlaneError("UNAUTHENTICATED", "User account is not active.");
     return { auth, user };
+  }
+
+  // Read in the line, so a queued check sees the hash and the status left by the previous one.
+  private async currentPasswordHash(userId: string): Promise<string | null> {
+    const [row] = await this.dbClient.db
+      .select({ passwordHash: users.passwordHash, userStatus: users.userStatus })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    // Disabled while queued: refused as authenticateRequest refuses it; the reserved try stays counted.
+    if (row?.userStatus !== "active") throw new ControlPlaneError("UNAUTHENTICATED", "User account is not active.");
+    return row.passwordHash;
   }
 
   private async fail(

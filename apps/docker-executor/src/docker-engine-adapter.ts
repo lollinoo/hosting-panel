@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import {
@@ -28,6 +28,7 @@ import {
   type BackupsResultByAction,
   type BackupTarget,
   type MailFailureDto,
+  type DnsProviderApplyRequest,
   type MailRelayApplyRequest,
   type MailTestResult,
   type PanelContainer,
@@ -101,6 +102,12 @@ import {
   buildMailRelaySaslLine,
 } from "./mail-relay.js";
 import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
+import {
+  DEFAULT_ACME_DNS_SECRET_DIR,
+  assertDnsProviderApplyRequest,
+  dnsProviderFileEnv,
+  dnsProviderState,
+} from "./dns-provider.js";
 import {
   LOG_READ_MAX_BYTES,
   demuxDockerLogStream,
@@ -534,6 +541,43 @@ export async function overwriteAndUnlinkSecretFile(filePath: string): Promise<vo
   }
 }
 
+/**
+ * After a reboot Docker creates each missing bind source, and the service folder above it, as a root-owned 0755 folder (#7).
+ * The executor has no capabilities: it cannot write into or empty that folder, only rename it inside its own 0700 root.
+ * What is set aside holds no secret and is gone at the next reboot (tmpfs).
+ */
+async function setServiceSecretDirAside(secretsRootDir: string, serviceDir: string): Promise<void> {
+  const aside = path.join(secretsRootDir, `.stale-${randomUUID()}`);
+  await rename(serviceDir, aside);
+  await rm(aside, { recursive: true, force: true }).catch(() => undefined);
+}
+
+/** Leaves serviceDir missing, or an executor-owned folder that holds regular files only. */
+async function repairServiceSecretDir(secretsRootDir: string, serviceDir: string): Promise<void> {
+  let st;
+  try {
+    st = await lstat(serviceDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw err;
+  }
+  if (!st.isDirectory() || st.uid !== process.getuid?.()) {
+    return setServiceSecretDirAside(secretsRootDir, serviceDir);
+  }
+  for (const entry of await readdir(serviceDir, { withFileTypes: true })) {
+    if (entry.isFile()) {
+      continue;
+    }
+    try {
+      await rm(path.join(serviceDir, entry.name), { recursive: true, force: true });
+    } catch {
+      return setServiceSecretDirAside(secretsRootDir, serviceDir);
+    }
+  }
+}
+
 export async function purgeServiceSecrets(
   secretsRootDir: string,
   serviceInstanceId: string,
@@ -551,7 +595,8 @@ export async function purgeServiceSecrets(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return;
     }
-    throw err;
+    await setServiceSecretDirAside(secretsRootDir, serviceDir);
+    return;
   }
 
   for (const entry of entries) {
@@ -561,13 +606,17 @@ export async function purgeServiceSecrets(
     }
   }
 
-  await rm(serviceDir, { recursive: true, force: true });
+  await rm(serviceDir, { recursive: true, force: true }).catch(() =>
+    setServiceSecretDirAside(secretsRootDir, serviceDir),
+  );
 }
 
+/** With options.additive, files not named in resolvedSecrets stay: a restart must not remove a file the container still mounts. */
 export async function writeServiceSecrets(
   secretsRootDir: string,
   serviceInstanceId: string,
   resolvedSecrets: Readonly<Record<string, string>> | undefined,
+  options?: { readonly additive?: boolean },
 ): Promise<{
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
@@ -576,7 +625,9 @@ export async function writeServiceSecrets(
   const secretEntries = resolvedSecrets ? Object.entries(resolvedSecrets) : [];
 
   if (secretEntries.length === 0) {
-    await purgeServiceSecrets(secretsRootDir, serviceInstanceId);
+    if (!options?.additive) {
+      await purgeServiceSecrets(secretsRootDir, serviceInstanceId);
+    }
     return { secretBinds: [], secretFileEnv: [] };
   }
 
@@ -586,11 +637,14 @@ export async function writeServiceSecrets(
     secretsRootDir,
     path.join(secretsRootDir, serviceInstanceId),
   );
+  await repairServiceSecretDir(secretsRootDir, serviceDir);
   await mkdir(serviceDir, { recursive: true, mode: 0o700 });
   await chmod(serviceDir, 0o700);
 
   const desiredKeys = new Set(secretEntries.map(([envName]) => envName));
-  const existingEntries = await readdir(serviceDir, { withFileTypes: true }).catch(() => []);
+  const existingEntries = options?.additive
+    ? []
+    : await readdir(serviceDir, { withFileTypes: true }).catch(() => []);
   for (const existing of existingEntries) {
     if (existing.isFile() && !desiredKeys.has(existing.name)) {
       const stalePath = assertContainedPath(serviceDir, path.join(serviceDir, existing.name));
@@ -1095,6 +1149,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly jobTimeoutMs?: number;
   /** tmpfs dir holding sasl_passwd; must exist and be owned by the executor (bootstrap/tmpfiles). */
   readonly mailRelaySecretDir?: string;
+  /** tmpfs dir holding the DNS provider credential files; must exist and be owned by the executor. */
+  readonly acmeDnsSecretDir?: string;
   /** How long to keep retrying the post-apply queue flush (default 30 000). */
   readonly mailRelayFlushWaitMs?: number;
   /** Test email: delay between log polls, and how long to wait for the delivery line. */
@@ -1165,6 +1221,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   /** `siteId:kind` of the site jobs running now. */
   private readonly runningSiteJobs = new Set<string>();
   private readonly mailRelaySecretDir: string;
+  private readonly acmeDnsSecretDir: string;
+  private dnsProviderQueue: Promise<unknown> = Promise.resolve();
   private readonly mailRelayFlushWaitMs: number;
   private readonly mailTestPollMs: number;
   private readonly mailTestWaitMs: number;
@@ -1229,6 +1287,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     this.mailRelaySecretDir = path.resolve(
       options?.mailRelaySecretDir ?? DEFAULT_MAIL_RELAY_SECRET_DIR,
     );
+    this.acmeDnsSecretDir = path.resolve(options?.acmeDnsSecretDir ?? DEFAULT_ACME_DNS_SECRET_DIR);
     this.mailRelayFlushWaitMs = options?.mailRelayFlushWaitMs ?? 30_000;
     this.mailTestPollMs = options?.mailTestPollMs ?? 1_000;
     this.mailTestWaitMs = options?.mailTestWaitMs ?? 20_000;
@@ -1332,7 +1391,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
   private async ensureIngressProxyOnce(): Promise<IngressEnsureResult> {
     await this.panelRestarts.get("ingress_proxy");
-    const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256 } =
+    const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256, acmeDns } =
       await this.ingressManager.ensureStaticConfig(this.panel);
 
     await this.ensureNetwork(INGRESS_BRIDGE_NETWORK_NAME, {
@@ -1354,6 +1413,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       dynamicDirHostPath: dynamicDirPath,
       acmeDirHostPath: acmeDirPath,
       staticSha256,
+      ...(acmeDns
+        ? { acmeDns: { secretDirHostPath: this.acmeDnsSecretDir, env: dnsProviderFileEnv(acmeDns) } }
+        : {}),
       // Same uid:gid as the executor, so the proxy can read hp-executor-owned dirs without DAC caps.
       ...(process.getuid && process.getgid
         ? { user: `${String(process.getuid())}:${String(process.getgid())}` }
@@ -1394,6 +1456,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       (existing.Config?.Image !== payload.Image ||
         JSON.stringify(existing.Config?.Cmd ?? []) !== JSON.stringify(payload.Cmd) ||
         (existing.Config?.User ?? "") !== (payload.User ?? "") ||
+        // Only the managed _FILE entries: the image's own Env (PATH) is not ours.
+        sortedJson(
+          (existing.Config?.Env ?? []).filter((e) => /^[A-Z0-9_]+_FILE=\/run\/secrets\/hp-acme-dns\//.test(e)),
+        ) !== sortedJson(payload.Env ?? []) ||
         existing.Config?.Labels?.[STATIC_SHA256_LABEL] !== staticSha256 ||
         sortedJson(existingBinds) !== sortedJson(payload.HostConfig.Binds) ||
         sortedJson(existing.HostConfig?.ExtraHosts) !== sortedJson(payload.HostConfig.ExtraHosts) ||
@@ -1452,6 +1518,85 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       status: "running",
       ensuredAt: new Date().toISOString(),
     };
+  }
+
+  /** Applies run one after the other, like applyMailRelay. Never logs a credential value. */
+  public applyDnsProvider(req: DnsProviderApplyRequest | null): Promise<void> {
+    const run = this.dnsProviderQueue
+      .then(() => this.panelRestarts.get("ingress_proxy"))
+      .then(() => this.applyDnsProviderNow(req));
+    this.dnsProviderQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Overwrites and unlinks every regular file in the DNS secret dir; a missing dir is fine. */
+  private async wipeDnsProviderFiles(): Promise<void> {
+    const entries = await readdir(this.acmeDnsSecretDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.isFile()) await overwriteAndUnlinkSecretFile(path.join(this.acmeDnsSecretDir, entry.name));
+    }
+  }
+
+  /** An ensure already in flight may have read the old DNS state: wait for it, then ensure again. */
+  private async ensureIngressProxyAfterStateChange(): Promise<void> {
+    await this.ingressEnsureInFlight?.catch(() => undefined);
+    await this.ensureIngressProxy();
+  }
+
+  private async applyDnsProviderNow(input: DnsProviderApplyRequest | null): Promise<void> {
+    if (input === null) {
+      // Wipe first: a failed removal must not leave the credentials on tmpfs.
+      await this.wipeDnsProviderFiles();
+      const changed = await this.ingressManager.setDnsProviderState(null);
+      // With a panel always: a retry after a failed ensure must recreate a removed proxy (no-op without drift).
+      // Without one, only on a change, so a fresh panel-less install gets no proxy on 80/443.
+      if (changed || this.panel !== null) await this.ensureIngressProxyAfterStateChange();
+      return;
+    }
+    const req = assertDnsProviderApplyRequest(input);
+    const dir = this.acmeDnsSecretDir;
+    const dirStat = await lstat(dir).catch(() => null);
+    if (!dirStat?.isDirectory() || dirStat.uid !== this.executorUid) {
+      throw new ExecutorCodedError(
+        "DNS provider secret directory is missing or not owned by the executor. Run bootstrap first",
+        "HOST_POLICY_DENIED",
+      );
+    }
+    let credsChanged = false;
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (!Object.hasOwn(req.credentials, entry.name)) {
+        credsChanged = true;
+        await overwriteAndUnlinkSecretFile(path.join(dir, entry.name));
+      }
+    }
+    for (const [name, value] of Object.entries(req.credentials)) {
+      const file = path.join(dir, name);
+      if ((await readFile(file, "utf8").catch(() => null)) === value) continue;
+      credsChanged = true;
+      // No trailing newline: lego strips it, but the exact value keeps the change check exact.
+      await writeFileAtomically(file, value, 0o400, 0o700);
+    }
+    try {
+      await this.ingressManager.setDnsProviderState(dnsProviderState(req));
+      // Without a panel there is no le-dns: the state waits on disk for the proxy a site deploy creates.
+      if (this.panel === null) return;
+      const before = (await this.inspectContainerByNameOrId(INGRESS_PROXY_CONTAINER_NAME))?.Id;
+      await this.ensureIngressProxyAfterStateChange();
+      const after = (await this.inspectContainerByNameOrId(INGRESS_PROXY_CONTAINER_NAME))?.Id;
+      // lego caches its client: a rotated credential needs a restart unless the proxy was recreated.
+      // Without HP_ACME_EMAIL there is no le-dns and the proxy does not mount the files.
+      if (credsChanged && this.panel?.acmeEmail && before && after === before) {
+        await restartContainerByName(
+          this.execTarget,
+          INGRESS_PROXY_CONTAINER_NAME,
+          PANEL_RESTART_STOP_SECONDS.ingress_proxy,
+        );
+      }
+    } catch (err) {
+      // Otherwise the next identical apply sees "unchanged" and the proxy keeps the old credentials.
+      if (credsChanged) await this.wipeDnsProviderFiles();
+      throw err;
+    }
   }
 
   /** Applies run one after the other (a queue, not de-dup: two configs are never merged). */
@@ -2620,12 +2765,21 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       );
     }
     const lines = res.statusCode === 200 ? demuxDockerLogStream(res.body).map((l) => l.text) : [];
+    // Best effort: the credential values, so a provider error never echoes one in `detail`.
+    const secrets: string[] = [];
+    for (const entry of await readdir(this.acmeDnsSecretDir, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isFile()) continue;
+      const value = await readFile(path.join(this.acmeDnsSecretDir, entry.name), "utf8").catch(() => null);
+      if (value) secrets.push(value);
+    }
     return {
       acmeEnabled: Boolean(this.panel?.acmeEmail),
       trusted: !this.panel?.acmeStaging && !this.panel?.acmeCaServer,
       readable: store.readable,
       certificates: store.certificates,
-      failures: parseAcmeFailures(lines, sinceMs),
+      dnsChallenge:
+        Boolean(this.panel?.acmeEmail) && (await this.ingressManager.loadDnsProviderState()) !== null,
+      failures: parseAcmeFailures(lines, sinceMs, secrets),
     };
   }
 
@@ -2813,11 +2967,21 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }[component];
   }
 
-  public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
+  public async restartService(
+    serviceInstanceId: string,
+    resolvedSecrets?: Readonly<Record<string, string>>,
+  ): Promise<DockerExecutionResult> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const summary = await this.findContainerSummaryByServiceId(serviceInstanceId);
     if (!summary) {
       throw new ExecutorCodedError("Managed service container not found", "NOT_FOUND");
+    }
+
+    // #7: the tmpfs files are gone after a reboot or a stop.
+    if (resolvedSecrets && Object.keys(resolvedSecrets).length > 0) {
+      await writeServiceSecrets(this.secretsRootDir, serviceInstanceId, resolvedSecrets, {
+        additive: true,
+      });
     }
 
     const res = await this.dockerClient.request("POST", `/containers/${summary.Id}/restart?t=10`);

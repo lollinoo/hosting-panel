@@ -41,6 +41,7 @@ import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { FirewallService } from "../src/firewall/firewall.service.js";
 import { enqueueHostJob, executeHostJob } from "../src/host/host-jobs.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle, type CreateControlPlaneAppOptions } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const version = vi.hoisted(() => ({ current: "1.4.2" as string | null }));
 vi.mock("../src/updates/release-version.js", async (load) => ({
@@ -223,6 +224,7 @@ describe("M5d API QA: the host routes", () => {
   async function owner(): Promise<{ id: string; orgId: string; token: string }> {
     const created = await call("POST", "/v1/admin/customer-account", { body: { organizationName: "Org A", ownerEmail: "owner@example.test", ownerName: "Owner" } });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     return { id: created.body.data.userId, orgId: created.body.data.organizationId, token: await login("owner@example.test", created.body.data.temporaryPassword as string) };
   }
 

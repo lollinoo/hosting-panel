@@ -66,6 +66,11 @@ export interface AuthenticatedRequestContext {
   readonly activeMembershipSummaries: readonly AuthenticatedMembershipSummary[];
 }
 
+export interface AuthenticateOptions {
+  /** Only GET /v1/me, POST /v1/me/password and POST /v1/auth/revoke pass this (#8). */
+  readonly allowPasswordChangePending?: boolean;
+}
+
 // Rows of refused requests per actor and minute: above the ~55 of one sweep of every admin route.
 const DENIED_ROWS_PER_MINUTE = 120;
 const DENIED_ACTORS_MAX = 10_000;
@@ -80,7 +85,10 @@ export class AuthzContextService {
     @Inject(OidcService) private readonly oidcService: OidcService,
   ) {}
 
-  public async authenticateRequest(req: FastifyRequest): Promise<AuthenticatedRequestContext> {
+  public async authenticateRequest(
+    req: FastifyRequest,
+    options: AuthenticateOptions = {},
+  ): Promise<AuthenticatedRequestContext> {
     const authHeader = extractRawHeader(
       req.headers as Record<string, string | string[] | undefined>,
       "authorization",
@@ -112,6 +120,11 @@ export class AuthzContextService {
 
     if (user.userStatus !== "active") {
       throw new ControlPlaneError("UNAUTHENTICATED", "User account is not active.");
+    }
+
+    // #8: a temporary password opens only the three exempt routes; no audit row, it is not a permission decision.
+    if (user.mustChangePassword && !options.allowPasswordChangePending && !isBreakGlass(claims)) {
+      throw new ControlPlaneError("PASSWORD_CHANGE_REQUIRED", "Change the temporary password first.");
     }
 
     const loaded = await this.loadPrincipalContextForUser(user);
@@ -459,4 +472,10 @@ export class AuthzContextService {
       },
     });
   }
+}
+
+/** Only a shell on the server mints a break-glass token, for 5 minutes, and recovery must not depend on the flag. */
+function isBreakGlass(claims: VerifiedJwtClaims): boolean {
+  const amr = claims.rawPayload.amr;
+  return Array.isArray(amr) && amr.includes("breakglass");
 }

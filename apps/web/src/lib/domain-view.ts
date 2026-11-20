@@ -12,10 +12,10 @@ export function domainView(
   now: Date,
 ): { tone: Tone; label: DomainLabel; hint: DomainHint | null } {
   if (!d.routed) return { tone: "muted", label: "settingUp", hint: null };
-  if (d.dns.status !== "ok") {
+  const c = d.certificate;
+  if (d.dns.status !== "ok" && !(d.challenge === "dns-01" && (c.status === "requested" || c.status === "failed"))) {
     return { tone: "warn", label: "waitingForDns", hint: d.dns.status === "unchecked" ? null : d.dns.status };
   }
-  const c = d.certificate;
   if (c.status === "requested") return { tone: "muted", label: "securing", hint: null };
   if (c.status === "failed") return { tone: "error", label: "httpsProblem", hint: c.problem ?? "other" };
   if (c.status === "active") {

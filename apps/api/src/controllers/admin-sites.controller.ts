@@ -1,10 +1,11 @@
-import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
+import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post, Req } from "@nestjs/common";
 import {
   AddSiteDomainInputSchema,
   AdminCreateSiteInputSchema,
   ChangeSiteOwnerInputSchema,
   DeleteSiteInputSchema,
   RestartInputSchema,
+  SetDomainChallengeInputSchema,
   SiteActionInputSchema,
   type AdminSitesListDto,
   type SiteDomainsDto,
@@ -165,6 +166,23 @@ export class AdminSitesController {
     return { data };
   }
 
+  @Patch(":siteId/domains/:domainId")
+  public async setDomainChallenge(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Param("domainId") domainId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: SiteDomainsDto }> {
+    const auth = await requireServerAdmin(this.authz, req, siteId, "site");
+    const owner = await this.sitesService.ownerOf(siteId);
+    const { challenge } = SetDomainChallengeInputSchema.parse(raw ?? {});
+    const { hostname } = await this.domainsService.findDomain(siteId, owner, domainId);
+    const { changed, data } = await this.domainsService.setChallenge(siteId, owner, domainId, challenge);
+    // Only a change that was written is audited.
+    if (changed) await this.#domainAudit(auth, req, siteId, "admin.site.domain.challenge", [hostname], { challenge });
+    return { data };
+  }
+
   @Post(":siteId/domains/:domainId/primary")
   @HttpCode(HttpStatus.OK)
   public async setPrimaryDomain(
@@ -197,8 +215,9 @@ export class AdminSitesController {
     siteId: string,
     action: string,
     hostnames: string[],
+    extra: Record<string, unknown> = {},
   ) {
-    return this.authz.recordAudit(auth, req, { action, targetType: "site", targetId: siteId, details: { hostnames } });
+    return this.authz.recordAudit(auth, req, { action, targetType: "site", targetId: siteId, details: { hostnames, ...extra } });
   }
 
   async #done(

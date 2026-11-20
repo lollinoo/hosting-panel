@@ -21,9 +21,13 @@ export const CERT_PROBLEMS = [
   "port_80_blocked",
   "not_pointing",
   "caa_blocked",
+  "dns_provider",
   "other",
 ] as const;
 export type CertProblem = (typeof CERT_PROBLEMS)[number];
+
+export const CERT_CHALLENGES = ["http-01", "dns-01"] as const;
+export type CertChallenge = (typeof CERT_CHALLENGES)[number];
 
 export const MAX_SITE_DOMAINS = 10;
 
@@ -51,11 +55,15 @@ export const AddSiteDomainInputSchema = z.object({
 });
 export type AddSiteDomainInput = z.infer<typeof AddSiteDomainInputSchema>;
 
+export const SetDomainChallengeInputSchema = z.object({ challenge: z.enum(CERT_CHALLENGES) });
+export type SetDomainChallengeInput = z.infer<typeof SetDomainChallengeInputSchema>;
+
 export const SiteDomainDtoSchema = z.object({
   id: EntityIdSchema,
   hostname: z.string(),
   isPrimary: z.boolean(),
   routed: z.boolean(),
+  challenge: z.enum(CERT_CHALLENGES),
   dns: z.object({
     status: z.enum(DNS_STATUSES),
     checkedAt: z.string().nullable(),
@@ -96,4 +104,5 @@ export interface SiteHostRoute {
   readonly tls: boolean;
   readonly httpsRedirect: boolean;
   readonly redirectTo: string | null;
+  readonly challenge?: CertChallenge;
 }

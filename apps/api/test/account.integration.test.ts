@@ -115,6 +115,33 @@ describe("self-service account API", () => {
     expect(JSON.stringify(audits)).not.toContain(PASSWORD);
   });
 
+  it("a session that must change its password is refused elsewhere until it does, then the same session works", async () => {
+    await seed("usr_a", { mustChange: true });
+    const token = await loginToken("usr_a");
+    expect((await call(token, "GET", "/v1/me")).status).toBe(200);
+    for (const [method, path, body] of [
+      ["GET", "/v1/me/organizations", undefined],
+      ["POST", "/v1/me/totp/setup", undefined],
+      ["PATCH", "/v1/me/locale", { locale: "en" }],
+    ] as const) {
+      const res = await call(token, method, path, body);
+      expect(res.status, `${method} ${path}`).toBe(403);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe("PASSWORD_CHANGE_REQUIRED");
+    }
+    const audits = await dbClient.db.select().from(auditEvents);
+    expect(audits.filter((a) => (a.details as { outcome?: string }).outcome === "denied")).toHaveLength(0);
+    const res = await call(token, "POST", "/v1/me/password", { currentPassword: PASSWORD, newPassword: NEW_PASSWORD });
+    expect(res.status).toBe(204);
+    expect((await call(token, "GET", "/v1/me/organizations")).status).toBe(200);
+  });
+
+  it("a session that must change its password can still sign out", async () => {
+    await seed("usr_a", { mustChange: true });
+    const token = await loginToken("usr_a");
+    expect((await call(token, "POST", "/v1/auth/revoke")).status).toBe(200);
+    expect((await call(token, "GET", "/v1/me")).status).toBe(401);
+  });
+
   it("wrong current password is rejected", async () => {
     await seed("usr_a");
     const a = await loginToken("usr_a");

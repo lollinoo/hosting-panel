@@ -10,7 +10,7 @@ import type {
 } from "@hosting-panel/executor-contracts";
 
 interface StoreEntry {
-  domain?: { main?: unknown };
+  domain?: { main?: unknown; sans?: unknown };
   certificate?: unknown;
 }
 
@@ -18,7 +18,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function readAcmeCertificates(
   storePath: string,
-  resolver = "le",
+  resolvers: readonly string[] = ["le", "le-dns"],
 ): Promise<AcmeStoreRead> {
   let parsed: unknown;
   for (let attempt = 0; ; attempt += 1) {
@@ -33,26 +33,30 @@ export async function readAcmeCertificates(
       await sleep(200);
     }
   }
-  const entries = (parsed as Record<string, { Certificates?: unknown } | null> | null)?.[resolver]
-    ?.Certificates;
-  const certificates: StoredCertificate[] = [];
-  if (Array.isArray(entries)) {
+  const byHost = new Map<string, StoredCertificate>();
+  for (const resolver of resolvers) {
+    const entries = (parsed as Record<string, { Certificates?: unknown } | null> | null)?.[resolver]
+      ?.Certificates;
+    if (!Array.isArray(entries)) continue;
     for (const entry of entries as StoreEntry[]) {
       try {
         if (typeof entry.domain?.main !== "string" || typeof entry.certificate !== "string") continue;
         const pem = Buffer.from(entry.certificate, "base64").toString("utf8");
         const cert = new X509Certificate(pem); // leaf comes first
-        certificates.push({
-          hostname: entry.domain.main,
-          notAfter: cert.validToDate.toISOString(),
-          serialNumber: cert.serialNumber,
-        });
+        const notAfter = cert.validToDate.toISOString();
+        const sans = Array.isArray(entry.domain.sans) ? entry.domain.sans : [];
+        for (const hostname of [entry.domain.main, ...sans]) {
+          if (typeof hostname !== "string") continue;
+          const seen = byHost.get(hostname);
+          if (seen && seen.notAfter >= notAfter) continue; // ISO strings sort by time
+          byHost.set(hostname, { hostname, notAfter, serialNumber: cert.serialNumber });
+        }
       } catch {
         return { readable: false, certificates: [] };
       }
     }
   }
-  return { readable: true, certificates };
+  return { readable: true, certificates: [...byHost.values()] };
 }
 
 export function classifyAcmeError(text: string): CertProblem {
@@ -72,10 +76,26 @@ export function classifyAcmeError(text: string): CertProblem {
   return "other";
 }
 
-export function parseAcmeFailures(lines: readonly string[], sinceMs: number): AcmeFailure[] {
+function classifyDnsAcmeError(text: string): CertProblem {
+  if (text.includes("rateLimited")) return "rate_limited";
+  if (text.includes(":caa")) return "caa_blocked";
+  return "dns_provider";
+}
+
+export function parseAcmeFailures(
+  lines: readonly string[],
+  sinceMs: number,
+  secrets: readonly string[] = [],
+): AcmeFailure[] {
   const out: AcmeFailure[] = [];
   for (const line of lines) {
-    let entry: { time?: unknown; message?: unknown; error?: unknown; domains?: unknown };
+    let entry: {
+      time?: unknown;
+      message?: unknown;
+      error?: unknown;
+      domains?: unknown;
+      providerName?: unknown;
+    };
     try {
       entry = JSON.parse(line) as typeof entry;
     } catch {
@@ -101,13 +121,19 @@ export function parseAcmeFailures(lines: readonly string[], sinceMs: number): Ac
     } else {
       continue;
     }
+    const problem = entry.providerName === "le-dns.acme" ? classifyDnsAcmeError(error) : classifyAcmeError(error);
+    // Longest first, so a credential that contains a shorter one is removed whole.
+    const unsecret = [...secrets]
+      .sort((a, b) => b.length - a.length)
+      .reduce((text, s) => (s.length >= 4 ? text.split(s).join("[REDACTED]") : text), error);
+    const detail = redactSensitiveString(unsecret).slice(0, 1024);
     for (const hostname of hostnames) {
       out.push({
         hostname,
         at: new Date(at).toISOString(),
         kind,
-        problem: classifyAcmeError(error),
-        detail: redactSensitiveString(error).slice(0, 1024),
+        problem,
+        detail,
       });
     }
   }

@@ -36,6 +36,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "correct-horse-qa-battery";
@@ -190,6 +191,7 @@ describe("site databases & phpMyAdmin QA (simulator API)", () => {
     );
     expect(aRes.status).toBe(201);
     orgA = aRes.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "alpha@qa.test");
     ownerAToken = await login("alpha@qa.test", aRes.body.data.temporaryPassword as string);
 
     const [installation] = await dbClient.db.select().from(platformInstallations);
