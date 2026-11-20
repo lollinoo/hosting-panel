@@ -391,6 +391,75 @@ describe("nightly panel copy (panel.backups.create)", () => {
     });
   }
 
+  const leaseOf = async (opId: string) =>
+    (await dbClient.db.select().from(operations).where(eq(operations.id, opId)))[0]!.leaseExpiresAt!.getTime();
+  /** Real-time wait: only setInterval/clearInterval are faked in the lease tests. */
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /** Holds the panel dump open until `release` is called; the fake interval clock drives the lease. */
+  function heldDump(outcome: "resolve" | "reject") {
+    let started!: () => void;
+    let release!: () => void;
+    const startedP = new Promise<void>((r) => (started = r));
+    const gate = new Promise<void>((r) => (release = r));
+    applier.panel.dump = async (cmd) => {
+      await fakeDump(cmd);
+      started();
+      await gate;
+      if (outcome === "reject") throw new PanelDumpError("exit", 1);
+    };
+    return { started: startedP, release };
+  }
+
+  it("renews the operation lease every leaseMs/3 while a long panel dump runs and stops after it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      expect(applier.leaseMs).toBe(120_000);
+      const held = heldDump("resolve");
+      const opId = await queuePanel();
+      const run = app.outboxWorker.processPendingOnce();
+      await held.started;
+      expect(vi.getTimerCount()).toBe(1);
+
+      const marker = Date.now() - 60_000;
+      await dbClient.db.update(operations).set({ leaseExpiresAt: new Date(marker) }).where(eq(operations.id, opId));
+      await vi.advanceTimersByTimeAsync(39_999);
+      for (let i = 0; i < 10; i++) {
+        await sleep(10);
+        expect(await leaseOf(opId)).toBe(marker);
+      }
+
+      await vi.advanceTimersByTimeAsync(1);
+      const deadline = Date.now() + 5_000;
+      while ((await leaseOf(opId)) === marker && Date.now() < deadline) await sleep(10);
+      expect(await leaseOf(opId)).toBeGreaterThan(Date.now() + 100_000);
+
+      held.release();
+      await run;
+      expect((await panelOps())[0]!.status).toBe("succeeded");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops renewing the lease when the panel dump fails", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const held = heldDump("reject");
+      await queuePanel();
+      const run = app.outboxWorker.processPendingOnce();
+      await held.started;
+      expect(vi.getTimerCount()).toBe(1);
+      held.release();
+      await run;
+      expect((await panelOps())[0]!.status).toBe("failed");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("Outcome: an executor failure class is stored as the problem; the file is removed", async () => {
     sim.backupState.failNext("panel_dump_missing");
     const opId = await queuePanel();

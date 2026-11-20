@@ -518,5 +518,38 @@ describe("mail relay API", () => {
       expect(await revisions(siteId)).toHaveLength(before.length + 1);
       expect(await deploys(siteId)).toHaveLength(1);
     });
+
+    it("a revision added between the read and the upgrade is not overwritten; the next tick upgrades it", async () => {
+      const siteId = await provisionSite();
+      await stripSiteMail(siteId);
+      const svc = await webService(siteId);
+      const before = await revisions(siteId);
+      const latest = before.sort((a, b) => b.revisionNumber - a.revisionNumber)[0]!;
+      const deploysBefore = (await deploys(siteId)).length;
+      const outboxBefore = (await dbClient.db.select().from(outboxEvents)).length;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const original = dbClient.db.transaction.bind(dbClient.db);
+      // A PHP change commits after the upgrade listed the site, before its transaction runs.
+      vi.spyOn(dbClient.db, "transaction").mockImplementationOnce((async (...args: Parameters<typeof original>) => {
+        await appendStackRevisionTransactional(dbClient.db as unknown as HostingPanelDatabase, {
+          serviceInstanceId: svc.id,
+          organizationId: orgId,
+          declarativeConfig: { ...(latest.declarativeConfig as Json), phpVersion: "8.5" },
+          secretRefs: latest.secretRefs as Record<string, string>,
+        });
+        return original(...args);
+      }) as typeof original);
+
+      await app.mailRelay.tick();
+      expect(await revisions(siteId)).toHaveLength(before.length + 1);
+      expect(await deploys(siteId)).toHaveLength(deploysBefore);
+      expect(await dbClient.db.select().from(outboxEvents)).toHaveLength(outboxBefore);
+      expect(warn.mock.calls.flat().join("\n")).not.toContain("site_mail_upgrade_failed");
+
+      await app.mailRelay.tick();
+      const newest = (await revisions(siteId)).sort((a, b) => b.revisionNumber - a.revisionNumber)[0]!;
+      expect(newest.declarativeConfig).toMatchObject({ siteMail: true, phpVersion: "8.5" });
+      expect((await deploys(siteId)).map((o) => [o.kind, o.status])).toEqual([["service.deploy", "queued"]]);
+    });
   });
 });
