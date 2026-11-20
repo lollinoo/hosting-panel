@@ -2144,3 +2144,4 @@ export const it = {
     generic: "Si è verificato un errore. Riprova; se il problema continua contatta l'assistenza.",
   },
 } as const;
+    PASSWORD_CHANGE_REQUIRED: "Per continuare scegli una nuova password: ricarica la pagina.",

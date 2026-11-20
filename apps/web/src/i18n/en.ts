@@ -2116,3 +2116,4 @@ export const en: Messages = {
     generic: "Something went wrong. Try again, and contact support if it keeps happening.",
   },
 };
+    PASSWORD_CHANGE_REQUIRED: "Choose a new password to go on: reload the page.",

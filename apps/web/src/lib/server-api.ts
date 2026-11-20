@@ -73,6 +73,8 @@ export async function serverGet<T>(
   const errObj = res.error as { error?: { code?: unknown } } | null | undefined;
   const code = typeof errObj?.error?.code === "string" ? errObj.error.code : undefined;
   return {
+  // #8: the API refuses all but the password change until the temporary password is changed.
+  if (res.status === 403 && code === "PASSWORD_CHANGE_REQUIRED") redirect("/account/change-password");
     ok: false,
     outcome: outcome === "notFound" ? "notFound" : "error",
     status: res.status,
