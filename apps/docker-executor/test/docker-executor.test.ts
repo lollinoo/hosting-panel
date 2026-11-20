@@ -1155,6 +1155,8 @@ describe("purge site", () => {
       dockerSocketPath: mockDaemon.socketPath,
       secretsRootDir: path.join(tmp, "secrets"),
       ingressRootDir,
+      // purgeSite reads restore notes: never the host's real backup folder.
+      backupWorkDir: path.join(tmp, "backups"),
     });
     const dynamic = path.join(ingressRootDir, "dynamic");
     await mkdir(dynamic, { recursive: true });
@@ -1830,6 +1832,8 @@ describe("site mail wiring", () => {
       ingressRootDir: path.join(tmp, "ingress"),
       siteMailDir,
       pullMissingImages: false,
+      // purgeSite reads restore notes: never the host's real backup folder.
+      backupWorkDir: path.join(tmp, "backups"),
     });
     return { adapter, mockDaemon, siteMailDir, tmp };
   }
@@ -2368,6 +2372,8 @@ describe("backups shared base and IPC", () => {
       dockerSocketPath: daemon.socketPath,
       secretsRootDir: path.join(tmp, "secrets"),
       ingressRootDir: path.join(tmp, "ingress"),
+      // status and cleanupOrphanJobs read restore notes: never the host's real backup folder.
+      backupWorkDir: path.join(tmp, "backups"),
     });
     await expect(
       adapter.backups({ action: "status", jobId: validJobId }),
