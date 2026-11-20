@@ -25,6 +25,22 @@ export function passwordGateLoad(): number {
   return running + waiting.length;
 }
 
+/** The running line of password checks of each account, keyed by the normalized email. */
+export const passwordCheckLines = new Map<string, Promise<void>>();
+
+/** Runs check after the earlier password checks of the same account, so one account holds at most one gate place (LR-M1). */
+export function oneCheckPerAccount<T>(email: string, check: () => Promise<T>): Promise<T> {
+  const key = email.trim().toLowerCase();
+  const previous = passwordCheckLines.get(key) ?? Promise.resolve();
+  const result = previous.then(check);
+  const done = result.then(() => undefined, () => undefined);
+  passwordCheckLines.set(key, done);
+  void done.then(() => {
+    if (passwordCheckLines.get(key) === done) passwordCheckLines.delete(key);
+  });
+  return result;
+}
+
 // admitted: the caller already passed assertPasswordGateOpen, so it waits instead of being refused.
 async function derive(plain: string, salt: Buffer, n: number, r: number, p: number, admitted = false): Promise<Buffer> {
   if (!admitted) assertPasswordGateOpen();
