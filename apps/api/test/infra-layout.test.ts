@@ -215,6 +215,21 @@ describe("release workflow and docs", () => {
     expect(MAIL_RELAY_IMAGE).toBe("boky/postfix:5.2.1-alpine");
   });
 
+  it("m5 dns-01 docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["DNS-01", "docs/architecture/adr/0030-dns-01-certificates.md"]) expect(readme).toContain(s);
+    const api = read("docs/api/openapi.yaml");
+    for (const s of ["/v1/admin/dns-provider", "DnsProviderSettingsDto", "dns_provider"]) expect(api).toContain(s);
+    const adr = read("docs/architecture/adr/0030-dns-01-certificates.md");
+    for (const s of ["CP-01", "le-dns", "_FILE"]) expect(adr).toContain(s);
+    // Every repo path the ADR writes in backticks exists (a trailing :line is dropped).
+    const paths = [...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, ""));
+    expect(paths.length).toBeGreaterThanOrEqual(5);
+    for (const p of paths) expect(existsSync(join(root, p)), p).toBe(true);
+    const harness = read("HARNESS.md");
+    for (const s of ["0030", "accept-acme-pebble.mjs"]) expect(harness).toContain(s);
+  });
+
   it("m1a file manager docs are consistent", () => {
     const readme = read("README.md");
     for (const s of ["Web File Manager dei Siti", "ADR-0019"]) {

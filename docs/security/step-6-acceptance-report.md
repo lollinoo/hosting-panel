@@ -175,7 +175,8 @@ fourth case without the support mark: the panel cannot read `/v1/me` during a vi
   - during a visit the heavy-action limit refuses the administrator once the customer has used the
     hour's budget;
   - the customer can read the administrator's opaque user id (`requestedByUserId`) in an operation;
-  - `mustChangePassword` is enforced by the web app only;
+  - `mustChangePassword` was enforced by the web app only; since #8 the API enforces it too
+    (ADR 0025 limit 2);
   - the overall limit of 20 reset mails an hour can be used up by someone who knows seven customer
     addresses.
 

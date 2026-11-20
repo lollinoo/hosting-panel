@@ -77,10 +77,10 @@ hosting-panel/
 │   ├── policy-engine/            # Ammissione Dedicated/Shared, gate dedicated->shared, validatore sicurezza stack, quote
 │   ├── executor-contracts/       # Contratti tipizzati ApprovedServiceSpec, resolvedSecrets IPC e DockerExecutorPort
 │   ├── host-agent-contracts/     # Contratti tipizzati HostAgentPort, enum manutenzione e profili sicurezza nftables
-│   └── database/                 # Schema Drizzle, migrazioni 0001..0019 (encrypted_secrets, heartbeats, outbox, …), PGlite/pg
+│   └── database/                 # Schema Drizzle, migrazioni 0001..0020 (encrypted_secrets, heartbeats, outbox, …), PGlite/pg
 ├── docs/
 │   ├── architecture/             # Specifica HCP-SPEC-003 Fase 2, audit Fase 1, diagrammi ER e confini di fiducia
-│   │   ├── adr/                  # Registro delle 29 Architectural Decision Records (ADR 0001..0029; ADR-011 OPEN)
+│   │   ├── adr/                  # Registro delle 30 Architectural Decision Records (ADR 0001..0030; ADR-011 OPEN)
 │   │   └── diagrams/             # Diagramma di flusso trust boundaries e schema ER
 │   ├── security/                 # Matrice delle minacce, outage Control Plane (AC-F1-08), report di collaudo e di audit
 │   └── api/                      # Specifica contrattuale OpenAPI 3.1
@@ -182,12 +182,14 @@ Ogni sito può avere fino a **10 indirizzi**; uno è il principale e gli altri v
 
 Quando il DNS punta al server, Traefik ottiene da Let's Encrypt un certificato per ogni nome (HTTP-01, porta 80 raggiungibile da Internet) e lo rinnova da solo, anche con il control plane fermo. Dopo un errore il tentativo è ripetuto con attese crescenti (15 min, 1 h, 3 h, 6 h, 24 h; 24 h se Let's Encrypt limita le richieste). Non è attivo **HSTS**.
 
+Di base si usa HTTP-01 (porta 80). L'amministratore può impostare un fornitore DNS nella pagina «Certificati» (lista chiusa: Cloudflare, DigitalOcean, Gandi, Hetzner, IONOS, OVH, endpoint HTTP generico) e scegliere DNS-01 per ogni dominio nella pagina Domini del sito. Con DNS-01 il certificato arriva anche prima che il record A punti al server, e la porta 80 non serve per il certificato. Il record A serve comunque ai visitatori. Le credenziali sono di sola scrittura, cifrate, e arrivano a Traefik solo come file. Dopo un riavvio del server con il pannello fermo i rinnovi DNS-01 aspettano il pannello: Traefik rinnova 30 giorni prima della scadenza, quindi c'è margine.
+
 - **Pannello**: creare il record A del pannello **prima** di installare; l'installer avvisa se il nome non risolve all'IPv4 e, finché non risolve, il pannello usa un certificato temporaneo. Avvisa anche se l'IPv4 è privato (server dietro NAT: rilanciare con `--ipv4 <IPv4 pubblico>`). L'email `--acme-email` è il contatto Let's Encrypt e deve essere reale (no `example.com`, `.test` ecc.).
 - **Prove**: `--acme-staging` usa la CA di staging (certificati non attendibili dai browser, limiti larghi).
 - **Dove sono i certificati**: `/var/lib/hosting-panel/ingress/acme/acme.json` (`acme-staging.json` per lo staging); da includere nei backup.
 - **Avvisi**: l'amministratore vede un avviso quando un certificato scade entro 14 giorni o non è stato emesso.
 
-Dettagli e limiti: [ADR 0017](docs/architecture/adr/0017-domains-dns-and-acme-tls.md).
+Dettagli e limiti: [ADR 0017](docs/architecture/adr/0017-domains-dns-and-acme-tls.md) e, per DNS-01, [ADR 0030](docs/architecture/adr/0030-dns-01-certificates.md).
 
 ### Email in uscita
 
@@ -362,7 +364,7 @@ In **Amministrazione › Stato** il pulsante **Riavvia** è su ogni riga dei **C
 
 Un riavvio del pannello parte circa 2 secondi dopo la richiesta e dura al massimo 35 secondi; se non riesce, la riga di **Stato** dice com'è davvero il container.
 
-**Dopo un riavvio del server** i siti ripartono da soli. Limite noto: un servizio generico (non un sito) che usa segreti non riparte dopo un riavvio del server e non si riavvia né si ridistribuisce dal pannello; la riparazione è prevista in una versione successiva.
+**Dopo un riavvio del server** i siti ripartono da soli. Un servizio generico (non un sito) che usa segreti non riparte da solo, e il pannello non ha un pulsante per riavviarlo: lo riavvia il proprietario dal browser con la route BFF `POST /api/bff/orgs/{orgId}/services/{serviceId}/lifecycle` (sessione `hp_session` e `X-CSRF-Token`, corpo `{"action":"restart"}` o `{"action":"deploy"}`; l'API `/v1` ascolta solo su `127.0.0.1`), e l'esecutore riscrive i file dei segreti prima di avviarlo.
 
 #### Terminale di un sito
 
@@ -439,7 +441,7 @@ corepack pnpm run test
 
 - [Specifica Normativa Fase 2 (`HCP-SPEC-003`)](docs/architecture/hcp-spec-003-phase-2.md): Topologia Split Agents, IPC firmato, Traefik zero-sock, Outbox/Reconciler, segreti `AES-256-GCM` e protocollo `AC-F1-08`.
 - [Audit Architetturale Fase 1](docs/architecture/phase-1-repository-audit.md): Analisi baseline del repository e demarcazione dei confini.
-- [Registro delle ADR (`ADR 0001..0029`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress, `ADR-0025` amministratori, password per email e accesso di assistenza, `ADR-0026` stato, avvisi e log, `ADR-0027` riavvio e terminale, [`ADR-0028`](docs/architecture/adr/0028-host-firewall-and-updates.md) firewall, aggiornamenti, pacchetti e giornali del server, [`ADR-0029`](docs/architecture/adr/0029-site-types.md) tipi di sito).
+- [Registro delle ADR (`ADR 0001..0030`)](docs/architecture/adr/): Decisioni architetturali formali (inclusi `ADR-010` approvato, `ADR-011` `OPEN — prima di Shared`, `ADR-013..0015` `ADR-0016` MariaDB condiviso e job dei siti, `ADR-0017` domini e TLS, `ADR-0018` email in uscita, `ADR-0019` file manager dei siti, `ADR-0020` accesso SFTP per sito, `ADR-0021` database per sito e phpMyAdmin, `ADR-0022` backup dei siti su S3, `ADR-0023` strumenti WordPress, `ADR-0024` importazione WordPress, `ADR-0025` amministratori, password per email e accesso di assistenza, `ADR-0026` stato, avvisi e log, `ADR-0027` riavvio e terminale, [`ADR-0028`](docs/architecture/adr/0028-host-firewall-and-updates.md) firewall, aggiornamenti, pacchetti e giornali del server, [`ADR-0029`](docs/architecture/adr/0029-site-types.md) tipi di sito, `ADR-0030` certificati DNS-01).
 - [Diagrammi di Confine e Modello ER](docs/architecture/diagrams/domain-er-and-boundaries.md): Confini di fiducia e schema relazionale PostgreSQL.
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.
 - [Report di audit](docs/security/audit-report.md): ogni finding dell'audit di M6 con il suo stato, aperto o chiuso.
