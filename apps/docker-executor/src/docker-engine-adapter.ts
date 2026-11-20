@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, readdir, rm, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, stat, unlink } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import {
@@ -541,6 +541,43 @@ export async function purgeServiceSecrets(
   assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
   const serviceDir = assertContainedPath(
     secretsRootDir,
+/**
+ * After a reboot Docker creates each missing bind source, and the service folder above it, as a root-owned 0755 folder (#7).
+ * The executor has no capabilities: it cannot write into or empty that folder, only rename it inside its own 0700 root.
+ * What is set aside holds no secret and is gone at the next reboot (tmpfs).
+ */
+async function setServiceSecretDirAside(secretsRootDir: string, serviceDir: string): Promise<void> {
+  const aside = path.join(secretsRootDir, `.stale-${randomUUID()}`);
+  await rename(serviceDir, aside);
+  await rm(aside, { recursive: true, force: true }).catch(() => undefined);
+}
+
+/** Leaves serviceDir missing, or an executor-owned folder that holds regular files only. */
+async function repairServiceSecretDir(secretsRootDir: string, serviceDir: string): Promise<void> {
+  let st;
+  try {
+    st = await lstat(serviceDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw err;
+  }
+  if (!st.isDirectory() || st.uid !== process.getuid?.()) {
+    return setServiceSecretDirAside(secretsRootDir, serviceDir);
+  }
+  for (const entry of await readdir(serviceDir, { withFileTypes: true })) {
+    if (entry.isFile()) {
+      continue;
+    }
+    try {
+      await rm(path.join(serviceDir, entry.name), { recursive: true, force: true });
+    } catch {
+      return setServiceSecretDirAside(secretsRootDir, serviceDir);
+    }
+  }
+}
+
     path.join(secretsRootDir, serviceInstanceId),
   );
 
@@ -551,7 +588,8 @@ export async function purgeServiceSecrets(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       return;
     }
-    throw err;
+    await setServiceSecretDirAside(secretsRootDir, serviceDir);
+    return;
   }
 
   for (const entry of entries) {
@@ -561,7 +599,9 @@ export async function purgeServiceSecrets(
     }
   }
 
-  await rm(serviceDir, { recursive: true, force: true });
+  await rm(serviceDir, { recursive: true, force: true }).catch(() =>
+    setServiceSecretDirAside(secretsRootDir, serviceDir),
+  );
 }
 
 export async function writeServiceSecrets(
@@ -571,12 +611,16 @@ export async function writeServiceSecrets(
 ): Promise<{
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
+/** With options.additive, files not named in resolvedSecrets stay: a restart must not remove a file the container still mounts. */
 }> {
   assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
   const secretEntries = resolvedSecrets ? Object.entries(resolvedSecrets) : [];
 
+  options?: { readonly additive?: boolean },
   if (secretEntries.length === 0) {
-    await purgeServiceSecrets(secretsRootDir, serviceInstanceId);
+    if (!options?.additive) {
+      await purgeServiceSecrets(secretsRootDir, serviceInstanceId);
+    }
     return { secretBinds: [], secretFileEnv: [] };
   }
 
@@ -590,9 +634,12 @@ export async function writeServiceSecrets(
   await chmod(serviceDir, 0o700);
 
   const desiredKeys = new Set(secretEntries.map(([envName]) => envName));
-  const existingEntries = await readdir(serviceDir, { withFileTypes: true }).catch(() => []);
+  const existingEntries = options?.additive
+    ? []
+    : await readdir(serviceDir, { withFileTypes: true }).catch(() => []);
   for (const existing of existingEntries) {
     if (existing.isFile() && !desiredKeys.has(existing.name)) {
+  await repairServiceSecretDir(secretsRootDir, serviceDir);
       const stalePath = assertContainedPath(serviceDir, path.join(serviceDir, existing.name));
       await overwriteAndUnlinkSecretFile(stalePath);
     }
@@ -2813,7 +2860,10 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }[component];
   }
 
-  public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
+  public async restartService(
+    serviceInstanceId: string,
+    resolvedSecrets?: Readonly<Record<string, string>>,
+  ): Promise<DockerExecutionResult> {
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const summary = await this.findContainerSummaryByServiceId(serviceInstanceId);
     if (!summary) {
@@ -2927,6 +2977,13 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
     const observedRevisionHash = labels[MANAGED_DOCKER_LABELS.specHash] || null;
     const observedStatus = mapContainerStateToObservedStatus(inspect.State);
+    // #7: the tmpfs files are gone after a reboot or a stop.
+    if (resolvedSecrets && Object.keys(resolvedSecrets).length > 0) {
+      await writeServiceSecrets(this.secretsRootDir, serviceInstanceId, resolvedSecrets, {
+        additive: true,
+      });
+    }
+
     const restartCount =
       typeof inspect.RestartCount === "number" && inspect.RestartCount >= 0
         ? inspect.RestartCount

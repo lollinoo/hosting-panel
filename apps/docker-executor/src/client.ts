@@ -513,8 +513,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     return z.object({ data: PanelContainerStatusWireSchema }).parse(json).data;
   }
 
-  public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
-    return this.sendServiceAction(serviceInstanceId, "restart");
+  public async restartService(
+    serviceInstanceId: string,
+    resolvedSecrets?: Readonly<Record<string, string>>,
+  ): Promise<DockerExecutionResult> {
+    return this.sendServiceAction(serviceInstanceId, "restart", resolvedSecrets);
   }
 
   public async stopService(serviceInstanceId: string): Promise<DockerExecutionResult> {
@@ -549,11 +552,13 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
 
   private async sendSignedJsonRequest(
     method: "GET" | "POST",
+    resolvedSecrets?: Readonly<Record<string, string>>,
     pathWithQuery: string,
     bodyObject?: unknown,
     perCallTimeoutMs?: number,
   ): Promise<unknown> {
     const bodyBuffer =
+      ...(resolvedSecrets ? { resolvedSecrets: { ...resolvedSecrets } } : {}),
       bodyObject !== undefined ? Buffer.from(JSON.stringify(bodyObject), "utf8") : undefined;
 
     const signedHeaders = signIpcRequest({

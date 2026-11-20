@@ -853,7 +853,7 @@ export class DockerExecutorIpcServer {
 
     let result: DockerExecutionResult;
     if (action === "restart") {
-      result = await this.executor.restartService(serviceInstanceId);
+      result = await this.executor.restartService(serviceInstanceId, parsed.data.resolvedSecrets);
     } else if (action === "stop") {
       result = await this.executor.stopService(serviceInstanceId);
     } else {

@@ -846,7 +846,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     };
   }
 
-  public async restartService(serviceInstanceId: string): Promise<DockerExecutionResult> {
+  public async restartService(
+    serviceInstanceId: string,
+    resolvedSecrets?: Readonly<Record<string, string>>,
+  ): Promise<DockerExecutionResult> {
     this.assertEngineAvailable();
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
     const container = this.containersByServiceId.get(serviceInstanceId);
@@ -871,6 +874,17 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public async stopService(serviceInstanceId: string): Promise<DockerExecutionResult> {
     this.assertEngineAvailable();
     assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
+    if (resolvedSecrets && Object.keys(resolvedSecrets).length > 0) {
+      if (this.secretsRootDir) {
+        await writeServiceSecrets(this.secretsRootDir, serviceInstanceId, resolvedSecrets, { additive: true });
+      } else {
+        const names = this.virtualSecretFiles.get(serviceInstanceId) ?? new Set<string>();
+        for (const name of Object.keys(resolvedSecrets)) {
+          names.add(name);
+        }
+        this.virtualSecretFiles.set(serviceInstanceId, names);
+      }
+    }
     const container = this.containersByServiceId.get(serviceInstanceId);
     if (!container) {
       await this.cleanupSecrets(serviceInstanceId);
