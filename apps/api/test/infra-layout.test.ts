@@ -117,6 +117,11 @@ describe("per-service env files and wrappers", () => {
     expect(boot).toContain("install -d -m 00755 -o hp-executor -g hp-executor /run/hosting-panel/mail-relay\n");
   });
 
+  it("tmpfiles creates the DNS provider credential directory", () => {
+    expect(read("infra/systemd/hosting-panel-tmpfiles.conf").split("\n")).toContain("d /run/hosting-panel/acme-dns 0700 hp-executor hp-executor -");
+    expect(read("infra/linux/bootstrap-dedicated.sh")).toContain("install -d -m 00700 -o hp-executor -g hp-executor /run/hosting-panel/acme-dns\n");
+  });
+
   it.skipIf(!hasHost)("bootstrap dry-run creates the mail directories", () => {
     const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], { cwd: root, encoding: "utf8" });
     expect(r.status).toBe(0);
