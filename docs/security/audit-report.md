@@ -448,8 +448,19 @@ name `45-138-202-116.sslip.io`. The findings below are not in the counts above.
 |---|---|---|---|---|
 | RS1 | `apps/host-agent/src/linux-adapter.ts`, `replaceFirewallSets` | Every port opened or closed and every address blocked in the panel stayed "Saved, not active": `nft -f -` refuses the socket Node gives a child as stdin ("Not a regular file: /dev/stdin"). The unit tests replace the runner and `accept-m5-firewall.mjs` gives nft a pipe, so neither saw it. | lead (real server) | **repaired.** The program goes to a 0600 file in a new folder of the agent's private `/tmp`, nft reads that file, the folder is removed afterwards. Tests: `apps/host-agent/test/host-m5d.test.ts`, "replaces the sets through nft -f on a 0600 file of its own, removes the file and answers a fresh read" and "removes the program file and its folder when nft fails, and answers the fixed sentence". On the server (the installed release with the repaired file copied in): ports 8080 and 9100 opened and closed and 192.0.2.10 blocked and unblocked from the admin API reach the kernel sets at once. |
 
-Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, a reboot, SFTP
-from another network, `hp-update` between two versions.
+**A reboot of the server**, with a port open, an address blocked and a DNS provider saved: a one-time
+check four minutes after the boot found the 35 lines of the snapshot taken before it unchanged.
+- The panel's four services came back with no restart and no error line in their journals.
+- `nftables.service` loaded the base rules. The API sent the saved lists again, through the
+  repaired path of RS1, with no `firewall_sync_failed`: the port and the address are in the kernel
+  sets, and the boot file holds none.
+- The API wrote the DNS provider's files again on the empty tmpfs, 11 s after the boot. The proxy
+  has the same `_FILE` entries, and the marker is still nowhere.
+- The containers run, and the panel and the site serve the same certificates, so nothing was
+  ordered again. The SFTP login works with the same host key.
+
+Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, SFTP from another
+network, `hp-update` between two versions.
 
 ## Open high or critical findings
 
