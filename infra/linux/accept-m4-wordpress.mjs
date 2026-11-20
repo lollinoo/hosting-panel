@@ -287,10 +287,12 @@ function shapeProblems(rec, ins) {
   const cmd = ins?.Config?.Entrypoint ?? [];
   const want = ["timeout", "-s", "KILL", String(siteJobTimeoutMs(rec.kind) / 1000 + 5), "sh", "-c", SCRIPTS[rec.kind]];
   // R139: our whole command is the entry point (the image's docker-entrypoint.sh never runs), no Cmd, an init as process 1.
-  if (JSON.stringify(cmd) !== JSON.stringify(want)) p.push("Entrypoint is not timeout -s KILL <limit+5> sh -c <constant>");
+  const constant = JSON.stringify(cmd) === JSON.stringify(want);
+  if (!constant) p.push("Entrypoint is not timeout -s KILL <limit+5> sh -c <constant>");
   if (ins?.Config?.Cmd != null) p.push(`a Cmd is set: ${JSON.stringify(ins.Config.Cmd).slice(0, 60)}`);
   if (ins?.HostConfig?.Init !== true) p.push(`Init ${String(ins?.HostConfig?.Init)}`);
-  for (const v of Object.values(rec.params)) if (String(v).length >= 3 && cmd.join("\n").includes(String(v))) p.push(`value ${String(v)} in Entrypoint`);
+  // The constant script may contain a value's word (`core` in `wp core update`): only a changed Entrypoint can carry one.
+  if (!constant) for (const v of Object.values(rec.params)) if (String(v).length >= 3 && cmd.join("\n").includes(String(v))) p.push(`value ${String(v)} in Entrypoint`);
   const secretsSeen = leaks(JSON.stringify([ins?.Config?.Env, cmd, ins?.Config?.Labels]));
   if (secretsSeen.length > 0) p.push(`secret in Env/Entrypoint/Labels: ${secretsSeen.join(",")}`);
   const mounts = JSON.stringify([ins?.HostConfig?.Binds, ins?.Mounts]);
