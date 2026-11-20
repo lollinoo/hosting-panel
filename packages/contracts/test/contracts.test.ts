@@ -98,6 +98,7 @@ import {
   SiteSummaryDtoSchema,
   ManagedSiteDtoSchema,
   AdminSiteDtoSchema,
+  LoginInputSchema,
 } from "../src/index.js";
 
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
@@ -243,6 +244,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "FIREWALL_BASE_RULES_NOT_CURRENT",
       "HOST_JOB_FAILED",
       "RATE_LIMITED",
+      "PASSWORD_CHANGE_REQUIRED",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -258,6 +260,7 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.FIREWALL_BASE_RULES_NOT_CURRENT).toBe(409);
     expect(ERROR_CODE_HTTP_STATUS.HOST_JOB_FAILED).toBe(502);
     expect(ERROR_CODE_HTTP_STATUS.RATE_LIMITED).toBe(429);
+    expect(ERROR_CODE_HTTP_STATUS.PASSWORD_CHANGE_REQUIRED).toBe(403);
     expect(ERROR_CODES).not.toContain("UPDATE_CHECK_FAILED");
   });
 
@@ -1200,5 +1203,14 @@ describe("@hosting-panel/contracts — the site DTOs carry the site type", () =>
     expect(SiteSummaryDtoSchema.safeParse(withoutType).success).toBe(false);
     expect(ManagedSiteDtoSchema.parse({ ...site, primaryDomain: null }).siteType).toBe("wordpress");
     expect(AdminSiteDtoSchema.parse({ ...site, primaryDomain: null, owner: null }).siteType).toBe("wordpress");
+  });
+});
+
+describe("@hosting-panel/contracts — the sign-in input", () => {
+  it("the email has at most 254 characters after trimming (RFC 5321)", () => {
+    const at254 = `${"a".repeat(245)}@hotel.it`;
+    expect(at254).toHaveLength(254);
+    expect(LoginInputSchema.parse({ email: `  ${at254.toUpperCase()} `, password: "x" }).email).toBe(at254);
+    expect(LoginInputSchema.safeParse({ email: `a${at254}`, password: "x" }).success).toBe(false);
   });
 });

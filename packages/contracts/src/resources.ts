@@ -794,7 +794,8 @@ export type HostTelemetryDto = z.infer<typeof HostTelemetryDtoSchema>;
 
 // Login
 export const LoginInputSchema = z.object({
-  email: z.string().trim().toLowerCase().email(),
+  // 254: the longest address RFC 5321 allows; it also bounds the in-memory count of unknown addresses.
+  email: z.string().trim().toLowerCase().max(254).email(),
   password: z.string().min(1).max(1024),
   totpCode: z.string().regex(/^\d{6}$/).optional(),
 });

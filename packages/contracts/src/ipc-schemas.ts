@@ -208,13 +208,20 @@ export const DeployServiceIpcRequestSchema = z.object({
 });
 export type DeployServiceIpcRequest = z.infer<typeof DeployServiceIpcRequestSchema>;
 
-export const ServiceInstanceActionIpcRequestSchema = z.object({
-  operationId: z.string().min(1).max(128).optional(),
-  serviceInstanceId: z.string().min(1).max(128),
-  siteId: z.string().min(1).max(128).optional(),
-  organizationId: z.string().min(1).max(128).optional(),
-  action: z.enum(["restart", "stop", "delete"]),
-});
+export const ServiceInstanceActionIpcRequestSchema = z
+  .object({
+    operationId: z.string().min(1).max(128).optional(),
+    serviceInstanceId: z.string().min(1).max(128),
+    siteId: z.string().min(1).max(128).optional(),
+    organizationId: z.string().min(1).max(128).optional(),
+    action: z.enum(["restart", "stop", "delete"]),
+    /** Restart only (#7): the secret files are written again before Docker restarts the container. */
+    resolvedSecrets: z.record(SecretKeySchema, z.string().max(16384)).optional(),
+  })
+  .refine((r) => r.resolvedSecrets === undefined || r.action === "restart", {
+    message: "resolvedSecrets is allowed with restart only",
+    path: ["resolvedSecrets"],
+  });
 export type ServiceInstanceActionIpcRequest = z.infer<
   typeof ServiceInstanceActionIpcRequestSchema
 >;
