@@ -7,3 +7,10 @@ export async function DELETE(req: Request, context: { params: Promise<{ siteId: 
   if (segmentError) return segmentError;
   return forwardToUpstream(req, `v1/admin/sites/${siteId}/domains/${domainId}`, "DELETE");
 }
+
+export async function PATCH(req: Request, context: { params: Promise<{ siteId: string; domainId: string }> }) {
+  const { siteId, domainId } = await context.params;
+  const segmentError = validatePathSegments({ siteId, domainId });
+  if (segmentError) return segmentError;
+  return forwardToUpstream(req, `v1/admin/sites/${siteId}/domains/${domainId}`, "PATCH");
+}

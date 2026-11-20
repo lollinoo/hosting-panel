@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { LoadError } from "@/components/shared/load-error";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { DomainsPanel } from "@/components/customer/domains-panel";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { fetchServerAdminSiteDomains } from "@/lib/server-api";
+import { fetchServerAdminDnsProvider, fetchServerAdminSiteDomains } from "@/lib/server-api";
 import { getServerSession } from "@/lib/server-session";
 
 export const dynamic = "force-dynamic";
@@ -14,7 +15,7 @@ export default async function AdminSiteDomainsPage({ params }: { params: Promise
   const session = await getServerSession();
   if (!session) redirect("/login");
   const m = getMessages(await getRequestLocale());
-  const initial = await fetchServerAdminSiteDomains(siteId);
+  const [initial, dns] = await Promise.all([fetchServerAdminSiteDomains(siteId), fetchServerAdminDnsProvider()]);
   if (!initial) return <LoadError m={m} />;
   return (
     <div className="space-y-6">
@@ -24,7 +25,13 @@ export default async function AdminSiteDomainsPage({ params }: { params: Promise
         </Link>
         <h1 className="text-2xl font-bold tracking-tight">{format(m.admin.sites.domainsTitle, { site: initial.domains[0]?.hostname ?? "" })}</h1>
       </div>
-      <DomainsPanel basePath={`/api/admin/sites/${siteId}/domains`} csrfToken={session.csrfToken} initial={initial} />
+      {/* null = the provider read failed, not "no provider": keep dns-01 open, the API refuses it if none is set. */}
+      {!dns && (
+        <Alert variant="destructive" role="alert">
+          <AlertDescription>{m.errors.generic}</AlertDescription>
+        </Alert>
+      )}
+      <DomainsPanel basePath={`/api/admin/sites/${siteId}/domains`} csrfToken={session.csrfToken} initial={initial} challenge={{ dnsAvailable: !dns || dns.provider !== null }} />
     </div>
   );
 }

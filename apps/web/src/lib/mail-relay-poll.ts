@@ -1,9 +1,7 @@
-import type { MailRelaySettingsDto } from "@hosting-panel/contracts";
-
 /** Re-reads the settings until the relay reports `applied`; gives up after `limitMs`. Returns a stop function. */
-export function startMailRelayPolling(o: {
-  load: () => Promise<MailRelaySettingsDto | null>;
-  onData: (d: MailRelaySettingsDto) => void;
+export function startMailRelayPolling<T extends { applied: boolean }>(o: {
+  load: () => Promise<T | null>;
+  onData: (d: T) => void;
   onGiveUp: () => void;
   intervalMs?: number;
   limitMs?: number;
