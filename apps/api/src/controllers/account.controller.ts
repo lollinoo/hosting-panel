@@ -2,7 +2,11 @@ import { Body, Controller, HttpCode, HttpStatus, Inject, Patch, Post, Req } from
 import { and, encryptSecretAesGcm, eq, isNull, users, type DatabaseClient } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import { z } from "zod";
-import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
+import {
+  AuthzContextService,
+  type AuthenticateOptions,
+  type AuthenticatedRequestContext,
+} from "../auth/authz-context.service.js";
 import { OidcService } from "../auth/oidc.service.js";
 import { reservePasswordAttempt, reserveTotpAttempt } from "../auth/attempt-limits.js";
 import {
@@ -41,7 +45,7 @@ export class AccountController {
   @Post("password")
   @HttpCode(HttpStatus.NO_CONTENT)
   public async changePassword(@Req() req: FastifyRequest, @Body() raw: unknown): Promise<void> {
-    const { auth, user } = await this.load(req);
+    const { auth, user } = await this.load(req, { allowPasswordChangePending: true });
     const body = PasswordBody.parse(raw ?? {});
     // In the account's line with its sign-ins and other checks (LR-M1).
     await oneCheckPerAccount(user.email, async () => {
@@ -188,17 +192,13 @@ export class AccountController {
     return this.fail(auth, req, action, "ACCOUNT_LOCKED", "Account temporaneamente bloccato. Riprova più tardi.");
   }
 
-  private async load(req: FastifyRequest) {
-    const auth = await this.authz.authenticateRequest(req);
+  private async load(req: FastifyRequest, options?: AuthenticateOptions) {
+    const auth = await this.authz.authenticateRequest(req, options);
     const [user] = await this.dbClient.db.select().from(users).where(eq(users.id, auth.user.id)).limit(1);
     if (!user) throw new ControlPlaneError("UNAUTHENTICATED", "User account is not active.");
     return { auth, user };
   }
 
-  private async fail(
-    auth: AuthenticatedRequestContext,
-    req: FastifyRequest,
-    action: string,
   // Read in the line, so a queued check sees the hash and the status left by the previous one.
   private async currentPasswordHash(userId: string): Promise<string | null> {
     const [row] = await this.dbClient.db
@@ -211,6 +211,10 @@ export class AccountController {
     return row.passwordHash;
   }
 
+  private async fail(
+    auth: AuthenticatedRequestContext,
+    req: FastifyRequest,
+    action: string,
     code: "INVALID_CREDENTIALS" | "TOTP_INVALID" | "PERMISSION_DENIED" | "ACCOUNT_LOCKED",
     message: string,
   ): Promise<never> {

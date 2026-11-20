@@ -38,6 +38,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { SiteProvisioner } from "../src/runtime/site-provisioner.js";
 
 const KEY = Buffer.alloc(32, 7);
@@ -254,6 +255,7 @@ describe("site SFTP HTTP API integration (linux-systemd)", () => {
     );
     expect(createdA.status).toBe(201);
     orgAId = createdA.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "mario-sftp@hotel.it");
     ownerAToken = await loginUser(
       app.baseUrl!,
       "mario-sftp@hotel.it",
@@ -1338,6 +1340,7 @@ describe("site SFTP HTTP API on local-simulator backend", () => {
     });
     expect(createdOrg.status).toBe(201);
     orgId = createdOrg.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner@sim.it");
     ownerToken = await loginUser(
       app.baseUrl!,
       "owner@sim.it",
@@ -1464,6 +1467,7 @@ describe("createControlPlaneApp boot on DB without pre-seeded role_permissions",
     });
     expect(createdOrg.status).toBe(201);
     const orgId = createdOrg.body.data.organizationId as string;
+    await skipPasswordChange(app.dbClient.db, "owner@boot.it");
     const ownerToken = await loginUser(
       app.baseUrl!,
       "owner@boot.it",

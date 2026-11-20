@@ -16,6 +16,7 @@ import { SUPPORT_ACCESS_PERMISSIONS, SUPPORT_ACCESS_TTL_MS } from "../src/auth/s
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "sentinel-admin-pass-0001";
@@ -73,6 +74,7 @@ describe("support access", () => {
       ownerName: `Owner ${n}`,
     });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, email);
     return { orgId: created.body.data.organizationId as string, token: await login(email, created.body.data.temporaryPassword as string) };
   }
 

@@ -52,6 +52,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "correct horse battery";
@@ -528,6 +529,7 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     orgAId = createdA.body.data.organizationId as string;
     ownerAToken = await loginUser(
       app.baseUrl!,
+    await skipPasswordChange(dbClient.db, "mario-db@trattoria.it");
       "mario-db@trattoria.it",
       createdA.body.data.temporaryPassword as string,
     );
@@ -1627,6 +1629,7 @@ describe("site databases on local-simulator backend", () => {
     orgId = createdOrg.body.data.organizationId as string;
     ownerToken = await loginUser(
       app.baseUrl!,
+    await skipPasswordChange(dbClient.db, "owner-db@sim.it");
       "owner-db@sim.it",
       createdOrg.body.data.temporaryPassword as string,
     );
@@ -1743,6 +1746,7 @@ describe("createControlPlaneApp boot restores site.databases.manage to customer_
     const orgId = createdOrg.body.data.organizationId as string;
     const ownerToken = await loginUser(
       app.baseUrl!,
+    await skipPasswordChange(app.dbClient.db, "owner@bootdb.it");
       "owner@bootdb.it",
       createdOrg.body.data.temporaryPassword as string,
     );

@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { SITE_STEP_LEASE_MS } from "../src/runtime/site-provisioner.js";
 import { SITE_WORDPRESS_UPDATE_STEPS } from "../src/sites/site-wordpress-applier.js";
@@ -135,6 +136,7 @@ describe("WordPress import: the customer's routes", () => {
       ownerName: "Customer A",
     });
     const orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "admin@example.test");
     const token = await login("admin@example.test", created.body.data.temporaryPassword as string);
     const site = await call("POST", `/v1/organizations/${orgId}/managed-sites`, token, SITE);
     expect(site.status).toBe(202);

@@ -22,6 +22,7 @@ import { SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
 import { ADMIN_SITE_RESTORE_STEPS } from "../src/backups/site-restore-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 9);
 const PW = "correct horse battery";
@@ -199,6 +200,7 @@ describe("administrator's restore of a site where nothing may exist", () => {
     });
     expect(created.status).toBe(201);
     orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner-admin-restore@hotel.it");
     ownerToken = await login(
       app.baseUrl!,
       "owner-admin-restore@hotel.it",

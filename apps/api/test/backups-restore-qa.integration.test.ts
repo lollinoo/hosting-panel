@@ -51,6 +51,7 @@ import {
 } from "../src/backups/site-backups-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 11);
 const PW = "qa-restore-password-123";
@@ -366,6 +367,7 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
     expect(createdA.status, createdA.raw).toBe(201);
     orgAId = createdA.body.data.organizationId as string;
     ownerAPassword = createdA.body.data.temporaryPassword as string;
+    await skipPasswordChange(dbClient.db, "owner-a-restore@test.local");
     ownerAToken = await login(
       app.baseUrl!,
       "owner-a-restore@test.local",

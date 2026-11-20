@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 interface Call { readonly method: string; readonly args: unknown[] }
@@ -250,6 +251,7 @@ describe("site type pins: what the API hands the executor for a WordPress site",
       adminToken,
     );
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, OWNER_EMAIL);
     orgId = created.body.data.organizationId as string;
     ownerToken = await login(OWNER_EMAIL, created.body.data.temporaryPassword as string);
 

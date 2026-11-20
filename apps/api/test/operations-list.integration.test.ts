@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "sentinel-admin-pass";
@@ -49,6 +50,7 @@ describe("the operations list of an organisation reads one page from the databas
       ownerName: "Owner",
     });
     expect(res.status).toBe(201);
+    await skipPasswordChange(dbClient.db, email);
     token = await login(email, res.body.data.temporaryPassword as string);
     return res.body.data.organizationId as string;
   }

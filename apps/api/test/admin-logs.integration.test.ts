@@ -11,6 +11,7 @@ import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 
 const KEY = Buffer.alloc(32, 7);
@@ -73,6 +74,7 @@ describe("administrator log routes", () => {
       ownerName: "Customer",
     });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "customer@example.test");
     const token = await login("customer@example.test", created.body.data.temporaryPassword as string);
     const [user] = await dbClient.db.select().from(users).where(eq(users.email, "customer@example.test"));
     return { orgId: created.body.data.organizationId as string, token, userId: user!.id };

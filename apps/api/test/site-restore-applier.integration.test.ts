@@ -50,6 +50,7 @@ import {
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { SITE_STEP_LEASE_MS } from "../src/runtime/site-provisioner.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { WORDPRESS_API_SITE_TYPE } from "../src/site-types/wordpress.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../src/tokens.js";
 
@@ -418,6 +419,7 @@ describe("site restore and download applier (M3b)", () => {
       },
     });
     expect(createdOrg.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario-restore@hotel.it");
     orgAId = createdOrg.body.data.organizationId as string;
 
     const loginOwner = await httpJson(app.baseUrl!, "POST", "/v1/auth/login", {

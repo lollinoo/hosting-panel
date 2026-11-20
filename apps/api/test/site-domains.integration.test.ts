@@ -24,6 +24,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import {
   buildSiteHostRoutes,
   desiredWordpressUrl,
@@ -240,6 +241,7 @@ describe("site.domains operation", () => {
     );
     expect(created.status).toBe(201);
     orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     token = await login("mario@hotel.it", created.body.data.temporaryPassword as string);
   });
 

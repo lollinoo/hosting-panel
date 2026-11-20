@@ -32,6 +32,7 @@ import { z } from "zod";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle, type CreateControlPlaneAppOptions } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 5);
 const PW = "sentinel-password-0001";
@@ -564,6 +565,7 @@ describe("admin health and alerts", () => {
     await start();
     const created = await call("POST", "/v1/admin/customer-account", adminToken, { organizationName: "Org A", ownerEmail: "owner@example.test", ownerName: "Owner" });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     const token = await login("owner@example.test", created.body.data.temporaryPassword as string);
     for (const path of ["/v1/admin/health", "/v1/admin/alerts"]) {
       const before = (await dbClient.db.select({ id: auditEvents.id }).from(auditEvents)).map((r) => r.id);

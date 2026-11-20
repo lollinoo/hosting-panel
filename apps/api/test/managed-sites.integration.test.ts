@@ -28,6 +28,7 @@ import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { siteDatabaseIdentifier } from "../src/runtime/site-provisioner.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "correct horse battery";
@@ -144,6 +145,7 @@ describe("managed WordPress sites API", () => {
       adminToken,
     );
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     orgId = created.body.data.organizationId as string;
     token = await login("mario@hotel.it", created.body.data.temporaryPassword as string);
   });

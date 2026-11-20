@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle, type CreateControlPlaneAppOptions } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 6);
 const PW = "sentinel-password-0002";
@@ -119,6 +120,7 @@ describe("admin restart of a site and of a panel container", () => {
   async function customerToken(): Promise<string> {
     const created = await call("POST", "/v1/admin/customer-account", adminToken, { organizationName: "Org A", ownerEmail: "owner@example.test", ownerName: "Owner" });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     return login("owner@example.test", created.body.data.temporaryPassword as string);
   }
 

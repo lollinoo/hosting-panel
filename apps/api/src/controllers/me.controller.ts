@@ -37,7 +37,7 @@ export class MeController {
 
   @Get()
   public async getMe(@Req() req: FastifyRequest): Promise<{ data: MeDto }> {
-    const auth = await this.authzService.authenticateRequest(req);
+    const auth = await this.authzService.authenticateRequest(req, { allowPasswordChangePending: true });
 
     const [row] = await this.dbClient.db.select().from(users).where(eq(users.id, auth.user.id)).limit(1);
     const memberships = auth.activeMembershipSummaries.map((m) => ({

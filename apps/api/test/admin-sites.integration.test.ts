@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
 const PW = "correct horse battery";
@@ -89,6 +90,7 @@ describe("server administrator site API", () => {
       ownerName: "Mario",
     });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "mario@hotel.it");
     return {
       orgId: created.body.data.organizationId as string,
       token: await login("mario@hotel.it", created.body.data.temporaryPassword as string),

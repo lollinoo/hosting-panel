@@ -34,6 +34,7 @@ import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { enqueueSiteDomainsOperation } from "../src/sites/site-domains-applier.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 11);
 const PW = "sentinel-password-0003";
@@ -197,6 +198,7 @@ describe("M5b operations acceptance", () => {
     adminToken = await login("admin@example.test", PW, admin.totpSecretBase32);
     const created = await call("POST", "/v1/admin/customer-account", adminToken, { organizationName: "Org A", ownerEmail: "owner-a@example.test", ownerName: "Owner A" });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner-a@example.test");
     org.A = { id: created.body.data.organizationId as string, token: await login("owner-a@example.test", created.body.data.temporaryPassword as string) };
     // One customer per host: the second organisation gets its own host, as in site-restore-routes.
     const [hostA] = await dbClient.db.select().from(hosts).limit(1);

@@ -30,6 +30,7 @@ import { ensurePlatformOpsOrg } from "../src/backups/backup-scheduler.service.js
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle, type CreateControlPlaneAppOptions } from "../src/index.js";
 import { recoverPanelContainerApply } from "../src/updates/panel-container-apply.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 // The version this process "runs"; the updater changing it is a new process reading another RELEASE.json.
 const version = vi.hoisted(() => ({ current: "1.4.2" as string | null }));
@@ -150,6 +151,7 @@ describe("admin updates and system packages", () => {
   async function customerToken(): Promise<string> {
     const created = await call("POST", "/v1/admin/customer-account", adminToken, randomUUID(), { organizationName: "Org A", ownerEmail: "owner@example.test", ownerName: "Owner" });
     expect(created.status).toBe(201);
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     return login("owner@example.test", created.body.data.temporaryPassword as string);
   }
 

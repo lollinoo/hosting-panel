@@ -21,6 +21,7 @@ import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.
 import { siteProvisionSteps } from "../src/runtime/site-provisioner.js";
 import { getApiSiteType } from "../src/site-types/index.js";
 import { TEST_API_SITE_TYPE } from "./fixtures/test-site-type.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 interface Call { readonly method: string; readonly arg: Json }
@@ -161,6 +162,7 @@ describe("a WordPress site walks creation, provision, address change and updates
     );
     expect(created.status).toBe(201);
     orgId = created.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     ownerToken = await login("owner@example.test", created.body.data.temporaryPassword as string);
   }, 120_000);
 

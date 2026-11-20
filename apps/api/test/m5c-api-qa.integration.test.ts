@@ -24,6 +24,7 @@ import { hashPassword } from "../src/auth/password.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import { skipPasswordChange } from "./fixtures/password-change.js";
 import { AdminTerminalService } from "../src/terminal/admin-terminal.service.js";
 
 const KEY = Buffer.alloc(32, 5);
@@ -116,6 +117,7 @@ describe("M5c QA: the API of the terminal and of Restart", () => {
     expect(created.status).toBe(201);
     orgId = created.body.data.organizationId as string;
     ownerId = created.body.data.userId as string;
+    await skipPasswordChange(dbClient.db, "owner@example.test");
     ownerToken = await login("owner@example.test", created.body.data.temporaryPassword as string);
   }
 
