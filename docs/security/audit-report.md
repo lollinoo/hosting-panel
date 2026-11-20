@@ -459,8 +459,12 @@ check four minutes after the boot found the 35 lines of the snapshot taken befor
 - The containers run, and the panel and the site serve the same certificates, so nothing was
   ordered again. The SFTP login works with the same host key.
 
-Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, SFTP from another
-network, `hp-update` between two versions.
+**SFTP from another network:** the owner connected to port 2222 from a client outside the server and
+confirmed that everything worked. The SFTP container's log shows the accepted login from an address
+other than the server's own.
+
+Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, `hp-update` between
+two versions.
 
 ## Open high or critical findings
 
