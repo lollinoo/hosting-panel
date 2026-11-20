@@ -209,6 +209,8 @@ export class DomainReconcilerService {
       const failures = report.failures
         .filter((f) => f.hostname === row.hostname)
         .sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+      // DNS-01 needs no A record, only the proxy's DNS resolver.
+      const dnsReady = row.certChallenge === "dns-01" ? report.dnsChallenge === true : row.dnsStatus === "ok";
 
       if (cert) {
         const expiresAt = new Date(cert.notAfter);
@@ -259,7 +261,7 @@ export class DomainReconcilerService {
           !(row.certExpiresAt !== null && row.certExpiresAt > now)
         ) {
           await this.#fail(site, row, "other", "No certificate and no reported failure within 10 minutes", now);
-        } else if (row.dnsStatus !== "ok" && row.certExpiresAt === null) {
+        } else if (!dnsReady && row.certExpiresAt === null) {
           // Only a fresh request is DNS-gated; a re-request of a lost certificate (expiry kept) stays.
           await this.#transition(row, { certStatus: "none" }, now);
         }
@@ -269,10 +271,10 @@ export class DomainReconcilerService {
       const due = row.certStatus === "none" || (row.certRetryAt !== null && row.certRetryAt <= now);
       // At most one order per 15 min, even when DNS flaps and requested→none is followed by "Check now".
       const gapOk = !row.certRequestedAt || now.getTime() >= row.certRequestedAt.getTime() + MANUAL_CERT_RETRY_GAP_MS;
-      if (due && gapOk && row.dnsStatus === "ok" && row.status === "active" && report.acmeEnabled) {
+      if (due && gapOk && dnsReady && row.status === "active" && report.acmeEnabled) {
         // certExpiresAt null marks a fresh request (see the DNS gate above).
         const ok = await this.#transition(row, { certStatus: "requested", certRequestedAt: now, certExpiresAt: null }, now);
-        if (ok) await this.#audit(site, "site.certificate.requested", { hostname: row.hostname });
+        if (ok) await this.#audit(site, "site.certificate.requested", { hostname: row.hostname, challenge: row.certChallenge });
       }
     }
   }
@@ -292,6 +294,7 @@ export class DomainReconcilerService {
         hostname: row.hostname,
         problem,
         detail: redactSensitiveString(detail).slice(0, 1024),
+        challenge: row.certChallenge,
       });
     }
   }

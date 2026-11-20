@@ -40,6 +40,7 @@ import type { DnsLookup } from "./sites/dns-check.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
+import { DnsProviderService } from "./certificates/dns-provider.service.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
@@ -255,6 +256,7 @@ export interface ControlPlaneAppHandle {
   readonly driftReconciler: DriftReconcilerService;
   readonly domainReconciler: DomainReconcilerService;
   readonly mailRelay: MailRelayService;
+  readonly dnsProvider: DnsProviderService;
   readonly siteSftp: SiteSftpService;
   readonly backupScheduler: BackupSchedulerService;
   close(): Promise<void>;
@@ -540,6 +542,7 @@ export async function createControlPlaneApp(
   const driftReconciler = nestApp.get(DriftReconcilerService);
   const domainReconciler = nestApp.get(DomainReconcilerService);
   const mailRelay = nestApp.get(MailRelayService);
+  const dnsProvider = nestApp.get(DnsProviderService);
   const siteSftp = nestApp.get(SiteSftpService);
   const backupScheduler = nestApp.get(BackupSchedulerService);
   const terminal = nestApp.get(AdminTerminalService);
@@ -557,6 +560,7 @@ export async function createControlPlaneApp(
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
   mailRelay.startBackgroundLoop();
+  dnsProvider.startBackgroundLoop(mailRelayRetryIntervalMs);
   if (runtimeBackend !== "disabled") void firewall.syncAtStart();
   siteSftp.startBackgroundLoop();
   backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
@@ -579,6 +583,7 @@ export async function createControlPlaneApp(
     driftReconciler,
     domainReconciler,
     mailRelay,
+    dnsProvider,
     siteSftp,
     backupScheduler,
     async close(): Promise<void> {
@@ -594,6 +599,7 @@ export async function createControlPlaneApp(
       await driftReconciler.stop();
       await domainReconciler.stop();
       await mailRelay.stop();
+      await dnsProvider.stop();
       await siteSftp.stop();
       await nestApp.close();
       if (ownsDatabaseClient) {

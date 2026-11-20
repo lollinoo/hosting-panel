@@ -131,6 +131,8 @@ class FakeDatabasesDockerExecutor implements DockerExecutorPort {
     this.sim.getCertificateStatus(req);
   public applyMailRelay: DockerExecutorPort["applyMailRelay"] = (req) =>
     this.sim.applyMailRelay(req);
+  public applyDnsProvider: DockerExecutorPort["applyDnsProvider"] = (req) =>
+    this.sim.applyDnsProvider(req);
   public getMailRelayStatus: DockerExecutorPort["getMailRelayStatus"] = (req) =>
     this.sim.getMailRelayStatus(req);
   public sendTestMail: DockerExecutorPort["sendTestMail"] = (req) => this.sim.sendTestMail(req);
@@ -527,9 +529,9 @@ describe("site databases HTTP API integration (linux-systemd)", () => {
     );
     expect(createdA.status).toBe(201);
     orgAId = createdA.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "mario-db@trattoria.it");
     ownerAToken = await loginUser(
       app.baseUrl!,
-    await skipPasswordChange(dbClient.db, "mario-db@trattoria.it");
       "mario-db@trattoria.it",
       createdA.body.data.temporaryPassword as string,
     );
@@ -1627,9 +1629,9 @@ describe("site databases on local-simulator backend", () => {
       body: { organizationName: "Sim DB Org", ownerEmail: "owner-db@sim.it", ownerName: "Sim" },
     });
     orgId = createdOrg.body.data.organizationId as string;
+    await skipPasswordChange(dbClient.db, "owner-db@sim.it");
     ownerToken = await loginUser(
       app.baseUrl!,
-    await skipPasswordChange(dbClient.db, "owner-db@sim.it");
       "owner-db@sim.it",
       createdOrg.body.data.temporaryPassword as string,
     );
@@ -1744,9 +1746,9 @@ describe("createControlPlaneApp boot restores site.databases.manage to customer_
       body: { organizationName: "Boot DB Org", ownerEmail: "owner@bootdb.it", ownerName: "Owner" },
     });
     const orgId = createdOrg.body.data.organizationId as string;
+    await skipPasswordChange(app.dbClient.db, "owner@bootdb.it");
     const ownerToken = await loginUser(
       app.baseUrl!,
-    await skipPasswordChange(app.dbClient.db, "owner@bootdb.it");
       "owner@bootdb.it",
       createdOrg.body.data.temporaryPassword as string,
     );

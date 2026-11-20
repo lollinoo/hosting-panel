@@ -73,7 +73,7 @@ import { LogReadGate } from "./log-read-gate.js";
 import { restoreCertificateThrottle } from "./site-domains.service.js";
 
 const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
-const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "other"]);
+const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "dns_provider", "other"]);
 
 const isUniqueViolation = (err: unknown): boolean => {
   const e = err as { code?: string; cause?: { code?: string } } | null;

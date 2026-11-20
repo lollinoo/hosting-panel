@@ -32,12 +32,17 @@ export function buildSiteHostRoutes(
   const routed = rows.filter((r) => r.status === "active");
   const primary = routed.find((r) => r.isPrimary);
   const target = primary ? `${acme && hasTls(primary) ? "https" : "http"}://${primary.hostname}` : null;
-  return routed.map((row) => ({
-    hostname: row.hostname,
-    tls: acme && hasTls(row),
-    httpsRedirect: acme && !opts.transition && certificateUsable(row, now),
-    redirectTo: opts.transition || row.isPrimary ? null : target,
-  }));
+  return routed.map((row) => {
+    const tls = acme && hasTls(row);
+    return {
+      hostname: row.hostname,
+      tls,
+      httpsRedirect: acme && !opts.transition && certificateUsable(row, now),
+      redirectTo: opts.transition || row.isPrimary ? null : target,
+      // Only dns-01 is written, so http-01 plans and their hashes stay as they were.
+      ...(tls && row.certChallenge === "dns-01" ? { challenge: "dns-01" as const } : {}),
+    };
+  });
 }
 
 /** The address WordPress should have. Never moves an https site back to http. */
@@ -57,7 +62,11 @@ export function routePlanHash(hosts: readonly SiteHostRoute[], wordpressUrl: str
   // Fixed key order and host order: JSONB round trips reorder object keys.
   const canonical = [...hosts]
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
-    .map((h) => [h.hostname, h.tls, h.httpsRedirect, h.redirectTo]);
+    .map((h) =>
+      h.challenge === "dns-01"
+        ? [h.hostname, h.tls, h.httpsRedirect, h.redirectTo, "dns-01"]
+        : [h.hostname, h.tls, h.httpsRedirect, h.redirectTo],
+    );
   return createHash("sha256").update(JSON.stringify({ hosts: canonical, wordpressUrl })).digest("hex");
 }
 

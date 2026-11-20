@@ -69,6 +69,7 @@ function row(hostname: string, over: Partial<DomainRow> = {}): DomainRow {
     certAttempts: 0,
     certExpiresAt: null,
     certTrusted: true,
+    certChallenge: "http-01",
     createdAt: now,
     updatedAt: now,
     ...over,
@@ -240,8 +241,8 @@ describe("site.domains operation", () => {
       adminToken,
     );
     expect(created.status).toBe(201);
-    orgId = created.body.data.organizationId as string;
     await skipPasswordChange(dbClient.db, "mario@hotel.it");
+    orgId = created.body.data.organizationId as string;
     token = await login("mario@hotel.it", created.body.data.temporaryPassword as string);
   });
 
@@ -585,7 +586,12 @@ describe("site.domains operation", () => {
       expect(d.certRetryAt).toEqual(at(16));
       expect(plan(siteId)).toEqual([plain]);
       const [audit] = await audits("site.certificate.failed");
-      expect(audit!.details).toEqual({ hostname: "hotel.it", problem: "port_80_blocked", detail: "simulated port_80_blocked" });
+      expect(audit!.details).toEqual({
+        hostname: "hotel.it",
+        problem: "port_80_blocked",
+        detail: "simulated port_80_blocked",
+        challenge: "http-01",
+      });
 
       await reconcile(15);
       expect((await dom("hotel.it")).certStatus).toBe("failed");

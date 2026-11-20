@@ -4,6 +4,7 @@ import {
   MAX_SITE_DOMAINS,
   wwwPartner,
   type AddSiteDomainInput,
+  type CertChallenge,
   type CertProblem,
   type SiteDomainsDto,
 } from "@hosting-panel/contracts";
@@ -28,6 +29,7 @@ import {
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import { lockDnsProviderRow } from "../certificates/dns-provider.service.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN } from "../tokens.js";
 import {
@@ -123,6 +125,7 @@ export class SiteDomainsService {
         hostname: r.hostname,
         isPrimary: r.isPrimary,
         routed: r.status === "active",
+        challenge: r.certChallenge,
         dns: {
           status: r.dnsStatus,
           checkedAt: r.dnsCheckedAt?.toISOString() ?? null,
@@ -152,6 +155,46 @@ export class SiteDomainsService {
       .limit(1);
     if (!row) throw notFound();
     return row;
+  }
+
+  /**
+   * Admin only. A failed order starts over (not a rate limit); the 15-min gap stays, as certRequestedAt is kept.
+   * `changed` is false when the domain already had this challenge.
+   */
+  public async setChallenge(
+    siteId: string,
+    organizationId: string,
+    domainId: string,
+    challenge: CertChallenge,
+  ): Promise<{ changed: boolean; data: SiteDomainsDto }> {
+    await this.#site(siteId, organizationId);
+    // The domain row is locked, so the reconciler cannot move it between the read and the write.
+    const changed = await this.dbClient.db.transaction(async (tx) => {
+      const t = tx as unknown as HostingPanelDatabase;
+      const [row] = await t
+        .select()
+        .from(domains)
+        .where(and(eq(domains.id, domainId), eq(domains.siteId, siteId)))
+        .for("update");
+      if (!row) throw notFound();
+      if (row.certChallenge === challenge) return false;
+      if (challenge === "dns-01" && !(await lockDnsProviderRow(t))) {
+        const message = "Set up a DNS provider first.";
+        throw new ControlPlaneError("VALIDATION_ERROR", message, { details: [{ message, reason: "dns_provider_missing" }] });
+      }
+      const reset = row.certStatus === "failed" && row.certProblem !== "rate_limited";
+      await t
+        .update(domains)
+        .set({
+          certChallenge: challenge,
+          ...(reset ? { certStatus: "none" as const, certProblem: null, certRetryAt: null } : {}),
+          updatedAt: new Date(),
+        })
+        .where(eq(domains.id, row.id));
+      return true;
+    });
+    if (changed) await this.#reconcile(siteId, []);
+    return { changed, data: await this.list(siteId, organizationId) };
   }
 
   /** Names already on this site are skipped, so a repeated call changes nothing. */

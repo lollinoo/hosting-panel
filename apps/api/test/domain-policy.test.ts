@@ -1,14 +1,17 @@
+import { createHash } from "node:crypto";
 import dns from "node:dns";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseClient } from "@hosting-panel/database";
+import type { DatabaseClient, DomainRow } from "@hosting-panel/database";
 import { AppModule } from "../src/app.module.js";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { DNS_LOOKUP_TOKEN } from "../src/tokens.js";
 import {
+  buildSiteHostRoutes,
   certRetryAt,
   evaluateDns,
   manualCertRetryAt,
   nextDnsCheckAt,
+  routePlanHash,
 } from "../src/sites/domain-policy.js";
 import { createNodeDnsLookup, type ResolverLike } from "../src/sites/dns-check.js";
 
@@ -64,6 +67,39 @@ describe("domain policy", () => {
     expect(await ok.lookup("a.test")).toEqual({ a: [IP], aaaa: [] });
     const bad = createNodeDnsLookup(["1.1.1.1"], () => make(() => Promise.reject(err(dns.TIMEOUT))));
     await expect(bad.lookup("a.test")).rejects.toThrow();
+  });
+});
+
+describe("route plan challenge", () => {
+  const row = (hostname: string, over: Partial<DomainRow> = {}): DomainRow =>
+    ({
+      hostname,
+      isPrimary: hostname === "a.test",
+      status: "active",
+      certStatus: "requested",
+      certExpiresAt: null,
+      certChallenge: "http-01",
+      ...over,
+    }) as DomainRow;
+
+  it("routes carry challenge only for dns-01 TLS hosts", () => {
+    const hosts = buildSiteHostRoutes(
+      [row("a.test", { certChallenge: "dns-01" }), row("b.test"), row("c.test", { certChallenge: "dns-01", certStatus: "none" })],
+      now,
+    );
+    expect(hosts.map((h) => h.challenge)).toEqual(["dns-01", undefined, undefined]);
+    expect("challenge" in hosts[1]!).toBe(false);
+    expect(buildSiteHostRoutes([row("a.test", { certChallenge: "dns-01" })], now, { acmeEnabled: false })[0]).not.toHaveProperty("challenge");
+  });
+
+  it("the plan hash of http-01 routes is unchanged; a dns-01 host changes it", () => {
+    const http = buildSiteHostRoutes([row("a.test"), row("b.test")], now);
+    const legacy = createHash("sha256")
+      .update(JSON.stringify({ hosts: http.map((h) => [h.hostname, h.tls, h.httpsRedirect, h.redirectTo]), wordpressUrl: "https://a.test" }))
+      .digest("hex");
+    expect(routePlanHash(http, "https://a.test")).toBe(legacy);
+    const dns01 = buildSiteHostRoutes([row("a.test", { certChallenge: "dns-01" }), row("b.test")], now);
+    expect(routePlanHash(dns01, "https://a.test")).not.toBe(legacy);
   });
 });
 
