@@ -416,6 +416,41 @@ acceptance report and one sentence of `.agents/brain/state.md` differed from the
 The repairs marked #7, #9 and #10 and DNS-01 (ADR 0030) came later: these runs do not cover them,
 and the tests their rows cite did not exist in the tree of the runs.
 
+## Runs on a real server (2026-11-20)
+
+The lead ran these on a fresh Ubuntu 24.04.5 VPS (4 CPU, 7.7 GB, Docker 29.10.0, nftables 1.0.9),
+on the tree of pull request #13, with `infra/linux/install.sh --acme-staging` and the server's public
+name `45-138-202-116.sslip.io`. The findings below are not in the counts above.
+
+- **The twelve real-Docker scripts:** ten at exit 0 at once. `accept-m3-panel.mjs` and
+  `accept-m4-wordpress.mjs` failed on assumptions of the scripts, not of the product: the first
+  wanted the user in group 30, the second took the word `core` of the constant update script for a
+  value once WordPress 7.1.5 existed. After the repair of the two scripts: 13/13 and 12/12, nothing
+  left behind.
+- **`accept-m7-secrets-reboot.mjs`** (new, #7 on the real engine): 8/8. After a simulated reboot,
+  Docker answers 400 "not a directory" and leaves a root-owned folder for the service and each secret;
+  Restart and Deploy with the secrets set the folder aside and the container runs with the right
+  values. A Restart without the secrets ends in the coded error `DOCKER_ENGINE_UNAVAILABLE` (Docker
+  refuses the folder), never a crash; the API always sends them.
+- **The installer:** exit 0. Let's Encrypt staging certificates for the panel and for a site, both
+  through HTTP-01, the site's about a minute after it was made.
+- **#8:** a session with a temporary password gets `403 PASSWORD_CHANGE_REQUIRED` on GET and POST
+  routes, reads `GET /v1/me`, changes the password, then works with the same token.
+- **DNS-01** (httpreq with an endpoint that does not exist and a marker as password): the files are
+  0400 `hp-executor` in the 0700 tmpfs folder, the proxy gets only the `_FILE` entries and a read-only
+  bind; a dns-01 domain whose A record points elsewhere is ordered at once and ends `failed` with
+  `dns_provider` and a retry 15 minutes later. The marker is in no `docker inspect`, file under
+  `/var/lib/hosting-panel` or `/etc/hosting-panel`, journal line, proxy log line or `pg_dump`.
+- **SFTP on 2222** from the public address: the host key matches the one the API shows, the upload
+  works and the site serves the file.
+
+| ID | Where | What | Found by | State |
+|---|---|---|---|---|
+| RS1 | `apps/host-agent/src/linux-adapter.ts`, `replaceFirewallSets` | Every port opened or closed and every address blocked in the panel stayed "Saved, not active": `nft -f -` refuses the socket Node gives a child as stdin ("Not a regular file: /dev/stdin"). The unit tests replace the runner and `accept-m5-firewall.mjs` gives nft a pipe, so neither saw it. | lead (real server) | **repaired.** The program goes to a 0600 file in a new folder of the agent's private `/tmp`, nft reads that file, the folder is removed afterwards. Tests: `apps/host-agent/test/host-m5d.test.ts`, "replaces the sets through nft -f on a 0600 file of its own, removes the file and answers a fresh read" and "removes the program file and its folder when nft fails, and answers the fixed sentence". On the server (the installed release with the repaired file copied in): ports 8080 and 9100 opened and closed and 192.0.2.10 blocked and unblocked from the admin API reach the kernel sets at once. |
+
+Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, a reboot, SFTP
+from another network, `hp-update` between two versions.
+
 ## Open high or critical findings
 
 | id | Weight | State |
