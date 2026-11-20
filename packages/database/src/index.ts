@@ -23,6 +23,7 @@ export * from "./seed.js";
 export * from "./sites-repository.js";
 export * from "./domains-repository.js";
 export * from "./mail-relay-repository.js";
+export * from "./dns-provider-repository.js";
 export * from "./site-sftp-users-repository.js";
 export * from "./backups-repository.js";
 export * from "./site-wordpress-state-repository.js";

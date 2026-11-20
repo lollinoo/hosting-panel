@@ -19,8 +19,10 @@ import type {
   BackupKind,
   BackupProblem,
   BackupStatus,
+  CertChallenge,
   CertProblem,
   CertStatus,
+  DnsProvider,
   DnsStatus,
   DomainStatus,
   ErrorCode,
@@ -444,6 +446,7 @@ export const domains = pgTable(
     dnsAttempts: integer("dns_attempts").notNull().default(0),
     certStatus: text("cert_status").$type<CertStatus>().notNull().default("none"),
     certProblem: text("cert_problem").$type<CertProblem>(),
+    certChallenge: text("cert_challenge").$type<CertChallenge>().notNull().default("http-01"),
     certRequestedAt: timestamp("cert_requested_at", { withTimezone: true }),
     certRetryAt: timestamp("cert_retry_at", { withTimezone: true }),
     certAttempts: integer("cert_attempts").notNull().default(0),
@@ -714,6 +717,18 @@ export const mailRelaySettings = pgTable("mail_relay_settings", {
   passwordIvBase64: text("password_iv_base64").notNull(),
   passwordAuthTagBase64: text("password_auth_tag_base64").notNull(),
   passwordKeyVersion: text("password_key_version").notNull().default("v1"),
+  updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const dnsProviderSettings = pgTable("dns_provider_settings", {
+  id: text("id").primaryKey(),
+  provider: text("provider").$type<DnsProvider>().notNull(),
+  credentialNames: jsonb("credential_names").$type<string[]>().notNull().default([]),
+  credentialsCiphertextBase64: text("credentials_ciphertext_base64").notNull(),
+  credentialsIvBase64: text("credentials_iv_base64").notNull(),
+  credentialsAuthTagBase64: text("credentials_auth_tag_base64").notNull(),
+  credentialsKeyVersion: text("credentials_key_version").notNull().default("v1"),
   updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
