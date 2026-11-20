@@ -69,6 +69,7 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { LogReadGate } from "./log-read-gate.js";
 import { restoreCertificateThrottle } from "./site-domains.service.js";
 
 const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
@@ -113,6 +114,8 @@ function slugify(name: string): string {
 
 @Injectable()
 export class ManagedSitesService {
+  readonly #logReads = new LogReadGate();
+
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN)
@@ -546,16 +549,20 @@ export class ManagedSitesService {
       "The logs are not available right now. Try again in a few minutes.",
     );
     if (!this.executor.isRuntimeAvailable) throw unavailable;
-    try {
-      const lines = await this.executor.getServiceLogs(svc.id, tail);
-      return lines.map((l) => ({ at: l.at, stream: l.stream, text: l.text }));
-    } catch (err) {
-      const code = (err as { code?: string } | null)?.code;
-      // NOT_FOUND here is the site's container gone, not the site: never "does not exist".
-      if (code === "NOT_FOUND" && containerGoneIsNotFound) throw err;
-      // What the executor said never reaches the caller (ADR 0026 2.3).
-      throw unavailable;
-    }
+    const read = async (): Promise<SiteLogLineDto[]> => {
+      try {
+        const lines = await this.executor.getServiceLogs(svc.id, tail);
+        return lines.map((l) => ({ at: l.at, stream: l.stream, text: l.text }));
+      } catch (err) {
+        const code = (err as { code?: string } | null)?.code;
+        // NOT_FOUND here is the site's container gone, not the site: never "does not exist".
+        if (code === "NOT_FOUND" && containerGoneIsNotFound) throw err;
+        // What the executor said never reaches the caller (ADR 0026 2.3).
+        throw unavailable;
+      }
+    };
+    // The administrator's Log page is not counted, so customers cannot crowd it out.
+    return containerGoneIsNotFound ? read() : this.#logReads.run(organizationId, read);
   }
 
   /** The platform-ops allocation that holds unassigned sites; org and allocation are created on first use. */
