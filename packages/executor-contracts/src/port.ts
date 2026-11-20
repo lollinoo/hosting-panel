@@ -53,7 +53,8 @@ export interface DockerExecutionResult {
 export interface DockerExecutorPort {
   readonly isRuntimeAvailable: boolean;
   deployService(spec: ApprovedServiceSpec): Promise<DockerExecutionResult>;
-  restartService(serviceInstanceId: string): Promise<DockerExecutionResult>;
+  /** resolvedSecrets (#7): written again, additively, before the restart. */
+  restartService(serviceInstanceId: string, resolvedSecrets?: Readonly<Record<string, string>>): Promise<DockerExecutionResult>;
   stopService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   deleteService(serviceInstanceId: string): Promise<DockerExecutionResult>;
   getObservedState(serviceInstanceId: string): Promise<ObservedServiceState | null>;
