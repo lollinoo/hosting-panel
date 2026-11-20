@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { CERT_PROBLEMS } from "./site-domains.js";
+import { CERT_CHALLENGES, CERT_PROBLEMS } from "./site-domains.js";
+import { DNS_PROVIDERS, refineDnsCredentials } from "./dns-provider.js";
 import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
 import { FIREWALL_MAX_BLOCKS_PER_FAMILY, FIREWALL_PORT_NAMES } from "./admin-firewall.js";
 import { TERMINAL_INPUT_MAX_BYTES, TerminalSessionIdSchema, type TerminalEndReason } from "./admin-terminal.js";
@@ -137,6 +138,7 @@ export const SiteHostRouteSchema = z.object({
   tls: z.boolean(),
   httpsRedirect: z.boolean(),
   redirectTo: z.string().max(260).nullable(),
+  challenge: z.enum(CERT_CHALLENGES).optional(),
 });
 
 export const ApprovedServiceSpecWireSchema = z
@@ -292,6 +294,7 @@ export const CertificateStatusReportWireSchema = z.object({
       detail: z.string().max(1024),
     }),
   ),
+  dnsChallenge: z.boolean().optional(),
 });
 
 export const ObservedServiceStateWireSchema = z.object({
@@ -483,6 +486,18 @@ export type MailRelayApplyRequest = z.infer<typeof MailRelayApplyRequestSchema>;
 
 export const MailRelayApplyIpcRequestSchema = z.object({
   config: MailRelayApplyRequestSchema.nullable(),
+});
+
+export const DnsProviderApplyRequestSchema = z
+  .object({
+    provider: z.enum(DNS_PROVIDERS),
+    credentials: z.record(z.string().max(64), z.string().max(2048)),
+  })
+  .superRefine(refineDnsCredentials(true));
+export type DnsProviderApplyRequest = z.infer<typeof DnsProviderApplyRequestSchema>;
+
+export const DnsProviderApplyIpcRequestSchema = z.object({
+  config: DnsProviderApplyRequestSchema.nullable(),
 });
 
 export const MailRelayStatusIpcRequestSchema = z.object({

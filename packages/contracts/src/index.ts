@@ -6,6 +6,7 @@ export * from "./ipc-auth.js";
 export * from "./ipc-schemas.js";
 export * from "./site-runtime.js";
 export * from "./site-domains.js";
+export * from "./dns-provider.js";
 export * from "./mail-relay.js";
 export * from "./site-files.js";
 export * from "./site-files-ipc.js";
