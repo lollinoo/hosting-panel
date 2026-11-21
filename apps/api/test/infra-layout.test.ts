@@ -582,9 +582,14 @@ describe("release workflow and docs", () => {
     expect(script).toMatch(/skipped \(not counted in n\/m\)/);
     for (const stepName of [
       "local-init-and-test", "local-backup-manual", "local-repo-ciphertext-only", "local-modes-and-users", "local-hostile",
-      "local-readonly-and-no-space", "local-restore", "local-export-zip", "panel-local-and-dr", "legacy-s3-coexists", "no-secrets",
+      "local-readonly-and-no-space", "local-restore", "local-export-zip", "panel-local-and-dr", "legacy-s3-coexists", "two-copies-both-succeed",
+      "two-copies-second-fails-partial", "forget-per-target", "zip-age-blocked", "no-secrets",
     ]) {
       expect(script, stepName).toContain(`"${stepName}"`);
+    }
+    // BKP-07/08/09: the second copy is op_x-t2, forgets are per target, and the refusal reason is pinned.
+    for (const s of ["-t2", "-forget-t2", "local_target_unmounted", "isEncryptedBackupExportAvailable", "BLOCKED.md #4"]) {
+      expect(script, s).toContain(s);
     }
   });
 

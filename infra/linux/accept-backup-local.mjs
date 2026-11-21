@@ -15,7 +15,9 @@
  *   setup, local-init-and-test (BKP-02), local-backup-manual (BKP-02), local-repo-ciphertext-only (BKP-04),
  *   local-modes-and-users (BKP-04/05), local-hostile (BKP-05), local-readonly-and-no-space (BKP-05/06, root only),
  *   local-restore (BKP-10), local-export-zip (BKP-12), panel-local-and-dr (BKP-16 executor part),
- *   legacy-s3-coexists (BKP-01/03/11 executor part), no-secrets, cleanup.
+ *   legacy-s3-coexists (BKP-01/03/11 executor part), two-copies-both-succeed (BKP-07), two-copies-second-fails-partial
+ *   (BKP-08), forget-per-target (BKP-09 executor part), zip-age-blocked (BKP-13, BLOCKED.md #4: only the refusal while
+ *   the capability is false), no-secrets, cleanup.
  * HP_ACCEPT_ROOT_CASES=1 as root enables the read-only and small-filesystem cases (mount needs root); otherwise they are
  * reported as SKIP with the reason.
  */
@@ -70,8 +72,10 @@ const { localTargetMarkerContent } = await import(
 const {
   DEFAULT_PHP_VERSION,
   RESTIC_IMAGE,
+  RUNTIME_BACKENDS,
   SHARED_MARIADB_IMAGE,
   SITE_FILE_CHUNK_BYTES,
+  isEncryptedBackupExportAvailable,
   resolveWordpressImage,
   siteDatabaseFullName,
   siteDatabasePrefix,
@@ -639,6 +643,26 @@ async function main() {
         "-e", "RESTIC_CACHE_DIR=/tmp/cache",
         "-e", `RESTIC_REPOSITORY=${leafInContainer}`,
         "--entrypoint", "/usr/bin/restic", RESTIC_IMAGE, "ls", "--no-lock", snapshotId,
+      ]);
+    } finally {
+      await docker(["rm", "-f", lsContainerName]);
+      createdContainers.delete(lsContainerName);
+    }
+  };
+
+  /** Independent restic container reading the S3 site repository over the run's network. */
+  const resticLsS3 = async (snapshotId) => {
+    createdContainers.add(lsContainerName);
+    try {
+      return await docker([
+        "run", "--name", lsContainerName, "--network", networkName, "--read-only", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true", "--user", "33:33", "--tmpfs", "/tmp:rw,size=64m,mode=1777",
+        "-v", `${verifySecretsDir}:/run/secrets:ro`,
+        "-e", "AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws.creds", "-e", "RESTIC_PASSWORD_FILE=/run/secrets/backup.key",
+        "-e", "RESTIC_CACHE_DIR=/tmp/cache",
+        "-e", `RESTIC_REPOSITORY=s3:${s3Target.endpoint}/${s3Target.bucket}/${s3Target.prefix}/sites/${siteId}`,
+        "--entrypoint", "/usr/bin/restic", RESTIC_IMAGE, "-o", "s3.bucket-lookup=path", "-o", `s3.region=${s3Target.region}`,
+        "ls", "--no-lock", snapshotId,
       ]);
     } finally {
       await docker(["rm", "-f", lsContainerName]);
@@ -1640,19 +1664,7 @@ async function main() {
         "S3 repository still lists exactly the S3 snapshot (same id)",
         JSON.stringify(snapObjects),
       );
-      createdContainers.add(lsContainerName);
-      const s3Ls = await docker([
-        "run", "--name", lsContainerName, "--network", networkName, "--read-only", "--cap-drop", "ALL",
-        "--security-opt", "no-new-privileges:true", "--user", "33:33", "--tmpfs", "/tmp:rw,size=64m,mode=1777",
-        "-v", `${verifySecretsDir}:/run/secrets:ro`,
-        "-e", "AWS_SHARED_CREDENTIALS_FILE=/run/secrets/aws.creds", "-e", "RESTIC_PASSWORD_FILE=/run/secrets/backup.key",
-        "-e", "RESTIC_CACHE_DIR=/tmp/cache",
-        "-e", `RESTIC_REPOSITORY=s3:${s3Target.endpoint}/${s3Target.bucket}/${s3Target.prefix}/sites/${siteId}`,
-        "--entrypoint", "/usr/bin/restic", RESTIC_IMAGE, "-o", "s3.bucket-lookup=path", "-o", `s3.region=${s3Target.region}`,
-        "ls", "--no-lock", snapS3.snapshotId,
-      ]);
-      await docker(["rm", "-f", lsContainerName]);
-      createdContainers.delete(lsContainerName);
+      const s3Ls = await resticLsS3(snapS3.snapshotId);
       assert(s3Ls.ok && s3Ls.stdout.includes(`/backup/files/${markerFileName}`), "independent restic ls reads the S3 snapshot", s3Ls.stderr);
 
       // BKP-11: restore from the S3 snapshot while a local target exists.
@@ -1676,7 +1688,129 @@ async function main() {
       assert(!s3Mounts.some((m) => m.startsWith(localRoot)), "S3 jobs bind nothing from the local root", JSON.stringify(s3Mounts));
     });
 
-    // ----------------------------------------------------------------------------------------------- 11. no-secrets
+    // ------------------------------------------------------------------- 11. two-copies-both-succeed (BKP-07)
+    const snapshotCounts = async () => ({
+      s3: (await s3ListAll(s3Target, `${s3Target.prefix}/sites/${siteId}/snapshots/`)).length,
+      local: (await readdir(path.join(leafDir(), "snapshots"))).length,
+    });
+    const listedPaths = (stdout) => stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("/")).sort();
+    let copyX = null;
+    let copyY = null;
+    await runStep("two-copies-both-succeed", async () => {
+      assert(s3Target !== null && snapLocal1 !== null, "the S3 and local targets exist", "earlier steps failed");
+      const before = await snapshotCounts();
+      const siteState = await captureSiteAndDbState();
+      const opX = newJobId();
+      // One logical backup: copy 1 to S3 as op_x, copy 2 to the local target as op_x-t2, sequential, same site.
+      await adapter.backups({ action: "start", jobId: opX, siteId, serviceInstanceId, target: s3Target });
+      const c1 = await pollBackupJob(adapter, opX);
+      assert(c1.state === "succeeded" && c1.snapshot !== null, "copy 1 (S3, op_x) succeeds", JSON.stringify(c1));
+      await adapter.backups({ action: "start", jobId: `${opX}-t2`, siteId, serviceInstanceId, target: localTarget });
+      const c2 = await pollBackupJob(adapter, `${opX}-t2`);
+      assert(c2.state === "succeeded" && c2.snapshot !== null, "copy 2 (local, op_x-t2) succeeds", JSON.stringify(c2));
+      assert(
+        /^[0-9a-f]{64}$/.test(c1.snapshot.snapshotId) && /^[0-9a-f]{64}$/.test(c2.snapshot.snapshotId) && c1.snapshot.snapshotId !== c2.snapshot.snapshotId,
+        "two different 64-hex snapshot ids",
+        `${c1.snapshot.snapshotId} ${c2.snapshot.snapshotId}`,
+      );
+      const after = await snapshotCounts();
+      assert(after.s3 === before.s3 + 1 && after.local === before.local + 1, "each repository gained exactly one snapshot", JSON.stringify({ before, after }));
+      const lsS3 = await resticLsS3(c1.snapshot.snapshotId);
+      const lsLocal = await resticLsLocal(c2.snapshot.snapshotId);
+      assert(lsS3.ok && lsLocal.ok, "independent restic ls reads both copies", `${lsS3.stderr} ${lsLocal.stderr}`);
+      const s3Paths = listedPaths(lsS3.stdout);
+      const localPaths = listedPaths(lsLocal.stdout);
+      for (const want of [`/backup/files/${markerFileName}`, `/backup/databases/${db1Name}.sql`, `/backup/databases/${db2Name}.sql`]) {
+        assert(s3Paths.includes(want), `S3 copy lists ${want}`, lsS3.stdout);
+      }
+      assert(isDeepStrictEqual(s3Paths, localPaths), "both copies list the same /backup content", JSON.stringify({ s3Only: s3Paths.filter((p) => !localPaths.includes(p)), localOnly: localPaths.filter((p) => !s3Paths.includes(p)) }));
+      assert(sameState(await captureSiteAndDbState(), siteState), "the backups altered nothing in the site", "state changed");
+      assert((await myJobObjects("ps")).length === 0 && (await myJobObjects("volume")).length === 0, "no job container or volume left", "left over");
+      copyX = { opX, s3Snapshot: c1.snapshot.snapshotId, localSnapshot: c2.snapshot.snapshotId };
+    });
+
+    // ---------------------------------------------------------- 12. two-copies-second-fails-partial (BKP-08)
+    await runStep("two-copies-second-fails-partial", async () => {
+      assert(s3Target !== null && copyX !== null, "the S3 target and a first logical backup exist", "earlier steps failed");
+      const marker = path.join(targetDir(), MARKER_NAME);
+      const before = await snapshotCounts();
+      const state = await captureSiteAndDbState();
+      const opY = newJobId();
+      await adapter.backups({ action: "start", jobId: opY, siteId, serviceInstanceId, target: s3Target });
+      const c1 = await pollBackupJob(adapter, opY);
+      assert(c1.state === "succeeded" && c1.snapshot !== null, "copy 1 (S3, op_y) succeeds", JSON.stringify(c1));
+      // The local disk goes away between the two copies (marker gone = unmounted): the second copy fails alone.
+      const localFp = await treeFingerprint(localRoot);
+      await rename(marker, `${marker}.away`);
+      try {
+        const createsBefore = containerCreateCount;
+        await adapter.backups({ action: "start", jobId: `${opY}-t2`, siteId, serviceInstanceId, target: localTarget });
+        const c2 = await pollBackupJob(adapter, `${opY}-t2`);
+        assert(c2.state === "failed" && c2.failure === "local_target_unmounted" && c2.snapshot === null, "copy 2 fails local_target_unmounted", JSON.stringify(c2));
+        assert(containerCreateCount === createsBefore, "the failed copy created no container", `${String(createsBefore)} -> ${String(containerCreateCount)}`);
+      } finally {
+        await rename(`${marker}.away`, marker);
+      }
+      assert((await treeFingerprint(localRoot)) === localFp, "the local root is as before the failed copy", "tree changed");
+      const after = await snapshotCounts();
+      assert(after.s3 === before.s3 + 1 && after.local === before.local, "only the S3 repository gained a snapshot", JSON.stringify({ before, after }));
+      // Copy 1 is restorable on its own (partial = one usable copy).
+      const broke = await runSiteHelper("breakf", ["-c", `printf 'BROKEN-Y-${runHex}\\n' > /var/www/html/${markerFileName}`]);
+      assert(broke.ok, "break the site marker", broke.stderr);
+      const brk = await runSql(`UPDATE \`${db1Name}\`.hp_marker SET note='BROKEN-Y-DB1-${runHex}' WHERE id=1;`);
+      assert(brk.exitCode === 0, "break a database row", brk.stderr.toString("utf8"));
+      const rJob = newJobId();
+      await adapter.backups({ action: "restore", jobId: rJob, siteId, serviceInstanceId, target: s3Target, snapshotId: c1.snapshot.snapshotId });
+      const rDone = await pollBackupJob(adapter, rJob);
+      assert(rDone.state === "succeeded" && rDone.failure === null, "restore from the surviving S3 copy succeeds", JSON.stringify(rDone));
+      assert(sameState(await captureSiteAndDbState(), state), "restored files and tables equal the backed-up state", "state mismatch");
+      await assertNoRestoreLeftovers();
+      const test = await adapter.backups({ action: "test", target: localTarget });
+      assert(test.outcome === "ok", "the local target is usable again once the marker is back", JSON.stringify(test));
+      copyY = { opY, s3Snapshot: c1.snapshot.snapshotId };
+    });
+
+    // --------------------------------------------------------------------- 13. forget-per-target (BKP-09)
+    await runStep("forget-per-target", async () => {
+      assert(copyX !== null && copyY !== null, "the two logical backups exist", "earlier steps failed");
+      const s3Prefix = `${s3Target.prefix}/sites/${siteId}/`;
+      const s3Listing = async () => JSON.stringify(await s3ListAll(s3Target, s3Prefix));
+      const forget = async (jobId, target, snapshotId) => {
+        await adapter.backups({ action: "forget", jobId, siteId, target, snapshotIds: [snapshotId] });
+        const done = await pollBackupJob(adapter, jobId);
+        assert(done.state === "succeeded" && done.failure === null, `${jobId} succeeds`, JSON.stringify(done));
+      };
+      // op_x-forget removes the S3 copy of op_x and cannot touch the local repository.
+      const counts0 = await snapshotCounts();
+      const localFp = await treeFingerprint(targetDir());
+      await forget(`${copyX.opX}-forget`, s3Target, copyX.s3Snapshot);
+      const counts1 = await snapshotCounts();
+      assert(counts1.s3 === counts0.s3 - 1 && counts1.local === counts0.local, "op_x-forget removed exactly one S3 snapshot", JSON.stringify({ counts0, counts1 }));
+      assert((await treeFingerprint(targetDir())) === localFp, "op_x-forget left the local repository byte-for-byte alone", "local tree changed");
+      // op_x-forget-t2 removes the local copy and cannot touch S3.
+      const s3Before = await s3Listing();
+      await forget(`${copyX.opX}-forget-t2`, localTarget, copyX.localSnapshot);
+      const counts2 = await snapshotCounts();
+      assert(counts2.local === counts1.local - 1 && counts2.s3 === counts1.s3, "op_x-forget-t2 removed exactly one local snapshot", JSON.stringify({ counts1, counts2 }));
+      assert((await s3Listing()) === s3Before, "op_x-forget-t2 left the S3 repository alone", "S3 objects changed");
+      assert(!(await readdir(path.join(leafDir(), "snapshots"))).includes(copyX.localSnapshot), "the forgotten local snapshot is gone", copyX.localSnapshot);
+      // The other logical backup is untouched and still readable.
+      const ls = await resticLsS3(copyY.s3Snapshot);
+      assert(ls.ok && ls.stdout.includes(`/backup/files/${markerFileName}`), "the S3 copy of op_y still reads after both forgets", ls.stderr);
+      assert((await myJobObjects("ps")).length === 0 && (await myJobObjects("volume")).length === 0, "no job container or volume left", "left over");
+    });
+
+    // ------------------------------------------------------------------------ 14. zip-age-blocked (BKP-13)
+    await runStep("zip-age-blocked", async () => {
+      // BLOCKED.md #4: the age tool is not approved. The executor has no age code path; the API refuses the format
+      // while this capability is false (site-restore.service.ts prepareDownload), before anything is read or queued.
+      for (const backend of RUNTIME_BACKENDS) {
+        assert(isEncryptedBackupExportAvailable(backend) === false, `encryptedBackupExportAvailable is false on ${backend}`, "true");
+      }
+      info("zip-age-blocked: .zip.age stays BLOCKED (BLOCKED.md #4); only the refusal is verified here");
+    });
+
+    // ----------------------------------------------------------------------------------------------- 15. no-secrets
     await runStep("no-secrets", async () => {
       const secrets = [...secretsToGuard];
       assert(capturedContainerSpecs.length >= 15, "captured container specs across the run", String(capturedContainerSpecs.length));
