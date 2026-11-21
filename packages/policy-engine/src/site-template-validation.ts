@@ -356,6 +356,11 @@ function validateParameter(
         defaultOk =
           typeof value === "string" && value.length <= STRING_DEFAULT_MAX && !CONTROL_CHARACTER.test(value) && !value.includes("${") && !value.includes("$$");
         if (!defaultOk) invalidDefault(`text of at most ${STRING_DEFAULT_MAX} printable characters without '$\{' or '$$'`);
+        else if (envValueProblem(String(value)) !== null) {
+          // A default is filled into environment values, so it is held to the rules of a literal one.
+          defaultOk = false;
+          invalidDefault("free of the Docker socket path and of secret-looking text (passwords, tokens, keys)");
+        }
         break;
       case "boolean":
         defaultOk = typeof value === "boolean";
@@ -416,6 +421,9 @@ function validateOptions(ctx: Context, raw: unknown, parameterPath: TemplatePath
       valid = false;
     } else if (options.includes(text)) {
       issues.add("PARAM_OPTIONS_INVALID", [...path, index], "Options must be distinct.");
+      valid = false;
+    } else if (envValueProblem(text) !== null) {
+      issues.add("PARAM_OPTIONS_INVALID", [...path, index], "An option must not contain the Docker socket path or secret-looking text.");
       valid = false;
     } else options.push(text);
   });

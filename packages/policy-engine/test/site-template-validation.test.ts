@@ -240,6 +240,10 @@ describe("the parameters", () => {
     ["a string default with a placeholder", { key: "s", label: "S", type: "string", default: "a${b}" }, "PARAM_DEFAULT_INVALID"],
     ["a string default with '$$'", { key: "s", label: "S", type: "string", default: "a$$b" }, "PARAM_DEFAULT_INVALID"],
     ["a string default with a line break", { key: "s", label: "S", type: "string", default: "a\nb" }, "PARAM_DEFAULT_INVALID"],
+    ["a string default with the Docker socket", { key: "s", label: "S", type: "string", default: "/var/run/docker.sock" }, "PARAM_DEFAULT_INVALID"],
+    ["a string default with credentials in a URL", { key: "s", label: "S", type: "string", default: "mysql://u:p@db/x" }, "PARAM_DEFAULT_INVALID"],
+    ["an enum option with the Docker socket", { key: "m", label: "M", type: "enum", options: ["a", "docker.sock"], default: "a" }, "PARAM_OPTIONS_INVALID"],
+    ["an enum option that is a token", { key: "m", label: "M", type: "enum", options: ["a", `ghp_${"A".repeat(24)}`], default: "a" }, "PARAM_OPTIONS_INVALID"],
     ["a string with options", { key: "s", label: "S", type: "string", default: "a", options: ["a"] }, "KEY_UNKNOWN"],
     ["a boolean default that is text", { key: "b", label: "B", type: "boolean", default: "true" }, "PARAM_DEFAULT_INVALID"],
     ["a size with a 'B' suffix", { key: "z", label: "Z", type: "size", default: "64MB" }, "PARAM_DEFAULT_INVALID"],
@@ -257,6 +261,15 @@ describe("the parameters", () => {
     ["a customer flag that is text", { key: "b", label: "B", type: "boolean", default: true, customer: "yes" }, "TYPE_MISMATCH"],
   ])("refuses %s", (_name, parameter, code) => {
     expect(codesOf(withParameter(parameter))).toContain(code);
+  });
+
+  it("reports an unsafe string default or enum option at its own path without echoing it", () => {
+    const secret = "mysql://user:hunter2pass@db/x";
+    const [byDefault] = errorsOf(withParameter({ key: "s", label: "S", type: "string", default: secret }));
+    expect(byDefault).toMatchObject({ code: "PARAM_DEFAULT_INVALID", path: "x-hp-parameters[1].default" });
+    const [byOption] = errorsOf(withParameter({ key: "m", label: "M", type: "enum", options: ["a", "docker.sock"], default: "a" }));
+    expect(byOption).toMatchObject({ code: "PARAM_OPTIONS_INVALID", path: "x-hp-parameters[1].options[1]" });
+    for (const issue of [byDefault, byOption]) expect(issue?.message).not.toMatch(/hunter2pass|docker\.sock|mysql/);
   });
 
   it("refuses nine customer parameters and seventeen parameters", () => {
