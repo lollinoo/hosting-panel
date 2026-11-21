@@ -394,6 +394,25 @@ describe("admin backups page and component states (d, e, f)", () => {
     }
   });
 
+  it("renders a partial site row with its words and an icon, never colour alone, in IT and EN", () => {
+    for (const m of [en, itMsgs]) {
+      const html = decodeHtml(
+        renderToStaticMarkup(
+          wrap(m, createElement(BackupSettings, {
+            csrfToken: "csrf",
+            initial: makeSettings(),
+            sites: [makeSiteRow({ siteId: "s1", siteName: "Alpha", lastStatus: "partial", problem: "unreachable" })],
+          })),
+        ),
+      );
+      const badge = html.match(/<div[^>]*>(?:(?!<\/div>).)*<\/div>/gs)?.find((d) => d.includes(m.admin.backups.siteState.partial)) ?? "";
+      expect(badge).toContain("<svg");
+      expect(badge).toContain('aria-hidden="true"');
+      expect(html).toContain(m.admin.backups.problem.unreachable);
+      expect(m.admin.backups.siteState.partial).not.toBe(m.admin.backups.siteState.failed);
+    }
+  });
+
   it("renders per-site table statuses, Retry/Run buttons, and sitesLoadFailed", () => {
     const sites: AdminSiteBackupStatusDto[] = [
       makeSiteRow({ siteId: "s1", siteName: "Alpha", lastStatus: "succeeded", problem: null }),

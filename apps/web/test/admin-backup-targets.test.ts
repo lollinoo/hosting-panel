@@ -35,7 +35,7 @@ vi.mock("next/navigation", () => ({
 
 import AdminBackupsPage from "@/app/admin/backups/page";
 import { BackupTargets, canDeleteTarget, isLowSpace, targetErrorText, targetStateText } from "@/components/admin/backup-targets";
-import { BackupPolicyForm, policyPatch } from "@/components/admin/backup-policy";
+import { BackupPolicyForm, policyPatch, toggleTarget } from "@/components/admin/backup-policy";
 import { BackupDisasterRecovery } from "@/components/admin/backup-disaster-recovery";
 
 const SPEC_WARNING_IT =
@@ -252,8 +252,42 @@ describe("BackupPolicyForm (policy tab)", () => {
     expect(out).toContain(format(en.admin.backups.policy.option, { name: "Offsite", kind: "S3" }));
     expect(out).toContain(format(en.admin.backups.policy.option, { name: "This server", kind: "Local" }));
     expect(out).not.toContain("Old bucket");
-    expect(out.match(/type="radio"/g)).toHaveLength(4); // 2 targets x 2 cards: one destination in M3
-    expect(out.match(/type="radio"[^>]*checked/g)).toHaveLength(2);
+    expect(out).not.toContain('type="radio"');
+    expect(out.match(/type="checkbox"/g)).toHaveLength(4); // 2 targets x 2 cards: up to two destinations
+    expect(out.match(/type="checkbox"[^>]*checked/g)).toHaveLength(2);
+    expect(out).toContain(en.admin.backups.policy.destinationsHint);
+  });
+
+  it("shows both destinations of a two-target policy ticked, with the mandatory warning", () => {
+    const both = policy({
+      targets: [
+        { targetId: S3.id, kind: "s3", priority: 1, required: true },
+        { targetId: LOCAL.id, kind: "local", priority: 2, required: true },
+      ],
+    });
+    const out = mount({ siteDefault: both });
+    expect(out.match(/type="checkbox"[^>]*checked/g)).toHaveLength(3); // 2 on the sites card + 1 on the panel card
+    expect(out).toContain(SPEC_WARNING_EN);
+    expect(mount({ siteDefault: both }, itMsgs)).toContain(itMsgs.admin.backups.policy.destinationsHint);
+  });
+
+  it("stops at two destinations: with two ticked the third is disabled and a ticked one can be cleared", () => {
+    const third = target({ id: "bkt_dddddddddddddddddddddddddddddddd", kind: "s3", name: "Second bucket" });
+    const both = policy({
+      targets: [
+        { targetId: S3.id, kind: "s3", priority: 1, required: true },
+        { targetId: LOCAL.id, kind: "local", priority: 2, required: true },
+      ],
+    });
+    const sitesCard = mount({ siteDefault: both, targets: [S3, LOCAL, third] }).split('name="policy-panel-target"')[0] ?? "";
+    const boxes = sitesCard.match(/<input[^>]*type="checkbox"[^>]*>/g) ?? [];
+    expect(boxes).toHaveLength(3);
+    expect(boxes.filter((b) => b.includes("disabled"))).toHaveLength(1);
+    expect(boxes.find((b) => b.includes("disabled"))).toContain(third.id);
+    expect(toggleTarget([S3.id, LOCAL.id], third.id)).toEqual([S3.id, LOCAL.id]);
+    expect(toggleTarget([S3.id, LOCAL.id], S3.id)).toEqual([LOCAL.id]);
+    expect(toggleTarget([LOCAL.id], S3.id)).toEqual([LOCAL.id, S3.id]);
+    expect(toggleTarget([], S3.id)).toEqual([S3.id]);
   });
 
   it("shows the mandatory warning only when the chosen set holds a local target", () => {
@@ -280,6 +314,11 @@ describe("BackupPolicyForm (policy tab)", () => {
     const patch = policyPatch(base, { scheduleHourUtc: 5, retentionDays: 7, targetIds: [LOCAL.id] });
     expect(UpdateDefaultSiteBackupPolicyInputSchema.safeParse(patch).success).toBe(true);
     // The panel card sends destinations only.
+    expect(policyPatch(base, { scheduleHourUtc: 2, retentionDays: 14, targetIds: [S3.id, LOCAL.id] })).toEqual({
+      targetIds: [S3.id, LOCAL.id],
+    });
+    const twoPatch = policyPatch(base, { targetIds: [S3.id, LOCAL.id] });
+    expect(UpdateDefaultSiteBackupPolicyInputSchema.safeParse(twoPatch).success).toBe(true);
     const panelPatch = policyPatch(panel, { targetIds: [LOCAL.id] });
     expect(panelPatch).toEqual({ targetIds: [LOCAL.id] });
     expect(UpdatePanelBackupPolicyInputSchema.safeParse(panelPatch).success).toBe(true);

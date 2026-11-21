@@ -42,6 +42,8 @@ export function alertText(m: Messages, a: AdminAlertDto): string {
       return format(t.alerts.backup_storage_test_failed, { date: date(a.details.testedAt) });
     case "backup_site_without_target":
       return format(t.alerts.backup_site_without_target, { site: a.details.siteName });
+    case "backup_partial":
+      return format(t.alerts.backup_partial, { site: a.details.siteName, date: date(a.details.at) });
     case "backup_target_space_low":
       return format(t.alerts.backup_target_space_low, {
         free: formatSize(a.details.availableBytes, m.common.dateLocale),
@@ -87,6 +89,7 @@ export function alertLink(a: AdminAlertDto): AlertLink | null {
     case "backup_storage_test_failed":
     case "backup_target_space_low":
     case "backup_site_without_target":
+    case "backup_partial":
     case "restore_undo_incomplete":
     case "restore_stuck":
       return { href: "/admin/backups", label: "openBackups" };

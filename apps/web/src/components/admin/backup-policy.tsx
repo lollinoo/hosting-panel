@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import type { AdminBackupTargetDto, BackupPolicyDto } from "@hosting-panel/contracts";
+import { MAX_BACKUP_POLICY_TARGETS, type AdminBackupTargetDto, type BackupPolicyDto } from "@hosting-panel/contracts";
 import { formatLocalHour, formatUtcHour } from "@/components/admin/backup-settings";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -36,13 +36,19 @@ export function policyPatch(saved: BackupPolicyDto, draft: PolicyDraft): PolicyP
   return patch;
 }
 
+/** Ticks or clears a destination; a third one is refused. The order is the order they were ticked. */
+export function toggleTarget(ids: string[], id: string): string[] {
+  if (ids.includes(id)) return ids.filter((x) => x !== id);
+  return ids.length >= MAX_BACKUP_POLICY_TARGETS ? ids : [...ids, id];
+}
+
 /** Destinations an administrator can pick: live and enabled, plus the ones the policy already uses. */
 function choicesFor(targets: AdminBackupTargetDto[], policy: BackupPolicyDto): AdminBackupTargetDto[] {
   const used = new Set(policy.targets.map((x) => x.targetId));
   return targets.filter((x) => !x.archivedAt && (x.enabled || used.has(x.id)));
 }
 
-/** One card: optional hour and retention, and one destination (two in a later release). */
+/** One card: optional hour and retention, and up to two destinations. */
 function PolicyCard(p: {
   scope: "default" | "panel";
   csrfToken: string;
@@ -60,11 +66,11 @@ function PolicyCard(p: {
   const [saved, setSaved] = useState(p.policy);
   const [hour, setHour] = useState(p.policy.scheduleHourUtc ?? p.utcHour);
   const [days, setDays] = useState(String(p.policy.retentionDays));
-  const [targetId, setTargetId] = useState(p.policy.targets[0]?.targetId ?? "");
+  const [targetIds, setTargetIds] = useState(() => [...p.policy.targets].sort((a, b) => a.priority - b.priority).map((x) => x.targetId));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const choices = choicesFor(p.targets, saved);
-  const chosenLocal = choices.some((x) => x.id === targetId && x.kind === "local");
+  const chosenLocal = choices.some((x) => targetIds.includes(x.id) && x.kind === "local");
   const id = `policy-${p.scope}`;
 
   async function save(e: React.FormEvent) {
@@ -74,10 +80,10 @@ function PolicyCard(p: {
     if (p.editable && !(Number.isInteger(retentionDays) && retentionDays >= 1 && retentionDays <= 365)) {
       return setNotice({ ok: false, text: t.field.retention_days_invalid });
     }
-    if (targetId === "") return setNotice({ ok: false, text: t.policy.targetRequired });
+    if (targetIds.length === 0) return setNotice({ ok: false, text: t.policy.targetRequired });
     const patch = policyPatch(saved, {
       ...(p.editable ? { scheduleHourUtc: hour, retentionDays } : {}),
-      targetIds: [targetId],
+      targetIds,
     });
     if (Object.keys(patch).length === 0) return setNotice({ ok: true, text: t.policy.unchanged });
     setBusy(true);
@@ -126,12 +132,23 @@ function PolicyCard(p: {
           )}
           <fieldset className="space-y-2">
             <legend className="text-sm font-medium">{c.destination}</legend>
-            {choices.map((x) => (
-              <label key={x.id} className="flex items-center gap-2 text-sm">
-                <input type="radio" name={`${id}-target`} value={x.id} checked={targetId === x.id} onChange={() => setTargetId(x.id)} />
-                <span>{format(t.policy.option, { name: x.name, kind: t.targets.kind[x.kind] })}</span>
-              </label>
-            ))}
+            {choices.map((x) => {
+              const checked = targetIds.includes(x.id);
+              return (
+                <label key={x.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    name={`${id}-target`}
+                    value={x.id}
+                    checked={checked}
+                    disabled={!checked && targetIds.length >= MAX_BACKUP_POLICY_TARGETS}
+                    onChange={() => setTargetIds((ids) => toggleTarget(ids, x.id))}
+                  />
+                  <span>{format(t.policy.option, { name: x.name, kind: t.targets.kind[x.kind] })}</span>
+                </label>
+              );
+            })}
+            <p className="text-xs text-muted-foreground">{t.policy.destinationsHint}</p>
           </fieldset>
           {chosenLocal && (
             <Alert role="note">

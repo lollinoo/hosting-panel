@@ -835,6 +835,9 @@ export const it = {
         offServer: "Copia esterna",
         thisServer: "Copia su questo server",
         offServerN: "Copia esterna {n}",
+        both: "Entrambe: esterna e su questo server",
+        bothHelp:
+          "Ogni backup viene conservato in due posti. Se una copia non riesce il backup risulta Parziale e puoi comunque ripristinare dall'altra.",
         localWarning:
           "Le copie su questo server non proteggono dalla perdita del server o del disco. Conserva anche una copia esterna.",
         save: "Salva la scelta",
@@ -917,6 +920,8 @@ export const it = {
           "Lo spazio dei backup su questo server non è configurato in modo sicuro, quindi non è stato usato. Contatta il tuo fornitore di hosting.",
         backup_copy_missing:
           "Questa copia non si trova più dove era salvata. Usa un'altra copia, se c'è, oppure contatta il tuo fornitore di hosting.",
+        invalid_recipient:
+          "La chiave indicata per lo scaricamento cifrato non è valida. Controllala e riprova.",
       } satisfies Record<BackupProblem, string>,
       copyProblem: {
         unreachable:
@@ -977,6 +982,8 @@ export const it = {
           "Lo spazio dei backup su questo server non è configurato in modo sicuro, quindi non è stato usato. Contatta il tuo fornitore di hosting.",
         backup_copy_missing:
           "Questa copia non si trova più dove era salvata. Usa un'altra copia, se c'è, oppure contatta il tuo fornitore di hosting.",
+        invalid_recipient:
+          "La chiave indicata per lo scaricamento cifrato non è valida. Controllala e riprova.",
       } satisfies Record<BackupProblem, string>,
       restore: {
         button: "Ripristina",
@@ -1545,6 +1552,7 @@ export const it = {
         backup_storage_test_failed: "L'ultima prova dello spazio di backup non è riuscita il {date}. Apri Backup, controlla le impostazioni dello spazio, poi usa di nuovo Prova la connessione.",
         backup_target_space_low: "La cartella dei backup su questo server sta finendo lo spazio ({free} liberi su {total}). Apri Backup, libera spazio o monta un disco più grande, poi usa di nuovo Prova la connessione.",
         backup_site_without_target: "Il sito {site} non ha una destinazione di backup utilizzabile, quindi ogni notte viene saltato. Apri Backup, scegli una destinazione attiva per il sito (o per tutti i siti) e salva.",
+        backup_partial: "Il backup di {site} del {date} è riuscito in una destinazione e non nell'altra. Il sito è protetto solo dalla copia riuscita. Apri Backup, controlla la destinazione che ha fallito e fai un nuovo backup.",
         component_down: "{part}: {state}. {reason}. {fix}",
         site_container_down: "{site}: il sito dovrebbe essere attivo, ma il suo container è \"{observed}\". Controlla il suo log nella pagina Log, poi usa Riavvia nella sua riga in Container dei siti.",
         restore_undo_incomplete: "{site}: un ripristino non è riuscito il {date} e il sito non è stato rimesso com'era, quindi potrebbe non funzionare. Un ripristino del sito che riesce lo ripara: usa Ripristina nella pagina Backup.",
@@ -2344,6 +2352,10 @@ export const it = {
           destination: "Destinazione",
         },
         option: "{name} ({kind})",
+        destinations: "Destinazioni",
+        destinationsHint:
+          "Scegli una destinazione, oppure due per conservare ogni backup in due posti. Ogni copia viene segnalata a parte: Parziale significa che una copia non è riuscita e l'altra sì.",
+        tooMany: "Scegli al massimo due destinazioni.",
         targetRequired: "Scegli una destinazione.",
         save: "Salva",
         saving: "Salvataggio…",
@@ -2462,6 +2474,8 @@ export const it = {
           "La cartella gestita non è sicura (collegamenti simbolici, proprietario o permessi non attesi), quindi non viene usata. Controlla proprietario e permessi della cartella, poi usa «Prova».",
         backup_copy_missing:
           "La copia non è più nella destinazione: è stata cancellata o il disco è stato sostituito. Controlla la destinazione; le copie in altre destinazioni restano utilizzabili.",
+        invalid_recipient:
+          "La chiave pubblica age non è valida: inizia con age1 e ha 62 caratteri. Copiala di nuovo dallo strumento che l'ha creata e riprova.",
       } satisfies Record<BackupProblem, string>,
       removeButton: "Rimuovi destinazione",
       removeTitle: "Rimuovere la destinazione dei backup?",
@@ -2488,6 +2502,7 @@ export const it = {
         running: "In corso\u2026",
         succeeded: "Riuscito",
         failed: "Non riuscito",
+        partial: "Parziale",
       },
       runNow: "Fai un backup",
       retry: "Riprova",

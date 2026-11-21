@@ -50,6 +50,14 @@ export function choiceLabels(t: TargetTexts, items: readonly { kind: BackupTarge
   });
 }
 
+/**
+ * The ids behind the "both" choice: only when the administrator offered exactly two destinations,
+ * so the pair is never a guess. Null hides the choice.
+ */
+export function bothChoiceIds(choices: readonly { id: string }[]): [string, string] | null {
+  return choices.length === 2 ? [choices[0]!.id, choices[1]!.id] : null;
+}
+
 /** The copies a restore or a download can read from. */
 export function restorableCopies(b: Pick<SiteBackupDto, "copies">): BackupCopy[] {
   return (b.copies ?? []).filter((c) => c.status === "succeeded");

@@ -636,8 +636,8 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
       expect(Object.keys(en.site.backups[section]).length).toBeGreaterThan(0);
     }
 
-    // 3. All 30 BACKUP_PROBLEMS exist in site.backups.problem, site.backups.copyProblem, and admin.backups.problem with next steps
-    expect(BACKUP_PROBLEMS).toHaveLength(30);
+    // 3. All 31 BACKUP_PROBLEMS exist in site.backups.problem, site.backups.copyProblem, and admin.backups.problem with next steps
+    expect(BACKUP_PROBLEMS).toHaveLength(31);
     for (const problem of BACKUP_PROBLEMS) {
       for (const [localeName, catalog, re] of [
         ["en", en, enNext],

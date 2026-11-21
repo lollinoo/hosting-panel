@@ -12,6 +12,7 @@ import { en } from "@/i18n/en";
 import { it as itCatalog } from "@/i18n/it";
 import { I18nProvider } from "@/i18n/provider";
 import {
+  bothChoiceIds,
   choiceLabels,
   copyLabel,
   hasRestorableCopy,
@@ -165,6 +166,39 @@ describe("destination chooser", () => {
   });
 });
 
+describe("destination chooser: both", () => {
+  const both = (targetIds: string[] = []): SiteBackupPolicyDto => ({
+    targetIds,
+    inherited: targetIds.length === 0,
+    choices: [choice(S3A, "s3"), choice(LOCAL, "local")],
+  });
+
+  it("offers Both only when the administrator offered exactly two destinations", () => {
+    expect(bothChoiceIds([choice(S3A, "s3"), choice(LOCAL, "local")])).toEqual([S3A, LOCAL]);
+    expect(bothChoiceIds([choice(S3A, "s3")])).toBeNull();
+    expect(bothChoiceIds([choice(S3A, "s3"), choice(S3B, "s3"), choice(LOCAL, "local")])).toBeNull();
+    expect(page([row()], both())).toContain(T.target.both);
+    expect(page([row()], { targetIds: [], inherited: true, choices: [choice(LOCAL, "local")] })).not.toContain(T.target.both);
+    expect(page([row()], { targetIds: [], inherited: true, choices: [choice(S3A, "s3")] })).not.toContain(T.target.both);
+  });
+
+  it("marks Both as saved and warns about the local copy when the policy holds both", () => {
+    const html = page([row()], both([S3A, LOCAL]));
+    expect(html).toMatch(/type="radio"[^>]*checked=""[^>]*value="both"/);
+    expect(html).toContain(T.target.localWarning);
+    expect(page([row()], both([S3A]))).not.toContain(T.target.localWarning);
+  });
+
+  it("has an Italian text for Both", () => {
+    expect(page([row()], both(), "it")).toContain(itCatalog.site.backups.target.both);
+  });
+
+  it("never offers an encrypted .zip.age download while the export is unavailable", () => {
+    const html = page([row({ copies: [copy(S3A, "s3", "succeeded"), copy(LOCAL, "local", "succeeded")] })], both());
+    expect(html).not.toMatch(/\.zip\.age|age key|recipient/i);
+  });
+});
+
 describe("rows with copies", () => {
   it("keeps the legacy single off-server copy invisible", () => {
     expect(page([row()])).not.toContain(T.copies.title);
@@ -266,6 +300,10 @@ describe("request bodies", () => {
     expect(await send(triggerRestoreBackup, { targetId: LOCAL })).toBe(`{"confirmName":"shop","targetId":"${LOCAL}"}`);
   });
 
+  it("download prepare never sends a format or recipient", async () => {
+    expect(await send(triggerPrepareDownload, { targetId: LOCAL })).not.toMatch(/format|recipient/);
+  });
+
   it("download prepare sends {} unless a target is given", async () => {
     expect(await send(triggerPrepareDownload, {})).toBe("{}");
     expect(await send(triggerPrepareDownload, { targetId: S3A })).toBe(`{"targetId":"${S3A}"}`);
@@ -285,6 +323,8 @@ describe("destination choice request", () => {
     expect(calls[0]![1].body).toBe('{"targetIds":null}');
     expect(calls[1]![1].body).toBe(`{"targetIds":["${LOCAL}"]}`);
     expect(calls[1]![1].headers["x-csrf-token"]).toBe("c");
+    await saveSiteBackupPolicy({ policyPath: path, targetIds: [S3A, LOCAL], csrfToken: "c", fetchImpl: fetchImpl as never });
+    expect((fetchImpl.mock.calls[2] as unknown as [string, RequestInit])[1].body).toBe(`{"targetIds":["${S3A}","${LOCAL}"]}`);
     const failing = vi.fn(async () => new Response("{}", { status: 500 }));
     expect(await saveSiteBackupPolicy({ policyPath: path, targetIds: null, csrfToken: "c", fetchImpl: failing as never })).toBe(false);
   });

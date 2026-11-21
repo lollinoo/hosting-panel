@@ -19,6 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { errorMessage, format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import {
+  bothChoiceIds,
   choiceLabels,
   hasRestorableCopy,
   labelledCopies,
@@ -651,17 +652,24 @@ function BackupTargetChooser({
 }) {
   const t = useMessages().site.backups.target;
   const labels = choiceLabels(t, policy.choices);
-  const initial = policy.inherited || policy.targetIds.length === 0 ? "inherit" : (policy.targetIds[0] ?? "inherit");
+  const both = bothChoiceIds(policy.choices);
+  const initial =
+    policy.inherited || policy.targetIds.length === 0
+      ? "inherit"
+      : policy.targetIds.length === 2 && both !== null && both.every((id) => policy.targetIds.includes(id))
+        ? "both"
+        : (policy.targetIds[0] ?? "inherit");
   const [saved, setSaved] = useState(initial);
   const [selected, setSelected] = useState(initial);
   const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
-  const kind = policy.choices.find((c) => c.id === selected)?.kind;
+  const selectedIds = selected === "inherit" ? [] : selected === "both" ? (both ?? []) : [selected];
+  const hasLocal = policy.choices.some((c) => c.kind === "local" && selectedIds.includes(c.id));
 
   async function save() {
     setState("saving");
     const ok = await saveSiteBackupPolicy({
       policyPath,
-      targetIds: selected === "inherit" ? null : [selected],
+      targetIds: selected === "inherit" ? null : selectedIds,
       csrfToken,
     });
     if (ok) setSaved(selected);
@@ -674,7 +682,11 @@ function BackupTargetChooser({
         <fieldset className="space-y-2" disabled={state === "saving"}>
           <legend className="text-sm font-medium">{t.title}</legend>
           <p className="text-xs text-muted-foreground">{t.intro}</p>
-          {[{ id: "inherit", label: t.inherit }, ...policy.choices.map((c, i) => ({ id: c.id, label: labels[i] }))].map((o) => (
+          {[
+            { id: "inherit", label: t.inherit },
+            ...policy.choices.map((c, i) => ({ id: c.id, label: labels[i] })),
+            ...(both ? [{ id: "both", label: t.both }] : []),
+          ].map((o) => (
             <label key={o.id} className="flex items-center gap-2 text-sm">
               <input
                 type="radio"
@@ -689,8 +701,9 @@ function BackupTargetChooser({
               {o.label}
             </label>
           ))}
+          {both ? <p className="text-xs text-muted-foreground">{t.bothHelp}</p> : null}
         </fieldset>
-        {kind === "local" ? (
+        {hasLocal ? (
           <Alert variant="warning">
             <AlertDescription>{t.localWarning}</AlertDescription>
           </Alert>

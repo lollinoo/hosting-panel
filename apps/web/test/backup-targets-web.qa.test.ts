@@ -454,7 +454,7 @@ describe("per-copy and per-backup status do not rely on colour", () => {
       };
       for (const [k, r] of Object.entries(cases)) {
         const out = await customerPage(locale, customerDto([r]), customerPolicy([]));
-        const tr = out.split("<tr").find((x) => x.includes("bak_") || x.includes(MSGS[locale].site.backups.status[k as "succeeded"])) ?? "";
+        const tr = out.split("<tr").slice(1).find((x) => x.includes("<td")) ?? ""; // the one body row (the page text before it also names "Partial")
         const badge = stripColour(tr).match(/<(?:div|span)[^>]*>(?:(?!<\/(?:div|span)>)[\s\S])*<svg[\s\S]*?<\/svg>[^<]*<\/(?:div|span)>/)?.[0] ?? "";
         badges.set(k, badge);
         expect(visibleText(badge), k).toContain(MSGS[locale].site.backups.status[k as "succeeded"]);

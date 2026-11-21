@@ -826,6 +826,9 @@ export const en: Messages = {
         offServer: "Off-server copy",
         thisServer: "Copy on this server",
         offServerN: "Off-server copy {n}",
+        both: "Both: off-server and on this server",
+        bothHelp:
+          "Each backup is kept in two places. If one copy fails the backup shows as Partial, and you can still restore from the other.",
         localWarning:
           "Copies on this server do not protect against losing the server or its disk. Keep an off-server copy too.",
         save: "Save the choice",
@@ -906,6 +909,8 @@ export const en: Messages = {
           "The backup space on this server isn't set up safely, so it wasn't used. Contact your hosting provider.",
         backup_copy_missing:
           "This copy is no longer where it was saved. Use another copy, if there is one, or contact your hosting provider.",
+        invalid_recipient:
+          "The key you entered for the encrypted download is not valid. Check it and try again.",
       },
       copyProblem: {
         unreachable:
@@ -963,6 +968,8 @@ export const en: Messages = {
           "The backup space on this server isn't set up safely, so it wasn't used. Contact your hosting provider.",
         backup_copy_missing:
           "This copy is no longer where it was saved. Use another copy, if there is one, or contact your hosting provider.",
+        invalid_recipient:
+          "The key you entered for the encrypted download is not valid. Check it and try again.",
       } satisfies Record<BackupProblem, string>,
       restore: {
         button: "Restore",
@@ -1520,6 +1527,7 @@ export const en: Messages = {
         backup_storage_test_failed: "The last test of the backup storage failed on {date}. Open Backups, check the storage settings, then use Test the connection again.",
         backup_target_space_low: "The backup folder on this server is running low on space ({free} free of {total}). Open Backups, free up space or mount a larger disk, then use Test the connection again.",
         backup_site_without_target: "The site {site} has no backup destination it can use, so it is skipped every night. Open Backups, choose an active destination for it (or for all sites) and save.",
+        backup_partial: "The backup of {site} on {date} succeeded in one destination and failed in the other. The site is protected only by the copy that worked. Open Backups, check the failed destination and run a new backup.",
         component_down: "{part}: {state}. {reason}. {fix}",
         site_container_down: "{site}: the site should be running, but its container is \"{observed}\". Check its log on the Logs page, then use Restart on its row under Sites' containers.",
         restore_undo_incomplete: "{site}: a restore failed on {date} and the site was not put back, so the site may not work. A restore of this site that succeeds repairs it: use Restore on the Backups page.",
@@ -2319,6 +2327,10 @@ export const en: Messages = {
           destination: "Destination",
         },
         option: "{name} ({kind})",
+        destinations: "Destinations",
+        destinationsHint:
+          "Choose one destination, or two to keep each backup in two places. Each copy is reported on its own: Partial means one copy failed and the other succeeded.",
+        tooMany: "Choose at most two destinations.",
         targetRequired: "Choose a destination.",
         save: "Save",
         saving: "Saving…",
@@ -2435,6 +2447,8 @@ export const en: Messages = {
           "The managed folder is not safe (symbolic links, or an unexpected owner or permissions), so it is not used. Check the folder's owner and permissions, then use Test.",
         backup_copy_missing:
           "The copy is no longer in the destination: it was deleted or the disk was replaced. Check the destination; copies in other destinations stay usable.",
+        invalid_recipient:
+          "The age public key is not valid: it starts with age1 and has 62 characters. Copy it again from the tool that created it and try again.",
       },
       removeButton: "Remove destination",
       removeTitle: "Remove the backup destination?",
@@ -2461,6 +2475,7 @@ export const en: Messages = {
         running: "Running\u2026",
         succeeded: "Succeeded",
         failed: "Failed",
+        partial: "Partial",
       },
       runNow: "Back up",
       retry: "Retry",

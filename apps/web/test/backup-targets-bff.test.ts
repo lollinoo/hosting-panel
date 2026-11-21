@@ -23,6 +23,7 @@ import * as adminRestoreRoute from "@/app/api/admin/backups/sites/[siteId]/resto
 type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
 
 const TARGET = `bkt_${"a".repeat(32)}`;
+const AGE = `age1${"q".repeat(58)}`;
 const OTHER = `bkt_${"b".repeat(32)}`;
 const s3Body = {
   kind: "s3",
@@ -276,10 +277,15 @@ describe("restore and download bodies carry an optional targetId", () => {
     expect(fetchUpstream.mock.calls[1]![1].body).toEqual({});
     expect(fetchUpstream.mock.calls[2]![1].body).toEqual({ targetId: TARGET });
     expect(fetchUpstream.mock.calls[0]![0]).toBe(`${CP}/backups/bkp_1/download`);
-    for (const body of [{ targetId: "../x" }, { targetId: TARGET, format: "zip" }, { path: "/x" }, []]) {
+    // M4 contract (PrepareDownloadInputSchema): `format` is 'zip' | 'zip.age'; zip.age needs a recipient and zip refuses one.
+    await prepare(req("POST", { body: { format: "zip" } }), ctxOf(dl));
+    await prepare(req("POST", { body: { targetId: TARGET, format: "zip.age", recipient: AGE } }), ctxOf(dl));
+    expect(fetchUpstream.mock.calls[3]![1].body).toEqual({ format: "zip" });
+    expect(fetchUpstream.mock.calls[4]![1].body).toEqual({ targetId: TARGET, format: "zip.age", recipient: AGE });
+    for (const body of [{ targetId: "../x" }, { targetId: TARGET, format: "tar" }, { format: "zip", recipient: AGE }, { format: "zip.age" }, { recipient: AGE }, { path: "/x" }, []]) {
       expect((await prepare(req("POST", { body }), ctxOf(dl))).status, JSON.stringify(body)).toBe(400);
     }
-    expect(fetchUpstream).toHaveBeenCalledTimes(3);
+    expect(fetchUpstream).toHaveBeenCalledTimes(5);
   });
 
   it("customer restore: {confirmName} is forwarded unchanged, targetId is optional, extra keys are refused", async () => {
