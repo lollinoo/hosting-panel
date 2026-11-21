@@ -631,15 +631,17 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       expect(createPlatformCapabilities({ runtimeBackend }).wordpressToolsAvailable).toBe(false);
       expect(isWordpressToolsAvailable(runtimeBackend)).toBe(false);
     }
-    // Manual TLS ships on linux-systemd only; the two backup flags are not on for any backend yet
+    // Manual TLS and the local backup destination ship on linux-systemd only; encrypted export is on for no backend yet
     expect(isManualTlsAvailable("linux-systemd")).toBe(true);
     expect(createPlatformCapabilities({ runtimeBackend: "linux-systemd" }).manualTlsCertificatesAvailable).toBe(true);
     for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
       expect(isManualTlsAvailable(runtimeBackend)).toBe(false);
       expect(createPlatformCapabilities({ runtimeBackend }).manualTlsCertificatesAvailable).toBe(false);
     }
+    expect(isLocalBackupTargetsAvailable("linux-systemd")).toBe(true);
+    expect(createPlatformCapabilities({ runtimeBackend: "linux-systemd" }).localBackupTargetsAvailable).toBe(true);
     for (const runtimeBackend of RUNTIME_BACKENDS) {
-      expect(isLocalBackupTargetsAvailable(runtimeBackend)).toBe(false);
+      expect(isLocalBackupTargetsAvailable(runtimeBackend)).toBe(runtimeBackend === "linux-systemd");
       expect(isEncryptedBackupExportAvailable(runtimeBackend)).toBe(false);
     }
     expect(p2Caps).toEqual({
@@ -655,7 +657,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       productionBackupRuntimeAvailable: true,
       wordpressToolsAvailable: true,
       manualTlsCertificatesAvailable: true,
-      localBackupTargetsAvailable: false,
+      localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
@@ -1135,7 +1137,8 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
   it("pins the alert kinds, panel components and panel containers in order", () => {
     expect(ALERT_KINDS).toEqual([
       "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
-      "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
+      "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "backup_target_space_low",
+      "backup_site_without_target", "component_down",
       "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
     ]);
     expect(PANEL_COMPONENTS).toEqual([

@@ -372,7 +372,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       productionBackupRuntimeAvailable: true,
       wordpressToolsAvailable: true,
       manualTlsCertificatesAvailable: true,
-      localBackupTargetsAvailable: false,
+      localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
     });
 
@@ -392,7 +392,7 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       productionBackupRuntimeAvailable: true,
       wordpressToolsAvailable: true,
       manualTlsCertificatesAvailable: true,
-      localBackupTargetsAvailable: false,
+      localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
     });
 

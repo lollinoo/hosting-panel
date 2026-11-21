@@ -33,10 +33,11 @@ export const FORBIDDEN_PUBLIC_DTO_KEYS = [
   "authTagBase64",
   "secretValue",
   "resolvedSecrets",
+  "secretAccessKey",
 ] as const;
 
 const FORBIDDEN_KEY_PATTERN =
-  /^(dockerContainerId|dockerNetworkId|dockerVolumeName|internalDockerRef|socketPath|dockerSocket|hostPath|bindMount|secretRef|password|passwordHash|accessToken|refreshToken|privateKey|privateKeyPem|keyPem|apiKey|ciphertext|ciphertextBase64|ivBase64|authTagBase64|secretValue|resolvedSecrets|docker_container_id|docker_network_id|docker_volume_name|internal_docker_ref|socket_path|docker_socket|host_path|bind_mount|secret_ref|password_hash|access_token|refresh_token|private_key|private_key_pem|key_pem|api_key|ciphertext_base64|iv_base64|auth_tag_base64|secret_value|resolved_secrets)$/i;
+  /^(dockerContainerId|dockerNetworkId|dockerVolumeName|internalDockerRef|socketPath|dockerSocket|hostPath|bindMount|secretRef|password|passwordHash|accessToken|refreshToken|privateKey|privateKeyPem|keyPem|apiKey|ciphertext|ciphertextBase64|ivBase64|authTagBase64|secretValue|resolvedSecrets|secretAccessKey|docker_container_id|docker_network_id|docker_volume_name|internal_docker_ref|socket_path|docker_socket|host_path|bind_mount|secret_ref|password_hash|access_token|refresh_token|private_key|private_key_pem|key_pem|api_key|ciphertext_base64|iv_base64|auth_tag_base64|secret_value|resolved_secrets|secret_access_key)$/i;
 
 export function findForbiddenPublicDtoKeys(value: unknown): string[] {
   const found: string[] = [];
@@ -287,9 +288,9 @@ export function isManualTlsAvailable(runtimeBackend: RuntimeBackend): boolean {
   return runtimeBackend === "linux-systemd";
 }
 
-/** Local backup targets: false until the milestone that ships them. */
-export function isLocalBackupTargetsAvailable(_runtimeBackend: RuntimeBackend): boolean {
-  return false;
+/** A backup destination on this server's own disk runs only on the Linux systemd backend. */
+export function isLocalBackupTargetsAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
 }
 
 /** Encrypted backup export: designed, not built (BLOCKED.md #4). */
