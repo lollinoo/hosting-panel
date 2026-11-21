@@ -112,6 +112,7 @@ const FULL: Record<AlertKind, unknown> = {
   certificate_expiring: { severity: "warning", subject: "h", since: T, kind: "certificate_expiring", details: { ...site, hostname: "wp-a.example.test", expiresAt: T, problem: "not_pointing" } },
   certificate_not_issued: { severity: "warning", subject: "h", since: T, kind: "certificate_not_issued", details: { ...site, hostname: "wp-a.example.test", problem: "port_80_blocked" } },
   panel_certificate_expiring: { severity: "warning", subject: "h", since: T, kind: "panel_certificate_expiring", details: { hostname: "panel.example.test", expiresAt: T } },
+  manual_certificate_expiring: { severity: "warning", subject: "v1", since: T, kind: "manual_certificate_expiring", details: { ...site, certificateId: "c1", certificateName: "hotel-cert", notAfter: T, tier: "critical" } },
   backup_failed: { severity: "warning", subject: "s1", since: T, kind: "backup_failed", details: { ...site, failedAt: T } },
   panel_backup_failed: { severity: "warning", subject: "p", since: T, kind: "panel_backup_failed", details: { failedAt: T } },
   backup_storage_test_failed: { severity: "warning", subject: "b", since: T, kind: "backup_storage_test_failed", details: { testedAt: T } },
@@ -127,6 +128,7 @@ const EMPTY: Record<AlertKind, unknown> = {
   certificate_expiring: { severity: "warning", subject: "h", since: null, kind: "certificate_expiring", details: { siteId: "s1", siteName: "s1", hostname: "h.example.test", expiresAt: null, problem: null } },
   certificate_not_issued: { severity: "warning", subject: "h", since: null, kind: "certificate_not_issued", details: { siteId: "s1", siteName: "s1", hostname: "h.example.test", problem: null } },
   panel_certificate_expiring: { severity: "warning", subject: "h", since: null, kind: "panel_certificate_expiring", details: { hostname: "panel.example.test", expiresAt: T } },
+  manual_certificate_expiring: { severity: "warning", subject: "v1", since: null, kind: "manual_certificate_expiring", details: { siteId: null, siteName: null, certificateId: "c1", certificateName: "c", notAfter: T, tier: "expired" } },
   backup_failed: { severity: "warning", subject: "s1", since: null, kind: "backup_failed", details: { siteId: "s1", siteName: "s1", failedAt: T } },
   panel_backup_failed: { severity: "warning", subject: "p", since: null, kind: "panel_backup_failed", details: { failedAt: T } },
   backup_storage_test_failed: { severity: "warning", subject: "b", since: null, kind: "backup_storage_test_failed", details: { testedAt: T } },
@@ -151,8 +153,8 @@ const UNITS = new Set([
 const LOCALES = [["en", en], ["it", itMsgs]] as const;
 
 describe("1. every alert reads clearly", () => {
-  it("13 kinds x en/it x fullest/emptiest: no placeholder, no key, no undefined, and a next step", () => {
-    const next = { en: /systemctl|journalctl|df -h|hp-break-glass|Logs page|Domains page|Backups|Restore|Back up|Test the connection|Start/, it: /systemctl|journalctl|df -h|hp-break-glass|pagina Log|pagina Domini|Backup|Ripristina|Prova la connessione|Avvia/ };
+  it("14 kinds x en/it x fullest/emptiest: no placeholder, no key, no undefined, and a next step", () => {
+    const next = { en: /systemctl|journalctl|df -h|hp-break-glass|Logs page|Domains page|Certificates page|Backups|Restore|Back up|Test the connection|Start/, it: /systemctl|journalctl|df -h|hp-break-glass|pagina Log|pagina Domini|pagina Certificati|Backup|Ripristina|Prova la connessione|Avvia/ };
     expect(Object.keys(F).sort()).toEqual([...ALERT_KINDS].sort());
     for (const [lc, m] of LOCALES)
       for (const set of [F, E])

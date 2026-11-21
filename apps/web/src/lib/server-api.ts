@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { TLS_INVENTORY_FILTERS } from "@hosting-panel/contracts";
 import { getServerSession } from "./server-session";
 import { fetchUpstream } from "./upstream";
 import { FIREWALL_BFF_TIMEOUT_MS } from "./admin-firewall";
@@ -30,6 +31,10 @@ import type {
   FirewallDto,
   UpdatesDto,
   OsPackagesDto,
+  TlsCertificateDto,
+  AdminTlsInventoryItemDto,
+  TlsCertificateAlertDto,
+  TlsInventoryFilter,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -204,4 +209,29 @@ export async function fetchServerAdminBackups(): Promise<BackupSettingsDto | nul
 /** Loads per-site backup status rows for the administrator table, or null on request failure. */
 export async function fetchServerAdminBackupSites(): Promise<AdminSiteBackupStatusDto[] | null> {
   return orNull(await serverGet<AdminSiteBackupStatusDto[]>("v1/admin/backups/sites", { timeoutMs: 20_000 }));
+}
+
+/** The site's imported certificates (customer console); null = the list could not be loaded. */
+export async function fetchServerSiteTlsCertificates(orgId: string, siteId: string): Promise<TlsCertificateDto[] | null> {
+  return orNull(await serverGet<TlsCertificateDto[]>(`v1/organizations/${orgId}/managed-sites/${siteId}/tls-certificates`));
+}
+
+export async function fetchServerAdminSiteTlsCertificates(siteId: string): Promise<TlsCertificateDto[] | null> {
+  return orNull(await serverGet<TlsCertificateDto[]>(`v1/admin/sites/${siteId}/tls-certificates`));
+}
+
+/** The administrator's inventory; only the whitelisted `filter` and a bounded `q` are sent upstream. */
+export async function fetchServerAdminTlsCertificates(
+  query: { filter: TlsInventoryFilter; q: string },
+): Promise<AdminTlsInventoryItemDto[] | null> {
+  const qs = new URLSearchParams();
+  if (TLS_INVENTORY_FILTERS.includes(query.filter)) qs.set("filter", query.filter);
+  const q = query.q.trim().slice(0, 253);
+  if (q) qs.set("q", q);
+  const suffix = qs.size > 0 ? `?${qs}` : "";
+  return orNull(await serverGet<AdminTlsInventoryItemDto[]>(`v1/admin/tls-certificates${suffix}`));
+}
+
+export async function fetchServerAdminTlsAlerts(): Promise<TlsCertificateAlertDto[] | null> {
+  return orNull(await serverGet<TlsCertificateAlertDto[]>("v1/admin/tls-certificates/alerts"));
 }

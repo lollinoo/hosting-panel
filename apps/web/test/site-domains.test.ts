@@ -149,7 +149,7 @@ describe("domains UI", () => {
   });
 
   it("every domain hint exists in both languages and names a next step", () => {
-    const keys = ["not_found", "points_elsewhere", "ipv6_conflict", "lookup_failed", "rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "dns_provider", "other"];
+    const keys = ["not_found", "points_elsewhere", "ipv6_conflict", "lookup_failed", "rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "dns_provider", "other", "manualApplyFailed"];
     for (const m of [en, itMsgs]) expect(Object.keys(m.site.domains.hint).sort()).toEqual([...keys].sort());
     const h = (m: typeof en) => m.site.domains.hint;
     expect(h(en).not_found).toBe("This address doesn't point anywhere yet. At your domain provider, create an A record for {host} with the value {ip}. Changes can take a few hours; we check automatically.");
@@ -209,6 +209,7 @@ describe("domains UI", () => {
       httpsProblem: "HTTPS not active yet",
       httpsExpired: "HTTPS expired",
       testCertificate: "Test certificate",
+      applyingCertificate: "Applying certificate",
     });
     expect(en.site.domains.pill.validUntil).toBe("HTTPS valid until {date}");
     expect(itMsgs.site.domains.state.waitingForDns).toBe("In attesa del DNS");

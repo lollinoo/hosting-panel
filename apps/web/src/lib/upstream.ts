@@ -19,6 +19,19 @@ export interface UpstreamResponse<T = unknown> {
   error?: unknown;
 }
 
+/** Fixed envelope for a non-JSON error body: the status is kept, the upstream text is dropped. */
+function invalidUpstreamBody(status: number) {
+  return {
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "Risposta non valida dal server",
+      requestId: "err-upstream-body",
+      retryable: status >= 500,
+      details: [],
+    },
+  };
+}
+
 export async function fetchUpstream<T = unknown>(
   path: string,
   options: UpstreamRequestOptions = {}
@@ -64,6 +77,8 @@ export async function fetchUpstream<T = unknown>(
       parsed = await res.json();
     } else {
       const text = await res.text();
+      // An error page of a proxy or runtime may quote what it was sent: the text never leaves this function.
+      if (!res.ok) return { status: res.status, ok: false, error: invalidUpstreamBody(res.status) };
       parsed = text ? { raw: text } : null;
     }
 

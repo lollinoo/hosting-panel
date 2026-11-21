@@ -31,6 +31,8 @@ export function alertText(m: Messages, a: AdminAlertDto): string {
       return format(t.alerts.certificate_not_issued, { host: a.details.hostname, site: a.details.siteName, problem: problem(a.details.problem) });
     case "panel_certificate_expiring":
       return format(t.alerts.panel_certificate_expiring, { host: a.details.hostname, date: date(a.details.expiresAt) });
+    case "manual_certificate_expiring":
+      return format(t.alerts.manual_certificate_expiring, { name: a.details.certificateName, date: date(a.details.notAfter) });
     case "backup_failed":
       return format(t.alerts.backup_failed, { site: a.details.siteName, date: date(a.details.failedAt) });
     case "panel_backup_failed":
@@ -60,7 +62,7 @@ export function alertText(m: Messages, a: AdminAlertDto): string {
   }
 }
 
-export type AlertLink = { href: string; label: "openDomains" | "openBackups" | "openLog" };
+export type AlertLink = { href: string; label: "openDomains" | "openBackups" | "openLog" | "openCertificates" };
 
 /** Where the next step of an alert is done, or null when it is done on the server. */
 export function alertLink(a: AdminAlertDto): AlertLink | null {
@@ -70,6 +72,8 @@ export function alertLink(a: AdminAlertDto): AlertLink | null {
       return { href: `/admin/sites/${a.details.siteId}/domains`, label: "openDomains" };
     case "panel_certificate_expiring":
       return { href: "/admin/logs?source=ingress_proxy", label: "openLog" };
+    case "manual_certificate_expiring":
+      return { href: "/admin/certificates?filter=expiring", label: "openCertificates" };
     case "backup_failed":
     case "panel_backup_failed":
     case "backup_storage_test_failed":

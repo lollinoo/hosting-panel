@@ -64,6 +64,7 @@ const raw: Record<AlertKind, unknown> = {
   certificate_expiring: { severity: "warning", subject: "wp-a.example.test", since: null, kind: "certificate_expiring", details: { ...site, hostname: "wp-a.example.test", expiresAt: T, problem: "port_80_blocked" } },
   certificate_not_issued: { severity: "warning", subject: "wp-a.example.test", since: null, kind: "certificate_not_issued", details: { ...site, hostname: "wp-a.example.test", problem: null } },
   panel_certificate_expiring: { severity: "warning", subject: "panel.example.test", since: null, kind: "panel_certificate_expiring", details: { hostname: "panel.example.test", expiresAt: T } },
+  manual_certificate_expiring: { severity: "warning", subject: "v1", since: null, kind: "manual_certificate_expiring", details: { ...site, certificateId: "c1", certificateName: "hotel-cert", notAfter: T, tier: "warning" } },
   backup_failed: { severity: "warning", subject: "s1", since: T, kind: "backup_failed", details: { ...site, failedAt: T } },
   panel_backup_failed: { severity: "warning", subject: "panel", since: T, kind: "panel_backup_failed", details: { failedAt: T } },
   backup_storage_test_failed: { severity: "warning", subject: "storage", since: T, kind: "backup_storage_test_failed", details: { testedAt: T } },
@@ -145,6 +146,9 @@ describe("alert sentences and links (a, b, c)", () => {
     expect(alertText(en, A.certificate_expiring)).toContain(en.admin.sites.alertsProblem.port_80_blocked);
     expect(alertText(en, A.certificate_not_issued)).toContain(en.admin.sites.alertsProblem.other);
     expect(alertText(en, A.restore_undo_incomplete)).toContain(en.admin.health.unknownDate);
+    expect(alertText(en, A.manual_certificate_expiring)).toContain("hotel-cert");
+    expect(itMsgs.admin.health.alerts.manual_certificate_expiring).not.toBe(en.admin.health.alerts.manual_certificate_expiring);
+    expect(itMsgs.admin.health.openCertificates).not.toBe(en.admin.health.openCertificates);
     expect(alertText(en, A.operation_unknown)).toContain('--operation-id op1 --reason "<why>"');
     // R184 2.5(b), as built by health: an hp-api restart does not end a stuck restore; an executor restart does
     for (const m of [en, itMsgs]) expect(alertText(m, A.restore_stuck)).toContain("sudo systemctl restart hp-docker-executor:");
@@ -176,6 +180,7 @@ describe("alert sentences and links (a, b, c)", () => {
       certificate_expiring: { href: "/admin/sites/s1/domains", label: "openDomains" },
       certificate_not_issued: { href: "/admin/sites/s1/domains", label: "openDomains" },
       panel_certificate_expiring: { href: "/admin/logs?source=ingress_proxy", label: "openLog" },
+      manual_certificate_expiring: { href: "/admin/certificates?filter=expiring", label: "openCertificates" },
       backup_failed: { href: "/admin/backups", label: "openBackups" },
       panel_backup_failed: { href: "/admin/backups", label: "openBackups" },
       backup_storage_test_failed: { href: "/admin/backups", label: "openBackups" },

@@ -4,13 +4,13 @@ import { bffErrorResponse } from "@/lib/bff-response";
 import { bffUpstreamResponse, readBoundedJsonBody } from "@/lib/bff-proxy";
 import { fetchUpstream } from "@/lib/upstream";
 
-/** Admin mutation pass-through: CSRF + Origin, path segments checked, Idempotency-Key and bounded JSON body required. */
+/** Admin mutation pass-through: CSRF + Origin, path segments checked, Idempotency-Key and bounded JSON body required; `opts.body` may veto the parsed body (400, before the API). */
 export async function forwardIdempotent(
   req: Request,
   segments: Record<string, string>,
   upstreamPath: string,
   method: "POST" | "DELETE",
-  opts?: { timeoutMs?: number; headers?: Record<string, string> },
+  opts?: { timeoutMs?: number; headers?: Record<string, string>; body?: (b: unknown) => boolean },
 ) {
   const segmentError = validatePathSegments(segments);
   if (segmentError) return segmentError;
@@ -25,6 +25,9 @@ export async function forwardIdempotent(
   }
   const parsed = await readBoundedJsonBody(req, { requireJsonBody: true });
   if (!parsed.ok) return parsed.response;
+  if (opts?.body && !opts.body(parsed.body)) {
+    return bffErrorResponse("VALIDATION_ERROR", "Dati della richiesta non validi", 400);
+  }
   return bffUpstreamResponse(
     await fetchUpstream(upstreamPath, {
       method,
