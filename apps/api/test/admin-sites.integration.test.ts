@@ -327,7 +327,9 @@ describe("server administrator site API", () => {
       await createAndRun(null);
       const res = await call("GET", "/v1/admin/sites", adminToken);
       expect(res.status).toBe(200);
-      expect(res.body.data.customers).toEqual([{ organizationId: orgId, name: "Hotel Mario", ownerEmail: "mario@hotel.it" }]);
+      expect(res.body.data.customers).toEqual([
+        { organizationId: orgId, name: "Hotel Mario", ownerEmail: "mario@hotel.it", maxSites: null, siteCount: 0 },
+      ]);
     });
 
     it("admin sees all sites", async () => {

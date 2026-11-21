@@ -23,8 +23,10 @@ import {
   appendStackRevisionTransactional,
   asc,
   assertNoManualCapture,
+  assertSiteLimitAvailable,
   assertSiteMovable,
   createServiceWithRevisionTransactional,
+  countSitesByOrganization,
   createSiteTransactional,
   desc,
   domains,
@@ -48,6 +50,7 @@ import {
   outboxEvents,
   serviceInstances,
   sites,
+  SiteLimitReachedError,
   sql,
   stackRevisions,
   updateOperationStepTransactional,
@@ -73,6 +76,7 @@ import {
 } from "../tokens.js";
 import { LogReadGate } from "./log-read-gate.js";
 import { coverageError, restoreCertificateThrottle } from "./site-domains.service.js";
+import { siteLimitError } from "./site-limit.js";
 
 const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
 const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "dns_provider", "other"]);
@@ -275,6 +279,12 @@ export class ManagedSitesService {
         return { siteId: site.id, operationId };
       });
     } catch (err) {
+      // A concurrent create with the same key took the last slot first: the key replays that one, it is no refusal.
+      if (err instanceof SiteLimitReachedError) {
+        const twin = await this.#replay(organizationId, idempotencyKey);
+        if (twin) return twin;
+        throw siteLimitError(err);
+      }
       // A concurrent create passed the check above and committed first: the same key replays it.
       if (isUniqueViolation(err)) {
         const twin = await this.#replay(organizationId, idempotencyKey);
@@ -641,7 +651,12 @@ export class ManagedSitesService {
       .orderBy(asc(sites.name), asc(sites.id));
     const stopped = await stoppedSiteIds(db, rows.map(({ site }) => site.id));
     const customers = await db
-      .selectDistinct({ organizationId: organizations.id, name: organizations.name, ownerEmail: users.email })
+      .selectDistinct({
+        organizationId: organizations.id,
+        name: organizations.name,
+        ownerEmail: users.email,
+        maxSites: organizations.maxSites,
+      })
       .from(hostAllocations)
       .innerJoin(organizations, eq(organizations.id, hostAllocations.organizationId))
       .innerJoin(memberships, eq(memberships.organizationId, organizations.id))
@@ -652,6 +667,7 @@ export class ManagedSitesService {
       .innerJoin(users, eq(users.id, memberships.userId))
       .where(and(eq(hostAllocations.status, "active"), not(eq(organizations.id, PLATFORM_OPS_ORG_ID))))
       .orderBy(asc(organizations.name), asc(organizations.id));
+    const counts = await countSitesByOrganization(db, customers.map((c) => c.organizationId));
     return {
       sites: rows.map(({ site, orgName, primaryDomain }) => ({
         id: site.id,
@@ -667,7 +683,7 @@ export class ManagedSitesService {
         createdAt: site.createdAt.toISOString(),
         updatedAt: site.updatedAt.toISOString(),
       })),
-      customers,
+      customers: customers.map((c) => ({ ...c, siteCount: counts.get(c.organizationId) ?? 0 })),
       certificateAlerts: await this.certificateAlerts(),
     };
   }
@@ -746,7 +762,11 @@ export class ManagedSitesService {
     return this.dbClient.db.transaction(async (tx) => {
       const t = tx as unknown as HostingPanelDatabase;
       if (!redeployOnly) {
-        // Refuse a move the run would refuse anyway (a manual domain, or a published certificate covering the site).
+        // Refuse a move the run would refuse anyway (a full target customer, a manual domain, or a published
+        // certificate covering the site). The move itself repeats the limit check under the lock.
+        await assertSiteLimitAvailable(t, toOrganizationId).catch((err: unknown) => {
+          throw siteLimitError(err);
+        });
         await tx.select({ id: sites.id }).from(sites).where(eq(sites.id, siteId)).for("update");
         await assertSiteMovable(t, { siteId, toOrganizationId }).catch((err: unknown) => {
           throw coverageError(err);
