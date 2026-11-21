@@ -45,6 +45,7 @@ import {
   sites,
   stackRevisions,
 } from "./schema.js";
+import { assertSiteLimitAvailable } from "./site-limit.js";
 import { assertNoManualCapture } from "./tls-coverage.js";
 
 function generatePrefixedId(prefix: string): string {
@@ -442,6 +443,9 @@ export async function createSiteTransactional(
       (err as unknown as { code: ErrorCode }).code = "NOT_FOUND";
       throw err;
     }
+
+    // Per-customer site limit: locks the organization row, so a concurrent create or limit change waits here.
+    await assertSiteLimitAvailable(tx, input.organizationId);
 
     const siteId = generatePrefixedId("site");
     const [site] = await tx

@@ -99,6 +99,7 @@ export const organizations = pgTable(
     name: text("name").notNull(),
     slug: text("slug").notNull().unique(),
     status: text("status").$type<OrganizationStatus>().notNull().default("active"),
+    maxSites: integer("max_sites"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
