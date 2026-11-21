@@ -7,7 +7,7 @@ MAIN_BRANCH=main
 VERIFY_CMD="corepack pnpm run build && corepack pnpm run lint && corepack pnpm run typecheck && corepack pnpm run test"
 
 # Timezone of the release tags (YYYYMMDD-HHMM) and of the changelog dates.
-RELEASE_TZ=UTC
+RELEASE_TZ=Europe/Rome
 
 # Tag of the GitHub Release. Empty = the timestamp YYYYMMDD-HHMM (RELEASE_TZ). {version} is the
 # version of the first package in .devflow/packages, e.g. RELEASE_TAG='v{version}' gives v1.4.0.
