@@ -35,7 +35,7 @@ describe("site runtime", () => {
 
   it("CreateManagedSiteInputSchema", () => {
     const ok = CreateManagedSiteInputSchema.parse(body);
-    expect(ok.phpVersion).toBe("8.4");
+    expect(ok.phpVersion).toBeUndefined(); // the template's php_version default decides
     expect(ok.domain).toBe("hotel.it");
     const r = CreateManagedSiteInputSchema.safeParse({ ...body, adminPassword: "twelve-chars\nx" });
     expect(r.success).toBe(false);

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { PresetRoleNameSchema } from "./permissions.js";
 import { SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
 import { CertificateAlertDtoSchema } from "./site-domains.js";
+import { AdminSiteTemplateRefDtoSchema } from "./site-templates/dto.js";
 import { SiteTypeKeySchema } from "./site-types/keys.js";
 
 export const PLATFORM_OPS_ORG_ID = "org_platform_ops";
@@ -736,6 +737,8 @@ export const AdminSiteDtoSchema = SiteSummaryDtoSchema.extend({
   primaryDomain: z.string().nullable(),
   // null when the site is held by PLATFORM_OPS_ORG_ID
   owner: z.object({ organizationId: EntityIdSchema, name: z.string() }).nullable(),
+  // null: not a managed site (made through the generic service routes)
+  template: AdminSiteTemplateRefDtoSchema.nullable(),
 });
 export type AdminSiteDto = z.infer<typeof AdminSiteDtoSchema>;
 

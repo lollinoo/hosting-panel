@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SiteTemplateParameterEntriesSchema } from "./site-templates/spec.js";
 import { WORDPRESS_SITE_TYPE } from "./site-types/wordpress.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
@@ -73,7 +74,11 @@ export const CreateManagedSiteInputSchema = z.object({
   name: z.string().trim().min(1).max(80),
   domain: SiteDomainSchema,
   includeWww: z.boolean().default(false),
-  phpVersion: z.enum(SUPPORTED_PHP_VERSIONS).default(DEFAULT_PHP_VERSION),
+  // absent: the template's php_version default decides
+  phpVersion: z.enum(SUPPORTED_PHP_VERSIONS).optional(),
+  // absent: the built-in template of the legacy site type
+  templateId: EntityIdSchema.optional(),
+  parameters: SiteTemplateParameterEntriesSchema.optional(),
   title: z.string().min(1).max(120),
   adminUser: z.string().regex(/^[A-Za-z0-9._@-]{3,60}$/),
   adminEmail: z.string().email(),

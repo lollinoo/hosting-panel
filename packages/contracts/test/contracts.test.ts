@@ -1311,7 +1311,7 @@ describe("@hosting-panel/contracts — the site DTOs carry the site type", () =>
     const { siteType: _omitted, ...withoutType } = site;
     expect(SiteSummaryDtoSchema.safeParse(withoutType).success).toBe(false);
     expect(ManagedSiteDtoSchema.parse({ ...site, primaryDomain: null }).siteType).toBe("wordpress");
-    expect(AdminSiteDtoSchema.parse({ ...site, primaryDomain: null, owner: null }).siteType).toBe("wordpress");
+    expect(AdminSiteDtoSchema.parse({ ...site, primaryDomain: null, owner: null, template: null }).siteType).toBe("wordpress");
   });
 });
 
