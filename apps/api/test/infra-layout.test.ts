@@ -547,6 +547,47 @@ describe("release workflow and docs", () => {
     expect(r.stdout).toContain("ingress/dynamic/manual-certs (0700 hp-executor:hp-executor)");
   });
 
+  it("hcp-spec-004 the executor knows the local backup root", () => {
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(
+      "install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/local-repos\n",
+    );
+    const unit = read("infra/systemd/hp-docker-executor.service");
+    expect(unit).toContain("\nEnvironment=HP_BACKUP_LOCAL_ROOT=/var/lib/hosting-panel/local-repos\n");
+    expect(unit).toContain("\nReadWritePaths=/var/lib/hosting-panel /run/hosting-panel\n");
+    expect(unit).not.toContain("RequiresMountsFor");
+  });
+
+  it("hcp-spec-004 local backup acceptance script is registered and machine-safe", () => {
+    const script = read("infra/linux/accept-backup-local.mjs");
+    const s3Script = read("infra/linux/accept-m3-backups.mjs");
+    // Same pinned RustFS as the S3 acceptance script (the legacy-coexistence step).
+    const rustfs = /const RUSTFS_IMAGE =\s*"(rustfs\/rustfs:[^"]+)"/;
+    expect(script.match(rustfs)?.[1]).toBeDefined();
+    expect(script.match(rustfs)?.[1]).toBe(s3Script.match(rustfs)?.[1]);
+    // Drives the built executor with a temporary local root and the shipped CLI, not a copy of them.
+    for (const s of ["DockerEngineSocketAdapter", "backupLocalRoot", "localInit", "fetchPanelCopy", "local_repo", "panel-fetch.js", "backup-repo.json", "backup-upload.json"]) {
+      expect(script, s).toContain(s);
+    }
+    // Machine safety: own prefix, no published port, nothing pulled or pruned, no shell, never the host's own objects.
+    expect(script).toContain("hp_swarmtest_");
+    expect(script).toContain("pullMissingImages: false");
+    expect(script).not.toMatch(/PortBindings\s*:|["']-p["']|["']--publish["']/);
+    expect(script).not.toMatch(/["'](?:prune|pull|system)["']/);
+    expect(script).not.toMatch(/shell:\s*true|(?<![.\w])exec\(|execSync|spawnSync/);
+    expect(script).not.toMatch(/["'`]hp_(?:ingress_proxy|ingress_net|mariadb)["'`]/);
+    expect(script).toMatch(/mkdtemp\(path\.join\(os\.tmpdir\(\)/);
+    // The cases that need root are gated and reported as skipped with a reason, never passed silently.
+    expect(script).toContain("HP_ACCEPT_ROOT_CASES");
+    expect(script).toMatch(/skipped \(not counted in n\/m\)/);
+    for (const stepName of [
+      "local-init-and-test", "local-backup-manual", "local-repo-ciphertext-only", "local-modes-and-users", "local-hostile",
+      "local-readonly-and-no-space", "local-restore", "local-export-zip", "panel-local-and-dr", "legacy-s3-coexists", "no-secrets",
+    ]) {
+      expect(script, stepName).toContain(`"${stepName}"`);
+    }
+  });
+
   it("m3b restore and download docs are consistent", () => {
     const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
     expect(bootstrap).toContain(
