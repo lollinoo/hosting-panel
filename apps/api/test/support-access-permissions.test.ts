@@ -15,7 +15,7 @@ const SITE_CONTROLLERS = [
 ];
 
 describe("support visit permissions", () => {
-  it("are exactly the 14 site, service and operation keys", () => {
+  it("are exactly the 15 site, service and operation keys", () => {
     expect([...SUPPORT_ACCESS_PERMISSIONS]).toEqual([
       "site.read",
       "site.create",
@@ -26,6 +26,7 @@ describe("support visit permissions", () => {
       "site.sftp.manage",
       "site.databases.manage",
       "site.backups.manage",
+      "site.certificates.manage",
       "service.deploy",
       "service.restart",
       "service.stop",

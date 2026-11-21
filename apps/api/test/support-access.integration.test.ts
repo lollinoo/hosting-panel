@@ -221,7 +221,7 @@ describe("support access", () => {
       expect((await files()).status).toBe(200);
     });
 
-    it("a visit gives nothing outside the 14 keys: members and another organization stay refused", async () => {
+    it("a visit gives nothing outside the 15 keys: members and another organization stay refused", async () => {
       const other = await bareOrg();
       await open(siteId);
       expect((await call("GET", `/v1/organizations/${orgId}/members`, adminToken)).body.error.code).toBe("PERMISSION_DENIED");

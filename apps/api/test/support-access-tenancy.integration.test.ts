@@ -308,7 +308,7 @@ describe("support access tenancy over every organization route", () => {
     expect((await close(token)).status).toBe(204);
   });
 
-  it("an open visit opens the routes of the 14 keys and nothing else (the site's DELETE runs last)", async () => {
+  it("an open visit opens the routes of the 15 keys and nothing else (the site's DELETE runs last)", async () => {
     // Each route's permission, read from the denied row an expired visit leaves.
     expect((await open(siteA)).status).toBe(201);
     await dbClient.db.update(supportAccessGrants).set({ expiresAt: new Date(Date.now() - 1000) });

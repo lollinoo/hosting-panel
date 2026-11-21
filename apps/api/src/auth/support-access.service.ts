@@ -28,6 +28,7 @@ export const SUPPORT_ACCESS_PERMISSIONS = [
   "site.sftp.manage",
   "site.databases.manage",
   "site.backups.manage",
+  "site.certificates.manage",
   "service.deploy",
   "service.restart",
   "service.stop",

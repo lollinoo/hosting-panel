@@ -44,6 +44,9 @@ import {
   type ResourceQuotaDto,
   type ServiceInstanceDto,
   isBackupAvailable,
+  isEncryptedBackupExportAvailable,
+  isLocalBackupTargetsAvailable,
+  isManualTlsAvailable,
   isWordpressToolsAvailable,
   isPhpMyAdminAvailable,
   isSftpAvailable,
@@ -333,6 +336,9 @@ export class OrganizationsController {
       phpMyAdminAvailable: isPhpMyAdminAvailable(this.config.runtimeBackend),
       productionBackupRuntimeAvailable: isBackupAvailable(this.config.runtimeBackend),
       wordpressToolsAvailable: isWordpressToolsAvailable(this.config.runtimeBackend),
+      manualTlsCertificatesAvailable: isManualTlsAvailable(this.config.runtimeBackend),
+      localBackupTargetsAvailable: isLocalBackupTargetsAvailable(this.config.runtimeBackend),
+      encryptedBackupExportAvailable: isEncryptedBackupExportAvailable(this.config.runtimeBackend),
     };
   }
 
