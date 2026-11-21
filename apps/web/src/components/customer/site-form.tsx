@@ -21,9 +21,9 @@ export type SiteFormBody = Omit<CreateManagedSiteInput, "phpVersion" | "includeW
 type SiteTypeParameter = CustomerSiteTypeDto["parameters"][number];
 type ParameterInputs = Readonly<Record<string, string | boolean>>;
 
-/** What a control shows for an option: what the customer typed, else the default, else an empty control. */
+/** What a control shows for an option: what the customer typed, else the default, else an empty control. Own keys only: an option may be named `constructor` or `__proto__`. */
 const shownValue = (p: SiteTypeParameter, inputs: ParameterInputs): string | number | boolean =>
-  inputs[p.key] ?? p.default ?? (p.type === "boolean" ? false : p.type === "enum" ? (p.options?.[0] ?? "") : "");
+  (Object.hasOwn(inputs, p.key) ? inputs[p.key] : undefined) ?? p.default ?? (p.type === "boolean" ? false : p.type === "enum" ? (p.options?.[0] ?? "") : "");
 
 /** The values to send: what the controls show, converted to the option's type; a blank one falls back to the default, or is omitted without one. */
 export function buildParameterValues(defs: readonly SiteTypeParameter[], inputs: ParameterInputs): { key: string; value: string | number | boolean }[] {
