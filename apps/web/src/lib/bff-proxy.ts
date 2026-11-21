@@ -97,7 +97,7 @@ export async function forwardToUpstream(
   upstreamPath: string,
   method: "GET" | "POST" | "PATCH" | "DELETE",
   onSuccess?: (session: SessionData, body: unknown, response: NextResponse) => Promise<void>,
-  opts?: { timeoutMs?: number }
+  opts?: { timeoutMs?: number; body?: (b: unknown) => boolean }
 ): Promise<NextResponse> {
   const session = await getSessionFromRequest(req);
   if (method === "GET") {
@@ -112,6 +112,9 @@ export async function forwardToUpstream(
     const parsed = await readBoundedJsonBody(req);
     if (!parsed.ok) return parsed.response;
     body = parsed.body;
+    if (opts?.body && !opts.body(body)) {
+      return bffErrorResponse("VALIDATION_ERROR", "Dati della richiesta non validi", 400);
+    }
   }
 
   const upstreamRes = await fetchUpstream(upstreamPath, {

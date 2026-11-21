@@ -16,9 +16,12 @@ import {
 import { sql } from "drizzle-orm";
 import type {
   AuditActorType,
+  BackupCopyStatus,
   BackupKind,
+  BackupPolicyScope,
   BackupProblem,
   BackupStatus,
+  BackupTargetKind,
   CertChallenge,
   CertProblem,
   CertStatus,
@@ -46,6 +49,10 @@ import type {
   SiteHostRoute,
   SiteStatus,
   TerminalEndReason,
+  TlsCertMode,
+  TlsKeyType,
+  TlsVersionProblem,
+  TlsVersionStatus,
 } from "@hosting-panel/contracts";
 
 export const platformInstallations = pgTable("platform_installations", {
@@ -452,6 +459,10 @@ export const domains = pgTable(
     certAttempts: integer("cert_attempts").notNull().default(0),
     certExpiresAt: timestamp("cert_expires_at", { withTimezone: true }),
     certTrusted: boolean("cert_trusted").notNull().default(true),
+    // HCP-SPEC-004 (0021): 'manual' serves an imported certificate version. The composite FK
+    // fk_domains_manual_cert_version_org (manual_certificate_version_id, organization_id) is SQL-only.
+    certMode: text("cert_mode").$type<TlsCertMode>().notNull().default("acme"),
+    manualCertificateVersionId: text("manual_certificate_version_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -463,8 +474,103 @@ export const domains = pgTable(
     }).onUpdate("cascade").onDelete("cascade"),
     uniqueIndex("uq_domains_one_primary_per_site").on(t.siteId).where(sql`${t.isPrimary}`),
     index("idx_domains_dns_due").on(t.dnsNextCheckAt),
+    index("idx_domains_manual_cert_version")
+      .on(t.manualCertificateVersionId)
+      .where(sql`${t.manualCertificateVersionId} IS NOT NULL`),
   ],
 );
+
+// HCP-SPEC-004 (0021): organization-scoped imported TLS certificates. The key lives encrypted on the version row
+// (AAD <org>:*:tls:<certificate>:<version>). There is no deleted_at: a delete removes the key ciphertext too.
+// The circular FK fk_tls_certificates_active_version (active_version_id, id) is SQL-only, like the domain FK above.
+export const tlsCertificates = pgTable(
+  "tls_certificates",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    createdForSiteId: text("created_for_site_id"),
+    activeVersionId: text("active_version_id"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_tls_certificates_id_org").on(t.id, t.organizationId),
+    index("idx_tls_certificates_org").on(t.organizationId),
+    index("idx_tls_certificates_created_for_site")
+      .on(t.createdForSiteId)
+      .where(sql`${t.createdForSiteId} IS NOT NULL`),
+    // SQL: ON UPDATE NO ACTION ON DELETE SET NULL (created_for_site_id) — only the site column is cleared.
+    foreignKey({
+      columns: [t.createdForSiteId, t.organizationId],
+      foreignColumns: [sites.id, sites.organizationId],
+      name: "fk_tls_certificates_site_org",
+    }).onUpdate("no action").onDelete("set null"),
+  ],
+);
+
+// Version material is immutable (trigger trg_prevent_tls_certificate_versions_mutation); only the lifecycle
+// columns (status, publish_generation, last_error_code, last_checked_at, activated_at) change.
+export const tlsCertificateVersions = pgTable(
+  "tls_certificate_versions",
+  {
+    id: text("id").primaryKey(),
+    certificateId: text("certificate_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    versionNumber: integer("version_number").notNull(),
+    leafPem: text("leaf_pem").notNull(),
+    chainPem: text("chain_pem").notNull(),
+    keyCiphertextBase64: text("key_ciphertext_base64").notNull(),
+    keyIvBase64: text("key_iv_base64").notNull(),
+    keyAuthTagBase64: text("key_auth_tag_base64").notNull(),
+    keyVersion: text("key_version").notNull().default("v1"),
+    subject: text("subject").notNull(),
+    issuer: text("issuer").notNull(),
+    serialNumber: text("serial_number").notNull(),
+    fingerprintSha256: text("fingerprint_sha256").notNull(),
+    notBefore: timestamp("not_before", { withTimezone: true }).notNull(),
+    notAfter: timestamp("not_after", { withTimezone: true }).notNull(),
+    sanDns: jsonb("san_dns").$type<string[]>().notNull(),
+    keyType: text("key_type").$type<TlsKeyType>().notNull(),
+    keyBits: integer("key_bits").notNull(),
+    status: text("status").$type<TlsVersionStatus>().notNull().default("pending"),
+    publishGeneration: bigint("publish_generation", { mode: "number" }).notNull().default(0),
+    lastErrorCode: text("last_error_code").$type<TlsVersionProblem>(),
+    lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+    activatedAt: timestamp("activated_at", { withTimezone: true }),
+    idempotencyKey: text("idempotency_key"),
+    requestHash: text("request_hash"),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_tls_certificate_versions_id_org").on(t.id, t.organizationId),
+    unique("uq_tls_certificate_versions_id_cert").on(t.id, t.certificateId),
+    unique("uq_tls_certificate_versions_number").on(t.certificateId, t.versionNumber),
+    uniqueIndex("uq_tls_certificate_versions_org_fingerprint").on(t.organizationId, t.fingerprintSha256),
+    uniqueIndex("uq_tls_certificate_versions_org_idempotency")
+      .on(t.organizationId, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
+    index("idx_tls_certificate_versions_not_after").on(t.notAfter),
+    index("idx_tls_certificate_versions_org_created").on(t.organizationId, t.createdAt),
+    foreignKey({
+      columns: [t.certificateId, t.organizationId],
+      foreignColumns: [tlsCertificates.id, tlsCertificates.organizationId],
+      name: "fk_tls_certificate_versions_cert_org",
+    }).onUpdate("no action").onDelete("cascade"),
+  ],
+);
+
+// One server-wide counter for the manifest hp-manual-certificates.yml; the single row is locked to serialise publishes.
+export const tlsPublishState = pgTable("tls_publish_state", {
+  id: text("id").primaryKey(),
+  desiredGeneration: bigint("desired_generation", { mode: "number" }).notNull().default(0),
+  confirmedGeneration: bigint("confirmed_generation", { mode: "number" }).notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const resourceQuotas = pgTable(
   "resource_quotas",
@@ -530,6 +636,8 @@ export const operations = pgTable(
       onDelete: "set null",
     }),
     idempotencyKey: text("idempotency_key"),
+    // sha-256 hex of the canonical request: the same Idempotency-Key with another payload is refused (0021).
+    requestHash: text("request_hash"),
     lockKey: text("lock_key"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
     errorCode: text("error_code").$type<ErrorCode>(),
@@ -758,6 +866,46 @@ export const backupSettings = pgTable("backup_settings", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// HCP-SPEC-004 (0022): where a backup is written. The legacy S3 target (legacy_settings) keeps reading the untouched
+// backup_settings row; new S3 targets hold their own encrypted secret (AAD platform:*:HP_BACKUP_TARGET_S3_SECRET:<id>).
+// s3LocationKey = hp_s3_location_key(endpoint, bucket, prefix) (SQL function of 0022): the canonical restic location that
+// the unique index uq_backup_targets_s3_location compares. The targets service sets it on every insert and update.
+export const backupTargets = pgTable(
+  "backup_targets",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind").$type<BackupTargetKind>().notNull(),
+    name: text("name").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    legacySettings: boolean("legacy_settings").notNull().default(false),
+    customerSelectable: boolean("customer_selectable").notNull().default(false),
+    configJson: jsonb("config_json").$type<Record<string, unknown>>().notNull().default({}),
+    s3LocationKey: text("s3_location_key"),
+    s3SecretCiphertextBase64: text("s3_secret_ciphertext_base64"),
+    s3SecretIvBase64: text("s3_secret_iv_base64"),
+    s3SecretAuthTagBase64: text("s3_secret_auth_tag_base64"),
+    s3SecretKeyVersion: text("s3_secret_key_version"),
+    retentionDays: integer("retention_days"),
+    lastTestAt: timestamp("last_test_at", { withTimezone: true }),
+    lastTestOutcome: text("last_test_outcome").$type<"ok" | "failed">(),
+    lastTestProblem: text("last_test_problem").$type<BackupProblem>(),
+    lastTestAvailableBytes: bigint("last_test_available_bytes", { mode: "number" }),
+    lastTestTotalBytes: bigint("last_test_total_bytes", { mode: "number" }),
+    localRoot: text("local_root"),
+    initializedAt: timestamp("initialized_at", { withTimezone: true }),
+    createdByUserId: text("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("uq_backup_targets_one_local").on(t.kind).where(sql`${t.kind} = 'local' AND ${t.archivedAt} IS NULL`),
+    uniqueIndex("uq_backup_targets_one_legacy").on(t.legacySettings).where(sql`${t.legacySettings}`),
+    uniqueIndex("uq_backup_targets_s3_location").on(t.s3LocationKey).where(sql`${t.kind} = 's3' AND ${t.archivedAt} IS NULL`),
+  ],
+);
+
 export const siteBackups = pgTable(
   "site_backups",
   {
@@ -780,8 +928,110 @@ export const siteBackups = pgTable(
     archiveStatus: text("archive_status").$type<"preparing" | "ready" | "failed">(),
     archiveProblem: text("archive_problem").$type<BackupProblem>(),
     archiveReadyUntil: timestamp("archive_ready_until", { withTimezone: true }),
+    // 0022: the target a restore / a download archive was taken from (NULL = the default target).
+    restoreTargetId: text("restore_target_id").references(() => backupTargets.id, { onDelete: "set null" }),
+    archiveTargetId: text("archive_target_id").references(() => backupTargets.id, { onDelete: "set null" }),
   },
   (t) => [index("idx_site_backups_site_started").on(t.siteId, t.startedAt)],
+);
+
+// The nightly run state (cursor, lock) of the default_site scope moved here from backup_settings, so an install with
+// local targets only still schedules backups. 'site' rows choose targets only (hour and retention stay NULL).
+export const backupPolicies = pgTable(
+  "backup_policies",
+  {
+    id: text("id").primaryKey(),
+    scope: text("scope").$type<BackupPolicyScope>().notNull(),
+    siteId: text("site_id").references(() => sites.id, { onDelete: "cascade" }),
+    scheduleHourUtc: integer("schedule_hour_utc"),
+    retentionDays: integer("retention_days"),
+    enabled: boolean("enabled").notNull().default(true),
+    lastNightlyRunOn: date("last_nightly_run_on", { mode: "string" }),
+    nightlyRunStartedAt: timestamp("nightly_run_started_at", { withTimezone: true }),
+    updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_backup_policies_scope").on(t.scope).where(sql`${t.siteId} IS NULL`),
+    uniqueIndex("uq_backup_policies_site").on(t.siteId).where(sql`${t.siteId} IS NOT NULL`),
+  ],
+);
+
+// At most two targets per policy (priority 1..2); a referenced target is archived, never deleted (ON DELETE RESTRICT).
+export const backupPolicyTargets = pgTable(
+  "backup_policy_targets",
+  {
+    policyId: text("policy_id")
+      .notNull()
+      .references(() => backupPolicies.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => backupTargets.id, { onDelete: "restrict" }),
+    priority: integer("priority").notNull(),
+    required: boolean("required").notNull().default(true),
+  },
+  (t) => [
+    primaryKey({ columns: [t.policyId, t.targetId] }),
+    unique("uq_backup_policy_targets_priority").on(t.policyId, t.priority),
+    index("idx_backup_policy_targets_target").on(t.targetId),
+  ],
+);
+
+// One row per target a logical backup was written to (site_backups keeps the primary copy's snapshot for the previous release).
+export const siteBackupCopies = pgTable(
+  "site_backup_copies",
+  {
+    id: text("id").primaryKey(),
+    backupId: text("backup_id")
+      .notNull()
+      .references(() => siteBackups.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => backupTargets.id, { onDelete: "restrict" }),
+    priority: integer("priority").notNull().default(1),
+    required: boolean("required").notNull().default(true),
+    jobId: text("job_id"),
+    status: text("status").$type<BackupCopyStatus>().notNull(),
+    snapshotId: text("snapshot_id"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    problem: text("problem").$type<BackupProblem>(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("uq_site_backup_copies_backup_target").on(t.backupId, t.targetId),
+    unique("uq_site_backup_copies_backup_priority").on(t.backupId, t.priority),
+    uniqueIndex("uq_site_backup_copies_job").on(t.jobId).where(sql`${t.jobId} IS NOT NULL`),
+    index("idx_site_backup_copies_target_status").on(t.targetId, t.status),
+  ],
+);
+
+export const panelBackupCopies = pgTable(
+  "panel_backup_copies",
+  {
+    id: text("id").primaryKey(),
+    operationId: text("operation_id")
+      .notNull()
+      .references(() => operations.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => backupTargets.id, { onDelete: "restrict" }),
+    priority: integer("priority").notNull().default(1),
+    required: boolean("required").notNull().default(true),
+    jobId: text("job_id"),
+    status: text("status").$type<BackupCopyStatus>().notNull(),
+    snapshotId: text("snapshot_id"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    problem: text("problem").$type<BackupProblem>(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("uq_panel_backup_copies_operation_target").on(t.operationId, t.targetId),
+    unique("uq_panel_backup_copies_operation_priority").on(t.operationId, t.priority),
+    uniqueIndex("uq_panel_backup_copies_job").on(t.jobId).where(sql`${t.jobId} IS NOT NULL`),
+    index("idx_panel_backup_copies_target_started").on(t.targetId, t.startedAt.desc()),
+  ],
 );
 
 export const siteWordpressState = pgTable(

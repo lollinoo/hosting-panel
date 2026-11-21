@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SiteDomainSchema, normalizeSiteDomain } from "./site-runtime.js";
+import { SiteDomainTlsDtoSchema, TLS_VERSION_ID_PATTERN } from "./tls-certificates.js";
 
 const EntityIdSchema = z.string().min(1).max(128);
 
@@ -52,6 +53,8 @@ export function isSiteOrigin(value: string): boolean {
 export const AddSiteDomainInputSchema = z.object({
   hostname: SiteDomainSchema,
   includeWww: z.boolean().default(false),
+  /** Create the domain directly on a loaded certificate version of the same organisation. */
+  tlsVersionId: z.string().regex(TLS_VERSION_ID_PATTERN).optional(),
 });
 export type AddSiteDomainInput = z.infer<typeof AddSiteDomainInputSchema>;
 
@@ -78,6 +81,7 @@ export const SiteDomainDtoSchema = z.object({
     retryAt: z.string().nullable(),
     trusted: z.boolean(),
   }),
+  tls: SiteDomainTlsDtoSchema,
 });
 export type SiteDomainDto = z.infer<typeof SiteDomainDtoSchema>;
 
@@ -105,4 +109,5 @@ export interface SiteHostRoute {
   readonly httpsRedirect: boolean;
   readonly redirectTo: string | null;
   readonly challenge?: CertChallenge;
+  readonly source?: "manual";
 }

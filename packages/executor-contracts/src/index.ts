@@ -56,4 +56,5 @@ export {
 } from "@hosting-panel/contracts";
 export * from "./acme-status.js";
 export * from "./mail-relay.js";
+export * from "./manual-tls.js";
 export type { SiteHostRoute } from "@hosting-panel/contracts";

@@ -20,6 +20,7 @@ Environment=HP_IPC_KEY_FILE=/etc/hosting-panel/ipc.key
 Environment=HP_SECRETS_ROOT_DIR=/run/hosting-panel/secrets
 Environment=HP_PANEL_DUMP_DIR=/var/lib/hosting-panel/panel-dump
 Environment=HP_INGRESS_ROOT_DIR=/var/lib/hosting-panel/ingress
+Environment=HP_BACKUP_LOCAL_ROOT=/var/lib/hosting-panel/local-repos
 ExecStartPre=/usr/bin/install -d -m 0700 /run/hosting-panel/secrets
 ExecStart=/usr/bin/node /opt/hosting-panel/current/apps/docker-executor/dist/main.js
 Restart=on-failure

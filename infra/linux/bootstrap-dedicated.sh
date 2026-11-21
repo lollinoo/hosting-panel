@@ -151,7 +151,7 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log_dry "Would idempotently provision 32-byte key /etc/hosting-panel/backup.key (0440 root:hp-executor)"
   log_dry "Would create (only if absent) /etc/hosting-panel/api.env, web.env (BFF_SESSION_SECRET=<64 hex>) and executor.env, each 0400 root:root"
   log_dry "Would install /usr/local/sbin/hp-accounts, /usr/local/sbin/hp-break-glass, /usr/local/sbin/hp-update and /usr/local/sbin/hp-restore-panel (0750 root:root)"
-  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb), /var/lib/hosting-panel/site-mail (0755 hp-executor:hp-executor), /var/lib/hosting-panel/sftp (0700 hp-executor:hp-executor), /var/lib/hosting-panel/phpmyadmin (0755 hp-executor:hp-executor), and /var/lib/hosting-panel/backups (0700 hp-executor:hp-executor), and /var/lib/hosting-panel/panel-dump (2770 root:hp-ipc)"
+  log_dry "Would ensure directories /var/lib/hosting-panel/{ingress/static,ingress/dynamic,sites} (0750) and ingress/acme (0700 hp-executor), ingress/dynamic/manual-certs (0700 hp-executor:hp-executor), mariadb (0750 hp-executor:hp-ipc) and /var/lib/hosting-panel/mariadb/data (0700 hp-mariadb), /var/lib/hosting-panel/site-mail (0755 hp-executor:hp-executor), /var/lib/hosting-panel/sftp (0700 hp-executor:hp-executor), /var/lib/hosting-panel/phpmyadmin (0755 hp-executor:hp-executor), and /var/lib/hosting-panel/backups (0700 hp-executor:hp-executor), /var/lib/hosting-panel/local-repos (2770 hp-executor:hp-executor, HP_BACKUP_LOCAL_ROOT), and /var/lib/hosting-panel/panel-dump (2770 root:hp-ipc)"
   log_dry "Would install /etc/tmpfiles.d/hosting-panel.conf and ensure /run/hosting-panel (3770 root:hp-ipc) + /run/hosting-panel/secrets (0700 hp-executor:hp-executor) + /run/hosting-panel/mail-relay (0755 hp-executor:hp-executor) + /run/hosting-panel/acme-dns (0700 hp-executor:hp-executor) + /run/hosting-panel/host-jobs (0700 hp-agent:hp-agent)"
   for unit_name in "${REQUIRED_UNITS[@]}"; do
     log_dry "Would install /etc/systemd/system/${unit_name} (0644 root:root)"
@@ -365,6 +365,7 @@ install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/static
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/ingress/dynamic
+install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/dynamic/manual-certs
 install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/acme
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/sites
 install -d -m 0750 -o hp-executor -g hp-ipc /var/lib/hosting-panel/mariadb
@@ -373,6 +374,10 @@ install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/site-mai
 install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/sftp
 install -d -m 0755 -o hp-executor -g hp-executor /var/lib/hosting-panel/phpmyadmin
 install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/backups
+# 2770: the executor runs with RestrictSUIDSGID=yes and cannot ask for the setgid bit, so the directories it creates
+# here (<id>, sites/<site>, panel) inherit it, and the executor group, from this one.
+install -d -m 2770 -o hp-executor -g hp-executor /var/lib/hosting-panel/local-repos
+chmod 2770 /var/lib/hosting-panel/local-repos
 # The API writes the panel copy here, the executor reads it (group hp-ipc via setgid).
 install -d -m 2770 -o root -g hp-ipc /var/lib/hosting-panel/panel-dump
 chmod 2770 /var/lib/hosting-panel/panel-dump

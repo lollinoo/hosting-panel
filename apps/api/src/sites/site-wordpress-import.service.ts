@@ -21,15 +21,14 @@ import {
   eq,
   getSiteWordpressState,
   inArray,
-  insertSiteBackup,
   operations,
   operationSteps,
-  sites,
   type DatabaseClient,
   type DatabaseExecutor,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort, SiteFilesRequest, SiteFilesResult } from "@hosting-panel/executor-contracts";
+import { createBackupWithCopies } from "../backups/site-backups.service.js";
 import { assertHeavyActionAllowed } from "../backups/site-restore.service.js";
 import { ControlPlaneError, extractClientIp, extractRawHeader, resolveRequestId } from "../common/control-plane.error.js";
 import { SITE_STEP_LEASE_MS } from "../runtime/site-provisioner.js";
@@ -76,7 +75,7 @@ export class SiteWordpressImportService {
     const stored = await getSiteWordpressState(this.dbClient.db, { organizationId: site.organizationId, siteId: site.id });
     return {
       available,
-      backupsConfigured: await this.wordpressService.backupsConfigured(),
+      backupsConfigured: await this.wordpressService.backupsConfigured(site.id),
       slots: stat ? { archive: stat.archive, dump: stat.dump } : null,
       earlierImportUnfinished: stat?.remains ?? false,
       runningOperation: await this.#running(site),
@@ -141,7 +140,7 @@ export class SiteWordpressImportService {
     if (stat.archive.state !== "complete" || stat.dump.state !== "complete") {
       throw refusal("files_incomplete");
     }
-    const backupsConfigured = await this.wordpressService.backupsConfigured();
+    const backupsConfigured = await this.wordpressService.backupsConfigured(site.id);
     const operationId = await this.dbClient.db.transaction(async (tx) => {
       const enqueued = await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
         organizationId: site.organizationId,
@@ -159,8 +158,7 @@ export class SiteWordpressImportService {
       if (!enqueued.idempotentReplay) {
         await assertHeavyActionAllowed(tx, site.id, actor, { id, submittedAt });
         if (backupsConfigured) {
-          const [row] = await tx.select({ siteUrl: sites.siteUrl }).from(sites).where(eq(sites.id, site.id)).limit(1);
-          await insertSiteBackup(tx, { siteId: site.id, kind: "pre_update", status: "running", operationId: id, siteUrl: row?.siteUrl ?? null });
+          await createBackupWithCopies(tx, site, { kind: "pre_update", operationId: id });
         }
         await this.#audit(tx, site, actor, "requested", { operationId: id, backup: backupsConfigured ? "taken" : "skipped" });
       }

@@ -195,6 +195,8 @@ describe("support access tenancy over every organization route", () => {
       opId: op!.id,
       hostId: host!.id,
       domainId: `dom_${randomUUID()}`,
+      certificateId: `cti_${randomUUID().replace(/-/g, "")}`,
+      versionId: `ctv_${randomUUID().replace(/-/g, "")}`,
       backupId: `bkp_${randomUUID()}`,
       secretId: `sec_${randomUUID()}`,
       serviceId: service!.id,
@@ -220,6 +222,20 @@ describe("support access tenancy over every organization route", () => {
     expect(orgRoutes().length).toBeGreaterThanOrEqual(54);
     expect(orgRoutes()).toContainEqual({ method: "GET", path: "/v1/organizations/:orgId/managed-sites/:siteId/files" });
     expect(orgRoutes()).toContainEqual({ method: "GET", path: "/v1/organizations/:orgId/members" });
+    for (const method of ["GET", "PATCH"]) {
+      expect(orgRoutes()).toContainEqual({ method, path: "/v1/organizations/:orgId/managed-sites/:siteId/backup-policy" });
+    }
+    for (const [method, path] of [
+      ["GET", "/tls-certificates"],
+      ["POST", "/tls-certificates"],
+      ["GET", "/tls-certificates/:certificateId"],
+      ["DELETE", "/tls-certificates/:certificateId"],
+      ["POST", "/tls-certificates/:certificateId/versions"],
+      ["POST", "/tls-certificates/:certificateId/versions/:versionId/activate"],
+      ["POST", "/domains/:domainId/tls"],
+    ]) {
+      expect(orgRoutes()).toContainEqual({ method, path: `/v1/organizations/:orgId/managed-sites/:siteId${path}` });
+    }
   });
 
   it("without a visit, with a closed one, and on any other organization: 404 and no audit row on every route", async () => {
@@ -308,7 +324,7 @@ describe("support access tenancy over every organization route", () => {
     expect((await close(token)).status).toBe(204);
   });
 
-  it("an open visit opens the routes of the 14 keys and nothing else (the site's DELETE runs last)", async () => {
+  it("an open visit opens the routes of the 15 keys and nothing else (the site's DELETE runs last)", async () => {
     // Each route's permission, read from the denied row an expired visit leaves.
     expect((await open(siteA)).status).toBe(201);
     await dbClient.db.update(supportAccessGrants).set({ expiresAt: new Date(Date.now() - 1000) });

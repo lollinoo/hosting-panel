@@ -525,7 +525,7 @@ describe("M3b site restore & download routes and service", () => {
     });
   });
 
-  it("enforces exact check order on POST restore and POST download (404 -> 422 -> 400 not_configured -> 409 not_ready -> confirmName)", async () => {
+  it("enforces exact check order on POST restore and POST download (404 -> 422 -> 409 not_ready -> confirmName; no configured check, D7)", async () => {
     const failedId = await seedBackup({ status: "failed", problem: "other" });
     const runningId = await seedBackup({ status: "running", snapshotId: null });
     const noSnapId = await seedBackup({ status: "succeeded", snapshotId: null });
@@ -566,21 +566,21 @@ describe("M3b site restore & download routes and service", () => {
       expect(r3.body.error.message).toBe("Backup not found");
     }
 
-    // Step 3: not_configured beats maintenance & wrong confirmName
-    const notCfgRestore = await call("POST", `${baseUrlOf(orgAId, siteA1Id)}/${goodId}/restore`, {
+    // Step 3 (D7, SPEC 6.4): restoring or downloading an existing copy does not need a configured destination,
+    // so with the settings gone the next check (site busy) answers, not 400 not_configured.
+    const noCfgRestore = await call("POST", `${baseUrlOf(orgAId, siteA1Id)}/${goodId}/restore`, {
       headers: { "Idempotency-Key": randomUUID() },
       body: { confirmName: "wrong" },
     });
-    expect(notCfgRestore.status).toBe(400);
-    expect(notCfgRestore.body.error.code).toBe("VALIDATION_ERROR");
-    expect(notCfgRestore.body.error.message).toBe("not_configured");
+    expect(noCfgRestore.status).toBe(409);
+    expect(noCfgRestore.body.error.message).toBe("not_ready");
 
-    const notCfgDl = await call("POST", `${baseUrlOf(orgAId, siteA1Id)}/${goodId}/download`, {
+    const noCfgDl = await call("POST", `${baseUrlOf(orgAId, siteA1Id)}/${goodId}/download`, {
       headers: { "Idempotency-Key": randomUUID() },
       body: {},
     });
-    expect(notCfgDl.status).toBe(400);
-    expect(notCfgDl.body.error.message).toBe("not_configured");
+    expect(noCfgDl.status).toBe(409);
+    expect(noCfgDl.body.error.message).toBe("not_ready");
 
     // Step 4: deploying / maintenance beat wrong confirmName
     await upsertBackupSettings(dbClient.db, KEY, { ...SETTINGS, updatedByUserId: adminUserId });
@@ -643,7 +643,7 @@ describe("M3b site restore & download routes and service", () => {
       expect(siteAfter?.status).toBe(allowedStatus);
     }
 
-    // Step 2: unsupported runtimeBackend beats missing settings, maintenance, wrong confirmName
+    // Step 2: unsupported runtimeBackend beats maintenance, wrong confirmName
     await deleteBackupSettings(dbClient.db);
     await dbClient.db.update(sites).set({ status: "maintenance" }).where(eq(sites.id, siteA1Id));
     const disabledApp = await createControlPlaneApp({

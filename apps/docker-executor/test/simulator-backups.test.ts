@@ -1434,3 +1434,197 @@ describe("SimulatedBackups M3c site state, restore that creates the files, panel
     expect(inspect(sim, { depth: null, showHidden: true })).not.toContain(probe);
   });
 });
+
+describe("SimulatedBackups M3 local targets", () => {
+  const LOCAL = { kind: "local", targetId: `bkt_${"a".repeat(32)}` } as const;
+  const DEAD = { kind: "local", targetId: `bkt_${"0".repeat(28)}dead` } as const;
+  const LOCAL_OK = {
+    outcome: "ok",
+    problem: null,
+    availableBytes: 50 * 1024 ** 3,
+    totalBytes: 100 * 1024 ** 3,
+    localRoot: "/var/lib/hosting-panel/local-repos",
+  };
+
+  it("answers localInit and a local test with deterministic bytes and root", async () => {
+    const sim = new SimulatedBackups();
+    for (const request of [
+      { action: "localInit", target: LOCAL },
+      { action: "test", target: LOCAL },
+    ] as const) {
+      const result = await sim.handle(request);
+      expect(result).toEqual(LOCAL_OK);
+      expect(() => BACKUPS_RESULT_SCHEMAS[request.action].parse(result)).not.toThrow();
+    }
+  });
+
+  it("keeps the S3 test answer free of local fields", async () => {
+    const sim = new SimulatedBackups();
+    expect(await sim.handle({ action: "test", target: VALID_TARGET })).toEqual({
+      outcome: "ok",
+      problem: null,
+    });
+  });
+
+  it("fails an unmounted target id (…dead) without bytes and without consuming failNext", async () => {
+    const sim = new SimulatedBackups();
+    sim.failNext("no_space");
+    for (const action of ["localInit", "test"] as const) {
+      const result = await sim.handle({ action, target: DEAD });
+      expect(result).toEqual({ outcome: "failed", problem: "local_target_unmounted" });
+      expect(() => BackupTestResultSchema.parse(result)).not.toThrow();
+    }
+    expect(await sim.handle({ action: "test", target: LOCAL })).toEqual({
+      outcome: "failed",
+      problem: "no_space",
+    });
+    expect(await sim.handle({ action: "test", target: LOCAL })).toEqual(LOCAL_OK);
+  });
+
+  it("shares the single-test lock between S3 test, local test and localInit", async () => {
+    const sim = new SimulatedBackups();
+    const first = sim.handle({ action: "localInit", target: LOCAL });
+    await expect(sim.handle({ action: "test", target: LOCAL })).rejects.toMatchObject({
+      code: "RESOURCE_LOCKED",
+    });
+    expect(await first).toEqual(LOCAL_OK);
+  });
+
+  it("runs start, forget, restore, archive and panelStart on a local target like on S3", async () => {
+    const sim = new SimulatedBackups();
+    const started = await sim.handle({
+      action: "start",
+      jobId: JOB_1,
+      siteId: "site_1",
+      serviceInstanceId: "svc_1",
+      target: LOCAL,
+    });
+    expect(started.state).toBe("running");
+    const done = await sim.handle({ action: "status", jobId: JOB_1 });
+    expect(done.state).toBe("succeeded");
+    const snapshotId = done.snapshot?.snapshotId as string;
+    expect(sim.snapshots("site_1")).toEqual([snapshotId]);
+
+    await sim.handle({
+      action: "restore",
+      jobId: JOB_2,
+      siteId: "site_1",
+      serviceInstanceId: "svc_1",
+      target: LOCAL,
+      snapshotId,
+    });
+    expect((await sim.handle({ action: "settle", jobId: JOB_2 })).state).toBe("succeeded");
+
+    await sim.handle({
+      action: "archive",
+      jobId: JOB_3,
+      siteId: "site_1",
+      target: LOCAL,
+      snapshotId,
+    });
+    expect((await sim.handle({ action: "status", jobId: JOB_3 })).archive?.sizeBytes).toBe(1_048_577);
+
+    await sim.handle({
+      action: "forget",
+      jobId: FORGET_1,
+      siteId: "site_1",
+      target: LOCAL,
+      snapshotIds: [snapshotId],
+    });
+    expect((await sim.handle({ action: "status", jobId: FORGET_1 })).state).toBe("succeeded");
+    expect(sim.snapshots("site_1")).toEqual([]);
+
+    await sim.handle({
+      action: "panelStart",
+      jobId: JOB_4,
+      target: LOCAL,
+      masterKey: "b".repeat(64),
+      retentionDays: 30,
+    });
+    expect((await sim.handle({ action: "status", jobId: JOB_4 })).state).toBe("succeeded");
+    expect(sim.panelJobIds()).toEqual([JOB_4]);
+  });
+
+  it("keys snapshots per (target, site): a restore/archive on another target does not see them, a dead target fails every job", async () => {
+    const sim = new SimulatedBackups();
+    const OTHER = { kind: "local", targetId: `bkt_${"b".repeat(32)}` } as const;
+    await sim.handle({ action: "start", jobId: JOB_1, siteId: "site_1", serviceInstanceId: "svc_1", target: LOCAL });
+    const snapshotId = (await sim.handle({ action: "status", jobId: JOB_1 })).snapshot?.snapshotId as string;
+    expect(sim.snapshots("site_1", LOCAL)).toEqual([snapshotId]);
+    expect(sim.snapshots("site_1", OTHER)).toEqual([]);
+    expect(sim.snapshots("site_1")).toEqual([snapshotId]);
+
+    // the snapshot only exists on LOCAL
+    await sim.handle({ action: "restore", jobId: JOB_2, siteId: "site_1", serviceInstanceId: "svc_1", target: OTHER, snapshotId });
+    expect((await sim.handle({ action: "settle", jobId: JOB_2 })).failure).toBe("other");
+    await sim.handle({ action: "restore", jobId: JOB_3, siteId: "site_1", serviceInstanceId: "svc_1", target: LOCAL, snapshotId });
+    expect((await sim.handle({ action: "settle", jobId: JOB_3 })).state).toBe("succeeded");
+
+    // forgetting on OTHER leaves LOCAL's snapshot alone
+    await sim.handle({ action: "forget", jobId: FORGET_1, siteId: "site_1", target: OTHER, snapshotIds: [snapshotId] });
+    await sim.handle({ action: "status", jobId: FORGET_1 });
+    expect(sim.snapshots("site_1", LOCAL)).toEqual([snapshotId]);
+
+    // a dead target fails start, restore, archive, forget and panelStart without touching any repository
+    const base = { siteId: "site_2", serviceInstanceId: "svc_2", target: DEAD } as const;
+    await sim.handle({ action: "start", jobId: JOB_4, ...base });
+    expect(await sim.handle({ action: "settle", jobId: JOB_4 })).toMatchObject({ state: "failed", failure: "local_target_unmounted" });
+    expect(sim.snapshots("site_2")).toEqual([]);
+    await sim.handle({ action: "restore", jobId: `op_${"5".repeat(32)}`, snapshotId, ...base });
+    expect((await sim.handle({ action: "settle", jobId: `op_${"5".repeat(32)}` })).failure).toBe("local_target_unmounted");
+    await sim.handle({ action: "archive", jobId: `op_${"6".repeat(32)}`, siteId: "site_2", snapshotId, target: DEAD });
+    expect((await sim.handle({ action: "settle", jobId: `op_${"6".repeat(32)}` })).failure).toBe("local_target_unmounted");
+    await sim.handle({ action: "forget", jobId: FORGET_2, siteId: "site_2", snapshotIds: [snapshotId], target: DEAD });
+    expect((await sim.handle({ action: "status", jobId: FORGET_2 })).failure).toBe("local_target_unmounted");
+    await sim.handle({ action: "panelStart", jobId: `op_${"8".repeat(32)}`, target: DEAD, masterKey: "b".repeat(64), retentionDays: 30 });
+    expect((await sim.handle({ action: "settle", jobId: `op_${"8".repeat(32)}` })).failure).toBe("local_target_unmounted");
+  });
+
+  it("accepts the second-copy job id op_x-t2 for start and keeps it separate from op_x", async () => {
+    const sim = new SimulatedBackups();
+    const base = { action: "start", siteId: "site_1", serviceInstanceId: "svc_1" } as const;
+    await sim.handle({ ...base, jobId: JOB_1, target: VALID_TARGET });
+    await sim.handle({ action: "status", jobId: JOB_1 });
+    const t2 = await sim.handle({ ...base, jobId: `${JOB_1}-t2`, target: LOCAL });
+    expect(t2.jobId).toBe(`${JOB_1}-t2`);
+    expect((await sim.handle({ action: "status", jobId: `${JOB_1}-t2` })).state).toBe("succeeded");
+  });
+
+  it("refuses path-like or malformed local targets with VALIDATION_ERROR", async () => {
+    const sim = new SimulatedBackups();
+    const bad: unknown[] = [
+      { kind: "local", targetId: "../etc" },
+      { kind: "local", targetId: "/var/lib/hosting-panel/local-repos/x" },
+      { kind: "local", targetId: `bkt_${"a".repeat(31)}/` },
+      { kind: "local", targetId: `bkt_${"A".repeat(32)}` },
+      { kind: "local", targetId: `bkt_${"a".repeat(33)}` },
+      { kind: "local", targetId: "bkt_../../../../etc/passwd" },
+      { kind: "local", targetId: `bkt_${"a".repeat(32)}`, root: "/tmp" },
+      { kind: "local", targetId: `bkt_${"a".repeat(32)}`, path: "/tmp" },
+      { kind: "local" },
+      { kind: "s3", targetId: `bkt_${"a".repeat(32)}` },
+      { ...VALID_TARGET, kind: "local", targetId: `bkt_${"a".repeat(32)}` },
+      { ...VALID_TARGET, targetId: `bkt_${"a".repeat(32)}` },
+    ];
+    for (const target of bad) {
+      for (const action of ["test", "localInit"] as const) {
+        await expect(
+          sim.handle({ action, target } as unknown as BackupsIpcRequest),
+        ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      }
+      await expect(
+        sim.handle({
+          action: "start",
+          jobId: JOB_1,
+          siteId: "site_1",
+          serviceInstanceId: "svc_1",
+          target,
+        } as unknown as BackupsIpcRequest),
+      ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    }
+    // localInit never takes an S3 target.
+    await expect(
+      sim.handle({ action: "localInit", target: VALID_TARGET } as unknown as BackupsIpcRequest),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+});

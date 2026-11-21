@@ -5,6 +5,7 @@ import {
   SITE_DATABASE_NAME_PATTERN,
   type BackupFailureClass,
   type BackupJobStatus,
+  type BackupDispatchTarget,
   type BackupTarget,
 } from "@hosting-panel/contracts";
 import { S3_PROBE_BUDGET_MS, S3_PROBE_REQUEST_TIMEOUT_MS } from "./s3-probe.js";
@@ -42,6 +43,30 @@ const repoStepScript = (probeCmd: string): string =>
 export const BACKUP_REPO_JOB_SCRIPT = repoStepScript("unlock --remove-all");
 export const BACKUP_REPO_TEST_SCRIPT = repoStepScript("cat config --no-lock");
 
+/**
+ * Local repo probe/unlock/init step. A fresh `restic init` leaves 0400 config and 2700 dirs; the creator widens the
+ * children to the shared group (restic then inherits the group modes from `config`). The same check self-heals a repo
+ * left unwidened by a crash between init and chmod; it only runs for the owner of `config` and only when g+r is missing.
+ */
+export const localRepoStepScript = (probeCmd: string): string =>
+  `R="$RESTIC_REPOSITORY"; restic ${probeCmd}; rc=$?; if [ "$rc" -eq 10 ] && [ "$HP_INIT" = 1 ]; then restic init; rc=$?; fi; if [ "$rc" -eq 0 ] && [ -O "$R/config" ] && [ -z "$(find "$R/config" -perm -040)" ]; then chmod -R g+rwX,o= "$R"/* || rc=1; fi; exit $rc`;
+
+export const BACKUP_REPO_LOCAL_JOB_SCRIPT = localRepoStepScript("unlock --remove-all");
+export const BACKUP_REPO_LOCAL_TEST_SCRIPT = localRepoStepScript("cat config --no-lock");
+
+/** Strips every S3 option from a pinned S3 restic script so the same script runs against a local repository. */
+export function localizeResticScript(s3Script: string): string {
+  const out = s3Script
+    .replaceAll('RO="-o s3.bucket-lookup=path -o s3.region=$HP_REGION"', 'RO=""')
+    .replaceAll('RO="-o s3.bucket-lookup=path"', 'RO=""')
+    .replaceAll(' -o "s3.region=$HP_REGION"', "")
+    .replaceAll(" -o s3.bucket-lookup=path", "");
+  if (out.includes("s3.")) {
+    throw new ExecutorCodedError("Restic script keeps an S3 option", "VALIDATION_ERROR");
+  }
+  return out;
+}
+
 export const BACKUP_DUMP_SCRIPT = [
   "set -eu",
   'free=$(df -Pk /run/mysqld | awk \'NR==2{print $4}\'); [ "$free" -ge "$HP_NEED_KB" ] || exit 75',
@@ -76,7 +101,16 @@ export interface BackupContainerCreatePayload {
     };
     readonly NetworkMode: string;
     readonly Binds: readonly string[];
+    readonly GroupAdd?: readonly string[];
+    readonly Mounts?: readonly BackupBindMount[];
   };
+}
+
+export interface BackupBindMount {
+  readonly Type: "bind";
+  readonly Source: string;
+  readonly Target: string;
+  readonly ReadOnly: boolean;
 }
 
 export interface BackupContainerSpec {
@@ -87,6 +121,26 @@ export interface BackupContainerSpec {
 export type BackupResticRepoKind =
   | { readonly kind: "site"; readonly siteId: string }
   | { readonly kind: "panel" };
+
+/** An already-guarded local repository directory (only the local target guard produces it). */
+export interface GuardedLocalRepo {
+  readonly hostDir: string;
+  readonly containerPath: string;
+  readonly executorGid: number;
+  readonly availableBytes: number;
+  readonly totalBytes: number;
+}
+
+/** Everything a builder needs to reach one restic repository, S3 or local. */
+export interface ResolvedBackupRepository {
+  readonly kind: "s3" | "local";
+  readonly repository: string;
+  readonly resticOptions: readonly string[];
+  readonly env: readonly string[];
+  readonly mounts: readonly BackupBindMount[];
+  readonly groupAdd: readonly string[];
+  readonly networkMode: string;
+}
 
 export type BackupSnapshotSummary = NonNullable<BackupJobStatus["snapshot"]>;
 
@@ -136,11 +190,21 @@ function assertJobId(jobId: string): string {
 export function buildBackupHostConfig(
   networkMode: string,
   binds: readonly string[],
+  extra: {
+    readonly groupAdd?: readonly string[];
+    readonly mounts?: readonly BackupBindMount[];
+  } = {},
 ): BackupContainerCreatePayload["HostConfig"] {
   assertSafeIdentifier(networkMode, "networkMode");
   if (binds.some((b) => b.includes("docker.sock"))) {
     throw new ExecutorCodedError("Forbidden docker.sock bind", "HOST_POLICY_DENIED");
   }
+  const groupAdd = extra.groupAdd ?? [];
+  const mounts = extra.mounts ?? [];
+  if (groupAdd.some((g) => !/^\d{1,10}$/.test(g))) {
+    throw new ExecutorCodedError("Invalid supplementary group", "VALIDATION_ERROR");
+  }
+  for (const m of mounts) assertSafeBindPath(m.Source, "mount source");
   return {
     Privileged: false,
     ReadonlyRootfs: true,
@@ -158,14 +222,12 @@ export function buildBackupHostConfig(
     },
     NetworkMode: networkMode,
     Binds: [...binds],
+    ...(groupAdd.length > 0 ? { GroupAdd: [...groupAdd] } : {}),
+    ...(mounts.length > 0 ? { Mounts: mounts.map((m) => ({ ...m })) } : {}),
   };
 }
 
-/** Builds a hardened restic container create payload with S3 secret mounts and cache env. */
-export function buildResticBasePayload(input: {
-  readonly repoKind: BackupResticRepoKind;
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
+interface ResticBasePayloadCommon {
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
   readonly labels: Readonly<Record<string, string>>;
@@ -174,15 +236,32 @@ export function buildResticBasePayload(input: {
   readonly binds?: readonly string[];
   readonly entrypoint?: readonly string[];
   readonly cmd?: readonly string[];
-}): BackupContainerCreatePayload {
+}
+
+/** The repository comes resolved, or as the legacy S3 triple (resolved here as S3). */
+type ResticBasePayloadInput = ResticBasePayloadCommon &
+  (
+    | { readonly repo: ResolvedBackupRepository }
+    | {
+        readonly repoKind: BackupResticRepoKind;
+        readonly target: BackupTarget;
+        readonly backupNetworkName: string;
+      }
+  );
+
+/** Builds a hardened restic container create payload with secret mounts and cache env. */
+export function buildResticBasePayload(input: ResticBasePayloadInput): BackupContainerCreatePayload {
   assertSafeSecretBinds(input.secretBinds);
   assertSafeSecretFileEnv(input.secretFileEnv);
-  const repoUrl = buildResticRepositoryUrl(input.target, input.repoKind);
+  const repo =
+    "repo" in input
+      ? input.repo
+      : resolveBackupRepository(input.target, input.repoKind, { backupNetworkName: input.backupNetworkName });
   const env = [
     "GOMAXPROCS=1",
     "NICE=19",
     `RESTIC_CACHE_DIR=${BACKUP_RESTIC_CACHE_DIR}`,
-    `RESTIC_REPOSITORY=${repoUrl}`,
+    `RESTIC_REPOSITORY=${repo.repository}`,
     ...(input.extraEnv ?? []),
     ...input.secretFileEnv,
   ];
@@ -194,10 +273,11 @@ export function buildResticBasePayload(input: {
     Hostname: BACKUP_HOSTNAME,
     Env: env,
     Labels: input.labels,
-    HostConfig: buildBackupHostConfig(input.backupNetworkName, [
-      ...(input.binds ?? []),
-      ...input.secretBinds,
-    ]),
+    HostConfig: buildBackupHostConfig(
+      repo.networkMode,
+      [...(input.binds ?? []), ...input.secretBinds],
+      { groupAdd: repo.groupAdd, mounts: repo.mounts },
+    ),
   };
 }
 
@@ -217,6 +297,67 @@ export function buildResticRepositoryUrl(target: BackupTarget, repo: BackupResti
   const suffix =
     repo.kind === "panel" ? "panel" : `sites/${assertSafeIdentifier(repo.siteId, "siteId")}`;
   return `s3:${target.endpoint}/${target.bucket}/${prefixSegment}${suffix}`;
+}
+
+const isLocalTarget = (t: BackupDispatchTarget): t is Extract<BackupDispatchTarget, { kind: "local" }> =>
+  "kind" in t && t.kind === "local";
+
+/** Container-side path of a local repository: the leaf host dir is bound exactly here. */
+const localContainerPath = (scope: BackupResticRepoKind): string =>
+  scope.kind === "panel"
+    ? "/backup/repository/panel"
+    : `/backup/repository/sites/${assertSafeIdentifier(scope.siteId, "siteId")}`;
+
+/**
+ * Pure: turns a dispatch target into everything a restic container needs. S3 keeps today's exact strings; a local
+ * target needs the guarded repo (only the guard produces it), is attached as a Mounts bind (Docker refuses a missing
+ * source, `Binds` would create it as root), has no network and no S3 option or credential.
+ */
+export function resolveBackupRepository(
+  target: BackupDispatchTarget,
+  scope: BackupResticRepoKind,
+  ctx: {
+    readonly backupNetworkName: string;
+    readonly local?: GuardedLocalRepo;
+    readonly readOnly?: boolean;
+  },
+): ResolvedBackupRepository {
+  if (!isLocalTarget(target)) {
+    const region = assertRegion(target.region);
+    return {
+      kind: "s3",
+      repository: buildResticRepositoryUrl(target, scope),
+      resticOptions: ["-o", "s3.bucket-lookup=path", "-o", `s3.region=${region}`],
+      env: [`HP_REGION=${region}`],
+      mounts: [],
+      groupAdd: [],
+      networkMode: ctx.backupNetworkName,
+    };
+  }
+  const local = ctx.local;
+  const containerPath = localContainerPath(scope);
+  if (local === undefined || local.containerPath !== containerPath) {
+    throw new ExecutorCodedError("Local backup target is not guarded for this repository", "VALIDATION_ERROR");
+  }
+  if (!Number.isSafeInteger(local.executorGid) || local.executorGid < 0) {
+    throw new ExecutorCodedError("Invalid executor group", "VALIDATION_ERROR");
+  }
+  return {
+    kind: "local",
+    repository: containerPath,
+    resticOptions: [],
+    env: [],
+    mounts: [
+      {
+        Type: "bind",
+        Source: assertSafeBindPath(local.hostDir, "local repository"),
+        Target: containerPath,
+        ReadOnly: ctx.readOnly === true,
+      },
+    ],
+    groupAdd: [String(local.executorGid)],
+    networkMode: "none",
+  };
 }
 
 /** Formats the AWS shared credentials INI file after re-checking credential characters. */
@@ -265,30 +406,40 @@ export function buildBackupStagingVolumePayload(input: {
   };
 }
 
+/** Either an already-resolved repository or the legacy S3 pair (resolved here as S3). */
+type RepoSource =
+  | { readonly repo: ResolvedBackupRepository }
+  | { readonly target: BackupTarget; readonly backupNetworkName: string };
+
+function repoOf(input: RepoSource, scope: BackupResticRepoKind): ResolvedBackupRepository {
+  return "repo" in input
+    ? input.repo
+    : resolveBackupRepository(input.target, scope, { backupNetworkName: input.backupNetworkName });
+}
+
 /** Builds the container spec for the repository probe/unlock/init step of a test or job. */
 export function buildBackupRepoContainerPayload(
-  input:
+  input: (
     | {
         readonly mode: "test";
         readonly testId: string;
-        readonly target: BackupTarget;
-        readonly backupNetworkName: string;
-        readonly secretBinds: readonly string[];
-        readonly secretFileEnv: readonly string[];
       }
     | {
         readonly mode: "job";
         readonly jobId: string;
         readonly siteId: string;
         readonly init: boolean;
-        readonly target: BackupTarget;
-        readonly backupNetworkName: string;
-        readonly secretBinds: readonly string[];
-        readonly secretFileEnv: readonly string[];
-      },
+      }
+  ) &
+    RepoSource & {
+      readonly secretBinds: readonly string[];
+      readonly secretFileEnv: readonly string[];
+      /** Local test runs as the executor user; default is the restic user. */
+      readonly user?: string;
+    },
 ): BackupContainerSpec {
-  const region = assertRegion(input.target.region);
   if (input.mode === "test") {
+    const repo = repoOf(input, { kind: "panel" });
     if (!HEX_16_PATTERN.test(input.testId)) {
       throw new ExecutorCodedError("Invalid backup testId", "VALIDATION_ERROR");
     }
@@ -296,9 +447,7 @@ export function buildBackupRepoContainerPayload(
     return {
       containerName: `hp_bk_${testJobId}`,
       payload: buildResticBasePayload({
-        repoKind: { kind: "panel" },
-        target: input.target,
-        backupNetworkName: input.backupNetworkName,
+        repo,
         secretBinds: input.secretBinds,
         secretFileEnv: input.secretFileEnv,
         labels: {
@@ -306,25 +455,34 @@ export function buildBackupRepoContainerPayload(
           "io.hostingpanel.role": SITE_JOB_ROLE,
           "io.hostingpanel.job_id": testJobId,
         },
-        extraEnv: [`HP_REGION=${region}`, "HP_INIT=1"],
-        entrypoint: ["/bin/sh", "-c", BACKUP_REPO_TEST_SCRIPT],
+        ...(input.user !== undefined ? { user: input.user } : {}),
+        extraEnv: [...repo.env, "HP_INIT=1"],
+        entrypoint: [
+          "/bin/sh",
+          "-c",
+          repo.kind === "local" ? BACKUP_REPO_LOCAL_TEST_SCRIPT : BACKUP_REPO_TEST_SCRIPT,
+        ],
       }),
     };
   }
 
   const jobId = assertJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
+  const repo = repoOf(input, { kind: "site", siteId });
   return {
     containerName: `hp_bk_${jobId}_repo`,
     payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
+      repo,
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
-      extraEnv: [`HP_REGION=${region}`, `HP_INIT=${input.init ? "1" : "0"}`],
-      entrypoint: ["/bin/sh", "-c", BACKUP_REPO_JOB_SCRIPT],
+      ...(input.user !== undefined ? { user: input.user } : {}),
+      extraEnv: [...repo.env, `HP_INIT=${input.init ? "1" : "0"}`],
+      entrypoint: [
+        "/bin/sh",
+        "-c",
+        repo.kind === "local" ? BACKUP_REPO_LOCAL_JOB_SCRIPT : BACKUP_REPO_JOB_SCRIPT,
+      ],
     }),
   };
 }
@@ -371,22 +529,22 @@ export function buildBackupDumpContainerPayload(input: {
 }
 
 /** Builds the restic upload container spec mounting site files and optional dumps read-only. */
-export function buildBackupUploadContainerPayload(input: {
-  readonly jobId: string;
-  readonly siteId: string;
-  readonly serviceInstanceId: string;
-  readonly siteType: ExecutorSiteType;
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
-  readonly secretBinds: readonly string[];
-  readonly secretFileEnv: readonly string[];
-  readonly stagingVolumeName: string | null;
-}): BackupContainerSpec {
+export function buildBackupUploadContainerPayload(
+  input: RepoSource & {
+    readonly jobId: string;
+    readonly siteId: string;
+    readonly serviceInstanceId: string;
+    readonly siteType: ExecutorSiteType;
+    readonly secretBinds: readonly string[];
+    readonly secretFileEnv: readonly string[];
+    readonly stagingVolumeName: string | null;
+  },
+): BackupContainerSpec {
   const t = input.siteType;
   const jobId = assertJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
-  const region = assertRegion(input.target.region);
+  const repo = repoOf(input, { kind: "site", siteId });
   const siteVolume = getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix);
   const binds = [`${siteVolume}:/backup/files:ro`];
   const paths = ["/backup/files"];
@@ -399,19 +557,14 @@ export function buildBackupUploadContainerPayload(input: {
   return {
     containerName: `hp_bk_${jobId}_up`,
     payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
+      repo,
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
       user: t.def.files.owner,
       binds,
       cmd: [
-        "-o",
-        "s3.bucket-lookup=path",
-        "-o",
-        `s3.region=${region}`,
+        ...repo.resticOptions,
         "backup",
         "-q",
         "--json",
@@ -429,18 +582,18 @@ export function buildBackupUploadContainerPayload(input: {
 }
 
 /** Builds the container spec that forgets a single incomplete snapshot after restic exit 3. */
-export function buildPartialSnapshotDropContainerPayload(input: {
-  readonly jobId: string;
-  readonly siteId: string;
-  readonly snapshotId: string;
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
-  readonly secretBinds: readonly string[];
-  readonly secretFileEnv: readonly string[];
-}): BackupContainerSpec {
+export function buildPartialSnapshotDropContainerPayload(
+  input: RepoSource & {
+    readonly jobId: string;
+    readonly siteId: string;
+    readonly snapshotId: string;
+    readonly secretBinds: readonly string[];
+    readonly secretFileEnv: readonly string[];
+  },
+): BackupContainerSpec {
   const jobId = assertJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
-  const region = assertRegion(input.target.region);
+  const repo = repoOf(input, { kind: "site", siteId });
   if (!SNAPSHOT_ID_PATTERN.test(input.snapshotId)) {
     throw new ExecutorCodedError("Invalid snapshot id", "VALIDATION_ERROR");
   }
@@ -448,37 +601,28 @@ export function buildPartialSnapshotDropContainerPayload(input: {
   return {
     containerName: `hp_bk_${jobId}_drop`,
     payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
+      repo,
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
-      cmd: [
-        "-o",
-        "s3.bucket-lookup=path",
-        "-o",
-        `s3.region=${region}`,
-        "forget",
-        input.snapshotId,
-      ],
+      cmd: [...repo.resticOptions, "forget", input.snapshotId],
     }),
   };
 }
 
 /** Builds the container spec that forgets and prunes specified snapshots for a site. */
-export function buildBackupForgetContainerPayload(input: {
-  readonly jobId: string;
-  readonly siteId: string;
-  readonly snapshotIds: readonly string[];
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
-  readonly secretBinds: readonly string[];
-  readonly secretFileEnv: readonly string[];
-}): BackupContainerSpec {
+export function buildBackupForgetContainerPayload(
+  input: RepoSource & {
+    readonly jobId: string;
+    readonly siteId: string;
+    readonly snapshotIds: readonly string[];
+    readonly secretBinds: readonly string[];
+    readonly secretFileEnv: readonly string[];
+  },
+): BackupContainerSpec {
   const jobId = assertJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
-  const region = assertRegion(input.target.region);
+  const repo = repoOf(input, { kind: "site", siteId });
   if (
     input.snapshotIds.length === 0 ||
     input.snapshotIds.length > 100 ||
@@ -490,21 +634,11 @@ export function buildBackupForgetContainerPayload(input: {
   return {
     containerName: `hp_bk_${jobId}_forget`,
     payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
+      repo,
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
-      cmd: [
-        "-o",
-        "s3.bucket-lookup=path",
-        "-o",
-        `s3.region=${region}`,
-        "forget",
-        "--prune",
-        ...input.snapshotIds,
-      ],
+      cmd: [...repo.resticOptions, "forget", "--prune", ...input.snapshotIds],
     }),
   };
 }
@@ -531,10 +665,18 @@ export function classifyResticStderr(stderrText: string): BackupFailureClass {
   return "other";
 }
 
+/** Local repository stderr: filesystem errors first, then the shared classifier (no-space, ...). */
+export function classifyLocalResticStderr(stderrText: string): BackupFailureClass {
+  if (/read-only file system/i.test(stderrText)) return "local_target_readonly";
+  if (/permission denied/i.test(stderrText)) return "local_target_unsafe";
+  return classifyResticStderr(stderrText);
+}
+
 /** Maps a restic container exit code and optional stderr tail to a backup failure class or null. */
 export function classifyResticExitCode(
   exitCode: number,
   stderrText = "",
+  kind: "s3" | "local" = "s3",
 ): BackupFailureClass | null {
   if (exitCode === 0) return null;
   if (exitCode === 124) return "timeout";
@@ -542,7 +684,9 @@ export function classifyResticExitCode(
   if (exitCode === 11) return "repository_locked";
   if (exitCode === 3) return "files_unreadable";
   if (exitCode === 10) return "other";
-  if (exitCode === 1) return classifyResticStderr(stderrText);
+  if (exitCode === 1) {
+    return kind === "local" ? classifyLocalResticStderr(stderrText) : classifyResticStderr(stderrText);
+  }
   return "other";
 }
 

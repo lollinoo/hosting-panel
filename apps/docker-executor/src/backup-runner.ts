@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, readdir, readFile, rm, statfs, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rm, statfs, unlink } from "node:fs/promises";
 import path from "node:path";
 import {
   BackupsIpcRequestSchema,
@@ -14,9 +14,10 @@ import {
   type BackupSiteState,
   type BackupsIpcRequest,
   type BackupsResultByAction,
-  type BackupTarget,
+  type BackupRepositoryTarget,
   type BackupTestResult,
   type SiteTypeKey,
+  isLocalBackupTarget,
 } from "@hosting-panel/contracts";
 import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
@@ -30,6 +31,9 @@ import {
   BACKUP_TEST_BUDGET_MS,
   BACKUP_UPLOAD_TIMEOUT_MS,
   type BackupContainerSpec,
+  type BackupResticRepoKind,
+  type GuardedLocalRepo,
+  type ResolvedBackupRepository,
   buildAwsSharedCredentials,
   buildBackupDumpContainerPayload,
   buildBackupForgetContainerPayload,
@@ -41,6 +45,7 @@ import {
   classifyResticExitCode,
   parseBackupKeyFileContent,
   parseResticSummary,
+  resolveBackupRepository,
 } from "./backup-jobs.js";
 import {
   BACKUP_ARCHIVE_TIMEOUT_MS,
@@ -87,11 +92,19 @@ import {
   PANEL_RESTORE_KEY_NAME,
   buildPanelDropContainerPayload,
   buildPanelFetchContainerPayload,
+  buildPanelFetchLocalContainerPayload,
   buildPanelKeepContainerPayload,
   buildPanelRepoContainerPayload,
   buildPanelUploadContainerPayload,
 } from "./panel-jobs.js";
 import { demuxDockerLogStream } from "./docker-logs.js";
+import {
+  guardLocalTarget,
+  initLocalTarget,
+  type LocalTargetGuardDeps,
+  type LocalTargetIntent,
+  type LocalTargetResult,
+} from "./local-target-guard.js";
 import { probeS3, S3_PROBE_BUDGET_MS } from "./s3-probe.js";
 import { DEFAULT_SHARED_DB_DATA_DIR } from "./shared-database.js";
 import { resolveExecutorSiteType, type ExecutorSiteType } from "./site-types/index.js";
@@ -106,6 +119,11 @@ export const DEFAULT_BACKUP_KEY_FILE = "/etc/hosting-panel/backup.key" as const;
 export const DEFAULT_BACKUP_NETWORK_NAME = "hp_backup_net" as const;
 export const DEFAULT_BACKUP_WORK_DIR = "/var/lib/hosting-panel/backups" as const;
 export const DEFAULT_PANEL_DUMP_DIR = "/var/lib/hosting-panel/panel-dump" as const;
+export const DEFAULT_BACKUP_LOCAL_ROOT = "/var/lib/hosting-panel/local-repos" as const;
+
+/** Directories a disaster-recovery repository (`--local-repo`) may never live in or above. */
+const LOCAL_REPO_DENYLIST = ["/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/var/lib/docker"] as const;
+const LOCAL_REPO_DIR_CHARS = /^\/[A-Za-z0-9._@+/-]+$/;
 
 export type DockerRequest = (
   method: string,
@@ -134,6 +152,12 @@ export interface BackupRunnerDeps {
     readonly bavail: number | bigint;
     readonly bsize: number | bigint;
   }>;
+  /** HP_BACKUP_LOCAL_ROOT, already validated. Absent/null: every local request answers local_target_unsafe. */
+  readonly localRepoRoot?: string | null;
+  /** Test seam of the local target guard (free space). */
+  readonly localTargetStatfs?: LocalTargetGuardDeps["statfs"];
+  /** Test seam of the local target guard (write probe). */
+  readonly localTargetOpen?: LocalTargetGuardDeps["open"];
   readonly now?: () => number;
   readonly fetch?: typeof globalThis.fetch;
   readonly resolveSiteType?: (key: SiteTypeKey) => ExecutorSiteType;
@@ -142,12 +166,21 @@ export interface BackupRunnerDeps {
 type StartBackupRequest = Extract<BackupsIpcRequest, { action: "start" }>;
 type ForgetBackupRequest = Extract<BackupsIpcRequest, { action: "forget" }>;
 type TestBackupRequest = Extract<BackupsIpcRequest, { action: "test" }>;
+type LocalInitRequest = Extract<BackupsIpcRequest, { action: "localInit" }>;
 type RestoreBackupRequest = Extract<BackupsIpcRequest, { action: "restore" }>;
 type ArchiveBackupRequest = Extract<BackupsIpcRequest, { action: "archive" }>;
 type PanelStartRequest = Extract<BackupsIpcRequest, { action: "panelStart" }>;
 type SiteStateRequest = Extract<BackupsIpcRequest, { action: "siteState" }>;
 
 export type PanelFetchProblem = BackupFailureClass | "no_copy" | "refused";
+
+/** A panel repository directory taken from the command line (`hp-restore-panel --local-repo`); never an IPC input. */
+export interface LocalPanelRepoSource {
+  readonly kind: "local_repo";
+  readonly repoDir: string;
+}
+const isLocalPanelRepoSource = (source: BackupRepositoryTarget | LocalPanelRepoSource): source is LocalPanelRepoSource =>
+  "kind" in source && source.kind === "local_repo";
 export type PanelFetchResult =
   | { readonly ok: true; readonly snapshotId: string; readonly time: string }
   | { readonly ok: false; readonly problem: PanelFetchProblem };
@@ -193,6 +226,10 @@ type ContainerOutcome =
     };
 
 type StepOutcome = ContainerOutcome | { readonly kind: "error" };
+
+type PreparedRepository =
+  | { readonly ok: true; readonly repo: ResolvedBackupRepository; readonly local?: GuardedLocalRepo }
+  | { readonly ok: false; readonly problem: BackupFailureClass };
 
 interface RestoreIds {
   readonly jobId: string;
@@ -326,20 +363,89 @@ export class BackupRunner {
     }
   }
 
+  /** The only writer of restic secrets: AWS credentials only for an S3 target, the repository password always. */
   private async writeResticSecrets(
     secretInstanceId: string,
-    target: BackupTarget,
+    target: BackupRepositoryTarget | LocalPanelRepoSource,
     backupKey: string,
     trackedSecretIds: string[],
   ): Promise<SecretMounts> {
     trackedSecretIds.push(secretInstanceId);
     return writeServiceSecrets(this.deps.secretsRootDir, secretInstanceId, {
-      AWS_SHARED_CREDENTIALS: buildAwsSharedCredentials(
-        target.accessKeyId,
-        target.secretAccessKey,
-      ),
+      // The frozen S3 object is the only target without a `kind`.
+      ...("kind" in target
+        ? {}
+        : { AWS_SHARED_CREDENTIALS: buildAwsSharedCredentials(target.accessKeyId, target.secretAccessKey) }),
       RESTIC_PASSWORD: backupKey,
     });
+  }
+
+  /** Guard deps of the local targets; the executor ids come from `executorUser` (`uid:gid`). */
+  private localGuardDeps(): LocalTargetGuardDeps {
+    const ids = /^(\d+):(\d+)$/.exec(this.deps.executorUser);
+    return {
+      root: ids === null ? null : (this.deps.localRepoRoot ?? null),
+      executorUid: ids === null ? -1 : Number(ids[1]),
+      executorGid: ids === null ? -1 : Number(ids[2]),
+      ...(this.deps.localTargetStatfs ? { statfs: this.deps.localTargetStatfs } : {}),
+      ...(this.deps.localTargetOpen ? { open: this.deps.localTargetOpen } : {}),
+    };
+  }
+
+  /**
+   * The repository of one job: S3 targets are probed (exact existing call), local targets pass the guard right before
+   * the first container that binds them. Either way the result is the resolved repository the builders take.
+   */
+  private async prepareRepository(
+    target: BackupRepositoryTarget,
+    scope: BackupResticRepoKind,
+    intent: LocalTargetIntent,
+    extraBytes: number,
+    s3BudgetMs?: number,
+  ): Promise<PreparedRepository> {
+    if (isLocalBackupTarget(target)) {
+      return this.resolveGuarded(
+        target,
+        scope,
+        await guardLocalTarget(this.localGuardDeps(), {
+          targetId: target.targetId,
+          scope,
+          intent,
+          requiredExtraBytes: extraBytes,
+        }),
+      );
+    }
+    const probe = await probeS3(target, {
+      fetch: this.deps.fetch,
+      now: () => new Date(this.nowMs()),
+      ...(s3BudgetMs === undefined ? {} : { budgetMs: s3BudgetMs }),
+    });
+    if (probe.problem !== null) return { ok: false, problem: probe.problem };
+    return {
+      ok: true,
+      repo: resolveBackupRepository(target, scope, { backupNetworkName: this.deps.backupNetworkName }),
+    };
+  }
+
+  private resolveGuarded(
+    target: BackupRepositoryTarget,
+    scope: BackupResticRepoKind,
+    guarded: LocalTargetResult<GuardedLocalRepo>,
+  ): PreparedRepository {
+    if (!guarded.ok) return { ok: false, problem: guarded.problem };
+    return {
+      ok: true,
+      repo: resolveBackupRepository(target, scope, {
+        backupNetworkName: this.deps.backupNetworkName,
+        local: guarded.repo,
+      }),
+      local: guarded.repo,
+    };
+  }
+
+  /** Only an S3 repository needs the backup network; a local one runs with none. */
+  private async ensureNetworkFor(repo: ResolvedBackupRepository): Promise<void> {
+    if (repo.kind === "s3") await this.deps.ensureBackupNetwork();
   }
 
   private async writeDbSecrets(
@@ -591,14 +697,15 @@ export class BackupRunner {
     }
   }
 
-  private async executeTest(req: TestBackupRequest): Promise<BackupTestResult> {
+  /** `test` (any target) and `localInit` (creates the local target first, then tests it like `test`). */
+  private async executeTest(req: TestBackupRequest | LocalInitRequest): Promise<BackupTestResult> {
     if (this.testInFlight) {
       throw new ExecutorCodedError("A storage test is already running", "RESOURCE_LOCKED");
     }
     this.testInFlight = true;
     const deadline = this.nowMs() + BACKUP_TEST_BUDGET_MS;
     const createdRefs: string[] = [];
-    let secretInstanceId: string | null = null;
+    const secretIds: string[] = [];
 
     try {
       const backupKey = await this.readBackupKey();
@@ -611,14 +718,25 @@ export class BackupRunner {
         return { outcome: "failed", problem: "timeout" };
       }
 
-      const probe = await probeS3(req.target, {
-        fetch: this.deps.fetch,
-        now: () => new Date(this.nowMs()),
-        budgetMs: Math.min(S3_PROBE_BUDGET_MS, remainingBeforeS3),
-      });
-      if (probe.problem !== null) {
-        return { outcome: "failed", problem: probe.problem };
+      const panelScope: BackupResticRepoKind = { kind: "panel" };
+      const prepared =
+        req.action === "localInit"
+          ? this.resolveGuarded(
+              req.target,
+              panelScope,
+              await initLocalTarget(this.localGuardDeps(), req.target.targetId),
+            )
+          : await this.prepareRepository(
+              req.target,
+              panelScope,
+              "test",
+              0,
+              Math.min(S3_PROBE_BUDGET_MS, remainingBeforeS3),
+            );
+      if (!prepared.ok) {
+        return { outcome: "failed", problem: prepared.problem };
       }
+      const { repo } = prepared;
 
       if (deadline - this.nowMs() <= 0) {
         return { outcome: "failed", problem: "timeout" };
@@ -633,7 +751,7 @@ export class BackupRunner {
       }
 
       try {
-        await this.deps.ensureBackupNetwork();
+        await this.ensureNetworkFor(repo);
       } catch (err) {
         throw toEngineError(err, "Docker engine is unavailable for backup test");
       }
@@ -644,24 +762,19 @@ export class BackupRunner {
       }
 
       const testId = randomBytes(8).toString("hex");
-      secretInstanceId = `job_bk_test_${testId}`;
-      const { secretBinds, secretFileEnv } = await writeServiceSecrets(
-        this.deps.secretsRootDir,
-        secretInstanceId,
-        {
-          AWS_SHARED_CREDENTIALS: buildAwsSharedCredentials(
-            req.target.accessKeyId,
-            req.target.secretAccessKey,
-          ),
-          RESTIC_PASSWORD: backupKey,
-        },
+      const { secretBinds, secretFileEnv } = await this.writeResticSecrets(
+        `job_bk_test_${testId}`,
+        req.target,
+        backupKey,
+        secretIds,
       );
 
       const spec = buildBackupRepoContainerPayload({
         mode: "test",
         testId,
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo,
+        // A local repository belongs to the executor's group: its test runs as the executor, an S3 one keeps the default.
+        ...(repo.kind === "local" ? { user: this.deps.executorUser } : {}),
         secretBinds,
         secretFileEnv,
       });
@@ -673,12 +786,21 @@ export class BackupRunner {
         return { outcome: "failed", problem: "tool_unavailable" };
       }
 
-      const problem = classifyResticExitCode(outcome.exitCode, outcome.stderr);
-      return problem === null
+      const problem = classifyResticExitCode(outcome.exitCode, outcome.stderr, repo.kind);
+      if (problem !== null) {
+        return { outcome: "failed", problem };
+      }
+      return prepared.local === undefined
         ? { outcome: "ok", problem: null }
-        : { outcome: "failed", problem };
+        : {
+            outcome: "ok",
+            problem: null,
+            availableBytes: prepared.local.availableBytes,
+            totalBytes: prepared.local.totalBytes,
+            ...(this.deps.localRepoRoot ? { localRoot: this.deps.localRepoRoot } : {}),
+          };
     } finally {
-      await this.cleanupContainersAndSecrets(createdRefs, null, secretInstanceId);
+      await this.cleanupContainersAndSecrets(createdRefs, null, secretIds);
       this.testInFlight = false;
     }
   }
@@ -738,11 +860,12 @@ export class BackupRunner {
 
   private async runBackupJob(req: StartBackupRequest, t: ExecutorSiteType, entry: JobRecord): Promise<void> {
     const createdRefs: string[] = [];
+    const secretIds: string[] = [];
     let stagingVolumeName: string | null = null;
-    let secretInstanceId: string | null = null;
     let finalState: "succeeded" | "failed" = "failed";
     let finalFailure: BackupJobStatus["failure"] = "other";
     let finalSnapshot: BackupJobStatus["snapshot"] = null;
+    const scope: BackupResticRepoKind = { kind: "site", siteId: req.siteId };
     const setOutcome = (
       state: "succeeded" | "failed",
       failure: BackupJobStatus["failure"],
@@ -760,20 +883,21 @@ export class BackupRunner {
         return;
       }
 
-      const probe = await probeS3(req.target, {
-        fetch: this.deps.fetch,
-        now: () => new Date(this.nowMs()),
-      });
-      if (probe.problem !== null) {
-        setOutcome("failed", probe.problem, null);
-        return;
+      // S3 is probed first as ever; a local target is guarded once the database sizes are known (below).
+      let prepared: PreparedRepository | null = null;
+      if (!isLocalBackupTarget(req.target)) {
+        prepared = await this.prepareRepository(req.target, scope, "backup", 0);
+        if (!prepared.ok) {
+          setOutcome("failed", prepared.problem, null);
+          return;
+        }
       }
 
       if ((await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok") {
         setOutcome("failed", "tool_unavailable", null);
         return;
       }
-      await this.deps.ensureBackupNetwork();
+      if (prepared !== null) await this.ensureNetworkFor(prepared.repo);
 
       const siteVolume = getManagedVolumeName(req.serviceInstanceId, t.def.files.volumeSuffix);
       const siteVolRes = await this.callDocker(
@@ -797,17 +921,24 @@ export class BackupRunner {
         return;
       }
 
-      secretInstanceId = `job_bk_${req.jobId}`;
-      const { secretBinds, secretFileEnv } = await writeServiceSecrets(
-        this.deps.secretsRootDir,
-        secretInstanceId,
-        {
-          AWS_SHARED_CREDENTIALS: buildAwsSharedCredentials(
-            req.target.accessKeyId,
-            req.target.secretAccessKey,
-          ),
-          RESTIC_PASSWORD: backupKey,
-        },
+      if (prepared === null) {
+        const dumpBytes = databases.reduce(
+          (sum, db) => sum + (Number.isFinite(db.sizeBytes) && db.sizeBytes > 0 ? Math.ceil(db.sizeBytes) : 0),
+          0,
+        );
+        prepared = await this.prepareRepository(req.target, scope, "backup", dumpBytes);
+        if (!prepared.ok) {
+          setOutcome("failed", prepared.problem, null);
+          return;
+        }
+      }
+      const { repo } = prepared;
+
+      const { secretBinds, secretFileEnv } = await this.writeResticSecrets(
+        `job_bk_${req.jobId}`,
+        req.target,
+        backupKey,
+        secretIds,
       );
 
       const repoSpec = buildBackupRepoContainerPayload({
@@ -815,8 +946,7 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         init: true,
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo,
         secretBinds,
         secretFileEnv,
       });
@@ -830,7 +960,7 @@ export class BackupRunner {
         setOutcome("failed", "tool_unavailable", null);
         return;
       }
-      const repoProblem = classifyResticExitCode(repoOutcome.exitCode, repoOutcome.stderr);
+      const repoProblem = classifyResticExitCode(repoOutcome.exitCode, repoOutcome.stderr, repo.kind);
       if (repoProblem !== null) {
         setOutcome("failed", repoProblem, null);
         return;
@@ -884,8 +1014,7 @@ export class BackupRunner {
         siteId: req.siteId,
         serviceInstanceId: req.serviceInstanceId,
         siteType: t,
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo,
         secretBinds,
         secretFileEnv,
         stagingVolumeName,
@@ -919,8 +1048,7 @@ export class BackupRunner {
               jobId: req.jobId,
               siteId: req.siteId,
               snapshotId: partial.snapshotId,
-              target: req.target,
-              backupNetworkName: this.deps.backupNetworkName,
+              repo,
               secretBinds,
               secretFileEnv,
             });
@@ -934,12 +1062,12 @@ export class BackupRunner {
       }
 
       const uploadProblem =
-        classifyResticExitCode(uploadOutcome.exitCode, uploadOutcome.stderr) ?? "other";
+        classifyResticExitCode(uploadOutcome.exitCode, uploadOutcome.stderr, repo.kind) ?? "other";
       setOutcome("failed", uploadProblem, null);
     } catch {
       setOutcome("failed", "other", null);
     } finally {
-      await this.cleanupContainersAndSecrets(createdRefs, stagingVolumeName, secretInstanceId);
+      await this.cleanupContainersAndSecrets(createdRefs, stagingVolumeName, secretIds);
       this.activeSiteIds.delete(req.siteId);
       this.activeJobCount = Math.max(0, this.activeJobCount - 1);
       // Settle only after cleanup and locks are released so status polls never observe pre-release state.
@@ -949,7 +1077,7 @@ export class BackupRunner {
 
   private async runForgetJob(req: ForgetBackupRequest, entry: JobRecord): Promise<void> {
     const createdRefs: string[] = [];
-    let secretInstanceId: string | null = null;
+    const secretIds: string[] = [];
     let finalState: "succeeded" | "failed" = "failed";
     let finalFailure: BackupJobStatus["failure"] = "other";
     const setOutcome = (
@@ -967,32 +1095,24 @@ export class BackupRunner {
         return;
       }
 
-      const probe = await probeS3(req.target, {
-        fetch: this.deps.fetch,
-        now: () => new Date(this.nowMs()),
-      });
-      if (probe.problem !== null) {
-        setOutcome("failed", probe.problem);
+      const prepared = await this.prepareRepository(req.target, { kind: "site", siteId: req.siteId }, "forget", 0);
+      if (!prepared.ok) {
+        setOutcome("failed", prepared.problem);
         return;
       }
+      const { repo } = prepared;
 
       if ((await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok") {
         setOutcome("failed", "tool_unavailable");
         return;
       }
-      await this.deps.ensureBackupNetwork();
+      await this.ensureNetworkFor(repo);
 
-      secretInstanceId = `job_bk_${req.jobId}`;
-      const { secretBinds, secretFileEnv } = await writeServiceSecrets(
-        this.deps.secretsRootDir,
-        secretInstanceId,
-        {
-          AWS_SHARED_CREDENTIALS: buildAwsSharedCredentials(
-            req.target.accessKeyId,
-            req.target.secretAccessKey,
-          ),
-          RESTIC_PASSWORD: backupKey,
-        },
+      const { secretBinds, secretFileEnv } = await this.writeResticSecrets(
+        `job_bk_${req.jobId}`,
+        req.target,
+        backupKey,
+        secretIds,
       );
 
       const repoSpec = buildBackupRepoContainerPayload({
@@ -1000,8 +1120,7 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         init: false,
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo,
         secretBinds,
         secretFileEnv,
       });
@@ -1020,7 +1139,7 @@ export class BackupRunner {
         setOutcome("succeeded", null);
         return;
       }
-      const repoProblem = classifyResticExitCode(repoOutcome.exitCode, repoOutcome.stderr);
+      const repoProblem = classifyResticExitCode(repoOutcome.exitCode, repoOutcome.stderr, repo.kind);
       if (repoProblem !== null) {
         setOutcome("failed", repoProblem);
         return;
@@ -1030,8 +1149,7 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         snapshotIds: req.snapshotIds,
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo,
         secretBinds,
         secretFileEnv,
       });
@@ -1045,7 +1163,7 @@ export class BackupRunner {
         setOutcome("failed", "tool_unavailable");
         return;
       }
-      const forgetProblem = classifyResticExitCode(forgetOutcome.exitCode, forgetOutcome.stderr);
+      const forgetProblem = classifyResticExitCode(forgetOutcome.exitCode, forgetOutcome.stderr, repo.kind);
       if (forgetProblem !== null) {
         setOutcome("failed", forgetProblem);
         return;
@@ -1054,7 +1172,7 @@ export class BackupRunner {
     } catch {
       setOutcome("failed", "other");
     } finally {
-      await this.cleanupContainersAndSecrets(createdRefs, null, secretInstanceId);
+      await this.cleanupContainersAndSecrets(createdRefs, null, secretIds);
       this.activeSiteIds.delete(req.siteId);
       this.activeJobCount = Math.max(0, this.activeJobCount - 1);
       this.settleEntry(entry, finalState, finalFailure, null);
@@ -1480,14 +1598,12 @@ export class BackupRunner {
         return;
       }
 
-      const probe = await probeS3(req.target, {
-        fetch: this.deps.fetch,
-        now: () => new Date(this.nowMs()),
-      });
-      if (probe.problem !== null) {
-        setOutcome("failed", probe.problem);
+      const prepared = await this.prepareRepository(req.target, { kind: "site", siteId: req.siteId }, "restore", 0);
+      if (!prepared.ok) {
+        setOutcome("failed", prepared.problem);
         return;
       }
+      const { repo } = prepared;
 
       if (
         (await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok" ||
@@ -1498,7 +1614,7 @@ export class BackupRunner {
         return;
       }
 
-      await this.deps.ensureBackupNetwork();
+      await this.ensureNetworkFor(repo);
 
       const siteVolume = getManagedVolumeName(req.serviceInstanceId, t.def.files.volumeSuffix);
       const siteVolRes = await this.callDocker(
@@ -1547,8 +1663,7 @@ export class BackupRunner {
         serviceInstanceId: req.serviceInstanceId,
         siteType: t,
         snapshotId: req.snapshotId,
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo,
         secretBinds: resticSecret.secretBinds,
         secretFileEnv: resticSecret.secretFileEnv,
       };
@@ -1571,7 +1686,9 @@ export class BackupRunner {
       if (fetchOutcome.kind !== "exited" || fetchOutcome.exitCode !== 0) {
         const problem =
           fetchOutcome.kind === "exited"
-            ? (classifyRestoreFetchExitCode(fetchOutcome.exitCode, fetchOutcome.stderr) ??
+            ? ((repo.kind === "local" && fetchOutcome.exitCode === 1
+                ? classifyResticExitCode(1, fetchOutcome.stderr, "local")
+                : classifyRestoreFetchExitCode(fetchOutcome.exitCode, fetchOutcome.stderr)) ??
               "restore_prepare_failed")
             : "restore_prepare_failed";
         await this.runPreSwitchUndoDb(
@@ -2113,20 +2230,18 @@ export class BackupRunner {
         return;
       }
 
-      const probe = await probeS3(req.target, {
-        fetch: this.deps.fetch,
-        now: () => new Date(this.nowMs()),
-      });
-      if (probe.problem !== null) {
-        finalFailure = probe.problem;
+      const prepared = await this.prepareRepository(req.target, { kind: "site", siteId: req.siteId }, "archive", 0);
+      if (!prepared.ok) {
+        finalFailure = prepared.problem;
         return;
       }
+      const { repo } = prepared;
 
       if ((await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok") {
         finalFailure = "tool_unavailable";
         return;
       }
-      await this.deps.ensureBackupNetwork();
+      await this.ensureNetworkFor(repo);
 
       const resticSecret = await this.writeResticSecrets(
         `job_bk_${req.jobId}`,
@@ -2139,10 +2254,9 @@ export class BackupRunner {
         jobId: req.jobId,
         siteId: req.siteId,
         snapshotId: req.snapshotId,
-        target: req.target,
+        repo,
         executorUser: this.deps.executorUser,
         archivesHostDir: this.archivesDir,
-        backupNetworkName: this.deps.backupNetworkName,
         secretBinds: resticSecret.secretBinds,
         secretFileEnv: resticSecret.secretFileEnv,
       });
@@ -2161,7 +2275,10 @@ export class BackupRunner {
         return;
       }
       if (outcome.exitCode !== 0) {
-        finalFailure = classifyArchiveExitCode(outcome.exitCode, outcome.stderr) ?? "other";
+        finalFailure =
+          (repo.kind === "local" && outcome.exitCode === 1
+            ? classifyResticExitCode(1, outcome.stderr, "local")
+            : classifyArchiveExitCode(outcome.exitCode, outcome.stderr)) ?? "other";
         return;
       }
 
@@ -2299,6 +2416,7 @@ export class BackupRunner {
     const request = parsed.data;
     switch (request.action) {
       case "test":
+      case "localInit":
         return (await this.executeTest(request)) as BackupsResultByAction[R["action"]];
       case "start": {
         const t = this.resolveSiteType(request.siteType ?? LEGACY_SITE_TYPE);
@@ -2467,19 +2585,23 @@ export class BackupRunner {
     try {
       const backupKey = await this.readBackupKey();
       if (backupKey === null) return fail("key_file_missing");
-      const dump = await this.inspectPanelDump(req.jobId);
+      const dump = await this.inspectPanelDump(req.dumpId ?? req.jobId);
       if (dump === null) return fail("panel_dump_missing");
-      const probe = await probeS3(req.target, {
-        fetch: this.deps.fetch,
-        now: () => new Date(this.nowMs()),
-      });
-      if (probe.problem !== null) return fail(probe.problem);
+      const prepared = await this.prepareRepository(
+        req.target,
+        { kind: "panel" },
+        "panelBackup",
+        Number(dump.identity.size),
+      );
+      if (!prepared.ok) return fail(prepared.problem);
+      const { repo: panelRepo } = prepared;
       if ((await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok") return fail("tool_unavailable");
-      await this.deps.ensureBackupNetwork();
+      await this.ensureNetworkFor(panelRepo);
 
       const restic = {
-        target: req.target,
-        backupNetworkName: this.deps.backupNetworkName,
+        repo: panelRepo,
+        // Local panel steps all run as the executor (primary gid = the repository group).
+        executorUser: this.deps.executorUser,
         ...(await this.writeResticSecrets(`job_bk_pn_${req.jobId}`, req.target, backupKey, secretIds)),
       };
       const masterKeyId = `job_bk_mk_${req.jobId}`;
@@ -2500,14 +2622,13 @@ export class BackupRunner {
         { captureStderr: true },
       );
       if (repo.kind === "not_found") return fail("tool_unavailable");
-      const repoProblem = classifyResticExitCode(repo.exitCode, repo.stderr);
+      const repoProblem = classifyResticExitCode(repo.exitCode, repo.stderr, panelRepo.kind);
       if (repoProblem !== null) return fail(repoProblem);
 
       const upload = await this.runContainer(
         buildPanelUploadContainerPayload({
           ...restic,
           jobId: req.jobId,
-          executorUser: this.deps.executorUser,
           dumpPath: dump.dumpPath,
           masterKeyPath,
           dirGid: dump.dirGid,
@@ -2518,7 +2639,7 @@ export class BackupRunner {
       );
       if (upload.kind === "not_found") return fail("tool_unavailable");
       if (upload.exitCode !== 0 && upload.exitCode !== 3) {
-        return fail(classifyResticExitCode(upload.exitCode, upload.stderr) ?? "other");
+        return fail(classifyResticExitCode(upload.exitCode, upload.stderr, panelRepo.kind) ?? "other");
       }
 
       const summary = parseResticSummary(upload.stdout);
@@ -2581,9 +2702,43 @@ export class BackupRunner {
     }
   }
 
+  /**
+   * Re-validates a `--local-repo` directory (the CLI is not trusted to have done it): canonical absolute path, outside
+   * the executor's own directories and the system denylist, no symlink in it or above it, a directory owned by a
+   * non-root user and not writable by others. Returns the owner ids the fetch container runs as.
+   */
+  private async validateLocalPanelRepoDir(
+    repoDir: string,
+  ): Promise<
+    | { readonly ok: true; readonly uid: number; readonly gid: number }
+    | { readonly ok: false; readonly problem: "local_target_unmounted" | "local_target_unsafe" }
+  > {
+    const unsafe = { ok: false, problem: "local_target_unsafe" } as const;
+    const own = [this.backupWorkDir, this.panelDumpDir, path.resolve(this.deps.secretsRootDir)];
+    const within = (child: string, parent: string): boolean => child === parent || child.startsWith(`${parent}/`);
+    if (
+      !LOCAL_REPO_DIR_CHARS.test(repoDir) ||
+      path.normalize(repoDir) !== repoDir ||
+      repoDir === "/" ||
+      repoDir.endsWith("/") ||
+      LOCAL_REPO_DENYLIST.some((d) => within(repoDir, d)) ||
+      own.some((d) => within(repoDir, d) || within(d, repoDir))
+    ) {
+      return unsafe;
+    }
+    try {
+      const st = await lstat(repoDir);
+      if (st.isSymbolicLink() || !st.isDirectory() || st.uid === 0 || (st.mode & 0o002) !== 0) return unsafe;
+      if ((await realpath(repoDir)) !== repoDir) return unsafe;
+      return { ok: true, uid: st.uid, gid: st.gid };
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === "ENOENT" ? { ok: false, problem: "local_target_unmounted" } : unsafe;
+    }
+  }
+
   /** Writes the newest panel copy (dump and master key) into `panelDumpDir` for a panel restore. */
   public async fetchPanelCopy(
-    target: BackupTarget,
+    source: BackupRepositoryTarget | LocalPanelRepoSource,
     panelDumpDir: string,
     signal?: AbortSignal,
   ): Promise<PanelFetchResult> {
@@ -2606,29 +2761,50 @@ export class BackupRunner {
       stopped.catch(() => undefined);
       const untilStopped = <T>(step: Promise<T>): Promise<T> => Promise.race([step, stopped]);
       signal?.throwIfAborted();
-      const probe = await untilStopped(
-        probeS3(target, { fetch: this.deps.fetch, now: () => new Date(this.nowMs()) }),
-      );
-      if (probe.problem !== null) return (result = { ok: false, problem: probe.problem });
+      // A repository directory from the CLI is validated here; a target goes through the probe or the local guard.
+      let repoDir: { readonly uid: number; readonly gid: number } | null = null;
+      let repo: ResolvedBackupRepository | null = null;
+      if (isLocalPanelRepoSource(source)) {
+        const checked = await this.validateLocalPanelRepoDir(source.repoDir);
+        if (!checked.ok) return (result = { ok: false, problem: checked.problem });
+        repoDir = checked;
+      } else {
+        const prepared = await untilStopped(this.prepareRepository(source, { kind: "panel" }, "restore", 0));
+        if (!prepared.ok) return (result = { ok: false, problem: prepared.problem });
+        repo = prepared.repo;
+      }
       if ((await untilStopped(this.tryEnsureImage(RESTIC_IMAGE))) !== "ok") {
         return (result = { ok: false, problem: "tool_unavailable" });
       }
-      await untilStopped(this.deps.ensureBackupNetwork());
+      if (repo !== null) await untilStopped(this.ensureNetworkFor(repo));
       signal?.throwIfAborted();
 
       const fetchId = randomBytes(16).toString("hex");
-      const secrets = await this.writeResticSecrets(`job_bk_pf_${fetchId}`, target, backupKey, secretIds);
+      const secrets = await this.writeResticSecrets(
+        `job_bk_pf_${fetchId}`,
+        source,
+        backupKey,
+        secretIds,
+      );
       touched = true;
       const outcome = await this.runContainer(
-        buildPanelFetchContainerPayload({
-          target,
-          backupNetworkName: this.deps.backupNetworkName,
-          ...secrets,
-          fetchId,
-          executorUser: this.deps.executorUser,
-          outDir,
-          dirGid: dir.gid,
-        }),
+        isLocalPanelRepoSource(source) && repoDir !== null
+          ? buildPanelFetchLocalContainerPayload({
+              fetchId,
+              repoDir: source.repoDir,
+              user: `${repoDir.uid}:${repoDir.gid}`,
+              outDir,
+              groupAdd: [dir.gid],
+              ...secrets,
+            })
+          : buildPanelFetchContainerPayload({
+              repo: repo!,
+              ...secrets,
+              fetchId,
+              executorUser: this.deps.executorUser,
+              outDir,
+              dirGid: dir.gid,
+            }),
         createdRefs,
         BACKUP_RESTORE_FETCH_TIMEOUT_MS,
         { captureStdout: true, captureStderr: true, signal },
@@ -2643,7 +2819,9 @@ export class BackupRunner {
       if (outcome.exitCode !== 0) {
         return (result = {
           ok: false,
-          problem: classifyResticExitCode(outcome.exitCode, outcome.stderr) ?? "other",
+          problem:
+            classifyResticExitCode(outcome.exitCode, outcome.stderr, repo?.kind ?? (repoDir === null ? "s3" : "local")) ??
+            "other",
         });
       }
 

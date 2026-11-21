@@ -173,9 +173,13 @@ describe("every administrator route refuses a customer before it does anything",
       siteId: siteRes.body.data.siteId as string,
       userId: admin.userId,
       domainId: `dom_${randomUUID()}`,
+      certificateId: `cti_${randomUUID().replace(/-/g, "")}`,
+      versionId: `ctv_${randomUUID().replace(/-/g, "")}`,
       hostId: host!.id,
       opId: `op_${randomUUID()}`,
       backupId: `bkp_${randomUUID()}`,
+      targetId: `bkt_${randomUUID().replace(/-/g, "")}`,
+      scope: "default",
       secretId: `sec_${randomUUID()}`,
       serviceId: `svc_${randomUUID()}`,
       memberId: `mem_${randomUUID()}`,
@@ -204,6 +208,16 @@ describe("every administrator route refuses a customer before it does anything",
       expect(guarded()).toContainEqual({ method: "POST", path });
     }
     for (const [method, path] of [
+      ["GET", "/v1/admin/tls-certificates"],
+      ["GET", "/v1/admin/tls-certificates/alerts"],
+      ["DELETE", "/v1/admin/tls-certificates/:certificateId"],
+      ["GET", "/v1/admin/sites/:siteId/tls-certificates"],
+      ["POST", "/v1/admin/sites/:siteId/tls-certificates"],
+      ["GET", "/v1/admin/sites/:siteId/tls-certificates/:certificateId"],
+      ["DELETE", "/v1/admin/sites/:siteId/tls-certificates/:certificateId"],
+      ["POST", "/v1/admin/sites/:siteId/tls-certificates/:certificateId/versions"],
+      ["POST", "/v1/admin/sites/:siteId/tls-certificates/:certificateId/versions/:versionId/activate"],
+      ["POST", "/v1/admin/sites/:siteId/domains/:domainId/tls"],
       ["GET", "/v1/admin/updates"],
       ["POST", "/v1/admin/updates/panel/check"],
       ["POST", "/v1/admin/updates/panel/apply"],
@@ -213,6 +227,18 @@ describe("every administrator route refuses a customer before it does anything",
       ["POST", "/v1/admin/os-packages/refresh"],
       ["POST", "/v1/admin/os-packages/upgrade"],
       ["POST", "/v1/admin/host-services/:service/restart"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/backup-targets"],
+      ["POST", "/v1/admin/backup-targets"],
+      ["PATCH", "/v1/admin/backup-targets/:targetId"],
+      ["DELETE", "/v1/admin/backup-targets/:targetId"],
+      ["POST", "/v1/admin/backup-targets/:targetId/test"],
+      ["POST", "/v1/admin/backup-targets/:targetId/initialize"],
+      ["GET", "/v1/admin/backup-policies/:scope"],
+      ["PATCH", "/v1/admin/backup-policies/:scope"],
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }

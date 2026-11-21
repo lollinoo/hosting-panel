@@ -70,6 +70,8 @@ function row(hostname: string, over: Partial<DomainRow> = {}): DomainRow {
     certExpiresAt: null,
     certTrusted: true,
     certChallenge: "http-01",
+    certMode: "acme",
+    manualCertificateVersionId: null,
     createdAt: now,
     updatedAt: now,
     ...over,

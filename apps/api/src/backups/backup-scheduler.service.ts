@@ -3,6 +3,7 @@ import { PLATFORM_OPS_ORG_ID, isBackupAvailable } from "@hosting-panel/contracts
 import {
   ACTIVE_OPERATION_LOCK_STATUSES,
   and,
+  anyUsableTarget,
   appendAuditEvent,
   countNightlyRunResults,
   enqueueOperationTransactional,
@@ -16,6 +17,7 @@ import {
   operations,
   organizations,
   platformInstallations,
+  resolvePanelTargets,
   siteBackups,
   sql,
   startNightlyRun,
@@ -120,7 +122,11 @@ export class BackupSchedulerService {
     let shouldTriggerOutbox: boolean;
     try {
       shouldTriggerOutbox = await this.dbClient.db.transaction(async (tx) => {
-        // Lock the singleton settings row for the full tick so concurrent ticks never interleave.
+        // No enabled, non-archived target (S3 or local) → nothing to schedule: no run state, no rows, no audit.
+        if (!(await anyUsableTarget(tx))) {
+          return false;
+        }
+        // Lock the default_site policy row (it carries the run state) for the full tick so concurrent ticks never interleave.
         const locked = await lockNightlyRunState(tx);
         if (!locked) {
           return false;
@@ -242,14 +248,14 @@ export class BackupSchedulerService {
     }
   }
 
-  /** Queues tonight's panel copy after the sites; a busy lock never fails the run. */
+  /** Queues tonight's panel copy after the sites (only when the panel policy names a usable target); a busy lock never fails the run. */
   async #enqueuePanelBackup(tx: DatabaseExecutor, date: string): Promise<boolean> {
-    if (!this.config.panelDump) {
+    if (!this.config.panelDump || (await resolvePanelTargets(tx)).length === 0) {
       return false;
     }
     await ensurePlatformOpsOrg(tx);
     try {
-      await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
+      const queued = await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
         organizationId: PLATFORM_OPS_ORG_ID,
         kind: "panel.backups.create",
         resourceType: "host",
@@ -260,6 +266,17 @@ export class BackupSchedulerService {
         steps: PANEL_BACKUP_STEPS,
         outboxPayload: {},
       });
+      if (!queued.idempotentReplay) {
+        await appendAuditEvent(tx as unknown as HostingPanelDatabase, {
+          actorId: null,
+          actorType: "system",
+          organizationId: null,
+          action: "panel.backups.create",
+          targetType: "backups",
+          targetId: null,
+          details: { operationId: queued.operation.id },
+        });
+      }
       return true;
     } catch (err: unknown) {
       if (isResourceLockedError(err)) {

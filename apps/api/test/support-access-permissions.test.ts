@@ -5,6 +5,7 @@ import { SUPPORT_ACCESS_PERMISSIONS } from "../src/auth/support-access.service.j
 
 const SITE_CONTROLLERS = [
   "site-domains",
+  "site-tls-certificates",
   "managed-sites",
   "site-files",
   "site-sftp",
@@ -15,7 +16,7 @@ const SITE_CONTROLLERS = [
 ];
 
 describe("support visit permissions", () => {
-  it("are exactly the 14 site, service and operation keys", () => {
+  it("are exactly the 15 site, service and operation keys", () => {
     expect([...SUPPORT_ACCESS_PERMISSIONS]).toEqual([
       "site.read",
       "site.create",
@@ -26,6 +27,7 @@ describe("support visit permissions", () => {
       "site.sftp.manage",
       "site.databases.manage",
       "site.backups.manage",
+      "site.certificates.manage",
       "service.deploy",
       "service.restart",
       "service.stop",

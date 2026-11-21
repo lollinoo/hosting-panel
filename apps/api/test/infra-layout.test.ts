@@ -230,6 +230,134 @@ describe("release workflow and docs", () => {
     for (const s of ["0030", "accept-acme-pebble.mjs"]) expect(harness).toContain(s);
   });
 
+  it("hcp-spec-004 ADRs are consistent", () => {
+    const adrs = [
+      { file: "docs/architecture/adr/0031-manual-tls-certificates.md", tokens: ["CP-01", "manual-certs", "PEM", "checkHost"] },
+      { file: "docs/architecture/adr/0032-backup-targets.md", tokens: ["HP_BACKUP_LOCAL_ROOT", "legacy_settings", "partial", "backup.key"] }
+    ];
+    for (const { file, tokens } of adrs) {
+      expect(existsSync(join(root, file)), file).toBe(true);
+      const adr = read(file);
+      for (const header of ["Stato", "Riferimento", "Migrazioni"]) expect(adr, `${file} ${header}`).toMatch(new RegExp(`^- \\*\\*${header}:\\*\\*`, "m"));
+      for (const s of tokens) expect(adr, `${file} ${s}`).toContain(s);
+      // Every repo path the ADR writes in backticks exists (a trailing :line is dropped); at least 8 are cited.
+      const paths = [...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, ""));
+      expect(paths.length, file).toBeGreaterThanOrEqual(8);
+      for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    }
+  });
+
+  it("hcp-spec-004 docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["ADR-0031", "ADR-0032", "HP_BACKUP_LOCAL_ROOT", "hp-restore-panel --local-repo", "--allow-feature-loss", "hp-restore-panel --endpoint"]) {
+      expect(readme, `README ${s}`).toContain(s);
+    }
+    const harness = read("HARNESS.md");
+    for (const s of ["0032", "0022_backup_targets_and_copies.sql", "accept-tls-manual.mjs", "accept-backup-local.mjs"]) expect(harness, `HARNESS ${s}`).toContain(s);
+    const runbook = read("docs/runbooks/tls-and-backup-targets.md");
+    for (let n = 1; n <= 10; n++) expect(runbook, `runbook heading ${n}.`).toMatch(new RegExp(`^## ${n}\\. `, "m"));
+    const api = read("docs/api/openapi.yaml");
+    for (const s of ["/v1/admin/backup-targets", "tls-certificates"]) expect(api, `openapi ${s}`).toContain(s);
+
+    // The acceptance report: exactly one row per id, an allowed verdict, and a command and SHA on every PASS row.
+    const report = read("docs/security/hcp-spec-004-acceptance-report.md");
+    const ids = [
+      ...Array.from({ length: 14 }, (_, i) => `TLS-${String(i + 1).padStart(2, "0")}`),
+      ...Array.from({ length: 20 }, (_, i) => `BKP-${String(i + 1).padStart(2, "0")}`)
+    ];
+    const rows = report
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("|"))
+      .map((line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()))
+      .filter((cells) => /^(TLS|BKP)-\d{2}$/.test((cells[0] ?? "").replace(/[`*]/g, "")));
+    const verdict = /^(PASS|FAIL|SKIPPED \(.+\)|PENDING \(owner: .+\)|BLOCKED \(BLOCKED\.md #\d+\))$/;
+    for (const id of ids) {
+      const mine = rows.filter((cells) => cells[0]!.replace(/[`*]/g, "") === id);
+      expect(mine.length, `acceptance report rows for ${id}`).toBe(1);
+      const cells = mine[0]!;
+      const v = (cells[2] ?? "").replace(/\*/g, "");
+      expect(v, `${id} verdict`).toMatch(verdict);
+      if (v === "PASS") {
+        expect((cells[3] ?? "").replace(/`/g, "").trim().length, `${id} command`).toBeGreaterThan(0);
+        expect(cells[5] ?? "", `${id} SHA`).toMatch(/[0-9a-f]{7,40}/);
+      }
+    }
+    expect(rows.length, "acceptance report has no extra id rows").toBe(ids.length);
+
+    // Both ADRs are as built and cite at least 15 repo paths that exist.
+    for (const file of ["docs/architecture/adr/0031-manual-tls-certificates.md", "docs/architecture/adr/0032-backup-targets.md"]) {
+      const adr = read(file);
+      expect(adr, `${file} Stato`).toMatch(/^- \*\*Stato:\*\* `APPROVATO`/m);
+      const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+      expect(paths.size, file).toBeGreaterThanOrEqual(15);
+      for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    }
+  });
+
+  it("hcp-spec-004 manual tls acceptance script is registered and machine-safe", () => {
+    const script = read("infra/linux/accept-tls-manual.mjs");
+    const helper = read("infra/linux/tls-test-certs.mjs");
+    // Same pinned Traefik and Pebble downloads as accept-acme-pebble.mjs (sha256 pins, 3.7.19).
+    const pebble = read("infra/linux/accept-acme-pebble.mjs");
+    for (const pin of [/TRAEFIK_SHA256 = "([0-9a-f]{64})"/, /pebble: "([0-9a-f]{64})"/, /minica: "([0-9a-f]{64})"/]) {
+      expect(script.match(pin)?.[1], String(pin)).toBeDefined();
+      expect(script.match(pin)?.[1]).toBe(pebble.match(pin)?.[1]);
+    }
+    expect(script).toContain("traefik_v3.7.19_linux_amd64.tar.gz");
+    // Drives the shipped executor modules and the contracts plan, not a copy of them.
+    for (const s of ["ManualTlsStore", "readAcmeStoreEntries", "evictAcmeEntries", "waitForServed", "planManualCertificates", "buildIngressProxyContainerPayload"]) {
+      expect(script, s).toContain(s);
+    }
+    // Machine safety: loopback only, own prefix, high ports, never the host's hp_ingress_proxy, no shell.
+    expect(script).toContain("hp_swarmtest_tls_");
+    expect(script).toContain('const HOST = "127.0.0.1"');
+    expect(script).not.toMatch(/0\.0\.0\.0|shell:\s*true|\bexec\(|execSync|spawnSync/);
+    expect(script).not.toMatch(/["'`]hp_ingress_proxy["'`]/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000)).toEqual([]);
+    // The steps of arch-tls-ingress 4.3 and the TLS-xx rows of the test matrix.
+    for (const stepName of [
+      "tls05-plan-says-eviction", "tls05-hot-superset", "tls05-cold-evict", "tls07-wildcard-exact", "wildcard-sibling-renews",
+      "capture-refused", "tls08-rotation-under-load", "bad-entry-not-fatal", "tls10-restart-x5", "tls09-crash-recovery",
+      "tls06-back-to-acme", "tls06-refused-under-wildcard", "gc-after-verify", "container-serves-manual-0700", "inspect-no-secrets",
+    ]) {
+      expect(script, stepName).toContain(`"${stepName}"`);
+    }
+    // The DER helper is node-only (no openssl, no dependency) and covers CN-not-in-SAN and a three-level chain.
+    expect([...helper.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1])).toEqual(["node:crypto"]);
+    expect(helper).toMatch(/export function makeCert/);
+    expect(helper).toMatch(/export function makeChain/);
+    expect(helper).not.toMatch(/openssl|child_process/);
+  });
+
+  it("hcp-spec-004 production-adapter tls acceptance script is registered and machine-safe", () => {
+    const script = read("infra/linux/accept-tls-adapter.mjs");
+    // Drives the production adapter from dist, through the proxy/network name seam, not a replay of its pieces.
+    for (const s of ["DockerEngineSocketAdapter", "ensureIngressProxy", "ingressProxyContainerName", "ingressNetworkName", "evictAcme", "acme_eviction_required", "not_served_reverted", "680febb"]) {
+      expect(script, s).toContain(s);
+    }
+    // Machine safety: own prefix, loopback ports only (the gate rewrites HostIp), gated Docker socket, no shell,
+    // and never the host's hp_ingress_proxy or hp_ingress_net by name.
+    expect(script).toContain("hp_swarmtest_adp_");
+    expect(script).toContain('const HOST = "127.0.0.1"');
+    expect(script).toContain("site_(edge|internal)");
+    expect(script).not.toMatch(/shell:\s*true|\bexec\(|execSync|spawnSync/);
+    // 0.0.0.0 appears only where the gate maps the payload's HostIp back (comments aside).
+    for (const line of script.split("\n").filter((l) => l.includes("0.0.0.0") && !/^\s*(\*|\/\/|\/\*)/.test(l))) expect(line).toContain('"HostIp"');
+    expect(script).not.toMatch(/["'`]hp_ingress_(proxy|net)["'`]/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000)).toEqual([]);
+    for (const stepName of [
+      "setup-proxy-through-ensure", "publish-on-fresh-empty-acme-store", "rotation-under-load", "executor-restart-recovers",
+      "setup-legacy-payload-proxy", "upgrade-no-recreate", "cold-path-refused-hot", "cold-path-evicts-with-backup",
+      "cold-path-failed-probe-restores", "gate-clean",
+    ]) {
+      expect(script, stepName).toContain(`"${stepName}"`);
+    }
+    // A step that cannot run is reported in the RESULT line, not passed silently (both acceptance scripts).
+    for (const file of ["infra/linux/accept-tls-adapter.mjs", "infra/linux/accept-tls-manual.mjs"]) {
+      expect(read(file), file).toMatch(/skipped \(not counted in n\/m\)/);
+    }
+  });
+
   it("m1a file manager docs are consistent", () => {
     const readme = read("README.md");
     for (const s of ["Web File Manager dei Siti", "ADR-0019"]) {
@@ -439,6 +567,78 @@ describe("release workflow and docs", () => {
       "site.backups.prune",
     ]) {
       expect(api).toContain(s);
+    }
+  });
+
+  it("hcp-spec-004 bootstrap provisions the manual certificate directory", () => {
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(
+      "install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/dynamic/manual-certs\n",
+    );
+    // Cold-start hazard: anything below dynamic/ the proxy uid cannot read takes every site down.
+    const dynamicDirs = bootstrap
+      .split("\n")
+      .filter((l) => l.startsWith("install -d ") && l.includes("/var/lib/hosting-panel/ingress/dynamic/"));
+    expect(dynamicDirs.length).toBeGreaterThan(0);
+    for (const l of dynamicDirs) {
+      expect(l).toMatch(/^install -d -m 0700 -o hp-executor -g hp-executor \/var\/lib\/hosting-panel\/ingress\/dynamic\/\S+$/);
+    }
+  });
+
+  it.skipIf(!hasHost)("hcp-spec-004 bootstrap dry-run mentions the manual certificate directory", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("ingress/dynamic/manual-certs (0700 hp-executor:hp-executor)");
+  });
+
+  it("hcp-spec-004 the executor knows the local backup root", () => {
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(
+      "install -d -m 2770 -o hp-executor -g hp-executor /var/lib/hosting-panel/local-repos\nchmod 2770 /var/lib/hosting-panel/local-repos\n",
+    );
+    // RestrictSUIDSGID=yes stays; it is why the root carries the setgid bit instead of the executor asking for it.
+    expect(read("infra/systemd/hp-docker-executor.service")).toContain("\nRestrictSUIDSGID=yes\n");
+    const unit = read("infra/systemd/hp-docker-executor.service");
+    expect(unit).toContain("\nEnvironment=HP_BACKUP_LOCAL_ROOT=/var/lib/hosting-panel/local-repos\n");
+    expect(unit).toContain("\nReadWritePaths=/var/lib/hosting-panel /run/hosting-panel\n");
+    expect(unit).not.toContain("RequiresMountsFor");
+  });
+
+  it("hcp-spec-004 local backup acceptance script is registered and machine-safe", () => {
+    const script = read("infra/linux/accept-backup-local.mjs");
+    const s3Script = read("infra/linux/accept-m3-backups.mjs");
+    // Same pinned RustFS as the S3 acceptance script (the legacy-coexistence step).
+    const rustfs = /const RUSTFS_IMAGE =\s*"(rustfs\/rustfs:[^"]+)"/;
+    expect(script.match(rustfs)?.[1]).toBeDefined();
+    expect(script.match(rustfs)?.[1]).toBe(s3Script.match(rustfs)?.[1]);
+    // Drives the built executor with a temporary local root and the shipped CLI, not a copy of them.
+    for (const s of ["DockerEngineSocketAdapter", "backupLocalRoot", "localInit", "fetchPanelCopy", "local_repo", "panel-fetch.js", "backup-repo.json", "backup-upload.json"]) {
+      expect(script, s).toContain(s);
+    }
+    // Machine safety: own prefix, no published port, nothing pulled or pruned, no shell, never the host's own objects.
+    expect(script).toContain("hp_swarmtest_");
+    expect(script).toContain("pullMissingImages: false");
+    expect(script).not.toMatch(/PortBindings\s*:|["']-p["']|["']--publish["']/);
+    expect(script).not.toMatch(/["'](?:prune|pull|system)["']/);
+    expect(script).not.toMatch(/shell:\s*true|(?<![.\w])exec\(|execSync|spawnSync/);
+    expect(script).not.toMatch(/["'`]hp_(?:ingress_proxy|ingress_net|mariadb)["'`]/);
+    expect(script).toMatch(/mkdtemp\(path\.join\(os\.tmpdir\(\)/);
+    // The cases that need root are gated and reported as skipped with a reason, never passed silently.
+    expect(script).toContain("HP_ACCEPT_ROOT_CASES");
+    expect(script).toMatch(/skipped \(not counted in n\/m\)/);
+    for (const stepName of [
+      "local-init-and-test", "local-backup-manual", "local-repo-ciphertext-only", "local-modes-and-users", "local-hostile",
+      "local-readonly-and-no-space", "local-restore", "local-export-zip", "panel-local-and-dr", "legacy-s3-coexists", "two-copies-both-succeed",
+      "two-copies-second-fails-partial", "forget-per-target", "zip-age-blocked", "no-secrets",
+    ]) {
+      expect(script, stepName).toContain(`"${stepName}"`);
+    }
+    // BKP-07/08/09: the second copy is op_x-t2, forgets are per target, and the refusal reason is pinned.
+    for (const s of ["-t2", "-forget-t2", "local_target_unmounted", "isEncryptedBackupExportAvailable", "BLOCKED.md #4"]) {
+      expect(script, s).toContain(s);
     }
   });
 

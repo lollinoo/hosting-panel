@@ -5,17 +5,25 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { DomainsPanel } from "@/components/customer/domains-panel";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { fetchServerAdminDnsProvider, fetchServerAdminSiteDomains } from "@/lib/server-api";
+import { fetchServerAdminDnsProvider, fetchServerAdminSiteDomains, fetchServerAdminSiteTlsCertificates, fetchServerMe } from "@/lib/server-api";
 import { getServerSession } from "@/lib/server-session";
 
 export const dynamic = "force-dynamic";
+
+/** The imported-certificate extras never block the page: any failure reads as "feature off". */
+const optional = <T,>(load: () => Promise<T | null>): Promise<T | null> => Promise.resolve().then(load).catch(() => null);
 
 export default async function AdminSiteDomainsPage({ params }: { params: Promise<{ siteId: string }> }) {
   const { siteId } = await params;
   const session = await getServerSession();
   if (!session) redirect("/login");
   const m = getMessages(await getRequestLocale());
-  const [initial, dns] = await Promise.all([fetchServerAdminSiteDomains(siteId), fetchServerAdminDnsProvider()]);
+  const [initial, dns, certificates, me] = await Promise.all([
+    fetchServerAdminSiteDomains(siteId),
+    fetchServerAdminDnsProvider(),
+    optional(() => fetchServerAdminSiteTlsCertificates(siteId)),
+    optional(() => fetchServerMe()),
+  ]);
   if (!initial) return <LoadError m={m} />;
   return (
     <div className="space-y-6">
@@ -31,7 +39,13 @@ export default async function AdminSiteDomainsPage({ params }: { params: Promise
           <AlertDescription>{m.errors.generic}</AlertDescription>
         </Alert>
       )}
-      <DomainsPanel basePath={`/api/admin/sites/${siteId}/domains`} csrfToken={session.csrfToken} initial={initial} challenge={{ dnsAvailable: !dns || dns.provider !== null }} />
+      <DomainsPanel
+        basePath={`/api/admin/sites/${siteId}/domains`}
+        csrfToken={session.csrfToken}
+        initial={initial}
+        challenge={{ dnsAvailable: !dns || dns.provider !== null }}
+        tls={{ certificates, manualAvailable: certificates !== null && me?.platformCapabilities?.manualTlsCertificatesAvailable === true }}
+      />
     </div>
   );
 }

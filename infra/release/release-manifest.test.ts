@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // @ts-expect-error -- plain ESM script without type declarations
-import { keepWebBuildPath, listReleaseViolations, releaseImages, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
+import { keepWebBuildPath, listReleaseViolations, RELEASE_FEATURES, releaseImages, releaseNodeVersion, REQUIRED_RELEASE_PATHS } from "./build-release.mjs";
 import * as contracts from "../../packages/contracts/src/index.js";
 import { DEFAULT_TRAEFIK_IMAGE } from "../../apps/docker-executor/src/traefik-config.js";
 
@@ -144,5 +144,12 @@ describe("releaseImages", () => {
     expect(named.length).toBeGreaterThan(4);
     for (const i of [...named, DEFAULT_TRAEFIK_IMAGE, ...php]) expect(images).toContain(i);
     expect(images).toEqual([...new Set(images)].sort());
+  });
+});
+
+describe("RELEASE_FEATURES", () => {
+  it("lists the gated features as sed-safe identifiers", () => {
+    expect(RELEASE_FEATURES).toEqual(["manual-tls", "backup-targets"]);
+    for (const f of RELEASE_FEATURES) expect(f).toMatch(/^[a-z0-9-]+$/);
   });
 });

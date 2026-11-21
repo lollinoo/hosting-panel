@@ -1,11 +1,13 @@
 "use client";
 
 import { Fragment, useEffect, useId, useRef, useState } from "react";
+import { AlertTriangle, CheckCircle2, CircleHelp, Clock, XCircle } from "lucide-react";
 import {
   ErrorCodeSchema,
   type BackupArchiveDto,
   type BackupLastRestoreDto,
   type SiteBackupDto,
+  type SiteBackupPolicyDto,
   type SiteBackupsDto,
 } from "@hosting-panel/contracts";
 import { RestoreBackupDialog } from "@/components/customer/restore-backup-dialog";
@@ -16,6 +18,16 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { errorMessage, format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
+import {
+  bothChoiceIds,
+  choiceLabels,
+  hasRestorableCopy,
+  labelledCopies,
+  restorableCopies,
+  statusView,
+  type BackupCopy,
+  type StatusView,
+} from "@/lib/backup-copies";
 import { formatDate, formatSize } from "@/lib/file-browser";
 
 const DAY_MS = 86_400_000;
@@ -38,6 +50,8 @@ export interface SiteBackupsProps {
   csrfToken: string;
   siteName?: string;
   initialDownloadError?: "gone" | "failed" | null;
+  /** The destination choice; null or without choices hides the chooser. */
+  policy?: SiteBackupPolicyDto | null;
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -80,7 +94,8 @@ export function backupExpiry(
   retentionDays: number,
   now: Date = new Date(),
 ): BackupExpiry {
-  if (row.status !== "succeeded") return null;
+  // A partial backup keeps a restorable copy, so it expires like a completed one.
+  if (row.status !== "succeeded" && (row.status as string) !== "partial") return null;
   const startedMs = Date.parse(row.startedAt);
   const nowMs = now.getTime();
   if (!Number.isFinite(startedMs) || !Number.isFinite(nowMs) || !Number.isFinite(retentionDays) || retentionDays < 0) {
@@ -348,6 +363,8 @@ export async function triggerRestoreBackup(opts: {
   basePath: string;
   backupId: string;
   confirmName: string;
+  /** Only when the backup has more than one restorable copy. */
+  targetId?: string;
   csrfToken: string;
   inFlightRef: { current: boolean };
   fetchImpl?: typeof fetch;
@@ -355,7 +372,7 @@ export async function triggerRestoreBackup(opts: {
 }): Promise<Response | null> {
   return postBackupEndpoint({
     url: `${opts.basePath}/${encodeURIComponent(opts.backupId)}/restore`,
-    body: { confirmName: opts.confirmName },
+    body: { confirmName: opts.confirmName, ...(opts.targetId ? { targetId: opts.targetId } : {}) },
     csrfToken: opts.csrfToken,
     inFlightRef: opts.inFlightRef,
     fetchImpl: opts.fetchImpl,
@@ -367,6 +384,8 @@ export async function triggerRestoreBackup(opts: {
 export async function triggerPrepareDownload(opts: {
   basePath: string;
   backupId: string;
+  /** Only when the backup has more than one restorable copy. */
+  targetId?: string;
   csrfToken: string;
   inFlightRef: { current: boolean };
   fetchImpl?: typeof fetch;
@@ -374,7 +393,7 @@ export async function triggerPrepareDownload(opts: {
 }): Promise<Response | null> {
   return postBackupEndpoint({
     url: `${opts.basePath}/${encodeURIComponent(opts.backupId)}/download`,
-    body: {},
+    body: opts.targetId ? { targetId: opts.targetId } : {},
     csrfToken: opts.csrfToken,
     inFlightRef: opts.inFlightRef,
     fetchImpl: opts.fetchImpl,
@@ -453,6 +472,7 @@ export async function submitRestoreBackup(opts: {
   basePath: string;
   backupId: string;
   confirmName: string;
+  targetId?: string;
   csrfToken: string;
   inFlightRef: { current: boolean };
   messages: Messages;
@@ -472,6 +492,7 @@ export async function submitRestoreBackup(opts: {
 export async function submitPrepareDownload(opts: {
   basePath: string;
   backupId: string;
+  targetId?: string;
   csrfToken: string;
   inFlightRef: { current: boolean };
   messages: Messages;
@@ -561,6 +582,152 @@ export function startBackupPolling(opts: {
   };
 }
 
+/** Saves the site's destination choice; null returns to the provider's default. Resolves to true on 2xx. */
+export async function saveSiteBackupPolicy(opts: {
+  policyPath: string;
+  targetIds: string[] | null;
+  csrfToken: string;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  try {
+    const res = await (opts.fetchImpl ?? fetch)(opts.policyPath, {
+      method: "PATCH",
+      headers: { "content-type": "application/json", "x-csrf-token": opts.csrfToken },
+      body: JSON.stringify({ targetIds: opts.targetIds }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+const STATUS_ICONS = {
+  check: CheckCircle2,
+  x: XCircle,
+  clock: Clock,
+  alert: AlertTriangle,
+  help: CircleHelp,
+} as const;
+
+function StatusIcon({ icon }: { icon: StatusView["icon"] }) {
+  const Icon = STATUS_ICONS[icon];
+  return <Icon aria-hidden="true" className="mr-1 h-3.5 w-3.5 shrink-0" />;
+}
+
+/** One line per copy: where, its state (text and icon), its size and, when it failed, what to do. */
+function CopiesList({ copies, t, locale }: { copies: BackupCopy[]; t: Messages["site"]["backups"]; locale: string }) {
+  return (
+    <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground" aria-label={t.copies.title}>
+      {labelledCopies(t.target, copies).map((c) => {
+        const view = statusView(c.status);
+        const status = t.copies.status[view.textKey as keyof typeof t.copies.status];
+        const text =
+          c.sizeBytes === null
+            ? format(t.copies.withoutSize, { label: c.label, status })
+            : format(t.copies.withSize, { label: c.label, status, size: formatSize(c.sizeBytes, locale) });
+        const problem = c.problem ? (Object.hasOwn(t.problem, c.problem) ? t.problem[c.problem] : t.problem.other) : null;
+        return (
+          <li key={c.targetId}>
+            <span className="inline-flex items-center">
+              <StatusIcon icon={view.icon} />
+              {text}
+            </span>
+            {problem ? <span className="block pl-5 text-destructive">{problem}</span> : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** Radio choice between the provider's default and one of the destinations the customer may use. */
+function BackupTargetChooser({
+  policy,
+  policyPath,
+  csrfToken,
+}: {
+  policy: SiteBackupPolicyDto;
+  policyPath: string;
+  csrfToken: string;
+}) {
+  const t = useMessages().site.backups.target;
+  const labels = choiceLabels(t, policy.choices);
+  const both = bothChoiceIds(policy.choices);
+  const initial =
+    policy.inherited || policy.targetIds.length === 0
+      ? "inherit"
+      : policy.targetIds.length === 2 && both !== null && both.every((id) => policy.targetIds.includes(id))
+        ? "both"
+        : (policy.targetIds[0] ?? "inherit");
+  const [saved, setSaved] = useState(initial);
+  const [selected, setSelected] = useState(initial);
+  const [state, setState] = useState<"idle" | "saving" | "saved" | "failed">("idle");
+  const selectedIds = selected === "inherit" ? [] : selected === "both" ? (both ?? []) : [selected];
+  const hasLocal = policy.choices.some((c) => c.kind === "local" && selectedIds.includes(c.id));
+
+  async function save() {
+    setState("saving");
+    const ok = await saveSiteBackupPolicy({
+      policyPath,
+      targetIds: selected === "inherit" ? null : selectedIds,
+      csrfToken,
+    });
+    if (ok) setSaved(selected);
+    setState(ok ? "saved" : "failed");
+  }
+
+  return (
+    <Card>
+      <CardContent className="space-y-3 p-4">
+        <fieldset className="space-y-2" disabled={state === "saving"}>
+          <legend className="text-sm font-medium">{t.title}</legend>
+          <p className="text-xs text-muted-foreground">{t.intro}</p>
+          {[
+            { id: "inherit", label: t.inherit },
+            ...policy.choices.map((c, i) => ({ id: c.id, label: labels[i] })),
+            ...(both ? [{ id: "both", label: t.both }] : []),
+          ].map((o) => (
+            <label key={o.id} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="backup-target"
+                value={o.id}
+                checked={selected === o.id}
+                onChange={() => {
+                  setSelected(o.id);
+                  setState("idle");
+                }}
+              />
+              {o.label}
+            </label>
+          ))}
+          {both ? <p className="text-xs text-muted-foreground">{t.bothHelp}</p> : null}
+        </fieldset>
+        {hasLocal ? (
+          <Alert variant="warning">
+            <AlertDescription>{t.localWarning}</AlertDescription>
+          </Alert>
+        ) : null}
+        <div className="flex items-center gap-3">
+          <Button type="button" size="sm" disabled={state === "saving" || selected === saved} onClick={() => void save()}>
+            {state === "saving" ? t.saving : t.save}
+          </Button>
+          {state === "saved" ? (
+            <p className="text-sm text-muted-foreground" role="status">
+              {t.saved}
+            </p>
+          ) : null}
+          {state === "failed" ? (
+            <p className="text-sm text-destructive" role="alert">
+              {t.failed}
+            </p>
+          ) : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // Render the customer backups tab state machine, restore/download actions, and failure notes.
 export function SiteBackups({
   basePath,
@@ -568,6 +735,7 @@ export function SiteBackups({
   csrfToken,
   siteName = "",
   initialDownloadError = null,
+  policy = null,
 }: SiteBackupsProps) {
   const m = useMessages();
   const locale = useLocale();
@@ -580,6 +748,7 @@ export function SiteBackups({
   const [errorText, setErrorText] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<"gone" | "failed" | null>(initialDownloadError);
   const [restoreTarget, setRestoreTarget] = useState<SiteBackupDto | null>(null);
+  const [downloadSource, setDownloadSource] = useState<Record<string, string>>({});
   const inFlightRef = useRef(false);
   const latestDataRef = useRef<SiteBackupsDto>(initial);
 
@@ -672,10 +841,16 @@ export function SiteBackups({
     setDownloadError(null);
     setPollTimedOut(false);
 
+    const sources = restorableCopies(row);
+    const chosen = downloadSource[row.id];
+    const targetId =
+      sources.length > 1 ? (sources.find((c) => c.targetId === chosen) ?? sources[0])?.targetId : undefined;
+
     try {
       const outcome = await submitPrepareDownload({
         basePath,
         backupId: row.id,
+        targetId,
         csrfToken,
         inFlightRef,
         messages: m,
@@ -691,7 +866,7 @@ export function SiteBackups({
     }
   }
 
-  async function handleConfirmRestore(confirmName: string): Promise<string | null> {
+  async function handleConfirmRestore(confirmName: string, targetId?: string): Promise<string | null> {
     if (!restoreTarget) return null;
     const target = restoreTarget;
     setErrorText(null);
@@ -702,6 +877,7 @@ export function SiteBackups({
       basePath,
       backupId: target.id,
       confirmName,
+      targetId,
       csrfToken,
       inFlightRef,
       messages: m,
@@ -724,6 +900,9 @@ export function SiteBackups({
   const now = new Date();
   const hasReadyArchive = data.backups.some((row) => isArchiveReady(row.archive, now));
   const currentRestoreBanner = restoreBanner(m, data.lastRestore, locale);
+  const policyPath = basePath.replace(/\/backups$/, "/backup-policy");
+  const restoreSources = restoreTarget ? labelledCopies(t.target, restorableCopies(restoreTarget)) : [];
+  const restoreOptions = restoreSources.length > 0 ? restoreSources : undefined;
 
   return (
     <div className="space-y-4">
@@ -740,6 +919,10 @@ export function SiteBackups({
           {t.backupNow}
         </Button>
       </div>
+
+      {policy && policy.choices.length > 0 ? (
+        <BackupTargetChooser policy={policy} policyPath={policyPath} csrfToken={csrfToken} />
+      ) : null}
 
       {isBackupRunning ? (
         <p className="text-sm text-muted-foreground" role="status">
@@ -793,12 +976,13 @@ export function SiteBackups({
                         ? t.keptLatest
                         : formatExpiryDate(expiry, locale);
                   const sizeText = row.sizeBytes === null ? "—" : formatSize(row.sizeBytes, locale);
-                  const badgeVariant =
-                    row.status === "succeeded"
-                      ? "default"
-                      : row.status === "failed"
-                        ? "destructive"
-                        : "secondary";
+                  const view = statusView(row.status);
+                  const copies = row.copies ?? [];
+                  const sources = restorableCopies(row);
+                  const canUse = hasRestorableCopy(row);
+                  // One succeeded off-server copy is the pre-existing single destination: nothing new to say.
+                  const only = copies.length === 1 ? copies[0] : undefined;
+                  const showCopies = copies.length > 1 || (only !== undefined && (only.kind !== "s3" || only.status !== "succeeded"));
                   const problemText =
                     row.status === "failed" && row.problem
                       ? Object.hasOwn(t.problem, row.problem)
@@ -817,9 +1001,8 @@ export function SiteBackups({
                         : t.copyProblem.other
                       : null;
 
-                  const showPrepare =
-                    row.status === "succeeded" && !busy && !rowReady && !rowPreparing;
-                  const showRestore = row.status === "succeeded" && !busy;
+                  const showPrepare = canUse && !busy && !rowReady && !rowPreparing;
+                  const showRestore = canUse && !busy;
 
                   return (
                     <Fragment key={row.id}>
@@ -828,11 +1011,25 @@ export function SiteBackups({
                         <TableCell>{t.kind[row.kind]}</TableCell>
                         <TableCell>{sizeText}</TableCell>
                         <TableCell>
-                          <Badge variant={badgeVariant}>{t.status[row.status]}</Badge>
+                          <Badge
+                            variant={view.variant}
+                            title={view.textKey === "partial" ? t.status.partialLong : undefined}
+                          >
+                            <StatusIcon icon={view.icon} />
+                            {t.status[view.textKey as keyof typeof t.status]}
+                          </Badge>
+                          {showCopies ? (
+                            <>
+                              <CopiesList copies={copies} t={t} locale={locale} />
+                              {view.textKey === "partial" ? (
+                                <p className="mt-1 text-xs text-muted-foreground">{t.copies.partialHelp}</p>
+                              ) : null}
+                            </>
+                          ) : null}
                         </TableCell>
                         <TableCell>{expiryText}</TableCell>
                         <TableCell>
-                          {row.status !== "succeeded" ? (
+                          {!canUse ? (
                             "—"
                           ) : (
                             <div className="space-y-1.5">
@@ -876,6 +1073,23 @@ export function SiteBackups({
 
                               {showPrepare || showRestore ? (
                                 <div className="flex flex-wrap items-center gap-2">
+                                  {showPrepare && sources.length > 1 ? (
+                                    <select
+                                      aria-label={t.restore.fromLabel}
+                                      className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                                      disabled={submitting}
+                                      value={downloadSource[row.id] ?? sources[0]?.targetId}
+                                      onChange={(e) =>
+                                        setDownloadSource((prev) => ({ ...prev, [row.id]: e.target.value }))
+                                      }
+                                    >
+                                      {labelledCopies(t.target, sources).map((c) => (
+                                        <option key={c.targetId} value={c.targetId}>
+                                          {c.label}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  ) : null}
                                   {showPrepare ? (
                                     <Button
                                       type="button"
@@ -937,6 +1151,7 @@ export function SiteBackups({
           if (!open) setRestoreTarget(null);
         }}
         onConfirm={handleConfirmRestore}
+        copies={restoreOptions}
       />
     </div>
   );

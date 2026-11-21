@@ -220,6 +220,9 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
                 phpMyAdminAvailable: false,
                 productionBackupRuntimeAvailable: false,
                 wordpressToolsAvailable: false,
+                manualTlsCertificatesAvailable: false,
+                localBackupTargetsAvailable: false,
+                encryptedBackupExportAvailable: false,
               },
             },
           };
@@ -1179,6 +1182,9 @@ describe("Next.js 16 Encrypted JWE BFF Security Boundary & 3-Console Integration
       expect(caps.phpMyAdminAvailable).toBe(false);
       expect(caps.productionBackupRuntimeAvailable).toBe(false);
       expect(caps.wordpressToolsAvailable).toBe(false);
+      expect(caps.manualTlsCertificatesAvailable).toBe(false);
+      expect(caps.localBackupTargetsAvailable).toBe(false);
+      expect(caps.encryptedBackupExportAvailable).toBe(false);
 
       // Missing CSRF on lifecycle must fail with 403
       const noCsrfRes = await postOrgLifecycle(

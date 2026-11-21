@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
-import { BACKUP_PROBLEMS, type SiteDomainDto, type SiteDomainsDto } from "@hosting-panel/contracts";
+import { BACKUP_PROBLEMS, ERROR_CODES, type SiteDomainDto, type SiteDomainsDto } from "@hosting-panel/contracts";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
+import { errorMessage } from "@/i18n";
 import { I18nProvider } from "@/i18n/provider";
 
 const fetchUpstream = vi.fn();
@@ -55,6 +56,7 @@ const dom = (over: {
   challenge: over.challenge ?? "http-01",
   dns: { status: "ok", checkedAt: null, nextCheckAt: "2026-11-09T13:00:00Z", observedA: [], observedAaaa: [], ...over.dns },
   certificate: { status: "none", problem: null, expiresAt: null, retryAt: null, trusted: true, ...over.certificate },
+  tls: { mode: "acme", certificateId: null, versionId: null, state: null, problem: null },
 });
 
 describe("domains BFF", () => {
@@ -147,7 +149,7 @@ describe("domains UI", () => {
   });
 
   it("every domain hint exists in both languages and names a next step", () => {
-    const keys = ["not_found", "points_elsewhere", "ipv6_conflict", "lookup_failed", "rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "dns_provider", "other"];
+    const keys = ["not_found", "points_elsewhere", "ipv6_conflict", "lookup_failed", "rate_limited", "port_80_blocked", "not_pointing", "caa_blocked", "dns_provider", "other", "manualApplyFailed"];
     for (const m of [en, itMsgs]) expect(Object.keys(m.site.domains.hint).sort()).toEqual([...keys].sort());
     const h = (m: typeof en) => m.site.domains.hint;
     expect(h(en).not_found).toBe("This address doesn't point anywhere yet. At your domain provider, create an A record for {host} with the value {ip}. Changes can take a few hours; we check automatically.");
@@ -207,6 +209,7 @@ describe("domains UI", () => {
       httpsProblem: "HTTPS not active yet",
       httpsExpired: "HTTPS expired",
       testCertificate: "Test certificate",
+      applyingCertificate: "Applying certificate",
     });
     expect(en.site.domains.pill.validUntil).toBe("HTTPS valid until {date}");
     expect(itMsgs.site.domains.state.waitingForDns).toBe("In attesa del DNS");
@@ -311,6 +314,18 @@ describe("backups shared base", () => {
           expect(problemMap[key].trim().length, `${label}.${key}`).toBeGreaterThan(0);
         }
       }
+    }
+  });
+
+  it("has its own next-step text for every manual-certificate error and for a target still in use, in both catalogs", () => {
+    const codes = ERROR_CODES.filter((c) => c.startsWith("CERTIFICATE_") || c === "BACKUP_TARGET_IN_USE");
+    expect(codes).toHaveLength(12);
+    for (const code of codes) {
+      const [enText, itText] = [errorMessage(en, code), errorMessage(itMsgs, code)];
+      expect(enText, `en.${code}`).not.toBe(en.errors.generic);
+      expect(itText, `it.${code}`).not.toBe(itMsgs.errors.generic);
+      expect(enText, code).not.toBe(itText);
+      expect(`${enText} ${itText}`, code).not.toMatch(/-----BEGIN|\bBEGIN\b/);
     }
   });
 

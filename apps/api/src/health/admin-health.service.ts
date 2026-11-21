@@ -26,14 +26,18 @@ import {
 } from "@hosting-panel/contracts";
 import {
   and,
+  anyUsableTarget,
   asc,
+  backupPolicies,
   backupSettings,
   desc,
   eq,
   gte,
   hostAgentHeartbeats,
   inArray,
+  latestPanelBackupOutcome,
   listAdminBackupStatus,
+  listBackupTargets,
   listUnsettledOperations,
   lte,
   not,
@@ -41,7 +45,9 @@ import {
   operations,
   or,
   organizations,
+  resolveEffectiveTargets,
   serviceInstances,
+  siteBackups,
   sites,
   stackRevisions,
   type DatabaseClient,
@@ -49,6 +55,7 @@ import {
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { evaluateServiceDrift } from "@hosting-panel/hosting-domain";
 import { z } from "zod";
+import { manualExpiryAlerts } from "../certificates/tls-expiry.js";
 import { BACKUP_POLL_DEADLINE_MS } from "../backups/site-backups-applier.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, HOST_AGENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
@@ -60,6 +67,7 @@ type DownSite = { siteId: string; siteName: string; observed: AdminHealthDto["si
 const PanelContainersSnapshotSchema = z.object({ containers: z.array(PanelContainerStatusWireSchema) });
 const DisksSnapshotSchema = z.object({ disks: z.array(HostDiskWireSchema) });
 const HOST_SERVICES_READ_MS = 3_000;
+const LOW_SPACE_FLOOR_BYTES = 1024 ** 3;
 const DRIFT_REASONS = [
   ["OUT_OF_BAND_MODIFIED", "out_of_band_modified"],
   ["STATUS_MISMATCH", "status_mismatch"],
@@ -110,7 +118,8 @@ export class AdminHealthService {
     const db = this.dbClient.db;
     const { health, downSites } = await this.#read(now);
     const alerts: AdminAlertDto[] = [];
-    const push = <A extends AdminAlertDto>(a: Omit<A, "severity">) => alerts.push({ ...a, severity: ALERT_SEVERITY[a.kind] } as A);
+    const push = <A extends AdminAlertDto>(a: Omit<A, "severity"> & { severity?: A["severity"] }) =>
+      alerts.push({ severity: ALERT_SEVERITY[a.kind], ...a } as A);
 
     for (const d of health.disks.filter((d) => d.usedPercent >= DISK_HIGH_PERCENT)) {
       push({ kind: "disk_high", subject: d.paths.join("+"), since: d.observedAt, details: { paths: d.paths, usedPercent: d.usedPercent } });
@@ -142,23 +151,69 @@ export class AdminHealthService {
         else push({ kind: "certificate_not_issued", subject: a.hostname, since: null, details: site });
       }
     }
+    for (const m of await manualExpiryAlerts(db, now)) {
+      push({
+        kind: "manual_certificate_expiring",
+        severity: m.tier === "warning" ? "warning" : "critical",
+        subject: m.versionId,
+        since: null,
+        details: { siteId: m.siteId, siteName: m.siteName, certificateId: m.certificateId, certificateName: m.certificateName, notAfter: m.notAfter, tier: m.tier },
+      });
+    }
     for (const b of await listAdminBackupStatus(db)) {
       if (b.lastStatus === "failed" && b.lastAttemptAt) {
         push({ kind: "backup_failed", subject: b.siteId, since: b.lastAttemptAt, details: { siteId: b.siteId, siteName: b.siteName, failedAt: b.lastAttemptAt } });
+      }
+      if (b.lastStatus === "partial" && b.lastAttemptAt) {
+        // The status DTO carries no backup id: read the id of that same newest attempt (same ordering as the status query).
+        const [latest] = await db.select({ id: siteBackups.id }).from(siteBackups).where(eq(siteBackups.siteId, b.siteId)).orderBy(desc(siteBackups.startedAt), desc(siteBackups.id)).limit(1);
+        if (latest) push({ kind: "backup_partial", subject: b.siteId, since: b.lastAttemptAt, details: { siteId: b.siteId, siteName: b.siteName, backupId: latest.id, at: b.lastAttemptAt } });
       }
       const r = b.lastRestore;
       if (r?.status === "failed" && r.problem === "undo_incomplete") {
         push({ kind: "restore_undo_incomplete", subject: r.backupId, since: r.finishedAt, details: { siteId: b.siteId, siteName: b.siteName, backupId: r.backupId, failedAt: r.finishedAt } });
       }
     }
-    const [settings] = await db.select().from(backupSettings).limit(1);
-    if (settings?.lastPanelBackupStatus === "failed" && settings.lastPanelBackupAt) {
-      const failedAt = settings.lastPanelBackupAt.toISOString();
-      push({ kind: "panel_backup_failed", subject: "panel", since: failedAt, details: { failedAt } });
+    // Panel copies are the source once any panel backup has settled; backup_settings only covers a panel that never wrote copies.
+    const panelOutcome = await latestPanelBackupOutcome(db);
+    if (panelOutcome) {
+      if (panelOutcome.status !== "succeeded") {
+        const failedAt = panelOutcome.at.toISOString();
+        push({ kind: "panel_backup_failed", subject: "panel", since: failedAt, details: { failedAt } });
+      }
+    } else {
+      const [settings] = await db.select().from(backupSettings).limit(1);
+      if (settings?.lastPanelBackupStatus === "failed" && settings.lastPanelBackupAt) {
+        const failedAt = settings.lastPanelBackupAt.toISOString();
+        push({ kind: "panel_backup_failed", subject: "panel", since: failedAt, details: { failedAt } });
+      }
     }
-    if (settings?.lastTestOutcome === "failed" && settings.lastTestAt) {
-      const testedAt = settings.lastTestAt.toISOString();
-      push({ kind: "backup_storage_test_failed", subject: "storage", since: testedAt, details: { testedAt } });
+    // One alert per live target from its stored last test; paths, endpoints and buckets never leave the row.
+    for (const t of (await listBackupTargets(db)).filter((t) => t.enabled && t.archivedAt === null && t.lastTestAt !== null)) {
+      const testedAt = t.lastTestAt!.toISOString();
+      if (t.lastTestOutcome === "failed") {
+        push({ kind: "backup_storage_test_failed", subject: t.id, since: testedAt, details: { testedAt, targetId: t.id, targetKind: t.kind, problem: t.lastTestProblem } });
+      } else if (t.kind === "local" && t.lastTestAvailableBytes !== null && t.lastTestTotalBytes !== null &&
+        t.lastTestAvailableBytes < Math.max(LOW_SPACE_FLOOR_BYTES, t.lastTestTotalBytes / 10)) {
+        push({ kind: "backup_target_space_low", subject: t.id, since: testedAt, details: { targetId: t.id, targetKind: "local", availableBytes: t.lastTestAvailableBytes, totalBytes: t.lastTestTotalBytes, testedAt } });
+      }
+    }
+    // The nightly run skips these sites without a trace, so the administrator is told: same site eligibility and effective-target
+    // resolution as the scheduler, and only once some target is usable (a fresh install is not an alert per site).
+    if (await anyUsableTarget(db)) {
+      const own = new Set((await db.select({ siteId: backupPolicies.siteId }).from(backupPolicies).where(eq(backupPolicies.scope, "site"))).map((p) => p.siteId));
+      let inheritedUsable: boolean | null = null;
+      const eligible = await db
+        .select({ id: sites.id, name: sites.name })
+        .from(sites)
+        .where(and(inArray(sites.status, ["ready", "degraded", "stopped"]), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
+        .orderBy(asc(sites.id));
+      for (const s of eligible) {
+        const hasOwn = own.has(s.id);
+        const usable: boolean = !hasOwn && inheritedUsable !== null ? inheritedUsable : (await resolveEffectiveTargets(db, s.id)).length > 0;
+        if (!hasOwn) inheritedUsable = usable;
+        if (!usable) push({ kind: "backup_site_without_target", subject: s.id, since: null, details: { siteId: s.id, siteName: s.name } });
+      }
     }
     const stuckRestores = await db
       .select({ operationId: operations.id, startedAt: operations.startedAt, siteId: sites.id, siteName: sites.name })

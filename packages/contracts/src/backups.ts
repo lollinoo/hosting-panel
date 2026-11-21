@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { BACKUP_FAILURE_CLASSES, BackupTargetSchema } from "./ipc-schemas.js";
+import {
+  BACKUP_FAILURE_CLASSES,
+  BACKUP_TARGET_ID_PATTERN,
+  BackupTargetSchema,
+} from "./ipc-schemas.js";
 import type { OperationKind } from "./operations.js";
 import { SiteFileChunkDtoSchema } from "./site-files.js";
 import { SITE_TYPES } from "./site-types/registry.js";
@@ -26,6 +30,10 @@ export const BACKUP_PROBLEMS = [
   "panel_dump_failed",
   "panel_dump_tool_missing",
   "site_not_started",
+  // A copy's snapshot is gone from its repository (API-only: the executor never reports it).
+  "backup_copy_missing",
+  // The age recipient of an encrypted export is not a valid age1 public key.
+  "invalid_recipient",
 ] as const;
 export const BackupProblemSchema = z.enum(BACKUP_PROBLEMS);
 export type BackupProblem = z.infer<typeof BackupProblemSchema>;
@@ -33,7 +41,7 @@ export type BackupProblem = z.infer<typeof BackupProblemSchema>;
 export const BACKUP_KINDS = ["nightly", "manual", "pre_update"] as const;
 export type BackupKind = (typeof BACKUP_KINDS)[number];
 
-export const BACKUP_STATUSES = ["running", "succeeded", "failed"] as const;
+export const BACKUP_STATUSES = ["running", "succeeded", "failed", "partial"] as const;
 export type BackupStatus = (typeof BACKUP_STATUSES)[number];
 
 function deriveTargetField(schema: z.ZodType<string>, message: string) {
@@ -127,9 +135,13 @@ export const BackupSettingsDtoSchema = z.object({
 });
 export type BackupSettingsDto = z.infer<typeof BackupSettingsDtoSchema>;
 
+// Not imported from backup-targets.ts (it imports this file); a contracts test pins the parity.
+const BackupCopyTargetIdSchema = z.string().regex(BACKUP_TARGET_ID_PATTERN);
+
 export const RestoreBackupInputSchema = z
   .object({
     confirmName: z.string().max(255),
+    targetId: BackupCopyTargetIdSchema.optional(),
   })
   .strict();
 export type RestoreBackupInput = z.infer<typeof RestoreBackupInputSchema>;
@@ -141,9 +153,38 @@ export const AdminRestoreBackupInputSchema = z
       .regex(/^bkp_[0-9a-f]{32}$/)
       .optional(),
     confirmName: z.string().max(255),
+    targetId: BackupCopyTargetIdSchema.optional(),
   })
   .strict();
 export type AdminRestoreBackupInput = z.infer<typeof AdminRestoreBackupInputSchema>;
+
+/** age X25519 public key: `age1` plus 58 bech32 characters (pure TS, no age binary involved). */
+export function isAgeRecipient(value: string): boolean {
+  return /^age1[02-9ac-hj-np-z]{58}$/.test(value);
+}
+
+export const BACKUP_DOWNLOAD_FORMATS = ["zip", "zip.age"] as const;
+export type BackupDownloadFormat = (typeof BACKUP_DOWNLOAD_FORMATS)[number];
+
+/** Body of the download-prepare route; `{}` stays valid. `zip.age` needs a recipient and `zip` refuses one. */
+export const PrepareDownloadInputSchema = z
+  .object({
+    targetId: BackupCopyTargetIdSchema.optional(),
+    format: z.enum(BACKUP_DOWNLOAD_FORMATS).optional(),
+    recipient: z.string().refine(isAgeRecipient, { error: "invalid_recipient" }).optional(),
+  })
+  .strict()
+  .refine((body) => (body.format === "zip.age") === (body.recipient !== undefined), {
+    error: "recipient_format_mismatch",
+    path: ["recipient"],
+  });
+export type PrepareDownloadInput = z.infer<typeof PrepareDownloadInputSchema>;
+
+/** Body of POST .../backups and the admin run route; `{}` stays valid. */
+export const CreateSiteBackupInputSchema = z
+  .object({ targetId: BackupCopyTargetIdSchema.optional() })
+  .strict();
+export type CreateSiteBackupInput = z.infer<typeof CreateSiteBackupInputSchema>;
 
 export const BackupArchiveDtoSchema = z.object({
   status: z.enum(["preparing", "ready", "failed"]),
@@ -161,6 +202,23 @@ export const BackupLastRestoreDtoSchema = z.object({
 });
 export type BackupLastRestoreDto = z.infer<typeof BackupLastRestoreDtoSchema>;
 
+// Private twins of SiteBackupCopyDtoSchema / BackupTargetChoiceDtoSchema (backup-targets.ts imports this
+// file, so it cannot be imported here); a contracts test pins that the shapes are identical.
+const SiteBackupCopyLineSchema = z
+  .object({
+    targetId: BackupCopyTargetIdSchema,
+    kind: z.enum(["s3", "local"]),
+    status: z.enum(["running", "succeeded", "failed", "missing", "unknown"]),
+    sizeBytes: z.number().int().nonnegative().nullable(),
+    problem: BackupProblemSchema.nullable(),
+    startedAt: z.string().datetime({ offset: true }),
+    finishedAt: z.string().datetime({ offset: true }).nullable(),
+  })
+  .strict();
+const SiteBackupTargetChoiceSchema = z
+  .object({ id: BackupCopyTargetIdSchema, kind: z.enum(["s3", "local"]) })
+  .strict();
+
 export const SiteBackupDtoSchema = z.object({
   id: z.string(),
   kind: z.enum(BACKUP_KINDS),
@@ -170,6 +228,7 @@ export const SiteBackupDtoSchema = z.object({
   sizeBytes: z.number().int().nullable(),
   problem: BackupProblemSchema.nullable(),
   archive: BackupArchiveDtoSchema.nullable(),
+  copies: z.array(SiteBackupCopyLineSchema),
 });
 export type SiteBackupDto = z.infer<typeof SiteBackupDtoSchema>;
 
@@ -181,6 +240,7 @@ export const SiteBackupsDtoSchema = z.object({
   runningOperationId: z.string().nullable(),
   lastRestore: BackupLastRestoreDtoSchema.nullable(),
   backups: z.array(SiteBackupDtoSchema),
+  targets: z.array(SiteBackupTargetChoiceSchema),
 });
 export type SiteBackupsDto = z.infer<typeof SiteBackupsDtoSchema>;
 

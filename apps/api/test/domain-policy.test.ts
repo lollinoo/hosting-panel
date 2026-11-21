@@ -8,6 +8,7 @@ import { DNS_LOOKUP_TOKEN } from "../src/tokens.js";
 import {
   buildSiteHostRoutes,
   certRetryAt,
+  desiredWordpressUrl,
   evaluateDns,
   manualCertRetryAt,
   nextDnsCheckAt,
@@ -119,5 +120,76 @@ describe("app module DNS lookup", () => {
     const lookup = (provider as { useValue: { lookup(h: string): Promise<unknown> } }).useValue;
     await lookup.lookup("hotel.it");
     expect(servers).toHaveBeenCalledWith(["127.0.0.1:5353"]);
+  });
+});
+
+describe("route plan of manual hosts", () => {
+  const row = (hostname: string, over: Partial<DomainRow> = {}): DomainRow =>
+    ({
+      hostname,
+      isPrimary: hostname === "a.test",
+      status: "active",
+      certMode: "acme",
+      certStatus: "none",
+      certExpiresAt: null,
+      certChallenge: "http-01",
+      ...over,
+    }) as DomainRow;
+  const manual = (hostname: string, over: Partial<DomainRow> = {}): DomainRow =>
+    row(hostname, { certMode: "manual", certStatus: "active", certExpiresAt: new Date("2027-01-01T00:00:00Z"), ...over });
+
+  it("a manual host serves https with a redirect, with or without ACME", () => {
+    for (const acmeEnabled of [true, false]) {
+      expect(buildSiteHostRoutes([manual("a.test")], now, { acmeEnabled })).toEqual([
+        { hostname: "a.test", tls: true, httpsRedirect: true, redirectTo: null, source: "manual" },
+      ]);
+    }
+  });
+
+  it("an expired or still pending manual certificate keeps https (no silent fallback)", () => {
+    for (const over of [{ certExpiresAt: new Date("2025-01-01T00:00:00Z") }, { certStatus: "none" as const, certExpiresAt: null }]) {
+      const [h] = buildSiteHostRoutes([manual("a.test", over)], now);
+      expect(h).toMatchObject({ tls: true, httpsRedirect: true, source: "manual" });
+    }
+  });
+
+  it("a manual host never carries a challenge and the transition plan does not redirect", () => {
+    const [h] = buildSiteHostRoutes([manual("a.test", { certChallenge: "dns-01" })], now, { transition: true });
+    expect(h).toEqual({ hostname: "a.test", tls: true, httpsRedirect: false, redirectTo: null, source: "manual" });
+    expect(h).not.toHaveProperty("challenge");
+  });
+
+  it("an ACME row has no source key and a manual primary is the https redirect target", () => {
+    const hosts = buildSiteHostRoutes([manual("a.test"), row("b.test")], now, { acmeEnabled: false });
+    expect(hosts[1]).toEqual({ hostname: "b.test", tls: false, httpsRedirect: false, redirectTo: "https://a.test" });
+    expect("source" in hosts[1]!).toBe(false);
+  });
+
+  it("a manual non-primary redirects to an http primary only as the primary says", () => {
+    const hosts = buildSiteHostRoutes([row("a.test"), manual("b.test")], now, { acmeEnabled: false });
+    expect(hosts[0]).toMatchObject({ tls: false, redirectTo: null });
+    expect(hosts[1]).toMatchObject({ tls: true, httpsRedirect: true, redirectTo: "http://a.test", source: "manual" });
+  });
+
+  it("desiredWordpressUrl is https for a manual primary, even without ACME", () => {
+    expect(desiredWordpressUrl([manual("a.test")], now, "http://a.test", false)).toBe("https://a.test");
+    expect(desiredWordpressUrl([manual("a.test", { certStatus: "none", certExpiresAt: null })], now, null, false)).toBe("https://a.test");
+    expect(desiredWordpressUrl([row("a.test")], now, null, false)).toBe("http://a.test");
+  });
+
+  it("the hash differs for a manual host and an ACME host stays byte-identical", () => {
+    const acme = buildSiteHostRoutes([row("a.test", { certStatus: "active", certExpiresAt: new Date("2027-01-01T00:00:00Z") })], now);
+    const legacy = createHash("sha256")
+      .update(JSON.stringify({ hosts: acme.map((h) => [h.hostname, h.tls, h.httpsRedirect, h.redirectTo]), wordpressUrl: "https://a.test" }))
+      .digest("hex");
+    expect(routePlanHash(acme, "https://a.test")).toBe(legacy);
+    const man = buildSiteHostRoutes([manual("a.test")], now);
+    expect(man[0]).toMatchObject({ tls: true, httpsRedirect: true, redirectTo: null });
+    expect(routePlanHash(man, "https://a.test")).not.toBe(legacy);
+    expect(routePlanHash(man, "https://a.test")).toBe(
+      createHash("sha256")
+        .update(JSON.stringify({ hosts: [["a.test", true, true, null, "manual"]], wordpressUrl: "https://a.test" }))
+        .digest("hex"),
+    );
   });
 });

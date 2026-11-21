@@ -7,6 +7,10 @@ import { POST as postLogin } from "@/app/api/session/login/route";
 import { POST as postOrgSites } from "@/app/api/bff/orgs/[orgId]/sites/route";
 import { PUT as putFileContent } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/files/content/route";
 import { POST as postSiteBackup } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/backups/route";
+import { POST as postTlsImport } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/tls-certificates/route";
+import { POST as postTlsVersion } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/tls-certificates/[certificateId]/versions/route";
+import { POST as postAdminTlsImport } from "@/app/api/admin/sites/[siteId]/tls-certificates/route";
+import { POST as postAdminTlsVersion } from "@/app/api/admin/sites/[siteId]/tls-certificates/[certificateId]/versions/route";
 import { POST as postPhpMyAdmin } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/databases/phpmyadmin/route";
 
 const src = path.resolve(__dirname, "../src");
@@ -142,6 +146,36 @@ describe("web.3 (b): a body that never ends is refused and its read stops at the
       name: "site backup (readBoundedText)",
       cap: MAX_BFF_BODY_BYTES,
       call: (s) => postSiteBackup(request("/api/bff/orgs/org_1/managed-sites/site_1/backups", "POST", s, true), siteCtx),
+    },
+    {
+      name: "TLS certificate import (forwardSiteCall, private key in the body)",
+      cap: MAX_BFF_BODY_BYTES,
+      call: (s) => postTlsImport(request("/api/bff/orgs/org_1/managed-sites/site_1/tls-certificates", "POST", s, true), siteCtx),
+    },
+    {
+      name: "TLS certificate new version (forwardSiteCall)",
+      cap: MAX_BFF_BODY_BYTES,
+      call: (s) =>
+        postTlsVersion(
+          request("/api/bff/orgs/org_1/managed-sites/site_1/tls-certificates/cert_1/versions", "POST", s, true),
+          { params: Promise.resolve({ orgId: "org_1", siteId: "site_1", certificateId: "cert_1" }) },
+        ),
+    },
+    {
+      name: "admin TLS certificate import (forwardIdempotent)",
+      cap: MAX_BFF_BODY_BYTES,
+      call: (s) =>
+        postAdminTlsImport(request("/api/admin/sites/site_1/tls-certificates", "POST", s, true), {
+          params: Promise.resolve({ siteId: "site_1" }),
+        }),
+    },
+    {
+      name: "admin TLS certificate new version (forwardIdempotent)",
+      cap: MAX_BFF_BODY_BYTES,
+      call: (s) =>
+        postAdminTlsVersion(request("/api/admin/sites/site_1/tls-certificates/cert_1/versions", "POST", s, true), {
+          params: Promise.resolve({ siteId: "site_1", certificateId: "cert_1" }),
+        }),
     },
     {
       name: "phpMyAdmin sign-on (readBoundedText, 4 KiB)",

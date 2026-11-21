@@ -50,8 +50,10 @@ tags:
     description: WordPress sites created, controlled and deleted by customers (async, 202 + operation)
   - name: Admin Sites
     description: Server administrator view over all WordPress sites, creation for a customer and ownership moves
+  - name: TLS Certificates
+    description: Imported (PEM) certificates, their versions and which domains serve them; the administrator's inventory and alerts
   - name: Admin Backups
-    description: Platform S3 backup target settings, connectivity tests, and per-site backup status (server administrator only)
+    description: Platform backup destinations (S3-compatible and local), backup policies, connectivity tests, and per-site backup status (server administrator only)
   - name: Admin Health
     description: Panel health, open alerts, site and panel logs, and restarts of the panel's parts (server administrator only)
   - name: Admin Terminal
@@ -2326,6 +2328,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/SiteIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Required when the request carries `tlsVersionId`
+          schema:
+            type: string
       requestBody:
         content:
           application/json:
@@ -2351,6 +2359,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: With `tlsVersionId`, the certificate does not cover a new name (`CERTIFICATE_HOSTNAME_MISMATCH`) or expires within 24 hours (`CERTIFICATE_EXPIRED`); nothing is created
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}:
@@ -2446,6 +2457,668 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates:
+    get:
+      tags: [TLS Certificates]
+      operationId: customerListTlsCertificates
+      summary: List the imported certificates of the site's organization
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Imported certificates, oldest first, with the domains they cover and the ones they serve
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [TLS Certificates]
+      operationId: customerImportTlsCertificate
+      summary: "Import a certificate (PEM): validated, stored as a pending version"
+      description: >-
+        The key is validated (matches the certificate, not encrypted), the chain is checked against the trusted
+        root list, and the certificate must cover at least one DNS name and stay valid for 24 hours. Nothing is served
+        until a version is assigned to a domain. Errors: `CERTIFICATE_*` (422), `CERTIFICATE_UPLOAD_TOO_LARGE` (413),
+        `ALREADY_EXISTS` (the leaf is already imported in the organization), `IDEMPOTENCY_CONFLICT` (same key, other
+        body), `QUOTA_EXCEEDED` (100 certificates), `RATE_LIMITED` (10 versions per hour for customers).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportTlsCertificateRequest"
+      responses:
+        "201":
+          description: The new certificate with its version 1 (`pending`). A replay of the same Idempotency-Key and body answers the same certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates/{certificateId}:
+    get:
+      tags: [TLS Certificates]
+      operationId: customerGetTlsCertificate
+      summary: Read one imported certificate
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "200":
+          description: The certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [TLS Certificates]
+      operationId: customerDeleteTlsCertificate
+      summary: Delete an imported certificate and its versions
+      description: >-
+        `409 CERTIFICATE_IN_USE` while a domain uses a version, a version is applying or active, or an operation
+        names one. The key material is removed with the rows.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates/{certificateId}/versions:
+    post:
+      tags: [TLS Certificates]
+      operationId: customerAddTlsCertificateVersion
+      summary: Add a new version (renewal) to an imported certificate
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTlsCertificateVersionRequest"
+      responses:
+        "201":
+          description: The certificate with the new `pending` version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates/{certificateId}/versions/{versionId}/activate:
+    post:
+      tags: [TLS Certificates]
+      operationId: customerActivateTlsVersion
+      summary: Serve a version on domains
+      description: >-
+        Without `domainIds` every domain of the organization, on any site, that uses another version of the same
+        certificate moves to this version (a renewal: a certificate shared by several sites rotates in one request);
+        with `domainIds` exactly those domains are set, and they may belong to any site of the organization.
+        Every domain of the change is named in `moved`.
+        The operation runs on the site of the path and covers the whole list. The permission to manage certificates is
+        needed on every affected site: a site of the organization that the caller cannot manage answers 403, a domain
+        or site of another organization answers 404, and nothing changes.
+        Refusals: `CERTIFICATE_HOSTNAME_MISMATCH`, `CERTIFICATE_EXPIRED`, `CERTIFICATE_SNI_MISMATCH`,
+        `CERTIFICATE_IN_USE` (it would also be served for another address of the organization), `DOMAIN_CONFLICT`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+        - $ref: "#/components/parameters/VersionIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateTlsVersionRequest"
+      responses:
+        "202":
+          description: The domains of the site in the path, and every domain the change moves on any site. The change runs as one `site.tls.apply` operation; a request that changes nothing (or a replay) answers 202 without an operation and an empty `moved`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, moved]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+                  moved:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsMovedDomain"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}/tls:
+    post:
+      tags: [TLS Certificates]
+      operationId: customerSetDomainTls
+      summary: "Choose the certificate of a domain: automatic (ACME) or an imported version"
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetDomainTlsRequest"
+      responses:
+        "202":
+          description: The domains of the site; the change runs as one `site.tls.apply` operation (none when the domain already is in that state)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (needed only when the request sets or changes `tlsVersionId`); the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminListTlsCertificates
+      summary: List the imported certificates of the site's organization
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Imported certificates, oldest first, with the domains they cover and the ones they serve
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [TLS Certificates]
+      operationId: adminImportTlsCertificate
+      summary: "Import a certificate (PEM): validated, stored as a pending version"
+      description: >-
+        The key is validated (matches the certificate, not encrypted), the chain is checked against the trusted
+        root list, and the certificate must cover at least one DNS name and stay valid for 24 hours. Nothing is served
+        until a version is assigned to a domain. Errors: `CERTIFICATE_*` (422), `CERTIFICATE_UPLOAD_TOO_LARGE` (413),
+        `ALREADY_EXISTS` (the leaf is already imported in the organization), `IDEMPOTENCY_CONFLICT` (same key, other
+        body), `QUOTA_EXCEEDED` (100 certificates), `RATE_LIMITED` (10 versions per hour for customers).
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportTlsCertificateRequest"
+      responses:
+        "201":
+          description: The new certificate with its version 1 (`pending`). A replay of the same Idempotency-Key and body answers the same certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates/{certificateId}:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminGetTlsCertificate
+      summary: Read one imported certificate
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "200":
+          description: The certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [TLS Certificates]
+      operationId: adminDeleteTlsCertificate
+      summary: Delete an imported certificate and its versions
+      description: >-
+        `409 CERTIFICATE_IN_USE` while a domain uses a version, a version is applying or active, or an operation
+        names one. The key material is removed with the rows.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates/{certificateId}/versions:
+    post:
+      tags: [TLS Certificates]
+      operationId: adminAddTlsCertificateVersion
+      summary: Add a new version (renewal) to an imported certificate
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTlsCertificateVersionRequest"
+      responses:
+        "201":
+          description: The certificate with the new `pending` version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates/{certificateId}/versions/{versionId}/activate:
+    post:
+      tags: [TLS Certificates]
+      operationId: adminActivateTlsVersion
+      summary: Serve a version on domains
+      description: >-
+        Without `domainIds` every domain of the organization, on any site, that uses another version of the same
+        certificate moves to this version (a renewal: a certificate shared by several sites rotates in one request);
+        with `domainIds` exactly those domains are set, and they may belong to any site of the organization.
+        Every domain of the change is named in `moved`.
+        The operation runs on the site of the path and covers the whole list. The sites must belong to the organization of the site
+        in the path; anything else answers 404 and nothing changes.
+        Refusals: `CERTIFICATE_HOSTNAME_MISMATCH`, `CERTIFICATE_EXPIRED`, `CERTIFICATE_SNI_MISMATCH`,
+        `CERTIFICATE_IN_USE` (it would also be served for another address of the organization), `DOMAIN_CONFLICT`. `evictAcme` with `confirmHostname` (administrator only) allows the cold removal of a Let's Encrypt entry that ties with the imported certificate.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+        - $ref: "#/components/parameters/VersionIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminActivateTlsVersionRequest"
+      responses:
+        "202":
+          description: The domains of the site in the path, and every domain the change moves on any site. The change runs as one `site.tls.apply` operation; a request that changes nothing (or a replay) answers 202 without an operation and an empty `moved`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, moved]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+                  moved:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsMovedDomain"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/domains/{domainId}/tls:
+    post:
+      tags: [TLS Certificates]
+      operationId: adminSetDomainTls
+      summary: "Choose the certificate of a domain: automatic (ACME) or an imported version"
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminSetDomainTlsRequest"
+      responses:
+        "202":
+          description: The domains of the site; the change runs as one `site.tls.apply` operation (none when the domain already is in that state)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (needed only when the request sets or changes `tlsVersionId`) (`PERMISSION_DENIED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/tls-certificates:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminListTlsInventory
+      summary: Inventory of imported and automatic certificates (server administrator only)
+      parameters:
+        - in: query
+          name: filter
+          schema:
+            type: string
+            enum: [all, manual, automatic, expiring, expired]
+            default: all
+        - in: query
+          name: q
+          description: Case-insensitive text found in a hostname or the issuer
+          schema:
+            type: string
+            maxLength: 253
+      responses:
+        "200":
+          description: Certificates by end date, soonest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminTlsInventoryItemDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/tls-certificates/alerts:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminListTlsAlerts
+      summary: Imported certificates in use that expire within 14 days or have expired (server administrator only)
+      responses:
+        "200":
+          description: One alert per active version, soonest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsCertificateAlertDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/tls-certificates/{certificateId}:
+    delete:
+      tags: [TLS Certificates]
+      operationId: adminDeleteAnyTlsCertificate
+      summary: Delete an imported certificate of any organization (server administrator only)
+      parameters:
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/sites/{siteId}/domains:
     get:
       tags: [Admin Sites]
@@ -2480,6 +3153,12 @@ paths:
       summary: Add a domain (optionally with its www pair)
       parameters:
         - $ref: "#/components/parameters/SiteIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Required when the request carries `tlsVersionId`
+          schema:
+            type: string
       requestBody:
         content:
           application/json:
@@ -2505,6 +3184,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: With `tlsVersionId`, the certificate does not cover a new name (`CERTIFICATE_HOSTNAME_MISMATCH`) or expires within 24 hours (`CERTIFICATE_EXPIRED`); nothing is created
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/domains/{domainId}:
@@ -4159,7 +4841,7 @@ paths:
     patch:
       tags: [Admin Backups]
       operationId: adminSaveBackups
-      summary: Configure or update the S3-compatible backup target and nightly schedule (omitting secretAccessKey keeps the stored secret; changing endpoint, bucket, or prefix purges stored backup history rows)
+      summary: Configure or update the S3-compatible backup target and nightly schedule (omitting secretAccessKey keeps the stored secret; changing endpoint, bucket, or prefix creates a new destination and archives the old one, keeping the history and its copies restorable)
       requestBody:
         required: true
         content:
@@ -4190,7 +4872,7 @@ paths:
     delete:
       tags: [Admin Backups]
       operationId: adminClearBackups
-      summary: Remove the backup target settings, stored secret, and site backup index rows
+      summary: Archive the S3 backup destinations and clear their settings (non-destructive; backup history rows and copies are kept, and local destinations are untouched)
       responses:
         "200":
           description: Cleared platform backup settings
@@ -4271,6 +4953,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SiteIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteBackupInput"
       responses:
         "202":
           description: Accepted; backup queued via transactional outbox
@@ -4295,13 +4983,271 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
-          description: Site not found (`NOT_FOUND`)
+          description: Site not found, or the `targetId` destination is unknown or not usable (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by another operation (`RESOURCE_LOCKED`), or reused `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets:
+    get:
+      tags: [Admin Backups]
+      operationId: adminListBackupTargets
+      summary: List the backup destinations, archived ones included (server administrator only; never returns a secret)
+      responses:
+        "200":
+          description: Destinations and whether this server can offer a local one
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupTargets"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Admin Backups]
+      operationId: adminCreateBackupTarget
+      summary: Add an S3-compatible or local backup destination (a local one must be initialized before use)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBackupTargetInput"
+      responses:
+        "201":
+          description: "The new destination (a local one has `local.initializedAt: null`)"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminBackupTarget"
+        "400":
+          description: "Invalid destination (`VALIDATION_ERROR`, including `local_target_exists`: a server has at most one local destination)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets/{targetId}:
+    patch:
+      tags: [Admin Backups]
+      operationId: adminUpdateBackupTarget
+      summary: >-
+        Rename, enable, make customer-selectable, set the retention or archive a destination. Changing the
+        endpoint, bucket or prefix of an S3 destination creates a new one and archives the old one (history is kept).
+        The legacy destination accepts only name, enabled, customerSelectable and archived.
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBackupTargetInput"
+      responses:
+        "200":
+          description: The updated destination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminBackupTarget"
+        "400":
+          description: Invalid change (`VALIDATION_ERROR`, including `location_immutable`, `legacy_target_locked`, `target_archived` and `update_empty`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Admin Backups]
+      operationId: adminDeleteBackupTarget
+      summary: Delete a destination nothing refers to; the legacy destination and any destination with copies, policies or pending restores is refused
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The destination is still referenced or is the legacy one (`BACKUP_TARGET_IN_USE`); archive it instead
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets/{targetId}/test:
+    post:
+      tags: [Admin Backups]
+      operationId: adminTestBackupTarget
+      summary: Run an immediate connectivity and write test against a destination (synchronous, at most 30 seconds; the result is stored as `lastTest`)
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: Outcome of the test, with the free and total space of a local destination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupTargetTestResult"
+        "400":
+          description: Invalid body (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another connectivity test is already running (`RESOURCE_LOCKED`) or the outcome is unknown (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets/{targetId}/initialize:
+    post:
+      tags: [Admin Backups]
+      operationId: adminInitializeBackupTarget
+      summary: Create and check the managed directory of the local destination (local only; repeating it is harmless)
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: The destination, now with `local.initializedAt` set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminBackupTarget"
+        "400":
+          description: Not a local destination (`VALIDATION_ERROR`, `not_local`), or the directory is not usable (for example `no_space`, `write_denied`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-policies/{scope}:
+    get:
+      tags: [Admin Backups]
+      operationId: adminGetBackupPolicy
+      summary: Where and when backups go by default (`default`, nightly site backups) or for the panel database (`panel`)
+      parameters:
+        - $ref: "#/components/parameters/BackupPolicyScopeParam"
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupPolicy"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown scope (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Admin Backups]
+      operationId: adminUpdateBackupPolicy
+      summary: Change the schedule, the retention or the destinations of a policy (the order of `targetIds` is the priority)
+      parameters:
+        - $ref: "#/components/parameters/BackupPolicyScopeParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBackupPolicyInput"
+      responses:
+        "200":
+          description: The updated policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupPolicy"
+        "400":
+          description: Invalid policy (`VALIDATION_ERROR`, including a destination that is disabled, archived or unknown, `too_many_targets`, `scheduleHourUtc` on the panel policy)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown scope (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/backups/sites/{siteId}/restore:
@@ -5492,6 +6438,69 @@ paths:
           description: The host agent is disabled (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/backup-policy:
+    get:
+      tags: [Managed Sites]
+      operationId: getSiteBackupPolicy
+      summary: Where this site's backups go, whether that is inherited, and the destinations the customer may choose (`site.backups.manage`)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: The site backup policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupPolicy"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Managed Sites]
+      operationId: updateSiteBackupPolicy
+      summary: Choose the destinations of this site, or `null` to inherit the default (`site.backups.manage`)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetSiteBackupPolicyInput"
+      responses:
+        "200":
+          description: The updated site backup policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupPolicy"
+        "400":
+          description: Invalid body (`VALIDATION_ERROR`, including `target_ids_not_distinct`, `too_many_targets`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization, or a destination the customer may not choose (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/organizations/{orgId}/managed-sites/{siteId}/backups:
     get:
       tags: [Managed Sites]
@@ -5527,6 +6536,12 @@ paths:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/SiteIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteBackupInput"
       responses:
         "202":
           description: Accepted; follow the returned operation URL
@@ -5553,7 +6568,7 @@ paths:
           description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
-          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          description: Site not found or belongs to another organization, or the `targetId` destination may not be used by this customer (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: >-
@@ -5640,8 +6655,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
+              $ref: "#/components/schemas/PrepareDownloadInput"
       responses:
         "202":
           description: Accepted (or already preparing/ready); follow the returned operation URL
@@ -5660,7 +6674,11 @@ paths:
                       operation:
                         type: string
         "400":
-          description: Backup target not configured (`VALIDATION_ERROR`, message `not_configured`) or missing/invalid `Idempotency-Key`
+          description: >-
+            Backup target not configured (`VALIDATION_ERROR`, message `not_configured`), missing/invalid
+            `Idempotency-Key`, a malformed `recipient` (`VALIDATION_ERROR`, `details[].field: recipient`,
+            message `invalid_recipient`), or `zip.age` without a recipient / `zip` with one
+            (message `recipient_format_mismatch`). The recipient is never echoed
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
@@ -5679,7 +6697,10 @@ paths:
             `Retry-After` header)
           $ref: "#/components/responses/QuotaConflictErrorResponse"
         "422":
-          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          description: >-
+            Backups runtime unavailable on the active backend (`NOT_SUPPORTED`), or `format: zip.age`
+            while `encryptedBackupExportAvailable` is false (`NOT_SUPPORTED`, message `Encrypted backup
+            export is not available.`; nothing is queued and nothing is audited)
           $ref: "#/components/responses/ErrorResponse"
     get:
       tags: [Managed Sites]
@@ -6282,9 +7303,34 @@ components:
       required: true
       schema:
         type: string
+    BackupTargetIdParam:
+      in: path
+      name: targetId
+      required: true
+      schema:
+        $ref: "#/components/schemas/BackupTargetId"
+    BackupPolicyScopeParam:
+      in: path
+      name: scope
+      required: true
+      schema:
+        type: string
+        enum: [default, panel]
     DomainIdParam:
       in: path
       name: domainId
+      required: true
+      schema:
+        type: string
+    CertificateIdParam:
+      in: path
+      name: certificateId
+      required: true
+      schema:
+        type: string
+    VersionIdParam:
+      in: path
+      name: versionId
       required: true
       schema:
         type: string
@@ -6419,6 +7465,18 @@ components:
             - MAIL_RELAY_UNAVAILABLE
             - HOST_AGENT_UNAVAILABLE
             - INTERNAL_ERROR
+            - CERTIFICATE_INVALID
+            - CERTIFICATE_KEY_MISMATCH
+            - CERTIFICATE_CHAIN_INVALID
+            - CERTIFICATE_NOT_YET_VALID
+            - CERTIFICATE_EXPIRED
+            - CERTIFICATE_HOSTNAME_MISMATCH
+            - CERTIFICATE_IN_USE
+            - CERTIFICATE_APPLY_FAILED
+            - CERTIFICATE_SNI_MISMATCH
+            - CERTIFICATE_UPLOAD_TOO_LARGE
+            - CERTIFICATE_FORMAT_UNSUPPORTED
+            - BACKUP_TARGET_IN_USE
         message:
           type: string
         requestId:
@@ -6440,6 +7498,15 @@ components:
           type: string
         reason:
           type: string
+          description: >-
+            A stable machine reason. For `CERTIFICATE_*` errors (the PEM and the field in `field`, never the
+            material) it is one of: nul_byte, not_pem, wrong_block_type, multiple_blocks, too_many_intermediates,
+            encrypted_key, format_unsupported, parse_failed, key_parse_failed, key_algorithm, key_mismatch,
+            leaf_is_ca, eku_not_server_auth, not_yet_valid, expired, expires_within_24h, no_dns_san, too_many_sans,
+            unsupported_wildcard, san_invalid, cn_not_in_san, ip_san_unsupported, untrusted_or_incomplete,
+            chain_expired, bad_signature, verify_timeout, chain_invalid, not_covered, domain_not_active,
+            duplicate_certificate, manual_overlap, captures_host, acme_certificate_conflict, not_served,
+            proxy_start_restored
 
     AdminUserDto:
       type: object
@@ -6513,6 +7580,9 @@ components:
         - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
         - wordpressToolsAvailable
+        - manualTlsCertificatesAvailable
+        - localBackupTargetsAvailable
+        - encryptedBackupExportAvailable
       properties:
         phase:
           type: string
@@ -6543,6 +7613,18 @@ components:
         wordpressToolsAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        manualTlsCertificatesAvailable:
+          type: boolean
+          default: false
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        localBackupTargetsAvailable:
+          type: boolean
+          default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a backup target on this server's own disk can be configured); false otherwise
+        encryptedBackupExportAvailable:
+          type: boolean
+          default: false
+          description: True once an encrypted backup export can be downloaded; false until that capability ships
 
     OrganizationCapabilitiesDto:
       type: object
@@ -6556,6 +7638,9 @@ components:
         - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
         - wordpressToolsAvailable
+        - manualTlsCertificatesAvailable
+        - localBackupTargetsAvailable
+        - encryptedBackupExportAvailable
       properties:
         hostingMode:
           type: string
@@ -6581,6 +7666,18 @@ components:
         wordpressToolsAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        manualTlsCertificatesAvailable:
+          type: boolean
+          default: false
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        localBackupTargetsAvailable:
+          type: boolean
+          default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a backup target on this server's own disk can be configured); false otherwise
+        encryptedBackupExportAvailable:
+          type: boolean
+          default: false
+          description: True once an encrypted backup export can be downloaded; false until that capability ships
 
     DevPersonaDto:
       type: object
@@ -7239,6 +8336,14 @@ components:
         includeWww:
           type: boolean
           default: false
+        tlsVersionId:
+          type: string
+          pattern: "^ctv_[0-9a-f]{32}$"
+          description: >-
+            Create the domain directly on this imported certificate version of the same organization (a new
+            address under a wildcard that is already loaded). The domain and a `site.tls.apply` operation are
+            created together; the request then needs an `Idempotency-Key` header. Every new name (including the
+            `www` pair) must be covered by the version.
 
     CertificateAlertDto:
       type: object
@@ -7266,7 +8371,7 @@ components:
 
     SiteDomainDto:
       type: object
-      required: [id, hostname, isPrimary, routed, challenge, dns, certificate]
+      required: [id, hostname, isPrimary, routed, challenge, dns, certificate, tls]
       properties:
         id:
           type: string
@@ -7322,6 +8427,395 @@ components:
               nullable: true
             trusted:
               type: boolean
+        tls:
+          $ref: "#/components/schemas/SiteDomainTlsDto"
+
+    SiteDomainTlsDto:
+      type: object
+      required: [mode, certificateId, versionId, state, problem]
+      properties:
+        mode:
+          type: string
+          enum: [acme, manual]
+          description: "`acme` is the automatic Let's Encrypt certificate; `manual` is an imported one"
+        certificateId:
+          type: string
+          nullable: true
+          description: The imported certificate; null in `acme` mode
+        versionId:
+          type: string
+          nullable: true
+          description: >-
+            The certificate version assigned to the domain; null in `acme` mode. While `state` is `applying`
+            this is the version being applied, not yet the one served.
+        state:
+          type: string
+          enum: [applying, active, failed]
+          nullable: true
+          description: Whether the imported certificate is being put in place, is served, or could not be applied; null in `acme` mode
+        problem:
+          type: string
+          enum: [apply_failed, sni_mismatch, interrupted, acme_eviction_required, manual_overlap, captures_host]
+          nullable: true
+          description: >-
+            The `last_error_code` of the assigned version, in any state (for example an `active` domain can show
+            a problem that was recorded on the version); null when the version has none. It belongs to the version,
+            so every domain using that version shows the same value; null in `acme` mode
+
+    ImportTlsCertificateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, format, leafPem, privateKeyPem]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        format:
+          type: string
+          enum: [pem]
+        leafPem:
+          writeOnly: true
+          type: string
+          maxLength: 524288
+          description: Exactly one `CERTIFICATE` block
+        chainPem:
+          writeOnly: true
+          type: string
+          maxLength: 524288
+          default: ""
+          description: Up to 20 intermediate `CERTIFICATE` blocks; may be empty when the leaf chains to a trusted root directly
+        privateKeyPem:
+          writeOnly: true
+          type: string
+          maxLength: 524288
+          description: One unencrypted `PRIVATE KEY`, `RSA PRIVATE KEY` or `EC PRIVATE KEY` block. Never returned by any route
+      description: >-
+        The three PEM texts together may not exceed 512 KiB (UTF-8), the whole body 1 MiB
+        (`CERTIFICATE_UPLOAD_TOO_LARGE`, 413).
+
+    CreateTlsCertificateVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [format, leafPem, privateKeyPem]
+      properties:
+        format:
+          type: string
+          enum: [pem]
+        leafPem:
+          writeOnly: true
+          type: string
+          maxLength: 524288
+        chainPem:
+          writeOnly: true
+          type: string
+          maxLength: 524288
+          default: ""
+        privateKeyPem:
+          writeOnly: true
+          type: string
+          maxLength: 524288
+
+    SetDomainTlsRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [acme]
+        - type: object
+          additionalProperties: false
+          required: [mode, versionId]
+          properties:
+            mode:
+              type: string
+              enum: [manual]
+            versionId:
+              type: string
+              pattern: "^ctv_[0-9a-f]{32}$"
+
+    AdminSetDomainTlsRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [acme]
+            challenge:
+              type: string
+              enum: [http-01, dns-01]
+              description: How the automatic certificate is obtained once the domain returns to ACME
+        - type: object
+          additionalProperties: false
+          required: [mode, versionId]
+          properties:
+            mode:
+              type: string
+              enum: [manual]
+            versionId:
+              type: string
+              pattern: "^ctv_[0-9a-f]{32}$"
+            evictAcme:
+              type: boolean
+              enum: [true]
+              description: >-
+                Allow the cold removal of a Let's Encrypt entry that ties with this certificate (the proxy is
+                stopped for a moment, `acme.json` is backed up). Goes with `confirmHostname`; at most one run per
+                15 minutes per server
+            confirmHostname:
+              type: string
+              description: The exact hostname of the domain, typed by the administrator
+
+    ActivateTlsVersionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        domainIds:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+          description: The domains to set, of any site of the organization; absent = every domain of the organization on another version of this certificate
+
+    TlsMovedDomain:
+      type: object
+      required: [domainId, siteId, hostname]
+      properties:
+        domainId:
+          type: string
+        siteId:
+          type: string
+        hostname:
+          type: string
+
+    AdminActivateTlsVersionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        domainIds:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+          description: The domains to set, of any site of the organization; absent = every domain of the organization on another version of this certificate
+        evictAcme:
+          type: boolean
+          enum: [true]
+        confirmHostname:
+          type: string
+
+    TlsCertificateVersionDto:
+      type: object
+      required: [id, versionNumber, status, subject, issuer, sanDns, wildcard, notBefore, notAfter, serialNumber, fingerprintSha256, keyType, keyBits, createdAt, activatedAt, problem]
+      properties:
+        id:
+          type: string
+        versionNumber:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [pending, applying, active, inactive, failed]
+        subject:
+          type: string
+        issuer:
+          type: string
+        sanDns:
+          type: array
+          items:
+            type: string
+        wildcard:
+          type: boolean
+        notBefore:
+          type: string
+          format: date-time
+        notAfter:
+          type: string
+          format: date-time
+        serialNumber:
+          type: string
+        fingerprintSha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        keyType:
+          type: string
+          enum: [rsa, ec]
+        keyBits:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        activatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        problem:
+          type: string
+          enum: [apply_failed, sni_mismatch, interrupted, acme_eviction_required, manual_overlap, captures_host]
+          nullable: true
+          description: >-
+            The last apply problem recorded on this version: `apply_failed` (the proxy did not serve it),
+            `sni_mismatch` (it serves another certificate for the name), `interrupted` (the apply did not finish),
+            `acme_eviction_required` (a Let's Encrypt entry ties with the imported certificate; an administrator can
+            confirm `evictAcme`), `manual_overlap` (another imported certificate ties), `captures_host` (a wildcard
+            would capture a name of another tenant)
+
+    TlsCertificateDto:
+      type: object
+      required: [id, name, source, createdForSiteId, activeVersionId, versions, coveredDomains, assignedDomains, expiry, warnings, updatedAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        source:
+          type: string
+          enum: [manual]
+        createdForSiteId:
+          type: string
+          nullable: true
+        activeVersionId:
+          type: string
+          nullable: true
+        versions:
+          type: array
+          description: Oldest first. Never carries the certificate text or the key
+          items:
+            $ref: "#/components/schemas/TlsCertificateVersionDto"
+        coveredDomains:
+          type: array
+          description: Domains of the organization whose hostname some version of this certificate covers
+          items:
+            type: object
+            required: [domainId, hostname, assigned, versionId]
+            properties:
+              domainId:
+                type: string
+              hostname:
+                type: string
+              assigned:
+                type: boolean
+              versionId:
+                type: string
+                nullable: true
+        assignedDomains:
+          type: array
+          description: Domains (any site of the organization) that serve a version of this certificate
+          items:
+            type: object
+            required: [domainId, siteId, siteName, hostname, versionId]
+            properties:
+              domainId:
+                type: string
+              siteId:
+                type: string
+              siteName:
+                type: string
+              hostname:
+                type: string
+              versionId:
+                type: string
+        expiry:
+          type: object
+          nullable: true
+          required: [tier, daysLeft]
+          properties:
+            tier:
+              type: string
+              enum: [ok, notice, warning, critical, expired]
+            daysLeft:
+              type: integer
+        warnings:
+          type: array
+          items:
+            type: string
+            enum: [expiring, expired, covers_unassigned_domains]
+        updatedAt:
+          type: string
+          format: date-time
+
+    AdminTlsInventoryItemDto:
+      type: object
+      required: [source, certificateId, name, organizationId, organizationName, siteId, siteName, hostnames, issuer, wildcard, notAfter, status, tier]
+      properties:
+        source:
+          type: string
+          enum: [manual, acme]
+        certificateId:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        organizationId:
+          type: string
+        organizationName:
+          type: string
+        siteId:
+          type: string
+          nullable: true
+        siteName:
+          type: string
+          nullable: true
+        hostnames:
+          type: array
+          items:
+            type: string
+        issuer:
+          type: string
+          nullable: true
+        wildcard:
+          type: boolean
+        notAfter:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [pending, applying, active, inactive, failed, none, requested]
+        tier:
+          type: string
+          nullable: true
+          enum: [ok, notice, warning, critical, expired]
+
+    TlsCertificateAlertDto:
+      type: object
+      required: [certificateId, certificateName, versionId, organizationId, siteId, siteName, hostnames, notAfter, tier, daysLeft]
+      properties:
+        certificateId:
+          type: string
+        certificateName:
+          type: string
+        versionId:
+          type: string
+        organizationId:
+          type: string
+        siteId:
+          type: string
+          nullable: true
+        siteName:
+          type: string
+          nullable: true
+        hostnames:
+          type: array
+          items:
+            type: string
+        notAfter:
+          type: string
+          format: date-time
+        tier:
+          type: string
+          enum: [warning, critical, expired]
+        daysLeft:
+          type: integer
 
     MailRelaySettingsInput:
       type: object
@@ -7487,6 +8981,11 @@ components:
         - panel_dump_failed
         - panel_dump_tool_missing
         - site_not_started
+        - invalid_recipient
+        - local_target_unmounted
+        - local_target_readonly
+        - local_target_unsafe
+        - backup_copy_missing
 
     BackupSettingsInput:
       type: object
@@ -7634,6 +9133,9 @@ components:
         confirmName:
           type: string
           maxLength: 255
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to restore from; it must hold a succeeded copy of the backup (default is the best available copy)
 
     AdminRestoreBackupInput:
       type: object
@@ -7647,6 +9149,409 @@ components:
         confirmName:
           type: string
           maxLength: 255
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to restore from; it must hold a succeeded copy of the backup (default is the best available copy)
+
+    BackupTargetId:
+      type: string
+      pattern: "^bkt_[0-9a-f]{32}$"
+      description: Identifier of a backup destination
+
+    BackupTargetKind:
+      type: string
+      enum: [s3, local]
+
+    BackupCopyStatus:
+      type: string
+      enum: [running, succeeded, failed, missing, unknown]
+
+    CreateBackupTargetInput:
+      description: >-
+        An S3-compatible destination (location, access key and write-only secret) or the local destination.
+        A local destination has no path: the root is fixed by the server configuration.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, name, endpoint, region, bucket, accessKeyId, secretAccessKey]
+          properties:
+            kind:
+              type: string
+              const: s3
+            name:
+              type: string
+              minLength: 1
+              maxLength: 128
+            enabled:
+              type: boolean
+              default: true
+            customerSelectable:
+              type: boolean
+              default: false
+            endpoint:
+              type: string
+              pattern: "^https?:\\/\\/[A-Za-z0-9.-]+(:\\d{1,5})?$"
+            region:
+              type: string
+              pattern: "^[a-z0-9-]{1,64}$"
+            bucket:
+              type: string
+              pattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+            prefix:
+              type: string
+              default: ""
+            accessKeyId:
+              type: string
+              minLength: 1
+              maxLength: 256
+            secretAccessKey:
+              type: string
+              minLength: 1
+              maxLength: 256
+              writeOnly: true
+        - type: object
+          additionalProperties: false
+          required: [kind, name]
+          properties:
+            kind:
+              type: string
+              const: local
+            name:
+              type: string
+              minLength: 1
+              maxLength: 128
+            enabled:
+              type: boolean
+              default: true
+            customerSelectable:
+              type: boolean
+              default: false
+
+    UpdateBackupTargetInput:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >-
+        At least one property. The legacy destination accepts only `name`, `enabled`, `customerSelectable` and
+        `archived`; a local destination never takes a location. Changing `endpoint`, `bucket` or `prefix` of an S3
+        destination creates a new destination and archives this one.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        enabled:
+          type: boolean
+        customerSelectable:
+          type: boolean
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          nullable: true
+          description: "`null` inherits the policy retention"
+        archived:
+          type: boolean
+          const: true
+        endpoint:
+          type: string
+        region:
+          type: string
+        bucket:
+          type: string
+        prefix:
+          type: string
+        accessKeyId:
+          type: string
+        secretAccessKey:
+          type: string
+          minLength: 1
+          maxLength: 256
+          writeOnly: true
+
+    AdminBackupTarget:
+      type: object
+      required: [id, kind, name, enabled, customerSelectable, legacy, archivedAt, retentionDays, s3, local, lastTest, usage, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+        name:
+          type: string
+        enabled:
+          type: boolean
+        customerSelectable:
+          type: boolean
+        legacy:
+          type: boolean
+          description: The destination created from the pre-multi-target settings; its location cannot change
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        retentionDays:
+          type: integer
+          nullable: true
+        s3:
+          type: object
+          nullable: true
+          required: [endpoint, region, bucket, prefix, accessKeyId, secretAccessKeySet]
+          properties:
+            endpoint:
+              type: string
+            region:
+              type: string
+            bucket:
+              type: string
+            prefix:
+              type: string
+            accessKeyId:
+              type: string
+            secretAccessKeySet:
+              type: boolean
+              const: true
+        local:
+          type: object
+          nullable: true
+          required: [root, initializedAt]
+          properties:
+            root:
+              type: string
+              nullable: true
+            initializedAt:
+              type: string
+              format: date-time
+              nullable: true
+        lastTest:
+          type: object
+          nullable: true
+          required: [at, outcome, problem, availableBytes, totalBytes]
+          properties:
+            at:
+              type: string
+              format: date-time
+            outcome:
+              type: string
+              enum: [ok, failed]
+            problem:
+              $ref: "#/components/schemas/BackupProblem"
+              nullable: true
+            availableBytes:
+              type: integer
+              minimum: 0
+              nullable: true
+            totalBytes:
+              type: integer
+              minimum: 0
+              nullable: true
+        usage:
+          type: object
+          required: [policies, copies]
+          properties:
+            policies:
+              type: array
+              items:
+                type: string
+                enum: [default_site, site, panel]
+            copies:
+              type: integer
+              minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    BackupTargets:
+      type: object
+      required: [targets, localRootConfigured]
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminBackupTarget"
+        localRootConfigured:
+          type: boolean
+          description: False when this install cannot offer a local destination
+
+    BackupTargetTestResult:
+      allOf:
+        - $ref: "#/components/schemas/BackupTestResult"
+        - type: object
+          properties:
+            availableBytes:
+              type: integer
+              minimum: 0
+            totalBytes:
+              type: integer
+              minimum: 0
+
+    BackupPolicyTarget:
+      type: object
+      required: [targetId, kind, priority, required]
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+        priority:
+          type: integer
+          enum: [1, 2]
+        required:
+          type: boolean
+
+    BackupPolicy:
+      type: object
+      required: [scope, siteId, scheduleHourUtc, retentionDays, targets, updatedAt]
+      properties:
+        scope:
+          type: string
+          enum: [default_site, panel]
+        siteId:
+          type: string
+          nullable: true
+          description: Always `null` here; per-site choices are in `SiteBackupPolicy`
+        scheduleHourUtc:
+          type: integer
+          minimum: 0
+          maximum: 23
+          nullable: true
+          description: "`null` for the panel policy, which has no schedule of its own"
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+        targets:
+          type: array
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/BackupPolicyTarget"
+        updatedAt:
+          type: string
+          format: date-time
+
+    UpdateBackupPolicyInput:
+      type: object
+      additionalProperties: false
+      description: Every property is optional; `scheduleHourUtc` is refused on the panel policy
+      properties:
+        scheduleHourUtc:
+          type: integer
+          minimum: 0
+          maximum: 23
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+        targetIds:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          description: >-
+            Enabled, not archived destinations; the order is the priority. With two, every backup
+            is written to both, one after the other (priority 1 first), and its status is the
+            aggregate: `succeeded` when both copies succeed, `partial` when one fails, `failed` when
+            both fail. A `pre_update` backup counts as done only when every required copy succeeded
+          items:
+            $ref: "#/components/schemas/BackupTargetId"
+
+    SetSiteBackupPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [targetIds]
+      properties:
+        targetIds:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          nullable: true
+          description: Destinations the customer may choose; `null` inherits the default policy
+          items:
+            $ref: "#/components/schemas/BackupTargetId"
+
+    BackupTargetChoice:
+      type: object
+      required: [id, kind]
+      properties:
+        id:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+
+    SiteBackupPolicy:
+      type: object
+      required: [targetIds, inherited, choices]
+      properties:
+        targetIds:
+          type: array
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/BackupTargetId"
+        inherited:
+          type: boolean
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupTargetChoice"
+
+    SiteBackupCopy:
+      type: object
+      required: [targetId, kind, status, sizeBytes, problem, startedAt, finishedAt]
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+        status:
+          $ref: "#/components/schemas/BackupCopyStatus"
+        sizeBytes:
+          type: integer
+          minimum: 0
+          nullable: true
+        problem:
+          $ref: "#/components/schemas/BackupProblem"
+          nullable: true
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateSiteBackupInput:
+      type: object
+      additionalProperties: false
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to use instead of the site's own; the customer may name only a destination offered in `targets` of the backup list
+
+    PrepareDownloadInput:
+      type: object
+      additionalProperties: false
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to read from; it must hold a succeeded copy of the backup
+        format:
+          type: string
+          enum: [zip, zip.age]
+          default: zip
+          description: >-
+            `zip` (the default) is the decrypted single-zip archive. `zip.age` is the archive
+            encrypted to `recipient`; it is refused with 422 `NOT_SUPPORTED` while
+            `encryptedBackupExportAvailable` is false (always, in this release)
+        recipient:
+          type: string
+          pattern: "^age1[02-9ac-hj-np-z]{58}$"
+          description: >-
+            age public key (X25519) to encrypt to. Required with `zip.age`, refused with `zip`.
+            A public key, but still never stored, logged, audited or put in a URL: it travels only
+            in this body
 
     BackupArchive:
       type: object
@@ -7685,7 +9590,7 @@ components:
 
     SiteBackup:
       type: object
-      required: [id, kind, status, startedAt, finishedAt, sizeBytes, problem, archive]
+      required: [id, kind, status, startedAt, finishedAt, sizeBytes, problem, archive, copies]
       properties:
         id:
           type: string
@@ -7694,7 +9599,11 @@ components:
           enum: [nightly, manual, pre_update]
         status:
           type: string
-          enum: [running, succeeded, failed]
+          enum: [running, succeeded, failed, partial]
+          description: >-
+            The aggregate of its copies. `partial` means at least one copy succeeded and at least
+            one failed (only with two destinations); the backup stays restorable and downloadable
+            from the copies that succeeded, and `copies` says which one failed
         startedAt:
           type: string
           format: date-time
@@ -7711,10 +9620,15 @@ components:
         archive:
           $ref: "#/components/schemas/BackupArchive"
           nullable: true
+        copies:
+          type: array
+          description: One entry per destination the backup was written to (empty for a row from before destinations existed)
+          items:
+            $ref: "#/components/schemas/SiteBackupCopy"
 
     SiteBackups:
       type: object
-      required: [available, configured, retentionDays, manualKept, runningOperationId, lastRestore, backups]
+      required: [available, configured, retentionDays, manualKept, runningOperationId, lastRestore, backups, targets]
       properties:
         available:
           type: boolean
@@ -7735,6 +9649,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SiteBackup"
+        targets:
+          type: array
+          description: The destinations this customer may name as `targetId` (id and kind only)
+          items:
+            $ref: "#/components/schemas/BackupTargetChoice"
 
     BackupArchiveChunk:
       type: object
@@ -7786,8 +9705,9 @@ components:
           nullable: true
         lastStatus:
           type: string
-          enum: [running, succeeded, failed]
+          enum: [running, succeeded, failed, partial]
           nullable: true
+          description: "`partial`: one of the two copies of the last attempt failed and the other succeeded"
         problem:
           $ref: "#/components/schemas/BackupProblem"
           nullable: true
@@ -9022,7 +10942,8 @@ components:
       required: [severity, subject, since, kind, details]
       description: >-
         `critical` kinds: `disk_high`, `component_down`, `site_container_down`,
-        `restore_undo_incomplete`; every other kind is `warning`. `details` has a fixed shape per
+        `restore_undo_incomplete`; every other kind is `warning`, except `manual_certificate_expiring`,
+        which is `warning` at tier `warning` and `critical` at tiers `critical` and `expired`. `details` has a fixed shape per
         `kind` (listed under `details`) and no other field.
       properties:
         severity:
@@ -9037,7 +10958,7 @@ components:
           nullable: true
         kind:
           type: string
-          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
+          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, manual_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, backup_target_space_low, backup_site_without_target, backup_partial, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
         details:
           type: object
           description: >-
@@ -9045,9 +10966,13 @@ components:
             certificate_expiring `{siteId, siteName, hostname, expiresAt|null, problem|null}`;
             certificate_not_issued `{siteId, siteName, hostname, problem|null}`;
             panel_certificate_expiring `{hostname, expiresAt}`;
+            manual_certificate_expiring `{siteId|null, siteName|null, certificateId, certificateName, notAfter, tier: warning|critical|expired}`;
             backup_failed `{siteId, siteName, failedAt}`;
             panel_backup_failed `{failedAt}`;
-            backup_storage_test_failed `{testedAt}`;
+            backup_storage_test_failed `{testedAt, targetId, targetKind: s3|local, problem|null}`;
+            backup_target_space_low `{targetId, targetKind: local, availableBytes, totalBytes, testedAt}`;
+            backup_site_without_target `{siteId, siteName}`;
+            backup_partial `{siteId, siteName, backupId, at}`;
             component_down `{component, state: down|degraded, reason|null}`;
             site_container_down `{siteId, siteName, observed}`;
             restore_undo_incomplete `{siteId, siteName, backupId, failedAt|null}`;
@@ -9089,6 +11014,22 @@ components:
               properties:
                 hostname: { type: string }
                 expiresAt: { type: string, format: date-time }
+            - title: manual_certificate_expiring
+              type: object
+              description: >-
+                An imported certificate version in use is within 14 days of `notAfter` (`warning`),
+                within 7 days (`critical`) or past it (`expired`); `severity` is `warning` at tier
+                `warning` and `critical` otherwise. `siteId` and `siteName` are null when the
+                certificate is not assigned to a site
+              additionalProperties: false
+              required: [siteId, siteName, certificateId, certificateName, notAfter, tier]
+              properties:
+                siteId: { type: string, nullable: true }
+                siteName: { type: string, nullable: true }
+                certificateId: { type: string }
+                certificateName: { type: string }
+                notAfter: { type: string, format: date-time }
+                tier: { type: string, enum: [warning, critical, expired] }
             - title: backup_failed
               type: object
               additionalProperties: false
@@ -9106,9 +11047,53 @@ components:
             - title: backup_storage_test_failed
               type: object
               additionalProperties: false
-              required: [testedAt]
+              description: >-
+                The last test of an enabled backup target failed. `subject` is the target id;
+                `problem` is the problem name of that test, or null
+              required: [testedAt, targetId, targetKind, problem]
               properties:
                 testedAt: { type: string, format: date-time }
+                targetId: { type: string, pattern: "^bkt_[0-9a-f]{32}$" }
+                targetKind: { type: string, enum: [s3, local] }
+                problem: { type: string, nullable: true, pattern: "^[a-z][a-z_]{0,63}$" }
+            - title: backup_target_space_low
+              type: object
+              description: >-
+                The last test of an enabled local target passed but its free space is below the
+                larger of 1 GiB and a tenth of the total. `subject` is the target id; no path leaves
+                the panel
+              additionalProperties: false
+              required: [targetId, targetKind, availableBytes, totalBytes, testedAt]
+              properties:
+                targetId: { type: string, pattern: "^bkt_[0-9a-f]{32}$" }
+                targetKind: { type: string, enum: [local] }
+                availableBytes: { type: integer, minimum: 0 }
+                totalBytes: { type: integer, minimum: 0 }
+                testedAt: { type: string, format: date-time }
+            - title: backup_site_without_target
+              type: object
+              description: >-
+                A site the nightly run would back up has no usable target, while some other target
+                is usable. `subject` is the site id and `since` is null
+              additionalProperties: false
+              required: [siteId, siteName]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+            - title: backup_partial
+              type: object
+              description: >-
+                The latest backup attempt of the site ended `partial`: one of its two copies failed,
+                the other succeeded. `subject` is the site id and `since` is that attempt's time; the
+                alert is raised only while the latest attempt is `partial` (`backup_failed` stays for
+                `failed`)
+              additionalProperties: false
+              required: [siteId, siteName, backupId, at]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                backupId: { type: string }
+                at: { type: string, format: date-time }
             - title: component_down
               type: object
               additionalProperties: false
@@ -9165,7 +11150,7 @@ components:
               required: [operationId, kind, siteId, siteName]
               properties:
                 operationId: { type: string }
-                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply] }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply, site.tls.apply] }
                 siteId: { type: string, nullable: true }
                 siteName: { type: string, nullable: true }
 
@@ -9785,6 +11770,7 @@ components:
             - host.maintenance
             - host.security
             - host.allocate
+            - site.tls.apply
         status:
           type: string
           enum:

@@ -3,9 +3,11 @@ import os from "node:os";
 import path from "node:path";
 import { RESTIC_IMAGE, type BackupTarget } from "@hosting-panel/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { BACKUP_REPO_LOCAL_JOB_SCRIPT, localizeResticScript, resolveBackupRepository } from "../src/backup-jobs.js";
 import { BackupRunner, type BackupRunnerDeps, type DockerRequest } from "../src/index.js";
 import {
   PANEL_DUMP_MAGIC,
+  PANEL_FETCH_LOCAL_SCRIPT,
   PANEL_FETCH_SCRIPT,
   PANEL_KEEP_LAST,
   PANEL_KEY_FILE_PATTERN,
@@ -14,6 +16,7 @@ import {
   PANEL_REPO_KEY_PATH,
   buildPanelDropContainerPayload,
   buildPanelFetchContainerPayload,
+  buildPanelFetchLocalContainerPayload,
   buildPanelKeepContainerPayload,
   buildPanelRepoContainerPayload,
   buildPanelUploadContainerPayload,
@@ -739,5 +742,166 @@ describe("index exports", () => {
     ] as const) {
       expect(typeof index[name]).toBe("function");
     }
+  });
+});
+
+describe("panel-jobs local repository builders", () => {
+  const HOST_DIR = `/var/lib/hosting-panel/local-repos/bkt_${"cd".repeat(16)}/panel`;
+  const CONTAINER_DIR = "/backup/repository/panel";
+  const LOCAL_SECRETS = { secretBinds: [RESTIC_SECRETS.secretBinds[1]!], secretFileEnv: [RESTIC_SECRETS.secretFileEnv[1]!] };
+  const repo = resolveBackupRepository(
+    { kind: "local", targetId: `bkt_${"cd".repeat(16)}` },
+    { kind: "panel" },
+    {
+      backupNetworkName: "hp_backup_net",
+      local: { hostDir: HOST_DIR, containerPath: CONTAINER_DIR, executorGid: 990, availableBytes: 1, totalBytes: 2 },
+    },
+  );
+  const LOCAL = { repo, executorUser: "990:990", ...LOCAL_SECRETS };
+  const REPO_MOUNT = { Type: "bind", Source: HOST_DIR, Target: CONTAINER_DIR, ReadOnly: false };
+
+  function expectLocal(payload: { Env: readonly string[]; HostConfig: Record<string, unknown> }): void {
+    expectHardened(payload.HostConfig);
+    expect(payload.Env).toContain(`RESTIC_REPOSITORY=${CONTAINER_DIR}`);
+    expect(payload.HostConfig.NetworkMode).toBe("none");
+    expect(payload.Env.some((e) => e.startsWith("HP_REGION=") || e.startsWith("AWS_"))).toBe(false);
+    expect(JSON.stringify(payload)).not.toContain("s3.");
+    expect(JSON.stringify(payload)).not.toContain("AWS_SHARED");
+  }
+
+  it("repo step runs the local init script as the executor user", () => {
+    const spec = buildPanelRepoContainerPayload({ ...LOCAL, jobId: JOB_ID });
+    expect(spec.payload.User).toBe("990:990");
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", BACKUP_REPO_LOCAL_JOB_SCRIPT]);
+    expect(spec.payload.Env).toContain("HP_INIT=1");
+    expect(spec.payload.HostConfig.Mounts).toEqual([REPO_MOUNT]);
+    expect(spec.payload.HostConfig.GroupAdd).toEqual(["990"]);
+    expect(spec.payload.HostConfig.Binds).toEqual(LOCAL_SECRETS.secretBinds);
+    expectLocal(spec.payload);
+  });
+
+  it("upload keeps its two read-only Mounts next to the repo Mount and merges the groups", () => {
+    const spec = buildPanelUploadContainerPayload({
+      ...LOCAL,
+      jobId: JOB_ID,
+      dumpPath: `/var/lib/hp/panel-dump/${JOB_ID}.dump`,
+      masterKeyPath: `/run/hp/secrets/job_bk_mk_${JOB_ID}/SECRETS_MASTER_KEY`,
+      dirGid: 4500,
+    });
+    expect(spec.payload.User).toBe("990:990");
+    expect(spec.payload.HostConfig.GroupAdd).toEqual(["4500", "990"]);
+    expect(spec.payload.HostConfig.Mounts).toEqual([
+      REPO_MOUNT,
+      { Type: "bind", Source: `/var/lib/hp/panel-dump/${JOB_ID}.dump`, Target: PANEL_REPO_DUMP_PATH, ReadOnly: true },
+      {
+        Type: "bind",
+        Source: `/run/hp/secrets/job_bk_mk_${JOB_ID}/SECRETS_MASTER_KEY`,
+        Target: PANEL_REPO_KEY_PATH,
+        ReadOnly: true,
+      },
+    ]);
+    expect(spec.payload.Cmd).toEqual(["backup", "-q", "--json", "--host", "hosting-panel", "--tag", JOB_ID, "/backup/panel"]);
+    expectLocal(spec.payload);
+  });
+
+  it("drop and keep run as the executor user with no option tokens", () => {
+    const drop = buildPanelDropContainerPayload({ ...LOCAL, jobId: JOB_ID, snapshotId: SNAPSHOT_ID });
+    expect(drop.payload.User).toBe("990:990");
+    expect(drop.payload.Cmd).toEqual(["forget", SNAPSHOT_ID]);
+    expect(drop.payload.HostConfig.Mounts).toEqual([REPO_MOUNT]);
+    expectLocal(drop.payload);
+    const keep = buildPanelKeepContainerPayload({ ...LOCAL, jobId: JOB_ID, retentionDays: 30 });
+    expect(keep.payload.User).toBe("990:990");
+    expect(keep.payload.Cmd?.slice(0, 2)).toEqual(["forget", "--host"]);
+    expect(keep.payload.Cmd).toContain("--prune");
+    expectLocal(keep.payload);
+  });
+
+  it("fetch from a resolved local repo uses the localized script and keeps its /o Mount", () => {
+    const spec = buildPanelFetchContainerPayload({
+      ...LOCAL,
+      fetchId: "f".repeat(32),
+      outDir: "/var/lib/hp/panel-dump",
+      dirGid: 4500,
+    });
+    expect(spec.payload.User).toBe("990:990");
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", localizeResticScript(PANEL_FETCH_SCRIPT)]);
+    expect(spec.payload.HostConfig.Mounts).toEqual([
+      REPO_MOUNT,
+      { Type: "bind", Source: "/var/lib/hp/panel-dump", Target: "/o", ReadOnly: false },
+    ]);
+    expect(spec.payload.HostConfig.GroupAdd).toEqual(["4500", "990"]);
+    expectLocal(spec.payload);
+  });
+
+  it("a local step without an executor user is refused", () => {
+    expect(() => buildPanelRepoContainerPayload({ repo, ...LOCAL_SECRETS, jobId: JOB_ID })).toThrow();
+    expect(() => buildPanelRepoContainerPayload({ ...LOCAL, executorUser: "root", jobId: JOB_ID })).toThrow();
+  });
+
+  it("an S3 repo resolved up front equals the legacy target input", () => {
+    const s3 = resolveBackupRepository(TARGET, { kind: "panel" }, { backupNetworkName: "hp_backup_net" });
+    expect(buildPanelKeepContainerPayload({ repo: s3, ...RESTIC_SECRETS, jobId: JOB_ID, retentionDays: 30 })).toEqual(
+      buildPanelKeepContainerPayload({ ...BASE, jobId: JOB_ID, retentionDays: 30 }),
+    );
+    expect(buildPanelRepoContainerPayload({ repo: s3, ...RESTIC_SECRETS, jobId: JOB_ID })).toEqual(
+      buildPanelRepoContainerPayload({ ...BASE, jobId: JOB_ID }),
+    );
+  });
+
+  describe("PANEL_FETCH_LOCAL_SCRIPT and the disaster-recovery fetch", () => {
+    it("is the localized fetch script with --no-lock and umask 007, and no s3", () => {
+      expect(PANEL_FETCH_LOCAL_SCRIPT).toContain("umask 007");
+      expect(PANEL_FETCH_LOCAL_SCRIPT).not.toContain("umask 077");
+      expect(PANEL_FETCH_LOCAL_SCRIPT).toContain('RO="--no-lock"');
+      expect(PANEL_FETCH_LOCAL_SCRIPT).not.toContain("s3.");
+      expect(PANEL_FETCH_LOCAL_SCRIPT).not.toContain("HP_REGION");
+      expect(PANEL_FETCH_LOCAL_SCRIPT).toContain("restic $RO snapshots --json --host hosting-panel");
+      expect(PANEL_FETCH_LOCAL_SCRIPT).toContain('restic $RO dump "$id" /backup/panel/secrets-master.key');
+    });
+
+    it("mounts the repo read-only with no network, as the repo directory owner", () => {
+      const spec = buildPanelFetchLocalContainerPayload({
+        fetchId: "e".repeat(32),
+        repoDir: "/mnt/old-disk/local-repos/bkt_x/panel",
+        user: "1500:1500",
+        outDir: "/var/lib/hp/panel-dump",
+        groupAdd: [4500],
+        ...LOCAL_SECRETS,
+      });
+      expect(spec.containerName).toBe(`hp_bk_pf_${"e".repeat(32)}_fetch`);
+      expect(spec.payload.User).toBe("1500:1500");
+      expect(spec.payload.Image).toBe(RESTIC_IMAGE);
+      expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", PANEL_FETCH_LOCAL_SCRIPT]);
+      expect(spec.payload.HostConfig.Mounts).toEqual([
+        { Type: "bind", Source: "/mnt/old-disk/local-repos/bkt_x/panel", Target: CONTAINER_DIR, ReadOnly: true },
+        { Type: "bind", Source: "/var/lib/hp/panel-dump", Target: "/o", ReadOnly: false },
+      ]);
+      expect(spec.payload.HostConfig.GroupAdd).toEqual(["4500"]);
+      expect(spec.payload.HostConfig.Binds).toEqual(LOCAL_SECRETS.secretBinds);
+      expect(spec.payload.Env).toContain(`RESTIC_REPOSITORY=${CONTAINER_DIR}`);
+      expect(spec.payload.Env).toContain("HP_FLOOR=1073741824");
+      expect(spec.payload.Labels["io.hostingpanel.job_id"]).toBe(`pf_${"e".repeat(32)}`);
+      expectLocal(spec.payload);
+    });
+
+    it("refuses a bad fetch id, user, relative paths, root group and a docker.sock secret", () => {
+      const ok = {
+        fetchId: "e".repeat(32),
+        repoDir: "/mnt/r/panel",
+        user: "1500:1500",
+        outDir: "/o-dir",
+        groupAdd: [4500],
+        ...LOCAL_SECRETS,
+      };
+      expect(() => buildPanelFetchLocalContainerPayload({ ...ok, fetchId: "E".repeat(32) })).toThrow();
+      expect(() => buildPanelFetchLocalContainerPayload({ ...ok, user: "root" })).toThrow();
+      expect(() => buildPanelFetchLocalContainerPayload({ ...ok, repoDir: "rel/panel" })).toThrow();
+      expect(() => buildPanelFetchLocalContainerPayload({ ...ok, outDir: "rel" })).toThrow();
+      expect(() => buildPanelFetchLocalContainerPayload({ ...ok, groupAdd: [0] })).toThrow();
+      expect(() =>
+        buildPanelFetchLocalContainerPayload({ ...ok, secretBinds: ["/var/run/docker.sock:/s:ro"] }),
+      ).toThrow();
+    });
   });
 });

@@ -288,9 +288,9 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
     expect(mockUpstream.fetchUpstream).toHaveBeenCalledTimes(calls.length);
   });
 
-  it("redacts forbidden key 'password' via bffJsonResponse while observing that 'secretAccessKey' is not in FORBIDDEN_KEY_PATTERN", async () => {
+  it("redacts forbidden key 'password' via bffJsonResponse and 'secretAccessKey' (forbidden DTO key, SPEC 0.2.5)", async () => {
     // password is in FORBIDDEN_KEY_PATTERN -> bffJsonResponse replaces it with "[REDACTED]".
-    // secretAccessKey is NOT in FORBIDDEN_KEY_PATTERN (R60.7) -> BFF passes it through if upstream ever sent it.
+    // secretAccessKey is a forbidden DTO key too (SPEC 0.2.5, c3f1): the BFF redacts it if upstream ever sent it.
     const leakyPayload = {
       data: {
         available: true,
@@ -322,7 +322,8 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
     const adminJson = JSON.parse(adminText) as Json;
     expect(adminJson.data.password).toBe("[REDACTED]");
     expect(adminText).not.toContain("leaky-password-value");
-    expect(adminJson.data.secretAccessKey).toBe("leaky-s3-secret-value");
+    expect(adminJson.data.secretAccessKey).toBe("[REDACTED]"); // forbidden DTO key since SPEC 0.2.5 (c3f1)
+    expect(adminText).not.toContain("leaky-s3-secret-value");
 
     mockUpstream.fetchUpstream.mockResolvedValueOnce({
       ok: true,
@@ -344,7 +345,7 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
     expect(custRes.status).toBe(200);
     const custJson = (await custRes.json()) as Json;
     expect(custJson.data.password).toBe("[REDACTED]");
-    expect(custJson.data.secretAccessKey).toBe("leaky-cust-s3-secret");
+    expect(custJson.data.secretAccessKey).toBe("[REDACTED]");
   });
 
   it("enforces R63 upstream timeouts (45s test, 20s reads and customer POST)", async () => {
@@ -401,6 +402,7 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
           runningOperationId: null,
           lastRestore: null,
           backups: [],
+          targets: [],
         } satisfies SiteBackupsDto,
       },
     });
@@ -449,6 +451,7 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
       runningOperationId: "op_running_qa",
       lastRestore: null,
       backups: [],
+      targets: [],
     };
     const custFetchRunning = vi
       .fn()
@@ -551,8 +554,8 @@ describe("backups web BFF, timeouts, polling, and copy QA", () => {
     );
   });
 
-  it("defines all 26 BACKUP_PROBLEMS in IT/EN for admin and customer and never repeats key names as customer copy", () => {
-    expect(BACKUP_PROBLEMS).toHaveLength(26);
+  it("defines all 31 BACKUP_PROBLEMS in IT/EN for admin and customer and never repeats key names as customer copy", () => {
+    expect(BACKUP_PROBLEMS).toHaveLength(31);
 
     for (const problem of BACKUP_PROBLEMS) {
       for (const [localeName, catalog] of [

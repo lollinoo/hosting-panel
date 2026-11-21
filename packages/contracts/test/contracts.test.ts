@@ -13,6 +13,7 @@ import {
   DEFAULT_PLATFORM_CAPABILITIES,
   ERROR_CODES,
   ERROR_CODE_HTTP_STATUS,
+  ErrorCodeSchema,
   EncryptedSecretMetadataDtoSchema,
   GrantEffectSchema,
   HostAllocationDtoSchema,
@@ -67,6 +68,9 @@ import {
   findUnsafeDockerInputFields,
   isDefaultRetryableErrorCode,
   isBackupAvailable,
+  isEncryptedBackupExportAvailable,
+  isLocalBackupTargetsAvailable,
+  isManualTlsAvailable,
   isWordpressToolsAvailable,
   isWordpressSite,
   BACKUP_KINDS,
@@ -99,14 +103,20 @@ import {
   ManagedSiteDtoSchema,
   AdminSiteDtoSchema,
   LoginInputSchema,
+  AddSiteDomainInputSchema,
+  SiteDomainDtoSchema,
+  SiteDomainsDtoSchema,
 } from "../src/index.js";
 
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 38 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(38);
-    expect(new Set(PERMISSION_KEYS).size).toBe(38);
+  it("defines exactly 39 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(39);
+    expect(new Set(PERMISSION_KEYS).size).toBe(39);
+    expect(PERMISSION_KEYS[PERMISSION_KEYS.indexOf("site.backups.manage") + 1]).toBe(
+      "site.certificates.manage",
+    );
 
     for (const key of PERMISSION_KEYS) {
       expect(PermissionKeySchema.parse(key)).toBe(key);
@@ -155,6 +165,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(hostingPerms).toContain("site.sftp.manage");
     expect(hostingPerms).toContain("site.databases.manage");
     expect(hostingPerms).toContain("site.backups.manage");
+    expect(hostingPerms).toContain("site.certificates.manage");
     expect(hostingPerms).toContain("service.deploy");
     expect(hostingPerms).toContain("quota.manage");
 
@@ -176,6 +187,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(ownerPerms).toContain("site.sftp.manage");
     expect(ownerPerms).toContain("site.databases.manage");
     expect(ownerPerms).toContain("site.backups.manage");
+    expect(ownerPerms).toContain("site.certificates.manage");
     expect(ownerPerms).toContain("service.create");
     expect(ownerPerms).not.toContain("host.maintenance.execute");
     expect(ownerPerms).not.toContain("template.manage");
@@ -187,6 +199,8 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
       "quota.read",
       "operation.read",
     ]);
+    expect(collabPerms).not.toContain("site.certificates.manage");
+    expect(PRESET_ROLE_PERMISSIONS.infrastructure_admin).not.toContain("site.certificates.manage");
   });
 
   it("correctly identifies mutating vs read-only permissions", () => {
@@ -199,6 +213,7 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(isMutatingPermission("site.sftp.manage")).toBe(true);
     expect(isMutatingPermission("site.databases.manage")).toBe(true);
     expect(isMutatingPermission("site.backups.manage")).toBe(true);
+    expect(isMutatingPermission("site.certificates.manage")).toBe(true);
     expect(isMutatingPermission("service.deploy")).toBe(true);
     expect(isMutatingPermission("host.maintenance.execute")).toBe(true);
   });
@@ -245,6 +260,18 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
       "HOST_JOB_FAILED",
       "RATE_LIMITED",
       "PASSWORD_CHANGE_REQUIRED",
+      "CERTIFICATE_INVALID",
+      "CERTIFICATE_KEY_MISMATCH",
+      "CERTIFICATE_CHAIN_INVALID",
+      "CERTIFICATE_NOT_YET_VALID",
+      "CERTIFICATE_EXPIRED",
+      "CERTIFICATE_HOSTNAME_MISMATCH",
+      "CERTIFICATE_IN_USE",
+      "CERTIFICATE_APPLY_FAILED",
+      "CERTIFICATE_SNI_MISMATCH",
+      "CERTIFICATE_UPLOAD_TOO_LARGE",
+      "CERTIFICATE_FORMAT_UNSUPPORTED",
+      "BACKUP_TARGET_IN_USE",
     ]);
 
     for (const code of ERROR_CODES) {
@@ -262,6 +289,29 @@ describe("@hosting-panel/contracts — Errors & HTTP Status Mapping", () => {
     expect(ERROR_CODE_HTTP_STATUS.RATE_LIMITED).toBe(429);
     expect(ERROR_CODE_HTTP_STATUS.PASSWORD_CHANGE_REQUIRED).toBe(403);
     expect(ERROR_CODES).not.toContain("UPDATE_CHECK_FAILED");
+  });
+
+  it("maps the manual TLS and backup target codes to their HTTP status and never retries them", () => {
+    expect(
+      Object.fromEntries(ERROR_CODES.slice(-12).map((code) => [code, ERROR_CODE_HTTP_STATUS[code]])),
+    ).toEqual({
+      CERTIFICATE_INVALID: 422,
+      CERTIFICATE_KEY_MISMATCH: 422,
+      CERTIFICATE_CHAIN_INVALID: 422,
+      CERTIFICATE_NOT_YET_VALID: 422,
+      CERTIFICATE_EXPIRED: 422,
+      CERTIFICATE_HOSTNAME_MISMATCH: 422,
+      CERTIFICATE_IN_USE: 409,
+      CERTIFICATE_APPLY_FAILED: 502,
+      CERTIFICATE_SNI_MISMATCH: 409,
+      CERTIFICATE_UPLOAD_TOO_LARGE: 413,
+      CERTIFICATE_FORMAT_UNSUPPORTED: 422,
+      BACKUP_TARGET_IN_USE: 409,
+    });
+    for (const code of ERROR_CODES.slice(-12)) {
+      expect(isDefaultRetryableErrorCode(code)).toBe(false);
+      expect(ErrorCodeSchema.parse(code)).toBe(code);
+    }
   });
 
   it("maps status codes accurately", () => {
@@ -517,6 +567,8 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(OPERATION_KINDS).toContain("site.wordpress.update");
     expect(OPERATION_KINDS).toContain("host.job");
     expect(OPERATION_KINDS).toContain("panel.container.apply");
+    expect(OPERATION_KINDS).toContain("site.tls.apply");
+    expect(new Set(OPERATION_KINDS).size).toBe(OPERATION_KINDS.length);
 
     expect(PlatformCapabilitiesDtoSchema.parse(DEFAULT_PLATFORM_CAPABILITIES)).toEqual(
       DEFAULT_PLATFORM_CAPABILITIES,
@@ -527,6 +579,9 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(DEFAULT_PLATFORM_CAPABILITIES.sharedHostingEnabled).toBe(false);
     expect(DEFAULT_PLATFORM_CAPABILITIES.dockerExecutorRuntimeAvailable).toBe(false);
     expect(DEFAULT_PLATFORM_CAPABILITIES.hostAgentRuntimeAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.manualTlsCertificatesAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.localBackupTargetsAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.encryptedBackupExportAvailable).toBe(false);
 
     // Legacy payloads omitting runtimeBackend default cleanly to "disabled"
     const legacyParsed = PlatformCapabilitiesDtoSchema.parse({
@@ -542,6 +597,10 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       wordpressToolsAvailable: false,
     });
     expect(legacyParsed.runtimeBackend).toBe("disabled");
+    // Payloads of a release without the HCP-SPEC-004 flags fail closed
+    expect(legacyParsed.manualTlsCertificatesAvailable).toBe(false);
+    expect(legacyParsed.localBackupTargetsAvailable).toBe(false);
+    expect(legacyParsed.encryptedBackupExportAvailable).toBe(false);
 
     const disabledCaps = createPlatformCapabilities({
       runtimeBackend: "disabled",
@@ -572,6 +631,19 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       expect(createPlatformCapabilities({ runtimeBackend }).wordpressToolsAvailable).toBe(false);
       expect(isWordpressToolsAvailable(runtimeBackend)).toBe(false);
     }
+    // Manual TLS and the local backup destination ship on linux-systemd only; encrypted export is on for no backend yet
+    expect(isManualTlsAvailable("linux-systemd")).toBe(true);
+    expect(createPlatformCapabilities({ runtimeBackend: "linux-systemd" }).manualTlsCertificatesAvailable).toBe(true);
+    for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
+      expect(isManualTlsAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).manualTlsCertificatesAvailable).toBe(false);
+    }
+    expect(isLocalBackupTargetsAvailable("linux-systemd")).toBe(true);
+    expect(createPlatformCapabilities({ runtimeBackend: "linux-systemd" }).localBackupTargetsAvailable).toBe(true);
+    for (const runtimeBackend of RUNTIME_BACKENDS) {
+      expect(isLocalBackupTargetsAvailable(runtimeBackend)).toBe(runtimeBackend === "linux-systemd");
+      expect(isEncryptedBackupExportAvailable(runtimeBackend)).toBe(false);
+    }
     expect(p2Caps).toEqual({
       phase: "phase-2",
       runtimeBackend: "linux-systemd",
@@ -584,6 +656,9 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: true,
       wordpressToolsAvailable: true,
+      manualTlsCertificatesAvailable: true,
+      localBackupTargetsAvailable: true,
+      encryptedBackupExportAvailable: false,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
     expect(
@@ -599,6 +674,23 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
         wordpressToolsAvailable: true,
       }).productionBackupRuntimeAvailable,
     ).toBe(true);
+    expect(
+      OrganizationCapabilitiesDtoSchema.parse({
+        hostingMode: "dedicated",
+        sharedHostingEnabled: false,
+        dockerExecutorRuntimeAvailable: true,
+        hostAgentRuntimeAvailable: true,
+        acmeTlsRuntimeAvailable: true,
+        sftpAvailable: true,
+        phpMyAdminAvailable: true,
+        productionBackupRuntimeAvailable: true,
+        wordpressToolsAvailable: true,
+      }),
+    ).toMatchObject({
+      manualTlsCertificatesAvailable: false,
+      localBackupTargetsAvailable: false,
+      encryptedBackupExportAvailable: false,
+    });
 
     // Shared hosting remains strictly gated false (AC-F2-10)
     expect(
@@ -1045,7 +1137,8 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
   it("pins the alert kinds, panel components and panel containers in order", () => {
     expect(ALERT_KINDS).toEqual([
       "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
-      "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
+      "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "backup_target_space_low",
+      "backup_site_without_target", "backup_partial", "component_down",
       "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
     ]);
     expect(PANEL_COMPONENTS).toEqual([
@@ -1057,6 +1150,22 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
 
   it("gives every alert kind a severity", () => {
     expect(Object.keys(ALERT_SEVERITY).sort()).toEqual([...ALERT_KINDS].sort());
+  });
+
+  it("accepts a manual certificate alert per tier with either severity and nothing else", () => {
+    const manual = {
+      kind: "manual_certificate_expiring",
+      severity: "warning",
+      subject: "ctv_1",
+      since: null,
+      details: { siteId: null, siteName: null, certificateId: "cti_1", certificateName: "hotel", notAfter: SAMPLE_TIMESTAMP, tier: "warning" },
+    };
+    expect(ALERT_SEVERITY.manual_certificate_expiring).toBe("warning");
+    for (const [tier, severity] of [["warning", "warning"], ["critical", "critical"], ["expired", "critical"]] as const) {
+      expect(AdminAlertDtoSchema.safeParse({ ...manual, severity, details: { ...manual.details, tier } }).success).toBe(true);
+    }
+    expect(AdminAlertDtoSchema.safeParse({ ...manual, details: { ...manual.details, tier: "notice" } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...manual, details: { ...manual.details, leafPem: "x" } }).success).toBe(false);
   });
 
   const diskAlert = {
@@ -1212,5 +1321,89 @@ describe("@hosting-panel/contracts — the sign-in input", () => {
     expect(at254).toHaveLength(254);
     expect(LoginInputSchema.parse({ email: `  ${at254.toUpperCase()} `, password: "x" }).email).toBe(at254);
     expect(LoginInputSchema.safeParse({ email: `a${at254}`, password: "x" }).success).toBe(false);
+  });
+});
+
+
+describe("@hosting-panel/contracts — HCP-SPEC-004 root wiring", () => {
+  it("exports the TLS and backup target modules from the package root", async () => {
+    const root = (await import("../src/index.js")) as Record<string, unknown>;
+    for (const name of [
+      "certificateExpiryTier",
+      "checkPemShape",
+      "sanCoversHostname",
+      "PEM_SHAPE_REASONS",
+      "TLS_CERTIFICATE_ID_PATTERN",
+      "TLS_VERSION_ID_PATTERN",
+      "SiteDomainTlsDtoSchema",
+      "BACKUP_TARGET_KINDS",
+      "CreateBackupTargetInputSchema",
+      "BackupTargetChoiceDtoSchema",
+      "BackupPolicyDtoSchema",
+      "SiteBackupCopyDtoSchema",
+    ]) {
+      expect(root[name], name).toBeDefined();
+    }
+  });
+
+  const baseDomain = {
+    id: "dom_1",
+    hostname: "hotel.it",
+    isPrimary: true,
+    routed: true,
+    challenge: "http-01" as const,
+    dns: {
+      status: "ok" as const,
+      checkedAt: null,
+      nextCheckAt: SAMPLE_TIMESTAMP,
+      observedA: [],
+      observedAaaa: [],
+    },
+    certificate: { status: "none" as const, problem: null, expiresAt: null, retryAt: null, trusted: false },
+  };
+  const acmeTls = { mode: "acme", certificateId: null, versionId: null, state: null, problem: null };
+
+  it("requires the tls block on SiteDomainDto", () => {
+    expect(SiteDomainDtoSchema.safeParse(baseDomain).success).toBe(false);
+    expect(SiteDomainDtoSchema.parse({ ...baseDomain, tls: acmeTls }).tls).toEqual(acmeTls);
+    const manual = {
+      mode: "manual",
+      certificateId: `cti_${"a".repeat(32)}`,
+      versionId: `ctv_${"b".repeat(32)}`,
+      state: "applying",
+      problem: null,
+    };
+    expect(SiteDomainDtoSchema.parse({ ...baseDomain, tls: manual }).tls).toEqual(manual);
+    for (const state of ["active", "failed", null]) {
+      expect(SiteDomainDtoSchema.safeParse({ ...baseDomain, tls: { ...manual, state } }).success).toBe(true);
+    }
+    expect(SiteDomainDtoSchema.safeParse({ ...baseDomain, tls: { ...manual, mode: "pfx" } }).success).toBe(false);
+    expect(SiteDomainDtoSchema.safeParse({ ...baseDomain, tls: { ...manual, state: "pending" } }).success).toBe(false);
+    expect(SiteDomainDtoSchema.safeParse({ ...baseDomain, tls: { mode: "acme" } }).success).toBe(false);
+    expect(
+      SiteDomainsDtoSchema.safeParse({
+        serverIpv4: "203.0.113.7",
+        routesPending: false,
+        domains: [baseDomain],
+        mail: { configured: false, fromAddress: null },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts an optional tlsVersionId on the domain create input and keeps the old payloads valid", () => {
+    expect(AddSiteDomainInputSchema.parse({ hostname: "hotel.it" })).toEqual({
+      hostname: "hotel.it",
+      includeWww: false,
+    });
+    const versionId = `ctv_${"0123456789abcdef".repeat(2)}`;
+    expect(AddSiteDomainInputSchema.parse({ hostname: "hotel.it", includeWww: true, tlsVersionId: versionId })).toEqual({
+      hostname: "hotel.it",
+      includeWww: true,
+      tlsVersionId: versionId,
+    });
+    for (const bad of ["", "ctv_xyz", `cti_${"a".repeat(32)}`, `ctv_${"A".repeat(32)}`, `ctv_${"a".repeat(33)}`]) {
+      expect(AddSiteDomainInputSchema.safeParse({ hostname: "hotel.it", tlsVersionId: bad }).success, bad).toBe(false);
+    }
+    expect(AddSiteDomainInputSchema.safeParse({ hostname: "hotel.it", tlsVersionId: null }).success).toBe(false);
   });
 });

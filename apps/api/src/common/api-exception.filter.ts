@@ -83,6 +83,24 @@ export class ApiExceptionFilter implements ExceptionFilter {
       } else if (status === 404) {
         code = "NOT_FOUND";
         message = "Requested endpoint or resource was not found.";
+      } else if (status === 413) {
+        // Fastify refused a body over its limit (1 MiB; Nest hands it over as an HttpException). Fixed texts: the
+        // request is never echoed.
+        retryable = false;
+        const requestPath = (request.raw?.url ?? request.url ?? "").split("?")[0] ?? "";
+        if (requestPath.includes("/tls-certificates")) {
+          code = "CERTIFICATE_UPLOAD_TOO_LARGE";
+          message = "The certificate files are too large.";
+          details = [{ field: "body", reason: "too_large", message }];
+        } else {
+          code = "VALIDATION_ERROR";
+          message = "Request body is too large.";
+        }
+      } else if (status === 415) {
+        // No error code maps to 415: the closest is VALIDATION_ERROR (400). Fixed text, the content type is not echoed.
+        code = "VALIDATION_ERROR";
+        message = "Unsupported content type. Send application/json.";
+        retryable = false;
       } else if (status === 400 || status === 422) {
         code = "VALIDATION_ERROR";
         message = redactSensitiveString(exception.message || "Invalid request.");

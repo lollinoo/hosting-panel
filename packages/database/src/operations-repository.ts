@@ -3,6 +3,7 @@ import { and, asc, eq, exists, inArray, not, sql } from "drizzle-orm";
 import {
   canTransitionOperation,
   findForbiddenPublicDtoKeys,
+  findPemValues,
   findPlaintextSecretKeys,
   isTerminalOperationStatus,
   type AuditActorType,
@@ -44,6 +45,7 @@ import {
   sites,
   stackRevisions,
 } from "./schema.js";
+import { assertNoManualCapture } from "./tls-coverage.js";
 
 function generatePrefixedId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/g, "")}`;
@@ -458,6 +460,8 @@ export async function createSiteTransactional(
 
     let domainRecord = null;
     if (input.initialDomain) {
+      // T5: no published manual certificate may already cover the host (lock order: site row, then TLS state).
+      await assertNoManualCapture(tx, input.organizationId, [input.initialDomain]);
       const domainId = generatePrefixedId("dom");
       const [dom] = await tx
         .insert(domains)
@@ -840,6 +844,8 @@ export interface EnqueueOperationInput {
   readonly resourceId: string;
   readonly requestedByUserId?: string;
   readonly idempotencyKey?: string;
+  /** sha256 hex of the canonical request: a replay of the key with another hash is an IDEMPOTENCY_CONFLICT. */
+  readonly requestHash?: string;
   readonly lockKey?: string;
   readonly leaseDurationMs?: number;
   readonly leaseExpiresAt?: Date | null;
@@ -873,6 +879,12 @@ export async function enqueueOperationTransactional(
         ) {
           throw createRepoError(
             `Idempotency key '${input.idempotencyKey}' was already used for a different operation target`,
+            "IDEMPOTENCY_CONFLICT",
+          );
+        }
+        if (input.requestHash !== undefined && existingOp.requestHash !== input.requestHash) {
+          throw createRepoError(
+            `Idempotency key '${input.idempotencyKey}' was already used for a different request`,
             "IDEMPOTENCY_CONFLICT",
           );
         }
@@ -931,11 +943,13 @@ export async function enqueueOperationTransactional(
 
     const secretViolations = findPlaintextSecretKeys(outboxPayload);
     const forbiddenViolations = findForbiddenPublicDtoKeys(outboxPayload);
-    if (secretViolations.length > 0 || forbiddenViolations.length > 0) {
+    const pemViolations = findPemValues(outboxPayload);
+    if (secretViolations.length > 0 || forbiddenViolations.length > 0 || pemViolations.length > 0) {
       throw createRepoError(
         `Outbox payload must never contain secrets or forbidden internal keys (${[
           ...secretViolations,
           ...forbiddenViolations,
+          ...pemViolations,
         ].join(", ")})`,
         "VALIDATION_ERROR",
       );
@@ -954,6 +968,7 @@ export async function enqueueOperationTransactional(
           resourceId: input.resourceId,
           requestedByUserId: input.requestedByUserId ?? null,
           idempotencyKey: input.idempotencyKey ?? null,
+          requestHash: input.requestHash ?? null,
           lockKey: input.lockKey ?? null,
           leaseExpiresAt,
           submittedAt: now,
@@ -1220,10 +1235,69 @@ export interface AppendAuditEventInput {
   readonly details?: Record<string, unknown>;
 }
 
+const REDACTED_PEM = "[REDACTED_PEM]";
+const PEM_BEGIN = "-----BEGIN";
+const PEM_END = "-----END";
+/** Stored for details that cannot be serialised (circular, BigInt, a throwing toJSON, absurd depth): the row is still written. */
+const UNSERIALIZABLE_DETAILS = { detailsDropped: "unserializable" } as const;
+
+/**
+ * What PostgreSQL refuses in `jsonb` and `text`: U+0000 (22021), and in `jsonb` also a lone UTF-16 surrogate. Both become
+ * U+FFFD, so the row is always written; a valid surrogate pair (an emoji) is kept.
+ */
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+const storable = (text: string): string => text.replaceAll("\u0000", "\ufffd").replace(LONE_SURROGATE, "\ufffd");
+
+/**
+ * Redacts parsed JSON: a string or an object key that carries a PEM marker becomes `[REDACTED_PEM]` as a whole. In an
+ * array (a PEM split into lines) a BEGIN line hides itself and every string up to its END line; a block that is never
+ * closed hides the rest of the array. Other values, a lone END line included, are kept.
+ */
+function redactPemJson(value: unknown): unknown {
+  if (typeof value === "string") return value.includes(PEM_BEGIN) ? REDACTED_PEM : storable(value);
+  if (Array.isArray(value)) {
+    let open = false;
+    return value.map((item: unknown) => {
+      if (typeof item !== "string") return redactPemJson(item);
+      const begins = item.includes(PEM_BEGIN);
+      const hidden = open || begins;
+      if (begins) open = !item.includes(PEM_END);
+      else if (item.includes(PEM_END)) open = false;
+      return hidden ? REDACTED_PEM : storable(item);
+    });
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key.includes(PEM_BEGIN) ? REDACTED_PEM : storable(key), redactPemJson(nested)]),
+    );
+  }
+  return value;
+}
+
+/** What the database will hold: the JSON round trip (class fields, `toJSON`, dates), redacted and storable. Never throws. */
+function auditDetailsForStorage(details: Record<string, unknown> | undefined): Record<string, unknown> {
+  try {
+    const stored = redactPemJson(JSON.parse(JSON.stringify(details ?? {})) as unknown);
+    return (stored ?? {}) as Record<string, unknown>;
+  } catch {
+    return { ...UNSERIALIZABLE_DETAILS };
+  }
+}
+
+/**
+ * The audit trail never keeps a certificate or key and does not drop a row over its content: the details are reduced to the
+ * JSON the database would store, every PEM-bearing string or key in it (for example an `X-Request-ID: -----BEGIN` header,
+ * free text, a certificate split into lines) is replaced by `[REDACTED_PEM]`, and U+0000 and lone surrogates, which
+ * PostgreSQL refuses, become U+FFFD in the details and in the text columns. Callers audit after an auto-committed change,
+ * so throwing here would lose the audit and fail a request whose change is already saved. Only a database error (down,
+ * constraint) can still reject the row. The outbox payload keeps its fail-closed guard: there the throw rolls the
+ * operation back.
+ */
 export async function appendAuditEvent(
   executor: DatabaseExecutor,
   input: AppendAuditEventInput,
 ) {
+  const details = auditDetailsForStorage(input.details);
   const [event] = await executor
     .insert(auditEvents)
     .values({
@@ -1231,12 +1305,12 @@ export async function appendAuditEvent(
       actorId: input.actorId ?? null,
       actorType: input.actorType ?? "user",
       organizationId: input.organizationId ?? null,
-      action: input.action,
-      targetType: input.targetType,
-      targetId: input.targetId ?? null,
-      ipAddress: input.ipAddress ?? null,
-      userAgent: input.userAgent ?? null,
-      details: input.details ?? {},
+      action: storable(input.action),
+      targetType: storable(input.targetType),
+      targetId: input.targetId == null ? null : storable(input.targetId),
+      ipAddress: input.ipAddress == null ? null : storable(input.ipAddress),
+      userAgent: input.userAgent == null ? null : storable(input.userAgent),
+      details,
     })
     .returning();
 

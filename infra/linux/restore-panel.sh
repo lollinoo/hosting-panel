@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Hosting Panel — bring the panel back on a new server from its copy in the S3 bucket.
+# Hosting Panel — bring the panel back on a new server from its copy in the S3 bucket or on the old disk.
 # Installed as /usr/local/sbin/hp-restore-panel (a wrapper that runs the current release's copy).
 # ==============================================================================
 set -euo pipefail
@@ -8,17 +8,22 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: sudo hp-restore-panel --endpoint <url> --region <region> --bucket <bucket> [--prefix <path>] [--yes]
+       sudo hp-restore-panel --local-repo <panel repository folder> [--yes]
 
 Brings back the panel's accounts, sites and settings from the copy the old server kept in the
-bucket. Run it on a new server right after install.sh, once the old server's backup.key is back
+bucket, or in the panel repository of a local backup target on its old disk (mount the disk first;
+the folder is <root>/<target id>/panel, for instance /mnt/old/local-repos/bkt_<32 hex>/panel).
+--local-repo cannot be combined with the bucket options, never asks for S3 keys, and reads the
+disk without changing it. Run it on a new server right after install.sh, once the old server's backup.key is back
 in /etc/hosting-panel/backup.key (0440 root:hp-executor). Switch the old server off first.
-The S3 keys are taken from HP_S3_ACCESS_KEY_ID and HP_S3_SECRET_ACCESS_KEY when set, otherwise
-they are asked for; never pass them as arguments. Before anything is changed it shows the date of
+With a bucket, the S3 keys are taken from HP_S3_ACCESS_KEY_ID and HP_S3_SECRET_ACCESS_KEY when
+set, otherwise they are asked for; never pass them as arguments. Before anything is changed it shows the date of
 the copy and asks y/N; --yes answers yes (without a terminal and without --yes the answer is no).
 
 Exit codes: 0 panel restored, 1 a step failed (the message says what to do; running again is safe),
-2 refused: bad arguments, not root, no backup.key, sites already on this server, a copy made
-by a newer panel, or the question not answered y.
+2 refused: bad arguments (a --local-repo folder that is a relative path, has a symlink, belongs
+to root, is writable by everybody or is not a restic repository), not root, no backup.key, sites
+already on this server, a copy made by a newer panel, or the question not answered y.
 EOF
 }
 
@@ -36,16 +41,17 @@ info() { printf '[INFO] %s\n' "$1"; }
 SAFE="Nothing on this server was changed; running this again is safe."
 STOPPED="The panel is stopped: run this again (it is safe), or start the empty panel with systemctl start hp-api hp-web."
 
-endpoint="" region="" bucket="" prefix="" has_prefix=0 assume_yes=0
+endpoint="" region="" bucket="" prefix="" has_prefix=0 assume_yes=0 local_repo="" has_local=0
 while (($#)); do
   case "$1" in
-    --endpoint | --region | --bucket | --prefix)
+    --endpoint | --region | --bucket | --prefix | --local-repo)
       [[ $# -ge 2 && -n "$2" ]] || { usage >&2; die 2 "$1 needs a value"; }
       case "$1" in
         --endpoint) endpoint="$2" ;;
         --region) region="$2" ;;
         --bucket) bucket="$2" ;;
         --prefix) prefix="$2"; has_prefix=1 ;;
+        --local-repo) local_repo="$2"; has_local=1 ;;
       esac
       shift 2
       ;;
@@ -54,7 +60,13 @@ while (($#)); do
     *) usage >&2; die 2 "Unknown argument: $1" ;;
   esac
 done
-[[ -n "${endpoint}" && -n "${region}" && -n "${bucket}" ]] || { usage >&2; die 2 "--endpoint, --region and --bucket are required."; }
+if ((has_local)); then
+  [[ -z "${endpoint}${region}${bucket}" && ${has_prefix} -eq 0 ]] ||
+    { usage >&2; die 2 "--local-repo cannot be combined with --endpoint, --region, --bucket or --prefix."; }
+else
+  [[ -n "${endpoint}" && -n "${region}" && -n "${bucket}" ]] ||
+    { usage >&2; die 2 "Give --local-repo, or --endpoint, --region and --bucket."; }
+fi
 
 # Test overrides (stubs). Only honoured as non-root, where they cannot touch the real system.
 if [[ "${EUID}" -eq 0 ]]; then
@@ -83,11 +95,41 @@ health() {
     panel_health_check "${bind:-127.0.0.1}" 90
   fi
 }
+# The panel repository on the old disk: refused unless it is a plain, root-free restic folder, before anything runs.
+check_local_repo() {
+  local d="$1" c="" part x st m refusal
+  local -a parts
+  refusal="The --local-repo folder was refused. It must be the panel repository of a local backup target: an absolute path of letters, digits and . _ @ + - / with no symlink, .. or trailing slash, such as /mnt/old/local-repos/bkt_<32 hex>/panel, not owned by root, not writable by everybody, and holding a restic repository (config, keys, data, snapshots, index). ${SAFE}"
+  [[ ${#d} -le 255 && "${d}" =~ ^/[A-Za-z0-9._@+/-]+$ && "${d}" != */ && "${d}" != *//* && "${d}" != */./* && "${d}" != */. &&
+    "${d}" != */../* && "${d}" != */.. ]] || die 2 "${refusal}"
+  for x in /etc /proc /sys /dev /run /boot /root /var/lib/docker; do
+    [[ "${d}" != "${x}" && "${d}" != "${x}/"* ]] || die 2 "${refusal}"
+  done
+  # This server's own state (panel dump, secrets, site files) is never a source; the local-repos folder of a reinstall is.
+  if [[ "${d}" == "${STATE}" || "${d}" == "${STATE}/"* ]]; then
+    [[ "${d}" == "${STATE}/local-repos/"* ]] || die 2 "${refusal}"
+  fi
+  IFS=/ read -ra parts <<<"${d#/}"
+  for part in "${parts[@]}"; do
+    c+="/${part}"
+    [[ ! -L "${c}" ]] || die 2 "${refusal}"
+    [[ -e "${c}" ]] || die 1 "${d} cannot be found. Mount the old disk first (and check the path of the panel folder), then run this again. ${SAFE}"
+  done
+  [[ -d "${d}" && "$(readlink -f -- "${d}")" == "${d}" ]] || die 2 "${refusal}"
+  st="$(stat -c '%u %a' -- "${d}")"
+  [[ "${st%% *}" != 0 ]] && ((!(8#${st#* } & 2))) || die 2 "${refusal}"
+  m="$(stat -c '%u %a' -- "${d}/config" 2>/dev/null)" || die 2 "${refusal}"
+  [[ -f "${d}/config" && ! -L "${d}/config" && "${m%% *}" == "${st%% *}" ]] && ((!(8#${m#* } & 2))) || die 2 "${refusal}"
+  for x in keys data snapshots index; do
+    [[ -d "${d}/${x}" && ! -L "${d}/${x}" ]] || die 2 "${refusal}"
+  done
+}
 trap 'rm -f -- "${DUMP}" "${KEY}"' EXIT
 
 # 1. Checks that change nothing.
 [[ -s "${ETC}/backup.key" && "$(<"${ETC}/backup.key")" =~ ^[0-9a-f]{64}$ ]] ||
   die 2 "Put the old server's backup.key in ${ETC}/backup.key (0440 root:hp-executor) first, then run this again."
+((!has_local)) || check_local_repo "${local_repo}"
 hostname="$(env_value "${ETC}/executor.env" HP_PANEL_HOSTNAME)"
 ipv4="$(env_value "${ETC}/executor.env" HP_PANEL_IPV4)"
 [[ -n "${hostname}" && -n "${ipv4}" ]] || die 1 "Run install.sh on this server first: ${ETC}/executor.env has no panel hostname or address. ${SAFE}"
@@ -109,19 +151,43 @@ if [[ ! -e "${MARKER}" ]]; then
   [[ "${sites}" =~ ^[0-9]+$ ]] || die 1 "The panel database gave an unexpected answer to the site count. ${SAFE}"
   [[ "${sites}" == "0" ]] || die 2 "This panel already has ${sites} site(s): bringing back a copy would erase them. Run this only on a freshly installed server."
 fi
-[[ -n "${ak}" ]] || read -rp "S3 access key ID: " ak || true
-[[ -n "${sk}" ]] || { read -rsp "S3 secret access key: " sk || true; echo; }
-[[ -n "${ak}" && -n "${sk}" ]] || die 2 "No S3 keys: set HP_S3_ACCESS_KEY_ID and HP_S3_SECRET_ACCESS_KEY, or type them when asked."
+if ((!has_local)); then
+  [[ -n "${ak}" ]] || read -rp "S3 access key ID: " ak || true
+  [[ -n "${sk}" ]] || { read -rsp "S3 secret access key: " sk || true; echo; }
+  [[ -n "${ak}" && -n "${sk}" ]] || die 2 "No S3 keys: set HP_S3_ACCESS_KEY_ID and HP_S3_SECRET_ACCESS_KEY, or type them when asked."
+fi
 
 # 2. Fetch the newest copy: the executor's command writes restore.pgdump and restore.key.
 # The keys go on its stdin from a builtin, so they are in no argument list and no environment.
-info "Fetching the newest copy of the panel from the bucket..."
-fetch_args=(--endpoint "${endpoint}" --region "${region}" --bucket "${bucket}")
-((has_prefix == 0)) || fetch_args+=(--prefix "${prefix}")
-rc=0
-fetched="$(printf '%s\n%s\n' "${ak}" "${sk}" |
-  HP_PANEL_DUMP_DIR="${DUMP_DIR}" as hp-executor /usr/bin/node "${RELEASE}/apps/docker-executor/dist/cli/panel-fetch.js" "${fetch_args[@]}")" ||
-  rc=$?
+# A local repository takes no key: the fetch gets an empty stdin.
+if ((has_local)); then
+  src="the local repository"
+  info "Fetching the newest copy of the panel from ${local_repo}..."
+  rc=0
+  fetched="$(HP_PANEL_DUMP_DIR="${DUMP_DIR}" as hp-executor /usr/bin/node "${RELEASE}/apps/docker-executor/dist/cli/panel-fetch.js" --local-repo "${local_repo}" </dev/null)" ||
+    rc=$?
+else
+  src="the bucket"
+  info "Fetching the newest copy of the panel from the bucket..."
+  fetch_args=(--endpoint "${endpoint}" --region "${region}" --bucket "${bucket}")
+  ((has_prefix == 0)) || fetch_args+=(--prefix "${prefix}")
+  rc=0
+  fetched="$(printf '%s\n%s\n' "${ak}" "${sk}" |
+    HP_PANEL_DUMP_DIR="${DUMP_DIR}" as hp-executor /usr/bin/node "${RELEASE}/apps/docker-executor/dist/cli/panel-fetch.js" "${fetch_args[@]}")" ||
+    rc=$?
+fi
+if ((has_local)); then
+  case "${rc}" in
+    0) ;;
+    2) die 1 "The --local-repo folder was refused. It must be an absolute path without symlinks or .., such as /mnt/old/local-repos/<id>/panel. ${SAFE}" ;;
+    4) die 1 "No copy of the panel in that repository. Check that --local-repo is the panel folder of the target (not the local-repos folder), then run this again. ${SAFE}" ;;
+    5) die 1 "The copy cannot be opened with ${ETC}/backup.key. Put the old server's backup.key there, then run this again. ${SAFE}" ;;
+    6) die 1 "Not enough free space in ${DUMP_DIR} for the copy. Free disk space (df -h ${STATE}), then run this again. ${SAFE}" ;;
+    7) die 1 "That folder cannot be found. Mount the old disk first, then run this again. ${SAFE}" ;;
+    8) die 1 "That folder is not safe to read: a symlink, owned by root, writable by everybody, or a parent folder the hp-executor user cannot enter (chmod o+x on it). Fix the folder, then run this again. ${SAFE}" ;;
+    *) die 1 "Fetching the copy failed (see the line above). Check journalctl -u hp-docker-executor and that install.sh of this release ran completely, then run this again. ${SAFE}" ;;
+  esac
+fi
 case "${rc}" in
   0) ;;
   2) die 1 "The bucket settings were refused. --endpoint must be https://host or https://host:port with no path or trailing slash, --bucket lower-case letters, digits, dots and dashes, --prefix folder names of letters, digits, dots, dashes and underscores separated by /. Correct them, then run this again. ${SAFE}" ;;
@@ -148,7 +214,7 @@ while IFS= read -r m; do
 done <<<"${applied}"
 
 # 4. Replace this server's empty panel with the copy, once the administrator agreed to its date.
-info "The newest copy in the bucket was made on ${copy_time} (UTC)."
+info "The newest copy in ${src} was made on ${copy_time} (UTC)."
 if ((assume_yes == 0)); then
   answer=""
   [[ ! -t 0 ]] || read -rp "Replace this server's panel with this copy? [y/N] " answer || true
@@ -180,7 +246,7 @@ rm -f -- "${MARKER}"
 health || die 1 "The panel was restored but did not come up. Check journalctl -u hp-api -u hp-web, then systemctl restart hp-api hp-web."
 cat <<EOF
 
-Panel restored from the copy in the bucket. Next:
+Panel restored from the copy in ${src}. Next:
   1. Sign in with the old server's administrator account (the accounts install.sh made here are
      gone, and everybody signs in again).
   2. Point every site's domains at this server (${ipv4}).

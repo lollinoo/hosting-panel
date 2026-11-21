@@ -13,7 +13,11 @@ export function domainView(
 ): { tone: Tone; label: DomainLabel; hint: DomainHint | null } {
   if (!d.routed) return { tone: "muted", label: "settingUp", hint: null };
   const c = d.certificate;
-  if (d.dns.status !== "ok" && !(d.challenge === "dns-01" && (c.status === "requested" || c.status === "failed"))) {
+  const manual = d.tls.mode === "manual";
+  if (d.tls.state === "applying") return { tone: "muted", label: "applyingCertificate", hint: null };
+  if (manual && d.tls.state === "failed") return { tone: "error", label: "httpsProblem", hint: "manualApplyFailed" };
+  const dnsGateOpen = !manual && d.challenge === "dns-01" && (c.status === "requested" || c.status === "failed");
+  if (d.dns.status !== "ok" && !dnsGateOpen) {
     return { tone: "warn", label: "waitingForDns", hint: d.dns.status === "unchecked" ? null : d.dns.status };
   }
   if (c.status === "requested") return { tone: "muted", label: "securing", hint: null };

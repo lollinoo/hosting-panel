@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isIPv4 } from "node:net";
 import path from "node:path";
 import {
@@ -26,6 +26,11 @@ export const DEFAULT_INGRESS_ROOT_DIR = "/var/lib/hosting-panel/ingress" as cons
 export const DEFAULT_INGRESS_HTTP_PORT = 80 as const;
 export const DEFAULT_INGRESS_HTTPS_PORT = 443 as const;
 export const PANEL_DYNAMIC_FILE_NAME = "hp-panel.yml" as const;
+export const MANUAL_CERTS_DIR_NAME = "manual-certs" as const;
+export const MANUAL_CERTIFICATES_FILE_NAME = "hp-manual-certificates.yml" as const;
+export const MANUAL_TLS_STATE_FILE = "manual-tls-state.json" as const;
+/** Where the proxy sees dynamic/manual-certs through the existing read-only dynamic bind. */
+export const DEFAULT_MANUAL_CERT_MOUNT_DIR = "/etc/traefik/dynamic/manual-certs" as const;
 export const STATIC_SHA256_LABEL = "io.hostingpanel.static_sha256" as const;
 const ACME_EMAIL_PATTERN = /^[^\s@"'`\\]+@[^\s@"'`\\]+$/;
 const ACME_CA_SERVER_PATTERN = /^https:\/\/[^\s"'`\\]+$/;
@@ -343,13 +348,19 @@ function assertSiteHostRoute(host: SiteHostRoute, reserved: ReadonlySet<string>)
     if (!isSiteOrigin(host.redirectTo)) hostPolicyDenied("redirect origin");
     if (reserved.has(host.redirectTo.replace(/^https?:\/\//, ""))) hostPolicyDenied("redirect origin");
   }
+  if (host.source !== undefined && host.source !== "manual") hostPolicyDenied("certificate source");
+  // A manual certificate is not ordered, so no challenge applies to it.
+  if (host.source === "manual" && host.challenge !== undefined) {
+    throw new ExecutorCodedError("A manual certificate host cannot carry an ACME challenge", "VALIDATION_ERROR");
+  }
   const base = {
     hostname: host.hostname,
     tls: host.tls === true,
     httpsRedirect: host.httpsRedirect === true,
     redirectTo: host.redirectTo,
   };
-  // http-01 stays implicit, so its route files and @hp-route lines stay byte-identical.
+  // http-01 and ACME stay implicit, so their route files and @hp-route lines stay byte-identical.
+  if (host.source === "manual") return { ...base, source: "manual" };
   return host.challenge === "dns-01" ? { ...base, challenge: "dns-01" } : base;
 }
 
@@ -433,7 +444,8 @@ export function buildSiteDynamicTraefikYaml(
     for (const host of route.hosts) {
       const i = hostSuffix(host.hostname);
       const canon = host.redirectTo !== null ? `canon_${key}_${i}` : null;
-      const httpsRedirect = opts.acmeEnabled && host.httpsRedirect && canon === null;
+      const manual = host.source === "manual";
+      const httpsRedirect = (opts.acmeEnabled || manual) && host.httpsRedirect && canon === null;
       needsHttpsRedirect ||= httpsRedirect;
       const httpMiddleware = canon ?? (httpsRedirect ? `https_${key}` : null);
       const router = (name: string, entryPoint: string, middleware: string | null) => [
@@ -445,12 +457,13 @@ export function buildSiteDynamicTraefikYaml(
         ...(middleware ? ["      middlewares:", `        - "${middleware}"`] : []),
       ];
       routers.push(...router(`router_${key}_${i}`, "web", httpMiddleware));
-      if (host.tls && opts.acmeEnabled) {
+      if (host.tls && (opts.acmeEnabled || manual)) {
         const dns01 = host.challenge === "dns-01";
         routers.push(
           ...router(`router_${key}_${i}_tls`, "websecure", canon),
-          // Without le-dns a dns-01 host serves the default certificate instead of failing.
-          ...(dns01 && !opts.dnsChallenge
+          // A manual host is served from the loaded certificate list. Without le-dns a dns-01 host
+          // serves the default certificate instead of failing.
+          ...(manual || (dns01 && !opts.dnsChallenge)
             ? ["      tls: {}"]
             : ["      tls:", `        certResolver: ${dns01 ? DNS_RESOLVER_NAME : "le"}`]),
         );
@@ -501,7 +514,8 @@ function isSiteHostRouteShape(value: unknown): value is SiteHostRoute {
     typeof h.tls === "boolean" &&
     typeof h.httpsRedirect === "boolean" &&
     (h.redirectTo === null || typeof h.redirectTo === "string") &&
-    (h.challenge === undefined || h.challenge === "http-01" || h.challenge === "dns-01")
+    (h.challenge === undefined || h.challenge === "http-01" || h.challenge === "dns-01") &&
+    (h.source === undefined || h.source === "manual")
   );
 }
 
@@ -663,6 +677,12 @@ export class TraefikIngressFileManager {
   public readonly dynamicDirPath: string;
   public readonly acmeDirPath: string;
   public readonly dnsProviderStatePath: string;
+  /** dynamic/manual-certs: version dirs are written by the manual TLS store. */
+  public readonly manualCertsDirPath: string;
+  /** The names-only state of the manual TLS store, next to the DNS provider state. */
+  public readonly manualTlsStatePath: string;
+  /** The same directory as the proxy sees it. */
+  public readonly manualCertMountDir: string;
   private readonly siteRoutes = new Map<string, Map<string, SiteIngressRouteEntry>>();
   private readonly serviceToSite = new Map<string, string>();
   private readonly panel: PanelIngressConfig | null;
@@ -678,6 +698,7 @@ export class TraefikIngressFileManager {
   public constructor(
     ingressRootDir: string = DEFAULT_INGRESS_ROOT_DIR,
     panel: PanelIngressConfig | null = null,
+    options: { readonly manualCertMountDir?: string } = {},
   ) {
     this.panel = panel;
     this.routeOptions = siteRouteOptions(panel);
@@ -686,6 +707,9 @@ export class TraefikIngressFileManager {
     this.dynamicDirPath = path.join(this.ingressRootDir, "dynamic");
     this.acmeDirPath = path.join(this.ingressRootDir, "acme");
     this.dnsProviderStatePath = path.join(this.ingressRootDir, DNS_PROVIDER_STATE_FILE);
+    this.manualCertsDirPath = path.join(this.dynamicDirPath, MANUAL_CERTS_DIR_NAME);
+    this.manualTlsStatePath = path.join(this.ingressRootDir, MANUAL_TLS_STATE_FILE);
+    this.manualCertMountDir = options.manualCertMountDir ?? DEFAULT_MANUAL_CERT_MOUNT_DIR;
   }
 
   private inSiteFileLine<T>(work: () => Promise<T>): Promise<T> {
@@ -724,6 +748,37 @@ export class TraefikIngressFileManager {
     this.rememberDnsState(state);
     if (changed) await this.rerenderSiteFiles();
     return changed;
+  }
+
+  /** Writes the manual certificate list the proxy watches; null removes it. */
+  public writeManualCertificateManifest(content: string | null): Promise<void> {
+    return this.inSiteFileLine(async () => {
+      const file = path.join(this.dynamicDirPath, MANUAL_CERTIFICATES_FILE_NAME);
+      if (content === null) {
+        await rm(file, { force: true });
+        return;
+      }
+      await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
+      await writeFileIfChanged(file, content, 0o644);
+    });
+  }
+
+  /** The panel host and every host of the persisted site routes, read under the file line. */
+  public listRoutedHostnames(): Promise<string[]> {
+    return this.inSiteFileLine(async () => {
+      const hostnames = new Set<string>();
+      if (this.panel) hostnames.add(this.panel.hostname.trim().toLowerCase());
+      const names = await readdir(this.dynamicDirPath).catch(() => [] as string[]);
+      for (const name of names) {
+        const siteId = /^site_(.+)\.yml$/.exec(name)?.[1];
+        if (!siteId || siteId.includes("..") || !SAFE_IDENTIFIER_PATTERN.test(siteId)) continue;
+        const siteMap = await this.getOrHydrateSiteMap(siteId);
+        for (const entry of siteMap.values()) {
+          for (const routeHost of entry.hosts) hostnames.add(routeHost.hostname);
+        }
+      }
+      return [...hostnames].sort();
+    });
   }
 
   /** dns-01 hosts follow the resolver choice; files that would not change are not rewritten. */
@@ -798,6 +853,7 @@ export class TraefikIngressFileManager {
     await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
     await mkdir(this.acmeDirPath, { recursive: true, mode: 0o700 });
     await chmod(this.acmeDirPath, 0o700);
+    await this.ensureManualCertsDir();
     // Traefik refuses an acme.json looser than 0600; "a" never truncates existing certificates.
     const acmeJsonPath = path.join(this.acmeDirPath, acmeStorageFileName(panel));
     await (await open(acmeJsonPath, "a", 0o600)).close();
@@ -850,6 +906,20 @@ export class TraefikIngressFileManager {
       staticSha256: createHash("sha256").update(staticYaml).digest("hex"),
       acmeDns: panel?.acmeEmail ? dnsState : null,
     };
+  }
+
+  /** One unreadable subdirectory breaks the cold start of every route, so it is checked on every ensure. */
+  private async ensureManualCertsDir(): Promise<void> {
+    const existing = await lstat(this.manualCertsDirPath).catch(() => null);
+    if (existing !== null && !existing.isDirectory()) {
+      hostPolicyDenied("manual certificate directory");
+    }
+    await mkdir(this.manualCertsDirPath, { recursive: true, mode: 0o700 });
+    await chmod(this.manualCertsDirPath, 0o700);
+    const checked = await lstat(this.manualCertsDirPath);
+    if (!checked.isDirectory() || (process.getuid && checked.uid !== process.getuid())) {
+      hostPolicyDenied("manual certificate directory");
+    }
   }
 
   private async getOrHydrateSiteMap(siteId: string): Promise<Map<string, SiteIngressRouteEntry>> {

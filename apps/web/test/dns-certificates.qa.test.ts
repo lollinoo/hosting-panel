@@ -111,6 +111,7 @@ const dom = (hostname: string, challenge: SiteDomainDto["challenge"] = "http-01"
   challenge,
   dns: { status: "ok", checkedAt: null, nextCheckAt: "2026-11-09T13:00:00Z", observedA: [], observedAaaa: [] },
   certificate: { status: "active", problem: null, expiresAt: "2099-01-01T00:00:00Z", retryAt: null, trusted: true },
+  tls: { mode: "acme", certificateId: null, versionId: null, state: null, problem: null },
 });
 const domains = (...d: SiteDomainDto[]): SiteDomainsDto => ({
   serverIpv4: "203.0.113.10",

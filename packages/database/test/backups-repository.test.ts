@@ -35,6 +35,7 @@ import {
   platformInstallations,
   recordBackupTest,
   recordPanelBackupOutcome,
+  repairLegacyBackupCopies,
   rolePermissions,
   settleSiteArchive,
   settleSiteBackup,
@@ -43,6 +44,7 @@ import {
   sql,
   startNightlyRun,
   sumNewestBackupSizes,
+  updatePolicySettings,
   upsertBackupSettings,
   users,
   type DatabaseClient,
@@ -123,8 +125,14 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
   it("returns null before configuration and rejects initial save without a secret", async () => {
     expect(await getBackupSettingsPublic(db())).toBeNull();
     expect(await getBackupTarget(db(), KEY)).toBeNull();
-    expect(await db().transaction((tx) => lockNightlyRunState(tx))).toBeNull();
-    expect(await startNightlyRun(db(), "2026-11-15", 10)).toBeNull();
+    // The nightly state lives on the default_site policy, seeded by 0022 on every install: no S3 settings needed (BKP-02).
+    expect(await db().transaction((tx) => lockNightlyRunState(tx))).toEqual({
+      scheduleHourUtc: 2,
+      retentionDays: 14,
+      lastNightlyRunOn: null,
+      nightlyRunStartedAt: null,
+    });
+    expect(await startNightlyRun(db(), "2026-11-15", 1)).toBeNull(); // the seeded hour (2) is not reached
 
     await expect(
       upsertBackupSettings(db(), KEY, {
@@ -326,7 +334,8 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
   });
 
   it("locks, starts, finishes nightly runs cleanly by UTC hour, date, and clock correction", async () => {
-    // scheduleHourUtc is currently 4, retentionDays is 21
+    // scheduleHourUtc is currently 4, retentionDays is 21: the settings service writes them on the policy
+    await updatePolicySettings(db(), "default_site", { scheduleHourUtc: 4, retentionDays: 21 }, null);
     const initialLocked = await db().transaction((tx) => lockNightlyRunState(tx));
     expect(initialLocked).toEqual({
       scheduleHourUtc: 4,
@@ -375,7 +384,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
     // Clock correction: a future date recorded when the clock was ahead must not block today's run.
     const tDay3 = new Date("2026-11-17T04:00:00.000Z");
     await db().execute(
-      sql`UPDATE backup_settings SET last_nightly_run_on = '2026-12-01' WHERE id = 'default'`,
+      sql`UPDATE backup_policies SET last_nightly_run_on = '2026-12-01' WHERE scope = 'default_site'`,
     );
     expect(await startNightlyRun(db(), "2026-11-17", 4, tDay3)).toEqual({
       scheduleHourUtc: 4,
@@ -431,7 +440,7 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
         startedAt: futureNightlyAt,
       });
       await db().execute(
-        sql`UPDATE backup_settings SET last_nightly_run_on = '2026-12-01' WHERE id = 'default'`,
+        sql`UPDATE backup_policies SET last_nightly_run_on = '2026-12-01' WHERE scope = 'default_site'`,
       );
       const tCorrected = new Date("2026-11-20T04:00:00.000Z");
       const startedAfterFuture = await startNightlyRun(db(), "2026-11-20", 4, tCorrected);
@@ -460,6 +469,9 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
       phpVersion: "8.4",
       siteType: "wordpress",
     });
+
+    // A site is scheduled only when its effective policy has a usable target: the legacy S3 target of the settings.
+    await repairLegacyBackupCopies(db());
 
     await db().update(sites).set({ status: "ready" }).where(eq(sites.id, liveSiteId));
     await db().update(sites).set({ status: "stopped" }).where(eq(sites.id, deletedSiteId));
@@ -1217,6 +1229,31 @@ describe("@hosting-panel/database — 0009 backups repository", () => {
         problem: "other",
       });
       expect(live?.lastRestore?.finishedAt).toBeTruthy();
+    } finally {
+      await deleteAllSiteBackups(db());
+    }
+  });
+
+  it("M3: a partial backup (DB-level status of M4) counts as the newest backup and as the last success", async () => {
+    const make = async (opId: string, startedAt: string, size: number, status: "succeeded" | "partial") => {
+      await insertSiteBackup(db(), {
+        siteId: liveSiteId,
+        kind: "manual",
+        status: "running",
+        operationId: opId,
+        startedAt: new Date(startedAt),
+      });
+      await settleSiteBackup(db(), opId, { status: "succeeded", snapshotId: "e".repeat(64), sizeBytes: size });
+      if (status === "partial") {
+        await db().execute(sql`UPDATE site_backups SET status = 'partial' WHERE operation_id = ${opId}`);
+      }
+    };
+    try {
+      await make("op_m3_old", "2026-11-13T02:00:00.000Z", 100, "succeeded");
+      await make("op_m3_partial", "2026-11-14T02:00:00.000Z", 700, "partial");
+      expect(await sumNewestBackupSizes(db())).toBe(700);
+      const live = (await listAdminBackupStatus(db())).find((r) => r.siteId === liveSiteId);
+      expect(live).toMatchObject({ lastSuccessSizeBytes: 700, lastStatus: "partial" });
     } finally {
       await deleteAllSiteBackups(db());
     }

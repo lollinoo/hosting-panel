@@ -20,6 +20,8 @@ export function certificateUsable(row: DomainRow, now: Date): boolean {
   return row.certStatus === "active" && row.certExpiresAt !== null && row.certExpiresAt > now;
 }
 
+const isManual = (row: Pick<DomainRow, "certMode">): boolean => row.certMode === "manual";
+
 const hasTls = (row: DomainRow): boolean => row.certStatus === "active" || row.certStatus === "requested";
 
 /** The routes of a site's routed domains; non-primary names redirect to the primary. */
@@ -31,8 +33,18 @@ export function buildSiteHostRoutes(
   const acme = opts.acmeEnabled ?? true;
   const routed = rows.filter((r) => r.status === "active");
   const primary = routed.find((r) => r.isPrimary);
-  const target = primary ? `${acme && hasTls(primary) ? "https" : "http"}://${primary.hostname}` : null;
+  const target = primary ? `${isManual(primary) || (acme && hasTls(primary)) ? "https" : "http"}://${primary.hostname}` : null;
   return routed.map((row) => {
+    // A manual host serves https whatever the ACME switch or the certificate state says: no silent http fallback.
+    if (isManual(row)) {
+      return {
+        hostname: row.hostname,
+        tls: true,
+        httpsRedirect: !opts.transition,
+        redirectTo: opts.transition || row.isPrimary ? null : target,
+        source: "manual" as const,
+      };
+    }
     const tls = acme && hasTls(row);
     return {
       hostname: row.hostname,
@@ -54,7 +66,7 @@ export function desiredWordpressUrl(
 ): string | null {
   const primary = rows.find((r) => r.isPrimary && r.status === "active");
   if (!primary) return null;
-  const https = currentUrl?.startsWith("https://") === true || (acmeEnabled && certificateUsable(primary, now));
+  const https = currentUrl?.startsWith("https://") === true || isManual(primary) || (acmeEnabled && certificateUsable(primary, now));
   return `${https ? "https" : "http"}://${primary.hostname}`;
 }
 
@@ -63,9 +75,11 @@ export function routePlanHash(hosts: readonly SiteHostRoute[], wordpressUrl: str
   const canonical = [...hosts]
     .sort((a, b) => a.hostname.localeCompare(b.hostname))
     .map((h) =>
-      h.challenge === "dns-01"
-        ? [h.hostname, h.tls, h.httpsRedirect, h.redirectTo, "dns-01"]
-        : [h.hostname, h.tls, h.httpsRedirect, h.redirectTo],
+      h.source === "manual"
+        ? [h.hostname, h.tls, h.httpsRedirect, h.redirectTo, "manual"]
+        : h.challenge === "dns-01"
+          ? [h.hostname, h.tls, h.httpsRedirect, h.redirectTo, "dns-01"]
+          : [h.hostname, h.tls, h.httpsRedirect, h.redirectTo],
     );
   return createHash("sha256").update(JSON.stringify({ hosts: canonical, wordpressUrl })).digest("hex");
 }

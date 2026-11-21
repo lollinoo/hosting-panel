@@ -58,15 +58,19 @@ const T = "2026-11-14T10:00:00Z";
 const site = { siteId: "s1", siteName: "wp-a.example.test" };
 const op = { operationId: "op1", kind: "site.backups.restore", siteId: "s1", siteName: "wp-a.example.test" } as const;
 
-// One contract-valid alert per kind: a fourteenth kind without a fixture fails the type check and (a).
+// One contract-valid alert per kind: a sixteenth kind without a fixture fails the type check and (a).
 const raw: Record<AlertKind, unknown> = {
   disk_high: { severity: "critical", subject: "docker_data", since: T, kind: "disk_high", details: { paths: ["docker_data", "root"], usedPercent: 93 } },
   certificate_expiring: { severity: "warning", subject: "wp-a.example.test", since: null, kind: "certificate_expiring", details: { ...site, hostname: "wp-a.example.test", expiresAt: T, problem: "port_80_blocked" } },
   certificate_not_issued: { severity: "warning", subject: "wp-a.example.test", since: null, kind: "certificate_not_issued", details: { ...site, hostname: "wp-a.example.test", problem: null } },
   panel_certificate_expiring: { severity: "warning", subject: "panel.example.test", since: null, kind: "panel_certificate_expiring", details: { hostname: "panel.example.test", expiresAt: T } },
+  manual_certificate_expiring: { severity: "warning", subject: "v1", since: null, kind: "manual_certificate_expiring", details: { ...site, certificateId: "c1", certificateName: "hotel-cert", notAfter: T, tier: "warning" } },
   backup_failed: { severity: "warning", subject: "s1", since: T, kind: "backup_failed", details: { ...site, failedAt: T } },
   panel_backup_failed: { severity: "warning", subject: "panel", since: T, kind: "panel_backup_failed", details: { failedAt: T } },
-  backup_storage_test_failed: { severity: "warning", subject: "storage", since: T, kind: "backup_storage_test_failed", details: { testedAt: T } },
+  backup_storage_test_failed: { severity: "warning", subject: "storage", since: T, kind: "backup_storage_test_failed", details: { testedAt: T, targetId: "bkt_" + "a".repeat(32), targetKind: "s3", problem: null } },
+  backup_target_space_low: { severity: "warning", subject: "bkt_" + "b".repeat(32), since: T, kind: "backup_target_space_low", details: { targetId: "bkt_" + "b".repeat(32), targetKind: "local", availableBytes: 2_000_000_000, totalBytes: 100_000_000_000, testedAt: T } },
+  backup_site_without_target: { severity: "warning", subject: "site_1", since: null, kind: "backup_site_without_target", details: { siteId: "site_1", siteName: "Shop" } },
+  backup_partial: { severity: "warning", subject: "s1", since: T, kind: "backup_partial", details: { ...site, backupId: "bkp_1", at: T } },
   component_down: { severity: "critical", subject: "sftp", since: T, kind: "component_down", details: { component: "sftp", state: "down", reason: "stopped" } },
   site_container_down: { severity: "critical", subject: "s1", since: T, kind: "site_container_down", details: { ...site, observed: "stopped" } },
   restore_undo_incomplete: { severity: "critical", subject: "b1", since: T, kind: "restore_undo_incomplete", details: { ...site, backupId: "b1", failedAt: null } },
@@ -145,6 +149,9 @@ describe("alert sentences and links (a, b, c)", () => {
     expect(alertText(en, A.certificate_expiring)).toContain(en.admin.sites.alertsProblem.port_80_blocked);
     expect(alertText(en, A.certificate_not_issued)).toContain(en.admin.sites.alertsProblem.other);
     expect(alertText(en, A.restore_undo_incomplete)).toContain(en.admin.health.unknownDate);
+    expect(alertText(en, A.manual_certificate_expiring)).toContain("hotel-cert");
+    expect(itMsgs.admin.health.alerts.manual_certificate_expiring).not.toBe(en.admin.health.alerts.manual_certificate_expiring);
+    expect(itMsgs.admin.health.openCertificates).not.toBe(en.admin.health.openCertificates);
     expect(alertText(en, A.operation_unknown)).toContain('--operation-id op1 --reason "<why>"');
     // R184 2.5(b), as built by health: an hp-api restart does not end a stuck restore; an executor restart does
     for (const m of [en, itMsgs]) expect(alertText(m, A.restore_stuck)).toContain("sudo systemctl restart hp-docker-executor:");
@@ -176,9 +183,13 @@ describe("alert sentences and links (a, b, c)", () => {
       certificate_expiring: { href: "/admin/sites/s1/domains", label: "openDomains" },
       certificate_not_issued: { href: "/admin/sites/s1/domains", label: "openDomains" },
       panel_certificate_expiring: { href: "/admin/logs?source=ingress_proxy", label: "openLog" },
+      manual_certificate_expiring: { href: "/admin/certificates?filter=expiring", label: "openCertificates" },
       backup_failed: { href: "/admin/backups", label: "openBackups" },
       panel_backup_failed: { href: "/admin/backups", label: "openBackups" },
       backup_storage_test_failed: { href: "/admin/backups", label: "openBackups" },
+      backup_target_space_low: { href: "/admin/backups", label: "openBackups" },
+      backup_site_without_target: { href: "/admin/backups", label: "openBackups" },
+      backup_partial: { href: "/admin/backups", label: "openBackups" },
       component_down: { href: "/admin/logs?source=sftp", label: "openLog" },
       site_container_down: { href: "/admin/logs?source=site:s1", label: "openLog" },
       restore_undo_incomplete: { href: "/admin/backups", label: "openBackups" },

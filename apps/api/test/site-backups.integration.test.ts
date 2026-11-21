@@ -13,11 +13,14 @@ import {
 import {
   and,
   auditEvents,
+  backupPolicies,
+  backupTargets,
   claimPendingOutboxEvents,
   createDatabaseClient,
   deleteBackupSettings,
   enqueueOperationTransactional,
   eq,
+  getPolicy,
   hostAllocations,
   hosts,
   inArray,
@@ -29,7 +32,9 @@ import {
   organizations,
   outboxEvents,
   platformInstallations,
+  repairLegacyBackupCopies,
   settleSiteBackup,
+  setPolicyTargets,
   siteBackups,
   sites,
   sql,
@@ -52,7 +57,6 @@ import {
   BACKUP_POLL_DEADLINE_MS,
   BACKUP_POLL_GIVE_UP_MS,
   BACKUP_POLL_MS,
-  SITE_BACKUPS_INTERRUPTED,
   SiteBackupsApplier,
 } from "../src/backups/site-backups-applier.js";
 import {
@@ -127,6 +131,22 @@ const SITE_B = {
   adminEmail: "admin@caffemilano.it",
   adminPassword: "canary-Pass-123456",
 };
+
+/**
+ * Resets every backup setting. A location change archives the legacy target and an archived legacy target is never revived,
+ * so the targets and the policy targets go too; the backup_settings trigger recreates the live legacy target on the next upsert.
+ */
+async function resetBackupConfig(db: DatabaseClient["db"]): Promise<void> {
+  for (const scope of ["default_site", "panel"] as const) {
+    await setPolicyTargets(db, (await getPolicy(db, scope)).id, []);
+  }
+  await db.delete(backupTargets);
+  await db
+    .update(backupPolicies)
+    .set({ lastNightlyRunOn: null, nightlyRunStartedAt: null })
+    .where(eq(backupPolicies.scope, "default_site"));
+  await deleteBackupSettings(db);
+}
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -236,6 +256,7 @@ export function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): Backu
       case "settle":
       case "panelStart":
       case "siteState":
+      case "localInit":
         throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];
@@ -535,10 +556,12 @@ describe("site backups API and outbox execution", () => {
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA1Id));
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA2Id));
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteBId));
+    await resetBackupConfig(dbClient.db);
     await upsertBackupSettings(dbClient.db, KEY, {
       ...SETTINGS,
       updatedByUserId: adminUserId,
     });
+    await repairLegacyBackupCopies(dbClient.db);
     await snapshotAudits();
   });
 
@@ -731,7 +754,8 @@ describe("site backups API and outbox execution", () => {
     expect(siteAfterThrow?.status).toBe("ready");
 
     // Missing target answers 400 VALIDATION_ERROR not_configured.
-    await deleteBackupSettings(dbClient.db);
+    await dbClient.db.delete(siteBackups); // the target rows are referenced by the copies
+    await resetBackupConfig(dbClient.db);
     const unconfiguredRes = await call("POST", backupsUrl(orgAId, siteA1Id), {
       headers: { "Idempotency-Key": "k-t5-unconfigured" },
       body: {},
@@ -845,7 +869,7 @@ describe("site backups API and outbox execution", () => {
     const startCall = executorScript.calls.find((c) => c.action === "start");
     expect(startCall).toBeDefined();
     if (startCall?.action === "start") {
-      expect(startCall.target.secretAccessKey).toBe(CANARY_SECRET);
+      expect("secretAccessKey" in startCall.target && startCall.target.secretAccessKey).toBe(CANARY_SECRET);
     }
 
     const getRes = await call("GET", backupsUrl(orgAId, siteA1Id));
@@ -1038,6 +1062,7 @@ describe("site backups API and outbox execution", () => {
         });
         return res;
       });
+      await repairLegacyBackupCopies(dbClient.db);
       await dbClient.db
         .update(operations)
         .set({
@@ -1211,6 +1236,7 @@ describe("site backups API and outbox execution", () => {
           })
           .where(eq(siteBackups.id, backupId));
       }
+      await repairLegacyBackupCopies(dbClient.db);
       await dbClient.db
         .update(operations)
         .set({ status: "unknown", startedAt, submittedAt: startedAt })
@@ -1300,6 +1326,7 @@ describe("site backups API and outbox execution", () => {
       await dbClient.db.update(siteBackups).set({ status: "succeeded", snapshotId: i.toString(16).padStart(64, "c"), sizeBytes: 2000, finishedAt: newerDate }).where(eq(siteBackups.id, id));
     }
 
+    await repairLegacyBackupCopies(dbClient.db);
     executorScript.setHandlers({
       onForget: () => {
         throw new Error("s3 temporarily unavailable");
@@ -1342,6 +1369,7 @@ describe("site backups API and outbox execution", () => {
       .update(siteBackups)
       .set({ status: "succeeded", snapshotId: SNAP_HEX_OLD, sizeBytes: 1200, finishedAt: oldDate })
       .where(eq(siteBackups.id, orphanBackupId));
+    await repairLegacyBackupCopies(dbClient.db);
 
     await dbClient.db
       .insert(organizations)
@@ -1720,7 +1748,7 @@ describe("site backups API and outbox execution", () => {
     expect(evtNullLease?.lockedAt).toBeNull();
   });
 
-  it("R70(1): fails queued create backup without calling executor after target change, and prune ends without calling executor when no row remains", async () => {
+  it("R70(1) / SPEC 7.2.5: a target change keeps the history, archives the old target, and the queued create backup finishes on its pinned old target", async () => {
     const queuedRes = await call("POST", backupsUrl(orgAId, siteA1Id), {
       headers: { "Idempotency-Key": "k-r70-target-change" },
       body: {},
@@ -1768,31 +1796,38 @@ describe("site backups API and outbox execution", () => {
 
     const settingsService = app.nestApp.get(BackupSettingsService);
     await settingsService.save({ ...SETTINGS, bucket: "hotel-backups-v2" }, adminUserId);
-    expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
+    // SPEC 7.2.5: a target change keeps the backup history and archives the old target (it used to clear site_backups).
+    expect((await dbClient.db.select().from(siteBackups)).map((r) => r.id).sort()).toEqual(
+      [orphanRowId, ...(await dbClient.db.select().from(siteBackups).where(eq(siteBackups.operationId, opId))).map((r) => r.id)].sort(),
+    );
+
+    const targets = await dbClient.db.select().from(backupTargets);
+    expect(targets.filter((t) => t.archivedAt !== null).map((t) => t.legacySettings)).toEqual([true]);
+    expect(targets.filter((t) => t.archivedAt === null)).toHaveLength(1);
 
     await app.outboxWorker.processPendingOnce();
 
-    expect(executorScript.calls.filter((c) => c.action === "start")).toEqual([]);
-    expect(executorScript.calls.filter((c) => c.action === "forget")).toEqual([]);
+    // The in-flight job finishes on the target its copy was pinned to (the old, now archived bucket), never on the new one.
+    const starts = executorScript.calls.filter((c) => c.action === "start");
+    expect(starts).toHaveLength(1);
+    expect((starts[0] as { target: { bucket: string } }).target.bucket).toBe("hotel-backups");
 
     const [createOp] = await dbClient.db.select().from(operations).where(eq(operations.id, opId));
-    expect(createOp?.status).toBe("failed");
-    expect(createOp?.errorCode).toBe("OPERATION_INTERRUPTED");
-    expect(createOp?.errorMessage).toBe(SITE_BACKUPS_INTERRUPTED);
+    expect(createOp?.status).toBe("succeeded");
 
     const createSteps = await dbClient.db
       .select()
       .from(operationSteps)
       .where(eq(operationSteps.operationId, opId));
-    expect(createSteps.find((s) => s.key === "backup")?.status).toBe("failed");
-    expect(createSteps.find((s) => s.key === "retention")?.status).toBe("skipped");
+    expect(createSteps.find((s) => s.key === "backup")?.status).toBe("succeeded");
 
     const [pruneOpRow] = await dbClient.db
       .select()
       .from(operations)
       .where(eq(operations.id, pruneOp.id));
     expect(pruneOpRow?.status).toBe("succeeded");
-    expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
+    const [createRow] = await dbClient.db.select().from(siteBackups).where(eq(siteBackups.operationId, opId));
+    expect(createRow?.status).toBe("succeeded");
 
     const afterNext = await call("POST", backupsUrl(orgAId, siteA1Id), {
       headers: { "Idempotency-Key": "k-r70-target-change-next" },
@@ -1860,6 +1895,7 @@ describe("site backups API and outbox execution", () => {
       });
       return res;
     });
+    await repairLegacyBackupCopies(dbClient.db);
 
     await dbClient.db
       .update(operations)
@@ -1939,7 +1975,7 @@ describe("site backups API and outbox execution", () => {
     expect((await newAudits()).filter((a) => a.action === "site.backups.create")).toHaveLength(1);
   });
 
-  it("R75: aborts before calling executor start if target changes between first row check and start", async () => {
+  it("R75 / SPEC 7.2.5: a target change between the first row check and start keeps the row and the job runs on its pinned old target", async () => {
     const queuedRes = await call("POST", backupsUrl(orgAId, siteA1Id), {
       headers: { "Idempotency-Key": "k-r75-mid-flight-target-change" },
       body: {},
@@ -1958,21 +1994,23 @@ describe("site backups API and outbox execution", () => {
       beforeResolveSiteFilesServiceId = null;
     }
 
-    expect(executorScript.calls.filter((c) => c.action === "start")).toEqual([]);
+    // The copy is pinned to the old target: the job starts there and the change archives it without deleting the history.
+    const starts = executorScript.calls.filter((c) => c.action === "start");
+    expect(starts).toHaveLength(1);
+    expect((starts[0] as { target: { bucket: string } }).target.bucket).toBe("hotel-backups");
     expect(executorScript.calls.filter((c) => c.action === "forget")).toEqual([]);
 
     const [opRow] = await dbClient.db.select().from(operations).where(eq(operations.id, opId));
-    expect(opRow?.status).toBe("failed");
-    expect(opRow?.errorCode).toBe("OPERATION_INTERRUPTED");
-    expect(opRow?.errorMessage).toBe(SITE_BACKUPS_INTERRUPTED);
+    expect(opRow?.status).toBe("succeeded");
 
     const steps = await dbClient.db
       .select()
       .from(operationSteps)
       .where(eq(operationSteps.operationId, opId));
-    expect(steps.find((s) => s.key === "backup")?.status).toBe("failed");
-    expect(steps.find((s) => s.key === "retention")?.status).toBe("skipped");
-    expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
+    expect(steps.find((s) => s.key === "backup")?.status).toBe("succeeded");
+    const [row] = await dbClient.db.select().from(siteBackups).where(eq(siteBackups.operationId, opId));
+    expect(row?.status).toBe("succeeded");
+    expect((await dbClient.db.select().from(backupTargets)).filter((t) => t.archivedAt !== null)).toHaveLength(1);
   });
 
   it("M3b assertHeavyActionAllowed: exempts admins and refuses a customer's seventh action inside 60 minutes with QUOTA_EXCEEDED and retryAt", async () => {

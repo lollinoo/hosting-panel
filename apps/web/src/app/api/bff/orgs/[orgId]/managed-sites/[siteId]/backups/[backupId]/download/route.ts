@@ -1,12 +1,12 @@
 import {
   type BackupArchiveChunkDto,
   BackupArchiveChunkDtoSchema,
+  PrepareDownloadInputSchema,
 } from "@hosting-panel/contracts";
 import { chunkStreamResponse, isValidChunkDto } from "@/lib/bff-chunk-stream";
 import {
   FILE_CHUNK_BYTES,
   forwardSiteCall,
-  isPlainObject,
 } from "@/lib/bff-files";
 import { validatePathSegments } from "@/lib/bff-guard";
 import { getSessionFromRequest } from "@/lib/server-session";
@@ -21,7 +21,7 @@ const BACKUP_DOWNLOAD_CHUNK_TIMEOUT_MS = 40_000;
 const FALLBACK_ARCHIVE_NAME = "backup.zip";
 
 function isDownloadPrepareBody(body: unknown): boolean {
-  return body === undefined || (isPlainObject(body) && Object.keys(body).length === 0);
+  return body === undefined || PrepareDownloadInputSchema.safeParse(body).success;
 }
 
 function redirect303(location: string): Response {

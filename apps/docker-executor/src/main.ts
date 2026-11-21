@@ -15,9 +15,11 @@ import {
 } from "./docker-engine-adapter.js";
 import {
   DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_LOCAL_ROOT,
   DEFAULT_BACKUP_WORK_DIR,
   DEFAULT_PANEL_DUMP_DIR,
 } from "./backup-runner.js";
+import { validateLocalRepoRoot } from "./local-target-guard.js";
 import { DEFAULT_PHPMYADMIN_CONFIG_DIR } from "./phpmyadmin-platform.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { ensureSiteFilesProgram } from "./site-types/index.js";
@@ -259,6 +261,21 @@ export async function bootstrapDockerExecutorDaemon(
   const backupKeyFile = env.HP_BACKUP_KEY_FILE?.trim() || DEFAULT_BACKUP_KEY_FILE;
   const backupWorkDir = env.HP_BACKUP_WORK_DIR?.trim() || DEFAULT_BACKUP_WORK_DIR;
   const panelDumpDir = env.HP_PANEL_DUMP_DIR?.trim() || DEFAULT_PANEL_DUMP_DIR;
+  // Invalid root: local targets answer local_target_unsafe, S3 and the executor are unaffected.
+  const backupLocalRoot = validateLocalRepoRoot(
+    env.HP_BACKUP_LOCAL_ROOT?.trim() || DEFAULT_BACKUP_LOCAL_ROOT,
+    [backupWorkDir, panelDumpDir, secretsRootDir, ingressRootDir].map((dir) => path.resolve(dir)),
+  );
+  if (backupLocalRoot === null && !useSimulator) {
+    console.error(
+      JSON.stringify({
+        component: "hp-docker-executor",
+        status: "backup_local_root_invalid",
+        code: "local_target_unsafe",
+        timestamp: new Date().toISOString(),
+      }),
+    );
+  }
 
   const dockerAdapter = useSimulator
     ? null
@@ -281,6 +298,7 @@ export async function bootstrapDockerExecutorDaemon(
         backupKeyFile,
         backupWorkDir,
         panelDumpDir,
+        backupLocalRoot,
         ...(env.HP_MARIADB_ADMIN_SUBNET?.trim()
           ? { sharedDbAdminSubnet: env.HP_MARIADB_ADMIN_SUBNET.trim() }
           : {}),

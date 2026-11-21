@@ -233,8 +233,8 @@ describe("QA M3c web: admin restore BFF route", () => {
     }
   });
 
-  it("documents what passes through: an upstream answer with a secret or a host path reaches the browser unchanged", async () => {
-    // The route is a pure pass-through: scrubbing is the API's job (the API QA file checks no answer carries these).
+  it("redacts secretAccessKey (forbidden DTO key, SPEC 0.2.5) and keeps the rest of an upstream error unchanged", async () => {
+    // The BFF redacts forbidden DTO keys, secretAccessKey included (SPEC 0.2.5: no secrets in DTOs); the rest passes through.
     const leaky = {
       error: { code: "INTERNAL_ERROR", message: "boom", details: [{ field: "x", message: "/var/lib/hosting-panel/backups/k.bin" }] },
       secretAccessKey: "QA-SECRET-SENTINEL",
@@ -242,7 +242,7 @@ describe("QA M3c web: admin restore BFF route", () => {
     mockUpstream.fetchUpstream.mockResolvedValueOnce({ ok: false, status: 409, error: leaky });
     const res = await restorePost(restoreReq(), ctx());
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual(leaky);
+    expect(await res.json()).toEqual({ ...leaky, secretAccessKey: "[REDACTED]" });
     expect(res.headers.get("Cache-Control")).toContain("no-store");
   });
 });

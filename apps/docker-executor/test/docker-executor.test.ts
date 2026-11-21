@@ -519,7 +519,11 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     expect(staticYaml.toLowerCase()).not.toContain("docker.sock");
 
     const dynamicFiles = await readdir(path.join(ingressRootDir, "dynamic"));
-    expect(dynamicFiles).toEqual(["site_site_alpha.yml"]);
+    // manual-certs is the (empty, 0700) store of manual TLS certificates; no manifest exists until one is published.
+    expect(dynamicFiles).toEqual(["manual-certs", "site_site_alpha.yml"]);
+    const manualCertsDir = path.join(ingressRootDir, "dynamic", "manual-certs");
+    expect(await readdir(manualCertsDir)).toEqual([]);
+    expect((await stat(manualCertsDir)).mode & 0o777).toBe(0o700);
 
     const siteDynamicYaml = await readFile(
       path.join(ingressRootDir, "dynamic", "site_site_alpha.yml"),
@@ -552,7 +556,7 @@ describe("@hosting-panel/docker-executor (Wave 2A — HCP-SPEC-003)", () => {
     // Verify deleteService removes container and dynamic site_<siteId>.yml
     await adapter.deleteService("svc_prod_web");
     expect(await adapter.getObservedState("svc_prod_web")).toBeNull();
-    expect(await readdir(path.join(ingressRootDir, "dynamic"))).toEqual([]);
+    expect(await readdir(path.join(ingressRootDir, "dynamic"))).toEqual(["manual-certs"]);
   });
 
   it("supports automatic unversioned Docker API fallback when daemon rejects /v1.45", async () => {
@@ -2251,6 +2255,9 @@ describe("backups shared base and IPC", () => {
       }
       if (req.action === "siteState") {
         return { filesVolume: false, container: false } as never;
+      }
+      if (req.action === "localInit") {
+        return { outcome: "ok", problem: null } as never;
       }
       return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
     });

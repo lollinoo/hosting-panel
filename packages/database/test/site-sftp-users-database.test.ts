@@ -110,6 +110,8 @@ describe("@hosting-panel/database — 0008 site_sftp_users migration & constrain
       "0018_site_type.sql",
       "0019_operation_step_indexes.sql",
       "0020_dns_challenge.sql",
+      "0021_manual_tls_certificates.sql",
+      "0022_backup_targets_and_copies.sql",
     ]);
 
     const after0008 = await db().execute(

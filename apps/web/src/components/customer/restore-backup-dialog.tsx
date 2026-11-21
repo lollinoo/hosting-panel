@@ -12,8 +12,17 @@ import { format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { formatDate } from "@/lib/file-browser";
 
-/** Resolves to null on success (202 started) or to an inline error message to display. */
-export type ConfirmRestoreBackup = (confirmName: string) => Promise<string | null>;
+/**
+ * Resolves to null on success (202 started) or to an inline error message to display.
+ * `targetId` is given only when the backup has more than one restorable copy.
+ */
+export type ConfirmRestoreBackup = (confirmName: string, targetId?: string) => Promise<string | null>;
+
+/** A copy the customer can restore from; the label is the neutral destination name. */
+export interface RestoreSourceOption {
+  targetId: string;
+  label: string;
+}
 
 /** Texts the dialog shows; the customer's catalog block is the default. */
 export type RestoreDialogTexts = Pick<
@@ -42,6 +51,7 @@ export function RestoreBackupForm({
   cancelButtonRef,
   onBusyChange,
   texts,
+  copies,
 }: {
   backup: Pick<SiteBackupDto, "id" | "startedAt">;
   siteName: string;
@@ -50,6 +60,7 @@ export function RestoreBackupForm({
   cancelButtonRef?: RefObject<HTMLButtonElement | null>;
   onBusyChange?: (busy: boolean) => void;
   texts?: RestoreDialogTexts;
+  copies?: RestoreSourceOption[];
 }) {
   const customer = useMessages().site.backups.restore;
   const t = texts ?? customer;
@@ -58,6 +69,9 @@ export function RestoreBackupForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
+  const [source, setSource] = useState<string | null>(null);
+  const choosable = copies && copies.length > 1 ? copies : null;
+  const selected = choosable ? (source ?? choosable[0]?.targetId) : undefined;
 
   const dateText = formatDate(backup.startedAt, locale);
   const [beforeName, afterName] = t.typeName.split("{name}");
@@ -70,7 +84,7 @@ export function RestoreBackupForm({
     setError(null);
 
     try {
-      const message = await onConfirm(typed);
+      const message = await (selected === undefined ? onConfirm(typed) : onConfirm(typed, selected));
       if (message !== null) {
         setError(message);
         setBusy(false);
@@ -95,6 +109,28 @@ export function RestoreBackupForm({
         <p>{t.lostDatabases}</p>
         <p>{t.backupFirst}</p>
       </div>
+
+      {choosable ? (
+        <fieldset className="space-y-1.5" disabled={busy}>
+          <legend className="text-sm font-medium">{customer.fromLabel}</legend>
+          {choosable.map((c) => (
+            <label key={c.targetId} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="restore-source"
+                value={c.targetId}
+                checked={selected === c.targetId}
+                onChange={() => setSource(c.targetId)}
+              />
+              {c.label}
+            </label>
+          ))}
+        </fieldset>
+      ) : copies?.length === 1 ? (
+        <p className="text-sm">
+          {customer.fromLabel}: <strong>{copies[0]!.label}</strong>
+        </p>
+      ) : null}
 
       <div className="space-y-2">
         <Label htmlFor="restore-site-name">
@@ -160,6 +196,7 @@ export function RestoreBackupDialog({
   onOpenChange,
   onConfirm,
   texts,
+  copies,
 }: {
   backup: Pick<SiteBackupDto, "id" | "startedAt"> | null;
   siteName: string;
@@ -167,6 +204,7 @@ export function RestoreBackupDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: ConfirmRestoreBackup;
   texts?: RestoreDialogTexts;
+  copies?: RestoreSourceOption[];
 }) {
   const busyRef = useRef(false);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
@@ -189,6 +227,7 @@ export function RestoreBackupDialog({
             siteName={siteName}
             onConfirm={onConfirm}
             texts={texts}
+            copies={copies}
             onCancel={() => onOpenChange(false)}
             cancelButtonRef={cancelButtonRef}
             onBusyChange={(busy) => {

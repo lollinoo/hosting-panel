@@ -6,6 +6,7 @@ import {
   SetDomainChallengeInputSchema,
   SiteDomainDtoSchema,
   SiteHostRouteSchema,
+  type SiteHostRoute,
   isSiteOrigin,
   suggestWwwPair,
   wwwPartner,
@@ -91,8 +92,12 @@ describe("site domains", () => {
     expect(SiteHostRouteSchema.parse({ ...route, challenge: "dns-01" })).toEqual({ ...route, challenge: "dns-01" });
     expect(SiteHostRouteSchema.parse(route)).toEqual(route);
     expect(SiteHostRouteSchema.safeParse({ ...route, challenge: "tls-alpn-01" }).success).toBe(false);
+    // The TS interface and the wire schema carry the same optional `source: "manual"`.
+    const typed: SiteHostRoute = { ...route, source: "manual" };
+    expect(SiteHostRouteSchema.parse(typed)).toEqual(typed);
+    expect(SiteHostRouteSchema.safeParse({ ...route, source: "acme" }).success).toBe(false);
     expect(Object.keys(SiteDomainDtoSchema.shape)).toEqual(
-      ["id", "hostname", "isPrimary", "routed", "challenge", "dns", "certificate"],
+      ["id", "hostname", "isPrimary", "routed", "challenge", "dns", "certificate", "tls"],
     );
   });
 

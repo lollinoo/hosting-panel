@@ -63,6 +63,7 @@ import { buildApprovedServiceSpec, recordDeployedState, resolveRevisionSecrets }
 import { executePanelContainerRestart, recoverPanelContainerRestart } from "../health/panel-restart.js";
 import { executePanelContainerApply, recoverPanelContainerApply } from "../updates/panel-container-apply.js";
 import { FirewallService } from "../firewall/firewall.service.js";
+import { SITE_TLS_INTERRUPTED, SiteTlsApplier } from "../certificates/site-tls-applier.js";
 import { SITE_DOMAINS_INTERRUPTED, SiteDomainsApplier } from "../sites/site-domains-applier.js";
 import { SITE_FILES_INTERRUPTED, SiteFilesApplier } from "../sites/site-files-applier.js";
 import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-backups-applier.js";
@@ -207,6 +208,8 @@ export class OutboxWorkerService {
     @Inject(SiteFilesApplier) private readonly siteFilesApplier: SiteFilesApplier,
     @Optional() @Inject(SiteBackupsApplier) siteBackupsApplier?: SiteBackupsApplier,
     @Optional() @Inject(FirewallService) private readonly firewall?: FirewallService,
+    // Last and optional, like the others: unit tests build the worker positionally without it.
+    @Optional() @Inject(SiteTlsApplier) private readonly siteTlsApplier?: SiteTlsApplier,
   ) {
     this.#backupsApplier =
       siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
@@ -435,6 +438,9 @@ export class OutboxWorkerService {
         await this.siteProvisioner.reassign(op, payload);
       } else if (op.kind === "site.domains") {
         await this.siteDomainsApplier.apply(op);
+      } else if (op.kind === "site.tls.apply") {
+        if (!this.siteTlsApplier) throw new ControlPlaneError("NOT_SUPPORTED", "Certificate changes are not available");
+        await this.siteTlsApplier.apply(op, payload);
       } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
         await this.siteFilesApplier.apply(op, payload);
       } else if ((BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
@@ -964,6 +970,10 @@ export class OutboxWorkerService {
         if (op.kind === "site.domains") {
           // Only routes changed: the site keeps its status and the reconciler re-enqueues.
           await this.#convergeUnknownToFailed(op, SITE_DOMAINS_INTERRUPTED);
+          convergedFailed += 1;
+        } else if (op.kind === "site.tls.apply") {
+          // Read-only: nothing is replayed. The converge tick republishes the stored certificate set.
+          await this.#convergeUnknownToFailed(op, SITE_TLS_INTERRUPTED);
           convergedFailed += 1;
         } else if (op.kind === "site.files.archive" || op.kind === "site.files.extract") {
           // File archive/extract operations never leave the site degraded and are never blindly replayed.

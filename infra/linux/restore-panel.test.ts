@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -401,5 +401,233 @@ describe("restore-panel.sh failures", () => {
   it("(n) the six fetch messages differ", () => {
     const outs = Object.keys(FETCH_MESSAGES).map((rc) => fixture().run(ARGS, { STUB_FETCH_RC: rc }).out);
     expect(new Set(outs).size).toBe(outs.length);
+  });
+});
+
+describe("restore-panel.sh --local-repo", () => {
+  /** A panel repository in the 2770 layout the executor leaves on the old disk (E1), outside the server's state. */
+  function localFixture() {
+    const f = fixture();
+    const dir = join(f.d, "old-disk", "local-repos", `bkt_${"a".repeat(32)}`, "panel");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config"), "x");
+    for (const n of ["keys", "data", "snapshots", "index"]) mkdirSync(join(dir, n));
+    chmodSync(dir, 0o2770);
+    return { ...f, dir, runLocal: (extra: string[] = [], env: Record<string, string> = {}, input = "") => f.run(["--local-repo", dir, "--yes", ...extra], env, input) };
+  }
+  const LOCAL_FETCH = (dir: string) =>
+    `hp-executor node $R/opt/hosting-panel/current/apps/docker-executor/dist/cli/panel-fetch.js --local-repo ${dir}`;
+  const localOrder = (dir: string) => ORDER.map((c) => (c.includes("panel-fetch.js") ? LOCAL_FETCH(dir) : c));
+
+  it("(s) --local-repo with any S3 flag exits 2 with the usage and runs nothing", () => {
+    const { dir, run } = localFixture();
+    for (const extra of [["--endpoint", "https://s3.example.test"], ["--region", "r"], ["--bucket", "b"], ["--prefix", "p"], TARGET]) {
+      const r = run(["--local-repo", dir, ...extra, "--yes"]);
+      expect(r.code).toBe(2);
+      expect(r.out).toContain("Usage:");
+      expect(r.out).toContain("cannot be combined");
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  it("(s) neither group given exits 2; an incomplete S3 group names both ways", () => {
+    const f = fixture();
+    for (const args of [[], ["--yes"], ["--endpoint", "e", "--region", "r"]]) {
+      const r = f.run(args);
+      expect(r.code).toBe(2);
+      expect(r.out).toContain("Give --local-repo, or --endpoint, --region and --bucket");
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  it("(s) a --local-repo without a value exits 2", () => {
+    const r = fixture().run(["--local-repo"]);
+    expect(r.code).toBe(2);
+    expect(r.calls).toEqual([]);
+  });
+
+  it("(s) the happy path runs ORDER with the local fetch line, the 2770 layout accepted", () => {
+    const f = localFixture();
+    const r = f.runLocal();
+    expect(r.code, r.out).toBe(0);
+    expect(r.calls).toEqual(localOrder(f.dir));
+    expect(r.out).toContain("Panel restored from the copy in the local repository");
+    expect(r.out).not.toContain("bucket");
+    expect(f.leftovers()).toEqual([]);
+    expect(existsSync(f.marker)).toBe(false);
+  });
+
+  it("(s, k) --local-repo skips the key prompts: the fetch gets an empty stdin and no S3 key anywhere", () => {
+    const f = localFixture();
+    const r = f.runLocal([], { HP_S3_ACCESS_KEY_ID: "", HP_S3_SECRET_ACCESS_KEY: "" }, `${AKID}\n${SECRET}\n`);
+    expect(r.code, r.out).toBe(0);
+    expect(f.file("fetch.stdin")).toBe("");
+    expect(r.out).not.toContain("S3 access key");
+    const withKeys = localFixture();
+    const r2 = withKeys.runLocal();
+    expect(r2.code, r2.out).toBe(0);
+    expect(withKeys.file("fetch.stdin")).toBe("");
+    const seen = [r2.calls.join("\n"), withKeys.file("fetch.argv"), withKeys.file("env.log"), withKeys.file("fetch.env"), r2.out].join("\n");
+    for (const s of [AKID, SECRET]) expect(seen).not.toContain(s);
+    expect(withKeys.file("env.log")).not.toMatch(/^HP_S3_/m);
+  });
+
+  it("(s) without backup.key a local run refuses before anything runs", () => {
+    const f = localFixture();
+    rmSync(join(f.root, "etc/hosting-panel/backup.key"));
+    const r = f.runLocal();
+    expect(r.code).toBe(2);
+    expect(r.calls).toEqual([]);
+  });
+
+  describe("unsafe --local-repo values exit 2 and call nothing", () => {
+    const cases: [string, (f: ReturnType<typeof localFixture>) => string | void][] = [
+      ["a relative path", () => "old-disk/local-repos/x/panel"],
+      ["a dot-dot", (f) => `${f.dir}/../panel`],
+      ["a double slash", (f) => f.dir.replace("/old-disk/", "//old-disk/")],
+      ["a trailing slash", (f) => `${f.dir}/`],
+      ["a dot component", (f) => `${f.dir}/./`.slice(0, -1)],
+      ["a space", (f) => `${f.dir} x`],
+      ["a colon", (f) => `${f.dir}:ro`],
+      ["a comma", (f) => `${f.dir},x`],
+      ["/etc", () => "/etc"],
+      ["a path inside /etc", () => "/etc/ssl"],
+      ["/var/lib/docker", () => "/var/lib/docker/volumes"],
+      ["/", () => "/"],
+      [
+        "this server's own panel-dump",
+        (f) => {
+          for (const n of ["config"]) writeFileSync(join(f.root, "var/lib/hosting-panel/panel-dump", n), "x");
+          for (const n of ["keys", "data", "snapshots", "index"]) mkdirSync(join(f.root, "var/lib/hosting-panel/panel-dump", n));
+          return join(f.root, "var/lib/hosting-panel/panel-dump");
+        },
+      ],
+      [
+        "a symlink as the folder",
+        (f) => {
+          const l = join(f.d, "link");
+          symlinkSync(f.dir, l);
+          return l;
+        },
+      ],
+      [
+        "a symlink as a parent",
+        (f) => {
+          const l = join(f.d, "parent-link");
+          symlinkSync(join(f.d, "old-disk"), l);
+          return `${l}/local-repos/bkt_${"a".repeat(32)}/panel`;
+        },
+      ],
+      ["a file", (f) => join(f.dir, "config")],
+      [
+        "a folder that is not a restic repository",
+        (f) => {
+          rmSync(join(f.dir, "snapshots"), { recursive: true });
+        },
+      ],
+      [
+        "a repository without config",
+        (f) => {
+          rmSync(join(f.dir, "config"));
+        },
+      ],
+      [
+        "a config that is a symlink",
+        (f) => {
+          rmSync(join(f.dir, "config"));
+          symlinkSync("/etc/hostname", join(f.dir, "config"));
+        },
+      ],
+      [
+        "a repository folder that is a symlink",
+        (f) => {
+          rmSync(join(f.dir, "data"), { recursive: true });
+          symlinkSync("/tmp", join(f.dir, "data"));
+        },
+      ],
+      [
+        "a world-writable folder",
+        (f) => {
+          chmodSync(f.dir, 0o777);
+        },
+      ],
+      [
+        "a world-writable config",
+        (f) => {
+          chmodSync(join(f.dir, "config"), 0o666);
+        },
+      ],
+    ];
+    for (const [label, make] of cases) {
+      it(label, () => {
+        const f = localFixture();
+        const target = make(f) ?? f.dir;
+        const r = f.run(["--local-repo", target, "--yes"]);
+        expect(r.code, r.out).toBe(2);
+        expect(r.out).toContain("--local-repo folder was refused");
+        expect(r.out).toContain("Nothing on this server was changed");
+        expect(r.calls).toEqual([]);
+        expect(f.leftovers()).toEqual([]);
+      });
+    }
+    it.skipIf(!existsSync("/usr/share") || process.getuid?.() === 0)("a folder owned by root", () => {
+      const f = localFixture();
+      const r = f.run(["--local-repo", "/usr/share", "--yes"]);
+      expect(r.code).toBe(2);
+      expect(r.calls).toEqual([]);
+    });
+  });
+
+  it("(s) a folder that is missing says to mount the old disk and exits 1 without running anything", () => {
+    const f = localFixture();
+    for (const missing of [`${f.dir}-gone`, join(f.d, "not-mounted", "local-repos", "x", "panel")]) {
+      const r = f.run(["--local-repo", missing, "--yes"]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("Mount the old disk first");
+      expect(r.calls).toEqual([]);
+    }
+  });
+
+  it("(s) the local-repos folder of this server's own state is accepted (a reinstall on the same host)", () => {
+    const f = fixture();
+    const dir = join(f.root, "var/lib/hosting-panel/local-repos", `bkt_${"b".repeat(32)}`, "panel");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "config"), "x");
+    for (const n of ["keys", "data", "snapshots", "index"]) mkdirSync(join(dir, n));
+    const r = f.run(["--local-repo", dir, "--yes"]);
+    expect(r.code, r.out).toBe(0);
+  });
+
+  const LOCAL_MESSAGES: Record<string, string> = {
+    "2": "absolute path without symlinks",
+    "4": "panel folder of the target",
+    "5": "backup.key",
+    "6": "free space",
+    "7": "Mount the old disk first",
+    "8": "not safe to read",
+    "1": "Fetching the copy failed",
+  };
+  for (const [rc, text] of Object.entries(LOCAL_MESSAGES)) {
+    it(`(s) local fetch exit ${rc} ends with exit 1 and its own message`, () => {
+      const f = localFixture();
+      const r = f.runLocal([], { STUB_FETCH_RC: rc });
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(text);
+      expect(r.out).toContain("Nothing on this server was changed");
+      for (const n of ["systemctl", "dropdb", "install"]) expect(named(r.calls, n)).toEqual([]);
+      expect(f.leftovers()).toEqual([]);
+    });
+  }
+  it("(s) exit 3 never gets the bucket message in local mode, and the seven local messages differ", () => {
+    const outs = Object.keys(LOCAL_MESSAGES).map((rc) => localFixture().runLocal([], { STUB_FETCH_RC: rc }).out);
+    expect(new Set(outs).size).toBe(outs.length);
+    const three = localFixture().runLocal([], { STUB_FETCH_RC: "3" });
+    expect(three.out).toContain("Fetching the copy failed");
+    expect(three.out).not.toContain("bucket");
+  });
+  it("(s) the local messages differ from the S3 ones for the same exit", () => {
+    for (const rc of ["2", "4"]) {
+      expect(localFixture().runLocal([], { STUB_FETCH_RC: rc }).out).not.toBe(fixture().run(ARGS, { STUB_FETCH_RC: rc }).out);
+    }
   });
 });

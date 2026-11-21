@@ -15,11 +15,16 @@ import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
+import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
+import { AdminBackupTargetsController } from "./controllers/admin-backup-targets.controller.js";
 import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
 import { AdminDnsProviderController } from "./controllers/admin-dns-provider.controller.js";
 import { AdminHealthController } from "./controllers/admin-health.controller.js";
 import { AdminLogsController } from "./controllers/admin-logs.controller.js";
+import { AdminSiteTlsCertificatesController } from "./controllers/admin-site-tls-certificates.controller.js";
+import { AdminTlsCertificatesController } from "./controllers/admin-tls-certificates.controller.js";
+import { SiteTlsCertificatesController } from "./controllers/site-tls-certificates.controller.js";
 import { AdminTerminalController } from "./controllers/admin-terminal.controller.js";
 import { AdminFirewallController } from "./controllers/admin-firewall.controller.js";
 import { AdminHostController } from "./controllers/admin-host.controller.js";
@@ -47,8 +52,10 @@ import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { AdminTerminalService } from "./terminal/admin-terminal.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
+import { BackupPoliciesService } from "./backups/backup-policies.service.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "./backups/backup-settings.service.js";
+import { BackupTargetsService } from "./backups/backup-targets.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import { SiteBackupsService } from "./backups/site-backups.service.js";
 import { SiteRestoreService } from "./backups/site-restore.service.js";
@@ -73,6 +80,15 @@ import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteDomainsService } from "./sites/site-domains.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
 import { DnsProviderService } from "./certificates/dns-provider.service.js";
+import { TlsCertificatesService } from "./certificates/tls-certificates.service.js";
+import { SiteTlsApplier } from "./certificates/site-tls-applier.js";
+import { TlsPublishService } from "./certificates/tls-publish.service.js";
+import {
+  TLS_VALIDATOR_OPTIONS,
+  TlsCertificateValidator,
+  TlsValidationGate,
+  type TlsValidatorOptions,
+} from "./certificates/tls-certificate-validator.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
@@ -80,6 +96,8 @@ export interface AppModuleOptions {
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
   readonly dnsLookup?: DnsLookup;
+  /** Test seam of the certificate validator (clock, trust anchors); production registers `{}`. */
+  readonly tlsValidatorOptions?: TlsValidatorOptions;
 }
 
 @Module({})
@@ -103,6 +121,9 @@ export class AppModule {
         OrganizationsController,
         ManagedSitesController,
         SiteDomainsController,
+        SiteTlsCertificatesController,
+        AdminSiteTlsCertificatesController,
+        AdminTlsCertificatesController,
         SiteFilesController,
         SiteSftpController,
         SiteDatabasesController,
@@ -112,6 +133,8 @@ export class AppModule {
         AdminMailRelayController,
         AdminDnsProviderController,
         AdminBackupsController,
+        AdminBackupTargetsController,
+        AdminBackupPoliciesController,
         PasswordResetController,
         SupportAccessController,
         AdminHealthController,
@@ -142,12 +165,17 @@ export class AppModule {
           provide: DNS_LOOKUP_TOKEN,
           useValue: options.dnsLookup ?? createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
         },
+        {
+          provide: TLS_VALIDATOR_OPTIONS,
+          useValue: options.tlsValidatorOptions ?? {},
+        },
         OidcService,
         AuthzContextService,
         LoginService,
         OutboxWorkerService,
         SiteProvisioner,
         SiteDomainsApplier,
+        SiteTlsApplier,
         SiteFilesApplier,
         SiteBackupsApplier,
         ManagedSitesService,
@@ -160,11 +188,17 @@ export class AppModule {
         SiteWordpressService,
         SiteWordpressImportService,
         BackupSettingsService,
+        BackupTargetsService,
+        BackupPoliciesService,
         BackupSchedulerService,
         DriftReconcilerService,
         DomainReconcilerService,
         MailRelayService,
         DnsProviderService,
+        TlsCertificateValidator,
+        TlsValidationGate,
+        TlsCertificatesService,
+        TlsPublishService,
         PasswordResetService,
         SupportAccessService,
         AdminHealthService,

@@ -1,9 +1,14 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { SiteHostRoute } from "@hosting-panel/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  MANUAL_CERTIFICATES_FILE_NAME,
+  MANUAL_CERTS_DIR_NAME,
+  MANUAL_TLS_STATE_FILE,
+} from "../src/traefik-config.js";
 import {
   ACME_DNS_SECRET_MOUNT,
   TraefikIngressFileManager,
@@ -615,5 +620,176 @@ describe("DNS-01 challenge", () => {
       throw new Error("SERVFAIL");
     };
     expect(await manager.gatePanelCertificate(PANEL, fail)).toBe(false);
+  });
+});
+
+describe("manual certificate hosts", () => {
+  const manual = (hostname: string, over: Partial<SiteHostRoute> = {}): SiteHostRoute =>
+    host(hostname, { tls: true, source: "manual", ...over });
+
+  it("renders tls {} without a resolver, with ACME enabled or not", () => {
+    for (const acmeEnabled of [true, false]) {
+      const yaml = buildSiteDynamicTraefikYaml("site_1", [route([manual("shop.it")])], {
+        ...OPTS,
+        acmeEnabled,
+      });
+      const tls = block(yaml, `router_svc1_${h("shop.it")}_tls`);
+      expect(tls).toContain("      tls: {}");
+      expect(yaml).not.toContain("certResolver");
+    }
+  });
+
+  it("keeps the https redirect of a manual host when ACME is disabled", () => {
+    const yaml = buildSiteDynamicTraefikYaml(
+      "site_1",
+      [route([manual("shop.it", { httpsRedirect: true })])],
+      { ...OPTS, acmeEnabled: false },
+    );
+    expect(block(yaml, `router_svc1_${h("shop.it")}`)).toContain('- "https_svc1"');
+    expect(yaml).toContain("    https_svc1:");
+    // An ACME host without ACME still renders no TLS router and no redirect.
+    const acme = buildSiteDynamicTraefikYaml(
+      "site_1",
+      [route([host("a.it", { tls: true, httpsRedirect: true })])],
+      { ...OPTS, acmeEnabled: false },
+    );
+    expect(acme).not.toContain("https_svc1");
+    expect(acme).not.toContain("_tls");
+  });
+
+  it("a manual canon redirect host gets tls {} on its TLS router", () => {
+    const yaml = buildSiteDynamicTraefikYaml(
+      "site_1",
+      [
+        route([
+          manual("shop.it", { httpsRedirect: true }),
+          manual("www.shop.it", { redirectTo: "https://shop.it" }),
+        ]),
+      ],
+      { ...OPTS, acmeEnabled: false },
+    );
+    const tls = block(yaml, `router_svc1_${h("www.shop.it")}_tls`);
+    expect(tls).toContain(`- "canon_svc1_${h("www.shop.it")}"`);
+    expect(tls).toContain("      tls: {}");
+    expect(yaml).not.toContain("certResolver");
+  });
+
+  it("an ACME host next to a manual one keeps its resolver", () => {
+    const yaml = buildSiteDynamicTraefikYaml("site_1", [route([manual("shop.it"), host("b.it", { tls: true })])], OPTS);
+    expect(block(yaml, `router_svc1_${h("b.it")}_tls`)).toMatch(/^\s*certResolver: le$/m);
+    expect(block(yaml, `router_svc1_${h("shop.it")}_tls`)).not.toContain("certResolver");
+  });
+
+  it("source is part of the @hp-route line only when set, and manual with a challenge is rejected", () => {
+    const withSource = buildSiteDynamicTraefikYaml("site_1", [route([manual("shop.it")])], OPTS);
+    expect(withSource).toContain('"source":"manual"');
+    expect(buildSiteDynamicTraefikYaml("site_1", [route(PAIR)], OPTS)).not.toContain("source");
+    expect(() =>
+      buildSiteDynamicTraefikYaml("site_1", [route([manual("shop.it", { challenge: "dns-01" })])], OPTS),
+    ).toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
+    expect(() =>
+      buildSiteDynamicTraefikYaml("site_1", [route([manual("shop.it", { challenge: "http-01" })])], OPTS),
+    ).toThrow(expect.objectContaining({ code: "VALIDATION_ERROR" }));
+  });
+
+  it("source survives hydration and the DNS re-render", async () => {
+    const root = await tmp();
+    const seed = new TraefikIngressFileManager(root, PANEL);
+    await seed.upsertServiceRoute("site_1", route([manual("shop.it"), host("hotel.it", { tls: true, challenge: "dns-01" })]));
+    const file = seed.getSiteDynamicFilePath("site_1");
+
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await manager.setDnsProviderState(DNS);
+    const yaml = await readFile(file, "utf8");
+    expect(yaml).toContain('"source":"manual"');
+    expect(block(yaml, `router_svc1_${h("shop.it")}_tls`)).toContain("tls: {}");
+    expect(block(yaml, `router_svc1_${h("hotel.it")}_tls`)).toMatch(/^\s*certResolver: le-dns$/m);
+  });
+
+  it("ensureStaticConfig creates manual-certs 0700 and re-chmods a 0755 one", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await manager.ensureStaticConfig(PANEL);
+    const dir = path.join(root, "dynamic", MANUAL_CERTS_DIR_NAME);
+    expect(manager.manualCertsDirPath).toBe(dir);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    await chmod(dir, 0o755);
+    await manager.ensureStaticConfig(PANEL);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+  });
+
+  it("ensureStaticConfig refuses a symlinked manual-certs", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    await mkdir(path.join(root, "dynamic"), { recursive: true });
+    await mkdir(path.join(root, "elsewhere"));
+    await symlink(path.join(root, "elsewhere"), manager.manualCertsDirPath);
+    await expect(manager.ensureStaticConfig(PANEL)).rejects.toMatchObject({ code: "HOST_POLICY_DENIED" });
+  });
+
+  it("exposes the state path, mount dir and keeps the proxy binds unchanged", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    expect(manager.manualTlsStatePath).toBe(path.join(root, MANUAL_TLS_STATE_FILE));
+    expect(manager.manualCertMountDir).toBe("/etc/traefik/dynamic/manual-certs");
+    expect(new TraefikIngressFileManager(root, PANEL, { manualCertMountDir: "/m" }).manualCertMountDir).toBe("/m");
+    expect(
+      buildIngressProxyContainerPayload({
+        staticConfigHostPath: "/s/traefik.yml",
+        dynamicDirHostPath: "/s/dynamic",
+        acmeDirHostPath: "/s/acme",
+      }).HostConfig.Binds,
+    ).toHaveLength(3);
+  });
+
+  it("writes the manifest through the site file line and removes it on null", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    const file = path.join(root, "dynamic", MANUAL_CERTIFICATES_FILE_NAME);
+    await manager.writeManualCertificateManifest("tls:\n  certificates: []\n");
+    expect(await readFile(file, "utf8")).toBe("tls:\n  certificates: []\n");
+    expect((await stat(file)).mode & 0o777).toBe(0o644);
+    const inode = (await stat(file)).ino;
+    await manager.writeManualCertificateManifest("tls:\n  certificates: []\n");
+    expect((await stat(file)).ino).toBe(inode);
+    await manager.writeManualCertificateManifest(null);
+    await expect(stat(file)).rejects.toMatchObject({ code: "ENOENT" });
+    await manager.writeManualCertificateManifest(null);
+  });
+
+  it("serializes the manifest write with a held site file rename", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    const siteFile = manager.getSiteDynamicFilePath("site_1");
+    const held = holdNextRename(siteFile);
+    const upsert = manager.upsertServiceRoute("site_1", route(PAIR));
+    await held.entered;
+    let done = false;
+    const write = manager.writeManualCertificateManifest("x: 1\n").then(() => (done = true));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(done).toBe(false);
+    held.release();
+    await Promise.all([upsert, write]);
+    expect(done).toBe(true);
+  });
+
+  it("listRoutedHostnames returns the panel host and every routed host, deduplicated and sorted", async () => {
+    const root = await tmp();
+    const manager = new TraefikIngressFileManager(root, PANEL);
+    expect(await manager.listRoutedHostnames()).toEqual([PANEL.hostname]);
+    expect(await new TraefikIngressFileManager(root, null).listRoutedHostnames()).toEqual([]);
+    await manager.ensureStaticConfig(PANEL);
+    await manager.upsertServiceRoute("site_1", route([manual("shop.it"), host("a.it")]));
+    await manager.upsertServiceRoute("site_2", { ...route([host("b.it", { tls: true })]), serviceInstanceId: "svc2" });
+    // A fresh manager reads from disk, not from memory.
+    expect(await new TraefikIngressFileManager(root, PANEL).listRoutedHostnames()).toEqual([
+      "a.it",
+      "b.it",
+      "shop.it",
+      PANEL.hostname,
+    ]);
+    // A file without @hp-route lines contributes nothing.
+    await writeFile(path.join(root, "dynamic", "site_9.yml"), "# hand made\n");
+    expect(await manager.listRoutedHostnames()).toHaveLength(4);
   });
 });

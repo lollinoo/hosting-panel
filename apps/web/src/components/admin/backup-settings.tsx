@@ -13,6 +13,7 @@ import {
   type BackupStatus,
   type BackupTestResultDto,
 } from "@hosting-panel/contracts";
+import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { RestoreBackupDialog } from "@/components/customer/restore-backup-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -100,6 +101,7 @@ const SITE_BADGE_VARIANT: Record<BackupStatus | "never", "success" | "destructiv
   succeeded: "success",
   failed: "destructive",
   running: "warning",
+  partial: "warning",
   never: "secondary",
 };
 
@@ -1077,10 +1079,11 @@ export function BackupSettings({
                               : EMPTY_CELL}
                           </TableCell>
                           <TableCell>
-                            <Badge variant={SITE_BADGE_VARIANT[stateKey]}>
+                            <Badge variant={SITE_BADGE_VARIANT[stateKey]} className="gap-1">
+                              {stateKey === "partial" && <AlertTriangle className="size-3" aria-hidden="true" />}
                               {t.siteState[stateKey]}
                             </Badge>
-                            {row.lastStatus === "failed" && (
+                            {(row.lastStatus === "failed" || (row.lastStatus === "partial" && row.problem)) && (
                               <p className="mt-1 text-xs text-destructive">
                                 {backupProblemText(t, row.problem)}
                               </p>

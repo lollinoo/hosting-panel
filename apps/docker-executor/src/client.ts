@@ -1,10 +1,12 @@
 import http from "node:http";
 import {
   ApiErrorEnvelopeSchema,
+  type ErrorDetail,
   BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
   CertificateStatusReportWireSchema,
   EmptyDataEnvelopeSchema,
+  MANUAL_TLS_RESULT_SCHEMAS,
   ExecutorHealthResponseSchema,
   MailRelayStatusReportWireSchema,
   MailTestIpcResponseSchema,
@@ -57,6 +59,8 @@ import type {
   SftpAccessApplyRequest,
   SftpApplyResult,
   SftpStatusReport,
+  ManualTlsRequest,
+  ManualTlsResult,
   SiteDatabasesRequest,
   SiteDatabasesResult,
   SiteFilesRequest,
@@ -137,6 +141,11 @@ export const SFTP_APPLY_TIMEOUT_MS = 120_000;
 export const SFTP_STATUS_TIMEOUT_MS = 10_000;
 export const SITE_DATABASES_TIMEOUT_MS = 75_000;
 export const SITE_DATABASES_SIGNON_TIMEOUT_MS = 120_000;
+export const MANUAL_TLS_PUT_TIMEOUT_MS = 15_000;
+export const MANUAL_TLS_PUBLISH_TIMEOUT_MS = 30_000;
+export const MANUAL_TLS_PUBLISH_EVICT_TIMEOUT_MS = 90_000; // stop proxy, edit acme.json, start proxy
+export const MANUAL_TLS_PROBE_TIMEOUT_MS = 25_000;
+export const MANUAL_TLS_QUICK_TIMEOUT_MS = 10_000; // inventory, gc
 export const BACKUPS_TEST_TIMEOUT_MS = 40_000;
 export const BACKUPS_TIMEOUT_MS = 30_000;
 export const PANEL_CONTAINERS_TIMEOUT_MS = 10_000;
@@ -165,18 +174,32 @@ export class ExecutorIpcClientError extends Error {
   public readonly code: ErrorCode;
   public readonly statusCode: number;
   public readonly ambiguousOutcome: boolean;
+  /** The executor's error details (manual TLS: details[0].reason is the executor-internal TLS_* condition). */
+  public readonly details: readonly ErrorDetail[];
 
   public constructor(
     message: string,
     code: ErrorCode,
     statusCode: number,
     ambiguousOutcome: boolean = false,
+    details: readonly ErrorDetail[] = [],
   ) {
     super(message);
     this.name = "ExecutorIpcClientError";
     this.code = code;
     this.statusCode = statusCode;
     this.ambiguousOutcome = ambiguousOutcome;
+    this.details = details;
+  }
+
+  /** TLS_MANIFEST_CONFLICT | TLS_VERSION_MISSING | TLS_VERSION_CONFLICT | TLS_MATERIAL_INVALID | ... or undefined. */
+  public get reason(): string | undefined {
+    return this.details[0]?.reason;
+  }
+
+  /** Ids of the versions a TLS_VERSION_MISSING names. */
+  public get versionIds(): string[] {
+    return this.details.filter((d) => d.field === "versionId").map((d) => d.message);
   }
 }
 
@@ -460,11 +483,30 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   }
 
   public async backups<R extends BackupsRequest>(req: R): Promise<BackupsResult<R["action"]>> {
+    // localInit writes a marker and probes the volume, like test it is bounded by the 40 s budget.
     const timeoutMs =
-      req.action === "test" ? BACKUPS_TEST_TIMEOUT_MS : BACKUPS_TIMEOUT_MS;
+      req.action === "test" || req.action === "localInit"
+        ? BACKUPS_TEST_TIMEOUT_MS
+        : BACKUPS_TIMEOUT_MS;
     const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
     const schema = BACKUPS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
     return z.object({ data: schema }).parse(json).data as BackupsResult<R["action"]>;
+  }
+
+  public async manualTls<R extends ManualTlsRequest>(req: R): Promise<ManualTlsResult<R["action"]>> {
+    const timeoutMs =
+      req.action === "putVersion"
+        ? MANUAL_TLS_PUT_TIMEOUT_MS
+        : req.action === "publish"
+          ? req.evictAcme === true
+            ? MANUAL_TLS_PUBLISH_EVICT_TIMEOUT_MS
+            : MANUAL_TLS_PUBLISH_TIMEOUT_MS
+          : req.action === "probe"
+            ? MANUAL_TLS_PROBE_TIMEOUT_MS
+            : MANUAL_TLS_QUICK_TIMEOUT_MS;
+    const json = await this.sendSignedJsonRequest("POST", "/v1/ingress/manual-tls", req, timeoutMs);
+    const schema = MANUAL_TLS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
+    return z.object({ data: schema }).parse(json).data as ManualTlsResult<R["action"]>;
   }
 
   public async getServiceLogs(
@@ -754,6 +796,8 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
           parsedError.data.error.message,
           parsedError.data.error.code,
           response.statusCode,
+          false,
+          parsedError.data.error.details,
         );
       }
       const fallbackCode: ErrorCode =

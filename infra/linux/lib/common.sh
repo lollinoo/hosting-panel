@@ -20,6 +20,33 @@ latest_release_version() {
   printf '%s\n' "${v}"
 }
 
+# Features of this release that an older release cannot read (D6). Names match RELEASE.json "features".
+# Asks the panel database as hosting_panel (password only in the child's PGPASSWORD, never argv); unlike
+# panel_has_admin errors propagate: non-zero = cannot tell. Predicates run only when their migration is recorded.
+_hp_features_psql() { # <password> <query>
+  PGPASSWORD="$1" psql -X -qtA -v ON_ERROR_STOP=1 -h 127.0.0.1 -U hosting_panel -d hosting_panel -c "$2"
+}
+panel_features_in_use() { # <api.env>: prints the in-use gated feature names, one per line
+  local pw applied out
+  [[ "$(env_value "$1" DATABASE_URL)" =~ ^postgresql://hosting_panel:([A-Za-z0-9._~-]+)@127\.0\.0\.1:5432/hosting_panel$ ]] || return 1
+  pw="${BASH_REMATCH[1]}"
+  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql')")" || return 1
+  if grep -qx '0021_manual_tls_certificates.sql' <<<"${applied}"; then
+    out="$(_hp_features_psql "${pw}" "select 'manual-tls' where exists (select 1 from public.domains where cert_mode = 'manual')")" || return 1
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
+  fi
+  if grep -qx '0022_backup_targets_and_copies.sql' <<<"${applied}"; then
+    out="$(_hp_features_psql "${pw}" "select 'backup-targets' where exists (select 1 from public.backup_targets where not legacy_settings and archived_at is null)")" || return 1
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
+  fi
+  return 0
+}
+
+# Reads RELEASE.json on stdin; prints its space-separated "features" value (empty when absent).
+release_features() {
+  sed -n 's/^[[:space:]]*"features":[[:space:]]*"\([a-z0-9 -]*\)".*/\1/p'
+}
+
 HP_PANEL_UNITS=(hp-host-agent hp-docker-executor hp-api hp-web)
 
 # systemctl is-active with several units succeeds if ANY is active, so check one by one.

@@ -7,8 +7,9 @@ import {
 } from "@hosting-panel/contracts";
 import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
-import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites, siteSftpUsers } from "./schema.js";
+import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites, siteSftpUsers, tlsCertificates } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
+import { assertSiteMovable } from "./tls-coverage.js";
 
 export const WORDPRESS_TEMPLATE_ID = WORDPRESS_SITE_TYPE.templateId;
 
@@ -73,7 +74,9 @@ export interface MoveSiteInput {
 
 /**
  * Moves a site and everything it owns (children via ON UPDATE CASCADE, secrets re-encrypted
- * under the new AAD, all its operations including a running one) in one transaction.
+ * under the new AAD, all its operations including a running one) in one transaction. Refused with
+ * CERTIFICATE_IN_USE (T9) while a domain uses a manual certificate or a manual certificate of another organization
+ * covers one of its hostnames. Lock order: site row, then the TLS publish state, then the site's domain rows.
  */
 export async function moveSiteToOrganizationTransactional(
   db: HostingPanelDatabase,
@@ -87,6 +90,10 @@ export async function moveSiteToOrganizationTransactional(
       .where(and(eq(sites.id, siteId), eq(sites.organizationId, from)))
       .for("update");
     if (!site) throw notFound(`Site '${siteId}' not found in organization '${from}'`);
+
+    await assertSiteMovable(tx, { siteId, toOrganizationId: to });
+    // The provenance FK (site, organization) is ON UPDATE NO ACTION: detach the certificates created for this site.
+    await tx.update(tlsCertificates).set({ createdForSiteId: null }).where(eq(tlsCertificates.createdForSiteId, siteId));
 
     const secrets = await tx.select().from(encryptedSecrets).where(eq(encryptedSecrets.siteId, siteId));
     const plain = secrets.map((row) => ({

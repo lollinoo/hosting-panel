@@ -1,13 +1,18 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Req } from "@nestjs/common";
 import { AddSiteDomainInputSchema, type PermissionKey, type SiteDomainsDto } from "@hosting-panel/contracts";
+import type { DatabaseExecutor } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
+import { requireIdempotencyKey } from "../common/control-plane.error.js";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 import { SiteDomainsService, requestedHostnames } from "../sites/site-domains.service.js";
 
-type Auth = Awaited<ReturnType<AuthzContextService["authenticateRequest"]>>;
+const headersOf = (req: FastifyRequest) => req.headers as Record<string, string | string[] | undefined>;
 
-/** No Idempotency-Key: every call is idempotent by design. */
+type Auth = Awaited<ReturnType<AuthzContextService["authenticateRequest"]>>;
+type AuditEvent = { readonly action: string; readonly targetType: string; readonly targetId: string; readonly details: Record<string, unknown> };
+
+/** No Idempotency-Key: every call is idempotent by design, except an add on an imported certificate (`tlsVersionId`), which queues an operation. */
 @Controller("v1/organizations/:orgId/managed-sites/:siteId/domains")
 export class SiteDomainsController {
   public constructor(
@@ -36,7 +41,18 @@ export class SiteDomainsController {
   ): Promise<{ data: SiteDomainsDto }> {
     const auth = await this.#require(req, orgId, siteId, "site.update");
     const input = AddSiteDomainInputSchema.parse(raw ?? {});
-    const data = await this.domainsService.add(siteId, orgId, input);
+    // Naming an imported certificate assigns it: that needs the certificate permission, not only site.update.
+    if (input.tlsVersionId !== undefined) await this.#require(req, orgId, siteId, "site.certificates.manage");
+    const actor =
+      input.tlsVersionId === undefined
+        ? {}
+        : {
+            requestedByUserId: auth.user.id,
+            idempotencyKey: requireIdempotencyKey(headersOf(req)),
+            audit: (tx: DatabaseExecutor, event: AuditEvent) =>
+              this.authzService.recordAudit(auth, req, { organizationId: orgId, ...event }, tx),
+          };
+    const data = await this.domainsService.add(siteId, orgId, input, actor);
     await this.#audit(auth, req, orgId, siteId, "site.domain.add", requestedHostnames(input));
     return { data };
   }

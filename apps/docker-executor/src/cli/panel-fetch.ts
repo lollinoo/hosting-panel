@@ -1,3 +1,6 @@
+import { type Stats } from "node:fs";
+import { lstat } from "node:fs/promises";
+import path from "node:path";
 import { parseArgs } from "node:util";
 import { BackupTargetSchema, type BackupTarget } from "@hosting-panel/contracts";
 import { isInvokedDirectly } from "@hosting-panel/contracts/invoked-directly";
@@ -5,6 +8,7 @@ import { buildAwsSharedCredentials } from "../backup-jobs.js";
 import {
   DEFAULT_BACKUP_KEY_FILE,
   DEFAULT_PANEL_DUMP_DIR,
+  type LocalPanelRepoSource,
   type PanelFetchProblem,
   type PanelFetchResult,
 } from "../backup-runner.js";
@@ -28,7 +32,15 @@ const EXIT_BY_PROBLEM: Partial<Record<PanelFetchProblem, number>> = {
   wrong_key: 5,
   key_file_missing: 5,
   no_space: 6,
+  local_target_unmounted: 7,
+  local_target_unsafe: 8,
 };
+
+// The same rules as the runner's own check (it re-validates), with the layout of a restic repository on top.
+const LOCAL_REPO_CHARS = /^\/[A-Za-z0-9._@+/-]+$/;
+const LOCAL_REPO_DENYLIST = ["/etc", "/proc", "/sys", "/dev", "/run", "/boot", "/root", "/var/lib/docker"] as const;
+const LOCAL_REPO_MAX_LENGTH = 255;
+const RESTIC_DIRS = ["keys", "data", "snapshots", "index"] as const;
 
 export interface PanelFetchIo {
   readonly argv: readonly string[];
@@ -38,13 +50,15 @@ export interface PanelFetchIo {
   readonly stdout: (line: string) => void;
   readonly stderr: (line: string) => void;
   readonly createAdapter?: (paths: { readonly backupKeyFile: string; readonly panelDumpDir: string }) => {
-    fetchPanelCopy(target: BackupTarget, panelDumpDir: string, signal: AbortSignal): Promise<PanelFetchResult>;
+    fetchPanelCopy(target: BackupTarget | LocalPanelRepoSource, panelDumpDir: string, signal: AbortSignal): Promise<PanelFetchResult>;
   };
 }
 
-/** Reads the target from flags and stdin; null when anything is off. */
-function readTarget(argv: readonly string[], stdin: string): BackupTarget | null {
-  let values: { endpoint?: string; region?: string; bucket?: string; prefix?: string };
+type Source = { readonly s3: BackupTarget } | { readonly localRepo: string };
+
+/** Reads the source from flags (and stdin for S3); null when anything is off. */
+function readTarget(argv: readonly string[], stdin: string): Source | null {
+  let values: { endpoint?: string; region?: string; bucket?: string; prefix?: string; "local-repo"?: string };
   try {
     values = parseArgs({
       args: [...argv],
@@ -53,12 +67,20 @@ function readTarget(argv: readonly string[], stdin: string): BackupTarget | null
         region: { type: "string" },
         bucket: { type: "string" },
         prefix: { type: "string" },
+        "local-repo": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
     }).values;
   } catch {
     return null;
+  }
+  if (values["local-repo"] !== undefined) {
+    // A path, no S3 flag and nothing on stdin: this mode never takes a key.
+    const mixed = values.endpoint ?? values.region ?? values.bucket ?? values.prefix;
+    const dir = values["local-repo"];
+    if (mixed !== undefined || stdin !== "" || dir.length > LOCAL_REPO_MAX_LENGTH || !LOCAL_REPO_CHARS.test(dir)) return null;
+    return { localRepo: dir };
   }
   const lines = stdin.split("\n").map((line) => line.replace(/\r$/, ""));
   if (lines.length === 3 && lines[2] === "") lines.pop();
@@ -77,7 +99,56 @@ function readTarget(argv: readonly string[], stdin: string): BackupTarget | null
   } catch {
     return null;
   }
-  return parsed.data;
+  return { s3: parsed.data };
+}
+
+/**
+ * Checks a `--local-repo` directory without touching it: canonical path outside the system and executor directories, no
+ * symlink in it or above it, a directory owned by a non-root user and not writable by others (group bits are the normal
+ * 2770 layout), and the layout of a restic repository. A directory the executor cannot read is left to restic.
+ */
+async function checkLocalRepo(repoDir: string, panelDumpDir: string): Promise<PanelFetchProblem | null> {
+  const within = (child: string, parent: string): boolean => child === parent || child.startsWith(`${parent}/`);
+  const dump = path.resolve(panelDumpDir);
+  if (
+    path.posix.normalize(repoDir) !== repoDir ||
+    repoDir.endsWith("/") ||
+    LOCAL_REPO_DENYLIST.some((d) => within(repoDir, d)) ||
+    within(repoDir, dump) ||
+    within(dump, repoDir)
+  ) {
+    return "local_target_unsafe";
+  }
+  const parts = repoDir.split("/").slice(1);
+  let current = "";
+  let dirStat: Stats | undefined;
+  for (const part of parts) {
+    current += `/${part}`;
+    try {
+      dirStat = await lstat(current);
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code === "ENOENT" ? "local_target_unmounted" : "local_target_unsafe";
+    }
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) return "local_target_unsafe";
+  }
+  const dir = dirStat!;
+  if (dir.uid === 0 || (dir.mode & 0o002) !== 0) return "local_target_unsafe";
+  try {
+    const config = await lstat(`${repoDir}/config`);
+    if (config.isSymbolicLink() || !config.isFile() || config.uid !== dir.uid || (config.mode & 0o002) !== 0) {
+      return "local_target_unsafe";
+    }
+    for (const name of RESTIC_DIRS) {
+      const sub = await lstat(`${repoDir}/${name}`);
+      if (sub.isSymbolicLink() || !sub.isDirectory()) return "local_target_unsafe";
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return "no_copy";
+    // Another user's 0700 repository: the fetch container runs as that user and restic is the judge.
+    if (code !== "EACCES") return "local_target_unsafe";
+  }
+  return null;
 }
 
 /** Fetches the newest panel copy into HP_PANEL_DUMP_DIR; returns the process exit code. */
@@ -87,9 +158,15 @@ export async function main(io: PanelFetchIo): Promise<number> {
     return EXIT_BY_PROBLEM[problem] ?? 1;
   };
   if (io.uid === 0) return fail("refused");
-  const target = readTarget(io.argv, io.stdin);
-  if (target === null) return fail("refused");
+  const source = readTarget(io.argv, io.stdin);
+  if (source === null) return fail("refused");
   const panelDumpDir = io.env.HP_PANEL_DUMP_DIR?.trim() || DEFAULT_PANEL_DUMP_DIR;
+  if ("localRepo" in source) {
+    const problem = await checkLocalRepo(source.localRepo, panelDumpDir);
+    if (problem !== null) return fail(problem);
+  }
+  const target: BackupTarget | LocalPanelRepoSource =
+    "localRepo" in source ? { kind: "local_repo", repoDir: source.localRepo } : source.s3;
   const backupKeyFile = io.env.HP_BACKUP_KEY_FILE?.trim() || DEFAULT_BACKUP_KEY_FILE;
   const createAdapter =
     io.createAdapter ??

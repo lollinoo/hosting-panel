@@ -466,6 +466,86 @@ other than the server's own.
 Not run on the server: a backup to a real S3 bucket, DNS-01 with a real provider, `hp-update` between
 two versions.
 
+## HCP-SPEC-004: manual TLS certificates and backup targets
+
+This section lists what the reviews and the QA of the HCP-SPEC-004 work found, and what became of
+each finding. It is separate from the M6b counts above: the ids start with `S4-`, and the tables
+of M6b were not changed. The proof, id by id, is in `docs/security/hcp-spec-004-acceptance-report.md`.
+
+**How it was read.** Five rounds of independent review (opus, one reviewer per slice plus one on
+security), seven QA engineers on the TLS work, five on the local backup target and four on the second
+destination, and a final security review of the whole branch. Each QA engineer wrote tests that
+fail before a repair. The plan of the adversarial QA (arch-infra-qa §4.4) was covered like this:
+
+| §4.4 area | Covered by | Result |
+|---|---|---|
+| 1 Auth bypass | `tls-tenancy.qa.test.ts`, `backup-targets-tenancy.qa.test.ts`, `hcp004-m1.integration.test.ts`, the route walks of `admin-route-guard` and `support-access-tenancy` | holds: foreign ids answer 404 before the body is read; one low app-wide finding (S4-L1) |
+| 2 Path traversal and filesystem | `local-target-adversarial.test.ts` (253), `manual-tls-adversarial.test.ts` (80), AB step `local-hostile` | holds for the code; two store defects repaired (S4-M9); the executor unit's sandbox defect (S4-H1) was found by the final review and repaired |
+| 3 Secret leakage | `tls-keysafety.qa.test.ts`, `backup-targets-web.qa.test.ts`, `tls-web.qa.test.ts`, `docker inspect` steps of the acceptance scripts | the key canary is absent everywhere; the audit guard bug S4-H2 was found and repaired |
+| 4 Races | `tls-lifecycle.qa.test.ts`, `backup-dual.qa.test.ts`, `backup-retention-recovery.qa.test.ts` | holds. PGlite runs one transaction at a time, so the row locks are proven by outcome only, not by contention (S4-L6) |
+| 5 CP-01 (no proxy recreate) | `accept-tls-manual.mjs`, `accept-tls-adapter.mjs` (rotation under load, `upgrade-no-recreate`) | holds on a throw-away proxy; a live proxy on the test host was never touched. Reboot not run (owner) |
+| 6 Irreversible restore | `backup-retention-recovery.qa.test.ts`, `backups-restore-qa.integration.test.ts`, `restore-panel.test.ts` | holds in tests; no real new-host restore (owner) |
+| 7 SNI capture and ACME eviction | `tls-tenancy.qa.test.ts`, `manual-tls-adversarial.test.ts`, AM steps `capture-refused`, `tls05-*` | holds |
+| 8 Downgrade gate | `update.test.ts`, `features-gate.test.ts`, `rollback-compat.test.ts` | holds; one documented limit (S4-L4) |
+
+### High findings
+
+| id | Weight | Finding | State |
+|---|---|---|---|
+| S4-H1 | high | Local backup targets cannot work under the real `hp-docker-executor` unit. The unit sets `RestrictSUIDSGID=yes`, and `local-target-guard.ts` runs `chmod` with `02770` on every folder it creates, so the call fails with `EPERM` and becomes `local_target_unsafe`. Initialise always fails on `panel/`, the first local copy of every site fails on `sites/<id>`, and the folder left at 0700 then fails the exact-mode check for good. A "local" policy gives `failed`, and "Both" gives `partial`, every time. It fails closed: nothing is written outside the root. Found by `review-final-backup`; reproduced with `systemd-run --user -p RestrictSUIDSGID=yes` by the reviewer and again when this report was written (`chmod 0770` works, `chmod 2770` gives `EPERM`). No test ran the executor inside the unit's sandbox | repaired (`ffix-local-root-setgid`): the guard no longer requests setgid. It creates each folder with mode 0770 and takes setgid and the executor group from the parent, checks the parent before and that the new folder is exactly 2770 after, and removes a folder that fails the check. `infra/linux/bootstrap-dedicated.sh` creates the local root as 2770, so the unit keeps `RestrictSUIDSGID=yes`. Proof: under `systemd-run --user -p RestrictSUIDSGID=yes -p UMask=0007` a plain `chmod 2770` still gives `EPERM`, and the built guard ran Initialise and a site guard against a 2770 root and left `panel/`, `sites/` and `sites/<id>` at 2770; `infra/linux/accept-backup-local.mjs` gave `RESULT 16/16 passed, 2 skipped` (the two root-only cases) on real Docker, run outside the sandbox. Tests: `apps/docker-executor/test/local-target-guard.test.ts` (an `EPERM` seam for any mode with setgid), `apps/docker-executor/test/local-target-adversarial.test.ts`, `infra/linux/update.test.ts`. Not proved: the whole unit under `systemd` on a real server (owner). An external volume must be prepared by root (`chown hp-executor:hp-executor`, `chmod 2770`); the runbook says so |
+| S4-H2 | high | The audit check for PEM text threw after the change was saved. A header `X-Request-ID: -----BEGIN` passes the request-id pattern and lands in the audit details, so the change stayed and its audit row was lost. Found by `review-security` and `review-db-repos` | repaired (`eng-fixup1`): the audit now redacts and always writes the row; a second round made it safe for keys, class instances, `\u0000` and lone surrogates. Tests: `packages/database/test/hcp004-adversarial.test.ts`, `apps/api/test/hcp004-m1.integration.test.ts` |
+| S4-H3 | high | A certificate with a DNS SAN shaped like an IPv4 address (`1.2.3.4`) made `tls.connect` throw inside the `server.listen` callback of the validator: an uncaught exception that stops the API, reachable by any tenant with a self-made certificate. Found by `review-c2-api-validation` and `qa-tls-validator-adversarial` | repaired (`c2-fixup1`): an IP-literal SAN is refused and the handshake cannot throw. Test: `apps/api/test/tls-validator-adversarial.qa.test.ts` |
+
+### Medium findings
+
+| id | Finding | State |
+|---|---|---|
+| S4-M1 | The unique-location index of backup targets compared raw text, so a legacy target, JSON `null` parts, an endpoint in other case or with the default port gave several live S3 targets on one restic repository; panel retention could then prune another target's snapshots | repaired (`eng-fixup1`): `s3_location_key` and `hp_s3_location_key()`, strict S3 config checks. Test: `hcp004-adversarial.test.ts` |
+| S4-M2 | The key of the legacy S3 target went stale when `backup_settings` changed (today's route, or an older release after a rollback) | repaired (`eng-fixup2`): a trigger keeps the live key in sync, and a unique violation fails closed |
+| S4-M3 | The trigger archived the legacy target on a settings delete, so "clear, then save" left no live S3 target | repaired (`eng-fixup3`): the trigger acts on INSERT and UPDATE only; the first insert creates the target when none exists |
+| S4-M4 | `tlsVersionId` was documented in OpenAPI but silently ignored (a Let's Encrypt domain was created) | repaired: refused with 422 `NOT_SUPPORTED` until M2, implemented in M2 |
+| S4-M5 | Chain duplicates, the leaf inside the chain and unrelated certificates were accepted and stored | repaired (`c2-fixup1`): chain order, duplicates and unrelated certificates are refused |
+| S4-M6 | A `-` in a PEM body passed the shape check and made the validator throw a `TypeError` (500) | repaired (`c2-fixup1`): strict PEM bodies |
+| S4-M7 | The empty `acme.json` that `ensureStaticConfig` creates made every first manual publish fail with `CERTIFICATE_APPLY_FAILED` | repaired (`c2-fixup1`): empty means an empty store. Proved by AA step `publish-on-fresh-empty-acme-store` |
+| S4-M8 | A certificate shared by two sites of one organisation could not be rotated or assigned (site-scoped activation always gave `manual_overlap`) | repaired (`c2-fixup1`, `c2-fixup2`, `c2-fixup3`): one operation moves every same-organisation domain, a permission check per site, and `409 RESOURCE_LOCKED` while another affected site has an active operation |
+| S4-M9 | `manual-tls-store.ts`: `gc()` and `inventory()` followed a symlinked `manual-certs`, `readVersion` accepted a folder of any mode, and a revert could write a manifest that named a vanished version | repaired (`c2-fixup1`, `c2-fixup2b`). Test: `manual-tls-adversarial.test.ts` |
+| S4-M10 | Domain add with `tlsVersionId` skipped `site.certificates.manage` and the assign audit | repaired (`c2-fixup1`) |
+| S4-M11 | The adapter acceptance script still expected the old `evicted` result after a reverted cold publish (17/18) | repaired (`c2-fixup3`): the script is 18/18 |
+| S4-M12 | The 1 GiB free-space floor also stopped forget, restore and archive, so retention could not free a nearly full local target | repaired (`c3-fixup1`): the floor applies only to writes into the repository; 64 MiB margin for the others |
+| S4-M13 | Retention reused the forget job id for a third target, which orphaned its snapshots and deleted their rows | repaired (`c3-fixup1`): distinct ids per target (up to nine targets per run, S3 pins unchanged) |
+| S4-M14 | A site whose destinations were all archived or disabled was skipped each night with no alert | repaired (`c3-fixup1`): alert `backup_site_without_target` |
+| S4-M15 | A stale setup in `backup-targets.integration.test.ts` skipped 45 tests | repaired (`c3-fixup1`): the 45 tests run |
+| S4-M16 | The audit of a partial backup was missing on the recovery path | repaired (`c4-fixup1`) |
+
+### Low findings and limits
+
+| id | Finding | State |
+|---|---|---|
+| S4-L1 | Malformed JSON on an admin route gets 400 before the administrator check (`create-app.ts:478-496`). It is app-wide and older than HCP-SPEC-004. Nothing leaks | open, pinned by an `it.fails` in `backup-targets-tenancy.qa.test.ts`; follow-up issue |
+| S4-L2 | The customer `GET backup-policy`, when destinations are inherited, returns the ids of default-policy targets that are not offered to customers. Only the bare id leaks | repaired (`ffix-api-lows`): the inherited customer policy now returns only target ids that the customer is offered. Test: `apps/api/test/backup-policies.integration.test.ts` |
+| S4-L3 | Initialise does not check that the expected disk is mounted, so with an external disk unmounted the folder is made on the system disk (spec 6.5.6). The alert `backup_target_space_low` uses only the last admin test, so it can go stale | written as a limit (`review-final-backup`; ADR-0032 section 4): the marker is the only check, so the administrator must mount the disk before Initialise; the space alert follows the last admin test, and a target that is not tested again keeps its old value |
+| S4-L4 | The downgrade gate ignores an archived non-legacy destination that still holds copies. A disabled required destination is dropped at enqueue (a plain `succeeded`, no `partial`) | written as a limit (`.agents/brain/decisions.md` for the gate; ADR-0032 section 5 for the disabled destination) |
+| S4-L5 | Copies of the panel backup are not cascaded when an older release moves the legacy location after a forced downgrade | open, low: ADR-0032 limit 10 says a forced downgrade hides the local copies from the old release, but not this carry-over for panel copies |
+| S4-L6 | PGlite runs one transaction at a time, so the `FOR UPDATE` locks are proved by outcome, not by contention | open, low: no test shows the locks under real contention; the outcomes are tested |
+| S4-L7 | `application/xml` and form bodies answered 500; the import cap of ten per hour reset on delete; the other lows of the reviews (store hardening, torn reads, texts) | repaired in the fix-up rounds (`c2-fixup1`, `c2-fixup2b`, `c3-fixup1`, `c3-fixup2`) |
+| S4-L8 | Pending addresses of a site that is still deploying are not protected from a wildcard (`tls-assignment.ts`). A wildcard assigned in that window covers them once routed, and every later publish is refused with `captures_host` | written as a limit (`review-final-tls`; ADR-0031 section 4). Same organisation only |
+| S4-L9 | Deleting a domain while its own apply runs leaves an `active` version with no domain, still loaded, which blocks same-organisation subdomains and certificate deletion until the next certificate change (`site-domains.service.ts`) | written as a limit (`review-final-tls`; ADR-0031 section 4). Same organisation only |
+| S4-L10 | The API had no limit that matched the executor's 64 hosts per version, so a 65th address failed with a generic `CERTIFICATE_APPLY_FAILED` | repaired (`ffix-api-lows`): `checkAssignment` refuses it before the executor with `VALIDATION_ERROR`, reason `too_many_sans`, and no hostname in the details. The 200 expectations are trimmed by the executor and never fail an apply. Test: `apps/api/test/tls-assignment.test.ts` |
+
+### Counts and what no one could prove
+
+| Weight | Found | Repaired | Written as a limit | Open |
+|---|---|---|---|---|
+| high | 3 | 3 | 0 | 0 |
+| medium | 16 | 16 | 0 | 0 |
+| low (listed above) | 10 | 3 (S4-L2, S4-L7, S4-L10) | 4 (S4-L3, S4-L4, S4-L8, S4-L9) | 3 (S4-L1, S4-L5, S4-L6) |
+
+The lows of the reviews that the fix-up rounds repaired in a group are counted once, in S4-L7.
+
+Not proved by anyone: a real S3 bucket, a reboot, a root-only filesystem, a commercial certificate,
+a restore on a new host, PFX and `.zip.age` (blocked). The list and the actions are in the acceptance
+report.
+
 ## Open high or critical findings
 
 | id | Weight | State |
