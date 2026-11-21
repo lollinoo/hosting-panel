@@ -48,6 +48,9 @@ import type {
   ServiceDesiredStatus,
   SiteHostRoute,
   SiteStatus,
+  SiteTemplateParameterEntry,
+  SiteTemplateSpec,
+  SiteTypeKey,
   TerminalEndReason,
   TlsCertMode,
   TlsKeyType,
@@ -297,6 +300,45 @@ export const hostAllocations = pgTable(
   ],
 );
 
+// Site templates (ADR 0033). The default version and created_by carry no .references(): the circular FK and the user FK live in
+// the SQL (0024), which is the source of truth, like tlsCertificates.activeVersionId.
+export const siteTemplates = pgTable(
+  "site_templates",
+  {
+    id: text("id").primaryKey(),
+    module: text("module").$type<SiteTypeKey>().notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    builtIn: boolean("built_in").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(false),
+    defaultVersionId: text("default_version_id"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("uq_site_templates_name_active").on(sql`lower(${t.name})`).where(sql`${t.archivedAt} IS NULL`)],
+);
+
+export const siteTemplateVersions = pgTable(
+  "site_template_versions",
+  {
+    id: text("id").primaryKey(),
+    templateId: text("template_id")
+      .notNull()
+      .references(() => siteTemplates.id, { onDelete: "restrict" }),
+    versionNumber: integer("version_number").notNull(),
+    source: text("source").notNull(),
+    spec: jsonb("spec").$type<SiteTemplateSpec>().notNull(),
+    specHash: text("spec_hash").notNull(),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_site_template_versions_number").on(t.templateId, t.versionNumber),
+    unique("uq_site_template_versions_id_template").on(t.id, t.templateId),
+  ],
+);
+
 export const sites = pgTable(
   "sites",
   {
@@ -313,12 +355,16 @@ export const sites = pgTable(
     appliedRoutes: jsonb("applied_routes").$type<SiteHostRoute[] | null>(),
     siteUrl: text("wordpress_url"),
     siteType: text("site_type"),
+    // NULL = the built-in WordPress template, version 1 (sites that predate site templates); no .references(): the SQL FK is the source of truth.
+    templateVersionId: text("template_version_id"),
+    templateParameters: jsonb("template_parameters").$type<SiteTemplateParameterEntry[] | null>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     unique("uq_sites_id_org").on(t.id, t.organizationId),
     unique("uq_sites_org_slug").on(t.organizationId, t.slug),
+    index("idx_sites_template_version").on(t.templateVersionId).where(sql`${t.templateVersionId} IS NOT NULL`),
     foreignKey({
       columns: [t.hostAllocationId, t.organizationId],
       foreignColumns: [hostAllocations.id, hostAllocations.organizationId],
