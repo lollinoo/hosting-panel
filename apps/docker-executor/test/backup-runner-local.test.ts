@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, unlink, wr
 import os from "node:os";
 import path from "node:path";
 import type { BackupsIpcRequest } from "@hosting-panel/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
   BackupRunner,
@@ -21,6 +21,18 @@ const GIB = 1024 * 1024 * 1024;
 const FLOOR = BACKUP_DISK_FREE_FLOOR_BYTES;
 
 const cleanups: Array<() => Promise<unknown>> = [];
+// The unit runs with UMask=0007; under a 0022 umask (a GitHub runner) the guard's 0770 folders would lose group write.
+let oldUmask: number | undefined;
+beforeAll(() => {
+  try {
+    oldUmask = process.umask(0o007);
+  } catch {
+    // worker threads cannot change the umask
+  }
+});
+afterAll(() => {
+  if (oldUmask !== undefined) process.umask(oldUmask);
+});
 afterEach(async () => {
   for (const task of cleanups.splice(0).reverse()) await task();
 });
