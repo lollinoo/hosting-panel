@@ -111,6 +111,11 @@ export const it = {
       domainConflict: "Questo indirizzo web è già in uso. Controlla di non aver sbagliato a scrivere o scegli un altro indirizzo.",
       fieldInvalid: "Controlla questo campo e riprova.",
       alsoWww: "Usa anche www.{domain}",
+      usage: "{used} di {max} siti",
+      limitReached:
+        "Hai raggiunto il numero massimo di siti ({max}). Per crearne un altro eliminane uno oppure chiedi al tuo amministratore di aumentare il limite.",
+      limitReachedSubmit:
+        "Hai raggiunto il numero massimo di siti. Per crearne un altro eliminane uno oppure chiedi al tuo amministratore di aumentare il limite.",
     },
     progress: {
       title: "Stiamo preparando il tuo sito",
@@ -2018,6 +2023,27 @@ export const it = {
       support: {
         open: "Apri la vista di assistenza",
         ended: "Non c'è nessuna visita di assistenza aperta. Aprine una da questo elenco.",
+      },
+      limitReached: "Il cliente ha raggiunto il suo limite di siti. Aumenta il limite nella sezione Clienti e riprova.",
+      customers: {
+        title: "Clienti",
+        intro: "Quanti siti può avere ogni cliente. Abbassare il limite non tocca i siti esistenti: blocca solo la creazione di nuovi.",
+        colCustomer: "Cliente",
+        colSites: "Siti",
+        colActions: "Azioni",
+        usage: "{used} di {max}",
+        usageUnlimited: "{used} (nessun limite)",
+        full: "Limite raggiunto",
+        edit: "Modifica limite",
+        editAria: "Modifica il limite di siti di {name}",
+        editTitle: "Limite di siti di {name}",
+        maxLabel: "Numero massimo di siti",
+        unlimitedLabel: "Nessun limite",
+        belowUsage: "{name} ha già {used} siti: restano attivi, ma non potrà crearne altri finché non scende sotto {max}.",
+        invalid: "Inserisci un numero intero da 0 in su, oppure scegli «Nessun limite».",
+        save: "Salva",
+        saving: "Salvataggio...",
+        cancel: "Annulla",
       },
     },
     certificates: {

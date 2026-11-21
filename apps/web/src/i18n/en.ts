@@ -110,6 +110,11 @@ export const en: Messages = {
       domainConflict: "This web address is already used. Check for typos or choose another address.",
       fieldInvalid: "Check this field and try again.",
       alsoWww: "Also use www.{domain}",
+      usage: "{used} of {max} sites",
+      limitReached:
+        "You have reached the maximum number of sites ({max}). To create another one, delete a site or ask your administrator to raise the limit.",
+      limitReachedSubmit:
+        "You have reached the maximum number of sites. To create another one, delete a site or ask your administrator to raise the limit.",
     },
     progress: {
       title: "Setting up your site",
@@ -1993,6 +1998,27 @@ export const en: Messages = {
       support: {
         open: "Open support view",
         ended: "There is no open support visit. Open one from this list.",
+      },
+      limitReached: "The customer has reached their site limit. Raise the limit in the Customers section and try again.",
+      customers: {
+        title: "Customers",
+        intro: "How many sites each customer may have. Lowering the limit never touches existing sites: it only blocks new ones.",
+        colCustomer: "Customer",
+        colSites: "Sites",
+        colActions: "Actions",
+        usage: "{used} of {max}",
+        usageUnlimited: "{used} (no limit)",
+        full: "Limit reached",
+        edit: "Change limit",
+        editAria: "Change the site limit of {name}",
+        editTitle: "Site limit of {name}",
+        maxLabel: "Maximum number of sites",
+        unlimitedLabel: "No limit",
+        belowUsage: "{name} already has {used} sites: they keep running, but no new site can be created until the count is below {max}.",
+        invalid: 'Enter a whole number from 0 up, or choose "No limit".',
+        save: "Save",
+        saving: "Saving...",
+        cancel: "Cancel",
       },
     },
     certificates: {
