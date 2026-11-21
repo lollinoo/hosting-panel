@@ -26,6 +26,8 @@ export * from "./mail-relay-repository.js";
 export * from "./dns-provider-repository.js";
 export * from "./site-sftp-users-repository.js";
 export * from "./backups-repository.js";
+export * from "./backup-targets-repository.js";
+export * from "./tls-certificates-repository.js";
 export * from "./site-wordpress-state-repository.js";
 export * from "./password-reset-repository.js";
 export * from "./admin-terminal-repository.js";

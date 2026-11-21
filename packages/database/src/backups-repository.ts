@@ -85,6 +85,8 @@ export interface SiteBackupRow {
   archiveStatus: "preparing" | "ready" | "failed" | null;
   archiveProblem: BackupProblem | null;
   archiveReadyUntil: Date | null;
+  restoreTargetId: string | null;
+  archiveTargetId: string | null;
 }
 
 const SITE_BACKUP_SELECT = {
@@ -107,6 +109,8 @@ const SITE_BACKUP_SELECT = {
   archiveStatus: siteBackups.archiveStatus,
   archiveProblem: siteBackups.archiveProblem,
   archiveReadyUntil: siteBackups.archiveReadyUntil,
+  restoreTargetId: siteBackups.restoreTargetId,
+  archiveTargetId: siteBackups.archiveTargetId,
 };
 
 function generateBackupId(): string {
