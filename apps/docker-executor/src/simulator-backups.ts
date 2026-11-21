@@ -14,6 +14,12 @@ const MAX_RUNNING_JOBS = 2;
 const PANEL_LANE = "panel:db";
 const SIM_ARCHIVE_SIZE_BYTES = 1_048_577;
 const SIM_ARCHIVE_TTL_MS = 60 * 60 * 1000;
+const GIB = 1024 ** 3;
+const SIM_LOCAL_AVAILABLE_BYTES = 50 * GIB;
+const SIM_LOCAL_TOTAL_BYTES = 100 * GIB;
+const SIM_LOCAL_ROOT = "/var/lib/hosting-panel/local-repos";
+// Target ids ending in this suffix model a volume that is not mounted (no Docker needed).
+const SIM_UNMOUNTED_TARGET_SUFFIX = "dead";
 const EMPTY_ZIP_EOCD = Buffer.from([
   0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ]);
@@ -25,6 +31,8 @@ interface SimBackupJob {
   readonly action: "start" | "forget" | "restore" | "archive" | "panelStart";
   readonly jobId: string;
   readonly siteId: string;
+  /** Repository the job is pinned to (see repoKey): snapshots live per (target, site) like the real repositories. */
+  readonly targetKey: string;
   // Service instance whose files volume this restore creates, if any.
   readonly createsVolumeFor: string | null;
   readonly snapshotIdsToForget: readonly string[];
@@ -93,10 +101,40 @@ function createSimulatedSnapshot(): SimJobSnapshot {
   };
 }
 
+/** Answers a local test/init: fixed bytes and root, or the deterministic unmounted seam. */
+function localTestResult(
+  targetId: string,
+  nextQueuedFailure: () => BackupFailureClass | null,
+): BackupsResultByAction["test"] {
+  const problem = targetId.endsWith(SIM_UNMOUNTED_TARGET_SUFFIX)
+    ? "local_target_unmounted"
+    : nextQueuedFailure();
+  if (problem !== null) {
+    return { outcome: "failed", problem };
+  }
+  return {
+    outcome: "ok",
+    problem: null,
+    availableBytes: SIM_LOCAL_AVAILABLE_BYTES,
+    totalBytes: SIM_LOCAL_TOTAL_BYTES,
+    localRoot: SIM_LOCAL_ROOT,
+  };
+}
+
+type SimTarget = BackupsIpcRequest extends infer R ? (R extends { target: infer T } ? T : never) : never;
+
+/** One key per repository: a local target by id, an S3 target by endpoint/bucket/prefix. */
+function targetKeyOf(target: SimTarget): string {
+  if ("kind" in target) return `local:${target.targetId}`;
+  return `s3:${target.endpoint}/${target.bucket}/${target.prefix ?? ""}`;
+}
+
+const snapKey = (targetKey: string, siteId: string): string => `${targetKey}|${siteId}`;
+
 /** In-memory simulator for backup jobs and per-site snapshot repositories. */
 export class SimulatedBackups {
   private readonly jobs = new Map<string, SimBackupJob>();
-  private readonly snapshotsBySite = new Map<string, string[]>();
+  private readonly snapshotsByRepo = new Map<string, string[]>();
   private readonly readyArchives = new Map<string, string>();
   private readonly archiveBySite = new Map<string, string>();
   private readonly pendingFailures: BackupFailureClass[] = [];
@@ -116,7 +154,8 @@ export class SimulatedBackups {
     const req = parsed.data;
 
     switch (req.action) {
-      case "test": {
+      case "test":
+      case "localInit": {
         if (this.testInFlight) {
           throw new ExecutorCodedError("A storage test is already running", "RESOURCE_LOCKED");
         }
@@ -124,6 +163,12 @@ export class SimulatedBackups {
         try {
           // Yield a turn so concurrent test calls hit the single-test lock like the real runner.
           await new Promise<void>((resolve) => setImmediate(resolve));
+          if ("kind" in req.target) {
+            return localTestResult(
+              req.target.targetId,
+              () => this.pendingFailures.shift() ?? null,
+            ) as BackupsResultByAction[R["action"]];
+          }
           const problem = this.pendingFailures.shift() ?? null;
           return (
             problem !== null ? { outcome: "failed", problem } : { outcome: "ok", problem: null }
@@ -138,17 +183,19 @@ export class SimulatedBackups {
           "start",
           req.jobId,
           req.siteId,
+          { target: req.target },
         ) as BackupsResultByAction[R["action"]];
 
       case "forget":
         return this.enqueueJob("forget", req.jobId, req.siteId, {
           snapshotIdsToForget: req.snapshotIds,
+          target: req.target,
         }) as BackupsResultByAction[R["action"]];
 
       case "panelStart": {
         // The master key is dropped here: only the job id reaches the simulator's state.
         const known = this.jobs.has(req.jobId);
-        const status = this.enqueueJob("panelStart", req.jobId, PANEL_LANE);
+        const status = this.enqueueJob("panelStart", req.jobId, PANEL_LANE, { target: req.target });
         if (!known) {
           this.panelJobs.push(req.jobId);
         }
@@ -162,6 +209,7 @@ export class SimulatedBackups {
         const volumeMissing = !this.siteStateOf(req.serviceInstanceId).filesVolume;
         return this.enqueueJob("restore", req.jobId, req.siteId, {
           requiredSnapshotId: req.snapshotId,
+          target: req.target,
           failure: volumeMissing && !req.createVolume ? "restore_prepare_failed" : undefined,
           createsVolumeFor: volumeMissing && req.createVolume ? req.serviceInstanceId : null,
         }) as BackupsResultByAction[R["action"]];
@@ -170,6 +218,7 @@ export class SimulatedBackups {
       case "archive":
         return this.enqueueJob("archive", req.jobId, req.siteId, {
           requiredSnapshotId: req.snapshotId,
+          target: req.target,
         }) as BackupsResultByAction[R["action"]];
 
       case "status":
@@ -251,9 +300,12 @@ export class SimulatedBackups {
     return [...this.panelJobs];
   }
 
-  /** Lists snapshot ids currently recorded for a site. */
-  public snapshots(siteId: string): readonly string[] {
-    return [...(this.snapshotsBySite.get(siteId) ?? [])];
+  /** Lists snapshot ids recorded for a site: in one target's repository when given, else across all targets. */
+  public snapshots(siteId: string, target?: SimTarget): readonly string[] {
+    if (target !== undefined) {
+      return [...(this.snapshotsByRepo.get(snapKey(targetKeyOf(target), siteId)) ?? [])];
+    }
+    return [...this.snapshotsByRepo.entries()].filter(([k]) => k.endsWith(`|${siteId}`)).flatMap(([, ids]) => ids);
   }
 
   /** Returns the site state of a service instance, {true, true} unless set. */
@@ -261,9 +313,9 @@ export class SimulatedBackups {
     return this.siteStates.get(serviceInstanceId) ?? { filesVolume: true, container: true };
   }
 
-  /** Checks whether a snapshot id exists in the site's recorded snapshot list. */
-  private hasSnapshot(siteId: string, snapshotId: string): boolean {
-    return this.snapshotsBySite.get(siteId)?.includes(snapshotId) ?? false;
+  /** Checks whether a snapshot id exists in the site's repository on this target. */
+  private hasSnapshot(targetKey: string, siteId: string, snapshotId: string): boolean {
+    return this.snapshotsByRepo.get(snapKey(targetKey, siteId))?.includes(snapshotId) ?? false;
   }
 
   /** Removes any ready archive currently associated with a site. */
@@ -292,7 +344,8 @@ export class SimulatedBackups {
       requiredSnapshotId?: string;
       failure?: BackupFailureClass | undefined;
       createsVolumeFor?: string | null;
-    } = {},
+      target: SimTarget;
+    },
   ): BackupJobStatus {
     const existing = this.jobs.get(jobId);
     if (existing) {
@@ -303,14 +356,18 @@ export class SimulatedBackups {
       this.removeSiteArchive(siteId);
     }
     // A forced failure leaves failNext queued for the next job.
-    const queuedFailure = options.failure ?? this.pendingFailures.shift() ?? null;
+    const targetKey = targetKeyOf(options.target);
+    // A dead (unmounted) local target fails every job on it before restic would run; failNext stays queued.
+    const dead = "kind" in options.target && options.target.targetId.endsWith(SIM_UNMOUNTED_TARGET_SUFFIX);
+    const queuedFailure = dead ? "local_target_unmounted" : (options.failure ?? this.pendingFailures.shift() ?? null);
     const missingSnapshot =
       options.requiredSnapshotId !== undefined &&
-      !this.hasSnapshot(siteId, options.requiredSnapshotId);
+      !this.hasSnapshot(targetKey, siteId, options.requiredSnapshotId);
     const job: SimBackupJob = {
       action,
       jobId,
       siteId,
+      targetKey,
       createsVolumeFor: options.createsVolumeFor ?? null,
       snapshotIdsToForget: options.snapshotIdsToForget ? [...options.snapshotIdsToForget] : [],
       plannedFailure: queuedFailure ?? (missingSnapshot ? "other" : null),
@@ -415,9 +472,10 @@ export class SimulatedBackups {
     }
     if (job.action === "start") {
       const snapshot = createSimulatedSnapshot();
-      const siteSnapshots = this.snapshotsBySite.get(job.siteId) ?? [];
+      const key = snapKey(job.targetKey, job.siteId);
+      const siteSnapshots = this.snapshotsByRepo.get(key) ?? [];
       siteSnapshots.push(snapshot.snapshotId);
-      this.snapshotsBySite.set(job.siteId, siteSnapshots);
+      this.snapshotsByRepo.set(key, siteSnapshots);
       job.state = "succeeded";
       job.failure = null;
       job.snapshot = snapshot;
@@ -425,14 +483,15 @@ export class SimulatedBackups {
       return;
     }
     if (job.action === "forget") {
-      const existing = this.snapshotsBySite.get(job.siteId);
+      const key = snapKey(job.targetKey, job.siteId);
+      const existing = this.snapshotsByRepo.get(key);
       if (existing) {
         const toRemove = new Set(job.snapshotIdsToForget);
         const remaining = existing.filter((id) => !toRemove.has(id));
         if (remaining.length > 0) {
-          this.snapshotsBySite.set(job.siteId, remaining);
+          this.snapshotsByRepo.set(key, remaining);
         } else {
-          this.snapshotsBySite.delete(job.siteId);
+          this.snapshotsByRepo.delete(key);
         }
       }
       job.state = "succeeded";

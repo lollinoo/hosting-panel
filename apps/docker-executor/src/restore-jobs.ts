@@ -14,7 +14,6 @@ import {
 } from "@hosting-panel/contracts";
 import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
-  assertRegion,
   assertSafeBindPath,
   assertSafeSecretBinds,
   assertSafeSecretFileEnv,
@@ -22,7 +21,10 @@ import {
   buildJobLabels,
   buildResticBasePayload,
   classifyResticExitCode,
+  localizeResticScript,
+  resolveBackupRepository,
   type BackupContainerSpec,
+  type ResolvedBackupRepository,
 } from "./backup-jobs.js";
 import {
   ExecutorCodedError,
@@ -743,6 +745,17 @@ function buildRestoreFilesStepPayload(input: {
   };
 }
 
+/** The site repository comes resolved (S3 or guarded local), or as the legacy S3 pair (resolved here as S3). */
+type ResticRepoSource =
+  | { readonly repo: ResolvedBackupRepository }
+  | { readonly target: BackupTarget; readonly backupNetworkName: string };
+
+function restoreRepoOf(input: ResticRepoSource, siteId: string): ResolvedBackupRepository {
+  return "repo" in input
+    ? input.repo
+    : resolveBackupRepository(input.target, { kind: "site", siteId }, { backupNetworkName: input.backupNetworkName });
+}
+
 /** Builds a hardened restic fetch spec: `_rs_fetch` (dumps, staging only) or `_rs_fetch_files` (files, site volume only). */
 function buildRestoreFetchPayload(
   input: {
@@ -750,11 +763,9 @@ function buildRestoreFetchPayload(
     readonly siteId: string;
     readonly siteType: ExecutorSiteType;
     readonly snapshotId: string;
-    readonly target: BackupTarget;
-    readonly backupNetworkName: string;
     readonly secretBinds: readonly string[];
     readonly secretFileEnv: readonly string[];
-  },
+  } & ResticRepoSource,
   suffix: string,
   bind: string,
   script: string,
@@ -762,27 +773,25 @@ function buildRestoreFetchPayload(
   const { jobId, hexId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const snapshotId = assertSnapshotId(input.snapshotId);
-  const region = assertRegion(input.target.region);
+  const repo = restoreRepoOf(input, siteId);
   assertResticOnlySecrets(input.secretBinds, input.secretFileEnv);
 
   return {
     containerName: `hp_bk_${jobId}_${suffix}`,
     payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
+      repo,
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
       user: input.siteType.def.files.owner,
       binds: [bind],
       extraEnv: [
-        `HP_REGION=${region}`,
+        ...repo.env,
         `HP_SNAP=${snapshotId}`,
         `HP_H=${hexId}`,
         `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`,
       ],
-      entrypoint: ["/bin/sh", "-c", script],
+      entrypoint: ["/bin/sh", "-c", repo.kind === "local" ? localizeResticScript(script) : script],
     }),
   };
 }
@@ -793,12 +802,10 @@ export function buildRestoreFetchContainerPayload(input: {
   readonly siteId: string;
   readonly siteType: ExecutorSiteType;
   readonly snapshotId: string;
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
   readonly stagingVolumeName: string;
-}): BackupContainerSpec {
+} & ResticRepoSource): BackupContainerSpec {
   const stagingVolume = assertSafeIdentifier(input.stagingVolumeName, "stagingVolumeName");
   return buildRestoreFetchPayload(input, "rs_fetch", `${stagingVolume}:/var/tmp`, buildRestoreFetchScript());
 }
@@ -810,11 +817,9 @@ export function buildRestoreFetchFilesContainerPayload(input: {
   readonly serviceInstanceId: string;
   readonly siteType: ExecutorSiteType;
   readonly snapshotId: string;
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
-}): BackupContainerSpec {
+} & ResticRepoSource): BackupContainerSpec {
   const t = input.siteType;
   const serviceInstanceId = assertSafeIdentifier(input.serviceInstanceId, "serviceInstanceId");
   const siteVolume = getManagedVolumeName(serviceInstanceId, t.def.files.volumeSuffix);
@@ -979,17 +984,15 @@ export function buildArchiveContainerPayload(input: {
   readonly jobId: string;
   readonly siteId: string;
   readonly snapshotId: string;
-  readonly target: BackupTarget;
   readonly executorUser: string;
   readonly archivesHostDir: string;
-  readonly backupNetworkName: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
-}): BackupContainerSpec {
+} & ResticRepoSource): BackupContainerSpec {
   const { jobId } = assertRestoreJobId(input.jobId);
   const siteId = assertSafeIdentifier(input.siteId, "siteId");
   const snapshotId = assertSnapshotId(input.snapshotId);
-  const region = assertRegion(input.target.region);
+  const repo = restoreRepoOf(input, siteId);
   const executorUser = assertExecutorUser(input.executorUser);
   const archivesDir = assertSafeBindPath(input.archivesHostDir, "archivesHostDir");
   assertResticOnlySecrets(input.secretBinds, input.secretFileEnv);
@@ -997,21 +1000,19 @@ export function buildArchiveContainerPayload(input: {
   return {
     containerName: `hp_bk_${jobId}_zip`,
     payload: buildResticBasePayload({
-      repoKind: { kind: "site", siteId },
-      target: input.target,
-      backupNetworkName: input.backupNetworkName,
+      repo,
       secretBinds: input.secretBinds,
       secretFileEnv: input.secretFileEnv,
       labels: buildJobLabels(siteId, jobId),
       user: executorUser,
       binds: [`${archivesDir}:/a`],
       extraEnv: [
-        `HP_REGION=${region}`,
+        ...repo.env,
         `HP_SNAP=${snapshotId}`,
         `HP_JOB=${jobId}`,
         `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`,
       ],
-      entrypoint: ["/bin/sh", "-c", ARCHIVE_SCRIPT],
+      entrypoint: ["/bin/sh", "-c", repo.kind === "local" ? localizeResticScript(ARCHIVE_SCRIPT) : ARCHIVE_SCRIPT],
     }),
   };
 }

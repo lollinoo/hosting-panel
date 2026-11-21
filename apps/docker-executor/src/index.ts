@@ -283,11 +283,13 @@ export { SimulatedBackups } from "./simulator-backups.js";
 export {
   BackupRunner,
   DEFAULT_BACKUP_KEY_FILE,
+  DEFAULT_BACKUP_LOCAL_ROOT,
   DEFAULT_BACKUP_NETWORK_NAME,
   DEFAULT_BACKUP_WORK_DIR,
   DEFAULT_PANEL_DUMP_DIR,
   type BackupRunnerDeps,
   type DockerRequest,
+  type LocalPanelRepoSource,
   type PanelFetchProblem,
   type PanelFetchResult,
 } from "./backup-runner.js";

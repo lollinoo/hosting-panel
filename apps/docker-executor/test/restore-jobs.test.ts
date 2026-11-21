@@ -12,7 +12,13 @@ import {
   siteDatabasePrefix,
   type BackupTarget,
 } from "@hosting-panel/contracts";
-import { BACKUP_DISK_FREE_FLOOR_BYTES, BACKUP_JOB_MEMORY_BYTES, BACKUP_TMPFS } from "../src/backup-jobs.js";
+import {
+  BACKUP_DISK_FREE_FLOOR_BYTES,
+  BACKUP_JOB_MEMORY_BYTES,
+  BACKUP_TMPFS,
+  localizeResticScript,
+  resolveBackupRepository,
+} from "../src/backup-jobs.js";
 import {
   ARCHIVE_EXIT_CODES,
   ARCHIVE_SCRIPT,
@@ -819,5 +825,143 @@ describe("restore createVolume helpers", () => {
     expect(RestoreNoteSchema.safeParse({ ...base, createdVolume: true }).success).toBe(true);
     expect(RestoreNoteSchema.safeParse({ ...base, createdVolume: false }).success).toBe(false);
     expect(RestoreNoteSchema.safeParse(base).success).toBe(true);
+  });
+});
+
+describe("restore-jobs local repository builders", () => {
+  const TARGET_ID = `bkt_${"ab".repeat(16)}`;
+  const HOST_DIR = `/var/lib/hosting-panel/local-repos/${TARGET_ID}/sites/${SITE_ID}`;
+  const CONTAINER_DIR = `/backup/repository/sites/${SITE_ID}`;
+  const LOCAL_SECRET_BINDS = [RESTIC_SECRET_BINDS[1]!];
+  const LOCAL_SECRET_ENV = [RESTIC_SECRET_ENV[1]!];
+  const repo = resolveBackupRepository(
+    { kind: "local", targetId: TARGET_ID },
+    { kind: "site", siteId: SITE_ID },
+    {
+      backupNetworkName: BACKUP_NET,
+      local: { hostDir: HOST_DIR, containerPath: CONTAINER_DIR, executorGid: 990, availableBytes: 1, totalBytes: 2 },
+    },
+  );
+  const s3Repo = resolveBackupRepository(TARGET, { kind: "site", siteId: SITE_ID }, { backupNetworkName: BACKUP_NET });
+
+  function expectLocalRepo(spec: BackupContainerSpec): void {
+    const p = spec.payload;
+    expect(p.Env).toContain(`RESTIC_REPOSITORY=${CONTAINER_DIR}`);
+    expect(p.HostConfig.NetworkMode).toBe("none");
+    expect(p.HostConfig.GroupAdd).toEqual(["990"]);
+    expect(p.HostConfig.Mounts).toEqual([{ Type: "bind", Source: HOST_DIR, Target: CONTAINER_DIR, ReadOnly: false }]);
+    expect(p.HostConfig.Binds.some((b) => b.includes("local-repos"))).toBe(false);
+    expect(p.HostConfig.Binds.some((b) => b.includes("AWS"))).toBe(false);
+    expect(p.Env.some((e) => e.startsWith("HP_REGION=") || e.startsWith("AWS_"))).toBe(false);
+    expect(JSON.stringify(p)).not.toContain("s3.");
+    assertHardenedContainer(spec);
+  }
+
+  it("_rs_fetch on a local repo keeps files.owner, adds the executor group and a localized script", () => {
+    const spec = buildRestoreFetchContainerPayload({
+      siteType: WP,
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      snapshotId: SNAPSHOT_ID,
+      repo,
+      secretBinds: LOCAL_SECRET_BINDS,
+      secretFileEnv: LOCAL_SECRET_ENV,
+      stagingVolumeName: STAGING_VOL,
+    });
+    expect(spec.payload.User).toBe("33:33");
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", localizeResticScript(RESTORE_FETCH_SCRIPT)]);
+    expect(spec.payload.HostConfig.Binds).toEqual([`${STAGING_VOL}:/var/tmp`, ...LOCAL_SECRET_BINDS]);
+    expect(spec.payload.Env).toContain(`HP_SNAP=${SNAPSHOT_ID}`);
+    expectLocalRepo(spec);
+  });
+
+  it("_rs_fetch_files on a local repo keeps files.owner and mounts only the site volume besides the repo", () => {
+    const spec = buildRestoreFetchFilesContainerPayload({
+      siteType: WP,
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      serviceInstanceId: SERVICE_ID,
+      snapshotId: SNAPSHOT_ID,
+      repo,
+      secretBinds: LOCAL_SECRET_BINDS,
+      secretFileEnv: LOCAL_SECRET_ENV,
+    });
+    expect(spec.payload.User).toBe(WP.def.files.owner);
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", localizeResticScript(RESTORE_FETCH_FILES_SCRIPT)]);
+    expect(spec.payload.HostConfig.Binds).toEqual([`${SITE_VOL}:/var/www/html`, ...LOCAL_SECRET_BINDS]);
+    expectLocalRepo(spec);
+  });
+
+  it("_zip on a local repo runs as executorUser with the localized archive script and the archive dir bind", () => {
+    const spec = buildArchiveContainerPayload({
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      snapshotId: SNAPSHOT_ID,
+      repo,
+      executorUser: "990:990",
+      archivesHostDir: "/var/lib/hosting-panel/backups/archives",
+      secretBinds: LOCAL_SECRET_BINDS,
+      secretFileEnv: LOCAL_SECRET_ENV,
+    });
+    expect(spec.containerName).toBe(`hp_bk_${JOB_ID}_zip`);
+    expect(spec.payload.User).toBe("990:990");
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", localizeResticScript(ARCHIVE_SCRIPT)]);
+    expect(spec.payload.HostConfig.Binds).toEqual(["/var/lib/hosting-panel/backups/archives:/a", ...LOCAL_SECRET_BINDS]);
+    expect(spec.payload.Env).toContain(`HP_JOB=${JOB_ID}`);
+    expectLocalRepo(spec);
+  });
+
+  it("localized scripts drop every S3 option and keep the rest", () => {
+    for (const s of [RESTORE_FETCH_SCRIPT, RESTORE_FETCH_FILES_SCRIPT, ARCHIVE_SCRIPT]) {
+      const local = localizeResticScript(s);
+      expect(local).not.toContain("s3.");
+      expect(local).not.toContain("HP_REGION");
+      expect(local).toContain('RO=""');
+    }
+    expect(localizeResticScript(ARCHIVE_SCRIPT)).toContain('restic $RO dump --archive zip "$HP_SNAP:/backup" /');
+  });
+
+  it("an explicit S3 repo equals the legacy target input byte for byte", () => {
+    const legacy = buildArchiveContainerPayload({
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      snapshotId: SNAPSHOT_ID,
+      target: TARGET,
+      executorUser: "1001:1001",
+      archivesHostDir: "/var/lib/hosting-panel/backups/archives",
+      backupNetworkName: BACKUP_NET,
+      secretBinds: RESTIC_SECRET_BINDS,
+      secretFileEnv: RESTIC_SECRET_ENV,
+    });
+    const resolved = buildArchiveContainerPayload({
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      snapshotId: SNAPSHOT_ID,
+      repo: s3Repo,
+      executorUser: "1001:1001",
+      archivesHostDir: "/var/lib/hosting-panel/backups/archives",
+      secretBinds: RESTIC_SECRET_BINDS,
+      secretFileEnv: RESTIC_SECRET_ENV,
+    });
+    expect(resolved).toEqual(legacy);
+    expect(resolved.payload.Entrypoint).toEqual(["/bin/sh", "-c", ARCHIVE_SCRIPT]);
+    expect(resolved.payload.HostConfig).not.toHaveProperty("Mounts");
+    expect(resolved.payload.HostConfig).not.toHaveProperty("GroupAdd");
+  });
+
+  it("an S3 fetch built from the resolved repo keeps the S3 script, region env and backup network", () => {
+    const spec = buildRestoreFetchContainerPayload({
+      siteType: WP,
+      jobId: JOB_ID,
+      siteId: SITE_ID,
+      snapshotId: SNAPSHOT_ID,
+      repo: s3Repo,
+      secretBinds: RESTIC_SECRET_BINDS,
+      secretFileEnv: RESTIC_SECRET_ENV,
+      stagingVolumeName: STAGING_VOL,
+    });
+    expect(spec.payload.Entrypoint).toEqual(["/bin/sh", "-c", RESTORE_FETCH_SCRIPT]);
+    expect(spec.payload.Env).toContain("HP_REGION=eu-central-1");
+    expect(spec.payload.HostConfig.NetworkMode).toBe(BACKUP_NET);
   });
 });

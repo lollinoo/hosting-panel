@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import http from "node:http";
 import {
   BACKUPS_RESULT_SCHEMAS,
   BackupJobStatusSchema,
@@ -282,6 +283,65 @@ describe("Backups over signed loopback IPC (127.0.0.1:0) and simulator", () => {
     }
 
     expect(backupsSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses hostile local targets, widened job ids and localInit abuse before reaching the adapter", async () => {
+    const { simulator, client, rawPost } = await createLoopbackHarness();
+    const backupsSpy = vi.spyOn(simulator, "backups");
+    const LOCAL = { kind: "local", targetId: `bkt_${"1".repeat(32)}` };
+    const start = { action: "start", jobId: JOB_1, siteId: "site_ipc_1", serviceInstanceId: "svc_ipc_1" };
+
+    const invalidCases: Array<{ readonly label: string; readonly body: Record<string, unknown> }> = [
+      { label: "local target with a root path", body: { action: "test", target: { ...LOCAL, root: "/etc" } } },
+      { label: "local target with a path key", body: { ...start, target: { ...LOCAL, path: "/srv" } } },
+      { label: "local target carrying S3 secret", body: { action: "test", target: { ...LOCAL, secretAccessKey: SENTINEL_SECRET } } },
+      { label: "S3 object tagged kind local", body: { action: "test", target: { ...VALID_TARGET, kind: "local" } } },
+      { label: "local target id traversal", body: { action: "test", target: { kind: "local", targetId: "bkt_../../etc" } } },
+      { label: "local target id upper-case hex", body: { action: "test", target: { kind: "local", targetId: `bkt_${"A".repeat(32)}` } } },
+      { label: "local target without id", body: { action: "forget", jobId: FORGET_1, siteId: "site_ipc_1", snapshotIds: [SNAP_DUMMY], target: { kind: "local" } } },
+      { label: "localInit with an S3 target", body: { action: "localInit", target: VALID_TARGET } },
+      { label: "localInit with a root", body: { action: "localInit", target: { ...LOCAL, root: "/etc" } } },
+      { label: "localInit without target", body: { action: "localInit" } },
+      { label: "localInit extra key", body: { action: "localInit", target: LOCAL, force: true } },
+      { label: "-t2-forget job id (wrong order)", body: { action: "status", jobId: `${JOB_1}-t2-forget` } },
+      { label: "-t3 job id", body: { action: "status", jobId: `${JOB_1}-t3` } },
+      { label: "-forget job id on start", body: { ...start, jobId: FORGET_1, target: LOCAL } },
+      { label: "-t2 job id on restore", body: { action: "restore", jobId: `${JOB_1}-t2`, siteId: "site_ipc_1", serviceInstanceId: "svc_ipc_1", target: LOCAL, snapshotId: SNAP_DUMMY } },
+      { label: "-t2 job id on archive", body: { action: "archive", jobId: `${JOB_1}-t2`, siteId: "site_ipc_1", target: LOCAL, snapshotId: SNAP_DUMMY } },
+    ];
+    for (const item of invalidCases) {
+      const raw = await rawPost("/v1/backups", item.body);
+      expect(raw.status, item.label).toBe(400);
+      expect((JSON.parse(raw.text) as { error: { code: string } }).error.code, item.label).toBe("VALIDATION_ERROR");
+      expect(raw.text, item.label).not.toContain(SENTINEL_SECRET);
+      const err = await client.backups(item.body as never).catch((e: unknown) => e);
+      expect(err, item.label).toBeInstanceOf(ExecutorIpcClientError);
+      expect((err as ExecutorIpcClientError).code, item.label).toBe("VALIDATION_ERROR");
+    }
+    expect(backupsSpy).not.toHaveBeenCalled();
+  });
+
+  it("gives localInit the same 40 s budget as test and keeps the other actions at 30 s", async () => {
+    const { client } = await createLoopbackHarness();
+    const budgets = new Map<string, number | undefined>();
+    const original = http.request.bind(http);
+    let current = "";
+    vi.spyOn(http, "request").mockImplementation(((options: http.RequestOptions, cb: never) => {
+      budgets.set(current, options.timeout);
+      return original(options, cb);
+    }) as typeof http.request);
+    const LOCAL = { kind: "local", targetId: `bkt_${"1".repeat(32)}` } as const;
+    for (const req of [
+      { action: "test", target: VALID_TARGET },
+      { action: "localInit", target: LOCAL },
+      { action: "status", jobId: JOB_1 },
+    ] as const) {
+      current = req.action;
+      await client.backups(req).catch(() => undefined);
+    }
+    expect(budgets.get("test")).toBe(40_000);
+    expect(budgets.get("localInit")).toBe(40_000);
+    expect(budgets.get("status")).toBe(30_000);
   });
 
   it("never leaks secretAccessKey in any HTTP response or log line across success and failure paths", async () => {

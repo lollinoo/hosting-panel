@@ -2256,6 +2256,9 @@ describe("backups shared base and IPC", () => {
       if (req.action === "siteState") {
         return { filesVolume: false, container: false } as never;
       }
+      if (req.action === "localInit") {
+        return { outcome: "ok", problem: null } as never;
+      }
       return { jobId: req.jobId, state: "running", failure: null, snapshot: null } as never;
     });
 

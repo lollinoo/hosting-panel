@@ -3,10 +3,15 @@ import {
   BACKUP_DISK_FREE_FLOOR_BYTES,
   BACKUP_HOSTNAME,
   BACKUP_REPO_JOB_SCRIPT,
-  assertRegion,
+  BACKUP_REPO_LOCAL_JOB_SCRIPT,
   assertSafeBindPath,
+  assertSafeSecretBinds,
   buildResticBasePayload,
+  localizeResticScript,
+  resolveBackupRepository,
+  type BackupBindMount,
   type BackupContainerCreatePayload,
+  type ResolvedBackupRepository,
 } from "./backup-jobs.js";
 import { ExecutorCodedError, SITE_JOB_ROLE } from "./traefik-config.js";
 
@@ -25,12 +30,7 @@ export const PANEL_FETCH_ID_PATTERN = /^[0-9a-f]{32}$/;
 
 const PANEL_JOB_ID_PATTERN = /^op_[0-9a-f]{32}$/;
 const SNAPSHOT_ID_PATTERN = /^[0-9a-f]{64}$/;
-const RESTIC_S3_OPTIONS = (region: string): string[] => [
-  "-o",
-  "s3.bucket-lookup=path",
-  "-o",
-  `s3.region=${region}`,
-];
+const PANEL_LOCAL_REPO_PATH = "/backup/repository/panel" as const;
 
 export const PANEL_FETCH_SCRIPT = [
   "set -eu",
@@ -53,12 +53,15 @@ export const PANEL_FETCH_SCRIPT = [
   "sync /o",
 ].join("\n");
 
-export interface PanelBindMount {
-  readonly Type: "bind";
-  readonly Source: string;
-  readonly Target: string;
-  readonly ReadOnly: boolean;
-}
+/**
+ * Disaster-recovery fetch from a local panel repository: no S3, read without taking a lock (the repository is mounted
+ * read-only), and group-readable hand-over files (`umask 007`) because the container runs as the repository's owner.
+ */
+export const PANEL_FETCH_LOCAL_SCRIPT = localizeResticScript(PANEL_FETCH_SCRIPT)
+  .replace('RO=""', 'RO="--no-lock"')
+  .replace("umask 077", "umask 007");
+
+export type PanelBindMount = BackupBindMount;
 
 /** The hardened restic payload plus the two fields only the panel containers need. */
 export type PanelContainerCreatePayload = BackupContainerCreatePayload & {
@@ -73,12 +76,30 @@ export interface PanelContainerSpec {
   readonly payload: PanelContainerCreatePayload;
 }
 
-interface PanelResticInput {
-  readonly target: BackupTarget;
-  readonly backupNetworkName: string;
+/** The panel repository comes resolved (S3 or guarded local), or as the legacy S3 pair (resolved here as S3). */
+type PanelResticInput = {
+  /** `uid:gid` of the executor: every container of a local panel repository runs as it. */
+  readonly executorUser?: string;
   readonly secretBinds: readonly string[];
   readonly secretFileEnv: readonly string[];
+} & (
+  | { readonly repo: ResolvedBackupRepository }
+  | { readonly target: BackupTarget; readonly backupNetworkName: string }
+);
+
+function panelRepoOf(input: PanelResticInput): ResolvedBackupRepository {
+  return "repo" in input
+    ? input.repo
+    : resolveBackupRepository(input.target, { kind: "panel" }, { backupNetworkName: input.backupNetworkName });
 }
+
+/** Local panel steps run as the executor (primary gid = the repository group); S3 steps keep the image default. */
+function panelStepUser(input: PanelResticInput, repo: ResolvedBackupRepository): string | undefined {
+  return repo.kind === "local" ? assertUidGid(input.executorUser ?? "") : undefined;
+}
+
+/** Group ids of a step: the dump directory's, then the repository's own (deduplicated). */
+const mergeGroups = (...groups: readonly (readonly string[])[]): string[] => [...new Set(groups.flat())];
 
 function assertPanelJobId(jobId: string): string {
   if (!PANEL_JOB_ID_PATTERN.test(jobId)) {
@@ -120,16 +141,17 @@ export function buildPanelJobLabels(jobId: string): Readonly<Record<string, stri
 
 function panelRestic(
   input: PanelResticInput,
+  repo: ResolvedBackupRepository,
   jobId: string,
-  extra: Omit<Parameters<typeof buildResticBasePayload>[0], "repoKind" | "target" | "backupNetworkName" | "secretBinds" | "secretFileEnv" | "labels">,
+  extra: Omit<Parameters<typeof buildResticBasePayload>[0], "repo" | "repoKind" | "target" | "backupNetworkName" | "secretBinds" | "secretFileEnv" | "labels">,
 ): BackupContainerCreatePayload {
+  const user = panelStepUser(input, repo);
   return buildResticBasePayload({
-    repoKind: { kind: "panel" },
-    target: input.target,
-    backupNetworkName: input.backupNetworkName,
+    repo,
     secretBinds: input.secretBinds,
     secretFileEnv: input.secretFileEnv,
     labels: buildPanelJobLabels(jobId),
+    ...(user !== undefined ? { user } : {}),
     ...extra,
   });
 }
@@ -139,12 +161,16 @@ export function buildPanelRepoContainerPayload(
   input: PanelResticInput & { readonly jobId: string },
 ): PanelContainerSpec {
   const jobId = assertPanelJobId(input.jobId);
-  const region = assertRegion(input.target.region);
+  const repo = panelRepoOf(input);
   return {
     containerName: `hp_bk_${jobId}_prepo`,
-    payload: panelRestic(input, jobId, {
-      extraEnv: [`HP_REGION=${region}`, "HP_INIT=1"],
-      entrypoint: ["/bin/sh", "-c", BACKUP_REPO_JOB_SCRIPT],
+    payload: panelRestic(input, repo, jobId, {
+      extraEnv: [...repo.env, "HP_INIT=1"],
+      entrypoint: [
+        "/bin/sh",
+        "-c",
+        repo.kind === "local" ? BACKUP_REPO_LOCAL_JOB_SCRIPT : BACKUP_REPO_JOB_SCRIPT,
+      ],
     }),
   };
 }
@@ -160,15 +186,15 @@ export function buildPanelUploadContainerPayload(
   },
 ): PanelContainerSpec {
   const jobId = assertPanelJobId(input.jobId);
-  const region = assertRegion(input.target.region);
+  const repo = panelRepoOf(input);
   const user = assertUidGid(input.executorUser);
   const groupAdd = assertDirGid(input.dirGid);
   const dumpPath = assertAbsolutePath(input.dumpPath, "dumpPath");
   const masterKeyPath = assertAbsolutePath(input.masterKeyPath, "masterKeyPath");
-  const base = panelRestic(input, jobId, {
+  const base = panelRestic(input, repo, jobId, {
     user,
     cmd: [
-      ...RESTIC_S3_OPTIONS(region),
+      ...repo.resticOptions,
       "backup",
       "-q",
       "--json",
@@ -185,8 +211,9 @@ export function buildPanelUploadContainerPayload(
       ...base,
       HostConfig: {
         ...base.HostConfig,
-        GroupAdd: [groupAdd],
+        GroupAdd: mergeGroups([groupAdd], repo.groupAdd),
         Mounts: [
+          ...repo.mounts,
           { Type: "bind", Source: dumpPath, Target: PANEL_REPO_DUMP_PATH, ReadOnly: true },
           { Type: "bind", Source: masterKeyPath, Target: PANEL_REPO_KEY_PATH, ReadOnly: true },
         ],
@@ -200,14 +227,14 @@ export function buildPanelDropContainerPayload(
   input: PanelResticInput & { readonly jobId: string; readonly snapshotId: string },
 ): PanelContainerSpec {
   const jobId = assertPanelJobId(input.jobId);
-  const region = assertRegion(input.target.region);
+  const repo = panelRepoOf(input);
   if (!SNAPSHOT_ID_PATTERN.test(input.snapshotId)) {
     throw new ExecutorCodedError("Invalid snapshot id", "VALIDATION_ERROR");
   }
   return {
     containerName: `hp_bk_${jobId}_pdrop`,
-    payload: panelRestic(input, jobId, {
-      cmd: [...RESTIC_S3_OPTIONS(region), "forget", input.snapshotId],
+    payload: panelRestic(input, repo, jobId, {
+      cmd: [...repo.resticOptions, "forget", input.snapshotId],
     }),
   };
 }
@@ -217,15 +244,15 @@ export function buildPanelKeepContainerPayload(
   input: PanelResticInput & { readonly jobId: string; readonly retentionDays: number },
 ): PanelContainerSpec {
   const jobId = assertPanelJobId(input.jobId);
-  const region = assertRegion(input.target.region);
+  const repo = panelRepoOf(input);
   if (!Number.isInteger(input.retentionDays) || input.retentionDays < 1 || input.retentionDays > 365) {
     throw new ExecutorCodedError("Invalid retentionDays", "VALIDATION_ERROR");
   }
   return {
     containerName: `hp_bk_${jobId}_pkeep`,
-    payload: panelRestic(input, jobId, {
+    payload: panelRestic(input, repo, jobId, {
       cmd: [
-        ...RESTIC_S3_OPTIONS(region),
+        ...repo.resticOptions,
         "forget",
         "--host",
         BACKUP_HOSTNAME,
@@ -254,14 +281,14 @@ export function buildPanelFetchContainerPayload(
     throw new ExecutorCodedError("Invalid fetch id", "VALIDATION_ERROR");
   }
   const jobId = `pf_${input.fetchId}`;
-  const region = assertRegion(input.target.region);
+  const repo = panelRepoOf(input);
   const user = assertUidGid(input.executorUser);
   const groupAdd = assertDirGid(input.dirGid);
   const outDir = assertAbsolutePath(input.outDir, "outDir");
-  const base = panelRestic(input, jobId, {
+  const base = panelRestic(input, repo, jobId, {
     user,
-    extraEnv: [`HP_REGION=${region}`, `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`],
-    entrypoint: ["/bin/sh", "-c", PANEL_FETCH_SCRIPT],
+    extraEnv: [...repo.env, `HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`],
+    entrypoint: ["/bin/sh", "-c", repo.kind === "local" ? localizeResticScript(PANEL_FETCH_SCRIPT) : PANEL_FETCH_SCRIPT],
   });
   return {
     containerName: `hp_bk_${jobId}_fetch`,
@@ -269,8 +296,63 @@ export function buildPanelFetchContainerPayload(
       ...base,
       HostConfig: {
         ...base.HostConfig,
-        GroupAdd: [groupAdd],
-        Mounts: [{ Type: "bind", Source: outDir, Target: "/o", ReadOnly: false }],
+        GroupAdd: mergeGroups([groupAdd], repo.groupAdd),
+        Mounts: [...repo.mounts, { Type: "bind", Source: outDir, Target: "/o", ReadOnly: false }],
+      },
+    },
+  };
+}
+
+/**
+ * `pf_<hex>_fetch` for disaster recovery from a local panel repository (`hp-restore-panel --local-repo`): the
+ * repository directory is mounted read-only, there is no network and no S3 credential, and the container runs as the
+ * directory's owner (the old executor ids may differ on a new host) with the hand-over directory's group added.
+ */
+export function buildPanelFetchLocalContainerPayload(input: {
+  readonly fetchId: string;
+  readonly repoDir: string;
+  /** `uid:gid` of the repository directory owner. */
+  readonly user: string;
+  readonly outDir: string;
+  /** Group ids of the hand-over directory (never root). */
+  readonly groupAdd: readonly number[];
+  readonly secretBinds: readonly string[];
+  readonly secretFileEnv: readonly string[];
+}): PanelContainerSpec {
+  if (!PANEL_FETCH_ID_PATTERN.test(input.fetchId)) {
+    throw new ExecutorCodedError("Invalid fetch id", "VALIDATION_ERROR");
+  }
+  const jobId = `pf_${input.fetchId}`;
+  const user = assertUidGid(input.user);
+  const repoDir = assertAbsolutePath(input.repoDir, "repoDir");
+  const outDir = assertAbsolutePath(input.outDir, "outDir");
+  const groupAdd = mergeGroups(input.groupAdd.map(assertDirGid));
+  assertSafeSecretBinds(input.secretBinds);
+  const repo: ResolvedBackupRepository = {
+    kind: "local",
+    repository: PANEL_LOCAL_REPO_PATH,
+    resticOptions: [],
+    env: [],
+    mounts: [{ Type: "bind", Source: repoDir, Target: PANEL_LOCAL_REPO_PATH, ReadOnly: true }],
+    groupAdd,
+    networkMode: "none",
+  };
+  const base = buildResticBasePayload({
+    repo,
+    secretBinds: input.secretBinds,
+    secretFileEnv: input.secretFileEnv,
+    labels: buildPanelJobLabels(jobId),
+    user,
+    extraEnv: [`HP_FLOOR=${String(BACKUP_DISK_FREE_FLOOR_BYTES)}`],
+    entrypoint: ["/bin/sh", "-c", PANEL_FETCH_LOCAL_SCRIPT],
+  });
+  return {
+    containerName: `hp_bk_${jobId}_fetch`,
+    payload: {
+      ...base,
+      HostConfig: {
+        ...base.HostConfig,
+        Mounts: [...repo.mounts, { Type: "bind", Source: outDir, Target: "/o", ReadOnly: false }],
       },
     },
   };

@@ -483,8 +483,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
   }
 
   public async backups<R extends BackupsRequest>(req: R): Promise<BackupsResult<R["action"]>> {
+    // localInit writes a marker and probes the volume, like test it is bounded by the 40 s budget.
     const timeoutMs =
-      req.action === "test" ? BACKUPS_TEST_TIMEOUT_MS : BACKUPS_TIMEOUT_MS;
+      req.action === "test" || req.action === "localInit"
+        ? BACKUPS_TEST_TIMEOUT_MS
+        : BACKUPS_TIMEOUT_MS;
     const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
     const schema = BACKUPS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
     return z.object({ data: schema }).parse(json).data as BackupsResult<R["action"]>;

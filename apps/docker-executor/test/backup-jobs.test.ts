@@ -20,6 +20,7 @@ import {
   computeDumpNeedKb,
   parseBackupKeyFileContent,
   parseResticSummary,
+  resolveBackupRepository,
   type BackupContainerCreatePayload,
 } from "../src/backup-jobs.js";
 import { WORDPRESS_EXECUTOR_SITE_TYPE } from "../src/site-types/index.js";
@@ -164,6 +165,28 @@ describe("backup-jobs pure builders", () => {
     });
     expect(forgetRepo.containerName).toBe(`hp_bk_${FORGET_JOB_ID}_repo`);
     expect(forgetRepo.payload.Env).toContain("HP_INIT=0");
+
+    const thirdForget = buildBackupForgetContainerPayload({
+      jobId: `${JOB_ID}-forget-t3`,
+      siteId: SITE_ID,
+      snapshotIds: [SNAPSHOT_ID],
+      target: TARGET,
+      backupNetworkName: "hp_backup_net",
+      secretBinds: SECRET_BINDS,
+      secretFileEnv: SECRET_FILE_ENV,
+    });
+    expect(thirdForget.containerName).toBe(`hp_bk_${JOB_ID}-forget-t3_forget`);
+    expect(() =>
+      buildBackupForgetContainerPayload({
+        jobId: `${JOB_ID}-forget-t10`,
+        siteId: SITE_ID,
+        snapshotIds: [SNAPSHOT_ID],
+        target: TARGET,
+        backupNetworkName: "hp_backup_net",
+        secretBinds: SECRET_BINDS,
+        secretFileEnv: SECRET_FILE_ENV,
+      }),
+    ).toThrow();
 
     const stagingVol = buildBackupStagingVolumePayload({ jobId: JOB_ID, siteId: SITE_ID });
     expect(stagingVol).toEqual({
@@ -479,5 +502,24 @@ describe("backup-jobs pure builders", () => {
     expect(parseBackupKeyFileContent("short")).toBeNull();
     expect(parseBackupKeyFileContent("A".repeat(64))).toBeNull();
     expect(parseBackupKeyFileContent("g".repeat(64))).toBeNull();
+  });
+
+  it("builds the same S3 payloads from a resolved repository as from the legacy target input", () => {
+    const repo = resolveBackupRepository(TARGET, { kind: "site", siteId: SITE_ID }, { backupNetworkName: "hp_backup_net" });
+    const common = { jobId: JOB_ID, siteId: SITE_ID, secretBinds: SECRET_BINDS, secretFileEnv: SECRET_FILE_ENV };
+    expect(buildBackupForgetContainerPayload({ ...common, snapshotIds: [SNAPSHOT_ID], repo })).toEqual(
+      buildBackupForgetContainerPayload({ ...common, snapshotIds: [SNAPSHOT_ID], target: TARGET, backupNetworkName: "hp_backup_net" }),
+    );
+    expect(buildPartialSnapshotDropContainerPayload({ ...common, snapshotId: SNAPSHOT_ID, repo })).toEqual(
+      buildPartialSnapshotDropContainerPayload({ ...common, snapshotId: SNAPSHOT_ID, target: TARGET, backupNetworkName: "hp_backup_net" }),
+    );
+  });
+
+  it("classifies restic exit codes the same for s3 and local except the stderr of exit 1", () => {
+    for (const rc of [0, 3, 10, 11, 12, 124, 2]) {
+      expect(classifyResticExitCode(rc, "read-only file system", "local")).toBe(classifyResticExitCode(rc, "read-only file system"));
+    }
+    expect(classifyResticExitCode(1, "permission denied", "local")).toBe("local_target_unsafe");
+    expect(classifyResticExitCode(1, "permission denied")).toBe("other");
   });
 });

@@ -96,6 +96,7 @@ import {
   DEFAULT_BACKUP_NETWORK_NAME,
   DEFAULT_BACKUP_WORK_DIR,
   DEFAULT_PANEL_DUMP_DIR,
+  type LocalPanelRepoSource,
   type PanelFetchResult,
 } from "./backup-runner.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
@@ -1186,6 +1187,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly backupKeyFile?: string;
   readonly backupWorkDir?: string;
   readonly panelDumpDir?: string;
+  /** Validated HP_BACKUP_LOCAL_ROOT; null/absent = local targets answer local_target_unsafe. */
+  readonly backupLocalRoot?: string | null;
   readonly backupNetworkName?: string;
   readonly sharedDbNetworkName?: string;
   /**
@@ -1425,6 +1428,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       executorUser: `${String(process.getuid?.() ?? 0)}:${String(process.getgid?.() ?? 0)}`,
       backupWorkDir: path.resolve(options?.backupWorkDir ?? DEFAULT_BACKUP_WORK_DIR),
       panelDumpDir: path.resolve(options?.panelDumpDir ?? DEFAULT_PANEL_DUMP_DIR),
+      localRepoRoot: options?.backupLocalRoot ?? null,
     });
   }
 
@@ -2745,7 +2749,11 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   /** Fetches the newest panel copy into `panelDumpDir` (used by the panel-fetch CLI). */
-  public fetchPanelCopy(target: BackupTarget, panelDumpDir: string, signal?: AbortSignal): Promise<PanelFetchResult> {
+  public fetchPanelCopy(
+    target: BackupTarget | LocalPanelRepoSource,
+    panelDumpDir: string,
+    signal?: AbortSignal,
+  ): Promise<PanelFetchResult> {
     return this.backupRunner.fetchPanelCopy(target, panelDumpDir, signal);
   }
 
