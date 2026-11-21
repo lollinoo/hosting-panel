@@ -109,4 +109,5 @@ export interface SiteHostRoute {
   readonly httpsRedirect: boolean;
   readonly redirectTo: string | null;
   readonly challenge?: CertChallenge;
+  readonly source?: "manual";
 }

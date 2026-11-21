@@ -35,6 +35,7 @@ import type {
   PanelMailRequest,
   PanelMailResult,
 } from "./mail-relay.js";
+import type { ManualTlsRequest, ManualTlsResult } from "./manual-tls.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
@@ -160,6 +161,10 @@ export class Phase1DisabledDockerExecutor implements DockerExecutorPort {
   }
 
   async backups<R extends BackupsRequest>(_req: R): Promise<BackupsResult<R["action"]>> {
+    return this.refuse();
+  }
+
+  async manualTls<R extends ManualTlsRequest>(_req: R): Promise<ManualTlsResult<R["action"]>> {
     return this.refuse();
   }
 

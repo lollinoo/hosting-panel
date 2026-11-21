@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { CERT_PROBLEMS } from "./site-domains.js";
 import { OPERATION_KINDS } from "./operations.js";
+import { CERTIFICATE_ALERT_TIERS } from "./tls-certificates.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
 
@@ -79,7 +80,7 @@ export type AdminHealthDto = z.infer<typeof AdminHealthDtoSchema>;
 
 export const ALERT_KINDS = [
   "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
-  "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
+  "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
   "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
 ] as const;
 export type AlertKind = (typeof ALERT_KINDS)[number];
@@ -88,6 +89,8 @@ export type AlertSeverity = (typeof ALERT_SEVERITIES)[number];
 export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   disk_high: "critical", component_down: "critical", site_container_down: "critical", restore_undo_incomplete: "critical",
   certificate_expiring: "warning", certificate_not_issued: "warning", panel_certificate_expiring: "warning",
+  // Default only: the emitter overrides it per tier (critical at 7 days and once expired).
+  manual_certificate_expiring: "warning",
   backup_failed: "warning", panel_backup_failed: "warning", backup_storage_test_failed: "warning",
   restore_stuck: "warning", operation_unknown: "warning", operation_stuck: "warning",
 };
@@ -103,6 +106,14 @@ export const AdminAlertDtoSchema = z.discriminatedUnion("kind", [
   alert("certificate_expiring", { ...site, hostname: z.string(), expiresAt: IsoDateTimeSchema.nullable(), problem: z.enum(CERT_PROBLEMS).nullable() }),
   alert("certificate_not_issued", { ...site, hostname: z.string(), problem: z.enum(CERT_PROBLEMS).nullable() }),
   alert("panel_certificate_expiring", { hostname: z.string(), expiresAt: IsoDateTimeSchema }),
+  alert("manual_certificate_expiring", {
+    siteId: z.string().nullable(),
+    siteName: z.string().nullable(),
+    certificateId: z.string(),
+    certificateName: z.string(),
+    notAfter: IsoDateTimeSchema,
+    tier: z.enum(CERTIFICATE_ALERT_TIERS),
+  }),
   alert("backup_failed", { ...site, failedAt: IsoDateTimeSchema }),
   alert("panel_backup_failed", { failedAt: IsoDateTimeSchema }),
   alert("backup_storage_test_failed", { testedAt: IsoDateTimeSchema }),

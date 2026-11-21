@@ -32,6 +32,7 @@ import type {
   PanelMailRequest,
   PanelMailResult,
 } from "./mail-relay.js";
+import type { ManualTlsRequest, ManualTlsResult } from "./manual-tls.js";
 import type { ApprovedServiceSpec } from "./spec.js";
 
 export type SiteDatabasesRequest = SiteDatabasesIpcRequest;
@@ -81,6 +82,8 @@ export interface DockerExecutorPort {
   /** Full desired state; an empty list removes hp_sftp (host keys stay). */
   applySftpAccess(req: SftpAccessApplyRequest): Promise<SftpApplyResult>;
   getSftpStatus(): Promise<SftpStatusReport>;
+  /** Manual TLS store: PEM in, fingerprints out. Never returns a private key; errors never echo material. */
+  manualTls<R extends ManualTlsRequest>(req: R): Promise<ManualTlsResult<R["action"]>>;
   backups<R extends BackupsIpcRequest>(req: R): Promise<BackupsResultByAction[R["action"]]>;
   getPanelContainers(): Promise<readonly PanelContainerStatus[]>;
   getPanelContainerLogs(req: { readonly component: PanelContainer; readonly tail: number }): Promise<readonly ServiceLogLine[]>;

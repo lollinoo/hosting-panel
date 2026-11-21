@@ -15,6 +15,7 @@ export * from "./site-sftp.js";
 export * from "./site-databases.js";
 export * from "./backups.js";
 export * from "./tls-certificates.js";
+export * from "./tls-sni.js";
 export * from "./backup-targets.js";
 export * from "./site-wordpress.js";
 export * from "./site-wordpress-import.js";

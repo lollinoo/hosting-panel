@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { CERT_CHALLENGES, CERT_PROBLEMS } from "./site-domains.js";
+import { TLS_FINGERPRINT_PATTERN, TLS_VERSION_ID_PATTERN } from "./tls-certificates.js";
+import { SNI_VIOLATIONS } from "./tls-sni.js";
 import { DNS_PROVIDERS, refineDnsCredentials } from "./dns-provider.js";
 import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
 import { FIREWALL_MAX_BLOCKS_PER_FAMILY, FIREWALL_PORT_NAMES } from "./admin-firewall.js";
@@ -139,6 +141,8 @@ export const SiteHostRouteSchema = z.object({
   httpsRedirect: z.boolean(),
   redirectTo: z.string().max(260).nullable(),
   challenge: z.enum(CERT_CHALLENGES).optional(),
+  /** "manual": the host is served by an uploaded certificate (tls: {} and no certResolver). The executor refuses it together with `challenge`. */
+  source: z.literal("manual").optional(),
 });
 
 export const ApprovedServiceSpecWireSchema = z
@@ -1070,3 +1074,136 @@ export const BACKUPS_RESULT_SCHEMAS = {
 export type BackupsResultByAction = {
   [K in BackupsAction]: z.infer<(typeof BACKUPS_RESULT_SCHEMAS)[K]>;
 };
+
+// ---------------------------------------------------------------------------------------------------------------
+// Manual TLS store (POST /v1/ingress/manual-tls). PEM goes in only; no result ever carries a PEM or a private key.
+// ---------------------------------------------------------------------------------------------------------------
+
+export const TlsVersionIdSchema = z.string().regex(TLS_VERSION_ID_PATTERN);
+const TlsFingerprintSchema = z.string().regex(TLS_FINGERPRINT_PATTERN);
+const TlsHostnameSchema = z.string().min(1).max(253);
+
+export const MANUAL_TLS_ACTIONS = ["putVersion", "publish", "probe", "inventory", "gc"] as const;
+export type ManualTlsAction = (typeof MANUAL_TLS_ACTIONS)[number];
+export const MANUAL_TLS_FULLCHAIN_MAX_CHARS = 600_000;
+export const MANUAL_TLS_KEY_MAX_CHARS = 64_000;
+export const MANUAL_TLS_PUBLISH_MAX_ENTRIES = 500;
+export const MANUAL_TLS_PUBLISH_MAX_HOSTS_PER_ENTRY = 64;
+export const MANUAL_TLS_MAX_EXPECTATIONS = 200;
+
+export const ManualTlsIpcRequestSchema = z.discriminatedUnion("action", [
+  z
+    .object({
+      action: z.literal("putVersion"),
+      versionId: TlsVersionIdSchema,
+      fullchainPem: z.string().min(1).max(MANUAL_TLS_FULLCHAIN_MAX_CHARS),
+      keyPem: z.string().min(1).max(MANUAL_TLS_KEY_MAX_CHARS),
+      fingerprintSha256: TlsFingerprintSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("publish"),
+      baseGeneration: z.number().int().min(0),
+      entries: z
+        .array(
+          z
+            .object({
+              versionId: TlsVersionIdSchema,
+              assignedHosts: z.array(TlsHostnameSchema).min(1).max(MANUAL_TLS_PUBLISH_MAX_HOSTS_PER_ENTRY),
+            })
+            .strict(),
+        )
+        .max(MANUAL_TLS_PUBLISH_MAX_ENTRIES),
+      expect: z
+        .array(
+          z
+            .object({
+              hostname: TlsHostnameSchema,
+              fingerprintSha256: TlsFingerprintSchema.optional(),
+              notFingerprintSha256: TlsFingerprintSchema.optional(),
+            })
+            .strict(),
+        )
+        .max(MANUAL_TLS_MAX_EXPECTATIONS),
+      /** Administrator-confirmed cold cleanup of acme.json (proxy stopped); false when omitted. */
+      evictAcme: z.boolean().default(false),
+    })
+    .strict(),
+  z.object({ action: z.literal("probe"), hostnames: z.array(TlsHostnameSchema).min(1).max(MANUAL_TLS_MAX_EXPECTATIONS) }).strict(),
+  z.object({ action: z.literal("inventory") }).strict(),
+  z.object({ action: z.literal("gc"), baseGeneration: z.number().int().min(0) }).strict(),
+]);
+/** What a caller sends (evictAcme optional). The executor parses it into ManualTlsIpcRequestParsed. */
+export type ManualTlsIpcRequest = z.input<typeof ManualTlsIpcRequestSchema>;
+export type ManualTlsIpcRequestParsed = z.output<typeof ManualTlsIpcRequestSchema>;
+
+export const SniViolationWireSchema = z
+  .object({
+    kind: z.enum(SNI_VIOLATIONS),
+    hostname: z.string().max(253),
+    versionId: TlsVersionIdSchema.nullable(),
+    blockerIds: z.array(z.string().min(1).max(128)),
+  })
+  .strict();
+
+export const ManualTlsServedSchema = z
+  .object({ hostname: TlsHostnameSchema, fingerprintSha256: TlsFingerprintSchema.nullable() })
+  .strict();
+
+export const MANUAL_TLS_PUBLISH_OUTCOMES = [
+  "served",
+  "not_served_reverted",
+  "acme_eviction_required",
+  "manual_overlap",
+  "captures_host",
+  "start_failed_restored",
+] as const;
+export type ManualTlsPublishOutcome = (typeof MANUAL_TLS_PUBLISH_OUTCOMES)[number];
+
+const GenerationSchema = z.number().int().min(0);
+
+export const MANUAL_TLS_RESULT_SCHEMAS = {
+  putVersion: z.object({ versionId: TlsVersionIdSchema, written: z.boolean() }).strict(),
+  publish: z
+    .object({
+      generation: GenerationSchema,
+      outcome: z.enum(MANUAL_TLS_PUBLISH_OUTCOMES),
+      served: z.array(ManualTlsServedSchema),
+      violations: z.array(SniViolationWireSchema),
+      evicted: z.array(z.object({ resolver: z.string().max(64), main: z.string().max(253) }).strict()),
+      collateralHosts: z.array(TlsHostnameSchema),
+    })
+    .strict(),
+  probe: z.object({ served: z.array(ManualTlsServedSchema) }).strict(),
+  inventory: z
+    .object({
+      generation: GenerationSchema,
+      verified: z.boolean(),
+      versions: z.array(
+        z
+          .object({
+            versionId: TlsVersionIdSchema,
+            fingerprintSha256: TlsFingerprintSchema,
+            notAfter: z.string().datetime({ offset: true }),
+            names: z.array(z.string().max(253)),
+          })
+          .strict(),
+      ),
+      entries: z.array(z.object({ versionId: TlsVersionIdSchema, assignedHosts: z.array(TlsHostnameSchema) }).strict()),
+      missing: z.array(TlsVersionIdSchema),
+      acme: z.array(
+        z
+          .object({
+            id: z.string().min(1).max(128),
+            resolver: z.string().max(64),
+            names: z.array(z.string().max(253)),
+            notAfter: z.string().datetime({ offset: true }),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  gc: z.object({ removed: z.array(TlsVersionIdSchema) }).strict(),
+} as const satisfies Record<ManualTlsAction, z.ZodType>;
+export type ManualTlsResultByAction = { [A in ManualTlsAction]: z.infer<(typeof MANUAL_TLS_RESULT_SCHEMAS)[A]> };

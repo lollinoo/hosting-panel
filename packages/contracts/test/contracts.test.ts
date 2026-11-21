@@ -631,9 +631,14 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       expect(createPlatformCapabilities({ runtimeBackend }).wordpressToolsAvailable).toBe(false);
       expect(isWordpressToolsAvailable(runtimeBackend)).toBe(false);
     }
-    // M1 ships the contracts only: no runtime backend turns the HCP-SPEC-004 flags on yet
-    for (const runtimeBackend of RUNTIME_BACKENDS) {
+    // Manual TLS ships on linux-systemd only; the two backup flags are not on for any backend yet
+    expect(isManualTlsAvailable("linux-systemd")).toBe(true);
+    expect(createPlatformCapabilities({ runtimeBackend: "linux-systemd" }).manualTlsCertificatesAvailable).toBe(true);
+    for (const runtimeBackend of ["local-simulator", "disabled"] as const) {
       expect(isManualTlsAvailable(runtimeBackend)).toBe(false);
+      expect(createPlatformCapabilities({ runtimeBackend }).manualTlsCertificatesAvailable).toBe(false);
+    }
+    for (const runtimeBackend of RUNTIME_BACKENDS) {
       expect(isLocalBackupTargetsAvailable(runtimeBackend)).toBe(false);
       expect(isEncryptedBackupExportAvailable(runtimeBackend)).toBe(false);
     }
@@ -649,7 +654,7 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       phpMyAdminAvailable: true,
       productionBackupRuntimeAvailable: true,
       wordpressToolsAvailable: true,
-      manualTlsCertificatesAvailable: false,
+      manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: false,
       encryptedBackupExportAvailable: false,
     });
@@ -1130,7 +1135,7 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
   it("pins the alert kinds, panel components and panel containers in order", () => {
     expect(ALERT_KINDS).toEqual([
       "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
-      "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
+      "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "component_down",
       "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
     ]);
     expect(PANEL_COMPONENTS).toEqual([
@@ -1142,6 +1147,22 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
 
   it("gives every alert kind a severity", () => {
     expect(Object.keys(ALERT_SEVERITY).sort()).toEqual([...ALERT_KINDS].sort());
+  });
+
+  it("accepts a manual certificate alert per tier with either severity and nothing else", () => {
+    const manual = {
+      kind: "manual_certificate_expiring",
+      severity: "warning",
+      subject: "ctv_1",
+      since: null,
+      details: { siteId: null, siteName: null, certificateId: "cti_1", certificateName: "hotel", notAfter: SAMPLE_TIMESTAMP, tier: "warning" },
+    };
+    expect(ALERT_SEVERITY.manual_certificate_expiring).toBe("warning");
+    for (const [tier, severity] of [["warning", "warning"], ["critical", "critical"], ["expired", "critical"]] as const) {
+      expect(AdminAlertDtoSchema.safeParse({ ...manual, severity, details: { ...manual.details, tier } }).success).toBe(true);
+    }
+    expect(AdminAlertDtoSchema.safeParse({ ...manual, details: { ...manual.details, tier: "notice" } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...manual, details: { ...manual.details, leafPem: "x" } }).success).toBe(false);
   });
 
   const diskAlert = {
