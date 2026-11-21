@@ -30,13 +30,18 @@ panel_features_in_use() { # <api.env>: prints the in-use gated feature names, on
   local pw applied out
   [[ "$(env_value "$1" DATABASE_URL)" =~ ^postgresql://hosting_panel:([A-Za-z0-9._~-]+)@127\.0\.0\.1:5432/hosting_panel$ ]] || return 1
   pw="${BASH_REMATCH[1]}"
-  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql')")" || return 1
+  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql', '0024_site_templates.sql')")" || return 1
   if grep -qx '0021_manual_tls_certificates.sql' <<<"${applied}"; then
     out="$(_hp_features_psql "${pw}" "select 'manual-tls' where exists (select 1 from public.domains where cert_mode = 'manual')")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
   fi
   if grep -qx '0022_backup_targets_and_copies.sql' <<<"${applied}"; then
     out="$(_hp_features_psql "${pw}" "select 'backup-targets' where exists (select 1 from public.backup_targets where not legacy_settings and archived_at is null)")" || return 1
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
+  fi
+  if grep -qx '0024_site_templates.sql' <<<"${applied}"; then
+    # stv_wordpress_1 = the built-in WordPress version; NULL = legacy site, which an older release handles
+    out="$(_hp_features_psql "${pw}" "select 'site-templates' where exists (select 1 from public.sites where template_version_id is not null and template_version_id <> 'stv_wordpress_1')")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
   fi
   return 0
