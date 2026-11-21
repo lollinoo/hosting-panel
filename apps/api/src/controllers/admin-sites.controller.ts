@@ -3,6 +3,7 @@ import {
   AddSiteDomainInputSchema,
   AdminCreateSiteInputSchema,
   ChangeSiteOwnerInputSchema,
+  ChangeSiteTemplateVersionInputSchema,
   DeleteSiteInputSchema,
   RestartInputSchema,
   SetDomainChallengeInputSchema,
@@ -51,7 +52,7 @@ export class AdminSitesController {
     const idempotencyKey = requireIdempotencyKey(headersOf(req));
     const { ownerOrganizationId, ...body } = AdminCreateSiteInputSchema.parse(raw ?? {});
     const organizationId = await this.sitesService.resolveOwner(ownerOrganizationId);
-    const accepted = await this.sitesService.create({ organizationId, body, actorId: auth.user.id, idempotencyKey });
+    const accepted = await this.sitesService.create({ organizationId, body, actorId: auth.user.id, idempotencyKey, audience: "admin" });
     return this.#done(auth, req, "admin.site.create", accepted, { owner: ownerOrganizationId });
   }
 
@@ -114,6 +115,41 @@ export class AdminSitesController {
         details: { outcome: "succeeded", requestId: resolveRequestId(req), operationId, reason },
       }).then(() => undefined),
     );
+    this.outboxWorker.triggerAsync();
+    return { data: accepted };
+  }
+
+  /** Moves a site to a newer version of its own template; the audit row is written with the operation. */
+  @Post(":siteId/template-version")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public async changeTemplateVersion(
+    @Req() req: FastifyRequest,
+    @Param("siteId") siteId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: ManagedSiteAccepted }> {
+    const auth = await requireServerAdmin(this.authz, req, siteId, "site");
+    const idempotencyKey = requireIdempotencyKey(headersOf(req));
+    const { versionId } = ChangeSiteTemplateVersionInputSchema.parse(raw ?? {});
+    const owner = await this.sitesService.ownerOf(siteId);
+    const accepted = await this.sitesService.changeTemplateVersion({
+      siteId,
+      organizationId: owner,
+      versionId,
+      actorId: auth.user.id,
+      idempotencyKey,
+      onNew: (tx, operationId, change) =>
+        appendAuditEvent(tx, {
+          actorId: auth.user.id,
+          actorType: "user",
+          organizationId: owner,
+          action: "admin.site.template_version",
+          targetType: "site",
+          targetId: siteId,
+          ipAddress: extractClientIp(req),
+          userAgent: extractRawHeader(headersOf(req), "user-agent"),
+          details: { outcome: "succeeded", requestId: resolveRequestId(req), operationId, ...change },
+        }),
+    });
     this.outboxWorker.triggerAsync();
     return { data: accepted };
   }
