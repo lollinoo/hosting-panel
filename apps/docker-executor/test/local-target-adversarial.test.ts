@@ -1259,10 +1259,14 @@ describe("BKP-05: mounts, uid/gid and container hardening of the local branch", 
 });
 
 describe("BKP-05: the S3 branch payloads stay byte-identical to the frozen pins", () => {
+  // The executor user and the panel dump group are the ids of whoever runs the tests. The pins were recorded as
+  // 1000:1000, so the runner's own ids are mapped back to those (a GitHub runner is 1001 with group 118).
   const normalise = (env: Env, text: string): string =>
     text
       .replaceAll(env.tmp, "<TMP>")
-      .replace(/test_[0-9a-f]{16}/g, "test_<id>");
+      .replace(/test_[0-9a-f]{16}/g, "test_<id>")
+      .replaceAll(`"User":"${UID}:${GID}"`, '"User":"1000:1000"')
+      .replace(/"GroupAdd":\[[^\]]*\]/g, (groups) => groups.replaceAll(`"${GID}"`, '"1000"'));
 
   interface Step {
     readonly key: string;
