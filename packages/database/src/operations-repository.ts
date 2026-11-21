@@ -45,6 +45,7 @@ import {
   sites,
   stackRevisions,
 } from "./schema.js";
+import { assertNoManualCapture } from "./tls-coverage.js";
 
 function generatePrefixedId(prefix: string): string {
   return `${prefix}_${randomUUID().replace(/-/g, "")}`;
@@ -459,6 +460,8 @@ export async function createSiteTransactional(
 
     let domainRecord = null;
     if (input.initialDomain) {
+      // T5: no published manual certificate may already cover the host (lock order: site row, then TLS state).
+      await assertNoManualCapture(tx, input.organizationId, [input.initialDomain]);
       const domainId = generatePrefixedId("dom");
       const [dom] = await tx
         .insert(domains)
