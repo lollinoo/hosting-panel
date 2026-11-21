@@ -1,4 +1,5 @@
 import {
+  MANUAL_TLS_PUBLISH_MAX_HOSTS_PER_ENTRY,
   OPERATION_TERMINAL_STATUSES,
   TLS_VALIDITY_MARGIN_MS,
   planManualCertificates,
@@ -231,6 +232,13 @@ export async function checkAssignment(tx: DatabaseExecutor, input: AssignmentInp
     const after = overlay.has(d.id) ? overlay.get(d.id)! : d.certMode === "manual" ? d.manualVersionId : null;
     if (after !== null) assignedAfter.set(after, [...(assignedAfter.get(after) ?? []), lc(d.hostname)]);
     else if (d.status === "active") acmeAfterActive.push(lc(d.hostname));
+  }
+  // The executor takes at most MANUAL_TLS_PUBLISH_MAX_HOSTS_PER_ENTRY hosts per version: refuse here, not as a late
+  // generic apply failure. Closest catalogued reason: too_many_sans (a certificate that would serve too many names).
+  if ([...assignedAfter.values()].some((hostnames) => new Set(hostnames).size > MANUAL_TLS_PUBLISH_MAX_HOSTS_PER_ENTRY)) {
+    throw new ControlPlaneError("VALIDATION_ERROR", "This certificate would serve too many web addresses.", {
+      details: [{ field: "domainIds", reason: "too_many_sans", message: "Too many web addresses for one certificate." }],
+    });
   }
   const entryVersionIds = [...assignedAfter.keys()];
   const entryVersions = entryVersionIds.length

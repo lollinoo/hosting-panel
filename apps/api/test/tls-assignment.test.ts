@@ -364,6 +364,22 @@ describe("tls-assignment (PGlite)", () => {
       });
     });
 
+    describe("host limit per version", () => {
+      it("refuses the 65th address of one certificate before the executor, and accepts the 64th", async () => {
+        const siteId = await site(orgA);
+        const { versionId } = await cert(orgA, ["*.many.test"]);
+        const ids: string[] = [];
+        for (let i = 0; i < 64; i += 1) ids.push(await domain(orgA, siteId, `h${String(i)}.many.test`));
+        const changes = (n: number) => ids.slice(0, n).map((domainId) => ({ domainId, versionId }));
+        await expect(check({ organizationId: orgA, siteId, changes: changes(64) })).resolves.toMatchObject({ noop: false });
+        ids.push(await domain(orgA, siteId, "h64.many.test"));
+        const err = await refusal(check({ organizationId: orgA, siteId, changes: changes(65) }));
+        expect(err.code).toBe("VALIDATION_ERROR");
+        expect(err.details).toEqual([expect.objectContaining({ field: "domainIds", reason: "too_many_sans" })]);
+        expect(JSON.stringify(err.details)).not.toContain("many.test");
+      });
+    });
+
     describe("manual_overlap (CERTIFICATE_SNI_MISMATCH)", () => {
       it("refuses a rotation that leaves another domain on an equal-key version", async () => {
         const siteId = await site(orgA);

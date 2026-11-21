@@ -140,12 +140,12 @@ export class BackupPoliciesService {
   public async getSitePolicy(site: Pick<BackupSiteRef, "id">): Promise<SiteBackupPolicyDto> {
     const db = this.dbClient.db;
     const own = await getSitePolicyTargetIds(db, site.id);
-    const effective = own === null ? await resolveEffectiveTargets(db, site.id) : null;
-    return {
-      targetIds: own ?? effective!.map((t) => t.targetId),
-      inherited: own === null,
-      choices: (await listBackupTargets(db)).filter(selectable).map((t) => ({ id: t.id, kind: t.kind })),
-    };
+    const choices = (await listBackupTargets(db)).filter(selectable).map((t) => ({ id: t.id, kind: t.kind }));
+    // Inherited: the default may name destinations the customer cannot choose; never show those ids.
+    const offered = new Set(choices.map((c) => c.id));
+    const targetIds =
+      own ?? (await resolveEffectiveTargets(db, site.id)).map((t) => t.targetId).filter((id) => offered.has(id));
+    return { targetIds, inherited: own === null, choices };
   }
 
   /** `targetIds: null` inherits the default; ids must be targets the administrator offers, else 404 (no oracle). */

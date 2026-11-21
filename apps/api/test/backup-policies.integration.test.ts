@@ -263,6 +263,18 @@ describe("backup policies service and admin routes", () => {
       expect(findForbiddenPublicDtoKeys(policy)).toEqual([]);
     });
 
+    it("never shows an inherited default destination that is not offered to customers", async () => {
+      await service.update("default_site", { targetIds: [s3Selectable, s3Private] }, ADMIN_ID);
+      try {
+        const policy = await service.getSitePolicy(siteA);
+        expect(policy.inherited).toBe(true);
+        expect(policy.targetIds).toEqual([s3Selectable]);
+        expect(JSON.stringify(policy)).not.toContain(s3Private);
+      } finally {
+        await service.update("default_site", { targetIds: [s3Selectable] }, ADMIN_ID);
+      }
+    });
+
     it("chooses a destination, audits it with the organisation, and does not touch other sites", async () => {
       const dto = await service.updateSitePolicy(siteA, { targetIds: [local] }, actorOf(OWNER_ID));
       expect(dto).toMatchObject({ inherited: false, targetIds: [local] });
