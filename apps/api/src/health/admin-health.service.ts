@@ -49,6 +49,7 @@ import {
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { evaluateServiceDrift } from "@hosting-panel/hosting-domain";
 import { z } from "zod";
+import { manualExpiryAlerts } from "../certificates/tls-expiry.js";
 import { BACKUP_POLL_DEADLINE_MS } from "../backups/site-backups-applier.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, HOST_AGENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
@@ -110,7 +111,8 @@ export class AdminHealthService {
     const db = this.dbClient.db;
     const { health, downSites } = await this.#read(now);
     const alerts: AdminAlertDto[] = [];
-    const push = <A extends AdminAlertDto>(a: Omit<A, "severity">) => alerts.push({ ...a, severity: ALERT_SEVERITY[a.kind] } as A);
+    const push = <A extends AdminAlertDto>(a: Omit<A, "severity"> & { severity?: A["severity"] }) =>
+      alerts.push({ severity: ALERT_SEVERITY[a.kind], ...a } as A);
 
     for (const d of health.disks.filter((d) => d.usedPercent >= DISK_HIGH_PERCENT)) {
       push({ kind: "disk_high", subject: d.paths.join("+"), since: d.observedAt, details: { paths: d.paths, usedPercent: d.usedPercent } });
@@ -141,6 +143,15 @@ export class AdminHealthService {
         if (a.kind === "expiring") push({ kind: "certificate_expiring", subject: a.hostname, since: null, details: { ...site, expiresAt: a.expiresAt } });
         else push({ kind: "certificate_not_issued", subject: a.hostname, since: null, details: site });
       }
+    }
+    for (const m of await manualExpiryAlerts(db, now)) {
+      push({
+        kind: "manual_certificate_expiring",
+        severity: m.tier === "warning" ? "warning" : "critical",
+        subject: m.versionId,
+        since: null,
+        details: { siteId: m.siteId, siteName: m.siteName, certificateId: m.certificateId, certificateName: m.certificateName, notAfter: m.notAfter, tier: m.tier },
+      });
     }
     for (const b of await listAdminBackupStatus(db)) {
       if (b.lastStatus === "failed" && b.lastAttemptAt) {

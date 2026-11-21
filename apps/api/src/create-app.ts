@@ -37,11 +37,13 @@ import {
   SignedHostAgentIpcClient,
 } from "@hosting-panel/host-agent";
 import type { DnsLookup } from "./sites/dns-check.js";
+import type { TlsValidatorOptions } from "./certificates/tls-certificate-validator.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteSftpService } from "./sites/site-sftp.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
 import { DnsProviderService } from "./certificates/dns-provider.service.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
+import { TlsPublishService } from "./certificates/tls-publish.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
@@ -222,6 +224,8 @@ export interface CreateControlPlaneAppOptions {
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
   readonly dnsLookup?: DnsLookup;
+  /** Tests only: the certificate validator's clock and trust anchors. No environment variable widens them. */
+  readonly tlsValidatorOptions?: TlsValidatorOptions;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
   readonly jwtSigningKeyPem?: string;
@@ -232,6 +236,8 @@ export interface CreateControlPlaneAppOptions {
   readonly mailRelayRetryIntervalMs?: number | null;
   readonly sftpRetryIntervalMs?: number | null;
   readonly backupScheduleIntervalMs?: number | null;
+  /** Manual TLS converge tick (also the hourly expiry audit); null turns the loop off. */
+  readonly tlsConvergeIntervalMs?: number | null;
   readonly terminalSweepIntervalMs?: number | null;
   readonly panelDump?: ControlPlaneRuntimeConfig["panelDump"];
   readonly recoverUnknownOnStart?: boolean;
@@ -259,6 +265,7 @@ export interface ControlPlaneAppHandle {
   readonly dnsProvider: DnsProviderService;
   readonly siteSftp: SiteSftpService;
   readonly backupScheduler: BackupSchedulerService;
+  readonly tlsPublish: TlsPublishService;
   close(): Promise<void>;
 }
 
@@ -418,6 +425,14 @@ export async function createControlPlaneApp(
             : 5_000)
         : null;
 
+  const envTlsIntervalRaw = process.env["HP_TLS_CONVERGE_INTERVAL_MS"]?.trim();
+  const tlsConvergeIntervalMs =
+    options?.tlsConvergeIntervalMs !== undefined
+      ? options.tlsConvergeIntervalMs
+      : shouldListen && runtimeBackend !== "disabled"
+        ? (envTlsIntervalRaw && /^\d+$/.test(envTlsIntervalRaw) ? Number.parseInt(envTlsIntervalRaw, 10) : 60_000)
+        : null;
+
   const panelDumpDir = process.env["HP_PANEL_DUMP_DIR"]?.trim();
   const panelDump =
     options?.panelDump !== undefined
@@ -447,6 +462,8 @@ export async function createControlPlaneApp(
   const fastifyAdapter = new FastifyAdapter({
     logger: false,
     trustProxy: false,
+    // Fastify's default, set on purpose: a certificate upload is at most 512 KiB and the 413 answer relies on it.
+    bodyLimit: 1_048_576,
   });
 
   const fastifyInstance = fastifyAdapter.getInstance();
@@ -509,6 +526,7 @@ export async function createControlPlaneApp(
       dockerExecutor,
       hostAgent,
       ...(options?.dnsLookup ? { dnsLookup: options.dnsLookup } : {}),
+      ...(options?.tlsValidatorOptions ? { tlsValidatorOptions: options.tlsValidatorOptions } : {}),
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },
@@ -546,6 +564,7 @@ export async function createControlPlaneApp(
   const siteSftp = nestApp.get(SiteSftpService);
   const backupScheduler = nestApp.get(BackupSchedulerService);
   const terminal = nestApp.get(AdminTerminalService);
+  const tlsPublish = nestApp.get(TlsPublishService);
   const firewall = nestApp.get(FirewallService);
 
   if (options?.recoverUnknownOnStart ?? runtimeBackend !== "disabled") {
@@ -564,6 +583,7 @@ export async function createControlPlaneApp(
   if (runtimeBackend !== "disabled") void firewall.syncAtStart();
   siteSftp.startBackgroundLoop();
   backupScheduler.startBackgroundLoop(backupScheduleIntervalMs);
+  tlsPublish.startBackgroundLoop(tlsConvergeIntervalMs);
   terminal.startBackgroundLoop(options?.terminalSweepIntervalMs !== undefined ? options.terminalSweepIntervalMs : TERMINAL_SWEEP_INTERVAL_MS);
 
   let isClosed = false;
@@ -586,6 +606,7 @@ export async function createControlPlaneApp(
     dnsProvider,
     siteSftp,
     backupScheduler,
+    tlsPublish,
     async close(): Promise<void> {
       if (isClosed) {
         return;
@@ -595,6 +616,7 @@ export async function createControlPlaneApp(
       await terminal.stop();
       await firewall.stop();
       await backupScheduler.stop();
+      await tlsPublish.stop();
       await outboxWorker.stop();
       await driftReconciler.stop();
       await domainReconciler.stop();

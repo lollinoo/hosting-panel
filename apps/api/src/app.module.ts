@@ -20,6 +20,9 @@ import { AdminMailRelayController } from "./controllers/admin-mail-relay.control
 import { AdminDnsProviderController } from "./controllers/admin-dns-provider.controller.js";
 import { AdminHealthController } from "./controllers/admin-health.controller.js";
 import { AdminLogsController } from "./controllers/admin-logs.controller.js";
+import { AdminSiteTlsCertificatesController } from "./controllers/admin-site-tls-certificates.controller.js";
+import { AdminTlsCertificatesController } from "./controllers/admin-tls-certificates.controller.js";
+import { SiteTlsCertificatesController } from "./controllers/site-tls-certificates.controller.js";
 import { AdminTerminalController } from "./controllers/admin-terminal.controller.js";
 import { AdminFirewallController } from "./controllers/admin-firewall.controller.js";
 import { AdminHostController } from "./controllers/admin-host.controller.js";
@@ -73,6 +76,15 @@ import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
 import { SiteDomainsService } from "./sites/site-domains.service.js";
 import { MailRelayService } from "./mail/mail-relay.service.js";
 import { DnsProviderService } from "./certificates/dns-provider.service.js";
+import { TlsCertificatesService } from "./certificates/tls-certificates.service.js";
+import { SiteTlsApplier } from "./certificates/site-tls-applier.js";
+import { TlsPublishService } from "./certificates/tls-publish.service.js";
+import {
+  TLS_VALIDATOR_OPTIONS,
+  TlsCertificateValidator,
+  TlsValidationGate,
+  type TlsValidatorOptions,
+} from "./certificates/tls-certificate-validator.js";
 
 export interface AppModuleOptions {
   readonly config: ControlPlaneRuntimeConfig;
@@ -80,6 +92,8 @@ export interface AppModuleOptions {
   readonly dockerExecutor?: DockerExecutorPort;
   readonly hostAgent?: HostAgentPort;
   readonly dnsLookup?: DnsLookup;
+  /** Test seam of the certificate validator (clock, trust anchors); production registers `{}`. */
+  readonly tlsValidatorOptions?: TlsValidatorOptions;
 }
 
 @Module({})
@@ -103,6 +117,9 @@ export class AppModule {
         OrganizationsController,
         ManagedSitesController,
         SiteDomainsController,
+        SiteTlsCertificatesController,
+        AdminSiteTlsCertificatesController,
+        AdminTlsCertificatesController,
         SiteFilesController,
         SiteSftpController,
         SiteDatabasesController,
@@ -142,12 +159,17 @@ export class AppModule {
           provide: DNS_LOOKUP_TOKEN,
           useValue: options.dnsLookup ?? createNodeDnsLookup(parseDnsResolvers(process.env["HP_DNS_RESOLVERS"])),
         },
+        {
+          provide: TLS_VALIDATOR_OPTIONS,
+          useValue: options.tlsValidatorOptions ?? {},
+        },
         OidcService,
         AuthzContextService,
         LoginService,
         OutboxWorkerService,
         SiteProvisioner,
         SiteDomainsApplier,
+        SiteTlsApplier,
         SiteFilesApplier,
         SiteBackupsApplier,
         ManagedSitesService,
@@ -165,6 +187,10 @@ export class AppModule {
         DomainReconcilerService,
         MailRelayService,
         DnsProviderService,
+        TlsCertificateValidator,
+        TlsValidationGate,
+        TlsCertificatesService,
+        TlsPublishService,
         PasswordResetService,
         SupportAccessService,
         AdminHealthService,
