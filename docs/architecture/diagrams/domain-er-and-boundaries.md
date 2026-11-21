@@ -424,6 +424,59 @@ Note di lettura:
 - `backup_targets`: al più un target `local` vivo (`uq_backup_targets_one_local`) e uno solo `legacy_settings` (`uq_backup_targets_one_legacy`); il target legacy tiene la sua chiave sincronizzata con `backup_settings` tramite il trigger `trg_backup_settings_sync_legacy_target` e ne legge il segreto cifrato com'è (nessuna ricifratura).
 - Le copie sono la fonte di verità dello stato di un backup: `site_backups.status` è l'aggregato (`partial` = almeno una copia riuscita ma non tutte le richieste) e `snapshot_id`/`size_bytes` della riga logica rispecchiano la copia riuscita di priorità più bassa. `ON DELETE RESTRICT` sui target: un target con copie si archivia, non si cancella.
 
+### 2.2 Estensione `ADR-0034` e `ADR-0033`: limite di siti per cliente e modelli di sito
+
+Le migrazioni `0023_organization_site_limit.sql` (`ADR-0034`) e `0024_site_templates.sql` (`ADR-0033`) sono additive: la colonna `organizations.max_sites` è `NULL` (nessun limite) per ogni cliente esistente; le due colonne aggiunte a `sites` sono `NULL` e un sito con `template_version_id` `NULL` è il WordPress integrato alla versione 1. Una release precedente, dopo un rollback automatico, non le nomina mai. Il diagramma riporta le tabelle nuove e le colonne nuove di `organizations` e `sites`.
+
+```mermaid
+erDiagram
+    site_templates ||--|{ site_template_versions : "versioni immutabili (RESTRICT)"
+    site_templates |o--o| site_template_versions : "default_version_id (stesso modello)"
+    site_template_versions |o--o{ sites : "template_version_id (RESTRICT)"
+    users |o--o{ site_template_versions : "created_by (SET NULL)"
+    organizations ||--o{ sites : "possiede, al piu max_sites"
+
+    organizations {
+        integer max_sites "NULL = nessun limite, CHECK >= 0 (0023)"
+    }
+
+    site_templates {
+        text id PK "stpl_<id>; il WordPress integrato e stpl_wordpress"
+        text module "chiave di tipo sito (SITE_TYPE_KEYS, verificata nel codice)"
+        text name "1..80, unico (minuscole) fra i non archiviati"
+        text description "NULL o fino a 500"
+        boolean built_in "DEFAULT false; mai archiviato"
+        boolean enabled "DEFAULT false; richiede default_version_id"
+        text default_version_id FK "composita con id: versione dello stesso modello"
+        timestamptz archived_at "un modello archiviato e disabilitato"
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    site_template_versions {
+        text id PK "stv_<id>; il WordPress integrato v1 e stv_wordpress_1"
+        text template_id FK "UK (template_id, version_number), UK (id, template_id)"
+        integer version_number ">= 1"
+        text source "documento YAML-subset, 1..65536 byte"
+        jsonb spec "spec analizzata, oggetto"
+        text spec_hash "sha256 esadecimale"
+        text created_by FK "SET NULL"
+        timestamptz created_at "immutabile (trigger)"
+    }
+
+    sites {
+        text template_version_id FK "NULL = WordPress integrato v1; RESTRICT"
+        jsonb template_parameters "NULL o array di coppie chiave-valore"
+    }
+```
+
+Note di lettura:
+
+- `site_template_versions` è immutabile (trigger `trg_prevent_site_template_versions_mutation`): nessuna riga si cancella e nessuna colonna cambia, tranne `created_by` che diventa `NULL` se l'utente è rimosso. Una modifica è una nuova versione.
+- `ck_site_templates_enabled_needs_default` (un modello abilitato ha una versione predefinita), `ck_site_templates_archived_disabled` (un modello archiviato è disabilitato) e `ck_site_templates_built_in_not_archived` (il modello integrato non si archivia) tengono coerente il catalogo; la chiave esterna composita `(default_version_id, id)` impedisce una versione predefinita di un altro modello.
+- `sites.template_parameters` ha `CHECK jsonb_typeof = 'array'`; l'indice parziale `idx_sites_template_version` serve il conteggio dei siti per versione (elenco e dettaglio dei modelli) e il cancello del downgrade `site-templates`.
+- `organizations.max_sites` non ha chiavi esterne: il limite si controlla sotto il blocco di riga dell'organizzazione alla creazione e allo spostamento di un sito (`ADR-0034`).
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -446,6 +499,10 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `backup_targets` | `UNIQUE (kind) WHERE kind = 'local' AND archived_at IS NULL`, `UNIQUE (legacy_settings) WHERE legacy_settings`, `UNIQUE (s3_location_key) WHERE kind = 's3' AND archived_at IS NULL` (`0022`) | Una sola destinazione locale viva, un solo target legacy, nessuna destinazione S3 duplicata. |
 | `backup_policy_targets` | `UNIQUE (policy_id, priority)`, `priority BETWEEN 1 AND 2`, `target_id ... ON DELETE RESTRICT` (`0022`) | Al più due destinazioni per politica; un target in uso non si cancella. |
 | `site_backup_copies`, `panel_backup_copies` | `UNIQUE (backup_id, target_id)` e `UNIQUE (backup_id, priority)` (per il pannello su `operation_id`); `CHECK (status <> 'succeeded' OR snapshot_id IS NOT NULL)` (`0022`) | Una copia per destinazione e per priorità; una copia riuscita ha sempre uno snapshot. |
+| `organizations` | `CHECK (max_sites IS NULL OR max_sites >= 0)` (`0023`) | Il limite di siti per cliente è `NULL` (nessun limite) o un intero non negativo; il controllo vincolante sta nel codice, sotto il blocco di riga. |
+| `site_template_versions` | `UNIQUE (template_id, version_number)`, `UNIQUE (id, template_id)` e `TRIGGER trg_prevent_site_template_versions_mutation BEFORE UPDATE OR DELETE` (`0024`) | Una versione di modello non cambia e non si cancella; un modello non ha due versioni con lo stesso numero. |
+| `site_templates` | `FOREIGN KEY (default_version_id, id) REFERENCES site_template_versions(id, template_id)` e `CHECK (NOT enabled OR default_version_id IS NOT NULL)` (`0024`) | La versione predefinita appartiene al modello; un modello abilitato ne ha sempre una. |
+| `sites` | `FOREIGN KEY (template_version_id) REFERENCES site_template_versions(id) ON DELETE RESTRICT` (`0024`) | Una versione usata da un sito non si cancella; `NULL` è il WordPress integrato v1. |
 
 ---
 
@@ -459,3 +516,6 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 - **Versioni 0021 e 0022 (`HCP-SPEC-004`, additive)**:
   - `0021_manual_tls_certificates.sql`: tabelle `tls_certificates`, `tls_certificate_versions` (immutabili) e `tls_publish_state`; colonne `domains.cert_mode` (`acme` | `manual`, `DEFAULT 'acme'`) e `domains.manual_certificate_version_id` con chiave esterna composita sull'organizzazione; colonna `operations.request_hash` per l'idempotenza per payload.
   - `0022_backup_targets_and_copies.sql`: tabelle `backup_targets`, `backup_policies`, `backup_policy_targets`, `site_backup_copies` e `panel_backup_copies`; `site_backups.status` ammette `partial`; colonne `site_backups.restore_target_id` e `archive_target_id`; backfill idempotente del target legacy, delle due politiche e di una copia per ogni backup esistente; trigger `trg_backup_settings_sync_legacy_target` su `backup_settings`.
+- **Versioni 0023 e 0024 (`ADR-0034` e `ADR-0033`, additive)**:
+  - `0023_organization_site_limit.sql`: colonna `organizations.max_sites` (`NULL` = nessun limite, `CHECK >= 0`).
+  - `0024_site_templates.sql`: tabelle `site_templates` e `site_template_versions` (immutabili), colonne `sites.template_version_id` (chiave esterna `RESTRICT`) e `sites.template_parameters` (array JSONB), indice parziale `idx_sites_template_version`; il modello integrato WordPress (`stpl_wordpress`, versione `stv_wordpress_1`) è garantito a ogni avvio dell'API da `ensureBuiltInSiteTemplates` (`packages/database`), non dalla migrazione.

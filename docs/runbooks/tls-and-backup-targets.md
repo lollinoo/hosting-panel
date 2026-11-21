@@ -272,22 +272,28 @@ Every refusal leaves the previous state intact: a failed backup never deletes ol
 ## 10. Update and, if possible, roll back without breaking history; limits of older releases
 
 1. Update: `sudo hp-update` (or `--version <v>` / `--archive <file>`). Run `sudo hp-update --dry-run` first to see the plan.
-   Migrations 0021 and 0022 are additive: no column is dropped or retyped and every new column is nullable or has a default.
+   Migrations 0021, 0022 and 0024 (site templates) are additive: no column is dropped or retyped and every new column is nullable or has a default.
    The proxy is **not** recreated; nothing for TLS needs doing, and the executor unit gains one `Environment=` line and the
-   bootstrap one directory.
+   bootstrap one directory (plus `/var/lib/hosting-panel/site-php` for the per-site PHP settings of ADR 0033).
 2. **Automatic rollback** (health window 90 s) stays unconditional: it happens before any data of the new features can exist.
    The older release keeps working because the new code still writes `site_backups.snapshot_id` and `size_bytes` for the
    primary copy.
 3. **Downgrade chosen by the operator** (`hp-update --version <older> --allow-downgrade`): `hp-update` refuses with **exit
    code 8** when the target release does not list the feature in its `RELEASE.json` (`features`: `manual-tls`,
-   `backup-targets`) and the database already uses it: a domain with `cert_mode = 'manual'`, or a backup destination that is
-   not the legacy S3 one and not archived. A `psql` error also counts as a refusal (fail closed). To go back without forcing:
-   return the domains to Let's Encrypt and archive the non-legacy destinations (archived destinations keep their copies on
-   disk). To go ahead knowingly:
+   `backup-targets`, `site-templates`) and the database already uses it: a domain with `cert_mode = 'manual'`, a backup
+   destination that is not the legacy S3 one and not archived, or a site whose `template_version_id` is neither empty nor the
+   built-in WordPress version `stv_wordpress_1` (ADR 0033: a site on a custom template or on a newer version of the built-in
+   one; sites created before migration 0024 and sites on built-in version 1 do not count). A `psql` error also counts as a
+   refusal (fail closed). To go back without forcing: return the domains to Let's Encrypt, archive the non-legacy
+   destinations (archived destinations keep their copies on disk) and delete those sites or re-create them on built-in
+   WordPress version 1 (a site can only move to a newer version of its own template, never to another template or back);
+   or keep the current release. To go ahead knowingly:
    ```bash
    sudo hp-update --version <older> --allow-downgrade --allow-feature-loss
    ```
-4. What the older release cannot do after a forced downgrade: it still serves imported certificates (the files and the manifest
+4. What the older release cannot do after a forced downgrade: it keeps running sites that use a custom site type with their
+   stored configuration but does not know the site types (no template list, no version change, and a PHP change builds the
+   built-in image); it still serves imported certificates (the files and the manifest
    stay) but cannot rotate or remove them; it does not see local copies; and its change of S3 endpoint empties
    `site_backups` again. Local repositories and snapshots are untouched on disk.
 5. Panel copies written by an older release are re-attached on the next API start (boot repair).
