@@ -183,6 +183,16 @@ export {
 } from "./site-mail.js";
 
 export {
+  DEFAULT_SITE_PHP_DIR,
+  SITE_PHP_INI_TARGET,
+  removeSitePhpIni,
+  renderPhpIni,
+  sitePhpBinds,
+  sitePhpIniPath,
+  writeSitePhpIni,
+} from "./site-php.js";
+
+export {
   runDockerExec,
   startDockerExec,
   type DockerExecResult,

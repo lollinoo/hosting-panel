@@ -66,6 +66,7 @@ import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { resolveSimulatorSiteType, type SimulatorSiteType } from "./simulator-site-types.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
+import { renderPhpIni } from "./site-php.js";
 import { maskPhpMyAdminQuery } from "./docker-logs.js";
 import { startSimulatedShell } from "./simulator-terminal.js";
 import { TerminalSessions, type TerminalLimits, type TerminalShellSink } from "./terminal-sessions.js";
@@ -228,6 +229,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
+  /** The ini text the real executor would write, per service; absent when the spec has no phpIni. */
+  public readonly phpIniByService = new Map<string, string>();
   /** Latest route plan per site, from applySiteRoutes or a deploy carrying hostRoutes. */
   public readonly appliedRoutes = new Map<string, SiteRoutesRequest>();
   /** Every route plan in order. */
@@ -962,6 +965,11 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     }
     const spec = validateExecutorServiceSpec(rawSpec, siteRouteOptions(this.panel).reservedHosts);
     this.deployedSpecs.push(rawSpec);
+    if (spec.phpIni && Object.keys(spec.phpIni).length > 0) {
+      this.phpIniByService.set(spec.serviceInstanceId, renderPhpIni(spec.phpIni));
+    } else {
+      this.phpIniByService.delete(spec.serviceInstanceId);
+    }
 
     for (const [existingSvcId, existingCtr] of this.containersByServiceId) {
       if (existingSvcId !== spec.serviceInstanceId && existingCtr.name === `/${spec.containerName}`) {
@@ -1175,6 +1183,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
 
     this.containersByServiceId.delete(serviceInstanceId);
     this.expectedByServiceId.delete(serviceInstanceId);
+    this.phpIniByService.delete(serviceInstanceId);
     this.terminals.endService(serviceInstanceId, "container_gone");
     await this.cleanupSecrets(serviceInstanceId);
 

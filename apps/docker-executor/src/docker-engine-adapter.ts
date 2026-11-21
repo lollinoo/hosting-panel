@@ -101,6 +101,7 @@ import {
 } from "./backup-runner.js";
 import { DEFAULT_SITE_FILES_DIR } from "./site-files-program.js";
 import { DEFAULT_SITE_MAIL_DIR, ensureSiteMailFiles, siteMailBinds } from "./site-mail.js";
+import { DEFAULT_SITE_PHP_DIR, removeSitePhpIni, sitePhpBinds, writeSitePhpIni } from "./site-php.js";
 import {
   DEFAULT_MAIL_RELAY_SECRET_DIR,
   MAIL_RELAY_NETWORK_NAME,
@@ -513,6 +514,7 @@ export function validateExecutorServiceSpec(
       internalPort: input.internalPort,
       pidsLimit: input.pidsLimit,
       siteMail: input.siteMail,
+      phpIni: input.phpIni,
       volumeMounts: input.volumeMounts ? [...input.volumeMounts] : undefined,
       resolvedSecrets: validatedResolvedSecrets,
       rawConfig: declarativeFields,
@@ -702,6 +704,8 @@ export interface BuildHardenedContainerOptions {
   readonly secretFileEnv?: readonly string[];
   /** Each must be one of siteMailBinds(dir); the caller picks the directory. */
   readonly siteMailBinds?: readonly string[];
+  /** Each must be this service's own sitePhpBinds(dir, id) entry; the caller picks the directory. */
+  readonly sitePhpBinds?: readonly string[];
   readonly certifiedCapabilities?: readonly string[];
 }
 
@@ -774,6 +778,16 @@ export function buildHardenedContainerCreatePayload(
         throw new ExecutorCodedError("Unknown site mail bind mount", "HOST_POLICY_DENIED");
       }
       binds.push(mailBind);
+    }
+  }
+
+  if (options?.sitePhpBinds) {
+    for (const phpBind of options.sitePhpBinds) {
+      const dir = path.posix.dirname(phpBind.split(":")[0] ?? "");
+      if (sitePhpBinds(dir, spec.serviceInstanceId)[0] !== phpBind) {
+        throw new ExecutorCodedError("Unknown site PHP bind mount", "HOST_POLICY_DENIED");
+      }
+      binds.push(phpBind);
     }
   }
 
@@ -856,6 +870,7 @@ export function detectOutOfBandContainerModification(
   secretsRootDir: string,
   expected?: ExpectedManagedServiceMetadata,
   siteMailDir: string = DEFAULT_SITE_MAIL_DIR,
+  sitePhpDir: string = DEFAULT_SITE_PHP_DIR,
 ): boolean {
   const labels = inspect.Config?.Labels ?? {};
   const managedFlag = labels[MANAGED_DOCKER_LABELS.managed];
@@ -923,13 +938,16 @@ export function detectOutOfBandContainerModification(
   }
 
   const allowedVolumePrefix = `hp_vol_${serviceInstanceId}_`;
-  const allowedMailBinds = new Set(siteMailBinds(siteMailDir));
+  const allowedSiteFileBinds = new Set([
+    ...siteMailBinds(siteMailDir),
+    ...sitePhpBinds(sitePhpDir, serviceInstanceId),
+  ]);
   const allowedSecretDirPrefix = `${path.resolve(secretsRootDir, serviceInstanceId)}${path.sep}`;
   for (const bind of hostConfig.Binds ?? []) {
     if (bind.includes("/var/run/docker.sock")) {
       return true;
     }
-    if (bind.startsWith(allowedVolumePrefix) || allowedMailBinds.has(bind)) {
+    if (bind.startsWith(allowedVolumePrefix) || allowedSiteFileBinds.has(bind)) {
       continue;
     }
     if (
@@ -1143,6 +1161,7 @@ export interface DockerEngineSocketAdapterOptions {
   readonly dockerApiPrefix?: string;
   readonly secretsRootDir?: string;
   readonly siteMailDir?: string;
+  readonly sitePhpDir?: string;
   readonly ingressRootDir?: string;
   readonly traefikImage?: string;
   readonly ingressHttpPort?: number;
@@ -1237,6 +1256,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly dockerClient: DockerSocketHttpClient;
   private readonly secretsRootDir: string;
   private readonly siteMailDir: string;
+  private readonly sitePhpDir: string;
   private readonly ingressManager: TraefikIngressFileManager;
   private readonly traefikImage: string;
   private readonly ingressHttpPort: number;
@@ -1311,6 +1331,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     });
     this.secretsRootDir = path.resolve(options?.secretsRootDir ?? DEFAULT_SECRETS_ROOT_DIR);
     this.siteMailDir = path.resolve(options?.siteMailDir ?? DEFAULT_SITE_MAIL_DIR);
+    this.sitePhpDir = path.resolve(options?.sitePhpDir ?? DEFAULT_SITE_PHP_DIR);
     this.ingressManager = new TraefikIngressFileManager(
       options?.ingressRootDir ?? DEFAULT_INGRESS_ROOT_DIR,
       options?.panel ?? null,
@@ -2116,10 +2137,16 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     if (spec.siteMail === true) {
       await ensureSiteMailFiles(this.siteMailDir);
     }
+    // Absent phpIni: nothing is read, written or removed. A stale file is not bound and goes with the service.
+    const phpIni = spec.phpIni !== undefined && Object.keys(spec.phpIni).length > 0 ? spec.phpIni : undefined;
+    if (phpIni) {
+      await writeSitePhpIni(this.sitePhpDir, spec.serviceInstanceId, phpIni);
+    }
     const createPayload = buildHardenedContainerCreatePayload(spec, {
       secretBinds,
       secretFileEnv,
       ...(spec.siteMail === true ? { siteMailBinds: siteMailBinds(this.siteMailDir) } : {}),
+      ...(phpIni ? { sitePhpBinds: sitePhpBinds(this.sitePhpDir, spec.serviceInstanceId) } : {}),
     });
 
     const existingByService = await this.findContainerSummaryByServiceId(spec.serviceInstanceId);
@@ -3455,6 +3482,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     }
 
     await purgeServiceSecrets(this.secretsRootDir, serviceInstanceId);
+    await removeSitePhpIni(this.sitePhpDir, serviceInstanceId);
     const routeRemoval = await this.ingressManager.removeServiceRoute(
       serviceInstanceId,
       knownSiteId,
@@ -3502,6 +3530,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       this.secretsRootDir,
       expected,
       this.siteMailDir,
+      this.sitePhpDir,
     );
 
     const observedRevisionHash = labels[MANAGED_DOCKER_LABELS.specHash] || null;
