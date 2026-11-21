@@ -10634,9 +10634,10 @@ components:
           description: >-
             Values for the parameters of the site type that this caller may set; one entry per key. A parameter
             left out takes its default. A value the parameter refuses, an unknown key, or a missing required
-            value is `VALIDATION_ERROR` (`details[].field: parameters.<key>`). So is a value the executor
-            would refuse in an environment variable (for example a Docker socket path): the request is refused
-            with 400 and nothing is stored.
+            value is `VALIDATION_ERROR` (`details[].field: parameters.<key>`). A value whose rendered
+            environment variable the executor would refuse (only a Docker socket path does) is also
+            `VALIDATION_ERROR`, but with `details[0].field: parameters` (no key) and
+            `details[0].reason: unsafe_value`; nothing is stored.
           items:
             $ref: "#/components/schemas/SiteTemplateParameterEntry"
         title:
