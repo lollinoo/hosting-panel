@@ -9,17 +9,20 @@
 usage() {
   cat <<'EOF'
 Usage: sudo hp-update [--version <v> | --archive <path>] [--allow-downgrade] [--dry-run]
-                      [--allow-other-linux]
+                      [--allow-other-linux] [--allow-feature-loss]
 
   --version          Release to install (default: latest GitHub release).
   --archive          Local hosting-panel-<v>-linux-x64.tar.gz (its .sha256 must sit next to it).
   --allow-downgrade  Allow installing a version older than the current one.
+  --allow-feature-loss  With --allow-downgrade: install a release that lacks a feature still in use
+                     (manual-tls, backup-targets); that data stays unreachable until you upgrade again.
   --allow-other-linux  Pass through to bootstrap-dedicated.sh (lab hosts installed with it).
   --dry-run          Print the plan; changes nothing, needs neither root nor network.
 
 Exit codes: 0 ok (or already up to date), 1 step failed or another update is running,
 2 bad arguments, downgrade refused or archive VERSION differs from its file name, 4 checksum failure,
-6 new release unhealthy: rolled back, 7 rollback unhealthy too.
+6 new release unhealthy: rolled back, 7 rollback unhealthy too,
+8 downgrade refused: the target release lacks a feature in use (or it cannot be checked).
 EOF
 }
 
@@ -73,6 +76,27 @@ health() {
     panel_health_check "${bind:-127.0.0.1}" 90
   fi
 }
+features_in_use() { # prints the in-use gated features; non-zero = cannot tell
+  if [[ -n "${HP_FEATURES_CMD:-}" ]]; then
+    "${HP_FEATURES_CMD}"
+  else
+    panel_features_in_use /etc/hosting-panel/api.env
+  fi
+}
+# <prev release dir> <archive> <version>: prints the features in use that the current release has and the
+# target lacks; non-zero = cannot tell. Reads the database only when a feature is lacking.
+rollback_blockers() {
+  local cur tgt f lacking="" in_use hit=""
+  [[ -r "$1/RELEASE.json" ]] || return 0
+  cur="$(release_features <"$1/RELEASE.json")"
+  [[ -n "${cur}" ]] || return 0
+  tgt="$(tar -xzOf "$2" "hosting-panel-$3/RELEASE.json" 2>/dev/null | release_features)" || tgt=""
+  for f in ${cur}; do [[ " ${tgt} " == *" ${f} "* ]] || lacking+="${f} "; done
+  [[ -n "${lacking}" ]] || return 0
+  in_use="$(features_in_use)" || return 1
+  for f in ${lacking}; do ! grep -qx -- "${f}" <<<"${in_use}" || hit+="${f} "; done
+  printf '%s' "${hit% }"
+}
 restart_units() { "${SYSTEMCTL}" restart "${UNITS[@]}"; }
 restore_prev_units() { # <prev release dir>: put the previous release's units and wrappers back (best effort)
   run_bootstrap "$1" || printf '[WARN] bootstrap of %s failed while restoring it\n' "$1" >&2
@@ -84,7 +108,7 @@ main() {
   umask 027
   export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 
-  local version="" archive="" allow_downgrade=0 dry_run=0
+  local version="" archive="" allow_downgrade=0 allow_feature_loss=0 dry_run=0
   BOOTSTRAP_ARGS=()
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -94,6 +118,7 @@ main() {
         shift 2
         ;;
       --allow-downgrade) allow_downgrade=1; shift ;;
+      --allow-feature-loss) allow_feature_loss=1; shift ;;
       --allow-other-linux) BOOTSTRAP_ARGS+=(--allow-other-linux); shift ;;
       --dry-run) dry_run=1; shift ;;
       --help | -h) usage; exit 0 ;;
@@ -112,7 +137,7 @@ main() {
 
   if [[ "${EUID}" -eq 0 ]]; then
     local o
-    for o in HP_ROOT HP_SYSTEMCTL HP_HEALTH_CMD HP_BOOTSTRAP_CMD; do
+    for o in HP_ROOT HP_SYSTEMCTL HP_HEALTH_CMD HP_BOOTSTRAP_CMD HP_FEATURES_CMD; do
       [[ -z "${!o:-}" ]] || die 2 "${o} is a test override and is refused when running as root"
     done
   elif ((dry_run == 0)) && [[ -z "${HP_ROOT:-}" ]]; then
@@ -129,7 +154,7 @@ main() {
     step 2 "Verify checksum"
     plan "would verify the archive against its .sha256 (exit 4 on mismatch) and that its VERSION is ${version} (exit 2)"
     step 3 "Version check"
-    plan "current: ${prev:-<none>}; same version exits 0, older needs --allow-downgrade"
+    plan "current: ${prev:-<none>}; same version exits 0, older needs --allow-downgrade and, when it lacks a feature in use (manual-tls, backup-targets), --allow-feature-loss (exit 8)"
     step 4 "Install the release"
     plan "would extract into ${root}/releases/${version}"
     step 5 "Bootstrap (units, wrappers, tmpfiles) and daemon-reload"
@@ -199,13 +224,26 @@ main() {
   if version_gt "${prev}" "${version}" && ((allow_downgrade == 0)); then
     die 2 "${version} is older than the current ${prev}; pass --allow-downgrade to install it anyway."
   fi
+  local prev_dir="${root}/releases/${prev}"
+  if version_gt "${prev}" "${version}"; then
+    # Operator downgrade only: the automatic rollback (step 8) stays ungated. Fails closed.
+    local blockers rc=0
+    blockers="$(rollback_blockers "${prev_dir}" "${archive}" "${version}")" || rc=$?
+    if ((rc != 0)); then
+      ((allow_feature_loss)) || die 8 "Cannot tell whether this panel uses a feature that ${version} lacks (the database check failed); refusing the downgrade. Pass --allow-feature-loss to install it anyway."
+      printf '[WARN] could not check the features in use; continuing because of --allow-feature-loss\n' >&2
+    elif [[ -n "${blockers}" ]]; then
+      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt and archive the non-legacy backup targets, or keep ${prev}; --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
+      printf '[WARN] --allow-feature-loss: %s stays unreachable until you upgrade again\n' "${blockers}" >&2
+    fi
+  fi
   info "${prev} -> ${version}"
 
   step 4 "Install the release"
   # A leftover dir (e.g. from a failed update) is replaced; install_release refuses the current one.
   HP_FORCE_REINSTALL=1 install_release "${archive}" "${root}" >/dev/null || die 1 "Could not install release ${version}."
 
-  local new_dir="${root}/releases/${version}" prev_dir="${root}/releases/${prev}"
+  local new_dir="${root}/releases/${version}"
   step 5 "Bootstrap (units, wrappers, tmpfiles) and daemon-reload"
   if ! run_bootstrap "${new_dir}" || ! "${SYSTEMCTL}" daemon-reload; then
     restore_prev_units "${prev_dir}"

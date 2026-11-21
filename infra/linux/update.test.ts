@@ -27,18 +27,19 @@ function sh(cmd: string) {
   if (r.status !== 0) throw new Error(r.stderr);
 }
 /** hosting-panel-<v>-linux-x64.tar.gz (+ .sha256) in a fresh dir; `content` is the version inside. */
-function makeArchive(version: string, content = version, marker = "") {
+function makeArchive(version: string, content = version, marker = "", features?: string) {
   const d = tmp();
   mkdirSync(join(d, "src", `hosting-panel-${content}`), { recursive: true });
   writeFileSync(join(d, "src", `hosting-panel-${content}`, "VERSION"), `${content}\n`);
   if (marker) writeFileSync(join(d, "src", `hosting-panel-${content}`, marker), "");
+  if (features !== undefined) writeFileSync(join(d, "src", `hosting-panel-${content}`, "RELEASE.json"), `${JSON.stringify({ version: content, features }, null, 2)}\n`);
   const name = `hosting-panel-${version}-linux-x64.tar.gz`;
   sh(`cd "${d}" && tar -czf "${name}" -C src "hosting-panel-${content}" && sha256sum "${name}" > "${name}.sha256"`);
   return join(d, name);
 }
 
 /** Root with releases/<v> for each version, current -> releases/<current>, and logging stubs. */
-function fixture(current: string, others: string[] = [], healthFailsFor = "") {
+function fixture(current: string, others: string[] = [], healthFailsFor = "", opts: { features?: string; featuresCmd?: string } = {}) {
   const d = tmp();
   const root = join(d, "root");
   for (const v of [current, ...others]) {
@@ -52,7 +53,8 @@ function fixture(current: string, others: string[] = [], healthFailsFor = "") {
     writeFileSync(join(d, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
     return join(d, name);
   };
-  const env = {
+  if (opts.features !== undefined) writeFileSync(join(root, "releases", current, "RELEASE.json"), `${JSON.stringify({ version: current, features: opts.features }, null, 2)}\n`);
+  const env: Record<string, string> = {
     HP_ROOT: root,
     HP_SYSTEMCTL: stub("systemctl", `echo "$*" >> "${log}"`),
     HP_BOOTSTRAP_CMD: stub("bootstrap", `echo "bootstrap $1" >> "${join(d, "bootstrap.log")}"`),
@@ -62,6 +64,7 @@ function fixture(current: string, others: string[] = [], healthFailsFor = "") {
       `v="$(basename "$(readlink "${root}/current")")"; [[ "${healthFailsFor}" != "*" && "$v" != "${healthFailsFor}" ]]`
     )
   };
+  if (opts.featuresCmd !== undefined) env.HP_FEATURES_CMD = stub("features", `touch "${join(d, "features.asked")}"\n${opts.featuresCmd}`);
   return { root, log, env, d };
 }
 function update(args: string[], env: Record<string, string>) {
@@ -70,6 +73,79 @@ function update(args: string[], env: Record<string, string>) {
 }
 const cur = (root: string) => readlinkSync(join(root, "current"));
 const restarts = (log: string) => readFileSync(log, "utf8").split("\n").filter((l) => l === RESTART).length;
+
+describe("update.sh downgrade gate (features in use)", () => {
+  const BOTH = "manual-tls backup-targets";
+  const gated = (featuresCmd: string, features = BOTH) => fixture("0.2.0", [], "", { features, featuresCmd });
+  const old = () => makeArchive("0.1.0", "0.1.0", "", "");
+  const asked = (f: { d: string }) => existsSync(join(f.d, "features.asked"));
+
+  it("refuses a downgrade that drops a feature in use (exit 8) and installs nothing", () => {
+    const f = gated("echo manual-tls");
+    const r = update(["--archive", old(), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    expect(r.err).toContain("manual-tls");
+    expect(r.err).not.toContain("backup-targets");
+    expect(r.err).toContain("--allow-feature-loss");
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+    expect(existsSync(join(f.root, "releases/0.1.0"))).toBe(false);
+  });
+
+  it("--allow-feature-loss lets the downgrade through", () => {
+    const f = gated("echo manual-tls");
+    const r = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(r.err).toContain("manual-tls");
+  });
+
+  it("fails closed when the database cannot be asked", () => {
+    const f = gated("exit 1");
+    const r = update(["--archive", old(), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    expect(r.err).toContain("Cannot tell");
+    expect(cur(f.root)).toBe("releases/0.2.0");
+  });
+
+  it("proceeds when no lacking feature is in use", () => {
+    const f = gated("true");
+    expect(update(["--archive", old(), "--allow-downgrade"], f.env).code).toBe(0);
+    expect(asked(f)).toBe(true);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+  });
+
+  it("an in-use feature the target knows does not block, and the database is not asked", () => {
+    const f = gated("echo manual-tls");
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", BOTH), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(asked(f)).toBe(false);
+  });
+
+  it("a release without a features list is never gated", () => {
+    const f = fixture("0.2.0", [], "", { featuresCmd: "echo manual-tls" });
+    expect(update(["--archive", old(), "--allow-downgrade"], f.env).code).toBe(0);
+    expect(asked(f)).toBe(false);
+  });
+
+  it("an upgrade never asks the database", () => {
+    const f = gated("echo manual-tls");
+    const r = update(["--archive", makeArchive("0.3.0", "0.3.0", "", "")], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(asked(f)).toBe(false);
+  });
+
+  it("refuses HP_FEATURES_CMD as root", () => {
+    if (process.getuid?.() !== 0) return;
+    expect(update(["--archive", old()], { HP_FEATURES_CMD: "/bin/true" }).code).toBe(2);
+  });
+
+  it("the dry-run plan names --allow-feature-loss and exit 8", () => {
+    const r = update(["--version", "0.1.0", "--dry-run"], fixture("0.2.0").env);
+    expect(r.out).toContain("--allow-feature-loss");
+    expect(r.out).toContain("(exit 8)");
+  });
+});
 
 describe("update.sh", () => {
   it("update swaps current and prunes on healthy restart", () => {

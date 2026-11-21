@@ -108,6 +108,10 @@ export function releaseNodeVersion(nodeVersionFile, runningVersion) {
   return running;
 }
 
+// Features an older release cannot read; update.sh refuses a downgrade that drops one in use (exit 8).
+// Stable identifiers, one-line in RELEASE.json so sed reads them; never translated.
+export const RELEASE_FEATURES = ["manual-tls", "backup-targets"];
+
 // The images a release names (D17), from the built constants: sorted, each once.
 export function releaseImages(contracts, traefikImage) {
   const images = [
@@ -169,7 +173,7 @@ async function main() {
   writeFileSync(path.join(stage, "VERSION"), `${version}\n`);
   writeFileSync(
     path.join(stage, "RELEASE.json"),
-    `${JSON.stringify({ version, gitCommit, builtAt: new Date().toISOString(), node }, null, 2)}\n`
+    `${JSON.stringify({ version, gitCommit, builtAt: new Date().toISOString(), node, features: RELEASE_FEATURES.join(" ") }, null, 2)}\n`
   );
   const contracts = await import(pathToFileURL(path.join(repo, "packages/contracts/dist/index.js")).href);
   const { DEFAULT_TRAEFIK_IMAGE } = await import(pathToFileURL(path.join(repo, "apps/docker-executor/dist/traefik-config.js")).href);
