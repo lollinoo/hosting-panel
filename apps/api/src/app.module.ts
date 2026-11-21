@@ -13,6 +13,7 @@ import { SupportAccessService } from "./auth/support-access.service.js";
 import { ApiExceptionFilter } from "./common/api-exception.filter.js";
 import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
+import { AdminSiteTemplatesController } from "./controllers/admin-site-templates.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -45,6 +46,7 @@ import { SiteDatabasesController } from "./controllers/site-databases.controller
 import { SiteBackupsController } from "./controllers/site-backups.controller.js";
 import { SiteFilesController } from "./controllers/site-files.controller.js";
 import { SiteSftpController } from "./controllers/site-sftp.controller.js";
+import { SiteTypesController } from "./controllers/site-types.controller.js";
 import { SiteWordpressController } from "./controllers/site-wordpress.controller.js";
 import { SiteWordpressImportController } from "./controllers/site-wordpress-import.controller.js";
 import { SupportAccessController } from "./controllers/support-access.controller.js";
@@ -59,6 +61,7 @@ import { BackupTargetsService } from "./backups/backup-targets.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import { SiteBackupsService } from "./backups/site-backups.service.js";
 import { SiteRestoreService } from "./backups/site-restore.service.js";
+import { SiteTemplatesService } from "./site-templates/site-templates.service.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import { SiteFilesApplier } from "./sites/site-files-applier.js";
@@ -118,6 +121,8 @@ export class AppModule {
         AdminAuditController,
         AdminUsersController,
         AdminSitesController,
+        AdminSiteTemplatesController,
+        SiteTypesController,
         OrganizationsController,
         ManagedSitesController,
         SiteDomainsController,
@@ -179,6 +184,7 @@ export class AppModule {
         SiteFilesApplier,
         SiteBackupsApplier,
         ManagedSitesService,
+        SiteTemplatesService,
         SiteDomainsService,
         SiteFilesService,
         SiteSftpService,
