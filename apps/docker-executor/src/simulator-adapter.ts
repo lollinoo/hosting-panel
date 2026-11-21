@@ -1,13 +1,21 @@
-import { createHash, randomUUID } from "node:crypto";
+import { X509Certificate, createHash, createPrivateKey, randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   DEFAULT_SFTP_PORT,
   LEGACY_SITE_TYPE,
   SITE_TYPE_KEYS,
   SftpAccessApplyIpcRequestSchema,
+  planManualCertificates,
+  servedCertificate,
+  traefikCertificateNames,
+  traefikNameMatches,
   type BackupsIpcRequest,
   type BackupsResultByAction,
   type CertProblem,
+  ManualTlsIpcRequestSchema,
+  type ManualTlsIpcRequest,
+  type ManualTlsResultByAction,
+  type SniCertificate,
   type DnsProviderApplyRequest,
   type MailRelayApplyRequest,
   PANEL_CONTAINERS,
@@ -52,6 +60,7 @@ import type {
   TerminalReadResult,
   TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
+import { ManualTlsStoreError, normaliseEntries, type ManualTlsEntry } from "./manual-tls-store.js";
 import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
@@ -174,6 +183,29 @@ export const SIMULATED_WORDPRESS_STATE: WordpressStateResult = {
   administrators: [{ id: 1, login: "admin" }],
 };
 
+/** Leaf of a PEM bundle; the key must belong to it. A bad PEM is TLS_MATERIAL_INVALID, like the real store. */
+function parseSimulatedLeaf(fullchainPem: string, keyPem: string): X509Certificate {
+  try {
+    const cert = new X509Certificate(fullchainPem);
+    if (!cert.checkPrivateKey(createPrivateKey(keyPem))) throw new Error("mismatch");
+    return cert;
+  } catch {
+    throw new ManualTlsStoreError("TLS_MATERIAL_INVALID", "The certificate or its private key cannot be used");
+  }
+}
+
+/** Names as Traefik indexes the leaf (CN even when it is not a SAN). */
+function simulatedLeafNames(cert: X509Certificate): string[] {
+  const cn = /^CN=(.*)$/m.exec(cert.subject)?.[1] ?? "";
+  const dnsNames: string[] = [];
+  const ipAddresses: string[] = [];
+  for (const m of (cert.subjectAltName ?? "").matchAll(/(?:^|, )(DNS|IP Address):("(?:[^"\\]|\\.)*"|[^,]*)/g)) {
+    const raw = m[2]!;
+    (m[1] === "DNS" ? dnsNames : ipAddresses).push(raw.startsWith('"') ? (JSON.parse(raw) as string) : raw);
+  }
+  return traefikCertificateNames({ commonName: cn, dnsNames, ipAddresses });
+}
+
 export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
@@ -203,6 +235,16 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly certificates = new Map<string, StoredCertificate>();
   private readonly certFailures: AcmeFailure[] = [];
   private certStoreReadable = true;
+  private readonly manualVersions = new Map<string, { fingerprintSha256: string; names: string[]; notAfter: string }>();
+  private manualState: {
+    generation: number;
+    current: ManualTlsEntry[];
+    verified: boolean;
+    lastVerified: { generation: number; entries: ManualTlsEntry[] } | null;
+  } = { generation: 0, current: [], verified: true, lastVerified: null };
+  private readonly manualFailures: ("not_served_reverted" | "start_failed_restored")[] = [];
+  /** Every manual TLS request in order; a putVersion keeps only its id (never the PEM). */
+  public readonly manualTlsCalls: unknown[] = [];
   public acmeEnabled = true;
   /** Test hook awaited inside runSiteJob. */
   public onJob?: (req: SiteJobRequest) => Promise<void>;
@@ -506,6 +548,206 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   ): Promise<BackupsResultByAction[R["action"]]> {
     this.assertEngineAvailable();
     return this.backupState.handle(req);
+  }
+
+  /**
+   * In-memory manual TLS store: same plan function as the real executor over the simulator's ACME certificates
+   * (names = [hostname]) and the hosts of the applied routes, and the "served" certificate is the computed winner.
+   */
+  public async manualTls<R extends ManualTlsIpcRequest>(req: R): Promise<ManualTlsResultByAction[R["action"]]> {
+    this.assertEngineAvailable();
+    const parsed = ManualTlsIpcRequestSchema.safeParse(req);
+    if (!parsed.success) throw new ExecutorCodedError("Invalid manual TLS payload", "VALIDATION_ERROR");
+    const body = parsed.data;
+    this.manualTlsCalls.push(body.action === "putVersion" ? { action: "putVersion", versionId: body.versionId } : body);
+    switch (body.action) {
+      case "putVersion": {
+        const x509 = parseSimulatedLeaf(body.fullchainPem, body.keyPem);
+        const fingerprintSha256 = x509.fingerprint256.replaceAll(":", "").toLowerCase();
+        if (fingerprintSha256 !== body.fingerprintSha256) {
+          throw new ManualTlsStoreError("TLS_MATERIAL_INVALID", "The certificate does not match the announced fingerprint");
+        }
+        const existing = this.manualVersions.get(body.versionId);
+        if (existing) {
+          if (existing.fingerprintSha256 !== fingerprintSha256) {
+            throw new ManualTlsStoreError("TLS_VERSION_CONFLICT", "The version already holds other material");
+          }
+          return { versionId: body.versionId, written: false } as ManualTlsResultByAction[R["action"]];
+        }
+        this.manualVersions.set(body.versionId, {
+          fingerprintSha256,
+          names: simulatedLeafNames(x509),
+          notAfter: x509.validToDate.toISOString(),
+        });
+        return { versionId: body.versionId, written: true } as ManualTlsResultByAction[R["action"]];
+      }
+      case "publish":
+        return this.publishManualTls(body) as ManualTlsResultByAction[R["action"]];
+      case "probe":
+        return { served: this.simulatedServed(body.hostnames) } as ManualTlsResultByAction[R["action"]];
+      case "inventory":
+        return {
+          generation: this.manualState.generation,
+          verified: this.manualState.verified,
+          versions: [...this.manualVersions].sort(([a], [b]) => (a < b ? -1 : 1)).map(([versionId, v]) => ({
+            versionId,
+            fingerprintSha256: v.fingerprintSha256,
+            notAfter: v.notAfter,
+            names: [...v.names],
+          })),
+          entries: this.manualState.current.map((e) => ({ versionId: e.versionId, assignedHosts: [...e.assignedHosts] })),
+          missing: [],
+          acme: [...this.certificates.values()].map((c) => ({
+            id: `sim#${c.hostname}`,
+            resolver: "le",
+            names: [c.hostname.toLowerCase()],
+            notAfter: c.notAfter,
+          })),
+        } as ManualTlsResultByAction[R["action"]];
+      case "gc": {
+        if (body.baseGeneration !== this.manualState.generation) {
+          throw new ManualTlsStoreError("TLS_MANIFEST_CONFLICT", "The manual certificate set changed since it was read");
+        }
+        const keep = new Set(
+          [...this.manualState.current, ...(this.manualState.lastVerified?.entries ?? [])].map((e) => e.versionId),
+        );
+        const removed: string[] = [];
+        if (this.manualState.verified && this.manualState.generation > 0) {
+          for (const id of [...this.manualVersions.keys()].sort()) {
+            if (keep.has(id)) continue;
+            this.manualVersions.delete(id);
+            removed.push(id);
+          }
+        }
+        return { removed } as ManualTlsResultByAction[R["action"]];
+      }
+    }
+  }
+
+  /** The next `times` manual TLS publishes end in this outcome (start_failed_restored needs an ACME eviction). */
+  public failManualTlsPublish(outcome: "not_served_reverted" | "start_failed_restored" = "not_served_reverted", times = 1): void {
+    this.manualFailures.push(...Array.from({ length: times }, () => outcome));
+  }
+
+  private simulatedRoutedHosts(): string[] {
+    const hosts = new Set<string>();
+    if (this.panel) hosts.add(this.panel.hostname.trim().toLowerCase());
+    for (const route of this.appliedRoutes.values()) for (const h of route.hosts) hosts.add(h.hostname.toLowerCase());
+    return [...hosts];
+  }
+
+  private simulatedAcme(): SniCertificate[] {
+    return [...this.certificates.values()].map((c) => ({ id: `sim#${c.hostname}`, source: "acme", names: [c.hostname.toLowerCase()] }));
+  }
+
+  /** Winner of the SNI selection for each host, as a fingerprint (ACME: a stable fake one). */
+  private simulatedServed(hostnames: readonly string[]): { hostname: string; fingerprintSha256: string | null }[] {
+    const certs: SniCertificate[] = [
+      ...this.manualState.current.flatMap((e) => {
+        const v = this.manualVersions.get(e.versionId);
+        return v ? [{ id: e.versionId, source: "manual" as const, names: v.names }] : [];
+      }),
+      ...this.simulatedAcme(),
+    ];
+    return [...new Set(hostnames)].map((hostname) => {
+      const winner = servedCertificate(hostname.toLowerCase(), certs).winner;
+      const fingerprintSha256 = !winner
+        ? null
+        : winner.source === "manual"
+          ? (this.manualVersions.get(winner.id)?.fingerprintSha256 ?? null)
+          : createHash("sha256").update(`sim-acme:${winner.id}`).digest("hex");
+      return { hostname, fingerprintSha256 };
+    });
+  }
+
+  private publishManualTls(
+    body: Extract<ReturnType<typeof ManualTlsIpcRequestSchema.parse>, { action: "publish" }>,
+  ): ManualTlsResultByAction["publish"] {
+    const wanted = normaliseEntries(body.entries);
+    const state = this.manualState;
+    const replay =
+      state.generation === body.baseGeneration + 1 && JSON.stringify(state.current) === JSON.stringify(wanted);
+    if (!replay && state.generation !== body.baseGeneration) {
+      throw new ManualTlsStoreError("TLS_MANIFEST_CONFLICT", "The manual certificate set changed since it was read");
+    }
+    const missing = wanted.map((e) => e.versionId).filter((id) => !this.manualVersions.has(id));
+    if (missing.length > 0) {
+      throw new ManualTlsStoreError("TLS_VERSION_MISSING", "Certificate versions are missing on the executor", missing);
+    }
+    const assigned = new Set(wanted.flatMap((e) => e.assignedHosts));
+    const plan = planManualCertificates({
+      entries: wanted.map((e) => ({ versionId: e.versionId, names: this.manualVersions.get(e.versionId)!.names, assignedHosts: e.assignedHosts })),
+      acme: this.simulatedAcme(),
+      guardHosts: this.simulatedRoutedHosts().filter((h) => !assigned.has(h)),
+    });
+    const refusal = (outcome: ManualTlsResultByAction["publish"]["outcome"]): ManualTlsResultByAction["publish"] => ({
+      generation: state.generation,
+      outcome,
+      served: [],
+      violations: plan.violations.map((v) => ({ ...v, blockerIds: [...v.blockerIds] })),
+      evicted: [],
+      collateralHosts: [],
+    });
+    const hard = plan.violations.filter((v) => v.kind !== "acme_eviction_required");
+    if (hard.length > 0) return refusal(hard.some((v) => v.kind === "manual_overlap") ? "manual_overlap" : "captures_host");
+    const needsEviction = plan.violations.length > 0;
+    if (needsEviction && !body.evictAcme) return refusal("acme_eviction_required");
+
+    const forced = this.manualFailures[0];
+    const evictHosts = plan.violations.map((v) => v.hostname.toLowerCase());
+    const removedAcme = needsEviction
+      ? [...this.certificates.values()].filter((c) => evictHosts.some((h) => traefikNameMatches(h, c.hostname.toLowerCase())))
+      : [];
+    for (const c of removedAcme) this.certificates.delete(c.hostname);
+    const evicted = removedAcme.map((c) => ({ resolver: "le", main: c.hostname }));
+
+    const generation = replay ? state.generation : state.generation + 1;
+    if (!replay) {
+      this.manualState = { generation, current: wanted, verified: false, lastVerified: state.lastVerified };
+    }
+    const revert = (): void => {
+      const last = this.manualState.lastVerified ?? { generation, entries: [] };
+      this.manualState = { generation, current: [...last.entries], verified: true, lastVerified: last };
+    };
+    const done = (outcome: ManualTlsResultByAction["publish"]["outcome"]): ManualTlsResultByAction["publish"] => ({
+      generation,
+      outcome,
+      served: this.simulatedServed(body.expect.map((e) => e.hostname)),
+      violations: [],
+      evicted,
+      collateralHosts: needsEviction ? [...plan.collateralHosts] : [],
+    });
+    if (forced === "start_failed_restored" && needsEviction) {
+      this.manualFailures.shift();
+      for (const c of removedAcme) this.certificates.set(c.hostname, c);
+      revert();
+      return { ...done("start_failed_restored"), evicted: [] };
+    }
+    // A reverted publish puts the removed ACME entries back, like the real adapter's acme.json restore.
+    const restoreAcme = (): void => {
+      for (const c of removedAcme) this.certificates.set(c.hostname, c);
+    };
+    if (forced === "not_served_reverted") {
+      this.manualFailures.shift();
+      const result = { ...done("not_served_reverted"), evicted: [], collateralHosts: [] };
+      restoreAcme();
+      revert();
+      return { ...result, served: result.served.map((s) => ({ ...s, fingerprintSha256: null })) };
+    }
+    const served = this.simulatedServed(body.expect.map((e) => e.hostname));
+    const ok = body.expect.every((e) => {
+      const seen = served.find((s) => s.hostname === e.hostname)?.fingerprintSha256 ?? null;
+      if (seen === null) return false;
+      if (e.fingerprintSha256 !== undefined && seen !== e.fingerprintSha256) return false;
+      return e.notFingerprintSha256 === undefined || seen !== e.notFingerprintSha256;
+    });
+    if (!ok) {
+      restoreAcme();
+      revert();
+      return { ...done("not_served_reverted"), served, evicted: [], collateralHosts: [] };
+    }
+    this.manualState = { generation, current: wanted, verified: true, lastVerified: { generation, entries: wanted } };
+    return done("served");
   }
 
   public async purgeSite(siteId: string): Promise<void> {

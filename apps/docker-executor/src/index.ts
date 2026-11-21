@@ -104,6 +104,7 @@ export {
   buildPanelDynamicYaml,
   buildSiteDynamicTraefikYaml,
   buildTraefikStaticYaml,
+  DEFAULT_MANUAL_CERT_MOUNT_DIR,
   getManagedVolumeName,
   getSiteEdgeNetworkName,
   getSiteInternalNetworkName,
@@ -111,6 +112,9 @@ export {
   siteRouteOptions,
   writeFileAtomically,
   writeFileIfChanged,
+  MANUAL_CERTIFICATES_FILE_NAME,
+  MANUAL_CERTS_DIR_NAME,
+  MANUAL_TLS_STATE_FILE,
   type DockerIngressProxyCreatePayload,
   type IngressProxyContainerConfigInput,
   type PanelDnsLookup,
@@ -147,6 +151,11 @@ export {
   BACKUPS_TEST_TIMEOUT_MS,
   BACKUPS_TIMEOUT_MS,
   ExecutorIpcClientError,
+  MANUAL_TLS_PROBE_TIMEOUT_MS,
+  MANUAL_TLS_PUBLISH_EVICT_TIMEOUT_MS,
+  MANUAL_TLS_PUBLISH_TIMEOUT_MS,
+  MANUAL_TLS_PUT_TIMEOUT_MS,
+  MANUAL_TLS_QUICK_TIMEOUT_MS,
   SFTP_APPLY_TIMEOUT_MS,
   SFTP_STATUS_TIMEOUT_MS,
   SITE_DATABASES_SIGNON_TIMEOUT_MS,
@@ -407,3 +416,38 @@ export {
   renderPhpMyAdminConfig,
   type PhpMyAdminDeps,
 } from "./phpmyadmin-platform.js";
+
+export {
+  MANUAL_TLS_FULLCHAIN_FILE,
+  MANUAL_TLS_KEY_FILE,
+  MANUAL_TLS_MANIFEST_HEADER,
+  ManualTlsStore,
+  ManualTlsStoreError,
+  normaliseEntries,
+  type ManualTlsEntry,
+  type ManualTlsState,
+  type ManualTlsStoreDeps,
+  type ManualTlsStoreErrorReason,
+  type ManualTlsVersionInfo,
+} from "./manual-tls-store.js";
+
+export {
+  PROBE_CONNECT_TIMEOUT_MS,
+  PROBE_DEADLINE_MS,
+  PROBE_INTERVAL_MS,
+  probeServedFingerprint,
+  waitForServed,
+  type ProbeEndpoint,
+  type ServedExpectation,
+  type ServedReport,
+  type WaitForServedOptions,
+} from "./manual-tls-probe.js";
+
+export {
+  AcmeStoreError,
+  evictAcmeEntries,
+  readAcmeStoreEntries,
+  type AcmeEviction,
+  type AcmeStoreEntries,
+  type AcmeStoreEntry,
+} from "./acme-status.js";

@@ -15,6 +15,7 @@ import {
   MailRelayApplyIpcRequestSchema,
   MailRelayStatusIpcRequestSchema,
   MailTestIpcRequestSchema,
+  ManualTlsIpcRequestSchema,
   PanelContainerLogsIpcRequestSchema,
   PanelContainerRestartIpcRequestSchema,
   PanelContainerStatusWireSchema,
@@ -39,6 +40,7 @@ import {
   validateServiceVolumeMount,
   verifyIpcRequest,
   type ErrorCode,
+  type ErrorDetail,
   type ExecutorHealthResponse,
   type IpcVerificationKeyring,
   type RuntimeBackend,
@@ -551,6 +553,13 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (method === "POST" && pathname === "/v1/ingress/manual-tls") {
+        // PEM goes in, fingerprints come out: a failed parse names the field, never the value.
+        const req = this.parseBody(ManualTlsIpcRequestSchema, rawBody, "manual TLS");
+        writeJson(res, 200, { data: await this.executor.manualTls(req) });
+        return;
+      }
+
       if (method === "POST" && pathname === "/v1/backups") {
         const req = this.parseBody(BackupsIpcRequestSchema, rawBody, "backups");
         writeJson(res, 200, { data: await this.executor.backups(req) });
@@ -692,6 +701,7 @@ export class DockerExecutorIpcServer {
       );
     } catch (err) {
       const { statusCode, errorCode, safeMessage } = this.classifyError(err);
+      const details = this.errorDetails(err, safeMessage);
       writeJson(
         res,
         statusCode,
@@ -699,6 +709,7 @@ export class DockerExecutorIpcServer {
           code: errorCode,
           message: safeMessage,
           requestId,
+          ...(details.length > 0 ? { details } : {}),
         }),
       );
     }
@@ -875,6 +886,22 @@ export class DockerExecutorIpcServer {
       };
     }
     return result;
+  }
+
+  /**
+   * The executor-internal condition behind a coded error (the manual TLS store's TLS_* names are not public error
+   * codes): details[0].reason, then one `versionId` detail per missing certificate version.
+   */
+  private errorDetails(err: unknown, message: string): ErrorDetail[] {
+    const reason = (err as { reason?: unknown } | null)?.reason;
+    if (typeof reason !== "string" || !/^TLS_[A-Z_]{1,40}$/.test(reason)) return [];
+    const ids = (err as { versionIds?: unknown }).versionIds;
+    return [
+      { message, reason },
+      ...(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 200) : []).map(
+        (id) => ({ field: "versionId", message: id }),
+      ),
+    ];
   }
 
   private classifyError(err: unknown): {

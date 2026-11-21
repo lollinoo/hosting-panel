@@ -11,8 +11,12 @@ import {
   SECRET_KEY_PATTERN,
   SFTP_IMAGE,
   SHARED_MARIADB_IMAGE,
+  ManualTlsIpcRequestSchema,
   SftpAccessApplyIpcRequestSchema,
   findPlaintextSecretKeys,
+  planManualCertificates,
+  traefikNameMatches,
+  type SniViolation,
   resolveWordpressCliImage,
   resolveWordpressImage,
   MAIL_RELAY_ALIAS,
@@ -27,6 +31,9 @@ import {
   type BackupsIpcRequest,
   type BackupsResultByAction,
   type BackupTarget,
+  type ManualTlsIpcRequest,
+  type ManualTlsIpcRequestParsed,
+  type ManualTlsResultByAction,
   type MailFailureDto,
   type DnsProviderApplyRequest,
   type MailRelayApplyRequest,
@@ -101,7 +108,9 @@ import {
   buildMailRelayContainerPayload,
   buildMailRelaySaslLine,
 } from "./mail-relay.js";
-import { parseAcmeFailures, readAcmeCertificates } from "./acme-status.js";
+import { AcmeStoreError, evictAcmeEntries, parseAcmeFailures, readAcmeCertificates, readAcmeStoreEntries } from "./acme-status.js";
+import { probeServedFingerprint, waitForServed, type ServedExpectation } from "./manual-tls-probe.js";
+import { ManualTlsStore, ManualTlsStoreError, normaliseEntries, type ManualTlsEntry } from "./manual-tls-store.js";
 import {
   DEFAULT_ACME_DNS_SECRET_DIR,
   assertDnsProviderApplyRequest,
@@ -131,6 +140,7 @@ import {
   ExecutorCodedError,
   INGRESS_BRIDGE_NETWORK_NAME,
   INGRESS_PROXY_CONTAINER_NAME,
+  MANUAL_CERTIFICATES_FILE_NAME,
   STATIC_SHA256_LABEL,
   acmeStorageFileName,
   TraefikIngressFileManager,
@@ -1136,6 +1146,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly traefikImage?: string;
   readonly ingressHttpPort?: number;
   readonly ingressHttpsPort?: number;
+  /** Poll timing of the served-fingerprint probe after a manual TLS publish (tests shorten it). */
+  readonly manualTlsProbe?: { readonly deadlineMs?: number; readonly intervalMs?: number };
   /** null/undefined ⇒ panel ingress disabled. */
   readonly panel?: PanelIngressConfig | null;
   readonly requestTimeoutMs?: number;
@@ -1176,6 +1188,12 @@ export interface DockerEngineSocketAdapterOptions {
   readonly panelDumpDir?: string;
   readonly backupNetworkName?: string;
   readonly sharedDbNetworkName?: string;
+  /**
+   * TEST SEAM: the ingress proxy container and its network are hp_ingress_proxy / hp_ingress_net. A test that runs
+   * next to a live proxy sets other names; the default payloads are byte-identical. Never set in production.
+   */
+  readonly ingressProxyContainerName?: string;
+  readonly ingressNetworkName?: string;
   /** Shorter terminal limits (tests and the real-Docker script). */
   readonly terminalLimits?: Partial<TerminalLimits>;
   /** Turns a request's site-type key into its definition (default: the executor's registry). */
@@ -1199,6 +1217,18 @@ interface DockerContainerListSummary {
   readonly Labels?: Readonly<Record<string, string>>;
 }
 
+type ManualTlsPublishRequest = Extract<ManualTlsIpcRequestParsed, { action: "publish" }>;
+interface ManualColdInput {
+  req: ManualTlsPublishRequest;
+  wanted: ManualTlsEntry[];
+  entries: { versionId: string; names: string[]; assignedHosts: readonly string[] }[];
+  guardHosts: string[];
+  evictionHosts: string[];
+}
+
+const ACME_PLAN_READ_RETRIES = 3;
+const ACME_PLAN_READ_RETRY_MS = 50;
+
 export class DockerEngineSocketAdapter implements DockerExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly dockerClient: DockerSocketHttpClient;
@@ -1212,6 +1242,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly pullMissingImages: boolean;
   private readonly expectedMetadata = new Map<string, ExpectedManagedServiceMetadata>();
   private ingressEnsureInFlight: Promise<IngressEnsureResult> | null = null;
+  private readonly manualTlsStore: ManualTlsStore;
+  /** Manual publishes run strictly one after the other (the cold path stops the proxy). */
+  private manualTlsQueue: Promise<unknown> = Promise.resolve();
+  private manualTlsRecovered = false;
+  private manualPublishesInFlight = 0;
+  private readonly manualTlsProbe: { readonly deadlineMs?: number; readonly intervalMs?: number };
   private readonly sharedDbDataDir: string;
   private readonly sharedDbRootKeyFile: string;
   private readonly sharedDbAdminSubnet: string;
@@ -1255,8 +1291,14 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly execTarget: DockerExecTarget;
   private readonly terminals: TerminalSessions;
   private readonly resolveSiteType: (key: SiteTypeKey) => ExecutorSiteType;
+  private readonly ingressProxyContainerName: string;
+  private readonly ingressNetworkName: string;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
+    this.ingressProxyContainerName = options?.ingressProxyContainerName ?? INGRESS_PROXY_CONTAINER_NAME;
+    this.ingressNetworkName = options?.ingressNetworkName ?? INGRESS_BRIDGE_NETWORK_NAME;
+    assertSafeIdentifier(this.ingressProxyContainerName, "ingressProxyContainerName");
+    assertSafeIdentifier(this.ingressNetworkName, "ingressNetworkName");
     this.terminals = new TerminalSessions(options?.terminalLimits);
     this.resolveSiteType = options?.resolveSiteType ?? resolveExecutorSiteType;
     this.dockerClient = new DockerSocketHttpClient({
@@ -1270,9 +1312,23 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       options?.ingressRootDir ?? DEFAULT_INGRESS_ROOT_DIR,
       options?.panel ?? null,
     );
+    this.manualTlsStore = new ManualTlsStore({
+      dir: this.ingressManager.manualCertsDirPath,
+      statePath: this.ingressManager.manualTlsStatePath,
+      // The manager's value is the manual-certs directory as the proxy sees it; the store wants its parent (dynamic/).
+      mountDir: path.posix.dirname(this.ingressManager.manualCertMountDir),
+      writeManifest: (content) => this.ingressManager.writeManualCertificateManifest(content),
+      readManifest: () =>
+        readFile(path.join(this.ingressManager.dynamicDirPath, MANUAL_CERTIFICATES_FILE_NAME), "utf8").catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+          throw error;
+        }),
+      ...(options?.executorUid !== undefined ? { uid: options.executorUid } : {}),
+    });
     this.traefikImage = options?.traefikImage ?? DEFAULT_TRAEFIK_IMAGE;
     this.ingressHttpPort = options?.ingressHttpPort ?? DEFAULT_INGRESS_HTTP_PORT;
     this.ingressHttpsPort = options?.ingressHttpsPort;
+    this.manualTlsProbe = options?.manualTlsProbe ?? {};
     this.panel = options?.panel ?? null;
     this.pullMissingImages = options?.pullMissingImages ?? true;
     this.sharedDbContainerName = options?.sharedDbContainerName ?? SHARED_DB_CONTAINER_NAME;
@@ -1393,8 +1449,9 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     await this.panelRestarts.get("ingress_proxy");
     const { staticConfigPath, dynamicDirPath, acmeDirPath, staticSha256, acmeDns } =
       await this.ingressManager.ensureStaticConfig(this.panel);
+    await this.recoverManualTlsOnce();
 
-    await this.ensureNetwork(INGRESS_BRIDGE_NETWORK_NAME, {
+    await this.ensureNetwork(this.ingressNetworkName, {
       internal: false,
       labels: {
         [MANAGED_DOCKER_LABELS.managed]: "true",
@@ -1404,8 +1461,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
     await this.ensureImageAvailable(this.traefikImage);
 
-    const existing = await this.inspectContainerByNameOrId(INGRESS_PROXY_CONTAINER_NAME);
-    const payload = buildIngressProxyContainerPayload({
+    const existing = await this.inspectContainerByNameOrId(this.ingressProxyContainerName);
+    const built = buildIngressProxyContainerPayload({
       traefikImage: this.traefikImage,
       httpHostPort: this.ingressHttpPort,
       ...(this.ingressHttpsPort !== undefined ? { httpsHostPort: this.ingressHttpsPort } : {}),
@@ -1421,11 +1478,20 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         ? { user: `${String(process.getuid())}:${String(process.getgid())}` }
         : {}),
     });
+    // Only the test seam renames the network; the default payload is the builder's, untouched.
+    const payload =
+      this.ingressNetworkName === INGRESS_BRIDGE_NETWORK_NAME
+        ? built
+        : ({
+            ...built,
+            HostConfig: { ...built.HostConfig, NetworkMode: this.ingressNetworkName },
+            NetworkingConfig: { EndpointsConfig: { [this.ingressNetworkName]: { GwPriority: 1 } } },
+          } as unknown as typeof built);
 
     const createIngressProxy = async (): Promise<string> => {
       const createRes = await this.dockerClient.request(
         "POST",
-        `/containers/create?name=${encodeURIComponent(INGRESS_PROXY_CONTAINER_NAME)}`,
+        `/containers/create?name=${encodeURIComponent(this.ingressProxyContainerName)}`,
         payload,
         { apiPrefix: INGRESS_PROXY_DOCKER_API_PREFIX },
       );
@@ -1467,7 +1533,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         sortedJson(Object.entries(existing.HostConfig?.LogConfig?.Config ?? {}).map(String)) !==
           sortedJson(Object.entries(payload.HostConfig.LogConfig.Config).map(String)) ||
         (
-          existing.NetworkSettings?.Networks?.[INGRESS_BRIDGE_NETWORK_NAME] as
+          existing.NetworkSettings?.Networks?.[this.ingressNetworkName] as
             | { readonly GwPriority?: number }
             | undefined
         )?.GwPriority !== 1 ||
@@ -1580,15 +1646,15 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       await this.ingressManager.setDnsProviderState(dnsProviderState(req));
       // Without a panel there is no le-dns: the state waits on disk for the proxy a site deploy creates.
       if (this.panel === null) return;
-      const before = (await this.inspectContainerByNameOrId(INGRESS_PROXY_CONTAINER_NAME))?.Id;
+      const before = (await this.inspectContainerByNameOrId(this.ingressProxyContainerName))?.Id;
       await this.ensureIngressProxyAfterStateChange();
-      const after = (await this.inspectContainerByNameOrId(INGRESS_PROXY_CONTAINER_NAME))?.Id;
+      const after = (await this.inspectContainerByNameOrId(this.ingressProxyContainerName))?.Id;
       // lego caches its client: a rotated credential needs a restart unless the proxy was recreated.
       // Without HP_ACME_EMAIL there is no le-dns and the proxy does not mount the files.
       if (credsChanged && this.panel?.acmeEmail && before && after === before) {
         await restartContainerByName(
           this.execTarget,
-          INGRESS_PROXY_CONTAINER_NAME,
+          this.ingressProxyContainerName,
           PANEL_RESTART_STOP_SECONDS.ingress_proxy,
         );
       }
@@ -2117,7 +2183,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     if (hosts.length > 0) {
       await this.ensureIngressProxy();
       const edgeNetworkName = getSiteEdgeNetworkName(spec.siteId);
-      await this.connectContainerToNetwork(edgeNetworkName, INGRESS_PROXY_CONTAINER_NAME);
+      await this.connectContainerToNetwork(edgeNetworkName, this.ingressProxyContainerName);
 
       const effectiveInternalPort =
         spec.internalPort ?? spec.portBindings[0]?.containerPort ?? 80;
@@ -2138,7 +2204,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         const edgeNetworkName = getSiteEdgeNetworkName(routeRemoval.siteId);
         await this.disconnectContainerFromNetwork(
           edgeNetworkName,
-          INGRESS_PROXY_CONTAINER_NAME,
+          this.ingressProxyContainerName,
         ).catch(() => undefined);
       }
     }
@@ -2335,6 +2401,347 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     req: R,
   ): Promise<BackupsResultByAction[R["action"]]> {
     return this.backupRunner.run(req);
+  }
+
+  // -- manual TLS (HCP-SPEC-004, arch-tls-ingress D7-D9) -------------------------------------------------------------
+
+  /**
+   * Once per process, before the proxy is ensured: re-render the manifest from the persisted state (a crash between
+   * state and manifest), then a best-effort GC. A failure here never blocks the proxy (it would block every site).
+   */
+  private async recoverManualTlsOnce(): Promise<void> {
+    if (this.manualTlsRecovered) return;
+    // A publish of this process may be probing: reverting its manifest now would fail it spuriously. Retried later.
+    if (this.manualPublishesInFlight > 0) return;
+    try {
+      const recovered = await this.manualTlsStore.recoverAtStart();
+      this.manualTlsRecovered = true;
+      await this.manualTlsStore.gc(recovered.generation).catch(() => undefined);
+    } catch {
+      // Retried at the next ensure; Traefik keeps whatever manifest is on disk.
+    }
+  }
+
+  public async manualTls<R extends ManualTlsIpcRequest>(req: R): Promise<ManualTlsResultByAction[R["action"]]> {
+    const parsed = ManualTlsIpcRequestSchema.safeParse(req);
+    if (!parsed.success) throw new ExecutorCodedError("Invalid manual TLS payload", "VALIDATION_ERROR");
+    const body = parsed.data;
+    const store = this.manualTlsStore;
+    let result: unknown;
+    switch (body.action) {
+      case "putVersion":
+        result = await store.putVersion({
+          versionId: body.versionId,
+          fullchainPem: body.fullchainPem,
+          keyPem: body.keyPem,
+          fingerprintSha256: body.fingerprintSha256,
+        });
+        break;
+      case "publish": {
+        this.manualPublishesInFlight += 1;
+        const run = this.manualTlsQueue.then(() => this.publishManualTls(body));
+        this.manualTlsQueue = run.catch(() => undefined);
+        try {
+          result = await run;
+        } finally {
+          this.manualPublishesInFlight -= 1;
+        }
+        break;
+      }
+      case "probe":
+        result = { served: await this.probeManualHosts(body.hostnames) };
+        break;
+      case "inventory": {
+        const inventory = await store.inventory();
+        const acme = await readAcmeStoreEntries(this.acmeStorePath());
+        result = {
+          generation: inventory.generation,
+          verified: inventory.verified,
+          versions: inventory.versions.map((v) => ({ ...v, names: [...v.names] })),
+          entries: inventory.entries.map((e) => ({ versionId: e.versionId, assignedHosts: [...e.assignedHosts] })),
+          missing: inventory.missing,
+          acme: acme.entries.map((e) => ({ id: e.id, resolver: e.resolver, names: [...e.names], notAfter: e.notAfter })),
+        };
+        break;
+      }
+      case "gc":
+        result = await store.gc(body.baseGeneration);
+        break;
+    }
+    return result as ManualTlsResultByAction[R["action"]];
+  }
+
+  private acmeStorePath(): string {
+    return path.join(this.ingressManager.acmeDirPath, acmeStorageFileName(this.panel));
+  }
+
+  /** 127.0.0.1:<https port> first; the proxy's hp_ingress_net address (container port 443) when that refuses. */
+  private async manualTlsProbeEndpoint(): Promise<{
+    host: string;
+    port: number;
+    fallback?: { host: string; port: number };
+  }> {
+    const proxy = await this.inspectContainerByNameOrId(this.ingressProxyContainerName).catch(() => null);
+    const ip = (proxy?.NetworkSettings?.Networks?.[this.ingressNetworkName] as { IPAddress?: string } | undefined)
+      ?.IPAddress;
+    return {
+      host: "127.0.0.1",
+      port: this.ingressHttpsPort ?? DEFAULT_INGRESS_HTTPS_PORT,
+      ...(ip ? { fallback: { host: ip, port: DEFAULT_INGRESS_HTTPS_PORT } } : {}),
+    };
+  }
+
+  private async probeManualHosts(hostnames: readonly string[]): Promise<{ hostname: string; fingerprintSha256: string | null }[]> {
+    const endpoint = await this.manualTlsProbeEndpoint();
+    const one = async (hostname: string): Promise<string | null> => {
+      try {
+        return await probeServedFingerprint(endpoint.host, endpoint.port, hostname);
+      } catch (error) {
+        if (endpoint.fallback && (error as NodeJS.ErrnoException).code === "ECONNREFUSED") {
+          return probeServedFingerprint(endpoint.fallback.host, endpoint.fallback.port, hostname).catch(() => null);
+        }
+        return null;
+      }
+    };
+    const unique = [...new Set(hostnames)];
+    return Promise.all(unique.map(async (hostname) => ({ hostname, fingerprintSha256: await one(hostname) })));
+  }
+
+  /** What the plan needs: the ACME store as SNI candidates (a store that exists but cannot be read stops everything). */
+  private async readAcmeForPlan(needed: boolean): Promise<Awaited<ReturnType<typeof readAcmeStoreEntries>>> {
+    const storePath = this.acmeStorePath();
+    // Traefik rewrites the file in place: a parse failure is retried a few times before it stops the publish.
+    for (let attempt = 0; ; attempt += 1) {
+      const size = await stat(storePath).then((info) => info.size, () => null);
+      if (size === 0) return { readable: true, entries: [] }; // ensureStaticConfig's empty file: no certificates yet
+      const acme = await readAcmeStoreEntries(storePath);
+      if (acme.readable || !needed || size === null) return acme;
+      if (attempt >= ACME_PLAN_READ_RETRIES) {
+        throw new ExecutorCodedError("The ACME certificate store cannot be read; refusing to decide which certificate is served", "CERTIFICATE_APPLY_FAILED");
+      }
+      await new Promise((resolve) => setTimeout(resolve, ACME_PLAN_READ_RETRY_MS));
+    }
+  }
+
+  private async publishManualTls(
+    req: ManualTlsPublishRequest,
+  ): Promise<ManualTlsResultByAction["publish"]> {
+    const store = this.manualTlsStore;
+    const wanted = normaliseEntries(req.entries);
+    const state = await store.readState();
+    const generation = state?.generation ?? 0;
+    const replay =
+      state !== null && generation === req.baseGeneration + 1 && JSON.stringify(state.current.entries) === JSON.stringify(wanted);
+    if (!replay && generation !== req.baseGeneration) {
+      throw new ManualTlsStoreError("TLS_MANIFEST_CONFLICT", "The manual certificate set changed since it was read");
+    }
+
+    const inventory = await store.inventory();
+    const names = new Map(inventory.versions.map((v) => [v.versionId, v.names] as const));
+    const missing = wanted.map((e) => e.versionId).filter((id) => !names.has(id));
+    if (missing.length > 0) {
+      throw new ManualTlsStoreError("TLS_VERSION_MISSING", "Certificate versions are missing on the executor", missing);
+    }
+    const assigned = new Set(wanted.flatMap((e) => e.assignedHosts));
+    const entries = wanted.map((e) => ({ versionId: e.versionId, names: names.get(e.versionId)!, assignedHosts: e.assignedHosts }));
+    const routed = await this.ingressManager.listRoutedHostnames();
+    const guardHosts = routed.filter((h) => !assigned.has(h));
+
+    const acme = await this.readAcmeForPlan(wanted.length > 0);
+    const sni = acme.entries.map((e) => ({ id: e.id, source: "acme" as const, names: e.names }));
+    const plan = planManualCertificates({ entries, acme: sni, guardHosts });
+    const refusal = (violations: readonly SniViolation[], outcome: ManualTlsResultByAction["publish"]["outcome"]) => ({
+      generation,
+      outcome,
+      served: [],
+      violations: violations.map((v) => ({ ...v, blockerIds: [...v.blockerIds] })),
+      evicted: [],
+      collateralHosts: [],
+    });
+    const hard = plan.violations.filter((v) => v.kind !== "acme_eviction_required");
+    if (hard.length > 0) return refusal(plan.violations, hard.some((v) => v.kind === "manual_overlap") ? "manual_overlap" : "captures_host");
+    const evictionHosts = plan.violations.map((v) => v.hostname);
+    if (evictionHosts.length > 0 && !req.evictAcme) return refusal(plan.violations, "acme_eviction_required");
+
+    const expectations: ServedExpectation[] = req.expect.flatMap((e) => [
+      ...(e.fingerprintSha256 !== undefined ? [{ hostname: e.hostname, fingerprintSha256: e.fingerprintSha256 }] : []),
+      ...(e.notFingerprintSha256 !== undefined ? [{ hostname: e.hostname, notFingerprintSha256: e.notFingerprintSha256 }] : []),
+    ]);
+
+    if (evictionHosts.length === 0) {
+      const { generation: published } = await store.publishFiles(req.baseGeneration, wanted);
+      return this.verifyManualPublish(published, req.expect.map((e) => e.hostname), expectations, [], []);
+    }
+    return this.publishManualColdPath({ req, wanted, entries, guardHosts, evictionHosts });
+  }
+
+  /** Probe, then verified (served) or reverted (not_served_reverted). The served list is what the probe observed. */
+  private async verifyManualPublish(
+    generation: number,
+    hostnames: readonly string[],
+    expectations: readonly ServedExpectation[],
+    evicted: ManualTlsResultByAction["publish"]["evicted"],
+    collateralHosts: readonly string[],
+  ): Promise<ManualTlsResultByAction["publish"]> {
+    const store = this.manualTlsStore;
+    const endpoint = await this.manualTlsProbeEndpoint();
+    const report = expectations.length === 0 ? { served: true, observed: {} as Record<string, string | null> } : await waitForServed(expectations, { ...endpoint, ...this.manualTlsProbe });
+    const served = [...new Set(hostnames)].map((hostname) => ({ hostname, fingerprintSha256: report.observed[hostname] ?? null }));
+    if (report.served) await store.markVerified(generation);
+    else await store.revertToLastVerified();
+    return {
+      generation,
+      outcome: report.served ? "served" : "not_served_reverted",
+      served,
+      violations: [],
+      evicted: [...evicted],
+      collateralHosts: [...collateralHosts],
+    };
+  }
+
+  /**
+   * Administrator-confirmed cold path (D8): stop hp_ingress_proxy (t=5), evict from acme.json with a backup, publish
+   * the files, start; a failed start restores the backup. Serialised with ensureIngressProxy and panel restarts.
+   */
+  private async publishManualColdPath(input: ManualColdInput): Promise<ManualTlsResultByAction["publish"]> {
+    while (this.ingressEnsureInFlight) await this.ingressEnsureInFlight.catch(() => undefined);
+    if (this.panelRestarts.has("ingress_proxy")) {
+      throw new ExecutorCodedError("The ingress proxy is busy; try again shortly", "RESOURCE_LOCKED");
+    }
+    const run = this.coldManualPublish(input);
+    this.panelRestarts.set("ingress_proxy", run.then(() => undefined, () => undefined));
+    try {
+      return await run;
+    } finally {
+      this.panelRestarts.delete("ingress_proxy");
+    }
+  }
+
+  private async setProxyRunning(running: boolean): Promise<void> {
+    const res = await this.dockerClient.request(
+      "POST",
+      running
+        ? `/containers/${this.ingressProxyContainerName}/start`
+        : `/containers/${this.ingressProxyContainerName}/stop?t=${String(PANEL_RESTART_STOP_SECONDS.ingress_proxy)}`,
+    );
+    if (res.statusCode !== 204 && res.statusCode !== 304) {
+      throw new ExecutorCodedError(
+        `The Docker Engine did not ${running ? "start" : "stop"} the ingress proxy (HTTP ${String(res.statusCode)})`,
+        "DOCKER_ENGINE_UNAVAILABLE",
+      );
+    }
+  }
+
+  private async coldManualPublish(input: ManualColdInput): Promise<ManualTlsResultByAction["publish"]> {
+    const { req, wanted, entries } = input;
+    const store = this.manualTlsStore;
+    const storePath = this.acmeStorePath();
+    if ((await this.inspectContainerByNameOrId(this.ingressProxyContainerName)) === null) {
+      throw new ExecutorCodedError("The ingress proxy does not exist", "CERTIFICATE_APPLY_FAILED");
+    }
+    const expectations: ServedExpectation[] = req.expect.flatMap((e) => [
+      ...(e.fingerprintSha256 !== undefined ? [{ hostname: e.hostname, fingerprintSha256: e.fingerprintSha256 }] : []),
+      ...(e.notFingerprintSha256 !== undefined ? [{ hostname: e.hostname, notFingerprintSha256: e.notFingerprintSha256 }] : []),
+    ]);
+    const hostnames = req.expect.map((e) => e.hostname);
+
+    let backupPath: string | null = null;
+    let evicted: ManualTlsResultByAction["publish"]["evicted"];
+    let collateral: string[];
+    let generation: number;
+    try {
+      // Inside the try: a stop that errors after Docker stopped the container still ends with a start below.
+      await this.setProxyRunning(false);
+      // The store is stable now (Traefik rewrites it in place): plan again on exactly what will remain.
+      const acme = await readAcmeStoreEntries(storePath);
+      const hosts = input.evictionHosts.map((h) => h.toLowerCase());
+      const dropped = acme.entries.filter((e) => e.names.some((name) => hosts.some((h) => traefikNameMatches(h, name))));
+      const droppedIds = new Set(dropped.map((e) => e.id));
+      const assigned = new Set(wanted.flatMap((e) => e.assignedHosts));
+      collateral = [
+        ...new Set(dropped.flatMap((e) => e.names).map((n) => n.toLowerCase()).filter((n) => !n.startsWith("*") && !assigned.has(n))),
+      ].sort();
+      const replan = planManualCertificates({
+        entries,
+        acme: acme.entries.filter((e) => !droppedIds.has(e.id)).map((e) => ({ id: e.id, source: "acme" as const, names: e.names })),
+        guardHosts: [...new Set([...input.guardHosts, ...collateral])],
+      });
+      if (replan.violations.length > 0) {
+        await this.setProxyRunning(true);
+        return {
+          generation: (await store.readState())?.generation ?? 0,
+          outcome: replan.violations.some((v) => v.kind === "manual_overlap") ? "manual_overlap" : "captures_host",
+          served: [],
+          violations: replan.violations.map((v) => ({ ...v, blockerIds: [...v.blockerIds] })),
+          evicted: [],
+          collateralHosts: [],
+        };
+      }
+      const eviction = await evictAcmeEntries(storePath, hosts, new Date());
+      backupPath = eviction.backupPath;
+      evicted = eviction.evicted.map((e) => ({ resolver: e.resolver, main: e.main }));
+      generation = (await store.publishFiles(req.baseGeneration, wanted)).generation;
+    } catch (error) {
+      // Nothing was served from the changed store yet: put the backup back and bring the proxy up again.
+      const restored = backupPath ? await this.restoreAcmeBackup(backupPath, storePath).then(() => true, () => false) : true;
+      await this.setProxyRunning(true); // a proxy that stays down is an error, never swallowed
+      if (!restored) {
+        throw new ExecutorCodedError("The ACME certificate store could not be restored after a failed apply", "CERTIFICATE_APPLY_FAILED");
+      }
+      if (error instanceof AcmeStoreError) {
+        throw new ExecutorCodedError("The ACME certificate store cannot be edited safely", "CERTIFICATE_APPLY_FAILED");
+      }
+      throw error;
+    }
+
+    try {
+      await this.setProxyRunning(true);
+    } catch {
+      // The proxy did not come back with the new store: old store, old certificates, start again (D8).
+      await store.revertToLastVerified().catch(() => undefined);
+      if (backupPath) await this.restoreAcmeAndStart(backupPath, storePath);
+      else await this.setProxyRunning(true);
+      return { generation, outcome: "start_failed_restored", served: [], violations: [], evicted: [], collateralHosts: [] };
+    }
+    const result = await this.verifyManualPublish(generation, hostnames, expectations, evicted, collateral);
+    if (result.outcome === "not_served_reverted" && backupPath) {
+      // The manifest is back; the ACME entries must come back too, or those hosts are re-ordered from Let's Encrypt.
+      try {
+        await this.setProxyRunning(false);
+      } finally {
+        await this.restoreAcmeAndStart(backupPath, storePath);
+      }
+      // acme.json is back as it was: nothing was evicted, nobody lost a certificate.
+      return { ...result, evicted: [], collateralHosts: [] };
+    }
+    return result;
+  }
+
+  /** Puts acme.json back, then always attempts the proxy start; a failure of either is reported (both when both). */
+  private async restoreAcmeAndStart(backupPath: string, storePath: string): Promise<void> {
+    let restoreFailed = false;
+    let startError: unknown;
+    try {
+      await this.restoreAcmeBackup(backupPath, storePath);
+    } catch {
+      restoreFailed = true;
+    }
+    try {
+      await this.setProxyRunning(true);
+    } catch (error) {
+      startError = error;
+    }
+    if (restoreFailed) {
+      throw new ExecutorCodedError(
+        `The ACME certificate store could not be restored after a failed apply${startError ? " and the ingress proxy did not start" : ""}`,
+        "CERTIFICATE_APPLY_FAILED",
+      );
+    }
+    if (startError) throw startError;
+  }
+
+  private async restoreAcmeBackup(backupPath: string, storePath: string): Promise<void> {
+    await writeFileAtomically(storePath, await readFile(backupPath), 0o600);
   }
 
   /** Fetches the newest panel copy into `panelDumpDir` (used by the panel-fetch CLI). */
@@ -2655,7 +3062,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
 
     const internalNet = getSiteInternalNetworkName(siteId);
     const edgeNet = getSiteEdgeNetworkName(siteId);
-    await this.disconnectContainerFromNetwork(edgeNet, INGRESS_PROXY_CONTAINER_NAME);
+    await this.disconnectContainerFromNetwork(edgeNet, this.ingressProxyContainerName);
     await this.disconnectContainerFromNetwork(internalNet, SHARED_DB_CONTAINER_NAME);
     await this.disconnectContainerFromNetwork(internalNet, MAIL_RELAY_CONTAINER_NAME);
     for (const net of [edgeNet, internalNet]) {
@@ -2725,7 +3132,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       await this.ensureIngressProxy();
       await this.connectContainerToNetwork(
         getSiteEdgeNetworkName(req.siteId),
-        INGRESS_PROXY_CONTAINER_NAME,
+        this.ingressProxyContainerName,
       );
       await this.ingressManager.upsertServiceRoute(req.siteId, {
         serviceInstanceId: req.serviceInstanceId,
@@ -2739,7 +3146,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     if (removal.siteId && removal.remainingSiteRoutes === 0) {
       await this.disconnectContainerFromNetwork(
         getSiteEdgeNetworkName(removal.siteId),
-        INGRESS_PROXY_CONTAINER_NAME,
+        this.ingressProxyContainerName,
       ).catch(() => undefined);
     }
   }
@@ -2756,7 +3163,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     const sinceMs = Date.parse(req.failuresSince);
     const res = await this.dockerClient.request(
       "GET",
-      `/containers/${INGRESS_PROXY_CONTAINER_NAME}/logs?stdout=1&stderr=1&since=${String(Math.floor(sinceMs / 1000))}&tail=2000`,
+      `/containers/${this.ingressProxyContainerName}/logs?stdout=1&stderr=1&since=${String(Math.floor(sinceMs / 1000))}&tail=2000`,
     );
     if (res.statusCode !== 200 && res.statusCode !== 404) {
       throw new ExecutorCodedError(
@@ -2959,7 +3366,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   /** The closed map from panel component to container name. */
   private panelContainerName(component: PanelContainer): string {
     return {
-      ingress_proxy: INGRESS_PROXY_CONTAINER_NAME,
+      ingress_proxy: this.ingressProxyContainerName,
       shared_database: SHARED_DB_CONTAINER_NAME,
       phpmyadmin: this.phpMyAdminContainerName,
       sftp: this.sftpContainerName,
@@ -3049,7 +3456,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       const edgeNetworkName = getSiteEdgeNetworkName(routeRemoval.siteId);
       await this.disconnectContainerFromNetwork(
         edgeNetworkName,
-        INGRESS_PROXY_CONTAINER_NAME,
+        this.ingressProxyContainerName,
       ).catch(() => undefined);
     }
 
@@ -3212,7 +3619,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   private reconnectProxyToSiteEdgeNetworks(): Promise<void> {
-    return this.reconnectToRoleNetworks("site_edge", INGRESS_PROXY_CONTAINER_NAME);
+    return this.reconnectToRoleNetworks("site_edge", this.ingressProxyContainerName);
   }
 
   private async reconnectToRoleNetworks(
