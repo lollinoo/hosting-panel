@@ -2481,8 +2481,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
     post:
       tags: [TLS Certificates]
@@ -2520,8 +2524,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2555,8 +2563,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
     delete:
       tags: [TLS Certificates]
@@ -2575,8 +2587,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2613,8 +2629,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2672,8 +2692,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site; the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2714,8 +2738,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (needed only when the request sets or changes `tlsVersionId`); the organization's other sites a change reaches need it too (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2747,8 +2775,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
     post:
       tags: [TLS Certificates]
@@ -2785,8 +2817,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2819,8 +2855,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
     delete:
       tags: [TLS Certificates]
@@ -2838,8 +2878,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2875,8 +2919,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2932,8 +2980,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -2973,8 +3025,12 @@ paths:
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
+          description: >-
+            Missing `site.certificates.manage` on this site (needed only when the request sets or changes `tlsVersionId`) (`PERMISSION_DENIED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Site, certificate, version or domain not found, or it belongs to another organization (`NOT_FOUND`); this is checked before `site.certificates.manage`
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
@@ -3047,7 +3103,7 @@ paths:
   /v1/admin/tls-certificates/{certificateId}:
     delete:
       tags: [TLS Certificates]
-      operationId: adminDeleteTlsCertificate
+      operationId: adminDeleteAnyTlsCertificate
       summary: Delete an imported certificate of any organization (server administrator only)
       parameters:
         - $ref: "#/components/parameters/CertificateIdParam"
@@ -6618,7 +6674,11 @@ paths:
                       operation:
                         type: string
         "400":
-          description: Backup target not configured (`VALIDATION_ERROR`, message `not_configured`) or missing/invalid `Idempotency-Key`
+          description: >-
+            Backup target not configured (`VALIDATION_ERROR`, message `not_configured`), missing/invalid
+            `Idempotency-Key`, a malformed `recipient` (`VALIDATION_ERROR`, `details[].field: recipient`,
+            message `invalid_recipient`), or `zip.age` without a recipient / `zip` with one
+            (message `recipient_format_mismatch`). The recipient is never echoed
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
@@ -6637,7 +6697,10 @@ paths:
             `Retry-After` header)
           $ref: "#/components/responses/QuotaConflictErrorResponse"
         "422":
-          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          description: >-
+            Backups runtime unavailable on the active backend (`NOT_SUPPORTED`), or `format: zip.age`
+            while `encryptedBackupExportAvailable` is false (`NOT_SUPPORTED`, message `Encrypted backup
+            export is not available.`; nothing is queued and nothing is audited)
           $ref: "#/components/responses/ErrorResponse"
     get:
       tags: [Managed Sites]
@@ -7435,6 +7498,15 @@ components:
           type: string
         reason:
           type: string
+          description: >-
+            A stable machine reason. For `CERTIFICATE_*` errors (the PEM and the field in `field`, never the
+            material) it is one of: nul_byte, not_pem, wrong_block_type, multiple_blocks, too_many_intermediates,
+            encrypted_key, format_unsupported, parse_failed, key_parse_failed, key_algorithm, key_mismatch,
+            leaf_is_ca, eku_not_server_auth, not_yet_valid, expired, expires_within_24h, no_dns_san, too_many_sans,
+            unsupported_wildcard, san_invalid, cn_not_in_san, ip_san_unsupported, untrusted_or_incomplete,
+            chain_expired, bad_signature, verify_timeout, chain_invalid, not_covered, domain_not_active,
+            duplicate_certificate, manual_overlap, captures_host, acme_certificate_conflict, not_served,
+            proxy_start_restored
 
     AdminUserDto:
       type: object
@@ -8383,6 +8455,7 @@ components:
           description: Whether the imported certificate is being put in place, is served, or could not be applied; null in `acme` mode
         problem:
           type: string
+          enum: [apply_failed, sni_mismatch, interrupted, acme_eviction_required, manual_overlap, captures_host]
           nullable: true
           description: >-
             The `last_error_code` of the assigned version, in any state (for example an `active` domain can show
@@ -8402,15 +8475,18 @@ components:
           type: string
           enum: [pem]
         leafPem:
+          writeOnly: true
           type: string
           maxLength: 524288
           description: Exactly one `CERTIFICATE` block
         chainPem:
+          writeOnly: true
           type: string
           maxLength: 524288
           default: ""
           description: Up to 20 intermediate `CERTIFICATE` blocks; may be empty when the leaf chains to a trusted root directly
         privateKeyPem:
+          writeOnly: true
           type: string
           maxLength: 524288
           description: One unencrypted `PRIVATE KEY`, `RSA PRIVATE KEY` or `EC PRIVATE KEY` block. Never returned by any route
@@ -8427,13 +8503,16 @@ components:
           type: string
           enum: [pem]
         leafPem:
+          writeOnly: true
           type: string
           maxLength: 524288
         chainPem:
+          writeOnly: true
           type: string
           maxLength: 524288
           default: ""
         privateKeyPem:
+          writeOnly: true
           type: string
           maxLength: 524288
 
@@ -8580,8 +8659,14 @@ components:
           nullable: true
         problem:
           type: string
+          enum: [apply_failed, sni_mismatch, interrupted, acme_eviction_required, manual_overlap, captures_host]
           nullable: true
-          description: The last apply problem recorded on this version (`apply_failed`, `sni_mismatch`, ...)
+          description: >-
+            The last apply problem recorded on this version: `apply_failed` (the proxy did not serve it),
+            `sni_mismatch` (it serves another certificate for the name), `interrupted` (the apply did not finish),
+            `acme_eviction_required` (a Let's Encrypt entry ties with the imported certificate; an administrator can
+            confirm `evictAcme`), `manual_overlap` (another imported certificate ties), `captures_host` (a wildcard
+            would capture a name of another tenant)
 
     TlsCertificateDto:
       type: object
@@ -8896,6 +8981,11 @@ components:
         - panel_dump_failed
         - panel_dump_tool_missing
         - site_not_started
+        - invalid_recipient
+        - local_target_unmounted
+        - local_target_readonly
+        - local_target_unsafe
+        - backup_copy_missing
 
     BackupSettingsInput:
       type: object
@@ -9359,7 +9449,11 @@ components:
           type: array
           maxItems: 2
           uniqueItems: true
-          description: Enabled, not archived destinations; the order is the priority
+          description: >-
+            Enabled, not archived destinations; the order is the priority. With two, every backup
+            is written to both, one after the other (priority 1 first), and its status is the
+            aggregate: `succeeded` when both copies succeed, `partial` when one fails, `failed` when
+            both fail. A `pre_update` backup counts as done only when every required copy succeeded
           items:
             $ref: "#/components/schemas/BackupTargetId"
 
@@ -9443,6 +9537,21 @@ components:
         targetId:
           $ref: "#/components/schemas/BackupTargetId"
           description: The destination to read from; it must hold a succeeded copy of the backup
+        format:
+          type: string
+          enum: [zip, zip.age]
+          default: zip
+          description: >-
+            `zip` (the default) is the decrypted single-zip archive. `zip.age` is the archive
+            encrypted to `recipient`; it is refused with 422 `NOT_SUPPORTED` while
+            `encryptedBackupExportAvailable` is false (always, in this release)
+        recipient:
+          type: string
+          pattern: "^age1[02-9ac-hj-np-z]{58}$"
+          description: >-
+            age public key (X25519) to encrypt to. Required with `zip.age`, refused with `zip`.
+            A public key, but still never stored, logged, audited or put in a URL: it travels only
+            in this body
 
     BackupArchive:
       type: object
@@ -9490,7 +9599,11 @@ components:
           enum: [nightly, manual, pre_update]
         status:
           type: string
-          enum: [running, succeeded, failed]
+          enum: [running, succeeded, failed, partial]
+          description: >-
+            The aggregate of its copies. `partial` means at least one copy succeeded and at least
+            one failed (only with two destinations); the backup stays restorable and downloadable
+            from the copies that succeeded, and `copies` says which one failed
         startedAt:
           type: string
           format: date-time
@@ -9592,8 +9705,9 @@ components:
           nullable: true
         lastStatus:
           type: string
-          enum: [running, succeeded, failed]
+          enum: [running, succeeded, failed, partial]
           nullable: true
+          description: "`partial`: one of the two copies of the last attempt failed and the other succeeded"
         problem:
           $ref: "#/components/schemas/BackupProblem"
           nullable: true
@@ -10844,7 +10958,7 @@ components:
           nullable: true
         kind:
           type: string
-          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, manual_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, backup_target_space_low, backup_site_without_target, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
+          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, manual_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, backup_target_space_low, backup_site_without_target, backup_partial, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
         details:
           type: object
           description: >-
@@ -10858,6 +10972,7 @@ components:
             backup_storage_test_failed `{testedAt, targetId, targetKind: s3|local, problem|null}`;
             backup_target_space_low `{targetId, targetKind: local, availableBytes, totalBytes, testedAt}`;
             backup_site_without_target `{siteId, siteName}`;
+            backup_partial `{siteId, siteName, backupId, at}`;
             component_down `{component, state: down|degraded, reason|null}`;
             site_container_down `{siteId, siteName, observed}`;
             restore_undo_incomplete `{siteId, siteName, backupId, failedAt|null}`;
@@ -10965,6 +11080,20 @@ components:
               properties:
                 siteId: { type: string }
                 siteName: { type: string }
+            - title: backup_partial
+              type: object
+              description: >-
+                The latest backup attempt of the site ended `partial`: one of its two copies failed,
+                the other succeeded. `subject` is the site id and `since` is that attempt's time; the
+                alert is raised only while the latest attempt is `partial` (`backup_failed` stays for
+                `failed`)
+              additionalProperties: false
+              required: [siteId, siteName, backupId, at]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
+                backupId: { type: string }
+                at: { type: string, format: date-time }
             - title: component_down
               type: object
               additionalProperties: false

@@ -265,6 +265,165 @@ erDiagram
     }
 ```
 
+### 2.1 Estensione `HCP-SPEC-004`: certificati TLS manuali e destinazioni di backup
+
+Le migrazioni `0021_manual_tls_certificates.sql` (`ADR-0031`) e `0022_backup_targets_and_copies.sql` (`ADR-0032`) sono additive: ogni colonna aggiunta a una tabella esistente è `NULL` o ha un `DEFAULT`, così la release precedente continua a funzionare dopo un rollback automatico. Il diagramma riporta solo le tabelle nuove e le colonne nuove o coinvolte delle tabelle esistenti (`domains`, `operations`, `site_backups`); le altre colonne sono nelle migrazioni.
+
+```mermaid
+erDiagram
+    organizations ||--o{ tls_certificates : "possiede"
+    sites |o--o{ tls_certificates : "created_for_site_id (SET NULL)"
+    tls_certificates ||--|{ tls_certificate_versions : "versioni immutabili (CASCADE)"
+    tls_certificates |o--o| tls_certificate_versions : "active_version_id"
+    tls_certificate_versions |o--o{ domains : "manual_certificate_version_id (stessa organizzazione)"
+    sites ||--o{ domains : "mappato su"
+
+    backup_policies ||--o{ backup_policy_targets : "destinazioni, al piu 2 (CASCADE)"
+    backup_targets ||--o{ backup_policy_targets : "scelto da (RESTRICT)"
+    sites |o--o| backup_policies : "politica site (CASCADE)"
+    site_backups ||--|{ site_backup_copies : "una copia per destinazione (CASCADE)"
+    backup_targets ||--o{ site_backup_copies : "ospita (RESTRICT)"
+    operations ||--o{ panel_backup_copies : "una copia per destinazione (CASCADE)"
+    backup_targets ||--o{ panel_backup_copies : "ospita (RESTRICT)"
+    backup_targets |o--o{ site_backups : "restore_target_id / archive_target_id (SET NULL)"
+
+    tls_certificates {
+        text id PK "cti_<32 hex>"
+        text organization_id FK "UK (id, organization_id)"
+        text name "1..128"
+        text created_for_site_id FK "composita con organization_id, SET NULL"
+        text active_version_id FK "composita con id: versione dello stesso certificato"
+        text created_by_user_id FK
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    tls_certificate_versions {
+        text id PK "ctv_<32 hex>"
+        text certificate_id FK "UK (certificate_id, version_number)"
+        text organization_id FK "FK composita con il certificato"
+        integer version_number
+        text leaf_pem "pubblico"
+        text chain_pem "pubblico"
+        text key_ciphertext_base64 "AES-256-GCM, AAD org:*:tls:cert:ver"
+        text key_iv_base64
+        text key_auth_tag_base64
+        text key_version "v1"
+        text subject
+        text issuer
+        text serial_number
+        text fingerprint_sha256 UK "unico per organizzazione"
+        timestamptz not_before
+        timestamptz not_after
+        jsonb san_dns "1..64 nomi, niente IP"
+        text key_type "rsa | ec"
+        integer key_bits
+        text status "pending | applying | active | inactive | failed"
+        bigint publish_generation
+        text last_error_code "codice fisso, mai un valore"
+        timestamptz last_checked_at
+        timestamptz activated_at
+        text idempotency_key UK "unico per organizzazione se presente"
+        text request_hash "sha256 esadecimale"
+        timestamptz created_at
+    }
+
+    tls_publish_state {
+        text id PK "sempre default"
+        bigint desired_generation
+        bigint confirmed_generation "<= desired"
+    }
+
+    domains {
+        text cert_mode "acme | manual (DEFAULT acme)"
+        text manual_certificate_version_id FK "composita con organization_id; NULL se acme"
+    }
+
+    operations {
+        text request_hash "sha256, stessa Idempotency-Key con altro payload = conflitto"
+    }
+
+    backup_targets {
+        text id PK "bkt_<32 hex>"
+        text kind "s3 | local"
+        text name
+        boolean enabled
+        boolean legacy_settings "al piu uno; legge backup_settings"
+        boolean customer_selectable
+        jsonb config_json "mai segreti ne percorsi"
+        text s3_location_key UK "chiave normalizzata, unica fra gli S3 non archiviati, legacy incluso"
+        text s3_secret_ciphertext_base64 "AES-256-GCM, AAD platform:*:HP_BACKUP_TARGET_S3_SECRET:id"
+        text local_root "solo display, scritto da risposte dell executor"
+        integer retention_days "riservata"
+        text last_test_outcome "ok | failed"
+        text last_test_problem
+        bigint last_test_available_bytes
+        timestamptz initialized_at
+        timestamptz archived_at "archiviazione, mai cancellazione dei dati"
+    }
+
+    backup_policies {
+        text id PK
+        text scope "default_site | site | panel"
+        text site_id FK "solo se scope = site, UK"
+        integer schedule_hour_utc "solo default_site"
+        integer retention_days "solo default_site e panel"
+        date last_nightly_run_on "cursore notturno, solo default_site"
+        timestamptz nightly_run_started_at
+    }
+
+    backup_policy_targets {
+        text policy_id PK, FK
+        text target_id PK, FK
+        integer priority "1..2, UK con policy_id"
+        boolean required
+    }
+
+    site_backups {
+        text status "running | succeeded | partial | failed"
+        text restore_target_id FK "SET NULL"
+        text archive_target_id FK "SET NULL"
+    }
+
+    site_backup_copies {
+        text id PK
+        text backup_id FK "UK (backup_id, target_id) e (backup_id, priority)"
+        text target_id FK
+        integer priority "1..2"
+        boolean required
+        text job_id UK "op_id oppure op_id-t2"
+        text status "running | succeeded | failed | missing | unknown"
+        text snapshot_id "obbligatorio se succeeded"
+        bigint size_bytes
+        text problem
+        timestamptz started_at
+        timestamptz finished_at
+    }
+
+    panel_backup_copies {
+        text id PK
+        text operation_id FK "UK (operation_id, target_id) e (operation_id, priority)"
+        text target_id FK
+        integer priority "1..2"
+        boolean required
+        text job_id UK
+        text status "running | succeeded | failed | missing | unknown"
+        text snapshot_id "obbligatorio se succeeded"
+        bigint size_bytes
+        text problem
+        timestamptz started_at
+        timestamptz finished_at
+    }
+```
+
+Note di lettura:
+
+- `domains.cert_mode = 'manual'` richiede `manual_certificate_version_id` (CHECK `domains_cert_mode_version_check`); la chiave esterna composita `(manual_certificate_version_id, organization_id)` impedisce che un dominio usi la versione di un'altra organizzazione e rifiuta lo spostamento di un sito con un dominio manuale (`409 CERTIFICATE_IN_USE`).
+- `tls_certificate_versions` è immutabile (trigger `trg_prevent_tls_certificate_versions_mutation`): cambiano solo stato e campi di pubblicazione, mai il materiale. Le versioni cadono a cascata con il certificato; nessun testo cifrato della chiave resta dopo la cancellazione.
+- `tls_publish_state` ha una sola riga `default`: il contatore di generazione del manifest `hp-manual-certificates.yml`.
+- `backup_targets`: al più un target `local` vivo (`uq_backup_targets_one_local`) e uno solo `legacy_settings` (`uq_backup_targets_one_legacy`); il target legacy tiene la sua chiave sincronizzata con `backup_settings` tramite il trigger `trg_backup_settings_sync_legacy_target` e ne legge il segreto cifrato com'è (nessuna ricifratura).
+- Le copie sono la fonte di verità dello stato di un backup: `site_backups.status` è l'aggregato (`partial` = almeno una copia riuscita ma non tutte le richieste) e `snapshot_id`/`size_bytes` della riga logica rispecchiano la copia riuscita di priorità più bassa. `ON DELETE RESTRICT` sui target: un target con copie si archivia, non si cancella.
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -282,6 +441,11 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `resource_quotas` | `CONSTRAINT uk_quotas_org UNIQUE (organization_id)` | Ciascuna organizzazione dispone di una e una sola tabella di quote aggregate. |
 | `stack_revisions` | `TRIGGER trg_stack_revisions_immutable BEFORE UPDATE OR DELETE` | **Invariante `AC-F1-05`**: Le revisioni una volta create sono immutabili (nessun aggiornamento o cancellazione consentito). |
 | `audit_events` | `TRIGGER trg_audit_events_immutable BEFORE UPDATE OR DELETE` | **Invariante di Conformità Audit**: Il registro eventi è append-only; qualsiasi tentativo di alterazione o cancellazione solleva eccezione SQL. |
+| `domains` | `FOREIGN KEY (manual_certificate_version_id, organization_id) REFERENCES tls_certificate_versions(id, organization_id)` (`0021`) | **Invariante certificato manuale**: un dominio usa solo una versione di certificato della propria organizzazione; lo spostamento di un sito con un dominio manuale è rifiutato (`CERTIFICATE_IN_USE`). |
+| `tls_certificate_versions` | `UNIQUE (organization_id, fingerprint_sha256)` e `TRIGGER trg_prevent_tls_certificate_versions_mutation BEFORE UPDATE` (`0021`) | Lo stesso certificato non si importa due volte nella stessa organizzazione; il materiale e i metadati di una versione non cambiano mai (solo le colonne del ciclo di vita). |
+| `backup_targets` | `UNIQUE (kind) WHERE kind = 'local' AND archived_at IS NULL`, `UNIQUE (legacy_settings) WHERE legacy_settings`, `UNIQUE (s3_location_key) WHERE kind = 's3' AND archived_at IS NULL` (`0022`) | Una sola destinazione locale viva, un solo target legacy, nessuna destinazione S3 duplicata. |
+| `backup_policy_targets` | `UNIQUE (policy_id, priority)`, `priority BETWEEN 1 AND 2`, `target_id ... ON DELETE RESTRICT` (`0022`) | Al più due destinazioni per politica; un target in uso non si cancella. |
+| `site_backup_copies`, `panel_backup_copies` | `UNIQUE (backup_id, target_id)` e `UNIQUE (backup_id, priority)` (per il pannello su `operation_id`); `CHECK (status <> 'succeeded' OR snapshot_id IS NOT NULL)` (`0022`) | Una copia per destinazione e per priorità; una copia riuscita ha sempre uno snapshot. |
 
 ---
 
@@ -292,3 +456,6 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Aggiunta indici su chiavi esterne, indici univoci su `domains(fqdn)`, `operations(idempotency_key)` e `organizations(slug)`.
   - Creazione dei trigger PL/pgSQL di immutabilità su `stack_revisions` e `audit_events`.
   - Predisposizione di funzioni transazionali atomiche: `allocateHostTransactional` (`AC-F1-01`) e `reserveQuotaTransactional` (`AC-F1-07`).
+- **Versioni 0021 e 0022 (`HCP-SPEC-004`, additive)**:
+  - `0021_manual_tls_certificates.sql`: tabelle `tls_certificates`, `tls_certificate_versions` (immutabili) e `tls_publish_state`; colonne `domains.cert_mode` (`acme` | `manual`, `DEFAULT 'acme'`) e `domains.manual_certificate_version_id` con chiave esterna composita sull'organizzazione; colonna `operations.request_hash` per l'idempotenza per payload.
+  - `0022_backup_targets_and_copies.sql`: tabelle `backup_targets`, `backup_policies`, `backup_policy_targets`, `site_backup_copies` e `panel_backup_copies`; `site_backups.status` ammette `partial`; colonne `site_backups.restore_target_id` e `archive_target_id`; backfill idempotente del target legacy, delle due politiche e di una copia per ogni backup esistente; trigger `trg_backup_settings_sync_legacy_target` su `backup_settings`.
