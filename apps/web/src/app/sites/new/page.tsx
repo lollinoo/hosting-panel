@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import type { OrganizationDetailDto } from "@hosting-panel/contracts";
 import { NewSite } from "@/components/customer/new-site";
-import { fetchServerOrg } from "@/lib/server-api";
+import { fetchServerCustomerSiteTypes, fetchServerOrg } from "@/lib/server-api";
 import { getCustomerContext } from "../data";
 
 /** A read that fails (or throws) leaves the page without its extra; a dead session still redirects. */
@@ -20,7 +20,10 @@ const siteLimitOf = (org: OrganizationDetailDto | null) => (org?.maxSites == nul
 export default async function NewSitePage() {
   const { session, orgId, support } = await getCustomerContext();
   if (!orgId) redirect("/sites");
-  // A support visit lacks organization.read: the read would be refused and audited as denied on every load.
-  const limit = support ? null : siteLimitOf(await optional(fetchServerOrg(orgId)));
-  return <NewSite orgId={orgId} csrfToken={session.csrfToken} limit={limit} />;
+  // A support visit lacks the customer's own permissions: the reads would be refused and audited as denied on every load.
+  const [org, types] = support
+    ? [null, null]
+    : await Promise.all([optional(fetchServerOrg(orgId)), optional(fetchServerCustomerSiteTypes(orgId))]);
+  // Either read failing never blocks creating a site: no chooser means the legacy body, and the API stays the guard.
+  return <NewSite orgId={orgId} csrfToken={session.csrfToken} siteTypes={types?.siteTypes ?? []} limit={siteLimitOf(org)} />;
 }

@@ -2,9 +2,10 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { SITE_LIMIT_REACHED_REASON } from "@hosting-panel/contracts";
+import { SITE_LIMIT_REACHED_REASON, type CustomerSiteTypeDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { SiteForm, type SiteFormBody } from "@/components/customer/site-form";
+import { SiteTypeChooser } from "@/components/customer/site-type-chooser";
 import { errorMessage, format, type Messages } from "@/i18n";
 import { renewKeyAfter } from "@/lib/site-setup";
 import { useMessages } from "@/i18n/provider";
@@ -14,11 +15,15 @@ export type SiteLimit = { used: number; max: number };
 /** At the limit, or past it after the limit was lowered. */
 export const isLimitFull = (limit: SiteLimit | null): boolean => limit !== null && limit.used >= limit.max;
 
-/** What a refused creation shows: the field errors, the one sentence, and whether to reload the page's data. */
+/**
+ * What a refused creation shows: the field errors, the one sentence, and whether to reload the page's data.
+ * `siteTypeSent`: the request named a site type, so "not found" means that type is gone.
+ */
 export function createErrorView(
   m: Messages,
   code: string,
   details: { field?: string; reason?: string }[],
+  siteTypeSent = false,
 ): { error: string | null; fieldErrors: Record<string, string>; refresh: boolean } {
   const view = { error: null, fieldErrors: {}, refresh: false };
   if (code === "DOMAIN_CONFLICT") return { ...view, fieldErrors: { domain: m.site.create.domainConflict } };
@@ -26,15 +31,30 @@ export function createErrorView(
   if (code === "QUOTA_EXCEEDED" && details[0]?.reason === SITE_LIMIT_REACHED_REASON) {
     return { ...view, error: m.site.create.limitReachedSubmit, refresh: true };
   }
+  // The list changed under the customer: reloading shows what is offered now.
+  if (code === "NOT_FOUND" && siteTypeSent) return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
   if (code === "VALIDATION_ERROR" && details.some((d) => d.field)) {
     const fieldErrors: Record<string, string> = {};
-    for (const d of details) if (d.field) fieldErrors[d.field.split(".").pop()!] = m.site.create.fieldInvalid;
+    // An option is reported as parameters.<key> and sits under its own control; any other field by its last part.
+    for (const d of details) {
+      if (d.field) fieldErrors[d.field.startsWith("parameters.") ? `param:${d.field.slice("parameters.".length)}` : d.field.split(".").pop()!] = m.site.create.fieldInvalid;
+    }
     return { ...view, fieldErrors };
   }
   return { ...view, error: errorMessage(m, code) };
 }
 
-export function NewSite({ orgId, csrfToken, limit }: { orgId: string; csrfToken: string; limit: SiteLimit | null }) {
+export function NewSite({
+  orgId,
+  csrfToken,
+  siteTypes,
+  limit,
+}: {
+  orgId: string;
+  csrfToken: string;
+  siteTypes: readonly CustomerSiteTypeDto[];
+  limit: SiteLimit | null;
+}) {
   const m = useMessages();
   const router = useRouter();
   // One key per page instance: a double click or a retry after a lost reply cannot create two sites.
@@ -42,8 +62,12 @@ export function NewSite({ orgId, csrfToken, limit }: { orgId: string; csrfToken:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [typeId, setTypeId] = useState<string | null>(siteTypes[0]?.id ?? null);
+  // A choice that is no longer offered (the list was reloaded) falls back to the first one, as the chooser shows.
+  const selected = siteTypes.find((type) => type.id === typeId) ?? siteTypes[0] ?? null;
 
-  async function submit(body: SiteFormBody) {
+  async function submit(form: SiteFormBody) {
+    const body = selected ? { ...form, templateId: selected.id } : form;
     setBusy(true);
     setError(null);
     setFieldErrors({});
@@ -58,7 +82,7 @@ export function NewSite({ orgId, csrfToken, limit }: { orgId: string; csrfToken:
         router.push(`/sites/${data.data.siteId}`);
         return;
       }
-      const view = createErrorView(m, data?.error?.code ?? "", data?.error?.details ?? []);
+      const view = createErrorView(m, data?.error?.code ?? "", data?.error?.details ?? [], selected !== null);
       setError(view.error);
       setFieldErrors(view.fieldErrors);
       if (view.refresh) router.refresh();
@@ -93,8 +117,8 @@ export function NewSite({ orgId, csrfToken, limit }: { orgId: string; csrfToken:
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
-          {/* shortcut: creation takes the legacy type's form, there is no type chooser (ADR 0029). */}
-          <SiteForm onSubmit={submit} submitting={busy} fieldErrors={fieldErrors} />
+          {siteTypes.length > 1 && <SiteTypeChooser siteTypes={siteTypes} value={selected?.id ?? null} onChange={setTypeId} />}
+          <SiteForm onSubmit={submit} submitting={busy} fieldErrors={fieldErrors} siteType={selected} />
         </>
       )}
     </div>
