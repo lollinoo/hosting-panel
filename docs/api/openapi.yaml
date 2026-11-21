@@ -50,6 +50,8 @@ tags:
     description: WordPress sites created, controlled and deleted by customers (async, 202 + operation)
   - name: Admin Sites
     description: Server administrator view over all WordPress sites, creation for a customer and ownership moves
+  - name: TLS Certificates
+    description: Imported (PEM) certificates, their versions and which domains serve them; the administrator's inventory and alerts
   - name: Admin Backups
     description: Platform S3 backup target settings, connectivity tests, and per-site backup status (server administrator only)
   - name: Admin Health
@@ -2326,6 +2328,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/SiteIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Required when the request carries `tlsVersionId`
+          schema:
+            type: string
       requestBody:
         content:
           application/json:
@@ -2353,7 +2361,7 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
         "422":
-          description: The request carries `tlsVersionId`, which is available from M2 (`NOT_SUPPORTED`); nothing is created
+          description: With `tlsVersionId`, the certificate does not cover a new name (`CERTIFICATE_HOSTNAME_MISMATCH`) or expires within 24 hours (`CERTIFICATE_EXPIRED`); nothing is created
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}:
@@ -2449,6 +2457,612 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates:
+    get:
+      tags: [TLS Certificates]
+      operationId: customerListTlsCertificates
+      summary: List the imported certificates of the site's organization
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Imported certificates, oldest first, with the domains they cover and the ones they serve
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [TLS Certificates]
+      operationId: customerImportTlsCertificate
+      summary: "Import a certificate (PEM): validated, stored as a pending version"
+      description: >-
+        The key is validated (matches the certificate, not encrypted), the chain is checked against the trusted
+        root list, and the certificate must cover at least one DNS name and stay valid for 24 hours. Nothing is served
+        until a version is assigned to a domain. Errors: `CERTIFICATE_*` (422), `CERTIFICATE_UPLOAD_TOO_LARGE` (413),
+        `ALREADY_EXISTS` (the leaf is already imported in the organization), `IDEMPOTENCY_CONFLICT` (same key, other
+        body), `QUOTA_EXCEEDED` (100 certificates), `RATE_LIMITED` (10 versions per hour for customers).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportTlsCertificateRequest"
+      responses:
+        "201":
+          description: The new certificate with its version 1 (`pending`). A replay of the same Idempotency-Key and body answers the same certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates/{certificateId}:
+    get:
+      tags: [TLS Certificates]
+      operationId: customerGetTlsCertificate
+      summary: Read one imported certificate
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "200":
+          description: The certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [TLS Certificates]
+      operationId: customerDeleteTlsCertificate
+      summary: Delete an imported certificate and its versions
+      description: >-
+        `409 CERTIFICATE_IN_USE` while a domain uses a version, a version is applying or active, or an operation
+        names one. The key material is removed with the rows.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates/{certificateId}/versions:
+    post:
+      tags: [TLS Certificates]
+      operationId: customerAddTlsCertificateVersion
+      summary: Add a new version (renewal) to an imported certificate
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTlsCertificateVersionRequest"
+      responses:
+        "201":
+          description: The certificate with the new `pending` version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/tls-certificates/{certificateId}/versions/{versionId}/activate:
+    post:
+      tags: [TLS Certificates]
+      operationId: customerActivateTlsVersion
+      summary: Serve a version on domains
+      description: >-
+        Without `domainIds` every domain of the organization, on any site, that uses another version of the same
+        certificate moves to this version (a renewal: a certificate shared by several sites rotates in one request);
+        with `domainIds` exactly those domains are set, and they may belong to any site of the organization.
+        Every domain of the change is named in `moved`.
+        The operation runs on the site of the path and covers the whole list. The permission to manage certificates is
+        needed on every affected site: a site of the organization that the caller cannot manage answers 403, a domain
+        or site of another organization answers 404, and nothing changes.
+        Refusals: `CERTIFICATE_HOSTNAME_MISMATCH`, `CERTIFICATE_EXPIRED`, `CERTIFICATE_SNI_MISMATCH`,
+        `CERTIFICATE_IN_USE` (it would also be served for another address of the organization), `DOMAIN_CONFLICT`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+        - $ref: "#/components/parameters/VersionIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ActivateTlsVersionRequest"
+      responses:
+        "202":
+          description: The domains of the site in the path, and every domain the change moves on any site. The change runs as one `site.tls.apply` operation; a request that changes nothing (or a replay) answers 202 without an operation and an empty `moved`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, moved]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+                  moved:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsMovedDomain"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}/tls:
+    post:
+      tags: [TLS Certificates]
+      operationId: customerSetDomainTls
+      summary: "Choose the certificate of a domain: automatic (ACME) or an imported version"
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetDomainTlsRequest"
+      responses:
+        "202":
+          description: The domains of the site; the change runs as one `site.tls.apply` operation (none when the domain already is in that state)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminListTlsCertificates
+      summary: List the imported certificates of the site's organization
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: Imported certificates, oldest first, with the domains they cover and the ones they serve
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [TLS Certificates]
+      operationId: adminImportTlsCertificate
+      summary: "Import a certificate (PEM): validated, stored as a pending version"
+      description: >-
+        The key is validated (matches the certificate, not encrypted), the chain is checked against the trusted
+        root list, and the certificate must cover at least one DNS name and stay valid for 24 hours. Nothing is served
+        until a version is assigned to a domain. Errors: `CERTIFICATE_*` (422), `CERTIFICATE_UPLOAD_TOO_LARGE` (413),
+        `ALREADY_EXISTS` (the leaf is already imported in the organization), `IDEMPOTENCY_CONFLICT` (same key, other
+        body), `QUOTA_EXCEEDED` (100 certificates), `RATE_LIMITED` (10 versions per hour for customers).
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportTlsCertificateRequest"
+      responses:
+        "201":
+          description: The new certificate with its version 1 (`pending`). A replay of the same Idempotency-Key and body answers the same certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates/{certificateId}:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminGetTlsCertificate
+      summary: Read one imported certificate
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "200":
+          description: The certificate
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [TLS Certificates]
+      operationId: adminDeleteTlsCertificate
+      summary: Delete an imported certificate and its versions
+      description: >-
+        `409 CERTIFICATE_IN_USE` while a domain uses a version, a version is applying or active, or an operation
+        names one. The key material is removed with the rows.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates/{certificateId}/versions:
+    post:
+      tags: [TLS Certificates]
+      operationId: adminAddTlsCertificateVersion
+      summary: Add a new version (renewal) to an imported certificate
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTlsCertificateVersionRequest"
+      responses:
+        "201":
+          description: The certificate with the new `pending` version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/TlsCertificateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "413":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/tls-certificates/{certificateId}/versions/{versionId}/activate:
+    post:
+      tags: [TLS Certificates]
+      operationId: adminActivateTlsVersion
+      summary: Serve a version on domains
+      description: >-
+        Without `domainIds` every domain of the organization, on any site, that uses another version of the same
+        certificate moves to this version (a renewal: a certificate shared by several sites rotates in one request);
+        with `domainIds` exactly those domains are set, and they may belong to any site of the organization.
+        Every domain of the change is named in `moved`.
+        The operation runs on the site of the path and covers the whole list. The sites must belong to the organization of the site
+        in the path; anything else answers 404 and nothing changes.
+        Refusals: `CERTIFICATE_HOSTNAME_MISMATCH`, `CERTIFICATE_EXPIRED`, `CERTIFICATE_SNI_MISMATCH`,
+        `CERTIFICATE_IN_USE` (it would also be served for another address of the organization), `DOMAIN_CONFLICT`. `evictAcme` with `confirmHostname` (administrator only) allows the cold removal of a Let's Encrypt entry that ties with the imported certificate.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/CertificateIdParam"
+        - $ref: "#/components/parameters/VersionIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminActivateTlsVersionRequest"
+      responses:
+        "202":
+          description: The domains of the site in the path, and every domain the change moves on any site. The change runs as one `site.tls.apply` operation; a request that changes nothing (or a replay) answers 202 without an operation and an empty `moved`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, moved]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+                  moved:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsMovedDomain"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/domains/{domainId}/tls:
+    post:
+      tags: [TLS Certificates]
+      operationId: adminSetDomainTls
+      summary: "Choose the certificate of a domain: automatic (ACME) or an imported version"
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminSetDomainTlsRequest"
+      responses:
+        "202":
+          description: The domains of the site; the change runs as one `site.tls.apply` operation (none when the domain already is in that state)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteDomainsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/tls-certificates:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminListTlsInventory
+      summary: Inventory of imported and automatic certificates (server administrator only)
+      parameters:
+        - in: query
+          name: filter
+          schema:
+            type: string
+            enum: [all, manual, automatic, expiring, expired]
+            default: all
+        - in: query
+          name: q
+          description: Case-insensitive text found in a hostname or the issuer
+          schema:
+            type: string
+            maxLength: 253
+      responses:
+        "200":
+          description: Certificates by end date, soonest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AdminTlsInventoryItemDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/tls-certificates/alerts:
+    get:
+      tags: [TLS Certificates]
+      operationId: adminListTlsAlerts
+      summary: Imported certificates in use that expire within 14 days or have expired (server administrator only)
+      responses:
+        "200":
+          description: One alert per active version, soonest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TlsCertificateAlertDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/tls-certificates/{certificateId}:
+    delete:
+      tags: [TLS Certificates]
+      operationId: adminDeleteTlsCertificate
+      summary: Delete an imported certificate of any organization (server administrator only)
+      parameters:
+        - $ref: "#/components/parameters/CertificateIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/sites/{siteId}/domains:
     get:
       tags: [Admin Sites]
@@ -2483,6 +3097,12 @@ paths:
       summary: Add a domain (optionally with its www pair)
       parameters:
         - $ref: "#/components/parameters/SiteIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: false
+          description: Required when the request carries `tlsVersionId`
+          schema:
+            type: string
       requestBody:
         content:
           application/json:
@@ -2510,7 +3130,7 @@ paths:
         "409":
           $ref: "#/components/responses/ErrorResponse"
         "422":
-          description: The request carries `tlsVersionId`, which is available from M2 (`NOT_SUPPORTED`); nothing is created
+          description: With `tlsVersionId`, the certificate does not cover a new name (`CERTIFICATE_HOSTNAME_MISMATCH`) or expires within 24 hours (`CERTIFICATE_EXPIRED`); nothing is created
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/domains/{domainId}:
@@ -6294,6 +6914,18 @@ components:
       required: true
       schema:
         type: string
+    CertificateIdParam:
+      in: path
+      name: certificateId
+      required: true
+      schema:
+        type: string
+    VersionIdParam:
+      in: path
+      name: versionId
+      required: true
+      schema:
+        type: string
     UserIdParam:
       in: path
       name: userId
@@ -6567,7 +7199,7 @@ components:
         manualTlsCertificatesAvailable:
           type: boolean
           default: false
-          description: True once manual TLS certificates can be imported and assigned; false until that capability ships
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         localBackupTargetsAvailable:
           type: boolean
           default: false
@@ -6620,7 +7252,7 @@ components:
         manualTlsCertificatesAvailable:
           type: boolean
           default: false
-          description: True once manual TLS certificates can be imported and assigned; false until that capability ships
+          description: True when `runtimeBackend` is `linux-systemd`; false otherwise
         localBackupTargetsAvailable:
           type: boolean
           default: false
@@ -7291,9 +7923,10 @@ components:
           type: string
           pattern: "^ctv_[0-9a-f]{32}$"
           description: >-
-            Create the domain directly on this loaded certificate version of the same organisation.
-            Available from M2; until then a request carrying it is refused with 422 `NOT_SUPPORTED`
-            and nothing is created.
+            Create the domain directly on this imported certificate version of the same organization (a new
+            address under a wildcard that is already loaded). The domain and a `site.tls.apply` operation are
+            created together; the request then needs an `Idempotency-Key` header. Every new name (including the
+            `www` pair) must be covered by the version.
 
     CertificateAlertDto:
       type: object
@@ -7410,6 +8043,349 @@ components:
             The `last_error_code` of the assigned version, in any state (for example an `active` domain can show
             a problem that was recorded on the version); null when the version has none. It belongs to the version,
             so every domain using that version shows the same value; null in `acme` mode
+
+    ImportTlsCertificateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, format, leafPem, privateKeyPem]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        format:
+          type: string
+          enum: [pem]
+        leafPem:
+          type: string
+          maxLength: 524288
+          description: Exactly one `CERTIFICATE` block
+        chainPem:
+          type: string
+          maxLength: 524288
+          default: ""
+          description: Up to 20 intermediate `CERTIFICATE` blocks; may be empty when the leaf chains to a trusted root directly
+        privateKeyPem:
+          type: string
+          maxLength: 524288
+          description: One unencrypted `PRIVATE KEY`, `RSA PRIVATE KEY` or `EC PRIVATE KEY` block. Never returned by any route
+      description: >-
+        The three PEM texts together may not exceed 512 KiB (UTF-8), the whole body 1 MiB
+        (`CERTIFICATE_UPLOAD_TOO_LARGE`, 413).
+
+    CreateTlsCertificateVersionRequest:
+      type: object
+      additionalProperties: false
+      required: [format, leafPem, privateKeyPem]
+      properties:
+        format:
+          type: string
+          enum: [pem]
+        leafPem:
+          type: string
+          maxLength: 524288
+        chainPem:
+          type: string
+          maxLength: 524288
+          default: ""
+        privateKeyPem:
+          type: string
+          maxLength: 524288
+
+    SetDomainTlsRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [acme]
+        - type: object
+          additionalProperties: false
+          required: [mode, versionId]
+          properties:
+            mode:
+              type: string
+              enum: [manual]
+            versionId:
+              type: string
+              pattern: "^ctv_[0-9a-f]{32}$"
+
+    AdminSetDomainTlsRequest:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode:
+              type: string
+              enum: [acme]
+            challenge:
+              type: string
+              enum: [http-01, dns-01]
+              description: How the automatic certificate is obtained once the domain returns to ACME
+        - type: object
+          additionalProperties: false
+          required: [mode, versionId]
+          properties:
+            mode:
+              type: string
+              enum: [manual]
+            versionId:
+              type: string
+              pattern: "^ctv_[0-9a-f]{32}$"
+            evictAcme:
+              type: boolean
+              enum: [true]
+              description: >-
+                Allow the cold removal of a Let's Encrypt entry that ties with this certificate (the proxy is
+                stopped for a moment, `acme.json` is backed up). Goes with `confirmHostname`; at most one run per
+                15 minutes per server
+            confirmHostname:
+              type: string
+              description: The exact hostname of the domain, typed by the administrator
+
+    ActivateTlsVersionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        domainIds:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+          description: The domains to set, of any site of the organization; absent = every domain of the organization on another version of this certificate
+
+    TlsMovedDomain:
+      type: object
+      required: [domainId, siteId, hostname]
+      properties:
+        domainId:
+          type: string
+        siteId:
+          type: string
+        hostname:
+          type: string
+
+    AdminActivateTlsVersionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        domainIds:
+          type: array
+          minItems: 1
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+          description: The domains to set, of any site of the organization; absent = every domain of the organization on another version of this certificate
+        evictAcme:
+          type: boolean
+          enum: [true]
+        confirmHostname:
+          type: string
+
+    TlsCertificateVersionDto:
+      type: object
+      required: [id, versionNumber, status, subject, issuer, sanDns, wildcard, notBefore, notAfter, serialNumber, fingerprintSha256, keyType, keyBits, createdAt, activatedAt, problem]
+      properties:
+        id:
+          type: string
+        versionNumber:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [pending, applying, active, inactive, failed]
+        subject:
+          type: string
+        issuer:
+          type: string
+        sanDns:
+          type: array
+          items:
+            type: string
+        wildcard:
+          type: boolean
+        notBefore:
+          type: string
+          format: date-time
+        notAfter:
+          type: string
+          format: date-time
+        serialNumber:
+          type: string
+        fingerprintSha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        keyType:
+          type: string
+          enum: [rsa, ec]
+        keyBits:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        activatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        problem:
+          type: string
+          nullable: true
+          description: The last apply problem recorded on this version (`apply_failed`, `sni_mismatch`, ...)
+
+    TlsCertificateDto:
+      type: object
+      required: [id, name, source, createdForSiteId, activeVersionId, versions, coveredDomains, assignedDomains, expiry, warnings, updatedAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        source:
+          type: string
+          enum: [manual]
+        createdForSiteId:
+          type: string
+          nullable: true
+        activeVersionId:
+          type: string
+          nullable: true
+        versions:
+          type: array
+          description: Oldest first. Never carries the certificate text or the key
+          items:
+            $ref: "#/components/schemas/TlsCertificateVersionDto"
+        coveredDomains:
+          type: array
+          description: Domains of the organization whose hostname some version of this certificate covers
+          items:
+            type: object
+            required: [domainId, hostname, assigned, versionId]
+            properties:
+              domainId:
+                type: string
+              hostname:
+                type: string
+              assigned:
+                type: boolean
+              versionId:
+                type: string
+                nullable: true
+        assignedDomains:
+          type: array
+          description: Domains (any site of the organization) that serve a version of this certificate
+          items:
+            type: object
+            required: [domainId, siteId, siteName, hostname, versionId]
+            properties:
+              domainId:
+                type: string
+              siteId:
+                type: string
+              siteName:
+                type: string
+              hostname:
+                type: string
+              versionId:
+                type: string
+        expiry:
+          type: object
+          nullable: true
+          required: [tier, daysLeft]
+          properties:
+            tier:
+              type: string
+              enum: [ok, notice, warning, critical, expired]
+            daysLeft:
+              type: integer
+        warnings:
+          type: array
+          items:
+            type: string
+            enum: [expiring, expired, covers_unassigned_domains]
+        updatedAt:
+          type: string
+          format: date-time
+
+    AdminTlsInventoryItemDto:
+      type: object
+      required: [source, certificateId, name, organizationId, organizationName, siteId, siteName, hostnames, issuer, wildcard, notAfter, status, tier]
+      properties:
+        source:
+          type: string
+          enum: [manual, acme]
+        certificateId:
+          type: string
+          nullable: true
+        name:
+          type: string
+          nullable: true
+        organizationId:
+          type: string
+        organizationName:
+          type: string
+        siteId:
+          type: string
+          nullable: true
+        siteName:
+          type: string
+          nullable: true
+        hostnames:
+          type: array
+          items:
+            type: string
+        issuer:
+          type: string
+          nullable: true
+        wildcard:
+          type: boolean
+        notAfter:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [pending, applying, active, inactive, failed, none, requested]
+        tier:
+          type: string
+          nullable: true
+          enum: [ok, notice, warning, critical, expired]
+
+    TlsCertificateAlertDto:
+      type: object
+      required: [certificateId, certificateName, versionId, organizationId, siteId, siteName, hostnames, notAfter, tier, daysLeft]
+      properties:
+        certificateId:
+          type: string
+        certificateName:
+          type: string
+        versionId:
+          type: string
+        organizationId:
+          type: string
+        siteId:
+          type: string
+          nullable: true
+        siteName:
+          type: string
+          nullable: true
+        hostnames:
+          type: array
+          items:
+            type: string
+        notAfter:
+          type: string
+          format: date-time
+        tier:
+          type: string
+          enum: [warning, critical, expired]
+        daysLeft:
+          type: integer
 
     MailRelaySettingsInput:
       type: object
