@@ -1,7 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
-  LEGACY_SITE_TYPE,
+  BUILT_IN_VERSION_BY_MODULE,
+  PHP_VERSION_PARAMETER_KEY,
+  renderSiteTemplate,
+  resolveSiteTemplateParameters,
   siteTypeKeyOf,
   SITE_TYPE_KEYS,
   PLATFORM_OPS_ORG_ID,
@@ -15,6 +18,8 @@ import {
   type SiteActionInput,
   type SiteLogLineDto,
   type SiteStatus,
+  SiteTemplateRenderError,
+  toStoredSiteTemplateParameters,
   wwwPartner,
 } from "@hosting-panel/contracts";
 import {
@@ -32,6 +37,7 @@ import {
   domains,
   enqueueOperationTransactional,
   eq,
+  getSiteTemplateVersionById,
   hostAgentHeartbeats,
   hostAllocations,
   hosts,
@@ -41,6 +47,7 @@ import {
   isNotNull,
   latestSiteOperation,
   listSiteDomains,
+  listSiteTemplateRefs,
   membershipRoles,
   memberships,
   not,
@@ -48,6 +55,7 @@ import {
   or,
   organizations,
   outboxEvents,
+  readSiteTemplateSpec,
   serviceInstances,
   sites,
   SiteLimitReachedError,
@@ -77,6 +85,13 @@ import {
 import { LogReadGate } from "./log-read-gate.js";
 import { coverageError, restoreCertificateThrottle } from "./site-domains.service.js";
 import { siteLimitError } from "./site-limit.js";
+import {
+  assertTemplateUsable,
+  loadTemplateForCreate,
+  resolveCreateParameters,
+  storedEntries,
+  type TemplateAudience,
+} from "./site-template-runtime.js";
 
 const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
 const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "dns_provider", "other"]);
@@ -90,6 +105,26 @@ export interface ManagedSiteAccepted {
   readonly siteId: string;
   readonly operationId: string;
 }
+
+/** What a template version change moved: the audit row of the admin route carries it. */
+export interface TemplateVersionChange {
+  readonly templateId: string;
+  readonly fromVersionId: string;
+  readonly toVersionId: string;
+  readonly fromVersionNumber: number;
+  readonly toVersionNumber: number;
+}
+
+const refusal = (message: string, reason: string, field?: string): ControlPlaneError =>
+  new ControlPlaneError("VALIDATION_ERROR", message, { details: [{ ...(field ? { field } : {}), message, reason }] });
+
+/** The transaction has rolled back cleanly: a template that cannot render for these values is a refusal, not a crash. */
+const renderRefusal = (err: unknown): unknown =>
+  err instanceof SiteTemplateRenderError
+    ? new ControlPlaneError("VALIDATION_ERROR", "These settings cannot be used.", {
+        details: [{ field: "parameters", message: err.message, reason: err.code }],
+      })
+    : err;
 
 /** A stored ready site whose services are all wanted stopped shows as stopped. */
 export function shownSiteStatus(status: SiteStatus, allStopped: boolean): SiteStatus {
@@ -135,13 +170,21 @@ export class ManagedSitesService {
     body: CreateManagedSiteInput;
     actorId: string;
     idempotencyKey: string;
+    /** Who asks: an administrator may also use a disabled template and set the parameters a customer may not. */
+    audience?: TemplateAudience;
   }): Promise<ManagedSiteAccepted> {
-    const { organizationId, body, actorId, idempotencyKey } = input;
+    const { organizationId, body, actorId, idempotencyKey, audience = "customer" } = input;
     const db = this.dbClient.db;
 
     // Replay before the domain check, or a network retry would turn into a 409.
     const replay = await this.#replay(organizationId, idempotencyKey);
     if (replay) return replay;
+
+    // Template and parameters before the domain, the server and the site limit (which the transaction checks).
+    const loaded = await loadTemplateForCreate(db, body.templateId, audience);
+    assertTemplateUsable(loaded);
+    const values = resolveCreateParameters(loaded.spec, body.parameters ?? [], audience, body.phpVersion);
+    const phpVersion = Object.hasOwn(values, PHP_VERSION_PARAMETER_KEY) ? (values[PHP_VERSION_PARAMETER_KEY] as PhpVersion) : null;
 
     const partner = body.includeWww ? wwwPartner(body.domain) : null;
     const names = partner ? [body.domain, partner] : [body.domain];
@@ -181,8 +224,7 @@ export class ManagedSitesService {
       );
     }
 
-    // shortcut: creation takes the legacy type's form only; a type chooser comes with a second type (ADR 0029).
-    const type = getApiSiteType(LEGACY_SITE_TYPE);
+    const type = getApiSiteType(loaded.module);
     const { database } = type.definition;
     const adminSecretKey = type.install?.adminSecretKey ?? null;
     const masterKey = this.config.secretsMasterKey;
@@ -199,8 +241,10 @@ export class ManagedSitesService {
           initialDomain: body.domain,
           initialDomainStatus: "pending",
           status: "deploying",
-          phpVersion: body.phpVersion,
-          siteType: LEGACY_SITE_TYPE,
+          phpVersion,
+          siteType: loaded.module,
+          templateVersionId: loaded.version.id,
+          templateParameters: toStoredSiteTemplateParameters(loaded.spec, values),
           actorId,
         });
 
@@ -210,25 +254,19 @@ export class ManagedSitesService {
         }
         await restoreCertificateThrottle(t, await listSiteDomains(t, site.id));
 
+        const rendered = renderSiteTemplate(loaded.spec, values, {
+          siteId: site.id,
+          siteDomain: body.domain,
+          siteUrl: `http://${body.domain}`,
+        });
         await createServiceWithRevisionTransactional(t, {
           siteId: site.id,
           organizationId,
           serviceTemplateId: type.definition.templateId,
           name: "web",
-          // No env from the type: the image would write its own configuration, which the install job refuses.
-          configuration: {
-            image: type.image(body.phpVersion),
-            internalPort: 80,
-            exposeHttp: true,
-            siteMail: true,
-            volumeMounts: [
-              {
-                volumeSuffix: type.definition.files.volumeSuffix,
-                containerPath: type.definition.files.mountPath,
-              },
-            ],
-          },
-          resourceLimits: { cpuMilli: 1000, memoryBytes: "536870912" },
+          configuration: rendered.configuration,
+          resourceLimits: rendered.resourceLimits,
+          ...(Object.keys(rendered.secretRefs).length > 0 ? { secretRefs: rendered.secretRefs } : {}),
           actorId,
         });
 
@@ -294,7 +332,7 @@ export class ManagedSitesService {
           "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
         );
       }
-      throw coverageError(err);
+      throw coverageError(renderRefusal(err));
     }
   }
 
@@ -440,23 +478,11 @@ export class ManagedSitesService {
       );
     }
     const svc = await this.#webService(site);
-    // A deploy would start a site its owner stopped.
-    if (svc.desiredStatus === "stopped") {
-      throw new ControlPlaneError("VALIDATION_ERROR", "Start the site first, then change the PHP version.");
-    }
-    const [current] = svc.currentRevisionId
-      ? await this.dbClient.db
-          .select()
-          .from(stackRevisions)
-          .where(eq(stackRevisions.id, svc.currentRevisionId))
-          .limit(1)
-      : [];
-    if (!current) {
-      throw new ControlPlaneError(
-        "NOT_FOUND",
-        "Requested organization or resource was not found.",
-      );
-    }
+    const current = await this.#runningRevision(
+      svc,
+      new ControlPlaneError("VALIDATION_ERROR", "Start the site first, then change the PHP version."),
+    );
+    const image = await this.#imageFor(site, type, phpVersion);
 
     return this.dbClient.db.transaction(async (tx) => {
       const t = tx as unknown as HostingPanelDatabase;
@@ -477,7 +503,7 @@ export class ManagedSitesService {
           organizationId,
           declarativeConfig: {
             ...(current.declarativeConfig as Record<string, unknown>),
-            image: type.image(phpVersion),
+            image,
           },
           secretRefs: current.secretRefs as Record<string, string>,
           ...(current.resourceLimits
@@ -495,6 +521,115 @@ export class ManagedSitesService {
           .set({ phpVersion, updatedAt: new Date() })
           .where(eq(sites.id, siteId));
         await onNew?.(t, enqueued.operation.id);
+      }
+      return { siteId, operationId: enqueued.operation.id };
+    });
+  }
+
+  /**
+   * Moves a site to a newer version of its own template: the full render of that version replaces the
+   * configuration (extras added by hand through the generic service routes are not carried), then a redeploy.
+   * A legacy site without a version counts as built-in version 1.
+   */
+  public async changeTemplateVersion(input: {
+    siteId: string;
+    organizationId: string;
+    versionId: string;
+    actorId: string;
+    idempotencyKey?: string;
+    onNew?: (tx: HostingPanelDatabase, operationId: string, change: TemplateVersionChange) => Promise<unknown>;
+  }): Promise<ManagedSiteAccepted> {
+    const { siteId, organizationId, versionId, actorId, idempotencyKey, onNew } = input;
+    const db = this.dbClient.db;
+    const site = await this.#loadSite(siteId, organizationId);
+    const moduleKey = siteTypeKeyOf(site.siteType);
+    if (!moduleKey) {
+      throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    }
+    const svc = await this.#webService(site);
+    // Before the refusals below: a retried request must answer the first operation, not "already current".
+    const replay = idempotencyKey ? await this.#deployReplay(svc.id, organizationId, idempotencyKey) : null;
+    if (replay) return { siteId, operationId: replay };
+    const current = await this.#runningRevision(svc, refusal("Start the site first, then move it to the new version.", "stopped"));
+
+    const fromId = site.templateVersionId ?? BUILT_IN_VERSION_BY_MODULE[moduleKey];
+    const from = await getSiteTemplateVersionById(db, fromId);
+    const to = await getSiteTemplateVersionById(db, versionId);
+    if (!from) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    if (!to) {
+      throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.", {
+        details: [{ field: "versionId", message: "This version does not exist.", reason: "unknown_version" }],
+      });
+    }
+    if (to.template.id !== from.template.id) throw refusal("This version belongs to another template.", "other_template", "versionId");
+    if (to.version.versionNumber === from.version.versionNumber) throw refusal("The site already runs this version.", "already_current", "versionId");
+    // Only newer versions: a rollback is deliberately not offered.
+    if (to.version.versionNumber < from.version.versionNumber) throw refusal("Only a newer version can be chosen.", "not_newer", "versionId");
+    if (to.template.archivedAt !== null) {
+      throw new ControlPlaneError("RESOURCE_LOCKED", "This site type is archived.", {
+        details: [{ field: "versionId", message: "This site type is archived.", reason: "template_archived" }],
+      });
+    }
+    assertTemplateUsable({ version: to.version, module: to.template.module });
+
+    const spec = readSiteTemplateSpec(to.version);
+    const resolved = resolveSiteTemplateParameters(spec, storedEntries(site, spec), { audience: "admin", phpVersion: site.phpVersion });
+    if (!resolved.ok) {
+      throw new ControlPlaneError("VALIDATION_ERROR", "The saved settings do not fit this version.", {
+        details: resolved.issues.map(({ field, message, reason }) => ({ field, message, reason })),
+      });
+    }
+    const [primary] = await db
+      .select({ hostname: domains.hostname })
+      .from(domains)
+      .where(and(eq(domains.siteId, site.id), eq(domains.isPrimary, true)))
+      .limit(1);
+    const hostname = primary?.hostname ?? "";
+    let rendered: ReturnType<typeof renderSiteTemplate>;
+    try {
+      rendered = renderSiteTemplate(spec, resolved.values, { siteId, siteDomain: hostname, siteUrl: site.siteUrl ?? `http://${hostname}` });
+    } catch (err) {
+      throw renderRefusal(err);
+    }
+    const change: TemplateVersionChange = {
+      templateId: to.template.id,
+      fromVersionId: from.version.id,
+      toVersionId: to.version.id,
+      fromVersionNumber: from.version.versionNumber,
+      toVersionNumber: to.version.versionNumber,
+    };
+
+    return db.transaction(async (tx) => {
+      const t = tx as unknown as HostingPanelDatabase;
+      // Enqueue first: a held site lock aborts the whole transaction before any revision is written.
+      const enqueued = await enqueueOperationTransactional(t, {
+        organizationId,
+        kind: "service.deploy",
+        resourceType: "service",
+        resourceId: svc.id,
+        requestedByUserId: actorId,
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        lockKey: `site:${siteId}`,
+        steps: SERVICE_STEPS,
+      });
+      if (!enqueued.idempotentReplay) {
+        await appendStackRevisionTransactional(t, {
+          serviceInstanceId: svc.id,
+          organizationId,
+          declarativeConfig: rendered.configuration,
+          secretRefs: current.secretRefs as Record<string, string>,
+          resourceLimits: rendered.resourceLimits,
+          authorId: actorId,
+        });
+        await tx
+          .update(sites)
+          .set({
+            templateVersionId: to.version.id,
+            templateParameters: toStoredSiteTemplateParameters(spec, resolved.values),
+            updatedAt: new Date(),
+          })
+          .where(eq(sites.id, siteId));
+        await onNew?.(t, enqueued.operation.id, change);
       }
       return { siteId, operationId: enqueued.operation.id };
     });
@@ -650,6 +785,7 @@ export class ManagedSitesService {
       .where(inArray(sites.siteType, [...SITE_TYPE_KEYS]))
       .orderBy(asc(sites.name), asc(sites.id));
     const stopped = await stoppedSiteIds(db, rows.map(({ site }) => site.id));
+    const templates = await listSiteTemplateRefs(db, rows.map(({ site }) => site));
     const customers = await db
       .selectDistinct({
         organizationId: organizations.id,
@@ -680,6 +816,7 @@ export class ManagedSitesService {
         siteType: siteTypeKeyOf(site.siteType),
         primaryDomain: primaryDomain ?? null,
         owner: site.organizationId === PLATFORM_OPS_ORG_ID ? null : { organizationId: site.organizationId, name: orgName },
+        template: templates.get(site.id) ?? null,
         createdAt: site.createdAt.toISOString(),
         updatedAt: site.updatedAt.toISOString(),
       })),
@@ -809,6 +946,44 @@ export class ManagedSitesService {
       return this.reassign(siteId, to, actorId, idempotencyKey);
     }
     return this.act(siteId, owner, "retry", actorId, idempotencyKey);
+  }
+
+  /** The current revision of a service that is meant to run: what a redeploy builds on. */
+  async #runningRevision(svc: typeof serviceInstances.$inferSelect, whenStopped: ControlPlaneError) {
+    // A deploy would start a site its owner stopped.
+    if (svc.desiredStatus === "stopped") throw whenStopped;
+    const [current] = svc.currentRevisionId
+      ? await this.dbClient.db.select().from(stackRevisions).where(eq(stackRevisions.id, svc.currentRevisionId)).limit(1)
+      : [];
+    if (!current) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    return current;
+  }
+
+  /** The id of the service.deploy already accepted under this key for this service, if any. */
+  async #deployReplay(serviceId: string, organizationId: string, idempotencyKey: string): Promise<string | null> {
+    const [previous] = await this.dbClient.db
+      .select({ id: operations.id, kind: operations.kind, resourceId: operations.resourceId })
+      .from(operations)
+      .where(and(eq(operations.organizationId, organizationId), eq(operations.idempotencyKey, idempotencyKey)))
+      .limit(1);
+    return previous?.kind === "service.deploy" && previous.resourceId === serviceId ? previous.id : null;
+  }
+
+  /** The image a PHP change builds: the site's own template version renders it (a legacy site without one: the module's pin). */
+  async #imageFor(site: typeof sites.$inferSelect, type: ApiSiteType, phpVersion: PhpVersion): Promise<string> {
+    if (!site.templateVersionId) return type.image(phpVersion);
+    const loaded = await getSiteTemplateVersionById(this.dbClient.db, site.templateVersionId);
+    if (!loaded) throw new ControlPlaneError("NOT_FOUND", "Requested organization or resource was not found.");
+    const spec = readSiteTemplateSpec(loaded.version);
+    const resolved = resolveSiteTemplateParameters(spec, storedEntries(site, spec), { audience: "admin", phpVersion });
+    if (!resolved.ok) {
+      throw refusal("This PHP version is not available for this site.", resolved.issues[0]!.reason, "phpVersion");
+    }
+    try {
+      return String(renderSiteTemplate(spec, resolved.values, { siteId: site.id, siteDomain: "", siteUrl: "" }).configuration["image"]);
+    } catch (err) {
+      throw renderRefusal(err);
+    }
   }
 
   async #webService(site: typeof sites.$inferSelect) {
