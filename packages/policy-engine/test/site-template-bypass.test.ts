@@ -917,19 +917,18 @@ describe("interpolation in places where it must not be expanded", () => {
   });
 });
 
-describe("known gap: text that reaches an environment value through a parameter", () => {
-  // envValueProblem checks the literal text only ("before any ${NAME} is filled in", design rule 26), and a string default
-  // or an enum option is not scanned for a secret or the docker socket. This pins the CURRENT behaviour so a change is visible:
-  // the rendered value is still refused later by the executor spec gate (findUnsafeDockerInputFields).
+describe("a value that reaches an environment variable through a parameter is refused", () => {
+  // envValueProblem checks the literal text only ("before any ${NAME} is filled in", design rule 26), so a string default and an
+  // enum option are held to the same literal environment value rules: the docker socket or a token never reaches the executor.
   const viaParameter = (parameter: string[], value: string): string =>
     template({ service: ["environment:", `  WP_X: ${q(value)}`] }).replace("services:", () => `${parameter.join("\n")}\nservices:`);
 
   it.each([
-    ["a string default holding the docker socket", ["  - key: s", "    label: S", "    type: string", '    default: "unix:///var/run/docker.sock"']],
-    ["a string default holding a token", ["  - key: s", "    label: S", "    type: string", `    default: "ghp_${"a".repeat(30)}"`]],
-    ["an enum option named like the socket file", ["  - key: s", "    label: S", "    type: enum", '    options: ["docker.sock"]', '    default: "docker.sock"']],
-  ])("accepts %s", (_name, parameter) => {
-    expect(validateSiteTemplateSource(viaParameter(parameter, "${s}"), "wordpress").ok).toBe(true);
+    ["a string default holding the docker socket", ["  - key: s", "    label: S", "    type: string", '    default: "unix:///var/run/docker.sock"'], "PARAM_DEFAULT_INVALID", "x-hp-parameters[1].default"],
+    ["a string default holding a token", ["  - key: s", "    label: S", "    type: string", `    default: "ghp_${"a".repeat(30)}"`], "PARAM_DEFAULT_INVALID", "x-hp-parameters[1].default"],
+    ["an enum option named like the socket file", ["  - key: s", "    label: S", "    type: enum", '    options: ["docker.sock"]', '    default: "docker.sock"'], "PARAM_OPTIONS_INVALID", "x-hp-parameters[1].options[0]"],
+  ])("refuses %s", (_name, parameter, code, path) => {
+    refused(viaParameter(parameter, "${s}"), code, path);
   });
 });
 
