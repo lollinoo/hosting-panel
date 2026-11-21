@@ -55,6 +55,7 @@ const dom = (over: {
   challenge: over.challenge ?? "http-01",
   dns: { status: "ok", checkedAt: null, nextCheckAt: "2026-11-09T13:00:00Z", observedA: [], observedAaaa: [], ...over.dns },
   certificate: { status: "none", problem: null, expiresAt: null, retryAt: null, trusted: true, ...over.certificate },
+  tls: { mode: "acme", certificateId: null, versionId: null, state: null, problem: null },
 });
 
 describe("domain challenge BFF", () => {

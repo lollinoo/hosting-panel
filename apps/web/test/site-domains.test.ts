@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
-import { BACKUP_PROBLEMS, type SiteDomainDto, type SiteDomainsDto } from "@hosting-panel/contracts";
+import { BACKUP_PROBLEMS, ERROR_CODES, type SiteDomainDto, type SiteDomainsDto } from "@hosting-panel/contracts";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
+import { errorMessage } from "@/i18n";
 import { I18nProvider } from "@/i18n/provider";
 
 const fetchUpstream = vi.fn();
@@ -55,6 +56,7 @@ const dom = (over: {
   challenge: over.challenge ?? "http-01",
   dns: { status: "ok", checkedAt: null, nextCheckAt: "2026-11-09T13:00:00Z", observedA: [], observedAaaa: [], ...over.dns },
   certificate: { status: "none", problem: null, expiresAt: null, retryAt: null, trusted: true, ...over.certificate },
+  tls: { mode: "acme", certificateId: null, versionId: null, state: null, problem: null },
 });
 
 describe("domains BFF", () => {
@@ -311,6 +313,18 @@ describe("backups shared base", () => {
           expect(problemMap[key].trim().length, `${label}.${key}`).toBeGreaterThan(0);
         }
       }
+    }
+  });
+
+  it("has its own next-step text for every manual-certificate error and for a target still in use, in both catalogs", () => {
+    const codes = ERROR_CODES.filter((c) => c.startsWith("CERTIFICATE_") || c === "BACKUP_TARGET_IN_USE");
+    expect(codes).toHaveLength(12);
+    for (const code of codes) {
+      const [enText, itText] = [errorMessage(en, code), errorMessage(itMsgs, code)];
+      expect(enText, `en.${code}`).not.toBe(en.errors.generic);
+      expect(itText, `it.${code}`).not.toBe(itMsgs.errors.generic);
+      expect(enText, code).not.toBe(itText);
+      expect(`${enText} ${itText}`, code).not.toMatch(/-----BEGIN|\bBEGIN\b/);
     }
   });
 
