@@ -6,6 +6,13 @@ MAIN_BRANCH=main
 # One command that must pass before a push and before a PR is marked ready. Empty = no check.
 VERIFY_CMD="corepack pnpm run build && corepack pnpm run lint && corepack pnpm run typecheck && corepack pnpm run test"
 
+# Lighter check for .githooks/pre-push when CI already runs VERIFY_CMD in full, e.g. only the
+# tests related to the change. Empty = VERIFY_CMD. A push of commits that already passed it
+# from a clean checkout, or a push that only deletes branches, skips the check.
+# Here: only the tests related to the change since origin/main; forceRerunTriggers in
+# vitest.config.ts runs the whole suite when shared packages, migrations or infra change.
+PUSH_VERIFY_CMD="corepack pnpm run build && corepack pnpm run lint && corepack pnpm run typecheck && corepack pnpm run test --changed origin/main --passWithNoTests"
+
 # Timezone of the release tags (YYYYMMDD-HHMM) and of the changelog dates.
 RELEASE_TZ=Europe/Rome
 

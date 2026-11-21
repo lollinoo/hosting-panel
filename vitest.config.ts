@@ -13,6 +13,18 @@ export default defineConfig({
     // One initdb per run instead of one per in-memory database (PGLITE_TEMPLATE_KEY in packages/database).
     globalSetup: ["test/pglite-template.global-setup.ts"],
     setupFiles: ["test/pglite-template.setup.ts"],
+    // With --changed (PUSH_VERIFY_CMD in .devflow/config) a change to one of these runs every test:
+    // the tests import the built packages, and the infra tests start the scripts as programs,
+    // so the import graph does not link these files to the tests that cover them.
+    forceRerunTriggers: [
+      "**/package.json",
+      "**/{vitest,vite}.config.*",
+      "**/pnpm-lock.yaml",
+      "**/packages/*/src/**",
+      "**/packages/database/migrations/**",
+      "**/infra/**",
+      "**/test/pglite-template.*",
+    ],
   },
   resolve: {
     alias: {
