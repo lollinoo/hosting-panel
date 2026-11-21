@@ -53,7 +53,7 @@ tags:
   - name: TLS Certificates
     description: Imported (PEM) certificates, their versions and which domains serve them; the administrator's inventory and alerts
   - name: Admin Backups
-    description: Platform S3 backup target settings, connectivity tests, and per-site backup status (server administrator only)
+    description: Platform backup destinations (S3-compatible and local), backup policies, connectivity tests, and per-site backup status (server administrator only)
   - name: Admin Health
     description: Panel health, open alerts, site and panel logs, and restarts of the panel's parts (server administrator only)
   - name: Admin Terminal
@@ -4785,7 +4785,7 @@ paths:
     patch:
       tags: [Admin Backups]
       operationId: adminSaveBackups
-      summary: Configure or update the S3-compatible backup target and nightly schedule (omitting secretAccessKey keeps the stored secret; changing endpoint, bucket, or prefix purges stored backup history rows)
+      summary: Configure or update the S3-compatible backup target and nightly schedule (omitting secretAccessKey keeps the stored secret; changing endpoint, bucket, or prefix creates a new destination and archives the old one, keeping the history and its copies restorable)
       requestBody:
         required: true
         content:
@@ -4816,7 +4816,7 @@ paths:
     delete:
       tags: [Admin Backups]
       operationId: adminClearBackups
-      summary: Remove the backup target settings, stored secret, and site backup index rows
+      summary: Archive the S3 backup destinations and clear their settings (non-destructive; backup history rows and copies are kept, and local destinations are untouched)
       responses:
         "200":
           description: Cleared platform backup settings
@@ -4897,6 +4897,12 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SiteIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteBackupInput"
       responses:
         "202":
           description: Accepted; backup queued via transactional outbox
@@ -4921,13 +4927,271 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
-          description: Site not found (`NOT_FOUND`)
+          description: Site not found, or the `targetId` destination is unknown or not usable (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: Site deploying/maintenance (`RESOURCE_LOCKED`, message `not_ready`), locked by another operation (`RESOURCE_LOCKED`), or reused `Idempotency-Key` (`IDEMPOTENCY_CONFLICT`)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets:
+    get:
+      tags: [Admin Backups]
+      operationId: adminListBackupTargets
+      summary: List the backup destinations, archived ones included (server administrator only; never returns a secret)
+      responses:
+        "200":
+          description: Destinations and whether this server can offer a local one
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupTargets"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Admin Backups]
+      operationId: adminCreateBackupTarget
+      summary: Add an S3-compatible or local backup destination (a local one must be initialized before use)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBackupTargetInput"
+      responses:
+        "201":
+          description: "The new destination (a local one has `local.initializedAt: null`)"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminBackupTarget"
+        "400":
+          description: "Invalid destination (`VALIDATION_ERROR`, including `local_target_exists`: a server has at most one local destination)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets/{targetId}:
+    patch:
+      tags: [Admin Backups]
+      operationId: adminUpdateBackupTarget
+      summary: >-
+        Rename, enable, make customer-selectable, set the retention or archive a destination. Changing the
+        endpoint, bucket or prefix of an S3 destination creates a new one and archives the old one (history is kept).
+        The legacy destination accepts only name, enabled, customerSelectable and archived.
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBackupTargetInput"
+      responses:
+        "200":
+          description: The updated destination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminBackupTarget"
+        "400":
+          description: Invalid change (`VALIDATION_ERROR`, including `location_immutable`, `legacy_target_locked`, `target_archived` and `update_empty`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Admin Backups]
+      operationId: adminDeleteBackupTarget
+      summary: Delete a destination nothing refers to; the legacy destination and any destination with copies, policies or pending restores is refused
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      responses:
+        "204":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The destination is still referenced or is the legacy one (`BACKUP_TARGET_IN_USE`); archive it instead
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets/{targetId}/test:
+    post:
+      tags: [Admin Backups]
+      operationId: adminTestBackupTarget
+      summary: Run an immediate connectivity and write test against a destination (synchronous, at most 30 seconds; the result is stored as `lastTest`)
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: Outcome of the test, with the free and total space of a local destination
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupTargetTestResult"
+        "400":
+          description: Invalid body (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another connectivity test is already running (`RESOURCE_LOCKED`) or the outcome is unknown (`OPERATION_AMBIGUOUS`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-targets/{targetId}/initialize:
+    post:
+      tags: [Admin Backups]
+      operationId: adminInitializeBackupTarget
+      summary: Create and check the managed directory of the local destination (local only; repeating it is harmless)
+      parameters:
+        - $ref: "#/components/parameters/BackupTargetIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: The destination, now with `local.initializedAt` set
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminBackupTarget"
+        "400":
+          description: Not a local destination (`VALIDATION_ERROR`, `not_local`), or the directory is not usable (for example `no_space`, `write_denied`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Destination not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: Backups runtime unavailable on the active backend (`NOT_SUPPORTED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: Executor temporarily unavailable (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/backup-policies/{scope}:
+    get:
+      tags: [Admin Backups]
+      operationId: adminGetBackupPolicy
+      summary: Where and when backups go by default (`default`, nightly site backups) or for the panel database (`panel`)
+      parameters:
+        - $ref: "#/components/parameters/BackupPolicyScopeParam"
+      responses:
+        "200":
+          description: The policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupPolicy"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown scope (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Admin Backups]
+      operationId: adminUpdateBackupPolicy
+      summary: Change the schedule, the retention or the destinations of a policy (the order of `targetIds` is the priority)
+      parameters:
+        - $ref: "#/components/parameters/BackupPolicyScopeParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBackupPolicyInput"
+      responses:
+        "200":
+          description: The updated policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/BackupPolicy"
+        "400":
+          description: Invalid policy (`VALIDATION_ERROR`, including a destination that is disabled, archived or unknown, `too_many_targets`, `scheduleHourUtc` on the panel policy)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown scope (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/backups/sites/{siteId}/restore:
@@ -6118,6 +6382,69 @@ paths:
           description: The host agent is disabled (`NOT_SUPPORTED`)
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/managed-sites/{siteId}/backup-policy:
+    get:
+      tags: [Managed Sites]
+      operationId: getSiteBackupPolicy
+      summary: Where this site's backups go, whether that is inherited, and the destinations the customer may choose (`site.backups.manage`)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      responses:
+        "200":
+          description: The site backup policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupPolicy"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Managed Sites]
+      operationId: updateSiteBackupPolicy
+      summary: Choose the destinations of this site, or `null` to inherit the default (`site.backups.manage`)
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/SiteIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetSiteBackupPolicyInput"
+      responses:
+        "200":
+          description: The updated site backup policy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteBackupPolicy"
+        "400":
+          description: Invalid body (`VALIDATION_ERROR`, including `target_ids_not_distinct`, `too_many_targets`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Site not found or belongs to another organization, or a destination the customer may not choose (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/organizations/{orgId}/managed-sites/{siteId}/backups:
     get:
       tags: [Managed Sites]
@@ -6153,6 +6480,12 @@ paths:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/SiteIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteBackupInput"
       responses:
         "202":
           description: Accepted; follow the returned operation URL
@@ -6179,7 +6512,7 @@ paths:
           description: Missing `site.backups.manage` permission or suspended organization (`PERMISSION_DENIED` / `ORGANIZATION_SUSPENDED`)
           $ref: "#/components/responses/ErrorResponse"
         "404":
-          description: Site not found or belongs to another organization (`NOT_FOUND`)
+          description: Site not found or belongs to another organization, or the `targetId` destination may not be used by this customer (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
           description: >-
@@ -6266,8 +6599,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
+              $ref: "#/components/schemas/PrepareDownloadInput"
       responses:
         "202":
           description: Accepted (or already preparing/ready); follow the returned operation URL
@@ -6908,6 +7240,19 @@ components:
       required: true
       schema:
         type: string
+    BackupTargetIdParam:
+      in: path
+      name: targetId
+      required: true
+      schema:
+        $ref: "#/components/schemas/BackupTargetId"
+    BackupPolicyScopeParam:
+      in: path
+      name: scope
+      required: true
+      schema:
+        type: string
+        enum: [default, panel]
     DomainIdParam:
       in: path
       name: domainId
@@ -7203,7 +7548,7 @@ components:
         localBackupTargetsAvailable:
           type: boolean
           default: false
-          description: True once a backup target on this server can be configured; false until that capability ships
+          description: True when `runtimeBackend` is `linux-systemd` (a backup target on this server's own disk can be configured); false otherwise
         encryptedBackupExportAvailable:
           type: boolean
           default: false
@@ -7256,7 +7601,7 @@ components:
         localBackupTargetsAvailable:
           type: boolean
           default: false
-          description: True once a backup target on this server can be configured; false until that capability ships
+          description: True when `runtimeBackend` is `linux-systemd` (a backup target on this server's own disk can be configured); false otherwise
         encryptedBackupExportAvailable:
           type: boolean
           default: false
@@ -8698,6 +9043,9 @@ components:
         confirmName:
           type: string
           maxLength: 255
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to restore from; it must hold a succeeded copy of the backup (default is the best available copy)
 
     AdminRestoreBackupInput:
       type: object
@@ -8711,6 +9059,390 @@ components:
         confirmName:
           type: string
           maxLength: 255
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to restore from; it must hold a succeeded copy of the backup (default is the best available copy)
+
+    BackupTargetId:
+      type: string
+      pattern: "^bkt_[0-9a-f]{32}$"
+      description: Identifier of a backup destination
+
+    BackupTargetKind:
+      type: string
+      enum: [s3, local]
+
+    BackupCopyStatus:
+      type: string
+      enum: [running, succeeded, failed, missing, unknown]
+
+    CreateBackupTargetInput:
+      description: >-
+        An S3-compatible destination (location, access key and write-only secret) or the local destination.
+        A local destination has no path: the root is fixed by the server configuration.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [kind, name, endpoint, region, bucket, accessKeyId, secretAccessKey]
+          properties:
+            kind:
+              type: string
+              const: s3
+            name:
+              type: string
+              minLength: 1
+              maxLength: 128
+            enabled:
+              type: boolean
+              default: true
+            customerSelectable:
+              type: boolean
+              default: false
+            endpoint:
+              type: string
+              pattern: "^https?:\\/\\/[A-Za-z0-9.-]+(:\\d{1,5})?$"
+            region:
+              type: string
+              pattern: "^[a-z0-9-]{1,64}$"
+            bucket:
+              type: string
+              pattern: "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+            prefix:
+              type: string
+              default: ""
+            accessKeyId:
+              type: string
+              minLength: 1
+              maxLength: 256
+            secretAccessKey:
+              type: string
+              minLength: 1
+              maxLength: 256
+              writeOnly: true
+        - type: object
+          additionalProperties: false
+          required: [kind, name]
+          properties:
+            kind:
+              type: string
+              const: local
+            name:
+              type: string
+              minLength: 1
+              maxLength: 128
+            enabled:
+              type: boolean
+              default: true
+            customerSelectable:
+              type: boolean
+              default: false
+
+    UpdateBackupTargetInput:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: >-
+        At least one property. The legacy destination accepts only `name`, `enabled`, `customerSelectable` and
+        `archived`; a local destination never takes a location. Changing `endpoint`, `bucket` or `prefix` of an S3
+        destination creates a new destination and archives this one.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        enabled:
+          type: boolean
+        customerSelectable:
+          type: boolean
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+          nullable: true
+          description: "`null` inherits the policy retention"
+        archived:
+          type: boolean
+          const: true
+        endpoint:
+          type: string
+        region:
+          type: string
+        bucket:
+          type: string
+        prefix:
+          type: string
+        accessKeyId:
+          type: string
+        secretAccessKey:
+          type: string
+          minLength: 1
+          maxLength: 256
+          writeOnly: true
+
+    AdminBackupTarget:
+      type: object
+      required: [id, kind, name, enabled, customerSelectable, legacy, archivedAt, retentionDays, s3, local, lastTest, usage, createdAt, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+        name:
+          type: string
+        enabled:
+          type: boolean
+        customerSelectable:
+          type: boolean
+        legacy:
+          type: boolean
+          description: The destination created from the pre-multi-target settings; its location cannot change
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        retentionDays:
+          type: integer
+          nullable: true
+        s3:
+          type: object
+          nullable: true
+          required: [endpoint, region, bucket, prefix, accessKeyId, secretAccessKeySet]
+          properties:
+            endpoint:
+              type: string
+            region:
+              type: string
+            bucket:
+              type: string
+            prefix:
+              type: string
+            accessKeyId:
+              type: string
+            secretAccessKeySet:
+              type: boolean
+              const: true
+        local:
+          type: object
+          nullable: true
+          required: [root, initializedAt]
+          properties:
+            root:
+              type: string
+              nullable: true
+            initializedAt:
+              type: string
+              format: date-time
+              nullable: true
+        lastTest:
+          type: object
+          nullable: true
+          required: [at, outcome, problem, availableBytes, totalBytes]
+          properties:
+            at:
+              type: string
+              format: date-time
+            outcome:
+              type: string
+              enum: [ok, failed]
+            problem:
+              $ref: "#/components/schemas/BackupProblem"
+              nullable: true
+            availableBytes:
+              type: integer
+              minimum: 0
+              nullable: true
+            totalBytes:
+              type: integer
+              minimum: 0
+              nullable: true
+        usage:
+          type: object
+          required: [policies, copies]
+          properties:
+            policies:
+              type: array
+              items:
+                type: string
+                enum: [default_site, site, panel]
+            copies:
+              type: integer
+              minimum: 0
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    BackupTargets:
+      type: object
+      required: [targets, localRootConfigured]
+      properties:
+        targets:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminBackupTarget"
+        localRootConfigured:
+          type: boolean
+          description: False when this install cannot offer a local destination
+
+    BackupTargetTestResult:
+      allOf:
+        - $ref: "#/components/schemas/BackupTestResult"
+        - type: object
+          properties:
+            availableBytes:
+              type: integer
+              minimum: 0
+            totalBytes:
+              type: integer
+              minimum: 0
+
+    BackupPolicyTarget:
+      type: object
+      required: [targetId, kind, priority, required]
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+        priority:
+          type: integer
+          enum: [1, 2]
+        required:
+          type: boolean
+
+    BackupPolicy:
+      type: object
+      required: [scope, siteId, scheduleHourUtc, retentionDays, targets, updatedAt]
+      properties:
+        scope:
+          type: string
+          enum: [default_site, panel]
+        siteId:
+          type: string
+          nullable: true
+          description: Always `null` here; per-site choices are in `SiteBackupPolicy`
+        scheduleHourUtc:
+          type: integer
+          minimum: 0
+          maximum: 23
+          nullable: true
+          description: "`null` for the panel policy, which has no schedule of its own"
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+        targets:
+          type: array
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/BackupPolicyTarget"
+        updatedAt:
+          type: string
+          format: date-time
+
+    UpdateBackupPolicyInput:
+      type: object
+      additionalProperties: false
+      description: Every property is optional; `scheduleHourUtc` is refused on the panel policy
+      properties:
+        scheduleHourUtc:
+          type: integer
+          minimum: 0
+          maximum: 23
+        retentionDays:
+          type: integer
+          minimum: 1
+          maximum: 365
+        targetIds:
+          type: array
+          maxItems: 2
+          uniqueItems: true
+          description: Enabled, not archived destinations; the order is the priority
+          items:
+            $ref: "#/components/schemas/BackupTargetId"
+
+    SetSiteBackupPolicyInput:
+      type: object
+      additionalProperties: false
+      required: [targetIds]
+      properties:
+        targetIds:
+          type: array
+          minItems: 1
+          maxItems: 2
+          uniqueItems: true
+          nullable: true
+          description: Destinations the customer may choose; `null` inherits the default policy
+          items:
+            $ref: "#/components/schemas/BackupTargetId"
+
+    BackupTargetChoice:
+      type: object
+      required: [id, kind]
+      properties:
+        id:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+
+    SiteBackupPolicy:
+      type: object
+      required: [targetIds, inherited, choices]
+      properties:
+        targetIds:
+          type: array
+          maxItems: 2
+          items:
+            $ref: "#/components/schemas/BackupTargetId"
+        inherited:
+          type: boolean
+        choices:
+          type: array
+          items:
+            $ref: "#/components/schemas/BackupTargetChoice"
+
+    SiteBackupCopy:
+      type: object
+      required: [targetId, kind, status, sizeBytes, problem, startedAt, finishedAt]
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+        kind:
+          $ref: "#/components/schemas/BackupTargetKind"
+        status:
+          $ref: "#/components/schemas/BackupCopyStatus"
+        sizeBytes:
+          type: integer
+          minimum: 0
+          nullable: true
+        problem:
+          $ref: "#/components/schemas/BackupProblem"
+          nullable: true
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateSiteBackupInput:
+      type: object
+      additionalProperties: false
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to use instead of the site's own; the customer may name only a destination offered in `targets` of the backup list
+
+    PrepareDownloadInput:
+      type: object
+      additionalProperties: false
+      properties:
+        targetId:
+          $ref: "#/components/schemas/BackupTargetId"
+          description: The destination to read from; it must hold a succeeded copy of the backup
 
     BackupArchive:
       type: object
@@ -8749,7 +9481,7 @@ components:
 
     SiteBackup:
       type: object
-      required: [id, kind, status, startedAt, finishedAt, sizeBytes, problem, archive]
+      required: [id, kind, status, startedAt, finishedAt, sizeBytes, problem, archive, copies]
       properties:
         id:
           type: string
@@ -8775,10 +9507,15 @@ components:
         archive:
           $ref: "#/components/schemas/BackupArchive"
           nullable: true
+        copies:
+          type: array
+          description: One entry per destination the backup was written to (empty for a row from before destinations existed)
+          items:
+            $ref: "#/components/schemas/SiteBackupCopy"
 
     SiteBackups:
       type: object
-      required: [available, configured, retentionDays, manualKept, runningOperationId, lastRestore, backups]
+      required: [available, configured, retentionDays, manualKept, runningOperationId, lastRestore, backups, targets]
       properties:
         available:
           type: boolean
@@ -8799,6 +9536,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SiteBackup"
+        targets:
+          type: array
+          description: The destinations this customer may name as `targetId` (id and kind only)
+          items:
+            $ref: "#/components/schemas/BackupTargetChoice"
 
     BackupArchiveChunk:
       type: object
@@ -10086,7 +10828,8 @@ components:
       required: [severity, subject, since, kind, details]
       description: >-
         `critical` kinds: `disk_high`, `component_down`, `site_container_down`,
-        `restore_undo_incomplete`; every other kind is `warning`. `details` has a fixed shape per
+        `restore_undo_incomplete`; every other kind is `warning`, except `manual_certificate_expiring`,
+        which is `warning` at tier `warning` and `critical` at tiers `critical` and `expired`. `details` has a fixed shape per
         `kind` (listed under `details`) and no other field.
       properties:
         severity:
@@ -10101,7 +10844,7 @@ components:
           nullable: true
         kind:
           type: string
-          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
+          enum: [disk_high, certificate_expiring, certificate_not_issued, panel_certificate_expiring, manual_certificate_expiring, backup_failed, panel_backup_failed, backup_storage_test_failed, backup_target_space_low, backup_site_without_target, component_down, site_container_down, restore_undo_incomplete, restore_stuck, operation_unknown, operation_stuck]
         details:
           type: object
           description: >-
@@ -10109,9 +10852,12 @@ components:
             certificate_expiring `{siteId, siteName, hostname, expiresAt|null, problem|null}`;
             certificate_not_issued `{siteId, siteName, hostname, problem|null}`;
             panel_certificate_expiring `{hostname, expiresAt}`;
+            manual_certificate_expiring `{siteId|null, siteName|null, certificateId, certificateName, notAfter, tier: warning|critical|expired}`;
             backup_failed `{siteId, siteName, failedAt}`;
             panel_backup_failed `{failedAt}`;
-            backup_storage_test_failed `{testedAt}`;
+            backup_storage_test_failed `{testedAt, targetId, targetKind: s3|local, problem|null}`;
+            backup_target_space_low `{targetId, targetKind: local, availableBytes, totalBytes, testedAt}`;
+            backup_site_without_target `{siteId, siteName}`;
             component_down `{component, state: down|degraded, reason|null}`;
             site_container_down `{siteId, siteName, observed}`;
             restore_undo_incomplete `{siteId, siteName, backupId, failedAt|null}`;
@@ -10153,6 +10899,22 @@ components:
               properties:
                 hostname: { type: string }
                 expiresAt: { type: string, format: date-time }
+            - title: manual_certificate_expiring
+              type: object
+              description: >-
+                An imported certificate version in use is within 14 days of `notAfter` (`warning`),
+                within 7 days (`critical`) or past it (`expired`); `severity` is `warning` at tier
+                `warning` and `critical` otherwise. `siteId` and `siteName` are null when the
+                certificate is not assigned to a site
+              additionalProperties: false
+              required: [siteId, siteName, certificateId, certificateName, notAfter, tier]
+              properties:
+                siteId: { type: string, nullable: true }
+                siteName: { type: string, nullable: true }
+                certificateId: { type: string }
+                certificateName: { type: string }
+                notAfter: { type: string, format: date-time }
+                tier: { type: string, enum: [warning, critical, expired] }
             - title: backup_failed
               type: object
               additionalProperties: false
@@ -10170,9 +10932,39 @@ components:
             - title: backup_storage_test_failed
               type: object
               additionalProperties: false
-              required: [testedAt]
+              description: >-
+                The last test of an enabled backup target failed. `subject` is the target id;
+                `problem` is the problem name of that test, or null
+              required: [testedAt, targetId, targetKind, problem]
               properties:
                 testedAt: { type: string, format: date-time }
+                targetId: { type: string, pattern: "^bkt_[0-9a-f]{32}$" }
+                targetKind: { type: string, enum: [s3, local] }
+                problem: { type: string, nullable: true, pattern: "^[a-z][a-z_]{0,63}$" }
+            - title: backup_target_space_low
+              type: object
+              description: >-
+                The last test of an enabled local target passed but its free space is below the
+                larger of 1 GiB and a tenth of the total. `subject` is the target id; no path leaves
+                the panel
+              additionalProperties: false
+              required: [targetId, targetKind, availableBytes, totalBytes, testedAt]
+              properties:
+                targetId: { type: string, pattern: "^bkt_[0-9a-f]{32}$" }
+                targetKind: { type: string, enum: [local] }
+                availableBytes: { type: integer, minimum: 0 }
+                totalBytes: { type: integer, minimum: 0 }
+                testedAt: { type: string, format: date-time }
+            - title: backup_site_without_target
+              type: object
+              description: >-
+                A site the nightly run would back up has no usable target, while some other target
+                is usable. `subject` is the site id and `since` is null
+              additionalProperties: false
+              required: [siteId, siteName]
+              properties:
+                siteId: { type: string }
+                siteName: { type: string }
             - title: component_down
               type: object
               additionalProperties: false
