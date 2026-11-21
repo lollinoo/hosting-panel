@@ -18,8 +18,9 @@ async function optional<T>(read: Promise<T | null>): Promise<T | null> {
 const siteLimitOf = (org: OrganizationDetailDto | null) => (org?.maxSites == null ? null : { used: org.siteCount, max: org.maxSites });
 
 export default async function NewSitePage() {
-  const { session, orgId } = await getCustomerContext();
+  const { session, orgId, support } = await getCustomerContext();
   if (!orgId) redirect("/sites");
-  const limit = siteLimitOf(await optional(fetchServerOrg(orgId)));
+  // A support visit lacks organization.read: the read would be refused and audited as denied on every load.
+  const limit = support ? null : siteLimitOf(await optional(fetchServerOrg(orgId)));
   return <NewSite orgId={orgId} csrfToken={session.csrfToken} limit={limit} />;
 }

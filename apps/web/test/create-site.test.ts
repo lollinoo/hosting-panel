@@ -216,6 +216,13 @@ describe("new site page", () => {
     await expect(NewSitePage()).rejects.toThrow("NEXT_REDIRECT");
   });
 
+  it("a support visit has no organization.read permission, so the page does not read the organisation", async () => {
+    getCustomerContext.mockResolvedValue({ session: { csrfToken: "csrf" }, orgId: "org-1", support: { organizationId: "org-1" } });
+    fetchServerOrg.mockResolvedValue({ maxSites: 5, siteCount: 3 });
+    expect(await limitOf()).toBeNull();
+    expect(fetchServerOrg).not.toHaveBeenCalled();
+  });
+
   it("without an organisation it goes back to /sites before reading anything", async () => {
     getCustomerContext.mockResolvedValue({ session: { csrfToken: "csrf" }, orgId: null });
     await expect(NewSitePage()).rejects.toThrow("REDIRECT:/sites");
