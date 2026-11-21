@@ -120,6 +120,7 @@ export const it = {
       siteTypeHint: "Scegli il modello da cui partire.",
       options: "Opzioni del sito",
       siteTypeUnavailable: "Questo tipo di sito non è più disponibile. Abbiamo aggiornato l'elenco: scegline un altro.",
+      noSiteTypes: "Al momento non c'è nessun tipo di sito disponibile. Contatta il tuo amministratore per averne uno.",
     },
     progress: {
       title: "Stiamo preparando il tuo sito",
@@ -1979,6 +1980,7 @@ export const it = {
       create: "Crea sito",
       createTitle: "Crea un sito",
       createHint: "Il sito viene preparato in pochi minuti. Compare nel pannello del proprietario appena viene assegnato.",
+      createInvalid: "Alcuni dati non sono validi. Controlla nome, indirizzo web, titolo, utente, email, password e versione PHP, poi riprova.",
       colName: "Nome",
       colDomain: "Indirizzo web",
       colOwner: "Proprietario",
@@ -2066,6 +2068,7 @@ export const it = {
       loadError: "Non è stato possibile caricare i modelli. Ricarica la pagina tra un minuto.",
       empty: "Nessun modello per ora.",
       back: "Torna ai modelli",
+      invalid: "Questa versione del modello non supera più i controlli e non si può usare. Aprila nell'editor, correggila e salva una nuova versione.",
       moduleCount: "{count} modelli",
       modules: { wordpress: "WordPress" },
       versionLabel: "v{version}",
@@ -2132,6 +2135,7 @@ export const it = {
         save: "Salva come nuova versione",
         saveCreate: "Crea modello",
         saving: "Salvataggio...",
+        createRetried: "Il salvataggio precedente potrebbe essere andato a buon fine anche se la risposta non è arrivata. Controlla l'elenco dei modelli prima di salvare di nuovo.",
       },
     },
     certificates: {

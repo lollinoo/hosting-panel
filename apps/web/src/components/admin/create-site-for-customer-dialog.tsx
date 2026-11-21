@@ -28,7 +28,8 @@ export function CreateSiteForCustomerDialog({ customers, csrfToken }: { customer
       ownerOrganizationId: owner || null,
     });
     setBusy(false);
-    if (!sent.ok) return setError(sent.code === "DOMAIN_CONFLICT" ? m.site.create.domainConflict : adminSiteErrorText(m, sent));
+    // The answer carries no field names here and nothing is highlighted, so the sentence names the fields itself.
+    if (!sent.ok) return setError(sent.code === "DOMAIN_CONFLICT" ? m.site.create.domainConflict : sent.code === "VALIDATION_ERROR" ? t.createInvalid : adminSiteErrorText(m, sent));
     setOpen(false);
     router.refresh();
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   SITE_TYPE_KEYS,
@@ -130,13 +131,16 @@ export function SiteTemplateEditor({
     setBusy("save");
     setError(null);
     if ((await check())?.valid) {
-      // The key is named by the body, so a lost reply replays the same save and an edited body gets a new key.
+      // The key is named by the body: a retry sends the same key, an edited body a new one. Only the version route replays it;
+      // the create route ignores it, so a create sent again after a lost reply may find the template already there (below).
       const body =
         target.kind === "create"
           ? { module: chosen, name: name.trim(), description: description.trim() || undefined, source }
           : { source, makeDefault };
       const url = target.kind === "create" ? "/api/admin/site-templates" : `/api/admin/site-templates/${target.templateId}/versions`;
-      const sent = await keyedSend(keys.current, csrfToken, `${url}:${JSON.stringify(body)}`, "POST", url, body);
+      const action = `${url}:${JSON.stringify(body)}`;
+      const retried = Object.hasOwn(keys.current, action); // an earlier attempt of this very save got no answer
+      const sent = await keyedSend(keys.current, csrfToken, action, "POST", url, body);
       if (sent.ok) {
         // Stay busy while the page changes, so a second click cannot save twice.
         if (target.kind === "create") {
@@ -150,6 +154,8 @@ export function SiteTemplateEditor({
       }
       // A refusal the check did not see: ask again, so the located errors show.
       if (sent.code === "VALIDATION_ERROR") await check();
+      // The name is taken by the template the lost attempt created, most likely: not a clash to fix by renaming (that would add a copy).
+      else if (target.kind === "create" && retried && sent.code === "ALREADY_EXISTS" && sent.reason === "name_taken") setError(e.createRetried);
       else setError(errorMessage(m, sent.code));
     }
     setBusy(null);
@@ -242,7 +248,17 @@ export function SiteTemplateEditor({
       </div>
       {error && (
         <Alert variant="destructive" role="alert">
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>
+            {error}
+            {error === e.createRetried && (
+              <>
+                {" "}
+                <Link href="/admin/templates" className="underline">
+                  {t.back}
+                </Link>
+              </>
+            )}
+          </AlertDescription>
         </Alert>
       )}
       {result &&

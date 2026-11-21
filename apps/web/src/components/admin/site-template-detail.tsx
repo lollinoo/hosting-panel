@@ -13,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { errorMessage, format } from "@/i18n";
+import { errorMessage, format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 
@@ -22,6 +22,13 @@ const BASE = "/api/admin/site-templates";
 /** A built-in template is part of the product and an archived one is already gone from the catalog. */
 export function canArchive(t: AdminSiteTemplateDetailDto): boolean {
   return !t.builtIn && t.archivedAt === null;
+}
+
+/** A template that is archived or no longer passes the checks stays so: "try again" would mislead, so these refusals say what is wrong. */
+export function templateRefusalText(m: Messages, sent: { code: string; reason?: string }): string {
+  if (sent.code === "RESOURCE_LOCKED" && sent.reason === "template_archived") return m.admin.templates.detail.archivedNotice;
+  if (sent.code === "RESOURCE_LOCKED" && sent.reason === "template_invalid") return m.admin.templates.invalid;
+  return errorMessage(m, sent.code);
 }
 
 /** One template: whether customers are offered it, its name, its versions (open, duplicate, make default) and archiving. */
@@ -52,7 +59,7 @@ export function SiteTemplateDetail({ template, csrfToken }: { template: AdminSit
     busyRef.current = false;
     setBusy(null);
     if (!sent.ok) {
-      setNotice({ ok: false, text: errorMessage(m, sent.code) });
+      setNotice({ ok: false, text: templateRefusalText(m, sent) });
       return false;
     }
     setNotice({ ok: true, text: done });

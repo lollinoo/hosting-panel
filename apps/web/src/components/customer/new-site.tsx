@@ -4,7 +4,7 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { SITE_LIMIT_REACHED_REASON, type CustomerSiteTypeDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { SiteForm, type SiteFormBody } from "@/components/customer/site-form";
+import { SITE_FORM_FIELDS, SiteForm, type SiteFormBody } from "@/components/customer/site-form";
 import { SiteTypeChooser } from "@/components/customer/site-type-chooser";
 import { errorMessage, format, type Messages } from "@/i18n";
 import { renewKeyAfter } from "@/lib/site-setup";
@@ -18,12 +18,14 @@ export const isLimitFull = (limit: SiteLimit | null): boolean => limit !== null 
 /**
  * What a refused creation shows: the field errors, the one sentence, and whether to reload the page's data.
  * `siteTypeSent`: the request named a site type, so "not found" means that type is gone.
+ * `optionKeys`: the options the form shows, each with a note of its own; a refusal naming anything else is not left silent.
  */
 export function createErrorView(
   m: Messages,
   code: string,
   details: { field?: string; reason?: string }[],
   siteTypeSent = false,
+  optionKeys: readonly string[] = [],
 ): { error: string | null; fieldErrors: Record<string, string>; refresh: boolean } {
   const view = { error: null, fieldErrors: {}, refresh: false };
   if (code === "DOMAIN_CONFLICT") return { ...view, fieldErrors: { domain: m.site.create.domainConflict } };
@@ -32,14 +34,21 @@ export function createErrorView(
     return { ...view, error: m.site.create.limitReachedSubmit, refresh: true };
   }
   // The list changed under the customer: reloading shows what is offered now.
-  if (code === "NOT_FOUND" && siteTypeSent) return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
+  const reason = details[0]?.reason;
+  if (code === "NOT_FOUND" && (siteTypeSent || reason === "template_unavailable")) return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
+  // An archived or no longer valid site type stays so: "retry" would mislead, the refreshed list shows what is offered now.
+  if (code === "RESOURCE_LOCKED" && (reason === "template_archived" || reason === "template_invalid")) {
+    return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
+  }
   if (code === "VALIDATION_ERROR" && details.some((d) => d.field)) {
     const fieldErrors: Record<string, string> = {};
     // An option is reported as parameters.<key> and sits under its own control; any other field by its last part.
     for (const d of details) {
       if (d.field) fieldErrors[d.field.startsWith("parameters.") ? `param:${d.field.slice("parameters.".length)}` : d.field.split(".").pop()!] = m.site.create.fieldInvalid;
     }
-    return { ...view, fieldErrors };
+    // A field with no control (an option reported by its array index, one the type no longer has) must not fail silently.
+    const shown = new Set([...SITE_FORM_FIELDS, ...optionKeys.map((key) => `param:${key}`)]);
+    return { ...view, error: Object.keys(fieldErrors).every((key) => shown.has(key)) ? null : errorMessage(m, code), fieldErrors };
   }
   return { ...view, error: errorMessage(m, code) };
 }
@@ -49,11 +58,14 @@ export function NewSite({
   csrfToken,
   siteTypes,
   limit,
+  noSiteTypes = false,
 }: {
   orgId: string;
   csrfToken: string;
   siteTypes: readonly CustomerSiteTypeDto[];
   limit: SiteLimit | null;
+  /** The list was read and is empty (not: could not be read), so there is nothing to create. */
+  noSiteTypes?: boolean;
 }) {
   const m = useMessages();
   const router = useRouter();
@@ -82,7 +94,7 @@ export function NewSite({
         router.push(`/sites/${data.data.siteId}`);
         return;
       }
-      const view = createErrorView(m, data?.error?.code ?? "", data?.error?.details ?? [], selected !== null);
+      const view = createErrorView(m, data?.error?.code ?? "", data?.error?.details ?? [], selected !== null, selected?.parameters.map((p) => p.key));
       setError(view.error);
       setFieldErrors(view.fieldErrors);
       if (view.refresh) router.refresh();
@@ -95,6 +107,9 @@ export function NewSite({
     }
   }
 
+  // The limit comes first: it is the cause the customer can act on, and the list may be empty for the same reason.
+  const blocked = limit && isLimitFull(limit) ? format(m.site.create.limitReached, { max: limit.max }) : noSiteTypes ? m.site.create.noSiteTypes : null;
+
   return (
     <div className="mx-auto max-w-xl space-y-4">
       <div>
@@ -106,9 +121,9 @@ export function NewSite({
           {format(m.site.create.usage, limit)}
         </p>
       )}
-      {limit && isLimitFull(limit) ? (
+      {blocked ? (
         <Alert variant="warning" role="status">
-          <AlertDescription>{format(m.site.create.limitReached, { max: limit.max })}</AlertDescription>
+          <AlertDescription>{blocked}</AlertDescription>
         </Alert>
       ) : (
         <>

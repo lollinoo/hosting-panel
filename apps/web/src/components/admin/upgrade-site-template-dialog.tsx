@@ -5,7 +5,8 @@ import type { AdminSiteDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { errorMessage, format } from "@/i18n";
+import { templateRefusalText } from "@/components/admin/site-template-detail";
+import { format } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 
@@ -45,7 +46,7 @@ export function UpgradeSiteTemplateDialog({
       versionId: target.versionId,
     });
     setBusy(false);
-    if (!sent.ok) return setError(errorMessage(m, sent.code));
+    if (!sent.ok) return setError(templateRefusalText(m, sent));
     onClose();
     onDone(t.accepted);
   }

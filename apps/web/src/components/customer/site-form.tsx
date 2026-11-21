@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   DEFAULT_PHP_VERSION,
   PHP_VERSION_PARAMETER_KEY,
+  SITE_TEMPLATE_STRING_PARAMETER_MAX,
   SUPPORTED_PHP_VERSIONS,
   suggestWwwPair,
   type CreateManagedSiteInput,
@@ -21,9 +22,18 @@ export type SiteFormBody = Omit<CreateManagedSiteInput, "phpVersion" | "includeW
 type SiteTypeParameter = CustomerSiteTypeDto["parameters"][number];
 type ParameterInputs = Readonly<Record<string, string | boolean>>;
 
-/** What a control shows for an option: what the customer typed, else the default, else an empty control. Own keys only: an option may be named `constructor` or `__proto__`. */
-const shownValue = (p: SiteTypeParameter, inputs: ParameterInputs): string | number | boolean =>
-  (Object.hasOwn(inputs, p.key) ? inputs[p.key] : undefined) ?? p.default ?? (p.type === "boolean" ? false : p.type === "enum" ? (p.options?.[0] ?? "") : "");
+/** The field errors this form can show; an option's is `param:<key>`. A refusal naming any other field needs a sentence of its own. */
+export const SITE_FORM_FIELDS: readonly string[] = ["name", "domain", "title", "adminUser", "adminEmail", "adminPassword", "phpVersion"];
+
+/**
+ * What a control shows for an option: what the customer typed, else the default, else an empty control. Own keys only: an option may be
+ * named `constructor` or `__proto__`. What was typed for another site type's option of the same key counts only if this option can take it.
+ */
+const shownValue = (p: SiteTypeParameter, inputs: ParameterInputs): string | number | boolean => {
+  const typed = Object.hasOwn(inputs, p.key) ? inputs[p.key] : undefined;
+  const fits = p.type === "boolean" ? typeof typed === "boolean" : typeof typed === "string" && (p.type !== "enum" || (p.options?.includes(typed) ?? false));
+  return (fits ? typed : undefined) ?? p.default ?? (p.type === "boolean" ? false : p.type === "enum" ? (p.options?.[0] ?? "") : "");
+};
 
 /** The values to send: what the controls show, converted to the option's type; a blank one falls back to the default, or is omitted without one. */
 export function buildParameterValues(defs: readonly SiteTypeParameter[], inputs: ParameterInputs): { key: string; value: string | number | boolean }[] {
@@ -169,7 +179,7 @@ export function SiteForm({
                     <Input
                       id={id}
                       type={p.type === "integer" ? "number" : "text"}
-                      {...(p.type === "integer" ? { min: p.min, max: p.max, step: 1 } : {})}
+                      {...(p.type === "integer" ? { min: p.min, max: p.max, step: 1 } : { maxLength: SITE_TEMPLATE_STRING_PARAMETER_MAX })}
                       autoComplete="off"
                       value={String(shown)}
                       onChange={(e) => setInput(p.key, e.target.value)}
@@ -191,17 +201,27 @@ export function SiteForm({
         </div>
       )}
       {phpChoice && (
-        <details className="rounded-md border px-3 py-2">
+        <details className="rounded-md border px-3 py-2" open={fieldErrors.phpVersion ? true : undefined}>
           <summary className="cursor-pointer text-sm font-medium">{t.advanced}</summary>
           <div className="mt-3 space-y-2">
             <Label htmlFor="site-php">{t.phpVersion}</Label>
-            <select id="site-php" value={effectivePhp} onChange={(e) => setPhp(e.target.value)} className={selectClass}>
+            <select
+              id="site-php"
+              value={effectivePhp}
+              onChange={(e) => setPhp(e.target.value)}
+              aria-invalid={fieldErrors.phpVersion ? true : undefined}
+              aria-describedby="site-php-note"
+              className={selectClass}
+            >
               {phpVersions.map((p) => (
                 <option key={p} value={p}>
                   {p === phpDefault ? `${p} (${t.recommended})` : p}
                 </option>
               ))}
             </select>
+            <p id="site-php-note" className={fieldErrors.phpVersion ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+              {fieldErrors.phpVersion ?? ""}
+            </p>
           </div>
         </details>
       )}

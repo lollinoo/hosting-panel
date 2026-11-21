@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
-import { SUPPORTED_PHP_VERSIONS, type CustomerSiteTypeDto } from "@hosting-panel/contracts";
+import { SITE_TEMPLATE_STRING_PARAMETER_MAX, SUPPORTED_PHP_VERSIONS, type CustomerSiteTypeDto } from "@hosting-panel/contracts";
 import { format, type Messages } from "@/i18n";
 import { I18nProvider } from "@/i18n/provider";
 
@@ -173,6 +173,42 @@ describe("NewSite and the site limit", () => {
   });
 });
 
+describe("NewSite when no site type is offered", () => {
+  const none = (m: Messages, locale: "en" | "it", limit: { used: number; max: number } | null = null) =>
+    renderToStaticMarkup(
+      createElement(I18nProvider, {
+        locale,
+        messages: m,
+        children: createElement(NewSite, { orgId: "org-1", csrfToken: "csrf", siteTypes: [], limit, noSiteTypes: true }),
+      }),
+    ).replace(/&#x27;/g, "'");
+
+  it("shows a notice instead of the form", () => {
+    for (const [locale, m] of locales) {
+      const out = none(m, locale);
+      expect(out).toContain(m.site.create.noSiteTypes);
+      expect(out).toContain('role="status"');
+      expect(out).toContain(m.site.create.title);
+      expect(out).not.toContain("<form");
+      expect(out).not.toContain(m.site.create.submit);
+    }
+  });
+
+  it("the site limit message still comes first; without the flag an empty list keeps the form", () => {
+    for (const [locale, m] of locales) {
+      const full = none(m, locale, { used: 5, max: 5 });
+      expect(full).toContain(format(m.site.create.limitReached, { max: 5 }));
+      expect(full).not.toContain(m.site.create.noSiteTypes);
+      expect(page(m, locale, null, [])).toContain("<form");
+      expect(page(m, locale, null, [])).not.toContain(m.site.create.noSiteTypes);
+    }
+  });
+
+  it("the copy keeps the customer vocabulary", () => {
+    for (const m of [en, itMsgs]) expect(m.site.create.noSiteTypes).not.toMatch(/\b(container|image|docker|volume|network|revision|service|template|job|organization|organizzazione|servizio)\b/i);
+  });
+});
+
 describe("NewSite and the site type chooser", () => {
   it("shows no chooser with no site type or with one, and the form keeps working", () => {
     for (const [locale, m] of locales) {
@@ -247,7 +283,7 @@ describe("createErrorView", () => {
 
   it("a refused option is shown under its own control, keyed param:<key>", () => {
     for (const [, m] of locales) {
-      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale" }, { field: "phpVersion" }], true)).toEqual({
+      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale" }, { field: "phpVersion" }], true, ["locale"])).toEqual({
         error: null,
         fieldErrors: { "param:locale": m.site.create.fieldInvalid, phpVersion: m.site.create.fieldInvalid },
         refresh: false,
@@ -266,6 +302,95 @@ describe("createErrorView", () => {
       expect(view(m, "VALIDATION_ERROR")).toEqual({ error: m.errors.VALIDATION_ERROR, fieldErrors: {}, refresh: false });
       expect(view(m, "PERMISSION_DENIED").error).toBe(m.errors.PERMISSION_DENIED);
       expect(view(m, "").error).toBe(m.errors.generic);
+    }
+  });
+});
+
+describe("createErrorView: a refusal always shows something", () => {
+  it("a field with no control (array index, unknown option, includeWww) adds the general sentence to the field errors", () => {
+    for (const [, m] of locales) {
+      for (const field of ["parameters.0.value", "parameters.gone", "includeWww", "templateId"]) {
+        const v = createErrorView(m, "VALIDATION_ERROR", [{ field }], true, ["locale"]);
+        expect(v.error).toBe(m.errors.VALIDATION_ERROR);
+        expect(v.refresh).toBe(false);
+      }
+      // One field that is shown does not excuse another that is not.
+      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "adminEmail" }, { field: "parameters.0.value" }]).error).toBe(m.errors.VALIDATION_ERROR);
+    }
+  });
+
+  it("fields the form renders (its inputs, the PHP select, a declared option) need no general sentence", () => {
+    for (const [, m] of locales) {
+      const fields = ["name", "domain", "title", "adminUser", "adminEmail", "adminPassword", "phpVersion", "parameters.locale"].map((field) => ({ field }));
+      expect(createErrorView(m, "VALIDATION_ERROR", fields, true, ["locale"]).error).toBeNull();
+    }
+  });
+
+  it("an archived or invalid site type is permanent: its own sentence and a refresh, not 'retry'", () => {
+    for (const [, m] of locales) {
+      for (const reason of ["template_archived", "template_invalid"]) {
+        for (const sent of [true, false]) {
+          expect(createErrorView(m, "RESOURCE_LOCKED", [{ reason }], sent)).toEqual({ error: m.site.create.siteTypeUnavailable, fieldErrors: {}, refresh: true });
+        }
+      }
+      expect(createErrorView(m, "RESOURCE_LOCKED", [{ reason: "built_in" }], true)).toEqual({ error: m.errors.RESOURCE_LOCKED, fieldErrors: {}, refresh: false });
+      expect(createErrorView(m, "RESOURCE_LOCKED", [])).toEqual({ error: m.errors.RESOURCE_LOCKED, fieldErrors: {}, refresh: false });
+    }
+  });
+
+  it("template_unavailable (the built-in is off) gets the site type sentence even when no site type was sent", () => {
+    for (const [, m] of locales) {
+      expect(createErrorView(m, "NOT_FOUND", [{ field: "templateId", reason: "template_unavailable" }], false)).toEqual({
+        error: m.site.create.siteTypeUnavailable,
+        fieldErrors: {},
+        refresh: true,
+      });
+      expect(createErrorView(m, "NOT_FOUND", [{ reason: "something_else" }], false).error).toBe(m.errors.NOT_FOUND);
+    }
+  });
+});
+
+describe("SiteForm shows what createErrorView maps", () => {
+  const withErrors = (m: Messages, locale: "en" | "it", siteType: CustomerSiteTypeDto, fieldErrors: Record<string, string>) =>
+    renderToStaticMarkup(
+      createElement(I18nProvider, { locale, messages: m, children: createElement(SiteForm, { onSubmit: () => {}, submitting: false, siteType, fieldErrors }) }),
+    ).replace(/&#x27;/g, "'");
+
+  it("a refused PHP version is written under the select, which is opened so the note is visible", () => {
+    for (const [locale, m] of locales) {
+      const quiet = withErrors(m, locale, blog, {});
+      expect(quiet).toMatch(/<p id="site-php-note"[^>]*><\/p>/);
+      expect(quiet).not.toMatch(/<details[^>]*\sopen/);
+      expect(tag(quiet, "site-php")).not.toContain("aria-invalid");
+
+      const out = withErrors(m, locale, blog, { phpVersion: m.site.create.fieldInvalid });
+      expect(out).toMatch(/<details[^>]*\sopen/);
+      expect(out).toContain(`<p id="site-php-note" class="text-xs text-destructive">${m.site.create.fieldInvalid}</p>`);
+      expect(tag(out, "site-php")).toContain('aria-invalid="true"');
+      expect(tag(out, "site-php")).toContain('aria-describedby="site-php-note"');
+    }
+  });
+
+  it("every mapped field error of a refusal is on the page, or the general sentence is", () => {
+    for (const [locale, m] of locales) {
+      const keys = shop.parameters.map((p) => p.key);
+      for (const field of ["phpVersion", "parameters.tagline", "adminEmail", "parameters.0.value", "parameters.gone"]) {
+        const v = createErrorView(m, "VALIDATION_ERROR", [{ field }], true, keys);
+        const out = withErrors(m, locale, { ...shop, phpVersions: ["8.3", "8.4"] }, v.fieldErrors);
+        const shown = out.includes(`text-destructive">${m.site.create.fieldInvalid}</p>`);
+        expect(shown || v.error !== null, field).toBe(true);
+        // ... and the general sentence is the one that carries the unshown ones.
+        expect(shown && v.error !== null, field).toBe(false);
+      }
+    }
+  });
+
+  it("a text or size option cannot be longer than the API accepts; a number has no length limit", () => {
+    for (const [locale, m] of locales) {
+      const out = siteForm(m, locale, shop);
+      expect(tag(out, "site-param-tagline")).toContain(`maxLength="${SITE_TEMPLATE_STRING_PARAMETER_MAX}"`);
+      expect(tag(out, "site-param-upload")).toContain(`maxLength="${SITE_TEMPLATE_STRING_PARAMETER_MAX}"`);
+      expect(tag(out, "site-param-workers")).not.toContain("maxLength");
     }
   });
 });
@@ -382,6 +507,19 @@ describe("new site page", () => {
       read();
       expect(await typesOf()).toEqual([]);
       expect(await limitOf()).toEqual({ used: 3, max: 5 });
+    }
+  });
+
+  it("tells the form when the list was read and is empty, never when the read failed or something is offered", async () => {
+    const flag = async () => ((await NewSitePage()) as { props: { noSiteTypes: unknown } }).props.noSiteTypes;
+    fetchServerOrg.mockResolvedValue({ maxSites: null, siteCount: 0 });
+    fetchServerCustomerSiteTypes.mockResolvedValue({ siteTypes: [] });
+    expect(await flag()).toBe(true);
+    fetchServerCustomerSiteTypes.mockResolvedValue({ siteTypes: [wordpress] });
+    expect(await flag()).toBe(false);
+    for (const read of [() => fetchServerCustomerSiteTypes.mockResolvedValue(null), () => fetchServerCustomerSiteTypes.mockRejectedValue(new Error("boom")), () => fetchServerCustomerSiteTypes.mockResolvedValue(undefined)]) {
+      read();
+      expect(await flag()).toBe(false);
     }
   });
 

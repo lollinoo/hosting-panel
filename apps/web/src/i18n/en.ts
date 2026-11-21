@@ -119,6 +119,7 @@ export const en: Messages = {
       siteTypeHint: "Choose what your site starts from.",
       options: "Site options",
       siteTypeUnavailable: "This site type is no longer available. The list has been refreshed: choose another one.",
+      noSiteTypes: "No site type is available right now. Contact your administrator to get one.",
     },
     progress: {
       title: "Setting up your site",
@@ -1954,6 +1955,7 @@ export const en: Messages = {
       create: "Create site",
       createTitle: "Create a site",
       createHint: "The site is set up in a few minutes. It appears in the owner's panel as soon as it is assigned.",
+      createInvalid: "Some details are not valid. Check the name, web address, title, user, email, password and PHP version, then try again.",
       colName: "Name",
       colDomain: "Web address",
       colOwner: "Owner",
@@ -2041,6 +2043,7 @@ export const en: Messages = {
       loadError: "The templates could not be loaded. Reload the page in a minute.",
       empty: "No templates yet.",
       back: "Back to templates",
+      invalid: "This template version no longer passes the checks and cannot be used. Open it in the editor, fix it and save a new version.",
       moduleCount: "{count} templates",
       modules: { wordpress: "WordPress" },
       versionLabel: "v{version}",
@@ -2107,6 +2110,7 @@ export const en: Messages = {
         save: "Save as new version",
         saveCreate: "Create template",
         saving: "Saving...",
+        createRetried: "The previous save may have gone through even though no answer arrived. Check the template list before saving again.",
       },
     },
     certificates: {

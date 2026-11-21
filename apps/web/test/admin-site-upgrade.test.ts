@@ -208,6 +208,22 @@ describe("UpgradeSiteTemplateDialog", () => {
     expect(sets.filter(([k]) => k === 0)).toEqual([[0, true], [0, false]]);
   });
 
+  it.each(locales)("an archived or invalid template is permanent: its own sentence, not 'try again' (%s)", async (_l, m) => {
+    const shown = async (answer: Record<string, unknown>) => {
+      keyedSend.mockResolvedValue({ ok: false, ...answer });
+      const { tree, sets } = callHooks(UpgradeSiteTemplateDialog, props(mk("a")), m);
+      await submit(tree);
+      return sets.filter(([k]) => k === 1).at(-1);
+    };
+    expect(await shown({ code: "RESOURCE_LOCKED", reason: "template_archived" })).toEqual([1, m.admin.templates.detail.archivedNotice]);
+    expect(await shown({ code: "RESOURCE_LOCKED", reason: "template_invalid" })).toEqual([1, m.admin.templates.invalid]);
+    expect(m.admin.templates.invalid).not.toBe(m.errors.RESOURCE_LOCKED);
+    // Another reason, or none, is the busy sentence; the reason under another code does not count.
+    expect(await shown({ code: "RESOURCE_LOCKED", reason: "other" })).toEqual([1, m.errors.RESOURCE_LOCKED]);
+    expect(await shown({ code: "RESOURCE_LOCKED" })).toEqual([1, m.errors.RESOURCE_LOCKED]);
+    expect(await shown({ code: "NOT_FOUND", reason: "template_archived" })).toEqual([1, m.errors.NOT_FOUND]);
+  });
+
   it.each(locales)("keeps the dialog open and shows the refusal (%s)", async (_l, m) => {
     keyedSend.mockResolvedValue({ ok: false, code: "NOT_FOUND" });
     const p = props(mk("a"));

@@ -25,5 +25,7 @@ export default async function NewSitePage() {
     ? [null, null]
     : await Promise.all([optional(fetchServerOrg(orgId)), optional(fetchServerCustomerSiteTypes(orgId))]);
   // Either read failing never blocks creating a site: no chooser means the legacy body, and the API stays the guard.
-  return <NewSite orgId={orgId} csrfToken={session.csrfToken} siteTypes={types?.siteTypes ?? []} limit={siteLimitOf(org)} />;
+  // A list that was read and is empty is different: nothing can be created, and the form would only fail after being filled in.
+  const siteTypes = types?.siteTypes ?? [];
+  return <NewSite orgId={orgId} csrfToken={session.csrfToken} siteTypes={siteTypes} limit={siteLimitOf(org)} noSiteTypes={types?.siteTypes?.length === 0} />;
 }

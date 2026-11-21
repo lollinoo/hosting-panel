@@ -25,6 +25,7 @@ vi.mock("@/components/ui/dialog", async () => {
     DialogFooter: part("footer"),
     DialogTitle: part("h2"),
     DialogDescription: part("p"),
+    DialogTrigger: part("span"),
   };
 });
 
@@ -39,6 +40,9 @@ import { SiteTemplateEditor, validationErrorText } from "@/components/admin/site
 import { CodeEditor } from "@/components/admin/code-editor";
 import { SitesTable } from "@/components/admin/sites-table";
 import { UpgradeSiteTemplateDialog, upgradeTarget } from "@/components/admin/upgrade-site-template-dialog";
+import { CreateSiteForCustomerDialog } from "@/components/admin/create-site-for-customer-dialog";
+import { Button } from "@/components/ui/button";
+import Link from "next/link";
 import { NewSite } from "@/components/customer/new-site";
 import { SiteForm, buildParameterValues, type SiteFormBody } from "@/components/customer/site-form";
 import { SiteTypeChooser } from "@/components/customer/site-type-chooser";
@@ -568,6 +572,149 @@ describe("option defaults are prefilled", () => {
     expect(buildParameterValues(params, {})).toEqual([{ key, value: "acme" }]);
     const typed = Object.defineProperty({}, key, { value: "mine", enumerable: true });
     expect(buildParameterValues(params, typed)).toEqual([{ key, value: "mine" }]);
+  });
+});
+
+// ---------------------------------------------------------------- stale option values after a change of site type
+
+describe("a value typed for another site type's option is ignored", () => {
+  const options: CustomerSiteTypeDto["parameters"] = [
+    { key: "cache", label: "Cache", type: "enum", options: ["memcached", "redis"] },
+    { key: "mode", label: "Mode", type: "enum", options: ["a", "b"], default: "b" },
+    { key: "flag", label: "Flag", type: "boolean" },
+  ];
+
+  it("an enum value that is not one of the choices falls back to the default, else the first choice; a wrong kind of value to the default", () => {
+    expect(buildParameterValues(options, { cache: "none", mode: "none" })).toEqual([
+      { key: "cache", value: "memcached" }, { key: "mode", value: "b" }, { key: "flag", value: false },
+    ]);
+    expect(buildParameterValues(options, { cache: true, mode: false, flag: "yes" })).toEqual([
+      { key: "cache", value: "memcached" }, { key: "mode", value: "b" }, { key: "flag", value: false },
+    ]);
+    expect(buildParameterValues(options, { cache: "redis", mode: "a", flag: true })).toEqual([
+      { key: "cache", value: "redis" }, { key: "mode", value: "a" }, { key: "flag", value: true },
+    ]);
+  });
+
+  it("a text option keeps what was typed, even when it is the text of another option's choice", () => {
+    expect(buildParameterValues([{ key: "tagline", label: "T", type: "string" }], { tagline: "none" })).toEqual([{ key: "tagline", value: "none" }]);
+  });
+
+  it("the controls show the value that is sent", () => {
+    const { tree } = callHooks(SiteForm, { onSubmit: vi.fn(), submitting: false, siteType: type("stpl_b", { parameters: options }) }, en, { 4: { cache: "none", flag: "yes" } });
+    const control = (id: string) => els(tree).find((e) => e.props.id === id)!;
+    expect(control("site-param-cache").props.value).toBe("memcached");
+    expect(control("site-param-mode").props.value).toBe("b");
+    expect(control("site-param-flag").props.checked).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- permanent refusals and the retried save
+
+const lostReply = (keys: Record<string, string>, _csrf: string, name: string) => {
+  keys[name] ??= "key"; // as keyedSend does: after a lost reply the key is kept, so a retry replays
+  return Promise.resolve({ ok: false as const, code: "" });
+};
+
+describe("an archived or invalid template is permanent on the template page", () => {
+  const detail = { ...summary({ id: "stpl_x" }), versions: [] } as unknown as AdminSiteTemplateDetailDto;
+  beforeEach(() => keyedSend.mockReset());
+
+  it.each(locales)("RESOURCE_LOCKED with template_archived or template_invalid is not 'try again' (%s)", async (_l, m) => {
+    const noticeAfter = async (answer: Record<string, unknown>) => {
+      keyedSend.mockResolvedValue({ ok: false, ...answer });
+      const { tree, sets } = callHooks(SiteTemplateDetail, { template: detail, csrfToken: "c" }, m);
+      (els(tree).find((e) => e.props.id === "template-enabled")!.props.onChange as (ev: unknown) => void)({ target: { checked: false } });
+      await vi.waitFor(() => expect(sets.filter(([k]) => k === 1).length).toBeGreaterThan(1));
+      return sets.filter(([k]) => k === 1).at(-1);
+    };
+    expect(await noticeAfter({ code: "RESOURCE_LOCKED", reason: "template_archived" })).toEqual([1, { ok: false, text: m.admin.templates.detail.archivedNotice }]);
+    expect(await noticeAfter({ code: "RESOURCE_LOCKED", reason: "template_invalid" })).toEqual([1, { ok: false, text: m.admin.templates.invalid }]);
+    expect(await noticeAfter({ code: "RESOURCE_LOCKED", reason: "built_in" })).toEqual([1, { ok: false, text: m.errors.RESOURCE_LOCKED }]);
+    expect(await noticeAfter({ code: "NOT_FOUND", reason: "template_archived" })).toEqual([1, { ok: false, text: m.errors.NOT_FOUND }]);
+  });
+});
+
+describe("the administrator's create dialog does not point at fields it never highlights", () => {
+  beforeEach(() => keyedSend.mockReset());
+
+  it.each(locales)("a validation refusal gets a sentence that names the fields (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR" });
+    const { tree, sets } = callHooks(CreateSiteForCustomerDialog, { customers: [], csrfToken: "c" }, m, { 0: true });
+    await (els(tree).find((e) => e.type === SiteForm)!.props.onSubmit as (b: SiteFormBody) => Promise<void>)(formBody);
+    const shown = sets.filter(([k]) => k === 3).at(-1)![1];
+    expect(shown).toBe(m.admin.sites.createInvalid);
+    expect(shown).not.toBe(m.errors.VALIDATION_ERROR);
+  });
+
+  it("the other refusals keep their sentences", async () => {
+    keyedSend.mockResolvedValue({ ok: false, code: "DOMAIN_CONFLICT" });
+    const { tree, sets } = callHooks(CreateSiteForCustomerDialog, { customers: [], csrfToken: "c" }, en, { 0: true });
+    await (els(tree).find((e) => e.type === SiteForm)!.props.onSubmit as (b: SiteFormBody) => Promise<void>)(formBody);
+    expect(sets.filter(([k]) => k === 3).at(-1)).toEqual([3, en.site.create.domainConflict]);
+  });
+});
+
+describe("a template save that is sent again after a lost reply", () => {
+  const fetchMock = vi.fn();
+  const e = en.admin.templates.editor;
+  const CREATE = { kind: "create", name: "Shop", description: "" } as const;
+  const VERSION = { kind: "version", templateId: "stpl_x", archived: false } as const;
+  beforeEach(() => {
+    keyedSend.mockReset();
+    router.push.mockReset();
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ data: { valid: true, errors: [], preview: {} } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const mount = (target: typeof CREATE | typeof VERSION, source = SOURCE) =>
+    callHooks(SiteTemplateEditor, { csrfToken: "c", module: "wordpress", initialSource: source, target }, en);
+  const save = async (tree: ReactNode, label = e.saveCreate) => {
+    await (els(tree).find((x) => x.type === Button && textOf(x) === label)!.props.onClick as () => Promise<void>)();
+  };
+  const errorOf = (sets: Array<[number, unknown]>) => sets.filter(([k]) => k === 7).at(-1)?.[1];
+  const taken = { ok: false, code: "ALREADY_EXISTS", reason: "name_taken" };
+
+  it("a name_taken after a lost reply says the first save may have worked, instead of 'name in use'", async () => {
+    keyedSend.mockImplementationOnce(lostReply).mockResolvedValueOnce(taken);
+    const { tree, sets } = mount(CREATE);
+    await save(tree);
+    expect(errorOf(sets)).toBe(errorMessage(en, "")); // the lost reply: the generic sentence
+    await save(tree);
+    expect(errorOf(sets)).toBe(e.createRetried);
+    expect(e.createRetried).not.toBe(en.errors.ALREADY_EXISTS);
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("the notice links to the template list", () => {
+    const link = (error: string | null) => els(callHooks(SiteTemplateEditor, { csrfToken: "c", module: "wordpress", initialSource: SOURCE, target: CREATE }, en, { 7: error }).tree).find((x) => x.type === Link);
+    expect(link(e.createRetried)!.props.href).toBe("/admin/templates");
+    expect(textOf(link(e.createRetried))).toBe(en.admin.templates.back);
+    expect(link(en.errors.ALREADY_EXISTS)).toBeUndefined();
+    expect(link(null)).toBeUndefined();
+  });
+
+  it("a name that is taken on the first attempt, or for another reason, keeps the ordinary sentence", async () => {
+    keyedSend.mockResolvedValueOnce(taken);
+    const first = mount(CREATE);
+    await save(first.tree);
+    expect(errorOf(first.sets)).toBe(en.errors.ALREADY_EXISTS);
+
+    keyedSend.mockImplementationOnce(lostReply).mockResolvedValueOnce({ ok: false, code: "ALREADY_EXISTS", reason: "other" });
+    const other = mount(CREATE);
+    await save(other.tree);
+    await save(other.tree);
+    expect(errorOf(other.sets)).toBe(en.errors.ALREADY_EXISTS);
+  });
+
+  it("a new version has no name to clash with: the retry is not given the template-list notice", async () => {
+    keyedSend.mockImplementationOnce(lostReply).mockResolvedValueOnce(taken);
+    const { tree, sets } = mount(VERSION, `${SOURCE}# changed\n`);
+    await save(tree, e.save);
+    await save(tree, e.save);
+    expect(errorOf(sets)).toBe(en.errors.ALREADY_EXISTS);
   });
 });
 
