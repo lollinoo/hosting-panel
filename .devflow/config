@@ -17,6 +17,12 @@ PUSH_VERIFY_CMD="corepack pnpm run build && corepack pnpm run lint && corepack p
 # becomes the body of the squash commit on the main branch: keep it short.
 PR_BODY_MAX=1000
 
+# Paths whose changes bump no package and stay out of the release notes (bash globs, * also
+# matches /). Default: CI and the workflow tooling. A merge that only touches them is not released
+# when RELEASE_TAG is set; its commits join no changelog entry.
+# Here also the agent contract, lint/test configuration, tests and docs: they do not change the archive.
+BUMP_IGNORE='.github/* .woodpecker/* .githooks/* .devflow/* scripts/devflow/* .agents/* AGENTS.md CLAUDE.md HARNESS.md vitest.config.ts eslint.config.mjs .editorconfig test/* *.test.ts apps/*/test/* packages/*/test/* infra/*/test/* docs/*'
+
 # Timezone of the release tags (YYYYMMDD-HHMM) and of the changelog dates.
 RELEASE_TZ=Europe/Rome
 

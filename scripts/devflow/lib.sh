@@ -9,6 +9,7 @@ MAIN_BRANCH=main
 VERIFY_CMD=
 PUSH_VERIFY_CMD=
 PR_BODY_MAX=1000
+BUMP_IGNORE='.github/* .woodpecker/* .githooks/* .devflow/* scripts/devflow/* .agents/* AGENTS.md CLAUDE.md'
 RELEASE_TZ=UTC
 RELEASE_TAG=
 RELEASE_DRAFT=false
@@ -100,6 +101,22 @@ df_release_base() {
   else
     echo "${a:-$b}"
   fi
+}
+
+# df_bump_ignored <path>: true when the path matches BUMP_IGNORE (bash globs, * also matches /),
+# so a change to it bumps no package and stays out of the release notes.
+df_bump_ignored() {
+  local pattern
+  set -f
+  for pattern in $BUMP_IGNORE; do
+    # shellcheck disable=SC2053
+    if [[ $1 == $pattern ]]; then
+      set +f
+      return 0
+    fi
+  done
+  set +f
+  return 1
 }
 
 # Tag of the GitHub Release: RELEASE_TAG with {version} replaced by the version of the first

@@ -43,6 +43,12 @@ trap 'rm -f "$NOTES"' EXIT
 bash "$DF_DIR/bump-version.sh" --amend-head --release-notes-out "$NOTES"
 NEW=$(git rev-parse HEAD)
 
+# Nothing bumped (only BUMP_IGNORE paths changed): a versioned tag would repeat the last release.
+if [ "$NEW" = "$CURRENT" ] && [ -n "$RELEASE_TAG" ]; then
+  echo "Notice: no package was bumped (only BUMP_IGNORE paths changed): no release."
+  finish "$CURRENT" '' false
+fi
+
 if [ "$NEW" != "$CURRENT" ]; then
   if [ -z "${GITHUB_ACTIONS:-}" ] && ! git log -1 --format=%B | grep -qiE '\[(skip ci|ci skip)\]'; then
     # The push below comes back as a webhook: without this an external CI would run again.

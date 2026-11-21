@@ -58,6 +58,7 @@ done < <(df_packages)
 RE_BREAK='^[a-z]+(\([^)]+\))?!:'
 RE_FEAT='^feat(\([^)]+\))?:'
 LEVEL_NAME=(none patch minor major)
+RELEVANT='' # commits that change at least one file outside BUMP_IGNORE
 while read -r sha; do
   subject=$(git log -1 --format=%s "$sha")
   case $subject in 'chore(release):'*) continue ;; esac
@@ -68,6 +69,8 @@ while read -r sha; do
     level=2
   fi
   while read -r f; do
+    if df_bump_ignored "$f"; then continue; fi
+    case $RELEVANT in *"$sha"*) ;; *) RELEVANT+="$sha$NL" ;; esac
     for ((i = 0; i < ${#P_NAME[@]}; i++)); do
       d=${P_DIR[i]}
       if [ "$d" = . ] || [ "${f#"$d"/}" != "$f" ]; then
@@ -119,8 +122,9 @@ done
 RE_CC="^($DF_TYPES)(\\(([^)]+)\\))?!?: (.+)\$"
 RE_PR='^(.*[^[:space:]])[[:space:]]*\(#[0-9]+\)$'
 FEAT='' FIX='' PERF='' OTHER='' H_FEAT='' H_MAIN='' H_ANY=''
-while read -r s; do
+while read -r sha s; do
   case $s in '' | 'chore(release):'*) continue ;; esac
+  case $RELEVANT in *"$sha"*) ;; *) continue ;; esac # only BUMP_IGNORE paths: not in the notes
   if [[ $s =~ $RE_CC ]]; then
     type=${BASH_REMATCH[1]} scope=${BASH_REMATCH[3]:-} desc=${BASH_REMATCH[4]}
     if [[ $desc =~ $RE_PR ]]; then desc=${BASH_REMATCH[1]}; fi
@@ -147,7 +151,7 @@ while read -r s; do
   else
     OTHER+="- $s$NL"
   fi
-done < <(git log --reverse --no-merges --format=%s "$BASE..HEAD")
+done < <(git log --reverse --no-merges --format='%H %s' "$BASE..HEAD")
 
 NOTES=''
 section() {

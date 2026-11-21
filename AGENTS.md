@@ -37,7 +37,7 @@ Several agents (or people) may work on the repository at once. The issue and its
 
 ### Versions & releases (fully automatic)
 - **Never bump a version or edit `CHANGELOG.md` on a branch** (blocked by `.githooks/pre-commit` and by the PR check), so parallel PRs never conflict. Do not run `bump-version.sh` on a branch, except with `--dry-run`.
-- After every merge on the main branch, CI runs `scripts/devflow/release-main.sh`: it bumps each package touched since the last release (list in `.devflow/packages`), prepends the entry to `CHANGELOG.md`, amends the merge commit in place keeping its author, and publishes a GitHub Release tagged by `RELEASE_TAG` in `.devflow/config` (`YYYYMMDD-HHMM` when it is empty). Merges landing in quick succession are released together by the newest run.
+- After every merge on the main branch, CI runs `scripts/devflow/release-main.sh`: it bumps each package touched since the last release (list in `.devflow/packages`), prepends the entry to `CHANGELOG.md`, amends the merge commit in place keeping its author, and publishes a GitHub Release tagged by `RELEASE_TAG` in `.devflow/config` (`YYYYMMDD-HHMM` when it is empty). Merges landing in quick succession are released together by the newest run. Changes only to `BUMP_IGNORE` paths (CI, hooks, workflow tooling) bump nothing.
 - Because that commit is amended, a local main branch can diverge from origin and `git pull` then fails: refresh it with `git fetch origin && git switch -C <main> origin/<main>` (nobody commits on it, so nothing is lost).
 - Preview the next bump at any time: `bash scripts/devflow/bump-version.sh --dry-run`.
 
