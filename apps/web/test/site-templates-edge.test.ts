@@ -500,6 +500,18 @@ describe("the customer chooser and the creation body", () => {
     expect(await post(form)).toMatchObject({ templateId: "stpl_a" });
   });
 
+  it.each([["unknown"], ["not_customer"]])("an option the page shows but the server now refuses as %s: the site type sentence and a refresh, no field note", async (reason) => {
+    const options = [{ key: "cache", label: "Cache", type: "enum" as const, options: ["a", "b"], default: "a" }];
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { code: "VALIDATION_ERROR", details: [{ field: "parameters.cache", reason }] } }), { status: 400 }));
+    router.refresh.mockReset();
+    const { tree, sets } = callHooks(NewSite, { orgId: "org_1", csrfToken: "csrf", siteTypes: [type("stpl_a", { parameters: options })], limit: null }, en);
+    expect(els(tree).find((e) => e.type === SiteForm)!.props.siteType).toMatchObject({ parameters: [{ key: "cache" }] });
+    await (els(tree).find((e) => e.type === SiteForm)!.props.onSubmit as (b: SiteFormBody) => Promise<void>)(formBody);
+    expect(sets.filter(([k]) => k === 1).at(-1)).toEqual([1, en.site.create.siteTypeUnavailable]);
+    expect(sets.filter(([k]) => k === 2).at(-1)).toEqual([2, {}]);
+    expect(router.refresh).toHaveBeenCalledTimes(1);
+  });
+
   it("the second type's choice is the one posted", async () => {
     expect(await post(newSite([type("stpl_a"), type("stpl_b")], { 3: "stpl_b" }).form)).toMatchObject({ templateId: "stpl_b" });
   });
@@ -600,6 +612,20 @@ describe("a value typed for another site type's option is ignored", () => {
     expect(buildParameterValues([{ key: "tagline", label: "T", type: "string" }], { tagline: "none" })).toEqual([{ key: "tagline", value: "none" }]);
   });
 
+  it("a number option takes over only a whole number (or nothing) typed for another type's option of the same key", () => {
+    const withDefault = [{ key: "x", label: "X", type: "integer" as const, default: 2 }];
+    for (const typed of ["abc", "1.5", "1e3", "-", "0x10", "12px", "1 2"]) {
+      expect(buildParameterValues(withDefault, { x: typed }), typed).toEqual([{ key: "x", value: 2 }]);
+      expect(buildParameterValues([{ key: "x", label: "X", type: "integer" }], { x: typed }), typed).toEqual([]);
+    }
+    for (const [typed, sent] of [["7", 7], ["-3", -3], [" 5 ", 5], ["0", 0]] as const) expect(buildParameterValues(withDefault, { x: typed }), typed).toEqual([{ key: "x", value: sent }]);
+    // Cleared by the customer: still blank, so the default is sent.
+    expect(buildParameterValues(withDefault, { x: "" })).toEqual([{ key: "x", value: 2 }]);
+    // The control shows the default, not text it cannot hold.
+    const { tree } = callHooks(SiteForm, { onSubmit: vi.fn(), submitting: false, siteType: type("stpl_b", { parameters: withDefault }) }, en, { 4: { x: "abc" } });
+    expect(els(tree).find((e) => e.props.id === "site-param-x")!.props.value).toBe("2");
+  });
+
   it("the controls show the value that is sent", () => {
     const { tree } = callHooks(SiteForm, { onSubmit: vi.fn(), submitting: false, siteType: type("stpl_b", { parameters: options }) }, en, { 4: { cache: "none", flag: "yes" } });
     const control = (id: string) => els(tree).find((e) => e.props.id === id)!;
@@ -620,7 +646,7 @@ describe("an archived or invalid template is permanent on the template page", ()
   const detail = { ...summary({ id: "stpl_x" }), versions: [] } as unknown as AdminSiteTemplateDetailDto;
   beforeEach(() => keyedSend.mockReset());
 
-  it.each(locales)("RESOURCE_LOCKED with template_archived or template_invalid is not 'try again' (%s)", async (_l, m) => {
+  it.each(locales)("an archived or invalid template is named as such, not 'try again' (%s)", async (_l, m) => {
     const noticeAfter = async (answer: Record<string, unknown>) => {
       keyedSend.mockResolvedValue({ ok: false, ...answer });
       const { tree, sets } = callHooks(SiteTemplateDetail, { template: detail, csrfToken: "c" }, m);
@@ -629,7 +655,9 @@ describe("an archived or invalid template is permanent on the template page", ()
       return sets.filter(([k]) => k === 1).at(-1);
     };
     expect(await noticeAfter({ code: "RESOURCE_LOCKED", reason: "template_archived" })).toEqual([1, { ok: false, text: m.admin.templates.detail.archivedNotice }]);
-    expect(await noticeAfter({ code: "RESOURCE_LOCKED", reason: "template_invalid" })).toEqual([1, { ok: false, text: m.admin.templates.invalid }]);
+    // What the enable / make-default PATCH really answers for a template that fails today's checks (keyedSend carries the first detail's reason).
+    expect(await noticeAfter({ code: "VALIDATION_ERROR", reason: "template_invalid" })).toEqual([1, { ok: false, text: m.admin.templates.invalid }]);
+    expect(await noticeAfter({ code: "VALIDATION_ERROR" })).toEqual([1, { ok: false, text: m.errors.VALIDATION_ERROR }]);
     expect(await noticeAfter({ code: "RESOURCE_LOCKED", reason: "built_in" })).toEqual([1, { ok: false, text: m.errors.RESOURCE_LOCKED }]);
     expect(await noticeAfter({ code: "NOT_FOUND", reason: "template_archived" })).toEqual([1, { ok: false, text: m.errors.NOT_FOUND }]);
   });

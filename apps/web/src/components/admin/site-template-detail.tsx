@@ -27,7 +27,8 @@ export function canArchive(t: AdminSiteTemplateDetailDto): boolean {
 /** A template that is archived or no longer passes the checks stays so: "try again" would mislead, so these refusals say what is wrong. */
 export function templateRefusalText(m: Messages, sent: { code: string; reason?: string }): string {
   if (sent.code === "RESOURCE_LOCKED" && sent.reason === "template_archived") return m.admin.templates.detail.archivedNotice;
-  if (sent.code === "RESOURCE_LOCKED" && sent.reason === "template_invalid") return m.admin.templates.invalid;
+  // The upgrade route answers RESOURCE_LOCKED; the enable and make-default PATCH answer VALIDATION_ERROR (field enabled).
+  if ((sent.code === "RESOURCE_LOCKED" || sent.code === "VALIDATION_ERROR") && sent.reason === "template_invalid") return m.admin.templates.invalid;
   return errorMessage(m, sent.code);
 }
 

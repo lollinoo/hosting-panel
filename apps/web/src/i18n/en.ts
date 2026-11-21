@@ -118,7 +118,8 @@ export const en: Messages = {
       siteTypeLabel: "Site type",
       siteTypeHint: "Choose what your site starts from.",
       options: "Site options",
-      siteTypeUnavailable: "This site type is no longer available. The list has been refreshed: choose another one.",
+      siteTypeUnavailable: "This site type is not available right now. The list has been refreshed. If this keeps happening, contact your administrator.",
+      invalid: "Some details aren't valid. Check the site name, web address, title, administrator details, PHP version and options, then try again.",
       noSiteTypes: "No site type is available right now. Contact your administrator to get one.",
     },
     progress: {

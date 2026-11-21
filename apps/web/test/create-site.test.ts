@@ -299,7 +299,7 @@ describe("createErrorView", () => {
         fieldErrors: { adminEmail: m.site.create.fieldInvalid, phpVersion: m.site.create.fieldInvalid },
         refresh: false,
       });
-      expect(view(m, "VALIDATION_ERROR")).toEqual({ error: m.errors.VALIDATION_ERROR, fieldErrors: {}, refresh: false });
+      expect(view(m, "VALIDATION_ERROR")).toEqual({ error: m.site.create.invalid, fieldErrors: {}, refresh: false });
       expect(view(m, "PERMISSION_DENIED").error).toBe(m.errors.PERMISSION_DENIED);
       expect(view(m, "").error).toBe(m.errors.generic);
     }
@@ -311,11 +311,11 @@ describe("createErrorView: a refusal always shows something", () => {
     for (const [, m] of locales) {
       for (const field of ["parameters.0.value", "parameters.gone", "includeWww", "templateId"]) {
         const v = createErrorView(m, "VALIDATION_ERROR", [{ field }], true, ["locale"]);
-        expect(v.error).toBe(m.errors.VALIDATION_ERROR);
+        expect(v.error).toBe(m.site.create.invalid);
         expect(v.refresh).toBe(false);
       }
       // One field that is shown does not excuse another that is not.
-      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "adminEmail" }, { field: "parameters.0.value" }]).error).toBe(m.errors.VALIDATION_ERROR);
+      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "adminEmail" }, { field: "parameters.0.value" }]).error).toBe(m.site.create.invalid);
     }
   });
 
@@ -335,6 +335,36 @@ describe("createErrorView: a refusal always shows something", () => {
       }
       expect(createErrorView(m, "RESOURCE_LOCKED", [{ reason: "built_in" }], true)).toEqual({ error: m.errors.RESOURCE_LOCKED, fieldErrors: {}, refresh: false });
       expect(createErrorView(m, "RESOURCE_LOCKED", [])).toEqual({ error: m.errors.RESOURCE_LOCKED, fieldErrors: {}, refresh: false });
+    }
+  });
+
+  it("a shown option the server now refuses as unknown or admin-only means the type changed under the form: its sentence and a refresh", () => {
+    for (const [, m] of locales) {
+      for (const reason of ["unknown", "not_customer"]) {
+        // "locale" is an option this form shows: it must not be left as a note under a control that can never pass.
+        expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale", reason }], true, ["locale"])).toEqual({
+          error: m.site.create.siteTypeUnavailable,
+          fieldErrors: {},
+          refresh: true,
+        });
+      }
+      // A value problem stays a note under its control; the same reasons on another field, or under another code, are not this case.
+      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale", reason: "not_in_options" }], true, ["locale"])).toEqual({
+        error: null,
+        fieldErrors: { "param:locale": m.site.create.fieldInvalid },
+        refresh: false,
+      });
+      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "phpVersion", reason: "not_applicable" }], true, ["locale"]).refresh).toBe(false);
+      expect(createErrorView(m, "NOT_FOUND", [{ field: "parameters.locale", reason: "unknown" }], false).refresh).toBe(false);
+    }
+  });
+
+  it("the general sentences never point at highlighted fields that are not there, and never send a single-type customer to a chooser that is not there", () => {
+    for (const [, m] of locales) {
+      // When nothing is highlighted, the sentence names the form's fields instead.
+      expect(m.site.create.invalid).not.toMatch(/evidenzia|highlight/i);
+      expect(m.site.create.siteTypeUnavailable).not.toMatch(/scegline|un altro|another|choose/i);
+      expect(m.site.create.siteTypeUnavailable).toMatch(/amministratore|administrator/i);
     }
   });
 

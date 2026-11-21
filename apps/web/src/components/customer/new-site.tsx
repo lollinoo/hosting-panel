@@ -40,17 +40,23 @@ export function createErrorView(
   if (code === "RESOURCE_LOCKED" && (reason === "template_archived" || reason === "template_invalid")) {
     return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
   }
+  // An option the form still shows but the type's current version dropped or kept for administrators: no retry can pass, the refreshed page shows the real form.
+  if (code === "VALIDATION_ERROR" && details.some((d) => d.field?.startsWith("parameters.") && (d.reason === "unknown" || d.reason === "not_customer"))) {
+    return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
+  }
+  // Without a control to point at, the general sentence must not send the customer to highlighted fields (it names the form's fields instead).
+  const general = code === "VALIDATION_ERROR" ? m.site.create.invalid : errorMessage(m, code);
   if (code === "VALIDATION_ERROR" && details.some((d) => d.field)) {
     const fieldErrors: Record<string, string> = {};
     // An option is reported as parameters.<key> and sits under its own control; any other field by its last part.
     for (const d of details) {
       if (d.field) fieldErrors[d.field.startsWith("parameters.") ? `param:${d.field.slice("parameters.".length)}` : d.field.split(".").pop()!] = m.site.create.fieldInvalid;
     }
-    // A field with no control (an option reported by its array index, one the type no longer has) must not fail silently.
+    // A field with no control (an option reported by its array index, or by a key the form does not show) must not fail silently.
     const shown = new Set([...SITE_FORM_FIELDS, ...optionKeys.map((key) => `param:${key}`)]);
-    return { ...view, error: Object.keys(fieldErrors).every((key) => shown.has(key)) ? null : errorMessage(m, code), fieldErrors };
+    return { ...view, error: Object.keys(fieldErrors).every((key) => shown.has(key)) ? null : general, fieldErrors };
   }
-  return { ...view, error: errorMessage(m, code) };
+  return { ...view, error: general };
 }
 
 export function NewSite({
