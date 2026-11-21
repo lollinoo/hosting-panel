@@ -4746,8 +4746,10 @@ paths:
       summary: Rename a site template, change its description, enable or disable it, or pick its default version (server administrator only; audited as admin.site_template.update)
       description: >-
         A disabled template is no longer offered to customers; sites already on it keep running. Enabling a
-        template, or picking another default, checks the stored source against today's policy again
-        (`VALIDATION_ERROR`, `details[0].reason: template_invalid`). The default must be a version of this
+        template, or picking another default for an enabled one, checks the stored source of the default in effect
+        against today's policy again, under the template lock (`VALIDATION_ERROR`, `details[0].field: enabled`,
+        `details[0].reason: template_invalid`; nothing changes). A disabled template's default is checked when it is
+        enabled. The default must be a version of this
         template (`details[0].reason: unknown_version`). At least one field is required.
       parameters:
         - $ref: "#/components/parameters/SiteTemplateIdParam"
