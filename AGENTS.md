@@ -42,6 +42,6 @@ Several agents (or people) may work on the repository at once. The issue and its
 
 ### Setup & verification
 - First clone: `bash scripts/devflow/setup.sh` (activates the git hooks and checks the version files).
-- Before a push and before marking a PR ready, the verify command (`VERIFY_CMD` in `.devflow/config`) must pass; `.githooks/pre-push` runs it on every push.
+- Before a PR is marked ready, the verify command (`VERIFY_CMD` in `.devflow/config`) must pass; CI runs it on every PR. `.githooks/pre-push` runs `PUSH_VERIFY_CMD` (or `VERIFY_CMD` when it is empty) before a push, and skips pushes that only delete branches or carry commits that already passed it.
 - New package: add it to `.devflow/packages`, then run `bash scripts/devflow/setup.sh` and `bash scripts/devflow/labels.sh`.
 <!-- devflow:end -->

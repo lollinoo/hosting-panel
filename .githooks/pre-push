@@ -1,12 +1,49 @@
 #!/usr/bin/env bash
-# Runs the project verify command (VERIFY_CMD in .devflow/config) before every push.
+# Runs the project's push check before a push: PUSH_VERIFY_CMD in .devflow/config, or VERIFY_CMD
+# when it is empty. Skipped when the push only deletes refs, or when every pushed commit has a
+# tree that already passed the same command from a clean checkout (cache in the git directory).
 set -euo pipefail
 # shellcheck disable=SC1091
 . "$(git rev-parse --show-toplevel)/scripts/devflow/lib.sh"
 cd "$DF_ROOT"
 
-if [ -z "$VERIFY_CMD" ]; then exit 0; fi
-echo "pre-push: $VERIFY_CMD"
-eval "$VERIFY_CMD" < /dev/null
+CMD=${PUSH_VERIFY_CMD:-$VERIFY_CMD}
+REFS=$(cat) # <local ref> <local sha> <remote ref> <remote sha>, one line per pushed ref
+CACHE=$(git rev-parse --path-format=absolute --git-common-dir)/devflow-verified
+CMD_ID=$(printf '%s' "$CMD" | git hash-object --stdin)
 
-df_local_hook pre-push "$@"
+run_check() {
+  [ -n "$CMD" ] || return 0
+  local trees='' line local_sha tree
+  while read -r _ local_sha _ _; do
+    [ -n "$local_sha" ] || continue
+    case $local_sha in *[!0]*) ;; *) continue ;; esac # deletion: nothing to check
+    tree=$(git rev-parse -q --verify "$local_sha^{tree}" 2> /dev/null) || tree=unknown
+    trees+="$tree$NL"
+  done <<< "$REFS"
+  if [ -z "$trees" ]; then
+    echo "pre-push: only deletions, nothing to verify."
+    return 0
+  fi
+
+  local missing=0
+  while read -r tree; do
+    [ -n "$tree" ] || continue
+    if ! grep -qxF "$tree $CMD_ID" "$CACHE" 2> /dev/null; then missing=1; fi
+  done <<< "$trees"
+  if [ "$missing" = 0 ]; then
+    echo "pre-push: these commits already passed '$CMD'."
+    return 0
+  fi
+
+  echo "pre-push: $CMD"
+  eval "$CMD" < /dev/null
+  # The command ran on the working tree: cache the result only when it equals HEAD.
+  if [ -z "$(git status --porcelain --untracked-files=normal)" ]; then
+    line="$(git rev-parse 'HEAD^{tree}') $CMD_ID"
+    grep -qxF "$line" "$CACHE" 2> /dev/null || echo "$line" >> "$CACHE"
+  fi
+}
+
+run_check
+printf '%s\n' "$REFS" | df_local_hook pre-push "$@"
