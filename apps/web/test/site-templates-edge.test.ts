@@ -500,14 +500,14 @@ describe("the customer chooser and the creation body", () => {
     expect(await post(form)).toMatchObject({ templateId: "stpl_a" });
   });
 
-  it.each([["unknown"], ["not_customer"]])("an option the page shows but the server now refuses as %s: the site type sentence and a refresh, no field note", async (reason) => {
+  it.each([["unknown"], ["not_customer"]])("an option the page shows but the server now refuses as %s: the options-changed sentence and a refresh, no field note", async (reason) => {
     const options = [{ key: "cache", label: "Cache", type: "enum" as const, options: ["a", "b"], default: "a" }];
     fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: { code: "VALIDATION_ERROR", details: [{ field: "parameters.cache", reason }] } }), { status: 400 }));
     router.refresh.mockReset();
     const { tree, sets } = callHooks(NewSite, { orgId: "org_1", csrfToken: "csrf", siteTypes: [type("stpl_a", { parameters: options })], limit: null }, en);
     expect(els(tree).find((e) => e.type === SiteForm)!.props.siteType).toMatchObject({ parameters: [{ key: "cache" }] });
     await (els(tree).find((e) => e.type === SiteForm)!.props.onSubmit as (b: SiteFormBody) => Promise<void>)(formBody);
-    expect(sets.filter(([k]) => k === 1).at(-1)).toEqual([1, en.site.create.siteTypeUnavailable]);
+    expect(sets.filter(([k]) => k === 1).at(-1)).toEqual([1, en.site.create.optionsChanged]);
     expect(sets.filter(([k]) => k === 2).at(-1)).toEqual([2, {}]);
     expect(router.refresh).toHaveBeenCalledTimes(1);
   });
@@ -612,13 +612,19 @@ describe("a value typed for another site type's option is ignored", () => {
     expect(buildParameterValues([{ key: "tagline", label: "T", type: "string" }], { tagline: "none" })).toEqual([{ key: "tagline", value: "none" }]);
   });
 
-  it("a number option takes over only a whole number (or nothing) typed for another type's option of the same key", () => {
+  it("a number option takes over text carried over from another type's option of the same key only if a number field can hold it", () => {
     const withDefault = [{ key: "x", label: "X", type: "integer" as const, default: 2 }];
-    for (const typed of ["abc", "1.5", "1e3", "-", "0x10", "12px", "1 2"]) {
+    // Text a number field cannot hold (or shows blank) falls back to the default.
+    for (const typed of ["abc", "-", "0x10", "12px", "1 2", " 5 ", "5 ", ".", "1e", "+5"]) {
       expect(buildParameterValues(withDefault, { x: typed }), typed).toEqual([{ key: "x", value: 2 }]);
       expect(buildParameterValues([{ key: "x", label: "X", type: "integer" }], { x: typed }), typed).toEqual([]);
     }
-    for (const [typed, sent] of [["7", 7], ["-3", -3], [" 5 ", 5], ["0", 0]] as const) expect(buildParameterValues(withDefault, { x: typed }), typed).toEqual([{ key: "x", value: sent }]);
+    // What the customer types into the number field itself is kept, decimals included: the browser blocks the submit (whole steps only), the form never swaps it for the default.
+    for (const [typed, sent] of [["7", 7], ["-3", -3], ["0", 0], ["2.5", 2.5], ["1e3", 1000], ["1.0", 1], [".5", 0.5]] as const) {
+      expect(buildParameterValues(withDefault, { x: typed }), typed).toEqual([{ key: "x", value: sent }]);
+    }
+    const kept = callHooks(SiteForm, { onSubmit: vi.fn(), submitting: false, siteType: type("stpl_b", { parameters: withDefault }) }, en, { 4: { x: "2.5" } });
+    expect(els(kept.tree).find((e) => e.props.id === "site-param-x")!.props.value).toBe("2.5");
     // Cleared by the customer: still blank, so the default is sent.
     expect(buildParameterValues(withDefault, { x: "" })).toEqual([{ key: "x", value: 2 }]);
     // The control shows the default, not text it cannot hold.

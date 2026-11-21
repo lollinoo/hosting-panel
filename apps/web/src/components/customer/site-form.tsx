@@ -28,14 +28,14 @@ export const SITE_FORM_FIELDS: readonly string[] = ["name", "domain", "title", "
 /**
  * What a control shows for an option: what the customer typed, else the default, else an empty control. Own keys only: an option may be
  * named `constructor` or `__proto__`. What was typed for another site type's option of the same key counts only if this option can take it
- * (a number option: a whole number, or blank).
+ * (a number option: whatever a number field can hold, untrimmed, so the browser still blocks a decimal itself).
  */
 const shownValue = (p: SiteTypeParameter, inputs: ParameterInputs): string | number | boolean => {
   const typed = Object.hasOwn(inputs, p.key) ? inputs[p.key] : undefined;
   const fits =
     p.type === "boolean"
       ? typeof typed === "boolean"
-      : typeof typed === "string" && (p.type === "enum" ? (p.options?.includes(typed) ?? false) : p.type !== "integer" || /^(-?\d+)?$/.test(typed.trim()));
+      : typeof typed === "string" && (p.type === "enum" ? (p.options?.includes(typed) ?? false) : p.type !== "integer" || /^(-?(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?)?$/.test(typed));
   return (fits ? typed : undefined) ?? p.default ?? (p.type === "boolean" ? false : p.type === "enum" ? (p.options?.[0] ?? "") : "");
 };
 

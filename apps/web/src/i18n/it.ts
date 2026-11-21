@@ -120,6 +120,7 @@ export const it = {
       siteTypeHint: "Scegli il modello da cui partire.",
       options: "Opzioni del sito",
       siteTypeUnavailable: "Questo tipo di sito non è disponibile al momento. Abbiamo aggiornato l'elenco. Se succede ancora, contatta il tuo amministratore.",
+      optionsChanged: "Le opzioni di questo tipo di sito sono cambiate. Abbiamo aggiornato il modulo: controlla le opzioni e riprova.",
       invalid: "Alcuni dati non sono validi. Controlla nome del sito, indirizzo web, titolo, dati dell'amministratore, versione PHP e opzioni, poi riprova.",
       noSiteTypes: "Al momento non c'è nessun tipo di sito disponibile. Contatta il tuo amministratore per averne uno.",
     },

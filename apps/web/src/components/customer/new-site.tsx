@@ -40,10 +40,13 @@ export function createErrorView(
   if (code === "RESOURCE_LOCKED" && (reason === "template_archived" || reason === "template_invalid")) {
     return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
   }
-  // An option the form still shows but the type's current version dropped or kept for administrators: no retry can pass, the refreshed page shows the real form.
-  if (code === "VALIDATION_ERROR" && details.some((d) => d.field?.startsWith("parameters.") && (d.reason === "unknown" || d.reason === "not_customer"))) {
-    return { ...view, error: m.site.create.siteTypeUnavailable, refresh: true };
-  }
+  // An option, or the PHP choice, that the form still shows but the type's current version dropped or kept for administrators: the type is
+  // still offered and no retry of this form can pass, the refreshed page shows the real one.
+  const optionGone = (d: { field?: string; reason?: string }) =>
+    d.field?.startsWith("parameters.")
+      ? d.reason === "unknown" || d.reason === "not_customer"
+      : d.field === "phpVersion" && (d.reason === "not_customer" || d.reason === "not_applicable");
+  if (code === "VALIDATION_ERROR" && details.some(optionGone)) return { ...view, error: m.site.create.optionsChanged, refresh: true };
   // Without a control to point at, the general sentence must not send the customer to highlighted fields (it names the form's fields instead).
   const general = code === "VALIDATION_ERROR" ? m.site.create.invalid : errorMessage(m, code);
   if (code === "VALIDATION_ERROR" && details.some((d) => d.field)) {

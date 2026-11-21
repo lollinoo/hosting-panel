@@ -338,15 +338,19 @@ describe("createErrorView: a refusal always shows something", () => {
     }
   });
 
-  it("a shown option the server now refuses as unknown or admin-only means the type changed under the form: its sentence and a refresh", () => {
+  it("a shown option, or the PHP choice, that the server now refuses as unknown, admin-only or not applicable means the options changed under the form: its own sentence and a refresh", () => {
     for (const [, m] of locales) {
+      const changed = { error: m.site.create.optionsChanged, fieldErrors: {}, refresh: true };
       for (const reason of ["unknown", "not_customer"]) {
         // "locale" is an option this form shows: it must not be left as a note under a control that can never pass.
-        expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale", reason }], true, ["locale"])).toEqual({
-          error: m.site.create.siteTypeUnavailable,
-          fieldErrors: {},
-          refresh: true,
-        });
+        expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale", reason }], true, ["locale"])).toEqual(changed);
+      }
+      // The type is still offered: its sentence must not say it is unavailable, and must say what to do.
+      expect(m.site.create.optionsChanged).not.toBe(m.site.create.siteTypeUnavailable);
+      expect(m.site.create.optionsChanged).not.toMatch(/amministratore|administrator|non è disponibile|not available/i);
+      // The PHP choice became administrator-only or was removed: a retry can never pass either.
+      for (const reason of ["not_customer", "not_applicable"]) {
+        expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "phpVersion", reason }], true, ["locale"])).toEqual(changed);
       }
       // A value problem stays a note under its control; the same reasons on another field, or under another code, are not this case.
       expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.locale", reason: "not_in_options" }], true, ["locale"])).toEqual({
@@ -354,7 +358,14 @@ describe("createErrorView: a refusal always shows something", () => {
         fieldErrors: { "param:locale": m.site.create.fieldInvalid },
         refresh: false,
       });
-      expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "phpVersion", reason: "not_applicable" }], true, ["locale"]).refresh).toBe(false);
+      // An unknown or unsupported PHP version stays the note under the select.
+      for (const reason of ["not_in_options", "invalid_type", "out_of_range", "unknown"]) {
+        expect(createErrorView(m, "VALIDATION_ERROR", [{ field: "phpVersion", reason }], true, ["locale"])).toEqual({
+          error: null,
+          fieldErrors: { phpVersion: m.site.create.fieldInvalid },
+          refresh: false,
+        });
+      }
       expect(createErrorView(m, "NOT_FOUND", [{ field: "parameters.locale", reason: "unknown" }], false).refresh).toBe(false);
     }
   });
