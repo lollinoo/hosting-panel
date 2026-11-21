@@ -16,6 +16,7 @@ import {
   type PhpVersion,
   type ServiceDesiredStatus,
   type SiteStatus,
+  type SiteTemplateParameterEntry,
   type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
@@ -418,6 +419,8 @@ export interface CreateSiteInput {
   readonly phpVersion?: PhpVersion | null;
   readonly siteType?: SiteTypeKey | null;
   readonly initialDomainStatus?: DomainStatus;
+  readonly templateVersionId?: string | null;
+  readonly templateParameters?: readonly SiteTemplateParameterEntry[] | null;
 }
 
 export async function createSiteTransactional(
@@ -459,6 +462,8 @@ export async function createSiteTransactional(
         status: input.status ?? "ready",
         phpVersion: input.phpVersion ?? null,
         siteType: input.siteType ?? null,
+        ...(input.templateVersionId ? { templateVersionId: input.templateVersionId } : {}),
+        ...(input.templateParameters ? { templateParameters: [...input.templateParameters] } : {}),
       })
       .returning();
 

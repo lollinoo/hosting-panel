@@ -10,6 +10,7 @@ import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites, siteSftpUsers, tlsCertificates } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
 import { assertSiteLimitAvailable } from "./site-limit.js";
+import { ensureBuiltInSiteTemplates } from "./site-templates-repository.js";
 import { assertSiteMovable } from "./tls-coverage.js";
 
 export const WORDPRESS_TEMPLATE_ID = WORDPRESS_SITE_TYPE.templateId;
@@ -32,6 +33,7 @@ export async function ensureWordpressTemplate(db: DatabaseExecutor): Promise<voi
       approvedForDedicated: true,
     })
     .onConflictDoUpdate({ target: serviceTemplates.id, set: { defaultImage, updatedAt: new Date() } });
+  await ensureBuiltInSiteTemplates(db);
 }
 
 export type SiteDatabaseRow = typeof siteDatabases.$inferInsert;
