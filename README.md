@@ -54,6 +54,7 @@ In ottemperanza ai criteri di veridicità contrattuale **`AC-F1-10`** e **`AC-F2
 | **Backup dei Siti (S3)** | ✅ **Attivo su linux-systemd** | `productionBackupRuntimeAvailable: true` (`ADR-0022`) |
 | **Strumenti WordPress** | ✅ **Attivo su linux-systemd** | `wordpressToolsAvailable: true`: versioni, aggiornamenti con copia preventiva, reimpostazione della password di un amministratore (`ADR-0023`) |
 | **Importazione WordPress** | ✅ **Attivo su linux-systemd** | `wordpressToolsAvailable: true`: porta su un sito WordPress del pannello i file e il database di un sito WordPress di fuori, con copia preventiva e ritorno com'era se qualcosa fallisce (`ADR-0024`) |
+| **Certificati TLS Importati** | ✅ **Attivo su linux-systemd** | `manualTlsCertificatesAvailable: true`: importazione di un certificato in formato PEM (nessun PFX) e assegnazione ai domini di un sito, con Traefik che lo serve al posto di quello automatico (`ADR-0031`) |
 | **Multi-Host Management Hub Federato Remoto** | ❌ **Non in Fase 2** | Differito a `HCP-SPEC-008` (`ADR-008`) |
 
 ---

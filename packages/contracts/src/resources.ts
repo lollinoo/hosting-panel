@@ -282,9 +282,9 @@ export function isWordpressToolsAvailable(runtimeBackend: RuntimeBackend): boole
   return runtimeBackend === "linux-systemd";
 }
 
-/** Manual TLS certificates: the M1 contracts ship first, the shipping milestone turns this on. */
-export function isManualTlsAvailable(_runtimeBackend: RuntimeBackend): boolean {
-  return false;
+/** Imported (manual) TLS certificates run only on the Linux systemd backend. */
+export function isManualTlsAvailable(runtimeBackend: RuntimeBackend): boolean {
+  return runtimeBackend === "linux-systemd";
 }
 
 /** Local backup targets: false until the milestone that ships them. */

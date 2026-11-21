@@ -161,10 +161,13 @@ describe("HCP-SPEC-004 M1 — error codes through the exception filter", () => {
 });
 
 describe("HCP-SPEC-004 M1 — capability flags", () => {
-  it("manual TLS, local targets and encrypted export are false on every runtime backend", () => {
+  it("manual TLS is on only for linux-systemd; local targets and encrypted export are false everywhere", () => {
     for (const runtimeBackend of RUNTIME_BACKENDS) {
       const caps = createPlatformCapabilities({ runtimeBackend });
-      for (const flag of CAPABILITY_FLAGS) expect(caps[flag], `${runtimeBackend}.${flag}`).toBe(false);
+      for (const flag of CAPABILITY_FLAGS) {
+        const expected = flag === "manualTlsCertificatesAvailable" && runtimeBackend === "linux-systemd";
+        expect(caps[flag], `${runtimeBackend}.${flag}`).toBe(expected);
+      }
     }
   });
 });
