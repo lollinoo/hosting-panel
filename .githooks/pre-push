@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Runs the project verify command (VERIFY_CMD in .devflow/config) before every push.
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$(git rev-parse --show-toplevel)/scripts/devflow/lib.sh"
+cd "$DF_ROOT"
+
+if [ -z "$VERIFY_CMD" ]; then exit 0; fi
+echo "pre-push: $VERIFY_CMD"
+eval "$VERIFY_CMD" < /dev/null
+
+df_local_hook pre-push "$@"

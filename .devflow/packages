@@ -1,0 +1,25 @@
+# Versioned packages, one version file per line:
+#
+#   <package> <dir> <version-file> <template>
+#
+# package   name used in changelogs, release notes and svc:<package> labels
+# dir       a commit touching a file under it bumps the package ("." = the whole repository)
+# file      repository-relative path of a file holding the version (no spaces)
+# template  text around the version as it appears in the file, with {v} in place of X.Y.Z.
+#           A leading ^ anchors to a line start; a space matches any whitespace, newlines included.
+#
+# The first line of a package is its source of truth; repeat the package name on further
+# lines for extra files that must carry the same version (lockfile, manifest, README badge).
+#
+# Examples:
+#   web     web     web/package.json        "version": "{v}"
+#   web     web     README.md               badge/web-v{v}-blue
+#   core    core    core/Cargo.toml         ^version = "{v}"
+#   core    core    core/Cargo.lock         name = "core" version = "{v}"
+#   api     api     api/pom.xml             <revision>{v}</revision>
+#   tool    tool    tool/Tool.csproj        <Version>{v}</Version>
+#   engine  engine  engine/CMakeLists.txt   project(engine VERSION {v}
+#   app     .       VERSION                 ^{v}
+hosting-panel  .  package.json  "version": "{v}"
+hosting-panel  .  README.md     ^V={v}
+hosting-panel  .  README.md     hp-update --version {v}

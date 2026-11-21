@@ -93,7 +93,7 @@ hosting-panel/
 │   ├── systemd/                  # Unit systemd blindate: hp-web, hp-api, hp-docker-executor, hp-host-agent + lavori root (hp-panel-update, hp-os-refresh, hp-os-upgrade, hp-unit-restart@)
 │   └── linux/                    # Script bootstrap-dedicated.sh, nftables-dedicated.conf, runner run-outage-ac-f1-08.mjs
 ├── .agents/brain/                # Memoria persistente dello swarm: decisions.md e state.md
-├── .github/workflows/ci.yml      # Pipeline CI GitHub Actions con esecuzione di tutti i sensori meccanici
+├── .github/workflows/            # CI devflow: controlli PR con tutti i sensori meccanici e release automatica
 ├── .env.example                  # Template variabili d'ambiente per Zero-Docker, Simulator e Linux Dedicated
 ├── HARNESS.md                    # Contratto operativo e protocollo di verifica meccanica
 └── package.json                  # Script e configurazione root del monorepo

@@ -1,25 +1,39 @@
-# HCP-SPEC-001 §11.3 — Continuous Integration Verification Workflow
-name: CI
+name: devflow PR checks
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
+    types: [opened, edited, synchronize, reopened]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: devflow-pr-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && 'title' || 'code' }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  verify:
-    name: Monorepo Quality & Security Sensors
+  check:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # check-pr.sh needs the merge-base with the base branch
+
+      - name: Workflow guardrails (commits, PR title, no version bump)
+        env:
+          # Passed through the environment, never interpolated into the script.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: origin/${{ github.base_ref }}
+        run: bash scripts/devflow/check-pr.sh
+
+  # HCP-SPEC-001 §11.3: the same command as VERIFY_CMD in .devflow/config.
+  # A title edit only needs the guardrails above.
+  verify:
+    name: Monorepo Quality & Security Sensors
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Setup Node.js runtime
         uses: actions/setup-node@v4

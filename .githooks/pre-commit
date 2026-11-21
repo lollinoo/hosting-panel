@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Blocks direct commits on main, non-conventional branch names, and version / CHANGELOG
+# edits on work branches (both are written automatically after the merge).
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$(git rev-parse --show-toplevel)/scripts/devflow/lib.sh"
+cd "$DF_ROOT"
+
+fail() {
+  echo "pre-commit: ERROR — $1" >&2
+  shift
+  for line in "$@"; do echo "  $line" >&2; done
+  exit 1
+}
+
+BRANCH=$(git symbolic-ref --short -q HEAD || true)
+if [ -z "$BRANCH" ]; then exit 0; fi # detached HEAD (rebase in progress)
+
+if [ "$BRANCH" = "$MAIN_BRANCH" ]; then
+  if [ "${ALLOW_MAIN_COMMIT:-}" = 1 ]; then exit 0; fi
+  fail "direct commits on '$MAIN_BRANCH' are forbidden." \
+    'Create a branch: <type>/<scope>-<description> (see AGENTS.md).'
+fi
+
+if ! [[ $BRANCH =~ $DF_BRANCH_REGEX ]]; then
+  fail "branch '$BRANCH' does not match <type>/<scope>-<description>." \
+    "Types: ${DF_TYPES//|/, }. Rename with: git branch -m <new-name>"
+fi
+
+MERGING=0
+if git rev-parse -q --verify MERGE_HEAD > /dev/null 2>&1; then MERGING=1; fi
+STAGED=$(git diff --cached --name-only)
+
+while read -r _ _ file tpl; do
+  if ! grep -qxF "$file" <<< "$STAGED"; then continue; fi
+  old=$(git show "HEAD:$file" 2> /dev/null) || continue
+  new=$(git show ":$file" 2> /dev/null) || continue
+  old_version=$(df_version_in "$old" "$tpl") || continue
+  new_version=$(df_version_in "$new" "$tpl") || continue
+  if [ "$old_version" = "$new_version" ]; then continue; fi
+  # During a merge, a version identical to the merged-in commit comes from main, not from a bump here.
+  if [ $MERGING -eq 1 ] && merged=$(git show "MERGE_HEAD:$file" 2> /dev/null) \
+    && [ "$(df_version_in "$merged" "$tpl" || true)" = "$new_version" ]; then
+    continue
+  fi
+  fail "version bump in '$file' ($old_version -> $new_version) on branch '$BRANCH'." \
+    "Versions are bumped automatically after the merge on '$MAIN_BRANCH', so parallel PRs never conflict."
+done < <(df_packages)
+
+if grep -qxF CHANGELOG.md <<< "$STAGED"; then
+  if git cat-file -e "origin/$MAIN_BRANCH:CHANGELOG.md" 2> /dev/null || git cat-file -e "$MAIN_BRANCH:CHANGELOG.md" 2> /dev/null; then
+    if [ $MERGING -eq 0 ] || ! git diff --cached --quiet MERGE_HEAD -- CHANGELOG.md; then
+      fail "CHANGELOG.md modified on branch '$BRANCH'." \
+        "It is written automatically after the merge on '$MAIN_BRANCH', so parallel PRs never conflict."
+    fi
+  fi
+fi
+
+df_local_hook pre-commit "$@"

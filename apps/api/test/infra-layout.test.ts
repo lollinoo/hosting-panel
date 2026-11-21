@@ -175,8 +175,13 @@ describe("per-service env files and wrappers", () => {
 describe("release workflow and docs", () => {
   const read = (p: string) => readFileSync(join(root, p), "utf8");
   it("release workflow and docs are consistent", () => {
-    const wf = read(".github/workflows/release.yml");
-    for (const s of ["tags:", "v*", "release:build", "release:smoke", "gh release create"]) expect(wf).toContain(s);
+    // devflow publishes a draft release tagged v<version>; the archive job attaches the build and publishes it.
+    const config = read(".devflow/config");
+    for (const s of ["RELEASE_TAG='v{version}'", "RELEASE_DRAFT=true"]) expect(config).toContain(s);
+    const wf = read(".github/workflows/devflow-release.yml");
+    for (const s of ["release-main.sh", "build_sha", "release:build", "release:smoke", "gh release upload", "--draft=false --latest"]) {
+      expect(wf).toContain(s);
+    }
     const readme = read("README.md");
     for (const s of ["install.sh", "hp-update", "sha256sum -c", "hp-accounts"]) expect(readme).toContain(s);
     expect(readme).not.toContain("export DATABASE_URL=");

@@ -1,0 +1,109 @@
+name: devflow release
+
+on:
+  push:
+    branches: [main] # keep in sync with MAIN_BRANCH in .devflow/config
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+# Queue the runs instead of cancelling them: a run on an older commit defers to the newest one.
+concurrency:
+  group: devflow-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # amends the merge commit on the main branch and publishes the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      build_sha: ${{ steps.release.outputs.build_sha }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      superseded: ${{ steps.release.outputs.superseded }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the bump reads every commit since the last release
+
+      # Project part (optional): run the tests here so a red main is never released.
+
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/devflow/release-main.sh
+
+  # The release above is a draft tagged v<version> (RELEASE_TAG / RELEASE_DRAFT in .devflow/config).
+  # This job verifies the amended commit, attaches the installable archive and only then publishes
+  # the release, so install.sh / hp-update never see a "latest" release without its archive.
+  # If it fails the release stays a draft: fix main, or publish by hand after a manual rebuild.
+  archive:
+    name: Build and publish release archive
+    needs: release
+    if: needs.release.outputs.superseded != 'true' && needs.release.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      TAG: ${{ needs.release.outputs.release_tag }}
+    steps:
+      - name: Checkout the released commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.build_sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Check PHP is available (sendmail shim test)
+        run: php --version
+
+      - name: Check PHP ZipArchive extension is available
+        run: php -r 'exit(class_exists("ZipArchive")?0:1);'
+
+      - name: Enable Corepack package manager
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Check tag matches package.json version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$version" ]; then
+            echo "Tag $TAG does not match package.json version v$version" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # The type check and the tests read the built packages.
+      - name: Build monorepo packages and applications
+        run: corepack pnpm run build
+
+      - name: Lint codebase
+        run: corepack pnpm run lint
+
+      - name: Typecheck monorepo
+        run: corepack pnpm run typecheck
+
+      - name: Run automated test suite
+        run: corepack pnpm run test
+
+      - name: Build release archive
+        run: corepack pnpm run release:build
+
+      - name: Smoke-test release archive
+        run: corepack pnpm run release:smoke "dist-release/hosting-panel-${VERSION}-linux-x64.tar.gz"
+
+      - name: Attach the archive and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          archive="dist-release/hosting-panel-${VERSION}-linux-x64.tar.gz"
+          gh release upload "$TAG" "$archive" "$archive.sha256" --clobber
+          gh release view "$TAG" --json body --jq .body > release-notes.md
+          printf '\nInstall: see "Installazione su un nuovo server" in the README.\nVerify the download with sha256sum -c.\n' >> release-notes.md
+          gh release edit "$TAG" --notes-file release-notes.md --draft=false --latest
