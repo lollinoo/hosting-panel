@@ -3,9 +3,12 @@ import { Body, Controller, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post
 import {
   CreateAdministratorInputSchema,
   CreateCustomerAccountInputSchema,
+  PLATFORM_OPS_ORG_ID,
+  UpdateOrganizationSiteLimitInputSchema,
   type AdminUserDto,
   type CreateAdministratorResultDto,
   type ErrorCode,
+  type OrganizationSiteLimitDto,
 } from "@hosting-panel/contracts";
 import {
   allocateHostTransactional,
@@ -15,6 +18,7 @@ import {
   membershipRoles,
   memberships,
   organizations,
+  updateOrganizationSiteLimitTransactional,
   users,
   type DatabaseClient,
   type HostingPanelDatabase,
@@ -136,6 +140,38 @@ export class AdminUsersController {
       details: { ownerEmail: body.ownerEmail },
     });
     return { data: { organizationId, userId, temporaryPassword } };
+  }
+
+  @Patch("organizations/:orgId/site-limit")
+  public async updateSiteLimit(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: OrganizationSiteLimitDto }> {
+    const auth = await requireServerAdmin(this.authz, req, orgId, "organization");
+    const { maxSites } = UpdateOrganizationSiteLimitInputSchema.parse(raw ?? {});
+    if (orgId === PLATFORM_OPS_ORG_ID) throw new ControlPlaneError("NOT_FOUND", "Customer not found.");
+    const changed = await this.dbClient.db.transaction(async (tx) => {
+      const result = await updateOrganizationSiteLimitTransactional(tx as unknown as HostingPanelDatabase, {
+        organizationId: orgId,
+        maxSites,
+      });
+      if (!result) throw new ControlPlaneError("NOT_FOUND", "Customer not found.");
+      await this.authz.recordAudit(
+        auth,
+        req,
+        {
+          organizationId: orgId,
+          action: "admin.customer.site_limit",
+          targetType: "organization",
+          targetId: orgId,
+          details: { from: result.previousMaxSites, to: result.maxSites },
+        },
+        tx,
+      );
+      return result;
+    });
+    return { data: { organizationId: orgId, maxSites: changed.maxSites, usedSites: changed.usedSites } };
   }
 
   @Post("administrators")

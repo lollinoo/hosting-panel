@@ -5,9 +5,8 @@ import { useRouter } from "next/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { OwnerSelect, type Customers } from "@/components/admin/change-owner-dialog";
+import { OwnerSelect, adminSiteErrorText, type Customers } from "@/components/admin/change-owner-dialog";
 import { SiteForm, type SiteFormBody } from "@/components/customer/site-form";
-import { errorMessage } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 
@@ -29,7 +28,8 @@ export function CreateSiteForCustomerDialog({ customers, csrfToken }: { customer
       ownerOrganizationId: owner || null,
     });
     setBusy(false);
-    if (!sent.ok) return setError(sent.code === "DOMAIN_CONFLICT" ? m.site.create.domainConflict : errorMessage(m, sent.code));
+    // The answer carries no field names here and nothing is highlighted, so the sentence names the fields itself.
+    if (!sent.ok) return setError(sent.code === "DOMAIN_CONFLICT" ? m.site.create.domainConflict : sent.code === "VALIDATION_ERROR" ? t.createInvalid : adminSiteErrorText(m, sent));
     setOpen(false);
     router.refresh();
   }

@@ -9,6 +9,8 @@ import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { encryptedSecrets, operations, resourceGrants, serviceInstances, serviceTemplates, siteDatabases, sites, siteSftpUsers, tlsCertificates } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
+import { assertSiteLimitAvailable } from "./site-limit.js";
+import { ensureBuiltInSiteTemplates } from "./site-templates-repository.js";
 import { assertSiteMovable } from "./tls-coverage.js";
 
 export const WORDPRESS_TEMPLATE_ID = WORDPRESS_SITE_TYPE.templateId;
@@ -31,6 +33,7 @@ export async function ensureWordpressTemplate(db: DatabaseExecutor): Promise<voi
       approvedForDedicated: true,
     })
     .onConflictDoUpdate({ target: serviceTemplates.id, set: { defaultImage, updatedAt: new Date() } });
+  await ensureBuiltInSiteTemplates(db);
 }
 
 export type SiteDatabaseRow = typeof siteDatabases.$inferInsert;
@@ -76,7 +79,8 @@ export interface MoveSiteInput {
  * Moves a site and everything it owns (children via ON UPDATE CASCADE, secrets re-encrypted
  * under the new AAD, all its operations including a running one) in one transaction. Refused with
  * CERTIFICATE_IN_USE (T9) while a domain uses a manual certificate or a manual certificate of another organization
- * covers one of its hostnames. Lock order: site row, then the TLS publish state, then the site's domain rows.
+ * covers one of its hostnames, and with QUOTA_EXCEEDED (SiteLimitReachedError) when the destination is at its site limit.
+ * Lock order: destination organization row, then site row, then the TLS publish state, then the site's domain rows.
  */
 export async function moveSiteToOrganizationTransactional(
   db: HostingPanelDatabase,
@@ -84,6 +88,9 @@ export async function moveSiteToOrganizationTransactional(
 ): Promise<void> {
   const { siteId, fromOrganizationId: from, toOrganizationId: to, masterKey } = input;
   await db.transaction(async (tx) => {
+    // The destination's site limit, under its organization row lock (taken before the site row lock).
+    await assertSiteLimitAvailable(tx, to);
+
     const [site] = await tx
       .select({ id: sites.id })
       .from(sites)

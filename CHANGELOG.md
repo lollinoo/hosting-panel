@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Site templates and per-customer site limits (2026-11-21)
+*hosting-panel v0.8.0*
+
+**New Features**
+- **sites**: Site templates and per-customer site limits
+
+---
+
 ### Keep PR descriptions short and free of template hints (2026-11-21)
 *hosting-panel v0.7.3*
 

@@ -839,6 +839,7 @@ export class DockerExecutorIpcServer {
       hostRoutes: wireSpec.hostRoutes,
       exposeHttp: wireSpec.exposeHttp,
       siteMail: wireSpec.siteMail,
+      phpIni: wireSpec.phpIni,
       internalPort: wireSpec.internalPort,
       pidsLimit: wireSpec.pidsLimit,
       volumeMounts: wireSpec.volumeMounts,

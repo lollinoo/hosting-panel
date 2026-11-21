@@ -22,6 +22,7 @@ import {
   SiteFilePathSchema,
   SiteFileUploadIdSchema,
 } from "./site-files.js";
+import { PhpSettingsSchema } from "./php-settings.js";
 import { SiteTypeKeySchema } from "./site-types/keys.js";
 import {
   MailFailureDtoSchema,
@@ -171,6 +172,7 @@ export const ApprovedServiceSpecWireSchema = z
     pidsLimit: z.number().int().min(16).max(4096).optional(),
     volumeMounts: z.array(ServiceVolumeMountWireSchema).optional(),
     resolvedSecrets: z.record(SecretKeySchema, z.string().max(16384)).optional(),
+    phpIni: PhpSettingsSchema.optional(),
     approvedAt: z.string().datetime({ offset: true }).optional(),
   })
   .superRefine((spec, ctx) => {

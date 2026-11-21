@@ -50,6 +50,8 @@ tags:
     description: WordPress sites created, controlled and deleted by customers (async, 202 + operation)
   - name: Admin Sites
     description: Server administrator view over all WordPress sites, creation for a customer and ownership moves
+  - name: Site Templates
+    description: Admin catalogue of site types (templates) and their immutable versions, and the customer's list of offered site types
   - name: TLS Certificates
     description: Imported (PEM) certificates, their versions and which domains serve them; the administrator's inventory and alerts
   - name: Admin Backups
@@ -1817,7 +1819,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Domain hostname conflict or slug conflict
+          description: >-
+            Domain hostname conflict or slug conflict, or the customer's site limit is reached
+            (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/sites/{siteId}:
@@ -2141,7 +2145,13 @@ paths:
     post:
       tags: [Managed Sites]
       operationId: createManagedSite
-      summary: Create a WordPress site (site.create); the admin password is stored as an encrypted site secret and deleted once the install succeeds
+      summary: Create a site (site.create); the admin password is stored as an encrypted site secret and deleted once the install succeeds
+      description: >-
+        The site type is the built-in WordPress unless `templateId` names one from the site types route; the
+        site is created from that site type's default version. `HP_SITE_DOMAIN` and `HP_SITE_URL` in a
+        template are fixed at creation. The PHP settings of the site type are applied to the site but never
+        appear in a site response (the generic service revisions route returns the stored configuration,
+        which is not secret).
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
@@ -2159,14 +2169,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ManagedSiteAccepted"
         "400":
+          description: >-
+            Invalid input, including a parameter the site type refuses (`VALIDATION_ERROR`,
+            `details[].field: parameters.<key>`) or a PHP version it does not offer
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Unknown organization, or an unknown, disabled or archived site type (`NOT_FOUND`,
+            `details[0].reason: template_unavailable`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: >-
+            Conflict, or the customer's site limit is reached (`QUOTA_EXCEEDED`,
+            `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}:
@@ -4457,6 +4476,10 @@ paths:
       tags: [Admin Sites]
       operationId: adminCreateSite
       summary: Create a site for a customer, or held by the platform-ops organization when ownerOrganizationId is null (audited as admin.site.create)
+      description: >-
+        Like the customer route, with the whole parameter list of the site type open to the administrator, and a
+        disabled (not archived) site type allowed when `templateId` names it. Without `templateId` the
+        built-in WordPress is used, and is refused when an administrator has disabled it.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
       requestBody:
@@ -4473,14 +4496,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ManagedSiteAccepted"
         "400":
+          description: >-
+            Invalid input, including a parameter the site type refuses (`VALIDATION_ERROR`,
+            `details[].field: parameters.<key>`) or a PHP version it does not offer
           $ref: "#/components/responses/ErrorResponse"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          description: >-
+            Unknown organization, or an unknown, disabled or archived site type (`NOT_FOUND`,
+            `details[0].reason: template_unavailable`)
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: >-
+            Conflict, or the owner's site limit is reached (`QUOTA_EXCEEDED`,
+            `details[0].reason: site_limit_reached`); a site held by platform-ops is never limited
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}:
@@ -4545,6 +4577,387 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: >-
+            Conflict, or the new owner's site limit is reached (`QUOTA_EXCEEDED`,
+            `details[0].reason: site_limit_reached`); the move is also checked again when it runs, and
+            stays with the old owner if the limit is reached by then
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/organizations/{orgId}/site-limit:
+    patch:
+      tags: [Admin Sites]
+      operationId: adminUpdateOrganizationSiteLimit
+      summary: Set or remove the maximum number of sites a customer can hold (server administrator only; audited as admin.customer.site_limit)
+      description: >-
+        `maxSites: null` removes the limit. A limit below the sites the customer already holds keeps those
+        sites and only refuses new ones, including a site moved to this customer. The platform-ops
+        organization has no limit (`NOT_FOUND`).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrganizationSiteLimitInput"
+      responses:
+        "200":
+          description: The limit now in force and the sites the customer holds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/OrganizationSiteLimitDto"
+        "400":
+          description: Invalid limit (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Customer not found (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/site-templates:
+    get:
+      tags: [Site Templates]
+      operationId: adminListSiteTemplates
+      summary: List the site templates, archived ones included, and the site types (modules) a template can be bound to (server administrator only)
+      description: >-
+        Each template carries its default version and the number of sites that run on it. `modules` lists the
+        site types this release knows with the PHP versions each one supports.
+      responses:
+        "200":
+          description: The templates and the modules
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplatesList"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [Site Templates]
+      operationId: adminCreateSiteTemplate
+      summary: Create a site template with its first version (server administrator only; audited as admin.site_template.create)
+      description: >-
+        The source is a Compose-like YAML document checked by the policy engine for the chosen module. A
+        source with problems is refused with `VALIDATION_ERROR` and up to 20 `details` (`field` is the path
+        in the document or `source`, `reason` the problem code); use the validate route to see them with
+        their line and column. The audit row never carries the source.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSiteTemplateInput"
+      responses:
+        "201":
+          description: The new template with its first version, which is the default
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplateDetail"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            Another template already has this name (`ALREADY_EXISTS`, `details[0].reason: name_taken`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/site-templates/validate:
+    post:
+      tags: [Site Templates]
+      operationId: adminValidateSiteTemplate
+      summary: Check a template source without saving it (server administrator only)
+      description: >-
+        Always answers 200 for a well-formed request: `valid` says whether the source passes, `errors` lists
+        the problems with their position, `parameters` the typed parameters it declares and `preview` the
+        service it would deploy with every parameter at its default (`null` when the source is not valid).
+        The preview is built from arrays only. Nothing is stored and nothing is audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidateSiteTemplateInput"
+      responses:
+        "200":
+          description: The verdict
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SiteTemplateValidation"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/site-templates/{templateId}:
+    get:
+      tags: [Site Templates]
+      operationId: adminGetSiteTemplate
+      summary: Show a site template with its versions, newest first, without their sources (server administrator only)
+      parameters:
+        - $ref: "#/components/parameters/SiteTemplateIdParam"
+      responses:
+        "200":
+          description: The template
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplateDetail"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+    patch:
+      tags: [Site Templates]
+      operationId: adminUpdateSiteTemplate
+      summary: Rename a site template, change its description, enable or disable it, or pick its default version (server administrator only; audited as admin.site_template.update)
+      description: >-
+        A disabled template is no longer offered to customers; sites already on it keep running. Enabling a
+        template, or picking another default for an enabled one, checks the stored source of the default in effect
+        against today's policy again, under the template lock (`VALIDATION_ERROR`, `details[0].field: enabled`,
+        `details[0].reason: template_invalid`; nothing changes). A disabled template's default is checked when it is
+        enabled. The default must be a version of this
+        template (`details[0].reason: unknown_version`). At least one field is required.
+      parameters:
+        - $ref: "#/components/parameters/SiteTemplateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateSiteTemplateInput"
+      responses:
+        "200":
+          description: The template as it is now
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplateDetail"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The template is archived (`RESOURCE_LOCKED`, `details[0].reason: template_archived`) or another
+            template already has this name (`ALREADY_EXISTS`, `details[0].reason: name_taken`)
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [Site Templates]
+      operationId: adminArchiveSiteTemplate
+      summary: Archive a site template (server administrator only; audited as admin.site_template.archive)
+      description: >-
+        Nothing is deleted: an archived template is no longer offered, cannot get new versions, and the sites
+        that run on it keep their version. Archiving an archived template changes nothing and writes no
+        second audit row. The built-in WordPress template cannot be archived
+        (`RESOURCE_LOCKED`, `details[0].reason: built_in`).
+      parameters:
+        - $ref: "#/components/parameters/SiteTemplateIdParam"
+      responses:
+        "200":
+          description: The archived template
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplateDetail"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The built-in template cannot be archived (`RESOURCE_LOCKED`, `details[0].reason: built_in`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/site-templates/{templateId}/versions:
+    post:
+      tags: [Site Templates]
+      operationId: adminAddSiteTemplateVersion
+      summary: Add a version to a site template (server administrator only; audited as admin.site_template.version)
+      description: >-
+        Versions are immutable. A source identical to the latest version adds nothing (`created: false`).
+        With `makeDefault` (the default) the new version becomes the one customers get. Sites already on the
+        template keep their version until an administrator moves them. A source with problems is refused
+        like on create. The audit row never carries the source.
+      parameters:
+        - $ref: "#/components/parameters/SiteTemplateIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddSiteTemplateVersionInput"
+      responses:
+        "201":
+          description: The version, with its source
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplateVersionCreated"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The template is archived (`RESOURCE_LOCKED`, `details[0].reason: template_archived`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/site-templates/{templateId}/versions/{versionId}:
+    get:
+      tags: [Site Templates]
+      operationId: adminGetSiteTemplateVersion
+      summary: Show one version of a site template with its source (server administrator only)
+      parameters:
+        - $ref: "#/components/parameters/SiteTemplateIdParam"
+        - $ref: "#/components/parameters/SiteTemplateVersionIdParam"
+      responses:
+        "200":
+          description: The version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminSiteTemplateVersion"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown template, or a version that belongs to another template (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/sites/{siteId}/template-version:
+    post:
+      tags: [Admin Sites]
+      operationId: adminChangeSiteTemplateVersion
+      summary: Move a site to a newer version of its template (server administrator only; audited as admin.site.template_version)
+      description: >-
+        Redeploys the site with the new version's configuration; the stored parameter values are kept when
+        the new version still accepts them, except that an admin-only parameter (`customer: false`) whose
+        stored value equals the old version's default takes the new version's default. Only a newer version of the same template is accepted, and the
+        site must not be stopped. Refusals are `VALIDATION_ERROR` with
+        `details[0].reason` `stopped`, `other_template`, `already_current`, `not_newer`, or
+        `parameters.<key>` (a stored value the new version refuses, or a new parameter without a default);
+        nothing changes then. An unknown version is `NOT_FOUND` (`unknown_version`). The audit row is
+        written with the operation and only when the operation is new.
+      parameters:
+        - $ref: "#/components/parameters/SiteIdParam"
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChangeSiteTemplateVersionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedSiteAccepted"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The target template is archived (`RESOURCE_LOCKED`, `details[0].reason: template_archived`), the
+            stored source no longer passes today's policy (`details[0].reason: template_invalid`), or another
+            operation holds the site
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/site-types:
+    get:
+      tags: [Site Templates]
+      operationId: listCustomerSiteTypes
+      summary: List the site types the customer can pick when creating a site (site.create)
+      description: >-
+        Enabled, not archived templates at their default version, the built-in WordPress first, then by name.
+        The list is the same for every organization. It never carries the source, the image, the environment
+        or the limits; only the PHP versions and the parameters the customer may set. A site type is chosen at
+        creation with `templateId` and `parameters`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+      responses:
+        "200":
+          description: The site types on offer
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/CustomerSiteTypes"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/actions:
@@ -6137,9 +6550,10 @@ paths:
         `never_checked`. `panel.running` is a panel update still queued or running; `panel.last` is
         the end of the last one. `components` come from the panel-container row the drift pass
         writes every 15 seconds; `imageCurrent` is `null` when nothing was seen. `sites` lists the
-        sites whose container runs another image than the one pinned for their PHP version, by name,
-        at most 200; `sitesTotal` counts them all. No registry is asked: an image is behind only when
-        a panel release changed its pin.
+        sites whose container runs another image than the one their template version renders (the pin of
+        their PHP version for a site without a template version), by name, at most 200; `sitesTotal`
+        counts them all. No registry is asked: an image is behind only when a panel release changed a pin
+        or the site's template version renders another image.
       responses:
         "200":
           description: The update view
@@ -6282,11 +6696,12 @@ paths:
     post:
       tags: [Admin Updates]
       operationId: adminUpdateSiteImage
-      summary: Move one site to the image pinned for its PHP version (server administrator; audited as admin.update.site_image)
+      summary: Move one site to the image its template version renders (server administrator; audited as admin.update.site_image)
       description: >-
         Uses the same path as the owner's PHP version change, with the same version: it queues
-        `service.deploy` under the site lock and the site's container is created again on the pinned
-        image. The site does not answer for a short while. A replayed key answers the first
+        `service.deploy` under the site lock and the site's container is created again on the expected
+        image: the one the site's template version renders (the pin of its PHP version for a site without
+        a template version). The site does not answer for a short while. A replayed key answers the first
         operation without any check and writes no second row. The row `admin.update.site_image`
         keeps `outcome`, `requestId`, `operationId`, `siteId`, `organizationId`, `fromImage` and
         `toImage` in `details`; its organisation is the site's owner.
@@ -7334,6 +7749,18 @@ components:
       required: true
       schema:
         type: string
+    SiteTemplateIdParam:
+      in: path
+      name: templateId
+      required: true
+      schema:
+        type: string
+    SiteTemplateVersionIdParam:
+      in: path
+      name: versionId
+      required: true
+      schema:
+        type: string
     UserIdParam:
       in: path
       name: userId
@@ -8029,7 +8456,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/OrganizationSummaryDto"
         - type: object
-          required: [capabilities, siteCount, serviceCount]
+          required: [capabilities, siteCount, serviceCount, maxSites]
           properties:
             capabilities:
               $ref: "#/components/schemas/OrganizationCapabilitiesDto"
@@ -8040,6 +8467,11 @@ components:
               type: integer
             serviceCount:
               type: integer
+            maxSites:
+              type: integer
+              minimum: 0
+              nullable: true
+              description: The site limit an administrator set for this organization (`siteCount` is the usage); `null` means unlimited
 
     MemberDto:
       type: object
@@ -8289,8 +8721,15 @@ components:
       allOf:
         - $ref: "#/components/schemas/ManagedSiteDto"
         - type: object
-          required: [owner]
+          required: [owner, template]
           properties:
+            template:
+              nullable: true
+              description: >-
+                The template the site runs on and the newest version it can move to; `null` when the
+                site type is not one a template can describe
+              allOf:
+                - $ref: "#/components/schemas/AdminSiteTemplateRef"
             owner:
               type: object
               nullable: true
@@ -8318,7 +8757,7 @@ components:
           type: array
           items:
             type: object
-            required: [organizationId, name, ownerEmail]
+            required: [organizationId, name, ownerEmail, maxSites, siteCount]
             properties:
               organizationId:
                 type: string
@@ -8326,6 +8765,15 @@ components:
                 type: string
               ownerEmail:
                 type: string
+              maxSites:
+                type: integer
+                minimum: 0
+                nullable: true
+                description: The customer's site limit; `null` means unlimited
+              siteCount:
+                type: integer
+                minimum: 0
+                description: Sites the customer holds now, whatever their status; the number the limit is checked against
 
     AddSiteDomainInput:
       type: object
@@ -10172,7 +10620,28 @@ components:
         phpVersion:
           type: string
           enum: ["8.3", "8.4", "8.5"]
-          default: "8.4"
+          description: >-
+            The PHP version of the site. Absent: the site type's default. A version the site type does not
+            offer (to this caller) is refused (`VALIDATION_ERROR`).
+        templateId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: >-
+            The site type, from the site types route. Absent: the built-in WordPress. An unknown, disabled or
+            archived site type is `NOT_FOUND` (`details[0].reason: template_unavailable`).
+        parameters:
+          type: array
+          maxItems: 32
+          description: >-
+            Values for the parameters of the site type that this caller may set; one entry per key. A parameter
+            left out takes its default. A value the parameter refuses, an unknown key, or a missing required
+            value is `VALIDATION_ERROR` (`details[].field: parameters.<key>`). A value whose rendered
+            environment variable the executor would refuse (only a Docker socket path does) is also
+            `VALIDATION_ERROR`, but with `details[0].field: parameters` (no key) and
+            `details[0].reason: unsafe_value`; nothing is stored.
+          items:
+            $ref: "#/components/schemas/SiteTemplateParameterEntry"
         title:
           type: string
           maxLength: 120
@@ -10203,6 +10672,480 @@ components:
       properties:
         ownerOrganizationId:
           type: string
+          nullable: true
+
+    UpdateOrganizationSiteLimitInput:
+      type: object
+      additionalProperties: false
+      required: [maxSites]
+      properties:
+        maxSites:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          nullable: true
+          description: "`null` removes the limit; `0` allows no new site. Sites the customer already holds are kept when the limit is set below their number."
+
+    OrganizationSiteLimitDto:
+      type: object
+      required: [organizationId, maxSites, usedSites]
+      properties:
+        organizationId:
+          type: string
+        maxSites:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: The limit now in force; `null` means unlimited
+        usedSites:
+          type: integer
+          minimum: 0
+          description: Sites the customer holds now, whatever their status
+
+    SiteTemplateParameterValue:
+      description: The value of a template parameter; its type follows the parameter (`enum`, `string` and `size` are strings, `integer` an integer, `boolean` a boolean)
+      oneOf:
+        - type: string
+          maxLength: 256
+        - type: integer
+        - type: boolean
+
+    SiteTemplateParameter:
+      type: object
+      required: [key, label, type, customer]
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z][a-z0-9_]{0,31}$"
+        label:
+          type: string
+        type:
+          type: string
+          enum: [enum, integer, string, boolean, size]
+        options:
+          type: array
+          description: The allowed values of an `enum` parameter
+          items:
+            type: string
+        min:
+          type: integer
+        max:
+          type: integer
+        default:
+          $ref: "#/components/schemas/SiteTemplateParameterValue"
+        customer:
+          type: boolean
+          description: Whether the customer may set the value when creating a site; otherwise only an administrator can
+
+    SiteTemplateParameterEntry:
+      type: object
+      additionalProperties: false
+      required: [key, value]
+      description: One parameter value. Parameters travel as a list of entries, never as an object keyed by name.
+      properties:
+        key:
+          type: string
+          pattern: "^[a-z][a-z0-9_]{0,31}$"
+        value:
+          $ref: "#/components/schemas/SiteTemplateParameterValue"
+
+    AdminSiteTemplateSummary:
+      type: object
+      required: [id, module, name, description, builtIn, enabled, archivedAt, defaultVersionId, defaultVersionNumber, versionCount, siteCount, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          pattern: "^stpl_[a-z0-9_]{1,64}$"
+        module:
+          type: string
+          enum: [wordpress]
+          description: The site type module the template is bound to
+        name:
+          type: string
+          maxLength: 80
+        description:
+          type: string
+          nullable: true
+        builtIn:
+          type: boolean
+          description: The WordPress template that ships with the panel; it cannot be archived
+        enabled:
+          type: boolean
+          description: Whether customers are offered the template
+        archivedAt:
+          type: string
+          format: date-time
+          nullable: true
+        defaultVersionId:
+          type: string
+          pattern: "^stv_[a-z0-9_]{1,64}$"
+        defaultVersionNumber:
+          type: integer
+        versionCount:
+          type: integer
+        siteCount:
+          type: integer
+          description: Sites that run on any version of the template
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AdminSiteTemplateVersionSummary:
+      type: object
+      required: [id, versionNumber, createdAt, siteCount, isDefault]
+      properties:
+        id:
+          type: string
+          pattern: "^stv_[a-z0-9_]{1,64}$"
+        versionNumber:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        siteCount:
+          type: integer
+          description: Sites that run on this version
+        isDefault:
+          type: boolean
+
+    AdminSiteTemplateDetail:
+      allOf:
+        - $ref: "#/components/schemas/AdminSiteTemplateSummary"
+        - type: object
+          required: [versions]
+          properties:
+            versions:
+              type: array
+              description: Newest first, without the source
+              items:
+                $ref: "#/components/schemas/AdminSiteTemplateVersionSummary"
+
+    AdminSiteTemplatesList:
+      type: object
+      required: [templates, modules]
+      properties:
+        templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminSiteTemplateSummary"
+        modules:
+          type: array
+          description: The site types this release knows, with the PHP versions each supports
+          items:
+            type: object
+            required: [key, phpVersions]
+            properties:
+              key:
+                type: string
+                enum: [wordpress]
+              phpVersions:
+                type: array
+                items:
+                  type: string
+
+    AdminSiteTemplateVersion:
+      type: object
+      required: [id, templateId, versionNumber, createdAt, source]
+      properties:
+        id:
+          type: string
+          pattern: "^stv_[a-z0-9_]{1,64}$"
+        templateId:
+          type: string
+          pattern: "^stpl_[a-z0-9_]{1,64}$"
+        versionNumber:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+          description: The Compose-like YAML document, as saved
+
+    AdminSiteTemplateVersionCreated:
+      allOf:
+        - $ref: "#/components/schemas/AdminSiteTemplateVersion"
+        - type: object
+          required: [isDefault, created]
+          properties:
+            isDefault:
+              type: boolean
+            created:
+              type: boolean
+              description: "`false` when the source is identical to the latest version and no version was added"
+
+    CreateSiteTemplateInput:
+      type: object
+      additionalProperties: false
+      required: [module, name, source]
+      properties:
+        module:
+          type: string
+          enum: [wordpress]
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+        source:
+          type: string
+          minLength: 1
+          description: The Compose-like YAML document, at most 65536 bytes
+          maxLength: 65536
+
+    AddSiteTemplateVersionInput:
+      type: object
+      additionalProperties: false
+      required: [source]
+      properties:
+        source:
+          type: string
+          minLength: 1
+          maxLength: 65536
+        makeDefault:
+          type: boolean
+          default: true
+          description: Make the new version the one customers get
+
+    UpdateSiteTemplateInput:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        description:
+          type: string
+          maxLength: 500
+          nullable: true
+        enabled:
+          type: boolean
+        defaultVersionId:
+          type: string
+          pattern: "^stv_[a-z0-9_]{1,64}$"
+
+    ValidateSiteTemplateInput:
+      type: object
+      additionalProperties: false
+      required: [module, source]
+      properties:
+        module:
+          type: string
+          enum: [wordpress]
+        source:
+          type: string
+          minLength: 1
+          maxLength: 65536
+
+    SiteTemplateIssue:
+      type: object
+      required: [line, column, path, code, message]
+      properties:
+        line:
+          type: integer
+          nullable: true
+          description: "`null` for a problem that has no position in the source"
+        column:
+          type: integer
+          nullable: true
+        path:
+          type: string
+          nullable: true
+          description: Where in the document the problem is; `null` for a syntax error
+        code:
+          type: string
+        message:
+          type: string
+
+    SiteTemplatePreview:
+      type: object
+      description: The service the template would deploy with every parameter at its default. Arrays only, so an environment variable named like a secret does not redact the answer.
+      required: [module, image, internalPort, exposeHttp, limits, environment, volumes, phpSettings, parameters]
+      properties:
+        module:
+          type: string
+          enum: [wordpress]
+        image:
+          type: string
+        internalPort:
+          type: integer
+        exposeHttp:
+          type: boolean
+        limits:
+          type: object
+          required: [cpuMilli, memoryBytes]
+          properties:
+            cpuMilli:
+              type: integer
+            memoryBytes:
+              type: string
+        environment:
+          type: array
+          items:
+            type: object
+            required: [name, value]
+            properties:
+              name:
+                type: string
+              value:
+                type: string
+        volumes:
+          type: array
+          items:
+            type: object
+            required: [volume, containerPath]
+            properties:
+              volume:
+                type: string
+              containerPath:
+                type: string
+        phpSettings:
+          type: array
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key:
+                type: string
+              value:
+                type: string
+        parameters:
+          type: array
+          items:
+            type: object
+            required: [key, label, type, customer, value]
+            properties:
+              key:
+                type: string
+              label:
+                type: string
+              type:
+                type: string
+                enum: [enum, integer, string, boolean, size]
+              customer:
+                type: boolean
+              value:
+                $ref: "#/components/schemas/SiteTemplateParameterValue"
+
+    SiteTemplateValidation:
+      type: object
+      required: [valid, errors, parameters, preview]
+      properties:
+        valid:
+          type: boolean
+        errors:
+          type: array
+          description: Sorted by position, at most 50
+          items:
+            $ref: "#/components/schemas/SiteTemplateIssue"
+        parameters:
+          type: array
+          items:
+            $ref: "#/components/schemas/SiteTemplateParameter"
+        preview:
+          nullable: true
+          description: "`null` when the source is not valid"
+          allOf:
+            - $ref: "#/components/schemas/SiteTemplatePreview"
+
+    CustomerSiteTypeParameter:
+      type: object
+      description: A parameter the customer may set; the same as a template parameter without the `customer` flag
+      required: [key, label, type]
+      properties:
+        key:
+          type: string
+        label:
+          type: string
+        type:
+          type: string
+          enum: [enum, integer, string, boolean, size]
+        options:
+          type: array
+          items:
+            type: string
+        min:
+          type: integer
+        max:
+          type: integer
+        default:
+          $ref: "#/components/schemas/SiteTemplateParameterValue"
+
+    CustomerSiteType:
+      type: object
+      required: [id, name, description, module, phpVersions, defaultPhpVersion, parameters]
+      properties:
+        id:
+          type: string
+          description: Sent as `templateId` when creating a site
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        module:
+          type: string
+          enum: [wordpress]
+        phpVersions:
+          type: array
+          description: The PHP versions the customer can pick; only the default when the site type does not let the customer choose
+          items:
+            type: string
+        defaultPhpVersion:
+          type: string
+          nullable: true
+        parameters:
+          type: array
+          description: The parameters the customer may set, without `php_version`, which is `phpVersion`
+          items:
+            $ref: "#/components/schemas/CustomerSiteTypeParameter"
+
+    CustomerSiteTypes:
+      type: object
+      required: [siteTypes]
+      properties:
+        siteTypes:
+          type: array
+          description: The built-in WordPress first, then by name
+          items:
+            $ref: "#/components/schemas/CustomerSiteType"
+
+    ChangeSiteTemplateVersionInput:
+      type: object
+      additionalProperties: false
+      required: [versionId]
+      properties:
+        versionId:
+          type: string
+          pattern: "^stv_[a-z0-9_]{1,64}$"
+          description: A newer version of the template the site runs on
+
+    AdminSiteTemplateRef:
+      type: object
+      required: [templateId, templateName, versionId, versionNumber, defaultVersionId, defaultVersionNumber]
+      properties:
+        templateId:
+          type: string
+        templateName:
+          type: string
+        versionId:
+          type: string
+          description: The version the site runs on
+        versionNumber:
+          type: integer
+        defaultVersionId:
+          type: string
+          nullable: true
+          description: The version the template offers now; the site can move to it when its number is higher
+        defaultVersionNumber:
+          type: integer
           nullable: true
 
     SiteActionInput:

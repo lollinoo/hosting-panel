@@ -6,6 +6,7 @@ import { fetchServerAdminSites } from "@/lib/server-api";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Card, CardContent } from "@/components/ui/card";
 import { CertificateAlerts } from "@/components/admin/certificate-alerts";
+import { CustomerSiteLimits } from "@/components/admin/customer-site-limits";
 import { SitesTable } from "@/components/admin/sites-table";
 import { CreateSiteForCustomerDialog } from "@/components/admin/create-site-for-customer-dialog";
 
@@ -32,6 +33,7 @@ export default async function AdminSitesPage({ searchParams }: { searchParams: P
         </Alert>
       )}
       {list && <CertificateAlerts alerts={list.certificateAlerts} />}
+      {list && <CustomerSiteLimits customers={list.customers} csrfToken={session.csrfToken} />}
       {list ? (
         <Card>
           <CardContent className="pt-6">

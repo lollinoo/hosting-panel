@@ -16,6 +16,7 @@ import {
   type PhpVersion,
   type ServiceDesiredStatus,
   type SiteStatus,
+  type SiteTemplateParameterEntry,
   type SiteTypeKey,
 } from "@hosting-panel/contracts";
 import {
@@ -45,6 +46,7 @@ import {
   sites,
   stackRevisions,
 } from "./schema.js";
+import { assertSiteLimitAvailable } from "./site-limit.js";
 import { assertNoManualCapture } from "./tls-coverage.js";
 
 function generatePrefixedId(prefix: string): string {
@@ -417,6 +419,8 @@ export interface CreateSiteInput {
   readonly phpVersion?: PhpVersion | null;
   readonly siteType?: SiteTypeKey | null;
   readonly initialDomainStatus?: DomainStatus;
+  readonly templateVersionId?: string | null;
+  readonly templateParameters?: readonly SiteTemplateParameterEntry[] | null;
 }
 
 export async function createSiteTransactional(
@@ -443,6 +447,9 @@ export async function createSiteTransactional(
       throw err;
     }
 
+    // Per-customer site limit: locks the organization row, so a concurrent create or limit change waits here.
+    await assertSiteLimitAvailable(tx, input.organizationId);
+
     const siteId = generatePrefixedId("site");
     const [site] = await tx
       .insert(sites)
@@ -455,6 +462,8 @@ export async function createSiteTransactional(
         status: input.status ?? "ready",
         phpVersion: input.phpVersion ?? null,
         siteType: input.siteType ?? null,
+        ...(input.templateVersionId ? { templateVersionId: input.templateVersionId } : {}),
+        ...(input.templateParameters ? { templateParameters: [...input.templateParameters] } : {}),
       })
       .returning();
 

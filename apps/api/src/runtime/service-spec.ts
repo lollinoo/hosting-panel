@@ -1,4 +1,5 @@
 import {
+  PhpSettingsSchema,
   SECRET_KEY_PATTERN,
   type ServiceVolumeMountSpec,
   type SiteHostRoute,
@@ -38,6 +39,7 @@ const STRUCTURED_CONFIG_KEYS: ReadonlySet<string> = new Set([
   "volumeMounts",
   "portBindings",
   "siteMail",
+  "phpIni",
 ]);
 
 export function sanitizeContainerIdentifier(serviceInstanceId: string): string {
@@ -267,6 +269,17 @@ export async function buildApprovedServiceSpec(
     ? (cfg["portBindings"] as PortBinding[])
     : undefined;
 
+  // Absent or `{}` means no PHP settings; anything else must parse, since a deploy must not silently drop limits the admin set.
+  const rawPhpIni = cfg["phpIni"];
+  const hasPhpIni =
+    rawPhpIni !== undefined &&
+    !(typeof rawPhpIni === "object" && rawPhpIni !== null && !Array.isArray(rawPhpIni) && Object.keys(rawPhpIni).length === 0);
+  const parsedPhpIni = hasPhpIni ? PhpSettingsSchema.safeParse(rawPhpIni) : undefined;
+  if (parsedPhpIni && !parsedPhpIni.success) {
+    throw new ControlPlaneError("VALIDATION_ERROR", "The saved PHP settings are not valid.");
+  }
+  const phpIni = parsedPhpIni?.data;
+
   const resourceLimits = (rev.resourceLimits as
     | { cpuMilli: number; memoryBytes: string }
     | null
@@ -293,6 +306,7 @@ export async function buildApprovedServiceSpec(
     internalPort: parsedPort,
     ...(pidsLimit !== undefined ? { pidsLimit } : {}),
     ...(volumeMounts !== undefined ? { volumeMounts } : {}),
+    ...(phpIni ? { phpIni } : {}),
     ...(resolvedSecrets && Object.keys(resolvedSecrets).length > 0
       ? { resolvedSecrets }
       : {}),

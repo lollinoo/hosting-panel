@@ -110,6 +110,7 @@ import {
 import { peekBody } from "../common/deferred-body-error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
+import { siteLimitError } from "../sites/site-limit.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -391,6 +392,7 @@ export class OrganizationsController {
         capabilities: this.#buildCapabilities(),
         quotas: quota ? mapQuotaToDto(quota) : null,
         siteCount: orgSites.length,
+        maxSites: org.maxSites,
         serviceCount: orgServices.length,
         createdAt: toIsoString(org.createdAt),
         updatedAt: toIsoString(org.updatedAt),
@@ -1048,6 +1050,8 @@ export class OrganizationsController {
       slug: body.slug,
       initialDomain: body.initialDomain,
       actorId: auth.user.id,
+    }).catch((err: unknown) => {
+      throw siteLimitError(err);
     });
 
     const domainList: DomainDto[] = result.domain ? [mapDomainToDto(result.domain)] : [];

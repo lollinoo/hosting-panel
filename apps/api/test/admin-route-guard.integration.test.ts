@@ -19,6 +19,8 @@ import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { skipPasswordChange } from "./fixtures/password-change.js";
 
 const KEY = Buffer.alloc(32, 7);
+// The sweeps visit every administrator route and slow down with each new one: 5 s (the default under apps/api) cuts them.
+const SWEEP_TIMEOUT_MS = 60_000;
 const PW = "sentinel-admin-pass-0001";
 const SETUP = { installationName: "Test", hostHostname: "panel.example.test", hostIpv4: "10.0.0.1" };
 const GUARDED = /^\/v1\/(admin(\/|$)|hosts(\/|$)|allocations(\/|$))/;
@@ -175,6 +177,7 @@ describe("every administrator route refuses a customer before it does anything",
       domainId: `dom_${randomUUID()}`,
       certificateId: `cti_${randomUUID().replace(/-/g, "")}`,
       versionId: `ctv_${randomUUID().replace(/-/g, "")}`,
+      templateId: `stpl_${randomUUID().replace(/-/g, "")}`,
       hostId: host!.id,
       opId: `op_${randomUUID()}`,
       backupId: `bkp_${randomUUID()}`,
@@ -223,6 +226,15 @@ describe("every administrator route refuses a customer before it does anything",
       ["POST", "/v1/admin/updates/panel/apply"],
       ["POST", "/v1/admin/updates/components/:component/apply"],
       ["POST", "/v1/admin/sites/:siteId/image-update"],
+      ["GET", "/v1/admin/site-templates"],
+      ["POST", "/v1/admin/site-templates"],
+      ["POST", "/v1/admin/site-templates/validate"],
+      ["GET", "/v1/admin/site-templates/:templateId"],
+      ["PATCH", "/v1/admin/site-templates/:templateId"],
+      ["DELETE", "/v1/admin/site-templates/:templateId"],
+      ["POST", "/v1/admin/site-templates/:templateId/versions"],
+      ["GET", "/v1/admin/site-templates/:templateId/versions/:versionId"],
+      ["POST", "/v1/admin/sites/:siteId/template-version"],
       ["GET", "/v1/admin/os-packages"],
       ["POST", "/v1/admin/os-packages/refresh"],
       ["POST", "/v1/admin/os-packages/upgrade"],
@@ -274,7 +286,7 @@ describe("every administrator route refuses a customer before it does anything",
     expect(failures).toEqual([]);
     expect(await snapshot()).toEqual(before);
     expect(await dbClient.db.select({ id: users.id, status: users.userStatus, role: users.platformRole }).from(users)).toEqual(usersBefore);
-  });
+  }, SWEEP_TIMEOUT_MS);
 
   it("R202 5: a path parameter holding %00 still answers a customer 403 with one denied row", async () => {
     const before = await snapshot();
@@ -366,7 +378,7 @@ describe("every administrator route refuses a customer before it does anything",
     // Each 403 is the route's own refusal, with its denied row.
     const denied = (await auditSince(seen)).filter((e) => e.actorId === stranger.id && (e.details as Json).outcome === "denied");
     expect(denied).toHaveLength(strangerDenied);
-  });
+  }, SWEEP_TIMEOUT_MS);
 
   it("without credentials every route answers 401 except the pinned open ones", async () => {
     const open: string[] = [];

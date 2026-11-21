@@ -328,6 +328,7 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
           : {}),
         ...(spec.exposeHttp !== undefined ? { exposeHttp: spec.exposeHttp } : {}),
         ...(spec.siteMail !== undefined ? { siteMail: spec.siteMail } : {}),
+        ...(spec.phpIni !== undefined ? { phpIni: { ...spec.phpIni } } : {}),
         ...(spec.internalPort !== undefined ? { internalPort: spec.internalPort } : {}),
         ...(spec.pidsLimit !== undefined ? { pidsLimit: spec.pidsLimit } : {}),
         ...(spec.volumeMounts !== undefined

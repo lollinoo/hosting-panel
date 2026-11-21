@@ -2,16 +2,21 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import type { AdminSiteDto, AdminSitesListDto } from "@hosting-panel/contracts";
+import { SITE_LIMIT_REACHED_REASON, type AdminSiteDto, type AdminSitesListDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { errorMessage, format } from "@/i18n";
+import { errorMessage, format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 
 export type Customers = AdminSitesListDto["customers"];
+
+/** The customer's site limit has its own sentence; any other refusal keeps the generic one of its code. */
+export function adminSiteErrorText(m: Messages, sent: { code: string; reason?: string }): string {
+  return sent.code === "QUOTA_EXCEEDED" && sent.reason === SITE_LIMIT_REACHED_REASON ? m.admin.sites.limitReached : errorMessage(m, sent.code);
+}
 
 /** "" means not assigned. */
 export function OwnerSelect({ id, value, onChange, customers }: { id: string; value: string; onChange: (v: string) => void; customers: Customers }) {
@@ -71,7 +76,7 @@ export function ChangeOwnerDialog({
       ownerOrganizationId: owner || null,
     });
     setBusy(false);
-    if (!sent.ok) return setError(errorMessage(m, sent.code));
+    if (!sent.ok) return setError(adminSiteErrorText(m, sent));
     onClose();
     router.refresh();
   }

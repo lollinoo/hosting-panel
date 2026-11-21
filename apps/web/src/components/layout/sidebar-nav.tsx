@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Archive, BrickWall, FileText, Globe, HeartPulse, Mail, RefreshCw, ScrollText, Server, Shield, ShieldCheck, Users } from "lucide-react";
+import { Archive, Blocks, BrickWall, FileText, Globe, HeartPulse, Mail, RefreshCw, ScrollText, Server, Shield, ShieldCheck, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMessages } from "@/i18n/provider";
 
@@ -13,6 +13,7 @@ export function SidebarNav() {
     { href: "/admin/health", label: t.health, icon: HeartPulse },
     { href: "/admin/hosts", label: t.server, icon: Server },
     { href: "/admin/sites", label: t.sites, icon: Globe },
+    { href: "/admin/templates", label: t.templates, icon: Blocks },
     { href: "/admin/certificates", label: t.certificates, icon: ShieldCheck },
     { href: "/admin/mail", label: t.mail, icon: Mail },
     { href: "/admin/backups", label: t.backups, icon: Archive },

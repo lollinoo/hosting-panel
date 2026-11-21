@@ -24,3 +24,5 @@ export * from "./admin-terminal.js";
 export * from "./admin-firewall.js";
 export * from "./admin-host.js";
 export * from "./site-types/index.js";
+export * from "./php-settings.js";
+export * from "./site-templates/index.js";
