@@ -667,12 +667,9 @@ describe("BKP-15: backup targets, copies and policies across tenants", () => {
       expect(await state()).toBe(before);
     });
 
-    // STATUS: ISSUE_FOUND (low). Fastify's JSON parser (create-app.ts:478-496) rejects syntactically invalid JSON with 400
-    // before the controller's requireServerAdmin runs, for every route and for anonymous callers too. Input: POST
-    // /v1/admin/backup-targets, Content-Type application/json, body "{not json", customer token. Expected 403 (401 with no
-    // token) per "refuse non-administrators before reading the body"; actual 400 "Malformed JSON request body". Reveals
-    // nothing and changes nothing; the schema-invalid-but-well-formed bodies above are refused 403 as required.
-    it.fails("refuses a customer (403) and anonymous (401) before a malformed JSON body is parsed", async () => {
+    // Was ISSUE_FOUND (low, #17): the JSON parser answered 400 before requireServerAdmin ran. A parse error on an
+    // administrator route now waits for the same check, so the caller learns nothing before it is authorised.
+    it("refuses a customer (403) and anonymous (401) before a malformed JSON body is parsed", async () => {
       expect(await malformed()).toEqual([]);
     });
 

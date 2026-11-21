@@ -19,6 +19,7 @@ import {
 import { generateTotpSecret, buildOtpauthUri } from "../auth/totp.js";
 import { checkUserTotp, saveTotpStep } from "../auth/totp-secret.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
+import { raiseDeferredBodyError } from "../common/deferred-body-error.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -196,6 +197,8 @@ export class AccountController {
     const auth = await this.authz.authenticateRequest(req, options);
     const [user] = await this.dbClient.db.select().from(users).where(eq(users.id, auth.user.id)).limit(1);
     if (!user) throw new ControlPlaneError("UNAUTHENTICATED", "User account is not active.");
+    // The caller's own account: signed in is authorised, so a malformed body is refused now (#17).
+    raiseDeferredBodyError(req);
     return { auth, user };
   }
 

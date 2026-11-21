@@ -294,6 +294,80 @@ describe("every administrator route refuses a customer before it does anything",
     expect(await snapshot()).toEqual(before);
   });
 
+  it("#17: a malformed JSON body is answered only after the route has authorised the caller, and changes nothing", async () => {
+    const send = async (method: string, path: string, as: string | null) => {
+      const res = await fetch(`${app.baseUrl!}${path}`, {
+        method,
+        headers: { ...(as ? { Authorization: `Bearer ${as}` } : {}), "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
+        body: "{not json",
+      });
+      const raw = await res.text();
+      return `${res.status}:${(((raw ? JSON.parse(raw) : {}) as Json).error?.code as string | undefined) ?? ""}`;
+    };
+    // Fresh users: the tests above already used most of the 120 denied rows a minute each user may write.
+    const freshUser = async (who: string, roleId: string | null) => {
+      const id = `usr_${randomUUID()}`;
+      const email = `${who}-b@example.test`;
+      await dbClient.db.insert(users).values({ id, email, name: `${who} b`, passwordHash: await hashPassword(PW) });
+      if (roleId !== null) {
+        const membershipId = `mem_${randomUUID()}`;
+        await dbClient.db.insert(memberships).values({ id: membershipId, organizationId: params.orgId!, userId: id });
+        await dbClient.db.insert(membershipRoles).values({ id: `mrl_${randomUUID()}`, membershipId, roleId });
+      }
+      return { id, token: await login(email, PW) };
+    };
+    // Signed in, but in no organisation and with no platform role.
+    const stranger = await freshUser("stranger", null);
+    const callers = {
+      anonymous: null,
+      stranger: stranger.token,
+      member: (await freshUser("member", "role_customer_collaborator")).token,
+      owner: (await freshUser("owner", "role_customer_owner")).token,
+      admin: adminToken,
+    } as const;
+    const BAD = "400:VALIDATION_ERROR";
+    const NOT_FOUND = "404:NOT_FOUND";
+    const DENIED = "403:PERMISSION_DENIED";
+    // Not found before the body: the walk's service id does not exist, and the lookup comes before the permission.
+    const UNKNOWN_SERVICE = /\/services\/:serviceId\//;
+    const expected = (r: Route, who: keyof typeof callers): readonly string[] => {
+      const key = `${r.method} ${r.path}`;
+      if (key === "POST /v1/dev/auth/token") return [NOT_FOUND]; // dev OIDC is off
+      if (OPEN_ROUTES.includes(key)) return [BAD];
+      if (who === "anonymous") return ["401:UNAUTHENTICATED"];
+      if (GUARDED.test(r.path)) return who === "admin" ? [BAD] : [DENIED];
+      if (r.path.startsWith("/v1/organizations/")) {
+        if (who === "stranger" || who === "admin") return [NOT_FOUND];
+        if (UNKNOWN_SERVICE.test(r.path)) return [NOT_FOUND];
+        return who === "owner" ? [BAD] : [DENIED];
+      }
+      if (key === "POST /v1/service-templates") return [DENIED]; // template.manage: no one here holds it
+      return [BAD]; // the caller's own account and session
+    };
+
+    // GET and HEAD bodies are never parsed; every other method is. Revoking the session last: it ends a token.
+    const lastly = (r: Route) => (r.path === "/v1/auth/revoke" ? 1 : 0);
+    const withBody = routes.filter((r) => r.method !== "GET").sort((a, b) => lastly(a) - lastly(b));
+    expect(withBody.length).toBeGreaterThanOrEqual(100);
+    const before = await snapshot();
+    const seen = await auditIds();
+    const failures: string[] = [];
+    let strangerDenied = 0;
+    for (const r of withBody) {
+      const path = fill(r.path);
+      if (expected(r, "stranger").includes(DENIED)) strangerDenied += 1;
+      for (const who of Object.keys(callers) as Array<keyof typeof callers>) {
+        const got = await send(r.method, path, callers[who]);
+        if (!expected(r, who).includes(got)) failures.push(`${r.method} ${r.path} as ${who}: ${got}, expected ${expected(r, who).join(" or ")}`);
+      }
+    }
+    expect(failures).toEqual([]);
+    expect(await snapshot()).toEqual(before);
+    // Each 403 is the route's own refusal, with its denied row.
+    const denied = (await auditSince(seen)).filter((e) => e.actorId === stranger.id && (e.details as Json).outcome === "denied");
+    expect(denied).toHaveLength(strangerDenied);
+  });
+
   it("without credentials every route answers 401 except the pinned open ones", async () => {
     const open: string[] = [];
     for (const r of routes) {

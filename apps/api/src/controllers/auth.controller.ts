@@ -16,6 +16,7 @@ import { AuthzContextService } from "../auth/authz-context.service.js";
 import { LoginService } from "../auth/login.service.js";
 import { OidcService } from "../auth/oidc.service.js";
 import { ControlPlaneError, extractClientIp } from "../common/control-plane.error.js";
+import { raiseDeferredBodyError } from "../common/deferred-body-error.js";
 import {
   CONTROL_PLANE_CONFIG_TOKEN,
   DATABASE_CLIENT_TOKEN,
@@ -187,6 +188,8 @@ export class AuthController {
     @Req() req: FastifyRequest,
   ): Promise<{ data: { revoked: boolean; revokedAt: string } }> {
     const auth = await this.authzService.authenticateRequest(req, { allowPasswordChangePending: true });
+    // Takes no body and checks no permission: a malformed one is refused once the caller is known (#17).
+    raiseDeferredBodyError(req);
     const jti = auth.claims.jti;
 
     await this.oidcService.revokeSession(jti);

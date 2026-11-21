@@ -52,6 +52,7 @@ import type { FastifyInstance } from "fastify";
 import { AppModule } from "./app.module.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { OidcService } from "./auth/oidc.service.js";
+import { deferMalformedBody } from "./common/deferred-body-error.js";
 import {
   DEFAULT_BREAKGLASS_KEY_FILE,
   parseBreakglassSigningKey,
@@ -478,7 +479,7 @@ export async function createControlPlaneApp(
   fastifyInstance.addContentTypeParser(
     "application/json",
     { parseAs: "string" },
-    (_req, body, done) => {
+    (req, body, done) => {
       const text = typeof body === "string" ? body.trim() : "";
       if (text.length === 0) {
         done(null, {});
@@ -487,11 +488,8 @@ export async function createControlPlaneApp(
       try {
         done(null, JSON.parse(text));
       } catch {
-        const err = new ControlPlaneError(
-          "VALIDATION_ERROR",
-          "Malformed JSON request body.",
-        );
-        done(err, undefined);
+        // Answered 400 only after the route has authorised the caller (#17).
+        done(null, deferMalformedBody(req));
       }
     },
   );
