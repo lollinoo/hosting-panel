@@ -3,6 +3,7 @@ import { Inject, Injectable } from "@nestjs/common";
 import {
   backupArchiveFileName,
   isBackupAvailable,
+  isEncryptedBackupExportAvailable,
   type AdminRestoreBackupInput,
   type BackupArchiveChunk,
   type BackupArchiveChunkDto,
@@ -343,6 +344,10 @@ export class SiteRestoreService {
     idempotencyKey: string,
     input: PrepareDownloadInput = {},
   ): Promise<SiteBackupAcceptedDto> {
+    // BLOCKED.md #4: no age tool yet. Refuse first: nothing is read, queued or audited, the recipient is never kept.
+    if (input.format === "zip.age" && !isEncryptedBackupExportAvailable(this.config.runtimeBackend)) {
+      throw new ControlPlaneError("NOT_SUPPORTED", "Encrypted backup export is not available.");
+    }
     const { row, copy } = await this.#requireManagedBackup(site.id, backupId, input.targetId);
     assertBackupRuntimeReady(this.config.runtimeBackend, site.status);
 

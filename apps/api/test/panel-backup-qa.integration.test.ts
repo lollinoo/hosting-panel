@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { PLATFORM_OPS_ORG_ID, type BackupsIpcRequest } from "@hosting-panel/contracts";
 import {
+  aggregateCopyStatuses,
   asc,
   auditEvents,
   backupPolicies,
@@ -27,6 +28,7 @@ import {
   organizations,
   outboxEvents,
   platformInstallations,
+  resolvePanelTargets,
   serviceInstances,
   setPolicyTargets,
   siteBackups,
@@ -647,6 +649,161 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     expect(await settingsRow()).toMatchObject({ lastPanelBackupStatus: "failed", lastPanelBackupProblem: "wrong_key" });
     expect(sim.backupState.panelJobIds().filter((id) => id === opId)).toHaveLength(1);
     expect(countCalls("panelStart")).toBe(1);
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------- Two destinations (M4)
+
+  /** Adds a second panel destination to the policy; returns the target ids in priority order. */
+  async function addSecondPanelTarget(): Promise<string[]> {
+    const first = (await resolvePanelTargets(dbClient.db)).map((t) => t.targetId);
+    expect(first).toHaveLength(1);
+    const second = await insertS3Target(dbClient.db, KEY, {
+      name: "Second",
+      endpoint: "https://second.example.com",
+      region: "eu-south-1",
+      bucket: "second-bucket",
+      prefix: "",
+      accessKeyId: "AKIASECONDTEST001",
+      secretAccessKey: "second-secret",
+      customerSelectable: false,
+      actorId: null,
+    });
+    const ids = [...first, second.id];
+    await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, "panel")).id, ids);
+    return ids;
+  }
+  const panelStarts = () =>
+    calls.filter((c): c is Extract<BackupsIpcRequest, { action: "panelStart" }> => c.action === "panelStart");
+
+  it("Two destinations: one dump, two sequential panelStart (op, op-t2 with dumpId), op succeeded, file removed", async () => {
+    const targets = await addSecondPanelTarget();
+    const opId = await queuePanel();
+    await app.outboxWorker.processPendingOnce();
+    expect((await panelOps())[0]!.status).toBe("succeeded");
+    expect(runs).toHaveLength(1);
+    const starts = panelStarts();
+    expect(starts.map((c) => c.jobId)).toEqual([opId, `${opId}-t2`]);
+    expect(starts[0]).not.toHaveProperty("dumpId");
+    expect(starts[1]!.dumpId).toBe(opId);
+    const copies = await listPanelBackupCopies(dbClient.db, opId);
+    expect(copies.map((c) => [c.targetId, c.status])).toEqual(targets.map((t) => [t, "succeeded"]));
+    expect(await dumpFiles()).toEqual([]);
+    await expectNoSecrets(2);
+  });
+
+  it("Two destinations: the dump file is still there while the second copy runs", async () => {
+    await addSecondPanelTarget();
+    const opId = await queuePanel();
+    let seen: string[] | null = null;
+    hook = (req) => {
+      if (req.action !== "panelStart" || req.jobId === opId) return undefined;
+      return (async () => {
+        seen = await dumpFiles();
+        return origBackups(req);
+      })();
+    };
+    await app.outboxWorker.processPendingOnce();
+    expect(seen).toEqual([`${opId}.dump`]);
+    expect((await panelOps())[0]!.status).toBe("succeeded");
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Two destinations: the second copy fails → op failed, the first copy is recorded and kept, file removed", async () => {
+    await addSecondPanelTarget();
+    const opId = await queuePanel();
+    hook = (req) => {
+      if (req.action !== "panelStart" || req.jobId !== opId) return undefined;
+      return (async () => {
+        const res = await origBackups(req);
+        sim.backupState.failNext("wrong_key");
+        return res;
+      })();
+    };
+    await app.outboxWorker.processPendingOnce();
+    expect((await panelOps())[0]!.status).toBe("failed");
+    const copies = await listPanelBackupCopies(dbClient.db, opId);
+    expect(copies.map((c) => [c.status, c.problem])).toEqual([
+      ["succeeded", null],
+      ["failed", "wrong_key"],
+    ]);
+    expect(copies[0]!.snapshotId).not.toBeNull();
+    expect(aggregateCopyStatuses(copies)).toBe("partial");
+    expect(await settingsRow()).toMatchObject({ lastPanelBackupStatus: "failed", lastPanelBackupProblem: "wrong_key" });
+    expect(countCalls("panelStart")).toBe(2);
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Two destinations: the first copy fails → the second still runs and is kept, op failed", async () => {
+    await addSecondPanelTarget();
+    const opId = await queuePanel();
+    sim.backupState.failNext("unreachable");
+    await app.outboxWorker.processPendingOnce();
+    expect((await panelOps())[0]!.status).toBe("failed");
+    const copies = await listPanelBackupCopies(dbClient.db, opId);
+    expect(copies.map((c) => c.status)).toEqual(["failed", "succeeded"]);
+    expect(panelStarts().map((c) => c.jobId)).toEqual([opId, `${opId}-t2`]);
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Two destinations: a start refused for the second copy settles it failed and fails the op, the first stays", async () => {
+    await addSecondPanelTarget();
+    const opId = await queuePanel();
+    hook = (req) =>
+      req.action === "panelStart" && req.jobId !== opId
+        ? Promise.reject(Object.assign(new Error("busy"), { code: "RESOURCE_LOCKED" }))
+        : undefined;
+    await app.outboxWorker.processPendingOnce();
+    expect((await panelOps())[0]!.status).toBe("failed");
+    expect((await listPanelBackupCopies(dbClient.db, opId)).map((c) => c.status)).toEqual(["succeeded", "failed"]);
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Two destinations, recovery: the second job is ambiguous → the file is kept, recovery polls it and never starts again", async () => {
+    await addSecondPanelTarget();
+    const opId = await queuePanel();
+    applier.pollGiveUpMs = 0;
+    hook = (req) => {
+      if (req.action !== "panelStart" || req.jobId === opId) return undefined;
+      return (async () => {
+        sim.backupState.holdJobs(true);
+        const res = await origBackups(req);
+        statusDown = true;
+        return res;
+      })();
+    };
+    await app.outboxWorker.processPendingOnce();
+    statusDown = false;
+    hook = null;
+    expect((await panelOps())[0]!.status).toBe("unknown");
+    expect(await dumpFiles()).toEqual([`${opId}.dump`]);
+    expect((await listPanelBackupCopies(dbClient.db, opId)).map((c) => c.status)).toEqual(["succeeded", "running"]);
+
+    await app.outboxWorker.recoverUnknownOperations();
+    expect((await panelOps())[0]!.status).toBe("unknown");
+    sim.backupState.finishHeld();
+    await app.outboxWorker.recoverUnknownOperations();
+    expect((await panelOps())[0]!.status).toBe("succeeded");
+    expect((await listPanelBackupCopies(dbClient.db, opId)).map((c) => c.status)).toEqual(["succeeded", "succeeded"]);
+    expect(countCalls("panelStart")).toBe(2);
+    expect(calls.filter((c) => c.action === "status").some((c) => c.action === "status" && c.jobId === `${opId}-t2`)).toBe(true);
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Two destinations, recovery: the first job is ambiguous → both job ids are polled, no panelStart again, nothing is restarted", async () => {
+    await addSecondPanelTarget();
+    const opId = await panelUntilAmbiguous();
+    expect(countCalls("panelStart")).toBe(1);
+    sim.backupState.finishHeld();
+    await app.outboxWorker.recoverUnknownOperations();
+    await app.outboxWorker.recoverUnknownOperations();
+    const polled = calls.filter((c) => c.action === "status").map((c) => (c as { jobId: string }).jobId);
+    expect(polled).toContain(opId);
+    expect(polled).toContain(`${opId}-t2`);
+    expect(countCalls("panelStart")).toBe(1);
+    const [op] = await panelOps();
+    expect(op!.status).toBe("failed");
+    expect((await listPanelBackupCopies(dbClient.db, opId)).map((c) => c.status)).toEqual(["succeeded", "failed"]);
     expect(await dumpFiles()).toEqual([]);
   });
 

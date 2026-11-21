@@ -134,8 +134,8 @@ describe("backup policies service and admin routes", () => {
       expect(await service.get("panel")).toMatchObject({ scope: "panel", scheduleHourUtc: null, targets: [] });
     });
 
-    it("keeps one copy in M3", () => {
-      expect(MAX_COPIES).toBe(1);
+    it("allows up to two copies per policy (SPEC 6.1 'fino a 2 copie')", () => {
+      expect(MAX_COPIES).toBe(2);
     });
 
     it("updates hour, retention and destination, in priority order, and audits it without secrets", async () => {
@@ -192,10 +192,22 @@ describe("backup policies service and admin routes", () => {
       expect((await service.update("panel", { targetIds: [] }, ADMIN_ID)).targets).toEqual([]);
     });
 
-    it("refuses more copies than M3 allows, duplicates, unknown, disabled and archived destinations", async () => {
+    it("accepts two destinations with priorities 1 and 2 (SPEC 6.1 'fino a 2 copie')", async () => {
+      const dto = await service.update("default_site", { targetIds: [s3Selectable, local] }, ADMIN_ID);
+      expect(dto.targets).toMatchObject([
+        { targetId: s3Selectable, kind: "s3", priority: 1, required: true },
+        { targetId: local, kind: "local", priority: 2, required: true },
+      ]);
+      expect(await service.get("default_site")).toEqual(dto);
+      await service.update("default_site", { targetIds: [s3Selectable] }, ADMIN_ID);
+    });
+
+    it("refuses a third copy (SPEC 6.1 'fino a 2 copie'), duplicates, unknown, disabled and archived destinations", async () => {
       const before = await service.get("default_site");
-      const tooMany = await rejection(service.update("default_site", { targetIds: [s3Selectable, local] }, ADMIN_ID));
-      expect(tooMany).toMatchObject({ code: "VALIDATION_ERROR", message: "too_many_targets" });
+      const tooMany = await rejection(
+        service.update("default_site", { targetIds: [s3Selectable, local, s3Private] }, ADMIN_ID),
+      );
+      expect(tooMany.code).toBe("VALIDATION_ERROR"); // the contract caps targetIds at 2 before the service runs
       expect((await rejection(service.update("default_site", { targetIds: [local, local] }, ADMIN_ID))).code).toBe(
         "VALIDATION_ERROR",
       );
@@ -280,9 +292,21 @@ describe("backup policies service and admin routes", () => {
       expect(await getBackupTargetRow(db(), s3Private)).not.toBeNull();
     });
 
-    it("refuses two destinations in M3 and malformed bodies", async () => {
-      const err = await rejection(service.updateSitePolicy(siteA, { targetIds: [local, s3Selectable] }, actorOf(OWNER_ID)));
-      expect(err).toMatchObject({ code: "VALIDATION_ERROR", message: "too_many_targets" });
+    it("accepts two destinations for a site, in order (SPEC 6.1 'fino a 2 copie')", async () => {
+      const dto = await service.updateSitePolicy(siteA, { targetIds: [local, s3Selectable] }, actorOf(OWNER_ID));
+      expect(dto).toMatchObject({ inherited: false, targetIds: [local, s3Selectable] });
+      expect(await BackupPoliciesService.effectiveTargets(db(), siteA.id)).toMatchObject([
+        { targetId: local, priority: 1 },
+        { targetId: s3Selectable, priority: 2 },
+      ]);
+      await service.updateSitePolicy(siteA, { targetIds: null }, actorOf(OWNER_ID));
+    });
+
+    it("refuses a third destination (SPEC 6.1 'fino a 2 copie') and malformed bodies", async () => {
+      const err = await rejection(
+        service.updateSitePolicy(siteA, { targetIds: [local, s3Selectable, s3Private] }, actorOf(OWNER_ID)),
+      );
+      expect(err.code).toBe("VALIDATION_ERROR"); // the contract caps targetIds at 2 before the service runs
       for (const body of [{}, { targetIds: [] }, { targetIds: null, extra: 1 }, { targetIds: [1] }]) {
         expect((await rejection(service.updateSitePolicy(siteA, body, actorOf(OWNER_ID)))).code).toBe("VALIDATION_ERROR");
       }

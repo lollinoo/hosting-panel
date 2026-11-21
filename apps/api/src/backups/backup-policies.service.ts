@@ -28,8 +28,8 @@ import { ControlPlaneError, extractClientIp, extractRawHeader } from "../common/
 import { DATABASE_CLIENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import type { BackupSiteRef, SiteBackupActor } from "./site-backups.service.js";
 
-/** Destinations one backup is written to. M3 ships one; M4 raises it to 2 (the schema and tables already allow 2). */
-export const MAX_COPIES = 1;
+/** Destinations one backup is written to: at most two (priorities 1 and 2; job ids `<op>` and `<op>-t2`). */
+export const MAX_COPIES = 2;
 
 export type AdminBackupPolicyScope = "default_site" | "panel";
 

@@ -108,22 +108,30 @@ export class PanelBackupApplier {
       await this.parent.safeUpdateStep(op.id, "upload", "running", "Sending the copy to the backup storage");
 
       const retentionDays = (await getPolicy(db, "panel")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
-      // One copy per target, in priority order; a failed copy does not stop the next one (M3 has a single target).
+      // One dump, one copy per target (at most two), in priority order and one after the other: the panel lane runs a single
+      // job at a time. The second job (`<op>-t2`) reads the first one's dump, so the file stays until every copy settled.
+      // A copy that fails does not stop the next one; an unknown outcome stops the run and keeps the file for recovery.
       for (const copy of copies.filter((c) => c.status === "running")) {
         const jobId = copy.jobId ?? op.id;
-        const target = await resolveDispatchTarget(db, this.config.secretsMasterKey, copy.targetId);
-        if (!target) {
+        try {
+          const target = await resolveDispatchTarget(db, this.config.secretsMasterKey, copy.targetId);
+          if (!target) {
+            await this.#settleCopy(copy, "failed", "other");
+            continue;
+          }
+          const startRes = await this.dockerExecutor.backups({
+            action: "panelStart",
+            jobId,
+            ...(jobId === op.id ? {} : { dumpId: op.id }),
+            target,
+            masterKey: this.config.secretsMasterKey.toString("hex"),
+            retentionDays,
+          });
+          await this.#settleCopyFromStatus(copy, await this.parent.pollJobStatus(op.id, jobId, startRes));
+        } catch (err) {
+          if (isAmbiguousError(err)) throw err;
           await this.#settleCopy(copy, "failed", "other");
-          continue;
         }
-        const startRes = await this.dockerExecutor.backups({
-          action: "panelStart",
-          jobId,
-          target,
-          masterKey: this.config.secretsMasterKey.toString("hex"),
-          retentionDays,
-        });
-        await this.#settleCopyFromStatus(copy, await this.parent.pollJobStatus(op.id, jobId, startRes));
       }
       await this.#finish(op);
     } catch (err) {

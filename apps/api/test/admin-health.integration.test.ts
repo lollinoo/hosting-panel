@@ -539,6 +539,24 @@ describe("admin health and alerts", () => {
       expect(alerts[0]!.kind).toBe("restore_undo_incomplete");
     });
 
+    it("raises backup_partial only while the latest attempt is partial, and keeps backup_failed for failed", async () => {
+      await start();
+      const { siteId } = await createSite();
+      const at = new Date(Date.now() - 30 * MIN);
+      const row = (id: string, status: "succeeded" | "partial" | "failed", startedAt: Date) => ({ id, siteId, kind: "nightly" as const, status, startedAt, finishedAt: startedAt });
+      const partial = async () => (await both()).alerts.filter((a) => a.kind === "backup_partial");
+      const failed = async () => (await both()).alerts.filter((a) => a.kind === "backup_failed");
+      await dbClient.db.insert(siteBackups).values(row("bk_p", "partial", at));
+      expect(await partial()).toEqual([expect.objectContaining({ severity: "warning", subject: siteId, details: { siteId, siteName: SITE.name, backupId: "bk_p", at: at.toISOString() } })]);
+      expect(await failed()).toEqual([]);
+      await dbClient.db.insert(siteBackups).values(row("bk_f", "failed", new Date(at.getTime() + MIN)));
+      expect(await partial()).toEqual([]);
+      expect(await failed()).toHaveLength(1);
+      await dbClient.db.insert(siteBackups).values(row("bk_ok", "succeeded", new Date(at.getTime() + 2 * MIN)));
+      expect(await partial()).toEqual([]);
+      expect(await failed()).toEqual([]);
+    });
+
     describe("backup targets and panel copies", () => {
       const GIB = 1024 ** 3;
       const ago = (ms: number) => new Date(Date.now() - ms);

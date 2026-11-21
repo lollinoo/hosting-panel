@@ -47,6 +47,7 @@ import {
   organizations,
   resolveEffectiveTargets,
   serviceInstances,
+  siteBackups,
   sites,
   stackRevisions,
   type DatabaseClient,
@@ -162,6 +163,11 @@ export class AdminHealthService {
     for (const b of await listAdminBackupStatus(db)) {
       if (b.lastStatus === "failed" && b.lastAttemptAt) {
         push({ kind: "backup_failed", subject: b.siteId, since: b.lastAttemptAt, details: { siteId: b.siteId, siteName: b.siteName, failedAt: b.lastAttemptAt } });
+      }
+      if (b.lastStatus === "partial" && b.lastAttemptAt) {
+        // The status DTO carries no backup id: read the id of that same newest attempt (same ordering as the status query).
+        const [latest] = await db.select({ id: siteBackups.id }).from(siteBackups).where(eq(siteBackups.siteId, b.siteId)).orderBy(desc(siteBackups.startedAt), desc(siteBackups.id)).limit(1);
+        if (latest) push({ kind: "backup_partial", subject: b.siteId, since: b.lastAttemptAt, details: { siteId: b.siteId, siteName: b.siteName, backupId: latest.id, at: b.lastAttemptAt } });
       }
       const r = b.lastRestore;
       if (r?.status === "failed" && r.problem === "undo_incomplete") {

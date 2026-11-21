@@ -247,7 +247,14 @@ export class SiteBackupsApplier {
     }
 
     let interrupted = false;
-    for (const copy of copies.filter((c) => c.status === "running")) {
+    let settledHere = false;
+    // Copies run one after another: each gets its own deadline, counted from when the previous one finished.
+    let copyStart: Date | null = null;
+    for (const copy of copies) {
+      if (copy.status !== "running") {
+        copyStart = copy.finishedAt ?? copyStart;
+        continue;
+      }
       let statusRes: BackupJobStatus;
       try {
         statusRes = await this.dockerExecutor.backups({ action: "status", jobId: copy.jobId ?? opId });
@@ -255,7 +262,7 @@ export class SiteBackupsApplier {
         return "pending";
       }
       if (statusRes.state === "running") {
-        if (!(await this.isPastPollDeadline(opId))) {
+        if (!(await this.isPastPollDeadline(opId, copyStart ?? undefined))) {
           return "pending";
         }
         statusRes = { ...statusRes, state: "failed", failure: "timeout" };
@@ -263,9 +270,14 @@ export class SiteBackupsApplier {
       const outcome = this.#copyOutcome(statusRes);
       interrupted ||= outcome.interrupted;
       await this.#settleCopy(op, backup.id, copy, outcome.settlement);
+      settledHere = true;
+      copyStart = new Date();
     }
 
     const aggregate = await settleSiteBackupAggregate(db, backup.id);
+    if (aggregate === "partial" && settledHere) {
+      await this.#audit(op, "site.backups.partial", { backupId: backup.id });
+    }
     const settled = (await listSiteBackupCopies(db, [backup.id])).get(backup.id) ?? [];
     if (aggregate === "succeeded" || (aggregate === "partial" && op.kind === "site.backups.create")) {
       await this.safeUpdateStep(opId, "backup", "succeeded", "Backup uploaded");
@@ -515,7 +527,7 @@ export class SiteBackupsApplier {
     return { code, message: "Backup did not finish.", stepMessage: "Backup did not finish" };
   }
 
-  async #audit(op: BackupOperationRef, action: string, details: Record<string, unknown>): Promise<void> {
+  async #audit(op: Pick<BackupOperationRef, "organizationId" | "resourceId">, action: string, details: Record<string, unknown>): Promise<void> {
     await appendAuditEvent(this.dbClient.db, {
       actorId: null,
       actorType: "system",
@@ -727,15 +739,15 @@ export class SiteBackupsApplier {
     return statusRes;
   }
 
-  /** @internal R120: true when the operation began longer ago than the poll deadline. */
-  public async isPastPollDeadline(operationId: string): Promise<boolean> {
+  /** @internal R120: true when the operation (or `since`, when a later copy started after it) began longer ago than the poll deadline. */
+  public async isPastPollDeadline(operationId: string, since?: Date): Promise<boolean> {
     const [row] = await this.dbClient.db
       .select({ startedAt: operations.startedAt, submittedAt: operations.submittedAt })
       .from(operations)
       .where(eq(operations.id, operationId))
       .limit(1);
-    const since = row?.startedAt ?? row?.submittedAt;
-    return since !== undefined && Date.now() - since.getTime() > this.pollDeadlineMs;
+    const from = since ?? row?.startedAt ?? row?.submittedAt;
+    return from !== undefined && Date.now() - from.getTime() > this.pollDeadlineMs;
   }
 
   /** @internal */
