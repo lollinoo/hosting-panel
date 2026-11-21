@@ -107,6 +107,7 @@ import {
   resolveOptionalIdempotencyKey,
   resolveRequestId,
 } from "../common/control-plane.error.js";
+import { peekBody } from "../common/deferred-body-error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { shownSiteStatus, stoppedSiteIds } from "../sites/managed-sites.service.js";
 import {
@@ -490,12 +491,14 @@ export class OrganizationsController {
     @Body() rawBody: unknown,
   ): Promise<{ data: EncryptedSecretMetadataDto }> {
     const auth = await this.authzService.authenticateRequest(req);
+    // A malformed body names no site: the organisation check runs, and only then the 400.
+    const peeked = peekBody(rawBody);
     const candidateSiteId =
-      rawBody !== null &&
-      typeof rawBody === "object" &&
-      typeof (rawBody as Record<string, unknown>)["siteId"] === "string" &&
-      ((rawBody as Record<string, unknown>)["siteId"] as string).trim().length > 0
-        ? ((rawBody as Record<string, unknown>)["siteId"] as string).trim()
+      peeked !== null &&
+      typeof peeked === "object" &&
+      typeof (peeked as Record<string, unknown>)["siteId"] === "string" &&
+      ((peeked as Record<string, unknown>)["siteId"] as string).trim().length > 0
+        ? ((peeked as Record<string, unknown>)["siteId"] as string).trim()
         : null;
 
     if (candidateSiteId !== null) {

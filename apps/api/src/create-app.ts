@@ -48,11 +48,11 @@ import { TlsPublishService } from "./certificates/tls-publish.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import { AppModule } from "./app.module.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { OidcService } from "./auth/oidc.service.js";
-import { requireServerAdmin } from "./auth/server-admin.guard.js";
+import { deferMalformedBody } from "./common/deferred-body-error.js";
 import {
   DEFAULT_BREAKGLASS_KEY_FILE,
   parseBreakglassSigningKey,
@@ -76,15 +76,6 @@ const DEFAULT_JWT_SIGNING_KEY_FILE = "/etc/hosting-panel/jwt-signing.pem";
 const DEV_FALLBACK_MASTER_KEY = createHash("sha256")
   .update("hosting-panel-dev-simulator-secrets-master-key-v1")
   .digest();
-
-// The administrator routes, as admin-route-guard.integration.test.ts lists them.
-const ADMINISTRATOR_ROUTE = /^\/v1\/(admin|hosts|allocations)(\/|$)/;
-
-/** Tested on the matched route pattern, not on the raw URL the client sent. */
-function isAdministratorRoute(req: FastifyRequest): boolean {
-  const route = req.routeOptions.url;
-  return route !== undefined && ADMINISTRATOR_ROUTE.test(route);
-}
 
 function resolveRuntimeBackend(options?: CreateControlPlaneAppOptions): RuntimeBackend {
   if (
@@ -481,11 +472,6 @@ export async function createControlPlaneApp(
 
   const fastifyInstance = fastifyAdapter.getInstance();
 
-  // The body is parsed before the controller's guard runs. On an administrator route a malformed body must not
-  // answer before that guard, so the parse error waits for the same check: 401 without a valid session, 403 to
-  // anyone but a server administrator, and only then 400. Wired as soon as Nest has built its providers.
-  let adminCheckBeforeMalformedBody: ((req: FastifyRequest) => Promise<void>) | null = null;
-
   // Tolerate empty bodies when Content-Type: application/json is sent on POST endpoints
   if (fastifyInstance.hasContentTypeParser("application/json")) {
     fastifyInstance.removeContentTypeParser("application/json");
@@ -502,19 +488,8 @@ export async function createControlPlaneApp(
       try {
         done(null, JSON.parse(text));
       } catch {
-        const err = new ControlPlaneError(
-          "VALIDATION_ERROR",
-          "Malformed JSON request body.",
-        );
-        const check = isAdministratorRoute(req) ? adminCheckBeforeMalformedBody : null;
-        if (check === null) {
-          done(err, undefined);
-          return;
-        }
-        check(req).then(
-          () => done(err, undefined),
-          (refusal: unknown) => done(refusal instanceof Error ? refusal : new Error(String(refusal)), undefined),
-        );
+        // Answered 400 only after the route has authorised the caller (#17).
+        done(null, deferMalformedBody(req));
       }
     },
   );
@@ -557,13 +532,6 @@ export async function createControlPlaneApp(
     fastifyAdapter,
     { logger: false, bodyParser: false },
   );
-
-  // Every administrator route that takes a body is for infrastructure_admin only: requireServerAdmin on /v1/admin,
-  // host.security.manage or host.maintenance.execute on /v1/hosts. Only that role holds them, so this is the same check.
-  const authzBeforeBody = nestApp.get(AuthzContextService);
-  adminCheckBeforeMalformedBody = async (req) => {
-    await requireServerAdmin(authzBeforeBody, req, null, "platform");
-  };
 
   if (options?.corsOrigin !== undefined) {
     nestApp.enableCors({

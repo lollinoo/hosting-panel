@@ -11,6 +11,7 @@ import {
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { requireIdempotencyKey } from "../common/control-plane.error.js";
+import { peekBody } from "../common/deferred-body-error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { ManagedSitesService, type ManagedSiteAccepted } from "../sites/managed-sites.service.js";
 
@@ -84,8 +85,9 @@ export class ManagedSitesController {
   ): Promise<ManagedSiteAcceptedEnvelope> {
     const auth = await this.authzService.authenticateRequest(req);
     const site = await this.sitesService.get(siteId, orgId);
-    // Permission first (a body that fails validation must not tell a collaborator more than a 403).
-    const requested = (rawBody as { action?: unknown } | null)?.action;
+    // Permission first (a body that fails validation must not tell a collaborator more than a 403). A malformed
+    // body names no action, so it is checked against site.create, like an unknown action.
+    const requested = (peekBody(rawBody) as { action?: unknown } | null | undefined)?.action;
     const permission: PermissionKey =
       requested === "stop" ? "service.stop" : requested === "start" || requested === "restart" ? "service.restart" : "site.create";
     await this.#require(auth, req, orgId, site, permission);

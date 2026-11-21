@@ -36,6 +36,7 @@ import {
   extractRawHeader,
   resolveRequestId,
 } from "../common/control-plane.error.js";
+import { raiseDeferredBodyError } from "../common/deferred-body-error.js";
 import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
 import { OidcService, type VerifiedJwtClaims } from "./oidc.service.js";
 
@@ -340,6 +341,7 @@ export class AuthzContextService {
         `Platform permission '${permission}' denied.`,
       );
     }
+    raiseDeferredBodyError(req);
   }
 
   public async requireOrgPermission(
@@ -386,6 +388,7 @@ export class AuthzContextService {
       );
     }
 
+    raiseDeferredBodyError(req);
     return decision;
   }
 
