@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # PR gate: Conventional Commit subjects and PR title, no version / CHANGELOG edits on the branch.
-# Env: BASE_REF (default origin/<main>), PR_TITLE (optional, linted when set).
+# Env: BASE_REF (default origin/<main>), PR_TITLE (optional, linted when set), PR_BODY (optional:
+# when set, even empty, it must close an issue with a GitHub keyword such as "Closes #12").
 set -euo pipefail
 # shellcheck disable=SC1091
 . "$(git rev-parse --show-toplevel)/scripts/devflow/lib.sh"
@@ -27,6 +28,12 @@ done < <(git log --no-merges --format=%s "$MB..HEAD")
 # The PR title becomes the squash commit on main and drives the version bump.
 if [ -n "${PR_TITLE:-}" ] && ! [[ $PR_TITLE =~ $DF_CC_REGEX ]]; then
   err "PR title is not a Conventional Commit (<type>(<scope>): <description>): $PR_TITLE"
+fi
+
+# Issue first: the PR closes its tracking issue, so the merge closes it too.
+DF_CLOSES_REGEX='(^|[^[:alnum:]])([Cc]lose[sd]?|[Ff]ix(e[sd])?|[Rr]esolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/[[:alnum:]_.-]+)?#[0-9]+'
+if [ -n "${PR_BODY+set}" ] && ! [[ $PR_BODY =~ $DF_CLOSES_REGEX ]]; then
+  err 'PR description does not close an issue: start it with "Closes #<issue>" (every PR starts from an issue).'
 fi
 
 while read -r _ _ file tpl; do
