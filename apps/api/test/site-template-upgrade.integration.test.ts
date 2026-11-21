@@ -178,6 +178,37 @@ describe("move a site to a newer template version", () => {
     expect(spec.phpIni).toEqual({ post_max_size: "128M", upload_max_filesize: "64M" });
   });
 
+  it("gives an admin-only parameter still at the old default the newer default, and keeps an explicit admin value", async () => {
+    // The custom fixture plus an admin-only debug_mode (default false) rendered into WORDPRESS_DEBUG.
+    const withDebugMode = (defaultValue: boolean, memory = "1024M") =>
+      customSource({ memory })
+        .replace("services:", () => `  - key: debug_mode\n    label: Debug mode\n    type: boolean\n    default: ${defaultValue}\n    customer: false\nservices:`)
+        .replace('WORDPRESS_DEBUG: "0"', () => 'WORDPRESS_DEBUG: "${debug_mode}"');
+    const moved = async (tag: string, parameters: unknown[], newer: string) => {
+      const created = await call(admin, "POST", TEMPLATES, { module: "wordpress", name: `Debuggable ${tag}`, source: withDebugMode(false) });
+      expect(created.status, created.raw).toBe(201);
+      const template = created.body.data as { id: string };
+      const site = await call(admin, "POST", "/v1/admin/sites", { ...SITE, name: `Hotel ${tag}`, domain: `${tag}.hotel.it`, ownerOrganizationId: null, templateId: template.id, parameters });
+      expect(site.status, site.raw).toBe(202);
+      const siteId = site.body.data.siteId as string;
+      await run();
+      const v2 = await addVersion(template.id, newer);
+      expect((await upgrade(siteId, v2.id)).status).toBe(202);
+      const stored = (await siteRow(siteId)).templateParameters as { key: string; value: unknown }[];
+      return { debug: stored.find((entry) => entry.key === "debug_mode")?.value, rendered: (await revisions(siteId))[0]!.declarativeConfig };
+    };
+
+    // v2 defaults debug_mode to true; the site never chose a value, so it follows the new default.
+    const atDefault = await moved("default", [{ key: "upload_limit", value: "64M" }], withDebugMode(true));
+    expect(atDefault.debug).toBe(true);
+    expect(atDefault.rendered).toMatchObject({ WORDPRESS_DEBUG: "true" });
+
+    // The administrator chose true at creation (v1 default false); v2 keeps default false, so only a kept value renders true.
+    const explicit = await moved("explicit", [{ key: "debug_mode", value: true }], withDebugMode(false, "2048M"));
+    expect(explicit.debug).toBe(true);
+    expect(explicit.rendered).toMatchObject({ WORDPRESS_DEBUG: "true" });
+  });
+
   it("refuses a version that is not newer, of another template or unknown, and changes nothing", async () => {
     const { template, siteId } = await customSite();
     const v2 = await addVersion(template.id, customSource({ debug: "1" }));

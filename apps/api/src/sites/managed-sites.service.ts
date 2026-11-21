@@ -90,6 +90,7 @@ import {
   loadTemplateForCreate,
   resolveCreateParameters,
   storedEntries,
+  withoutOldAdminDefaults,
   type TemplateAudience,
 } from "./site-template-runtime.js";
 
@@ -573,7 +574,8 @@ export class ManagedSitesService {
     assertTemplateUsable({ version: to.version, module: to.template.module });
 
     const spec = readSiteTemplateSpec(to.version);
-    const resolved = resolveSiteTemplateParameters(spec, storedEntries(site, spec), { audience: "admin", phpVersion: site.phpVersion });
+    const carried = withoutOldAdminDefaults(storedEntries(site, spec), readSiteTemplateSpec(from.version));
+    const resolved = resolveSiteTemplateParameters(spec, carried, { audience: "admin", phpVersion: site.phpVersion });
     if (!resolved.ok) {
       throw new ControlPlaneError("VALIDATION_ERROR", "The saved settings do not fit this version.", {
         details: resolved.issues.map(({ field, message, reason }) => ({ field, message, reason })),

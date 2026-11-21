@@ -107,6 +107,16 @@ export function storedEntries(site: { readonly templateParameters: unknown }, sp
   return entries;
 }
 
+/**
+ * What a move to a newer version carries over: every stored entry except an admin-only (customer: false) one of the OLD
+ * version that still equals the old default, so the newer version's default applies. Customer choices and explicit
+ * admin values stay.
+ */
+export function withoutOldAdminDefaults(entries: readonly SiteTemplateParameterEntry[], from: SiteTemplateSpec): SiteTemplateParameterEntry[] {
+  const oldDefaults = new Map(from.parameters.filter((parameter) => !parameter.customer).map((parameter) => [parameter.key, parameter.default]));
+  return entries.filter((entry) => !oldDefaults.has(entry.key) || oldDefaults.get(entry.key) !== entry.value);
+}
+
 /** The image a site's template renders today for its PHP version; null when it cannot be rendered (lenient, for Updates). */
 export function expectedTemplateImage(
   spec: SiteTemplateSpec,

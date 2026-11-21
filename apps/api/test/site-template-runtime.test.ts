@@ -25,6 +25,7 @@ import {
   resolveCreateParameters,
   storedEntries,
   templateUnavailable,
+  withoutOldAdminDefaults,
 } from "../src/sites/site-template-runtime.js";
 import { customSource } from "./fixtures/site-templates.js";
 
@@ -93,6 +94,29 @@ describe("storedEntries", () => {
     expect(storedEntries({ templateParameters: null })).toEqual([]);
     expect(storedEntries({ templateParameters: { upload_limit: "64M" } })).toEqual([]);
     expect(storedEntries({ templateParameters: [null, 3, { key: 1, value: "x" }, { key: "a", value: { x: 1 } }, { key: "b" }] })).toEqual([]);
+  });
+});
+
+describe("withoutOldAdminDefaults", () => {
+  const OLD: SiteTemplateSpec = { ...CUSTOM, parameters: CUSTOM.parameters.map((parameter) => ({ ...parameter })) };
+  const entries = [
+    { key: "upload_limit", value: "16M" },
+    { key: "admin_note", value: "x" },
+  ];
+
+  it("drops an admin-only value that still equals the old default, so the new default applies", () => {
+    expect(withoutOldAdminDefaults(entries, OLD)).toEqual([{ key: "upload_limit", value: "16M" }]);
+  });
+
+  it("keeps an explicit admin value and every customer value, even one equal to its default", () => {
+    expect(withoutOldAdminDefaults([{ key: "upload_limit", value: "16M" }, { key: "admin_note", value: "hello" }], OLD)).toEqual([
+      { key: "upload_limit", value: "16M" },
+      { key: "admin_note", value: "hello" },
+    ]);
+  });
+
+  it("keeps a key the old version did not declare", () => {
+    expect(withoutOldAdminDefaults([{ key: "added_later", value: "x" }], OLD)).toEqual([{ key: "added_later", value: "x" }]);
   });
 });
 
