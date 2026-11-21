@@ -1,11 +1,11 @@
 # ADR 0031 — Certificati TLS caricati a mano (PEM) accanto a Let's Encrypt
 
-- **Stato:** `PROPOSTO — M0`
+- **Stato:** `APPROVATO` — implementato (M2); la revisione del proprietario è in attesa: lo sciame non può approvare al suo posto
 - **Data:** 2026-11-21
 - **Riferimento:** `ADR-0017`, `ADR-0030`, `ADR-014`, `ADR-015`, `ADR-0025`, `CP-01`, HCP-SPEC-004 (parte A)
 - **Migrazioni:** `0021` (additiva)
 
-Questa è la versione di contorno (M0). I file che esistono già sono scritti tra apici inversi; quelli ancora da creare sono nominati senza apici e marcati «(da creare, Mn)». A fine M2/M5 l'ADR passa ad `APPROVATO` e i file creati vengono messi tra apici, con le prove reali (versione e comandi) al posto dei rimandi ai rapporti di progetto.
+Questa è la versione «as built» (M2, rilettura in M5): i file creati sono scritti tra apici inversi e le prove reali (versione e comandi) sono in §7 e §8. Le divergenze dalla specifica sono in §5; ciò che resta del proprietario (`PENDING`) o bloccato (`BLOCKED`) è in §4 e §8. Il verdetto riga per riga è nel rapporto `docs/security/hcp-spec-004-acceptance-report.md`; la procedura operativa è in `docs/runbooks/tls-and-backup-targets.md`.
 
 ## 1. Contesto
 
@@ -24,7 +24,7 @@ Traefik legge già `dynamic/` con il file provider e `watch: true` (`apps/docker
 
 **2.2 Solo PEM.** Questa release accetta PEM (foglia, catena, chiave privata). Il PKCS#12/PFX non è supportato: Node non ha un parser e una dipendenza o uno strumento esterno non sono approvati (BLOCKED.md #3 del run). Chiediamo l'approvazione del proprietario per un parser pinnato; fino ad allora l'interfaccia non mostra PFX e `TLS-14` resta bloccato. Il rifiuto ha codici stabili: un `format` diverso da `pem` è un `VALIDATION_ERROR` dello schema strict; un contenuto non PEM, anche un PKCS#12 incollato, è `CERTIFICATE_FORMAT_UNSUPPORTED` con motivo `not_pem`.
 
-**2.3 Validazione con `node:crypto` e `node:tls`.** Nessuna dipendenza nuova. Il validatore (apps/api/src/certificates/tls-certificate-validator.ts, da creare, M2) esegue, nell'ordine e fermandosi al primo errore:
+**2.3 Validazione con `node:crypto` e `node:tls`.** Nessuna dipendenza nuova. Il validatore (`apps/api/src/certificates/tls-certificate-validator.ts`) esegue, nell'ordine e fermandosi al primo errore:
 
 1. limiti: 512 KiB di materiale, corpo JSON di 1 MiB, al più 20 intermedi, nome di 128 caratteri, 64 SAN, 100 certificati per organizzazione; nessun byte NUL, nessun testo fuori dai blocchi `-----BEGIN/END-----`, nessuna chiave cifrata;
 2. `X509Certificate` e `createPrivateKey`; chiave RSA da 2048 a 8192 bit oppure EC `prime256v1`/`secp384r1`; `checkPrivateKey` fra foglia e chiave;
@@ -41,7 +41,7 @@ Ogni errore è un `ControlPlaneError` con `details[].reason` fisso e testo fisso
 
 **2.6 Rotte.** `SiteHostRoute` riceve il campo facoltativo `source: "manual"` (stesso schema del campo `challenge` di ADR 0030 §7). Una rotta manuale ha `tls: {}` senza `certResolver` e mantiene il reindirizzamento a HTTPS indipendentemente da `acmeEnabled` (oggi `tls` e redirect dipendono da `acmeEnabled`; `apps/docker-executor/src/traefik-config.ts` e `apps/api/src/sites/domain-policy.ts` vanno rifattorizzati). `source` insieme a `challenge` è rifiutato. Gli hash delle rotte ACME non cambiano: `routePlanHash` aggiunge un quinto elemento solo per `manual`, e `apps/api/test/fixtures/site-type-pins/route-hash.json` resta com'è. La rotta non porta l'id della versione: una rotazione non cambia nessuna rotta. Un certificato manuale scaduto mantiene HTTPS, senza ripiego silenzioso su Let's Encrypt o su HTTP.
 
-**2.7 Determinismo SNI e passaggio da Let's Encrypt a manuale.** Una funzione pura, senza `node:`, in packages/contracts/src/tls-sni.ts (da creare, M2) riproduce la regola di Traefik: `planManualCertificates` e `findManualCaptures`. L'API la usa come verifica anticipata, con l'ACME approssimato dal database; l'executor la riesegue alla pubblicazione contro `acme.json` letto in sola lettura e contro tutti gli host che instrada. Le regole (rapporto arch-tls-ingress D6, rapporto arch-tls-api §1b A3):
+**2.7 Determinismo SNI e passaggio da Let's Encrypt a manuale.** Una funzione pura, senza `node:`, in `packages/contracts/src/tls-sni.ts` riproduce la regola di Traefik: `planManualCertificates` e `findManualCaptures`. L'API la usa come verifica anticipata, con l'ACME approssimato dal database; l'executor la riesegue alla pubblicazione contro `acme.json` letto in sola lettura e contro tutti gli host che instrada. Le regole (rapporto arch-tls-ingress D6, rapporto arch-tls-api §1b A3):
 
 - R1. Per un host assegnato la versione deve vincere ed essere l'unica. Se la blocca un'altra voce manuale: `manual_overlap`, rifiutato. Se la blocca o pareggia solo ACME: `acme_eviction_required`. Un ACME battuto va bene.
 - R2. Ogni altro host instradato (compreso l'hostname del pannello e gli host in modalità ACME) non deve avere un certificato manuale come vincitore, altrimenti `captures_host`. Un fratello ACME esatto batte sempre un wildcard manuale (`*` ordina sotto ogni lettera) e continua a rinnovarsi; un nuovo fratello ACME sotto un wildcard caricato, o un host che torna ad ACME mentre il wildcard lo copre, è rifiutato. Lo stesso vale per un CN che ne cattura un altro.
@@ -86,7 +86,7 @@ Una versione diventa `active` solo dopo una sonda `tls.connect` reale sul proxy 
 
 - Le KU, il `pathLen` e i vincoli sui nomi sono lasciati al verdetto di OpenSSL nell'handshake; gli intermedi sono giudicati con l'ora reale, mentre le date della foglia usano l'orologio iniettabile.
 - Nessun controllo OCSP o CRL: la scadenza non è la revoca. Nessun rinnovo automatico dei certificati acquistati: solo avvisi e sostituzione.
-- Il tag di Traefik `traefik:v3.7` (`DEFAULT_TRAEFIK_IMAGE`) è mobile; il comportamento della selezione (ordine delle chiavi, CN nella chiave, ordine ACME saltato per i nomi coperti) dipende dalla versione ed è provato su 3.7.19. Un cambio del tag ricrea il proxy e il collaudo accept-tls-manual.mjs (da creare, M2) va rieseguito.
+- Il tag di Traefik `traefik:v3.7` (`DEFAULT_TRAEFIK_IMAGE`) è mobile; il comportamento della selezione (ordine delle chiavi, CN nella chiave, ordine ACME saltato per i nomi coperti) dipende dalla versione ed è provato su 3.7.19. Un cambio del tag ricrea il proxy e il collaudo `infra/linux/accept-tls-manual.mjs` va rieseguito.
 - La chiave in chiaro sta sul disco dell'host (`0400`, uid dell'executor): non è «cifrata a riposo» salvo un volume cifrato. Node non ha `openat`: il controllo del genitore è `lstat`, proprietario e modo subito prima di creare lo staging; solo l'uid dell'executor o root potrebbero correre contro di esso.
 - Nessun file sotto `dynamic/` può essere illeggibile per l'uid del proxy: all'avvio a freddo il file provider fallisce per intero e ogni rotta dà 404 (a caldo la configurazione precedente resta).
 - La pubblicazione a caldo è possibile solo quando il certificato manuale vince per chiave; il caso comune della stessa chiave richiede un amministratore e riavvia il proxy per pochi secondi.
@@ -98,6 +98,10 @@ Una versione diventa `active` solo dopo una sonda `tls.connect` reale sul proxy 
 - Dopo un downgrade forzato i certificati manuali restano serviti ma non gestibili.
 - Effetto noto del modello dei nomi di chiave in chiaro (`findPlaintextSecretKeys`, senza distinzione fra maiuscole e minuscole, usato anche dalla validazione della configurazione dei servizi): ora comprende `keyPem`, `privateKeyPem` e le forme snake, quindi una configurazione di servizio con una chiave (per esempio una variabile d'ambiente) di nome `KEY_PEM` o `PRIVATE_KEY_PEM` viene rifiutata come segreto in chiaro.
 - Reboot reale e certificato commerciale sono del proprietario (`PENDING`); PFX (`TLS-14`) è `BLOCKED`.
+- **Limiti accettati dalla revisione finale** (`review-final-tls`, audit S4-L8 e S4-L9), entrambi nella stessa organizzazione:
+  - Gli indirizzi in attesa di un sito ancora in distribuzione non sono protetti da un wildcard: un wildcard assegnato in quella finestra li copre appena instradati, e ogni pubblicazione successiva è rifiutata con `captures_host` finché l'assegnazione non cambia.
+  - Cancellare un dominio mentre la sua applicazione è in corso lascia una versione `active` senza dominio, ancora caricata: blocca i sottodomini della stessa organizzazione e la cancellazione del certificato fino alla modifica successiva dei certificati.
+- **Limite di 64 host per versione, ora imposto dall'API** (audit S4-L10, riparato): `checkAssignment` rifiuta il 65° indirizzo prima dell'executor con `VALIDATION_ERROR`, motivo `too_many_sans`, senza il nome dell'host nei dettagli. Non c'è un codice nuovo: uno dedicato richiederebbe modifiche a `packages/contracts` e ai cataloghi del web. Le 200 attese vengono ridotte in silenzio dall'executor e non fanno mai fallire l'applicazione.
 
 ## 5. Divergenze da HCP-SPEC-004
 
@@ -131,11 +135,28 @@ Le righe TLS di SPEC §14, più due nuove.
 | Caricamento ostile o parser | Limiti di dimensione e tempo, schema strict, un solo parser (`node:crypto`), PFX assente (2.2, 2.3) | `TLS-02`, `TLS-14` (`BLOCKED`) |
 | Certificato sbagliato per un conflitto ACME o di Traefik | Piano SNI puro, impronta servita verificata, passaggi reversibili (2.7) | `TLS-05`, `TLS-06`, `TLS-07` |
 | Rotazione che interrompe il data plane | Versioni immutabili, manifest atomico, nessuna ricreazione del proxy (2.5, 2.15) | `TLS-08`, `TLS-09`, `TLS-10` |
-| **Nuova.** Directory illeggibile sotto `dynamic/`: 404 su tutte le rotte all'avvio a freddo | Il bootstrap e l'executor impongono proprietario e modo; nulla viene creato sotto `dynamic/` con un altro proprietario (2.5) | test del bootstrap e dell'executor più passo di accept-tls-manual.mjs (da creare, M2) |
+| **Nuova.** Directory illeggibile sotto `dynamic/`: 404 su tutte le rotte all'avvio a freddo | Il bootstrap e l'executor impongono proprietario e modo; nulla viene creato sotto `dynamic/` con un altro proprietario (2.5) | test del bootstrap e dell'executor (`apps/api/test/infra-layout.test.ts`) più il passo di `infra/linux/accept-tls-manual.mjs` |
 | **Nuova.** Downgrade che fa perdere la gestione dei certificati | `infra/linux/update.sh` esce con 8 se esiste un dominio manuale; rollback e ripristino non cancellano il manifest (2.15) | `infra/linux/update.test.ts` (esteso in M5) |
 
 ## 7. Verifica
 
-- Prove di logica e di integrazione, con i nomi di test dei rapporti: tls-sni.test.ts, manual-tls-store.test.ts, acme-evict.test.ts, manual-tls-probe.test.ts, manual-tls-ipc.test.ts e il validatore dell'API (tutti da creare, M2). I test esistenti che fissano `Binds`, hash delle rotte e YAML (`apps/docker-executor/test/traefik-routes.test.ts`, `apps/api/test/fixtures/site-type-pins/route-hash.json`) restano invariati e sono la guardia di 2.5, 2.6 e 2.15.
-- Collaudo con processi reali: accept-tls-manual.mjs (da creare, M2) sullo schema di `infra/linux/accept-acme-pebble.mjs`: Traefik 3.7.19 e Pebble senza root; verifica `TLS-05` (rifiuto del piano, caldo con più SAN, pulizia a freddo), `TLS-07`, `TLS-08` sotto carico, `TLS-09` (crash), `TLS-10` (riavvii) e i rifiuti per cattura. Stampa la versione di Traefik.
-- Il rapporto di accettazione (da creare, M5) riporta una riga per `TLS-01`…`TLS-14` con esito, comando, ambiente e SHA; riavvio reale dell'host, certificato commerciale e PFX restano `PENDING` o `BLOCKED` con l'azione del proprietario.
+- Prove di logica e di integrazione: `packages/contracts/test/tls-sni.test.ts`, `apps/docker-executor/test/manual-tls-store.test.ts`, `apps/docker-executor/test/acme-evict.test.ts`, `apps/docker-executor/test/manual-tls-probe.test.ts`, `apps/docker-executor/test/manual-tls-ipc.test.ts`, `apps/api/test/tls-certificate-validator.test.ts`, `apps/api/test/tls-certificates.integration.test.ts`, `apps/api/test/tls-keysafety.qa.test.ts`. I test esistenti che fissano `Binds`, hash delle rotte e YAML (`apps/docker-executor/test/traefik-routes.test.ts`, `apps/api/test/fixtures/site-type-pins/route-hash.json`) restano invariati e sono la guardia di 2.5, 2.6 e 2.15.
+- Collaudo con processi reali, senza root: `infra/linux/accept-tls-manual.mjs` (Traefik 3.7.19 con il binario fissato per sha256, Pebble e l'immagine `traefik:v3.7`) e `infra/linux/accept-tls-adapter.mjs` (stesso scenario attraverso l'adattatore di produzione). Stampano la versione di Traefik. Il generatore di certificati di prova è `infra/linux/tls-test-certs.mjs`.
+- Il rapporto di accettazione `docs/security/hcp-spec-004-acceptance-report.md` riporta una riga per `TLS-01`…`TLS-14` con esito, comando, ambiente e SHA.
+
+## 8. Come costruito: prove registrate e voci aperte
+
+**Revisione del proprietario: in attesa.** Lo stato `APPROVATO` descrive il codice consegnato, non un'approvazione del proprietario.
+
+| Prova | Comando | Esito registrato |
+|---|---|---|
+| Manuale con Traefik reale | `node infra/linux/accept-tls-manual.mjs` | `RESULT 20/20 passed` (111 s) su Traefik 3.7.19, Pebble e `traefik:v3.7`: `TLS-05` (caldo con SAN in più, rifiuto del pareggio, pulizia a freddo dell'amministratore), `TLS-06`, `TLS-07`, `TLS-08` sotto carico, `TLS-09` (crash), `TLS-10` (riavvii del proxy), rifiuti per cattura, `docker inspect` senza segreti |
+| Manuale con l'adattatore di produzione | `node infra/linux/accept-tls-adapter.mjs` | `RESULT 18/18 passed` (23 s): primo ordine con `acme.json` vuoto, pulizia a freddo con copia identica byte per byte e ripristino a sonda fallita, aggiornamento dal payload `680febb` senza ricreare il proxy, rotazione sotto carico, riavvio dell'executor |
+| Generatore di prova | `infra/linux/tls-test-certs.mjs` | una corsa su 512 produceva un INTEGER DER non minimale (seriale casuale, «illegal padding» di OpenSSL); corretto, 3000 certificati generati senza errori, collaudo rieseguito verde |
+| Sensori del ramo | build, lint, typecheck, test | cicli registrati dal capo: M2 291 file / 5842 test; M4 più documenti 314 file / 6929 test, i file in conflitto con M4 corretti e rieseguiti verdi |
+
+Il flag `manualTlsCertificatesAvailable` è `true` su `linux-systemd` (README, tabella delle capacità).
+
+**Aperti.** `PENDING (owner)`: riavvio reale dell'host (`TLS-10`, qui provati i riavvii del proxy e dell'executor sul Docker locale) e importazione di un certificato commerciale vero (un CA locale con Traefik reale lo sostituisce). `BLOCKED`: PFX/PKCS#12 (`TLS-14`), perché Node non ha un parser e una dipendenza non è approvata (BLOCKED.md #3); la richiesta di approvazione è in 2.2.
+
+**Divergenze registrate** (oltre a §5): le directory in `dynamic/manual-certs` e il manifest sono scritti dall'executor oltre che dal bootstrap; l'IPC ha le azioni `putVersion`, `publish`, `probe`, `inventory`, `gc` con compare-and-swap sulla generazione; la rotta `source: "manual"` non porta l'id della versione.
