@@ -2585,7 +2585,7 @@ export class BackupRunner {
     try {
       const backupKey = await this.readBackupKey();
       if (backupKey === null) return fail("key_file_missing");
-      const dump = await this.inspectPanelDump(req.jobId);
+      const dump = await this.inspectPanelDump(req.dumpId ?? req.jobId);
       if (dump === null) return fail("panel_dump_missing");
       const prepared = await this.prepareRepository(
         req.target,

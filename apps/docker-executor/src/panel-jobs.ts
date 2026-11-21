@@ -28,7 +28,7 @@ export const PANEL_FETCH_EXIT_NO_COPY = 79 as const;
 export const PANEL_FETCH_EXIT_NO_SPACE = 75 as const;
 export const PANEL_FETCH_ID_PATTERN = /^[0-9a-f]{32}$/;
 
-const PANEL_JOB_ID_PATTERN = /^op_[0-9a-f]{32}$/;
+const PANEL_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2)?$/;
 const SNAPSHOT_ID_PATTERN = /^[0-9a-f]{64}$/;
 const PANEL_LOCAL_REPO_PATH = "/backup/repository/panel" as const;
 
