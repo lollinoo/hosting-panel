@@ -10,7 +10,7 @@ import {
   type AdminSitesListDto,
   type SiteDomainsDto,
 } from "@hosting-panel/contracts";
-import { appendAuditEvent } from "@hosting-panel/database";
+import { appendAuditEvent, type DatabaseExecutor } from "@hosting-panel/database";
 import type { FastifyRequest } from "fastify";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { requireServerAdmin } from "../auth/server-admin.guard.js";
@@ -24,6 +24,8 @@ import {
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { ManagedSitesService, type ManagedSiteAccepted } from "../sites/managed-sites.service.js";
 import { SiteDomainsService, requestedHostnames } from "../sites/site-domains.service.js";
+
+type AuditEvent = { readonly action: string; readonly targetType: string; readonly targetId: string; readonly details: Record<string, unknown> };
 
 const headersOf = (req: FastifyRequest) => req.headers as Record<string, string | string[] | undefined>;
 
@@ -147,7 +149,16 @@ export class AdminSitesController {
     const auth = await requireServerAdmin(this.authz, req, siteId, "site");
     const owner = await this.sitesService.ownerOf(siteId);
     const input = AddSiteDomainInputSchema.parse(raw ?? {});
-    const data = await this.domainsService.add(siteId, owner, input);
+    const actor =
+      input.tlsVersionId === undefined
+        ? {}
+        : {
+            requestedByUserId: auth.user.id,
+            idempotencyKey: requireIdempotencyKey(headersOf(req)),
+            audit: (tx: DatabaseExecutor, event: AuditEvent) =>
+              this.authz.recordAudit(auth, req, { organizationId: owner, ...event }, tx),
+          };
+    const data = await this.domainsService.add(siteId, owner, input, actor);
     await this.#domainAudit(auth, req, siteId, "admin.site.domain.add", requestedHostnames(input));
     return { data };
   }

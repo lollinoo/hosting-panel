@@ -311,6 +311,7 @@ class FakeDockerExecutor implements DockerExecutorPort {
     this.#base.getServiceLogs(id, tail);
   public applySiteRoutes: DockerExecutorPort["applySiteRoutes"] = (req) =>
     this.#base.applySiteRoutes(req);
+  public manualTls: DockerExecutorPort["manualTls"] = (req) => this.#base.manualTls(req);
   public getCertificateStatus: DockerExecutorPort["getCertificateStatus"] = (req) =>
     this.#base.getCertificateStatus(req);
   public applyMailRelay: DockerExecutorPort["applyMailRelay"] = (req) =>

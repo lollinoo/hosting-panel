@@ -201,15 +201,17 @@ describe("site domain DTO tls block", () => {
     }
   });
 
-  it("adding a domain with a tlsVersionId is refused on both routes until M2, and nothing is created", async () => {
+  it("adding a domain with a tlsVersionId on an address that is not routed yet is refused on both routes, and nothing is created", async () => {
     const { versionId } = await importVersion();
     const body = { hostname: "shop.hotel.it", includeWww: true, tlsVersionId: versionId };
     const customerAdd = await call("POST", `/v1/organizations/${orgId}/managed-sites/${siteId}/domains`, body);
     const adminAdd = await call("POST", `/v1/admin/sites/${siteId}/domains`, body, adminToken);
     for (const res of [customerAdd, adminAdd]) {
-      expect(res.status).toBe(422);
-      expect(res.body.error.code).toBe("NOT_SUPPORTED");
-      expect(res.body.error.message).toBe("Using an imported certificate when adding a web address is not available yet.");
+      // The site is still being set up, so the new address cannot be routed on a certificate yet (the real flow:
+      // tls-domain-side-effects.integration.test.ts).
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe("VALIDATION_ERROR");
+      expect(res.body.error.details).toEqual([expect.objectContaining({ reason: "domain_not_active" })]);
       expect(res.raw).not.toContain(versionId);
     }
     for (const res of [await customerList(), await adminList()]) {

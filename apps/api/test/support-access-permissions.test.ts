@@ -5,6 +5,7 @@ import { SUPPORT_ACCESS_PERMISSIONS } from "../src/auth/support-access.service.j
 
 const SITE_CONTROLLERS = [
   "site-domains",
+  "site-tls-certificates",
   "managed-sites",
   "site-files",
   "site-sftp",

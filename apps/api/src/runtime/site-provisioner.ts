@@ -10,6 +10,7 @@ import {
 import {
   and,
   appendAuditEvent,
+  bumpTlsDesiredGeneration,
   deleteEncryptedSecretTransactional,
   domains,
   encryptedSecrets,
@@ -340,7 +341,14 @@ export class SiteProvisioner {
       await renewOperationLease(db, op.id, SITE_STEP_LEASE_MS);
       await updateOperationStepTransactional(db, op.id, "finish", "running", STEP_RUNNING);
       await settleOperation(db, op.id, { status: "succeeded" }, async (tx) => {
+        const [manual] = await tx
+          .select({ id: domains.id })
+          .from(domains)
+          .where(and(eq(domains.siteId, siteId), eq(domains.certMode, "manual")))
+          .limit(1);
         await tx.delete(sites).where(and(eq(sites.id, siteId), eq(sites.organizationId, organizationId)));
+        // The manual set shrinks with the site's domains: the next convergence drops their certificates.
+        if (manual) await bumpTlsDesiredGeneration(tx);
         await updateOperationStepTransactional(tx, op.id, "finish", "succeeded", DELETE_STEP_DONE.finish);
         await appendAuditEvent(tx, {
           actorId: null,

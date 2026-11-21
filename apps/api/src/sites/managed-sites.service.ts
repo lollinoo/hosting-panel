@@ -22,6 +22,8 @@ import {
   and,
   appendStackRevisionTransactional,
   asc,
+  assertNoManualCapture,
+  assertSiteMovable,
   createServiceWithRevisionTransactional,
   createSiteTransactional,
   desc,
@@ -70,7 +72,7 @@ import {
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
 import { LogReadGate } from "./log-read-gate.js";
-import { restoreCertificateThrottle } from "./site-domains.service.js";
+import { coverageError, restoreCertificateThrottle } from "./site-domains.service.js";
 
 const ALERT_WINDOW_MS = 14 * 24 * 3600_000;
 const NOT_ISSUED_PROBLEMS: ReadonlySet<CertProblem | null> = new Set(["port_80_blocked", "caa_blocked", "dns_provider", "other"]);
@@ -199,6 +201,7 @@ export class ManagedSitesService {
         });
 
         if (partner) {
+          await assertNoManualCapture(t, organizationId, [partner]);
           await insertSiteDomains(t, { siteId: site.id, organizationId, hostnames: [partner], routed: false });
         }
         await restoreCertificateThrottle(t, await listSiteDomains(t, site.id));
@@ -281,7 +284,7 @@ export class ManagedSitesService {
           "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
         );
       }
-      throw err;
+      throw coverageError(err);
     }
   }
 
@@ -678,7 +681,13 @@ export class ManagedSitesService {
       .select({ d: domains, siteName: sites.name })
       .from(domains)
       .innerJoin(sites, eq(sites.id, domains.siteId))
-      .where(or(eq(domains.certStatus, "active"), eq(domains.certStatus, "failed"), isNotNull(domains.certProblem)))
+      // A manual certificate has its own expiry alerts (tiers, per version); the automatic renewal never touches it.
+      .where(
+        and(
+          eq(domains.certMode, "acme"),
+          or(eq(domains.certStatus, "active"), eq(domains.certStatus, "failed"), isNotNull(domains.certProblem)),
+        ),
+      )
       .orderBy(asc(sites.name), asc(domains.hostname));
     const alerts: CertificateAlertDto[] = [];
     for (const { d, siteName } of rows) {
@@ -736,6 +745,13 @@ export class ManagedSitesService {
     }
     return this.dbClient.db.transaction(async (tx) => {
       const t = tx as unknown as HostingPanelDatabase;
+      if (!redeployOnly) {
+        // Refuse a move the run would refuse anyway (a manual domain, or a published certificate covering the site).
+        await tx.select({ id: sites.id }).from(sites).where(eq(sites.id, siteId)).for("update");
+        await assertSiteMovable(t, { siteId, toOrganizationId }).catch((err: unknown) => {
+          throw coverageError(err);
+        });
+      }
       const enqueued = await enqueueOperationTransactional(t, {
         organizationId: from,
         kind: "site.reassign",

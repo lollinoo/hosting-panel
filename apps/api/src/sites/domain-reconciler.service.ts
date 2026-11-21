@@ -203,6 +203,8 @@ export class DomainReconcilerService {
     const stored = new Map(report.certificates.map((c) => [c.hostname, c]));
 
     for (const row of await listSiteDomains(this.dbClient.db, site.id)) {
+      // Manual certificates are owned by the TLS applier: no order, no status rewrite.
+      if (row.certMode === "manual") continue;
       const cert = stored.get(row.hostname);
       // A busy site's failing name must lose its resolver, or every proxy reload re-orders it.
       if (site.busy && (row.certStatus !== "requested" || cert)) continue;

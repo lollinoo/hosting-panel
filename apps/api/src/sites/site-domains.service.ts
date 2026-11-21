@@ -11,7 +11,10 @@ import {
 } from "@hosting-panel/contracts";
 import {
   and,
+  assertNoForeignManualCoverage,
+  assertNoManualCapture,
   auditEvents,
+  bumpTlsDesiredGeneration,
   desc,
   domains,
   eq,
@@ -23,15 +26,20 @@ import {
   listSiteDomains,
   listSiteManualTls,
   not,
+  operations,
   or,
   sites,
   sql,
+  TlsCoverageError,
   type DatabaseClient,
+  type DatabaseExecutor,
   type DomainManualTlsRow,
   type DomainRow,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import { checkAssignment, enqueueSiteTlsOperation } from "../certificates/tls-assignment.js";
+import { canonicalRequestHash } from "../common/request-hash.js";
 import { lockDnsProviderRow } from "../certificates/dns-provider.service.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN } from "../tokens.js";
@@ -54,6 +62,30 @@ const isUniqueViolation = (err: unknown): boolean => {
   const e = err as { code?: string; cause?: { code?: string } } | null;
   return e?.code === "23505" || e?.cause?.code === "23505";
 };
+
+/**
+ * The coverage guards of the database throw `TlsCoverageError`; the public form carries the reason, and the
+ * hostname only when it is the caller's own (`captures_host`). Any other error passes through unchanged.
+ */
+export function coverageError(err: unknown): unknown {
+  if (!(err instanceof TlsCoverageError)) return err;
+  if (err.code === "DOMAIN_CONFLICT") return new ControlPlaneError("DOMAIN_CONFLICT", CONFLICT);
+  const message = err.reason === "captures_host" && err.hostname ? err.hostname : err.message;
+  return new ControlPlaneError("CERTIFICATE_IN_USE", err.message, {
+    details: [{ field: "hostname", reason: err.reason, message }],
+  });
+}
+
+/** Who asked, for the assignment operation of an add that names an imported certificate. */
+export interface DomainAddActor {
+  readonly requestedByUserId?: string;
+  readonly idempotencyKey?: string;
+  /** Writes an audit row on the given transaction (the caller adds actor and request context). */
+  readonly audit?: (
+    tx: DatabaseExecutor,
+    event: { readonly action: string; readonly targetType: string; readonly targetId: string; readonly details: Record<string, unknown> },
+  ) => Promise<void>;
+}
 
 /** The names an add asks for: the hostname, plus its www partner with `includeWww`. */
 export function requestedHostnames(input: AddSiteDomainInput): string[] {
@@ -199,7 +231,8 @@ export class SiteDomainsService {
         const message = "Set up a DNS provider first.";
         throw new ControlPlaneError("VALIDATION_ERROR", message, { details: [{ message, reason: "dns_provider_missing" }] });
       }
-      const reset = row.certStatus === "failed" && row.certProblem !== "rate_limited";
+      // A manual row keeps its state: the challenge is only remembered for the return to automatic certificates.
+      const reset = row.certMode !== "manual" && row.certStatus === "failed" && row.certProblem !== "rate_limited";
       await t
         .update(domains)
         .set({
@@ -215,13 +248,27 @@ export class SiteDomainsService {
   }
 
   /** Names already on this site are skipped, so a repeated call changes nothing. */
-  public async add(siteId: string, organizationId: string, input: AddSiteDomainInput): Promise<SiteDomainsDto> {
-    // Adding a domain on an imported certificate version comes with the manual TLS routes (M2): until then refuse, never ignore.
-    if (input.tlsVersionId !== undefined) {
-      const message = "Using an imported certificate when adding a web address is not available yet.";
-      throw new ControlPlaneError("NOT_SUPPORTED", message, { details: [{ message, reason: "tls_version_unavailable" }] });
-    }
+  public async add(
+    siteId: string,
+    organizationId: string,
+    input: AddSiteDomainInput,
+    actor: DomainAddActor = {},
+  ): Promise<SiteDomainsDto> {
     const names = requestedHostnames(input);
+    // The key is bound to this body: the same key with another address or certificate is IDEMPOTENCY_CONFLICT.
+    const requestHash = canonicalRequestHash({ route: "tls.domain.add", siteId, hostnames: names, tlsVersionId: input.tlsVersionId });
+    if (input.tlsVersionId !== undefined && actor.idempotencyKey) {
+      // Checked before the assignment: a version already applying would otherwise answer CERTIFICATE_IN_USE.
+      const [previous] = await this.dbClient.db
+        .select({ requestHash: operations.requestHash })
+        .from(operations)
+        .where(and(eq(operations.organizationId, organizationId), eq(operations.idempotencyKey, actor.idempotencyKey)))
+        .limit(1);
+      if (previous && previous.requestHash !== requestHash) {
+        throw new ControlPlaneError("IDEMPOTENCY_CONFLICT", "The idempotency key was already used for a different request.");
+      }
+      if (previous) return this.list(siteId, organizationId);
+    }
     let inserted: DomainRow[];
     try {
       inserted = await this.#locked(siteId, organizationId, async (tx, rows) => {
@@ -242,14 +289,43 @@ export class SiteDomainsService {
           throw new ControlPlaneError("VALIDATION_ERROR", "A site can have up to 10 web addresses. Remove one first.", { details: [{ message: "A site can have up to 10 web addresses. Remove one first.", reason: "domain_limit" }] });
         }
         const routed = rows.some((r) => r.isPrimary && r.status === "active");
+        // A published manual certificate must not capture the new name. On a named version the capture is the
+        // point (the new name joins it below, checked as an assignment); another organisation's coverage never is.
+        if (input.tlsVersionId === undefined) await assertNoManualCapture(tx, organizationId, fresh);
+        else await assertNoForeignManualCoverage(tx, organizationId, fresh, "DOMAIN_CONFLICT");
         const created = await insertSiteDomains(tx, { siteId, organizationId, hostnames: fresh, routed });
         await restoreCertificateThrottle(tx, created);
+        if (input.tlsVersionId !== undefined) {
+          // Rows flip when the operation settles; the same transaction keeps the domain and its assignment together.
+          const plan = await checkAssignment(tx, {
+            organizationId,
+            siteId,
+            changes: created.map((r) => ({ domainId: r.id, versionId: input.tlsVersionId! })),
+          });
+          const { audit, ...queue } = actor;
+          const enqueued = await enqueueSiteTlsOperation(tx, { organizationId, siteId, changes: plan.changes, requestHash, ...queue });
+          // The assignment is audited with the domain and the operation, like the assign routes do.
+          if (audit && !enqueued.idempotentReplay) {
+            await audit(tx, {
+              action: "site.tls_certificate.assign",
+              targetType: "site",
+              targetId: siteId,
+              details: {
+                operationId: enqueued.operation.id,
+                siteId,
+                domainIds: plan.changes.map((c) => c.domainId),
+                versionId: input.tlsVersionId,
+                fromVersionIds: [],
+              },
+            });
+          }
+        }
         return created;
       });
     } catch (err) {
       // Another site took the name between the check and the insert.
       if (isUniqueViolation(err)) throw new ControlPlaneError("DOMAIN_CONFLICT", CONFLICT);
-      throw err;
+      throw coverageError(err);
     }
     if (inserted.length > 0) await this.#reconcile(siteId, inserted.map((r) => r.id));
     return this.list(siteId, organizationId);
@@ -264,6 +340,8 @@ export class SiteDomainsService {
         throw new ControlPlaneError("VALIDATION_ERROR", "Choose another main address first, then remove this one.", { details: [{ message: "Choose another main address first, then remove this one.", reason: "primary_domain" }] });
       }
       await tx.delete(domains).where(eq(domains.id, domainId));
+      // The manual set shrinks: the next convergence stops serving the certificate for this name.
+      if (row.certMode === "manual") await bumpTlsDesiredGeneration(tx);
     });
     await this.#reconcile(siteId, []);
     return this.list(siteId, organizationId);
