@@ -1817,7 +1817,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Domain hostname conflict or slug conflict
+          description: >-
+            Domain hostname conflict or slug conflict, or the customer's site limit is reached
+            (`QUOTA_EXCEEDED`, `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/sites/{siteId}:
@@ -2167,6 +2169,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: >-
+            Conflict, or the customer's site limit is reached (`QUOTA_EXCEEDED`,
+            `details[0].reason: site_limit_reached`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}:
@@ -4481,6 +4486,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: >-
+            Conflict, or the owner's site limit is reached (`QUOTA_EXCEEDED`,
+            `details[0].reason: site_limit_reached`); a site held by platform-ops is never limited
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}:
@@ -4545,6 +4553,49 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          description: >-
+            Conflict, or the new owner's site limit is reached (`QUOTA_EXCEEDED`,
+            `details[0].reason: site_limit_reached`); the move is also checked again when it runs, and
+            stays with the old owner if the limit is reached by then
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/organizations/{orgId}/site-limit:
+    patch:
+      tags: [Admin Sites]
+      operationId: adminUpdateOrganizationSiteLimit
+      summary: Set or remove the maximum number of sites a customer can hold (server administrator only; audited as admin.customer.site_limit)
+      description: >-
+        `maxSites: null` removes the limit. A limit below the sites the customer already holds keeps those
+        sites and only refuses new ones, including a site moved to this customer. The platform-ops
+        organization has no limit (`NOT_FOUND`).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrganizationSiteLimitInput"
+      responses:
+        "200":
+          description: The limit now in force and the sites the customer holds
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/OrganizationSiteLimitDto"
+        "400":
+          description: Invalid limit (`VALIDATION_ERROR`)
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Customer not found (`NOT_FOUND`)
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/actions:
@@ -8029,7 +8080,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/OrganizationSummaryDto"
         - type: object
-          required: [capabilities, siteCount, serviceCount]
+          required: [capabilities, siteCount, serviceCount, maxSites]
           properties:
             capabilities:
               $ref: "#/components/schemas/OrganizationCapabilitiesDto"
@@ -8040,6 +8091,11 @@ components:
               type: integer
             serviceCount:
               type: integer
+            maxSites:
+              type: integer
+              minimum: 0
+              nullable: true
+              description: The site limit an administrator set for this organization (`siteCount` is the usage); `null` means unlimited
 
     MemberDto:
       type: object
@@ -8318,7 +8374,7 @@ components:
           type: array
           items:
             type: object
-            required: [organizationId, name, ownerEmail]
+            required: [organizationId, name, ownerEmail, maxSites, siteCount]
             properties:
               organizationId:
                 type: string
@@ -8326,6 +8382,15 @@ components:
                 type: string
               ownerEmail:
                 type: string
+              maxSites:
+                type: integer
+                minimum: 0
+                nullable: true
+                description: The customer's site limit; `null` means unlimited
+              siteCount:
+                type: integer
+                minimum: 0
+                description: Sites the customer holds now, whatever their status; the number the limit is checked against
 
     AddSiteDomainInput:
       type: object
@@ -10204,6 +10269,34 @@ components:
         ownerOrganizationId:
           type: string
           nullable: true
+
+    UpdateOrganizationSiteLimitInput:
+      type: object
+      additionalProperties: false
+      required: [maxSites]
+      properties:
+        maxSites:
+          type: integer
+          minimum: 0
+          maximum: 10000
+          nullable: true
+          description: "`null` removes the limit; `0` allows no new site. Sites the customer already holds are kept when the limit is set below their number."
+
+    OrganizationSiteLimitDto:
+      type: object
+      required: [organizationId, maxSites, usedSites]
+      properties:
+        organizationId:
+          type: string
+        maxSites:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: The limit now in force; `null` means unlimited
+        usedSites:
+          type: integer
+          minimum: 0
+          description: Sites the customer holds now, whatever their status
 
     SiteActionInput:
       type: object
