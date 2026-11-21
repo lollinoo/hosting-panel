@@ -232,6 +232,7 @@ describe("update.sh", () => {
       ...["sftp", "phpmyadmin", "backups", "panel-dump"].map((p) => `/var/lib/hosting-panel/${p}`),
       "/run/hosting-panel/host-jobs",
       "/run/hosting-panel/acme-dns",
+      "ingress/dynamic/manual-certs",
       "unattended-upgrades",
       "2222 (site SFTP)",
       "127.0.0.1:8306"

@@ -247,6 +247,70 @@ describe("release workflow and docs", () => {
     }
   });
 
+  it("hcp-spec-004 manual tls acceptance script is registered and machine-safe", () => {
+    const script = read("infra/linux/accept-tls-manual.mjs");
+    const helper = read("infra/linux/tls-test-certs.mjs");
+    // Same pinned Traefik and Pebble downloads as accept-acme-pebble.mjs (sha256 pins, 3.7.19).
+    const pebble = read("infra/linux/accept-acme-pebble.mjs");
+    for (const pin of [/TRAEFIK_SHA256 = "([0-9a-f]{64})"/, /pebble: "([0-9a-f]{64})"/, /minica: "([0-9a-f]{64})"/]) {
+      expect(script.match(pin)?.[1], String(pin)).toBeDefined();
+      expect(script.match(pin)?.[1]).toBe(pebble.match(pin)?.[1]);
+    }
+    expect(script).toContain("traefik_v3.7.19_linux_amd64.tar.gz");
+    // Drives the shipped executor modules and the contracts plan, not a copy of them.
+    for (const s of ["ManualTlsStore", "readAcmeStoreEntries", "evictAcmeEntries", "waitForServed", "planManualCertificates", "buildIngressProxyContainerPayload"]) {
+      expect(script, s).toContain(s);
+    }
+    // Machine safety: loopback only, own prefix, high ports, never the host's hp_ingress_proxy, no shell.
+    expect(script).toContain("hp_swarmtest_tls_");
+    expect(script).toContain('const HOST = "127.0.0.1"');
+    expect(script).not.toMatch(/0\.0\.0\.0|shell:\s*true|\bexec\(|execSync|spawnSync/);
+    expect(script).not.toMatch(/["'`]hp_ingress_proxy["'`]/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000)).toEqual([]);
+    // The steps of arch-tls-ingress 4.3 and the TLS-xx rows of the test matrix.
+    for (const stepName of [
+      "tls05-plan-says-eviction", "tls05-hot-superset", "tls05-cold-evict", "tls07-wildcard-exact", "wildcard-sibling-renews",
+      "capture-refused", "tls08-rotation-under-load", "bad-entry-not-fatal", "tls10-restart-x5", "tls09-crash-recovery",
+      "tls06-back-to-acme", "tls06-refused-under-wildcard", "gc-after-verify", "container-serves-manual-0700", "inspect-no-secrets",
+    ]) {
+      expect(script, stepName).toContain(`"${stepName}"`);
+    }
+    // The DER helper is node-only (no openssl, no dependency) and covers CN-not-in-SAN and a three-level chain.
+    expect([...helper.matchAll(/^import .* from "([^"]+)"/gm)].map((m) => m[1])).toEqual(["node:crypto"]);
+    expect(helper).toMatch(/export function makeCert/);
+    expect(helper).toMatch(/export function makeChain/);
+    expect(helper).not.toMatch(/openssl|child_process/);
+  });
+
+  it("hcp-spec-004 production-adapter tls acceptance script is registered and machine-safe", () => {
+    const script = read("infra/linux/accept-tls-adapter.mjs");
+    // Drives the production adapter from dist, through the proxy/network name seam, not a replay of its pieces.
+    for (const s of ["DockerEngineSocketAdapter", "ensureIngressProxy", "ingressProxyContainerName", "ingressNetworkName", "evictAcme", "acme_eviction_required", "not_served_reverted", "680febb"]) {
+      expect(script, s).toContain(s);
+    }
+    // Machine safety: own prefix, loopback ports only (the gate rewrites HostIp), gated Docker socket, no shell,
+    // and never the host's hp_ingress_proxy or hp_ingress_net by name.
+    expect(script).toContain("hp_swarmtest_adp_");
+    expect(script).toContain('const HOST = "127.0.0.1"');
+    expect(script).toContain("site_(edge|internal)");
+    expect(script).not.toMatch(/shell:\s*true|\bexec\(|execSync|spawnSync/);
+    // 0.0.0.0 appears only where the gate maps the payload's HostIp back (comments aside).
+    for (const line of script.split("\n").filter((l) => l.includes("0.0.0.0") && !/^\s*(\*|\/\/|\/\*)/.test(l))) expect(line).toContain('"HostIp"');
+    expect(script).not.toMatch(/["'`]hp_ingress_(proxy|net)["'`]/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000)).toEqual([]);
+    for (const stepName of [
+      "setup-proxy-through-ensure", "publish-on-fresh-empty-acme-store", "rotation-under-load", "executor-restart-recovers",
+      "setup-legacy-payload-proxy", "upgrade-no-recreate", "cold-path-refused-hot", "cold-path-evicts-with-backup",
+      "cold-path-failed-probe-restores", "gate-clean",
+    ]) {
+      expect(script, stepName).toContain(`"${stepName}"`);
+    }
+    // A step that cannot run is reported in the RESULT line, not passed silently (both acceptance scripts).
+    for (const file of ["infra/linux/accept-tls-adapter.mjs", "infra/linux/accept-tls-manual.mjs"]) {
+      expect(read(file), file).toMatch(/skipped \(not counted in n\/m\)/);
+    }
+  });
+
   it("m1a file manager docs are consistent", () => {
     const readme = read("README.md");
     for (const s of ["Web File Manager dei Siti", "ADR-0019"]) {
@@ -457,6 +521,30 @@ describe("release workflow and docs", () => {
     ]) {
       expect(api).toContain(s);
     }
+  });
+
+  it("hcp-spec-004 bootstrap provisions the manual certificate directory", () => {
+    const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
+    expect(bootstrap).toContain(
+      "install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/ingress/dynamic/manual-certs\n",
+    );
+    // Cold-start hazard: anything below dynamic/ the proxy uid cannot read takes every site down.
+    const dynamicDirs = bootstrap
+      .split("\n")
+      .filter((l) => l.startsWith("install -d ") && l.includes("/var/lib/hosting-panel/ingress/dynamic/"));
+    expect(dynamicDirs.length).toBeGreaterThan(0);
+    for (const l of dynamicDirs) {
+      expect(l).toMatch(/^install -d -m 0700 -o hp-executor -g hp-executor \/var\/lib\/hosting-panel\/ingress\/dynamic\/\S+$/);
+    }
+  });
+
+  it.skipIf(!hasHost)("hcp-spec-004 bootstrap dry-run mentions the manual certificate directory", () => {
+    const r = spawnSync("bash", ["infra/linux/bootstrap-dedicated.sh", "--dry-run", "--allow-other-linux"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("ingress/dynamic/manual-certs (0700 hp-executor:hp-executor)");
   });
 
   it("m3b restore and download docs are consistent", () => {
