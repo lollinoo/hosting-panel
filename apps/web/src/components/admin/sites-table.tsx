@@ -9,10 +9,16 @@ import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ChangeOwnerDialog, type Customers } from "@/components/admin/change-owner-dialog";
 import { DeleteSiteDialog, type ConfirmDelete } from "@/components/customer/delete-site-dialog";
+import { UpgradeSiteTemplateDialog, upgradeTarget } from "@/components/admin/upgrade-site-template-dialog";
 import { StatusPill } from "@/components/customer/status-pill";
 import { errorMessage, format } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
+
+/** The site's template has a newer default version and the site is in a state that can be redeployed. */
+export function canUpgradeTemplate(s: AdminSiteDto): boolean {
+  return upgradeTarget(s) !== null && (s.status === "ready" || s.status === "degraded");
+}
 
 export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDto[]; customers: Customers; csrfToken: string }) {
   const m = useMessages();
@@ -23,6 +29,7 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
   const [deleting, setDeleting] = React.useState<AdminSiteDto | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<{ error: boolean; text: string } | null>(null);
+  const [upgrading, setUpgrading] = React.useState<AdminSiteDto | null>(null);
 
   async function retry(site: AdminSiteDto) {
     setBusy(site.id);
@@ -69,6 +76,7 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
             <TableHead>{t.colDomain}</TableHead>
             <TableHead>{t.colOwner}</TableHead>
             <TableHead>{t.colPhp}</TableHead>
+            <TableHead>{t.colTemplate}</TableHead>
             <TableHead>{t.colStatus}</TableHead>
             <TableHead>{t.colActions}</TableHead>
           </TableRow>
@@ -80,6 +88,7 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
               <TableCell>{s.primaryDomain ?? "-"}</TableCell>
               <TableCell>{s.owner?.name ?? t.unassigned}</TableCell>
               <TableCell>{s.phpVersion ?? "-"}</TableCell>
+              <TableCell>{s.template ? format(t.templateVersion, { name: s.template.templateName, version: s.template.versionNumber }) : "-"}</TableCell>
               <TableCell>
                 <StatusPill status={s.status} labels={m.site.status} />
               </TableCell>
@@ -101,6 +110,11 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
                       </Link>
                     </Button>
                   )}
+                  {canUpgradeTemplate(s) && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => setUpgrading(s)}>
+                      {t.upgrade}
+                    </Button>
+                  )}
                   {s.status === "degraded" && (
                     <Button type="button" size="sm" variant="outline" disabled={busy !== null} onClick={() => retry(s)}>
                       {busy === s.id ? t.working : t.retry}
@@ -116,6 +130,15 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
         </TableBody>
       </Table>
       <ChangeOwnerDialog site={moving} customers={customers} csrfToken={csrfToken} onClose={() => setMoving(null)} />
+      <UpgradeSiteTemplateDialog
+        site={upgrading}
+        csrfToken={csrfToken}
+        onClose={() => setUpgrading(null)}
+        onDone={(text) => {
+          setNotice({ error: false, text });
+          router.refresh();
+        }}
+      />
       <DeleteSiteDialog
         siteName={deleting?.name ?? ""}
         open={deleting !== null}
