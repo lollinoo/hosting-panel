@@ -290,6 +290,19 @@ describe("renderSiteTemplate: refusals", () => {
     expect(renderSiteTemplate(spec, { ...values, a: "x".repeat(240) }, CONTEXT).configuration.BIG).toHaveLength(17 * 240);
   });
 
+  it("refuses a rendered environment value that names the Docker socket, without echoing it", () => {
+    const spec = withService(
+      { environment: [{ name: "TAGLINE", value: "${tagline}" }, { name: "PLAIN", value: "ok" }] },
+      { parameters: [...BUILT_IN_WORDPRESS_SPEC.parameters, { key: "tagline", label: "Tagline", type: "string", default: "hi", customer: true }] },
+    );
+    const socket = "see /var/run/docker.sock";
+    const error = renderError(() => renderSiteTemplate(spec, { php_version: "8.4", tagline: socket }, CONTEXT));
+    expect(error.code).toBe("unsafe_value");
+    expect(error.message).not.toContain("docker.sock");
+    expect(error.message).not.toContain("TAGLINE");
+    expect(renderSiteTemplate(spec, { php_version: "8.4", tagline: "a docker note" }, CONTEXT).configuration.TAGLINE).toBe("a docker note");
+  });
+
   it("refuses a malformed reference and an unknown variable in the environment or the image", () => {
     expect(renderError(() => renderSiteTemplate(withService({ environment: [{ name: "A", value: "$x" }] }), { php_version: "8.4" }, CONTEXT)).code).toBe(
       "invalid_interpolation",

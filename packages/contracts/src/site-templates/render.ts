@@ -1,3 +1,4 @@
+import { findUnsafeDockerInputFields } from "../resources.js";
 import type { SiteTemplatePreviewDto } from "./dto.js";
 import { SITE_TEMPLATE_MODULES } from "./modules.js";
 import { sampleSiteTemplateParameterMap } from "./parameters.js";
@@ -67,6 +68,7 @@ export type SiteTemplateRenderErrorCode =
   | "missing_parameter"
   | "invalid_php_version"
   | "value_too_long"
+  | "unsafe_value"
   | "unknown_module";
 
 export class SiteTemplateRenderError extends Error {
@@ -153,6 +155,15 @@ export function renderSiteTemplate(
     return value;
   };
 
+  /** The executor refuses these later, on every deploy; a customer value that reaches one is refused here, never echoed. */
+  const renderEnvironmentValue = (raw: string): string => {
+    const value = render(raw);
+    if (findUnsafeDockerInputFields({ value }).length > 0) {
+      throw new SiteTemplateRenderError("unsafe_value", "A rendered environment value contains a path that is not allowed");
+    }
+    return value;
+  };
+
   let image: string;
   if (spec.service.image === `\${${MODULE_IMAGE_VARIABLE}}`) {
     if (phpVersion === null) {
@@ -164,7 +175,7 @@ export function renderSiteTemplate(
   }
 
   const entries: [string, unknown][] = [
-    ...spec.service.environment.map((entry): [string, unknown] => [entry.name, render(entry.value)]),
+    ...spec.service.environment.map((entry): [string, unknown] => [entry.name, renderEnvironmentValue(entry.value)]),
     ["image", image],
     ["internalPort", spec.service.expose[0] ?? facts.internalPort],
     ["exposeHttp", facts.exposeHttp],

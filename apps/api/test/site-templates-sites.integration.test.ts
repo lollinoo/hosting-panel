@@ -9,6 +9,7 @@ import {
 import {
   createDatabaseClient,
   eq,
+  operations,
   serviceInstances,
   siteTemplates,
   sites,
@@ -258,6 +259,24 @@ describe("site creation, PHP change and admin view with site templates", () => {
       { key: "admin_note", value: "y" },
       { key: "upload_limit", value: "16M" },
     ]);
+  });
+
+  it("refuses a customer value that renders to the Docker socket path with 400 and writes nothing", async () => {
+    // admin_note becomes a customer text parameter that feeds an environment variable.
+    const source = customSource()
+      .replace("    customer: false", "    customer: true")
+      .replace('      WORDPRESS_DEBUG: "0"', '      WORDPRESS_DEBUG: "0"\n      WP_TAGLINE: "${admin_note}"');
+    const templateId = await newTemplate({ source });
+    const res = await create({ templateId, parameters: [{ key: "admin_note", value: "/var/run/docker.sock" }] });
+    expect(res.status, res.raw).toBe(400);
+    expect(res.body.error.code).toBe("VALIDATION_ERROR");
+    expect(res.body.error.details.map((detail: Json) => detail.field)).toContain("parameters");
+    expect(res.raw).not.toContain("docker.sock");
+    expect(await siteRows()).toHaveLength(0);
+    expect(await dbClient.db.select().from(stackRevisions)).toHaveLength(0);
+    expect(await dbClient.db.select().from(operations)).toHaveLength(0);
+
+    expect((await create({ templateId, parameters: [{ key: "admin_note", value: "hello" }] })).status).toBe(202);
   });
 
   it("replays the same key with the original operation, even after the template was disabled or the body changed", async () => {
