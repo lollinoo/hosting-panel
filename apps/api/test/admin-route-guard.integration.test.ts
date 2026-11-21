@@ -294,6 +294,74 @@ describe("every administrator route refuses a customer before it does anything",
     expect(await snapshot()).toEqual(before);
   });
 
+  it("#17: a malformed JSON body answers 401 without credentials, 403 to a customer and 400 only to an administrator", async () => {
+    const send = async (method: string, path: string, as: string | null) => {
+      const res = await fetch(`${app.baseUrl!}${path}`, {
+        method,
+        headers: { ...(as ? { Authorization: `Bearer ${as}` } : {}), "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
+        body: "{not json",
+      });
+      const raw = await res.text();
+      return { status: res.status, body: (raw ? JSON.parse(raw) : {}) as Json };
+    };
+    // Fresh customers: the tests above already used most of the 120 denied rows a minute each user may write.
+    const freshUser = async (who: "owner" | "member") => {
+      const id = `usr_${randomUUID()}`;
+      const membershipId = `mem_${randomUUID()}`;
+      const email = `${who}-b@example.test`;
+      await dbClient.db.insert(users).values({ id, email, name: `${who} b`, passwordHash: await hashPassword(PW) });
+      await dbClient.db.insert(memberships).values({ id: membershipId, organizationId: params.orgId!, userId: id });
+      const roleId = who === "owner" ? "role_customer_owner" : "role_customer_collaborator";
+      await dbClient.db.insert(membershipRoles).values({ id: `mrl_${randomUUID()}`, membershipId, roleId });
+      return { id, token: await login(email, PW) };
+    };
+    const fresh = { owner: await freshUser("owner"), member: await freshUser("member") };
+
+    // GET and HEAD bodies are never parsed; every other method is.
+    const withBody = guarded().filter((r) => r.method !== "GET");
+    expect(withBody.length).toBeGreaterThanOrEqual(30);
+    expect(withBody.length).toBeLessThan(120);
+    const before = await snapshot();
+    const failures: string[] = [];
+    for (const r of withBody) {
+      const label = `${r.method} ${r.path}`;
+      const anonymous = await send(r.method, fill(r.path), null);
+      if (anonymous.status !== 401) failures.push(`${label} anonymous: ${anonymous.status} ${anonymous.body.error?.code ?? ""}`);
+      for (const who of ["member", "owner"] as const) {
+        const seen = await auditIds();
+        const res = await send(r.method, fill(r.path), fresh[who].token);
+        const added = await auditSince(seen);
+        const ok =
+          res.status === 403 &&
+          res.body.error?.code === "PERMISSION_DENIED" &&
+          added.length === 1 &&
+          added[0]!.actorId === fresh[who].id &&
+          (added[0]!.details as Json).outcome === "denied";
+        if (!ok) failures.push(`${label} as ${who}: ${res.status} ${res.body.error?.code ?? ""} audit+${added.length}`);
+      }
+      const seen = await auditIds();
+      const admin = await send(r.method, fill(r.path), adminToken);
+      const added = await auditSince(seen);
+      if (admin.status !== 400 || admin.body.error?.code !== "VALIDATION_ERROR" || added.length !== 0) {
+        failures.push(`${label} as administrator: ${admin.status} ${admin.body.error?.code ?? ""} audit+${added.length}`);
+      }
+    }
+    expect(failures).toEqual([]);
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("#17: a malformed JSON body on a customer or an open route is still a plain 400", async () => {
+    const res = await fetch(`${app.baseUrl!}/v1/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{not json" });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as Json).error.code).toBe("VALIDATION_ERROR");
+    const own = await fetch(`${app.baseUrl!}/v1/organizations/${params.orgId!}/managed-sites`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${customers.owner.token}`, "Content-Type": "application/json", "Idempotency-Key": randomUUID() },
+      body: "{not json",
+    });
+    expect(own.status).toBe(400);
+  });
+
   it("without credentials every route answers 401 except the pinned open ones", async () => {
     const open: string[] = [];
     for (const r of routes) {
