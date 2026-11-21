@@ -15,6 +15,7 @@ import {
   type OsPackagesDto,
   type PanelContainer,
   type PhpVersion,
+  type SiteTemplateSpec,
   type UpdatesDto,
 } from "@hosting-panel/contracts";
 import {
@@ -25,11 +26,13 @@ import {
   desc,
   enqueueOperationTransactional,
   eq,
+  getSiteTemplateVersionById,
   hostAgentHeartbeats,
   inArray,
   not,
   operations,
   organizations,
+  readSiteTemplateSpec,
   serviceInstances,
   sites,
   sql,
@@ -54,6 +57,7 @@ import { assertNoSiteWork, enqueueHostJob } from "../host/host-jobs.js";
 import { MailRelayService } from "../mail/mail-relay.service.js";
 import { findApiSiteType } from "../site-types/index.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
+import { expectedTemplateImage } from "../sites/site-template-runtime.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, HOST_AGENT_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import { PANEL_APPLY_LEASE_MS, PANEL_APPLY_STEPS } from "./panel-container-apply.js";
 import { checkPanelRelease, installedPanelVersion } from "./release-version.js";
@@ -124,17 +128,23 @@ export class UpdatesService {
     return {
       panel: { installedVersion: installedPanelVersion(), check: this.#check, running: running ? { operationId: running.id } : null, last: lastEnd },
       components,
-      sites: behind.slice(0, SITES_BEHIND_MAX).map(({ image: _image, organizationId: _org, ...s }) => s),
+      sites: behind.slice(0, SITES_BEHIND_MAX).map(({ image: _image, organizationId: _org, toImage: _to, ...s }) => s),
       sitesTotal: behind.length,
     };
   }
 
-  /** Sites whose current revision runs another image than the pin of their PHP version. */
+  /**
+   * Sites whose current revision runs another image than their own template version renders today (a site without a
+   * version: the pin of its PHP version). A version that cannot be read or rendered is never "behind": no redeploy
+   * is offered that cannot be built.
+   */
   async #sitesBehind() {
-    const rows = await this.dbClient.db
+    const db = this.dbClient.db;
+    const rows = await db
       .select({
         siteId: sites.id, siteName: sites.name, organizationId: sites.organizationId, orgName: organizations.name,
         phpVersion: sites.phpVersion, siteType: sites.siteType, desired: serviceInstances.desiredStatus,
+        templateVersionId: sites.templateVersionId, templateParameters: sites.templateParameters,
         image: sql<string | null>`${stackRevisions.declarativeConfig}->>'image'`,
       })
       .from(sites)
@@ -143,18 +153,43 @@ export class UpdatesService {
       .innerJoin(stackRevisions, eq(stackRevisions.id, serviceInstances.currentRevisionId))
       .where(inArray(sites.siteType, [...SITE_TYPE_KEYS]))
       .orderBy(asc(sites.name), asc(sites.id));
+    const specs = new Map<string, SiteTemplateSpec | null>(
+      await Promise.all(
+        [...new Set(rows.flatMap((r) => (r.templateVersionId ? [r.templateVersionId] : [])))].map(
+          async (id) => [id, await this.#templateSpec(id)] as const,
+        ),
+      ),
+    );
+    const targetImage = (r: (typeof rows)[number]): string | null => {
+      if (r.templateVersionId === null) return findApiSiteType(r.siteType)?.image(r.phpVersion as PhpVersion) ?? null;
+      const spec = specs.get(r.templateVersionId);
+      return spec ? expectedTemplateImage(spec, { id: r.siteId, phpVersion: r.phpVersion, templateParameters: r.templateParameters }) : null;
+    };
     // shortcut: filtered in memory, one row per site; move to SQL if a server ever holds many thousands of sites.
-    return rows
-      .filter((r) => r.image !== findApiSiteType(r.siteType)?.image(r.phpVersion as PhpVersion))
-      .map((r) => ({
-        siteId: r.siteId,
-        siteName: r.siteName,
-        organizationName: r.organizationId === PLATFORM_OPS_ORG_ID ? null : r.orgName,
-        phpVersion: r.phpVersion as PhpVersion,
-        stopped: r.desired === "stopped",
-        image: r.image,
-        organizationId: r.organizationId,
-      }));
+    return rows.flatMap((r) => {
+      const toImage = targetImage(r);
+      return toImage === null || r.image === toImage
+        ? []
+        : [{
+            siteId: r.siteId,
+            siteName: r.siteName,
+            organizationName: r.organizationId === PLATFORM_OPS_ORG_ID ? null : r.orgName,
+            phpVersion: r.phpVersion as PhpVersion,
+            stopped: r.desired === "stopped",
+            image: r.image,
+            organizationId: r.organizationId,
+            toImage,
+          }];
+    });
+  }
+
+  async #templateSpec(versionId: string): Promise<SiteTemplateSpec | null> {
+    const loaded = await getSiteTemplateVersionById(this.dbClient.db, versionId);
+    try {
+      return loaded ? readSiteTemplateSpec(loaded.version) : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Asks the release source for the latest panel version and writes the check row. */
@@ -237,7 +272,7 @@ export class UpdatesService {
     return { component, operationId };
   }
 
-  /** Queues one site's move to the pinned image of its PHP version through the shipped deploy. */
+  /** Queues one site's move to the image its template version renders (the pinned image of its PHP version without one) through the shipped deploy. */
   public async updateSiteImage(
     auth: AuthenticatedRequestContext,
     req: FastifyRequest,
@@ -262,7 +297,6 @@ export class UpdatesService {
     const row = (await this.#sitesBehind()).find((s) => s.siteId === siteId);
     if (!row) throw refused("already_current", "This site already runs the pinned image.");
     if (row.stopped) throw refused("stopped", "Start the site first, then update its image.");
-    const toImage = type.image(site.phpVersion as PhpVersion);
     // R202 2.2: the row is written in the transaction that creates the operation, only when it is new.
     const audit = (tx: HostingPanelDatabase, operationId: string) => appendAuditEvent(tx, {
       actorId: auth.user.id,
@@ -275,7 +309,7 @@ export class UpdatesService {
       userAgent: extractRawHeader(headersOf(req), "user-agent"),
       details: {
         outcome: "succeeded", requestId: resolveRequestId(req), operationId, siteId,
-        organizationId: site.organizationId, fromImage: row.image, toImage,
+        organizationId: site.organizationId, fromImage: row.image, toImage: row.toImage,
       },
     });
     const { operationId } = await this.sites.changeRuntime(siteId, site.organizationId, site.phpVersion as PhpVersion, auth.user.id, idempotencyKey, audit);
