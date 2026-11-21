@@ -7,6 +7,7 @@ import {
   type CertChallenge,
   type CertProblem,
   type SiteDomainsDto,
+  type SiteDomainTlsDto,
 } from "@hosting-panel/contracts";
 import {
   and,
@@ -20,11 +21,13 @@ import {
   inArray,
   insertSiteDomains,
   listSiteDomains,
+  listSiteManualTls,
   not,
   or,
   sites,
   sql,
   type DatabaseClient,
+  type DomainManualTlsRow,
   type DomainRow,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
@@ -56,6 +59,18 @@ const isUniqueViolation = (err: unknown): boolean => {
 export function requestedHostnames(input: AddSiteDomainInput): string[] {
   const partner = input.includeWww ? wwwPartner(input.hostname) : null;
   return partner ? [input.hostname, partner] : [input.hostname];
+}
+
+/** The `tls` block of a domain: automatic rows are all null, a manual row shows its version, the apply state and the version's last problem. */
+export function domainTlsDto(row: DomainRow, manual: DomainManualTlsRow | undefined): SiteDomainTlsDto {
+  if (row.certMode !== "manual") return { mode: "acme", certificateId: null, versionId: null, state: null, problem: null };
+  return {
+    mode: "manual",
+    certificateId: manual?.certificateId ?? null,
+    versionId: manual?.versionId ?? row.manualCertificateVersionId,
+    state: row.certStatus === "active" ? "active" : row.certStatus === "failed" ? "failed" : "applying",
+    problem: manual?.lastErrorCode ?? null,
+  };
 }
 
 /**
@@ -116,6 +131,7 @@ export class SiteDomainsService {
     const db = this.dbClient.db;
     const site = await this.#site(siteId, organizationId);
     const rows = await listSiteDomains(db, siteId);
+    const manual = new Map((await listSiteManualTls(db, siteId)).map((m) => [m.domainId, m]));
     const now = new Date();
     return {
       serverIpv4: site.ipv4,
@@ -140,6 +156,7 @@ export class SiteDomainsService {
           retryAt: r.certRetryAt?.toISOString() ?? null,
           trusted: r.certTrusted,
         },
+        tls: domainTlsDto(r, manual.get(r.id)),
       })),
       mail: await this.mailRelay.customerView(),
     };
@@ -199,6 +216,11 @@ export class SiteDomainsService {
 
   /** Names already on this site are skipped, so a repeated call changes nothing. */
   public async add(siteId: string, organizationId: string, input: AddSiteDomainInput): Promise<SiteDomainsDto> {
+    // Adding a domain on an imported certificate version comes with the manual TLS routes (M2): until then refuse, never ignore.
+    if (input.tlsVersionId !== undefined) {
+      const message = "Using an imported certificate when adding a web address is not available yet.";
+      throw new ControlPlaneError("NOT_SUPPORTED", message, { details: [{ message, reason: "tls_version_unavailable" }] });
+    }
     const names = requestedHostnames(input);
     let inserted: DomainRow[];
     try {
