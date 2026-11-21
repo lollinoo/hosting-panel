@@ -1,4 +1,5 @@
 import {
+  PhpSettingsSchema,
   SECRET_KEY_PATTERN,
   findPlaintextSecretKeys,
   findUnsafeDockerInputFields,
@@ -40,6 +41,8 @@ export interface ApprovedServiceSpec {
   readonly pidsLimit?: number;
   readonly volumeMounts?: readonly ServiceVolumeMountSpec[];
   readonly resolvedSecrets?: Readonly<Record<string, string>>;
+  /** Closed PHP directives (PhpSettingsSchema). Absent, never empty, when none are set. */
+  readonly phpIni?: Readonly<Record<string, string>>;
   readonly approvedAt: string;
 }
 
@@ -62,6 +65,8 @@ export interface CreateApprovedServiceSpecInput {
   readonly pidsLimit?: number;
   readonly volumeMounts?: readonly ServiceVolumeMountSpec[];
   readonly resolvedSecrets?: Readonly<Record<string, string>>;
+  /** `{}` is treated as absent. */
+  readonly phpIni?: Readonly<Record<string, string>>;
   readonly rawConfig?: Record<string, unknown>;
 }
 
@@ -190,6 +195,20 @@ export function createApprovedServiceSpec(
     frozenResolvedSecrets = Object.freeze(copy);
   }
 
+  let frozenPhpIni: Readonly<Record<string, string>> | undefined;
+  if (input.phpIni !== undefined && Object.keys(input.phpIni).length > 0) {
+    const parsed = PhpSettingsSchema.safeParse(input.phpIni);
+    if (!parsed.success) {
+      throw createCodedError(
+        `Cannot construct ApprovedServiceSpec: invalid phpIni: ${parsed.error.issues[0]?.message ?? "not valid"}`,
+        "VALIDATION_ERROR",
+      );
+    }
+    frozenPhpIni = Object.freeze(
+      Object.fromEntries(Object.entries(parsed.data).filter(([, value]) => value !== undefined)) as Record<string, string>,
+    );
+  }
+
   return Object.freeze({
     __brand: "ApprovedServiceSpec" as const,
     serviceInstanceId: input.serviceInstanceId,
@@ -214,6 +233,7 @@ export function createApprovedServiceSpec(
     ...(input.pidsLimit !== undefined ? { pidsLimit: input.pidsLimit } : {}),
     ...(frozenMounts !== undefined ? { volumeMounts: frozenMounts } : {}),
     ...(frozenResolvedSecrets !== undefined ? { resolvedSecrets: frozenResolvedSecrets } : {}),
+    ...(frozenPhpIni !== undefined ? { phpIni: frozenPhpIni } : {}),
     approvedAt: new Date().toISOString(),
   });
 }
