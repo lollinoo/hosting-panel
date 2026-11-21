@@ -886,6 +886,23 @@ export const BackupTargetSchema = z
 
 export type BackupTarget = z.infer<typeof BackupTargetSchema>;
 
+export const BACKUP_TARGET_ID_PATTERN = /^bkt_[0-9a-f]{32}$/;
+/** Local repository on this server: the executor resolves the path from the target id, never from a request. */
+export const LocalBackupTargetSchema = z
+  .object({
+    kind: z.literal("local"),
+    targetId: z.string().regex(BACKUP_TARGET_ID_PATTERN),
+  })
+  .strict();
+export type LocalBackupTarget = z.infer<typeof LocalBackupTargetSchema>;
+
+/** The S3 object stays the frozen one (no `kind`), so single-target S3 requests keep their bytes. */
+export const BackupDispatchTargetSchema = z.union([BackupTargetSchema, LocalBackupTargetSchema]);
+export type BackupDispatchTarget = z.infer<typeof BackupDispatchTargetSchema>;
+
+/** Job id of one copy of a logical backup: the first copy keeps `op_x`, the second is `op_x-t2`. */
+export const BACKUP_COPY_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2)?$/;
+
 export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
   z
     .object({

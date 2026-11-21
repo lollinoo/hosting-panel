@@ -24,6 +24,8 @@ export const FORBIDDEN_PUBLIC_DTO_KEYS = [
   "accessToken",
   "refreshToken",
   "privateKey",
+  "privateKeyPem",
+  "keyPem",
   "apiKey",
   "ciphertext",
   "ciphertextBase64",
@@ -34,7 +36,7 @@ export const FORBIDDEN_PUBLIC_DTO_KEYS = [
 ] as const;
 
 const FORBIDDEN_KEY_PATTERN =
-  /^(dockerContainerId|dockerNetworkId|dockerVolumeName|internalDockerRef|socketPath|dockerSocket|hostPath|bindMount|secretRef|password|passwordHash|accessToken|refreshToken|privateKey|apiKey|ciphertext|ciphertextBase64|ivBase64|authTagBase64|secretValue|resolvedSecrets|docker_container_id|docker_network_id|docker_volume_name|internal_docker_ref|socket_path|docker_socket|host_path|bind_mount|secret_ref|password_hash|access_token|refresh_token|private_key|api_key|ciphertext_base64|iv_base64|auth_tag_base64|secret_value|resolved_secrets)$/i;
+  /^(dockerContainerId|dockerNetworkId|dockerVolumeName|internalDockerRef|socketPath|dockerSocket|hostPath|bindMount|secretRef|password|passwordHash|accessToken|refreshToken|privateKey|privateKeyPem|keyPem|apiKey|ciphertext|ciphertextBase64|ivBase64|authTagBase64|secretValue|resolvedSecrets|docker_container_id|docker_network_id|docker_volume_name|internal_docker_ref|socket_path|docker_socket|host_path|bind_mount|secret_ref|password_hash|access_token|refresh_token|private_key|private_key_pem|key_pem|api_key|ciphertext_base64|iv_base64|auth_tag_base64|secret_value|resolved_secrets)$/i;
 
 export function findForbiddenPublicDtoKeys(value: unknown): string[] {
   const found: string[] = [];
@@ -132,7 +134,7 @@ export function findUnsafeDockerInputFields(value: unknown): string[] {
 }
 
 const PLAINTEXT_SECRET_KEY_PATTERN =
-  /^(password|secret|masterKey|apiKey|privateKey|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
+  /^(password|secret|masterKey|apiKey|privateKey|privateKeyPem|keyPem|token|connectionString|secretValue|resolvedSecrets|api_key|private_key|private_key_pem|key_pem|connection_string|client_secret|auth_token|secret_value|resolved_secrets)$/i;
 
 export function findPlaintextSecretKeys(value: unknown): string[] {
   const violations: string[] = [];
@@ -162,8 +164,45 @@ export function findPlaintextSecretKeys(value: unknown): string[] {
   return violations;
 }
 
+/**
+ * A PEM block up to its END line, or to the end of the string when the text is cut short. The label is any 1..64
+ * characters that are neither a line break nor a dash (`X9.42 DH PRIVATE KEY`, lowercase labels): bounded, so linear.
+ */
+const PEM_BLOCK_PATTERN = /-----BEGIN [^\r\n-]{1,64}-----[\s\S]*?(?:-----END [^\r\n-]{1,64}-----|$)/g;
+
 export function redactSensitiveString(str: string): string {
-  return str.replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]");
+  return str
+    .replace(PEM_BLOCK_PATTERN, "[REDACTED_PEM]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [REDACTED]");
+}
+
+/** Paths of the strings that carry (part of) a PEM block: they must never reach logs, outbox or audit. */
+export function findPemValues(value: unknown): string[] {
+  const found: string[] = [];
+
+  function walk(current: unknown, pathPrefix: string): void {
+    if (typeof current === "string") {
+      if (current.includes("-----BEGIN")) {
+        found.push(pathPrefix);
+      }
+      return;
+    }
+    if (current === null || typeof current !== "object") {
+      return;
+    }
+    if (Array.isArray(current)) {
+      for (let index = 0; index < current.length; index += 1) {
+        walk(current[index], `${pathPrefix}[${String(index)}]`);
+      }
+      return;
+    }
+    for (const [key, nested] of Object.entries(current as Record<string, unknown>)) {
+      walk(nested, pathPrefix ? `${pathPrefix}.${key}` : key);
+    }
+  }
+
+  walk(value, "");
+  return found;
 }
 
 export function redactSensitiveValue<T>(value: T): T {
@@ -243,6 +282,21 @@ export function isWordpressToolsAvailable(runtimeBackend: RuntimeBackend): boole
   return runtimeBackend === "linux-systemd";
 }
 
+/** Manual TLS certificates: the M1 contracts ship first, the shipping milestone turns this on. */
+export function isManualTlsAvailable(_runtimeBackend: RuntimeBackend): boolean {
+  return false;
+}
+
+/** Local backup targets: false until the milestone that ships them. */
+export function isLocalBackupTargetsAvailable(_runtimeBackend: RuntimeBackend): boolean {
+  return false;
+}
+
+/** Encrypted backup export: designed, not built (BLOCKED.md #4). */
+export function isEncryptedBackupExportAvailable(_runtimeBackend: RuntimeBackend): boolean {
+  return false;
+}
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -255,6 +309,9 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   phpMyAdminAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.boolean(),
   wordpressToolsAvailable: z.boolean(),
+  manualTlsCertificatesAvailable: z.boolean().default(false),
+  localBackupTargetsAvailable: z.boolean().default(false),
+  encryptedBackupExportAvailable: z.boolean().default(false),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
 
@@ -270,6 +327,9 @@ export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.fre
   phpMyAdminAvailable: false,
   productionBackupRuntimeAvailable: false,
   wordpressToolsAvailable: false,
+  manualTlsCertificatesAvailable: false,
+  localBackupTargetsAvailable: false,
+  encryptedBackupExportAvailable: false,
 });
 
 export interface CreatePlatformCapabilitiesOptions {
@@ -299,6 +359,9 @@ export function createPlatformCapabilities(
       phpMyAdminAvailable: isPhpMyAdminAvailable(options.runtimeBackend),
       productionBackupRuntimeAvailable: isBackupAvailable(options.runtimeBackend),
       wordpressToolsAvailable: isWordpressToolsAvailable(options.runtimeBackend),
+      manualTlsCertificatesAvailable: isManualTlsAvailable(options.runtimeBackend),
+      localBackupTargetsAvailable: isLocalBackupTargetsAvailable(options.runtimeBackend),
+      encryptedBackupExportAvailable: isEncryptedBackupExportAvailable(options.runtimeBackend),
     }),
   );
 }
@@ -313,6 +376,9 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   phpMyAdminAvailable: z.boolean(),
   productionBackupRuntimeAvailable: z.boolean(),
   wordpressToolsAvailable: z.boolean(),
+  manualTlsCertificatesAvailable: z.boolean().default(false),
+  localBackupTargetsAvailable: z.boolean().default(false),
+  encryptedBackupExportAvailable: z.boolean().default(false),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;
 

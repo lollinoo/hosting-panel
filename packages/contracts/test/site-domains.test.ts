@@ -92,7 +92,7 @@ describe("site domains", () => {
     expect(SiteHostRouteSchema.parse(route)).toEqual(route);
     expect(SiteHostRouteSchema.safeParse({ ...route, challenge: "tls-alpn-01" }).success).toBe(false);
     expect(Object.keys(SiteDomainDtoSchema.shape)).toEqual(
-      ["id", "hostname", "isPrimary", "routed", "challenge", "dns", "certificate"],
+      ["id", "hostname", "isPrimary", "routed", "challenge", "dns", "certificate", "tls"],
     );
   });
 
