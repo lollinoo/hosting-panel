@@ -916,3 +916,78 @@ describe("HCP-SPEC-004 0022: the legacy target's location key follows backup_set
     expect((await legacy())[0]?.archived_at).not.toBeNull();
   });
 });
+
+describe("HCP-SPEC-004 0022: the first write of backup_settings creates the live legacy target (fresh install, tests, older release)", () => {
+  let pg: PGlite;
+  const legacy = () => rows<Record<string, unknown>>(pg, "SELECT * FROM backup_targets WHERE legacy_settings");
+  const attached = () =>
+    rows(pg, "SELECT p.scope, t.target_id, t.priority, t.required FROM backup_policy_targets t JOIN backup_policies p ON p.id = t.policy_id ORDER BY p.scope");
+  const targetsState = async () => JSON.stringify([await rows(pg, "SELECT * FROM backup_targets ORDER BY id"), await attached()]);
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await applyAll(pg);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("starts without any legacy target; a plain INSERT creates it, keyed by the location, attached to both policies at priority 1", async () => {
+    expect(await legacy()).toEqual([]);
+    await pg.exec(settingsInsert("https://S3.Fresh.example:443", "fresh", "/f/"));
+    const [target] = await legacy();
+    expect(target).toMatchObject({
+      id: LEGACY_TARGET,
+      kind: "s3",
+      name: "S3",
+      enabled: true,
+      customer_selectable: false,
+      archived_at: null,
+      config_json: {},
+      s3_location_key: "https://s3.fresh.example/fresh/f",
+    });
+    expect(await attached()).toEqual([
+      { scope: "default_site", target_id: LEGACY_TARGET, priority: 1, required: true },
+      { scope: "panel", target_id: LEGACY_TARGET, priority: 1, required: true },
+    ]);
+  });
+
+  it("a second run of 0022 changes nothing", async () => {
+    const before = await targetsState();
+    await pg.exec(read(M0022));
+    expect(await targetsState()).toBe(before);
+  });
+
+  it("an older release's DELETE + INSERT keeps the one live legacy target, moves its key and adds no policy row", async () => {
+    await pg.exec("DELETE FROM backup_settings WHERE id = 'default'");
+    expect(await legacy()).toHaveLength(1);
+    await pg.exec(settingsInsert("https://s3.moved.example", "moved", "m"));
+    expect(await legacy()).toHaveLength(1);
+    expect((await legacy())[0]).toMatchObject({ id: LEGACY_TARGET, archived_at: null, s3_location_key: "https://s3.moved.example/moved/m" });
+    expect(await attached()).toHaveLength(2);
+  });
+
+  it("never revives, re-points or duplicates an archived legacy target", async () => {
+    await pg.exec(`UPDATE backup_targets SET archived_at = NOW(), enabled = FALSE, customer_selectable = FALSE WHERE id = '${LEGACY_TARGET}'`);
+    await pg.exec("DELETE FROM backup_settings WHERE id = 'default'");
+    await pg.exec(settingsInsert("https://s3.other.example", "other", "o"));
+    const all = await rows<Record<string, unknown>>(pg, "SELECT * FROM backup_targets WHERE legacy_settings");
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ enabled: false, s3_location_key: "https://s3.moved.example/moved/m" });
+    expect(all[0]?.archived_at).not.toBeNull();
+  });
+
+  it("fails the first write closed when a live target already holds the location: no settings row, no legacy target", async () => {
+    const fresh = new PGlite();
+    try {
+      await applyAll(fresh);
+      await fresh.exec(s3Row("bkt_holder", { ...S3_CONFIG, endpoint: "https://s3.held.example", bucket: "held", prefix: "h" }));
+      await refuses(fresh, settingsInsert("https://S3.HELD.example:443", "held", "h/"), "uq_backup_targets_s3_location");
+      expect(await rows(fresh, "SELECT 1 FROM backup_settings")).toEqual([]);
+      expect(await rows(fresh, "SELECT 1 FROM backup_targets WHERE legacy_settings")).toEqual([]);
+    } finally {
+      await fresh.close();
+    }
+  });
+});

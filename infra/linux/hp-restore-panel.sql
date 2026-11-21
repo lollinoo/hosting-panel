@@ -1,4 +1,15 @@
 -- infra/linux/hp-restore-panel.sql (NEW). Runs after `hp-accounts setup`, inside psql --single-transaction. Idempotent.
+-- Copies of the panel backup being restored: resolved while the operation is still open (the generic close below
+-- ignores them). One copy row with a recorded snapshot = that copy is the backup we restored from. A copy without a
+-- snapshot id cannot be 'succeeded' (ck_panel_backup_copies_snapshot), and two copies cannot be told apart: 'unknown'.
+UPDATE panel_backup_copies c
+   SET status = CASE WHEN c.snapshot_id IS NOT NULL
+                      AND (SELECT count(*) FROM panel_backup_copies x WHERE x.operation_id = c.operation_id) = 1
+                     THEN 'succeeded' ELSE 'unknown' END,
+       finished_at = COALESCE(c.finished_at, now())
+ WHERE c.status = 'running'
+   AND c.operation_id IN (SELECT id FROM operations WHERE kind = 'panel.backups.create'
+                             AND status IN ('queued', 'processing', 'accepted', 'reconciling', 'unknown'));
 UPDATE operation_steps SET status = 'succeeded', completed_at = COALESCE(completed_at, now())
  WHERE status IN ('pending', 'running', 'unknown')
    AND operation_id IN (SELECT id FROM operations WHERE kind = 'panel.backups.create'
@@ -17,14 +28,27 @@ UPDATE operation_steps SET status = CASE WHEN status = 'pending' THEN 'cancelled
 UPDATE operations SET status = 'failed', error_code = 'OPERATION_INTERRUPTED',
        error_message = 'Not finished when the panel copy was made', lease_expires_at = NULL, completed_at = now(), updated_at = now()
  WHERE status IN ('queued', 'processing', 'accepted', 'reconciling', 'unknown');
+UPDATE panel_backup_copies SET status = 'failed', problem = 'interrupted', finished_at = COALESCE(finished_at, now())
+ WHERE status = 'running';
 UPDATE outbox_events SET status = 'failed', locked_at = NULL, last_error = 'Not finished when the panel copy was made'
  WHERE status IN ('pending', 'processing');
 UPDATE quota_reservations SET status = 'released' WHERE status = 'pending';
 UPDATE site_backups SET status = 'failed', problem = 'interrupted', finished_at = COALESCE(finished_at, now()) WHERE status = 'running';
+UPDATE site_backup_copies SET status = 'failed', problem = 'interrupted', finished_at = COALESCE(finished_at, now())
+ WHERE status = 'running';
 UPDATE site_backups SET restore_status = 'failed', restore_problem = 'interrupted', restored_at = COALESCE(restored_at, now())
  WHERE restore_status = 'running';
-UPDATE site_backups SET archive_operation_id = NULL, archive_status = NULL, archive_problem = NULL, archive_ready_until = NULL
+UPDATE site_backups SET archive_operation_id = NULL, archive_target_id = NULL, archive_status = NULL, archive_problem = NULL, archive_ready_until = NULL
  WHERE archive_status IS NOT NULL;
 UPDATE backup_settings SET nightly_run_started_at = NULL WHERE nightly_run_started_at IS NOT NULL;
+UPDATE backup_policies SET nightly_run_started_at = NULL WHERE nightly_run_started_at IS NOT NULL;
+-- Manual certificates: the files do not exist on the new host. An interrupted apply is failed (active stays active);
+-- generation 0 makes the API/executor re-materialise every active version at start.
+UPDATE tls_certificate_versions SET status = 'failed', last_error_code = 'interrupted' WHERE status = 'applying';
+UPDATE tls_publish_state SET confirmed_generation = 0 WHERE confirmed_generation <> 0;
+-- No stale "healthy" for a folder that may not be mounted on the new host (the target stays enabled).
+UPDATE backup_targets SET last_test_at = NULL, last_test_outcome = NULL, last_test_problem = NULL,
+       last_test_available_bytes = NULL, last_test_total_bytes = NULL
+ WHERE kind = 'local';
 UPDATE sites SET status = 'degraded', updated_at = now() WHERE status IN ('deploying', 'maintenance');
 DELETE FROM user_sessions;

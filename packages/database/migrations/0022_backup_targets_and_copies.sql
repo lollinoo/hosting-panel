@@ -86,16 +86,33 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_backup_targets_s3_location ON backup_target
 -- The legacy target is a pointer to the one backup_settings row, so the database keeps the two in step for every
 -- release that writes the row: this one, the legacy adapter, or an older release after a rollback that knows nothing
 -- of backup_targets. A write that moves the settings onto the location of another live target fails (23505): fail
--- closed, never one restic repository under two targets. There is no DELETE trigger: deleting the settings (a "clear",
--- which also deletes every site backup) leaves the live legacy target as it is, with its last key, copies and policy
--- rows; it simply cannot be resolved while the settings are absent (not configured, as before), and the next INSERT
--- moves its key to the new location. A legacy target archived on purpose (the legacy adapter, M3) is never touched.
+-- closed, never one restic repository under two targets. When no legacy target exists at all (a fresh install, a plain
+-- upsert of the settings), the write also creates the live legacy target, with the deterministic id of the backfill
+-- below, and attaches it (priority 1, required) to the default_site and panel policies that have no target: the same
+-- state an upgraded install has. An ARCHIVED legacy target (the legacy adapter, M3, archives it on a location change
+-- and freezes the settings) counts as existing: it is never revived, re-pointed or replaced. There is no DELETE
+-- trigger: deleting the settings (a "clear", which also deletes every site backup) leaves the live legacy target as it
+-- is, with its last key, copies and policy rows; it simply cannot be resolved while the settings are absent (not
+-- configured, as before), and the next INSERT moves its key to the new location.
 CREATE OR REPLACE FUNCTION hp_backup_settings_sync_legacy_target() RETURNS TRIGGER
 LANGUAGE plpgsql AS $fn$
 BEGIN
-  UPDATE backup_targets SET s3_location_key = hp_s3_location_key(NEW.endpoint, NEW.bucket, NEW.prefix)
-    WHERE legacy_settings AND archived_at IS NULL
-      AND s3_location_key IS DISTINCT FROM hp_s3_location_key(NEW.endpoint, NEW.bucket, NEW.prefix);
+  IF EXISTS (SELECT 1 FROM backup_targets WHERE legacy_settings) THEN
+    UPDATE backup_targets SET s3_location_key = hp_s3_location_key(NEW.endpoint, NEW.bucket, NEW.prefix)
+      WHERE legacy_settings AND archived_at IS NULL
+        AND s3_location_key IS DISTINCT FROM hp_s3_location_key(NEW.endpoint, NEW.bucket, NEW.prefix);
+  ELSE
+    -- No ON CONFLICT: a location another live target already holds must fail the write (fail closed).
+    INSERT INTO backup_targets (id, kind, name, enabled, legacy_settings, customer_selectable, config_json,
+      s3_location_key, last_test_at, last_test_outcome, last_test_problem, updated_by_user_id, created_at, updated_at)
+    VALUES ('bkt_' || md5('hp:backup-target:s3_legacy_default'), 's3', 'S3', TRUE, TRUE, FALSE, '{}'::jsonb,
+      hp_s3_location_key(NEW.endpoint, NEW.bucket, NEW.prefix), NEW.last_test_at, NEW.last_test_outcome,
+      NEW.last_test_problem, NEW.updated_by_user_id, NEW.updated_at, NEW.updated_at);
+    INSERT INTO backup_policy_targets (policy_id, target_id, priority, required)
+    SELECT p.id, 'bkt_' || md5('hp:backup-target:s3_legacy_default'), 1, TRUE FROM backup_policies p
+    WHERE p.scope IN ('default_site','panel')
+      AND NOT EXISTS (SELECT 1 FROM backup_policy_targets x WHERE x.policy_id = p.id);
+  END IF;
   RETURN NEW;
 END
 $fn$;

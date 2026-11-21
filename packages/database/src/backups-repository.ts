@@ -27,7 +27,15 @@ import {
   sql,
 } from "drizzle-orm";
 import type { DatabaseExecutor } from "./client.js";
-import { backupSettings, operations, organizations, siteBackups, sites, users } from "./schema.js";
+import {
+  backupPolicies,
+  backupSettings,
+  operations,
+  organizations,
+  siteBackups,
+  sites,
+  users,
+} from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm } from "./secrets-crypto.js";
 
 const SINGLETON_ID = "default";
@@ -322,23 +330,51 @@ export interface NightlySiteRef {
   status: string;
 }
 
-/** Locks and reads the singleton nightly run state within an active transaction. */
+// The nightly run state (hour, retention, cursor, lock) lives on the default_site policy of backup_policies, seeded by
+// migration 0022 on every install, so an installation with local targets only still schedules (BKP-02). The same
+// values are mirrored, write-only, into the backup_settings row while it exists: a release older than 0022 and the
+// readers of getBackupSettingsPublic().lastNightlyRunOn keep working after a rollback.
+const DEFAULT_SITE_POLICY = and(eq(backupPolicies.scope, "default_site"), isNull(backupPolicies.siteId));
+
+const NIGHTLY_STATE_COLUMNS = {
+  scheduleHourUtc: backupPolicies.scheduleHourUtc,
+  retentionDays: backupPolicies.retentionDays,
+  lastNightlyRunOn: backupPolicies.lastNightlyRunOn,
+  nightlyRunStartedAt: backupPolicies.nightlyRunStartedAt,
+};
+
+function toNightlyRunState(row: {
+  scheduleHourUtc: number | null;
+  retentionDays: number | null;
+  lastNightlyRunOn: string | null;
+  nightlyRunStartedAt: Date | null;
+}): NightlyRunState {
+  // ck_backup_policies_hour / the seed keep both set on the default_site row.
+  return { ...row, scheduleHourUtc: row.scheduleHourUtc!, retentionDays: row.retentionDays! };
+}
+
+async function mirrorNightlyCursor(
+  tx: DatabaseExecutor,
+  cursor: { lastNightlyRunOn: string | null; nightlyRunStartedAt: Date | null },
+): Promise<void> {
+  await tx
+    .update(backupSettings)
+    .set({ lastNightlyRunOn: cursor.lastNightlyRunOn, nightlyRunStartedAt: cursor.nightlyRunStartedAt })
+    .where(eq(backupSettings.id, SINGLETON_ID));
+}
+
+/** Locks and reads the nightly run state (the default_site policy) within an active transaction. */
 export async function lockNightlyRunState(
   tx: DatabaseExecutor,
 ): Promise<NightlyRunState | null> {
   const rows = await tx
-    .select({
-      scheduleHourUtc: backupSettings.scheduleHourUtc,
-      retentionDays: backupSettings.retentionDays,
-      lastNightlyRunOn: backupSettings.lastNightlyRunOn,
-      nightlyRunStartedAt: backupSettings.nightlyRunStartedAt,
-    })
-    .from(backupSettings)
-    .where(eq(backupSettings.id, SINGLETON_ID))
+    .select(NIGHTLY_STATE_COLUMNS)
+    .from(backupPolicies)
+    .where(DEFAULT_SITE_POLICY)
     .limit(1)
     .for("update");
 
-  return rows[0] ?? null;
+  return rows[0] ? toNightlyRunState(rows[0]) : null;
 }
 
 /** Atomically starts a nightly backup run if idle, hour reached, and date differs from today. */
@@ -350,7 +386,7 @@ export async function startNightlyRun(
 ): Promise<NightlyRunState | null> {
   const startedAtIso = startedAt.toISOString();
   const rows = await tx
-    .update(backupSettings)
+    .update(backupPolicies)
     .set({
       lastNightlyRunOn: today,
       nightlyRunStartedAt: sql<Date>`GREATEST(
@@ -364,28 +400,26 @@ export async function startNightlyRun(
     })
     .where(
       and(
-        eq(backupSettings.id, SINGLETON_ID),
-        isNull(backupSettings.nightlyRunStartedAt),
-        lte(backupSettings.scheduleHourUtc, hourUtc),
-        or(isNull(backupSettings.lastNightlyRunOn), ne(backupSettings.lastNightlyRunOn, today)),
+        DEFAULT_SITE_POLICY,
+        isNull(backupPolicies.nightlyRunStartedAt),
+        lte(backupPolicies.scheduleHourUtc, hourUtc),
+        or(isNull(backupPolicies.lastNightlyRunOn), ne(backupPolicies.lastNightlyRunOn, today)),
       ),
     )
-    .returning({
-      scheduleHourUtc: backupSettings.scheduleHourUtc,
-      retentionDays: backupSettings.retentionDays,
-      lastNightlyRunOn: backupSettings.lastNightlyRunOn,
-      nightlyRunStartedAt: backupSettings.nightlyRunStartedAt,
-    });
+    .returning(NIGHTLY_STATE_COLUMNS);
 
-  return rows[0] ?? null;
+  const row = rows[0];
+  if (!row) {
+    return null;
+  }
+  await mirrorNightlyCursor(tx, row);
+  return toNightlyRunState(row);
 }
 
 /** Clears nightly_run_started_at when a nightly backup run completes. */
 export async function finishNightlyRun(tx: DatabaseExecutor): Promise<void> {
-  await tx
-    .update(backupSettings)
-    .set({ nightlyRunStartedAt: null })
-    .where(eq(backupSettings.id, SINGLETON_ID));
+  await tx.update(backupPolicies).set({ nightlyRunStartedAt: null }).where(DEFAULT_SITE_POLICY);
+  await tx.update(backupSettings).set({ nightlyRunStartedAt: null }).where(eq(backupSettings.id, SINGLETON_ID));
 }
 
 /** Finds the next eligible site without a nightly backup row since runStartedAt. */
@@ -404,6 +438,15 @@ export async function findNextNightlySite(
       and(
         inArray(sites.status, ["ready", "degraded", "stopped"]),
         inArray(sites.siteType, [...SITE_TYPE_KEYS]),
+        // Only a site whose effective policy (its own, else default_site) has a usable target: a fresh install
+        // with nothing configured must not write a failed row per site every night.
+        sql`EXISTS (
+          SELECT 1 FROM backup_policy_targets pt JOIN backup_targets t ON t.id = pt.target_id
+          WHERE pt.policy_id = COALESCE(
+              (SELECT sp.id FROM backup_policies sp WHERE sp.scope = 'site' AND sp.site_id = ${sites.id}),
+              (SELECT dp.id FROM backup_policies dp WHERE dp.scope = 'default_site' AND dp.site_id IS NULL))
+            AND t.enabled AND t.archived_at IS NULL
+            AND (NOT t.legacy_settings OR EXISTS (SELECT 1 FROM backup_settings bs WHERE bs.id = 'default')))`,
         notExists(
           tx
             .select({ id: siteBackups.id })
@@ -640,12 +683,12 @@ export async function recordPanelBackupOutcome(
     .where(eq(backupSettings.id, SINGLETON_ID));
 }
 
-/** Sums the size of each existing site's newest succeeded backup. */
+/** Sums the size of each existing site's newest succeeded (or partial: it has a restorable copy) backup. */
 export async function sumNewestBackupSizes(db: DatabaseExecutor): Promise<number> {
   const newest = db
     .selectDistinctOn([siteBackups.siteId], { siteId: siteBackups.siteId, sizeBytes: siteBackups.sizeBytes })
     .from(siteBackups)
-    .where(eq(siteBackups.status, "succeeded"))
+    .where(sql`${siteBackups.status} IN ('succeeded', 'partial')`)
     .orderBy(siteBackups.siteId, desc(siteBackups.startedAt), desc(siteBackups.id))
     .as("newest_success");
   const [row] = await db
@@ -710,7 +753,7 @@ export async function listAdminBackupStatus(
       finishedAt: siteBackups.finishedAt,
     })
     .from(siteBackups)
-    .where(eq(siteBackups.status, "succeeded"))
+    .where(sql`${siteBackups.status} IN ('succeeded', 'partial')`)
     .orderBy(siteBackups.siteId, desc(siteBackups.startedAt), desc(siteBackups.id))
     .as("latest_success");
 
