@@ -574,8 +574,24 @@ export const OrganizationDetailDtoSchema = OrganizationSummaryDtoSchema.extend({
   quotas: ResourceQuotaDtoSchema.nullable().optional(),
   siteCount: z.number().int().nonnegative(),
   serviceCount: z.number().int().nonnegative(),
+  // null: no per-customer site limit
+  maxSites: z.number().int().nonnegative().nullable(),
 });
 export type OrganizationDetailDto = z.infer<typeof OrganizationDetailDtoSchema>;
+
+// Per-customer site limit; a refused create or reassign is QUOTA_EXCEEDED with details [{ field: "sites", reason }]
+export const SITE_LIMIT_REACHED_REASON = "site_limit_reached" as const;
+export const MAX_SITES_CEILING = 10_000;
+export const UpdateOrganizationSiteLimitInputSchema = z
+  .object({ maxSites: z.number().int().min(0).max(MAX_SITES_CEILING).nullable() })
+  .strict();
+export type UpdateOrganizationSiteLimitInput = z.infer<typeof UpdateOrganizationSiteLimitInputSchema>;
+export const OrganizationSiteLimitDtoSchema = z.object({
+  organizationId: EntityIdSchema,
+  maxSites: z.number().int().nonnegative().nullable(),
+  usedSites: z.number().int().nonnegative(),
+});
+export type OrganizationSiteLimitDto = z.infer<typeof OrganizationSiteLimitDtoSchema>;
 
 export const MemberDtoSchema = z.object({
   id: EntityIdSchema,
@@ -726,7 +742,13 @@ export type AdminSiteDto = z.infer<typeof AdminSiteDtoSchema>;
 export const AdminSitesListDtoSchema = z.object({
   sites: z.array(AdminSiteDtoSchema),
   customers: z.array(
-    z.object({ organizationId: EntityIdSchema, name: z.string(), ownerEmail: z.string() }),
+    z.object({
+      organizationId: EntityIdSchema,
+      name: z.string(),
+      ownerEmail: z.string(),
+      maxSites: z.number().int().nonnegative().nullable(),
+      siteCount: z.number().int().nonnegative(),
+    }),
   ),
   certificateAlerts: z.array(CertificateAlertDtoSchema),
 });
