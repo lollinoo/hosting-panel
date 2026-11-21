@@ -479,7 +479,7 @@ fail before a repair. The plan of the adversarial QA (arch-infra-qa §4.4) was c
 
 | §4.4 area | Covered by | Result |
 |---|---|---|
-| 1 Auth bypass | `tls-tenancy.qa.test.ts`, `backup-targets-tenancy.qa.test.ts`, `hcp004-m1.integration.test.ts`, the route walks of `admin-route-guard` and `support-access-tenancy` | holds: foreign ids answer 404 before the body is read; one low app-wide finding (S4-L1) |
+| 1 Auth bypass | `tls-tenancy.qa.test.ts`, `backup-targets-tenancy.qa.test.ts`, `hcp004-m1.integration.test.ts`, the route walks of `admin-route-guard` and `support-access-tenancy` | holds: foreign ids answer 404 before the body is read; one low app-wide finding (S4-L1, repaired in #17) |
 | 2 Path traversal and filesystem | `local-target-adversarial.test.ts` (253), `manual-tls-adversarial.test.ts` (80), AB step `local-hostile` | holds for the code; two store defects repaired (S4-M9); the executor unit's sandbox defect (S4-H1) was found by the final review and repaired |
 | 3 Secret leakage | `tls-keysafety.qa.test.ts`, `backup-targets-web.qa.test.ts`, `tls-web.qa.test.ts`, `docker inspect` steps of the acceptance scripts | the key canary is absent everywhere; the audit guard bug S4-H2 was found and repaired |
 | 4 Races | `tls-lifecycle.qa.test.ts`, `backup-dual.qa.test.ts`, `backup-retention-recovery.qa.test.ts` | holds. PGlite runs one transaction at a time, so the row locks are proven by outcome only, not by contention (S4-L6) |
@@ -521,7 +521,7 @@ fail before a repair. The plan of the adversarial QA (arch-infra-qa §4.4) was c
 
 | id | Finding | State |
 |---|---|---|
-| S4-L1 | Malformed JSON on an admin route gets 400 before the administrator check (`create-app.ts:478-496`). It is app-wide and older than HCP-SPEC-004. Nothing leaks | open, pinned by an `it.fails` in `backup-targets-tenancy.qa.test.ts`; follow-up issue |
+| S4-L1 | Malformed JSON on an admin route gets 400 before the administrator check (`create-app.ts`, the JSON parser). It is app-wide and older than HCP-SPEC-004. Nothing leaks | repaired (#17): on a `/v1/admin`, `/v1/hosts` or `/v1/allocations` route the parse error waits for `requireServerAdmin`, so the caller gets 401 or 403 (with its denied row) and only an administrator gets 400. Tests: the former `it.fails` in `backup-targets-tenancy.qa.test.ts`, and the route walk in `admin-route-guard.integration.test.ts` |
 | S4-L2 | The customer `GET backup-policy`, when destinations are inherited, returns the ids of default-policy targets that are not offered to customers. Only the bare id leaks | repaired (`ffix-api-lows`): the inherited customer policy now returns only target ids that the customer is offered. Test: `apps/api/test/backup-policies.integration.test.ts` |
 | S4-L3 | Initialise does not check that the expected disk is mounted, so with an external disk unmounted the folder is made on the system disk (spec 6.5.6). The alert `backup_target_space_low` uses only the last admin test, so it can go stale | written as a limit (`review-final-backup`; ADR-0032 section 4): the marker is the only check, so the administrator must mount the disk before Initialise; the space alert follows the last admin test, and a target that is not tested again keeps its old value |
 | S4-L4 | The downgrade gate ignores an archived non-legacy destination that still holds copies. A disabled required destination is dropped at enqueue (a plain `succeeded`, no `partial`) | written as a limit (`.agents/brain/decisions.md` for the gate; ADR-0032 section 5 for the disabled destination) |
@@ -538,7 +538,7 @@ fail before a repair. The plan of the adversarial QA (arch-infra-qa §4.4) was c
 |---|---|---|---|---|
 | high | 3 | 3 | 0 | 0 |
 | medium | 16 | 16 | 0 | 0 |
-| low (listed above) | 10 | 3 (S4-L2, S4-L7, S4-L10) | 4 (S4-L3, S4-L4, S4-L8, S4-L9) | 3 (S4-L1, S4-L5, S4-L6) |
+| low (listed above) | 10 | 4 (S4-L1, S4-L2, S4-L7, S4-L10) | 4 (S4-L3, S4-L4, S4-L8, S4-L9) | 2 (S4-L5, S4-L6) |
 
 The lows of the reviews that the fix-up rounds repaired in a group are counted once, in S4-L7.
 

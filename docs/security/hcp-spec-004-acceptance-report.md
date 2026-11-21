@@ -70,7 +70,7 @@ helper, not product code. The fix is not committed at the time of writing.
 guard and TLS store files, contract and database files, and the update, downgrade-gate and restore-panel
 tests of `infra/linux`), on `fa5aa5d`, Node 26.13.1, 4 CPU, written while the final docs were being
 edited. Result: **35 of 35 files passed; 1353 tests passed, 1 expected fail (`it.fails`), 1 skipped; 170 s.**
-The expected fail is a low defect pinned on purpose (S4-L1).
+The expected fail is a low defect pinned on purpose (S4-L1), repaired since in #17.
 
 ## Matrix: TLS
 
