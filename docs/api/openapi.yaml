@@ -2352,6 +2352,9 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "409":
           $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The request carries `tlsVersionId`, which is available from M2 (`NOT_SUPPORTED`); nothing is created
+          $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites/{siteId}/domains/{domainId}:
     delete:
@@ -2505,6 +2508,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: The request carries `tlsVersionId`, which is available from M2 (`NOT_SUPPORTED`); nothing is created
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/sites/{siteId}/domains/{domainId}:
@@ -6419,6 +6425,18 @@ components:
             - MAIL_RELAY_UNAVAILABLE
             - HOST_AGENT_UNAVAILABLE
             - INTERNAL_ERROR
+            - CERTIFICATE_INVALID
+            - CERTIFICATE_KEY_MISMATCH
+            - CERTIFICATE_CHAIN_INVALID
+            - CERTIFICATE_NOT_YET_VALID
+            - CERTIFICATE_EXPIRED
+            - CERTIFICATE_HOSTNAME_MISMATCH
+            - CERTIFICATE_IN_USE
+            - CERTIFICATE_APPLY_FAILED
+            - CERTIFICATE_SNI_MISMATCH
+            - CERTIFICATE_UPLOAD_TOO_LARGE
+            - CERTIFICATE_FORMAT_UNSUPPORTED
+            - BACKUP_TARGET_IN_USE
         message:
           type: string
         requestId:
@@ -6513,6 +6531,9 @@ components:
         - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
         - wordpressToolsAvailable
+        - manualTlsCertificatesAvailable
+        - localBackupTargetsAvailable
+        - encryptedBackupExportAvailable
       properties:
         phase:
           type: string
@@ -6543,6 +6564,18 @@ components:
         wordpressToolsAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        manualTlsCertificatesAvailable:
+          type: boolean
+          default: false
+          description: True once manual TLS certificates can be imported and assigned; false until that capability ships
+        localBackupTargetsAvailable:
+          type: boolean
+          default: false
+          description: True once a backup target on this server can be configured; false until that capability ships
+        encryptedBackupExportAvailable:
+          type: boolean
+          default: false
+          description: True once an encrypted backup export can be downloaded; false until that capability ships
 
     OrganizationCapabilitiesDto:
       type: object
@@ -6556,6 +6589,9 @@ components:
         - phpMyAdminAvailable
         - productionBackupRuntimeAvailable
         - wordpressToolsAvailable
+        - manualTlsCertificatesAvailable
+        - localBackupTargetsAvailable
+        - encryptedBackupExportAvailable
       properties:
         hostingMode:
           type: string
@@ -6581,6 +6617,18 @@ components:
         wordpressToolsAvailable:
           type: boolean
           description: True when `runtimeBackend` is `linux-systemd`; false otherwise
+        manualTlsCertificatesAvailable:
+          type: boolean
+          default: false
+          description: True once manual TLS certificates can be imported and assigned; false until that capability ships
+        localBackupTargetsAvailable:
+          type: boolean
+          default: false
+          description: True once a backup target on this server can be configured; false until that capability ships
+        encryptedBackupExportAvailable:
+          type: boolean
+          default: false
+          description: True once an encrypted backup export can be downloaded; false until that capability ships
 
     DevPersonaDto:
       type: object
@@ -7239,6 +7287,13 @@ components:
         includeWww:
           type: boolean
           default: false
+        tlsVersionId:
+          type: string
+          pattern: "^ctv_[0-9a-f]{32}$"
+          description: >-
+            Create the domain directly on this loaded certificate version of the same organisation.
+            Available from M2; until then a request carrying it is refused with 422 `NOT_SUPPORTED`
+            and nothing is created.
 
     CertificateAlertDto:
       type: object
@@ -7266,7 +7321,7 @@ components:
 
     SiteDomainDto:
       type: object
-      required: [id, hostname, isPrimary, routed, challenge, dns, certificate]
+      required: [id, hostname, isPrimary, routed, challenge, dns, certificate, tls]
       properties:
         id:
           type: string
@@ -7322,6 +7377,39 @@ components:
               nullable: true
             trusted:
               type: boolean
+        tls:
+          $ref: "#/components/schemas/SiteDomainTlsDto"
+
+    SiteDomainTlsDto:
+      type: object
+      required: [mode, certificateId, versionId, state, problem]
+      properties:
+        mode:
+          type: string
+          enum: [acme, manual]
+          description: "`acme` is the automatic Let's Encrypt certificate; `manual` is an imported one"
+        certificateId:
+          type: string
+          nullable: true
+          description: The imported certificate; null in `acme` mode
+        versionId:
+          type: string
+          nullable: true
+          description: >-
+            The certificate version assigned to the domain; null in `acme` mode. While `state` is `applying`
+            this is the version being applied, not yet the one served.
+        state:
+          type: string
+          enum: [applying, active, failed]
+          nullable: true
+          description: Whether the imported certificate is being put in place, is served, or could not be applied; null in `acme` mode
+        problem:
+          type: string
+          nullable: true
+          description: >-
+            The `last_error_code` of the assigned version, in any state (for example an `active` domain can show
+            a problem that was recorded on the version); null when the version has none. It belongs to the version,
+            so every domain using that version shows the same value; null in `acme` mode
 
     MailRelaySettingsInput:
       type: object
@@ -9165,7 +9253,7 @@ components:
               required: [operationId, kind, siteId, siteName]
               properties:
                 operationId: { type: string }
-                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply] }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply, site.tls.apply] }
                 siteId: { type: string, nullable: true }
                 siteName: { type: string, nullable: true }
 
@@ -9785,6 +9873,7 @@ components:
             - host.maintenance
             - host.security
             - host.allocate
+            - site.tls.apply
         status:
           type: string
           enum:

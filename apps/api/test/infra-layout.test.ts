@@ -230,6 +230,23 @@ describe("release workflow and docs", () => {
     for (const s of ["0030", "accept-acme-pebble.mjs"]) expect(harness).toContain(s);
   });
 
+  it("hcp-spec-004 ADRs are consistent", () => {
+    const adrs = [
+      { file: "docs/architecture/adr/0031-manual-tls-certificates.md", tokens: ["CP-01", "manual-certs", "PEM", "checkHost"] },
+      { file: "docs/architecture/adr/0032-backup-targets.md", tokens: ["HP_BACKUP_LOCAL_ROOT", "legacy_settings", "partial", "backup.key"] }
+    ];
+    for (const { file, tokens } of adrs) {
+      expect(existsSync(join(root, file)), file).toBe(true);
+      const adr = read(file);
+      for (const header of ["Stato", "Riferimento", "Migrazioni"]) expect(adr, `${file} ${header}`).toMatch(new RegExp(`^- \\*\\*${header}:\\*\\*`, "m"));
+      for (const s of tokens) expect(adr, `${file} ${s}`).toContain(s);
+      // Every repo path the ADR writes in backticks exists (a trailing :line is dropped); at least 8 are cited.
+      const paths = [...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, ""));
+      expect(paths.length, file).toBeGreaterThanOrEqual(8);
+      for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    }
+  });
+
   it("m1a file manager docs are consistent", () => {
     const readme = read("README.md");
     for (const s of ["Web File Manager dei Siti", "ADR-0019"]) {
