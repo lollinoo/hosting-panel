@@ -247,6 +247,53 @@ describe("release workflow and docs", () => {
     }
   });
 
+  it("hcp-spec-004 docs are consistent", () => {
+    const readme = read("README.md");
+    for (const s of ["ADR-0031", "ADR-0032", "HP_BACKUP_LOCAL_ROOT", "hp-restore-panel --local-repo", "--allow-feature-loss", "hp-restore-panel --endpoint"]) {
+      expect(readme, `README ${s}`).toContain(s);
+    }
+    const harness = read("HARNESS.md");
+    for (const s of ["0032", "0022_backup_targets_and_copies.sql", "accept-tls-manual.mjs", "accept-backup-local.mjs"]) expect(harness, `HARNESS ${s}`).toContain(s);
+    const runbook = read("docs/runbooks/tls-and-backup-targets.md");
+    for (let n = 1; n <= 10; n++) expect(runbook, `runbook heading ${n}.`).toMatch(new RegExp(`^## ${n}\\. `, "m"));
+    const api = read("docs/api/openapi.yaml");
+    for (const s of ["/v1/admin/backup-targets", "tls-certificates"]) expect(api, `openapi ${s}`).toContain(s);
+
+    // The acceptance report: exactly one row per id, an allowed verdict, and a command and SHA on every PASS row.
+    const report = read("docs/security/hcp-spec-004-acceptance-report.md");
+    const ids = [
+      ...Array.from({ length: 14 }, (_, i) => `TLS-${String(i + 1).padStart(2, "0")}`),
+      ...Array.from({ length: 20 }, (_, i) => `BKP-${String(i + 1).padStart(2, "0")}`)
+    ];
+    const rows = report
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("|"))
+      .map((line) => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim()))
+      .filter((cells) => /^(TLS|BKP)-\d{2}$/.test((cells[0] ?? "").replace(/[`*]/g, "")));
+    const verdict = /^(PASS|FAIL|SKIPPED \(.+\)|PENDING \(owner: .+\)|BLOCKED \(BLOCKED\.md #\d+\))$/;
+    for (const id of ids) {
+      const mine = rows.filter((cells) => cells[0]!.replace(/[`*]/g, "") === id);
+      expect(mine.length, `acceptance report rows for ${id}`).toBe(1);
+      const cells = mine[0]!;
+      const v = (cells[2] ?? "").replace(/\*/g, "");
+      expect(v, `${id} verdict`).toMatch(verdict);
+      if (v === "PASS") {
+        expect((cells[3] ?? "").replace(/`/g, "").trim().length, `${id} command`).toBeGreaterThan(0);
+        expect(cells[5] ?? "", `${id} SHA`).toMatch(/[0-9a-f]{7,40}/);
+      }
+    }
+    expect(rows.length, "acceptance report has no extra id rows").toBe(ids.length);
+
+    // Both ADRs are as built and cite at least 15 repo paths that exist.
+    for (const file of ["docs/architecture/adr/0031-manual-tls-certificates.md", "docs/architecture/adr/0032-backup-targets.md"]) {
+      const adr = read(file);
+      expect(adr, `${file} Stato`).toMatch(/^- \*\*Stato:\*\* `APPROVATO`/m);
+      const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+      expect(paths.size, file).toBeGreaterThanOrEqual(15);
+      for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    }
+  });
+
   it("hcp-spec-004 manual tls acceptance script is registered and machine-safe", () => {
     const script = read("infra/linux/accept-tls-manual.mjs");
     const helper = read("infra/linux/tls-test-certs.mjs");
@@ -550,8 +597,10 @@ describe("release workflow and docs", () => {
   it("hcp-spec-004 the executor knows the local backup root", () => {
     const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
     expect(bootstrap).toContain(
-      "install -d -m 0700 -o hp-executor -g hp-executor /var/lib/hosting-panel/local-repos\n",
+      "install -d -m 2770 -o hp-executor -g hp-executor /var/lib/hosting-panel/local-repos\nchmod 2770 /var/lib/hosting-panel/local-repos\n",
     );
+    // RestrictSUIDSGID=yes stays; it is why the root carries the setgid bit instead of the executor asking for it.
+    expect(read("infra/systemd/hp-docker-executor.service")).toContain("\nRestrictSUIDSGID=yes\n");
     const unit = read("infra/systemd/hp-docker-executor.service");
     expect(unit).toContain("\nEnvironment=HP_BACKUP_LOCAL_ROOT=/var/lib/hosting-panel/local-repos\n");
     expect(unit).toContain("\nReadWritePaths=/var/lib/hosting-panel /run/hosting-panel\n");

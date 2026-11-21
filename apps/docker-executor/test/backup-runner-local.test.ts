@@ -80,8 +80,9 @@ async function setup(opts?: {
   const secretsRootDir = path.join(tmp, "secrets");
   await mkdir(secretsRootDir, { mode: 0o700 });
   const root = path.join(tmp, "repos");
+  // What bootstrap-dedicated.sh does: the root is 2770, so the guard's folders inherit setgid.
   await mkdir(root, { mode: 0o700 });
-  await chmod(root, 0o700);
+  await chmod(root, 0o2770);
   const panelDumpDir = path.join(tmp, "panel-dump");
   await mkdir(panelDumpDir, { mode: 0o770 });
   const backupKeyFile = path.join(tmp, "backup.key");

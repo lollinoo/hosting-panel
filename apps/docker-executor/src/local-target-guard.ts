@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { constants as fsc, type BigIntStats } from "node:fs";
-import { lstat, mkdir, open, readdir, readlink, realpath, rename, statfs, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readdir, readlink, realpath, rename, rmdir, statfs, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { BACKUP_DISK_FREE_FLOOR_BYTES } from "./backup-jobs.js";
@@ -36,15 +36,26 @@ export interface LocalTargetGuardDeps {
   /** Test seams. */
   readonly statfs?: (path: string, options: { readonly bigint: true }) => Promise<LocalStatfs>;
   readonly open?: (path: string, flags: number, mode: number) => Promise<FileHandle>;
+  readonly mkdir?: (path: string, mode: number) => Promise<unknown>;
   readonly randomHex?: (bytes: number) => string;
 }
 
-export type LocalTargetResult<T> = { readonly ok: true; readonly repo: T } | { readonly ok: false; readonly problem: LocalTargetProblem };
+export type LocalTargetResult<T> =
+  | { readonly ok: true; readonly repo: T }
+  | { readonly ok: false; readonly problem: LocalTargetProblem; readonly detail?: string };
 
 export const LOCAL_TARGET_MARKER_NAME = ".hp-local-target";
 export const localTargetMarkerContent = (targetId: string): string => `hosting-panel local backup target ${targetId}\n`;
+/**
+ * Mode passed to mkdir. It never carries S_ISGID: the executor unit sets RestrictSUIDSGID=yes, which makes any
+ * chmod/mkdir/open that asks for the bit fail with EPERM. The bit comes from the parent instead: the installer
+ * (or the admin, for an external volume) makes the root `2770 hp-executor:hp-executor` and Linux hands the setgid
+ * bit and the group to every directory created inside it.
+ */
+export const LOCAL_DIR_CREATE_MODE = 0o770;
+/** What a directory created under a prepared root must look like afterwards (and what a repo leaf must always be). */
 export const LOCAL_REPO_DIR_MODE = 0o2770;
-export const LOCAL_TARGET_DIR_MODE = 0o700;
+const S_ISGID = 0o2000;
 export const LOCAL_TARGET_ID_PATTERN = /^bkt_[0-9a-f]{32}$/;
 
 const DIR_FLAGS = fsc.O_RDONLY | fsc.O_DIRECTORY | fsc.O_NOFOLLOW;
@@ -64,12 +75,17 @@ const STALE_PROBE_MS = 5 * 60_000;
 const PROBE_NAME = /^\.hp-probe-[0-9a-f]{8}$/;
 
 class Refusal extends Error {
-  public constructor(public readonly problem: LocalTargetProblem) {
+  public constructor(
+    public readonly problem: LocalTargetProblem,
+    public readonly detail?: string,
+  ) {
     super(problem);
   }
 }
 
-const refuse = (problem: LocalTargetProblem): Refusal => new Refusal(problem);
+const refuse = (problem: LocalTargetProblem, detail?: string): Refusal => new Refusal(problem, detail);
+const NEEDS_SETGID_ROOT =
+  "local backup directories must be setgid and owned by the executor group: run `chown hp-executor:hp-executor <dir> && chmod 2770 <dir>` as root (docs/runbooks/tls-and-backup-targets.md)";
 const errno = (e: unknown): string => (e as NodeJS.ErrnoException | undefined)?.code ?? "";
 const noop = (): undefined => undefined;
 const fdPath = (fh: FileHandle, ...rest: string[]): string => path.posix.join("/proc/self/fd", String(fh.fd), ...rest);
@@ -108,11 +124,16 @@ export function validateLocalRepoRoot(raw: string | undefined, forbidden: readon
   return raw;
 }
 
-function checkDirStat(st: BigIntStats, deps: LocalTargetGuardDeps, exactMode?: number): void {
+/**
+ * Group write is allowed only on the group-shared layout (setgid + the executor group); other write never.
+ * `exact` (the repo leaf) must be exactly 2770 with the executor group.
+ */
+function checkDirStat(st: BigIntStats, deps: LocalTargetGuardDeps, exact = false): void {
   const mode = Number(st.mode) & 0o7777;
   if (!st.isDirectory() || Number(st.uid) !== deps.executorUid) throw refuse("local_target_unsafe");
-  if (exactMode === undefined ? (mode & 0o022) !== 0 : mode !== exactMode || Number(st.gid) !== deps.executorGid) {
-    throw refuse("local_target_unsafe");
+  const shared = (mode & S_ISGID) !== 0 && Number(st.gid) === deps.executorGid;
+  if (exact ? mode !== LOCAL_REPO_DIR_MODE || !shared : (mode & 0o002) !== 0 || ((mode & 0o020) !== 0 && !shared)) {
+    throw refuse("local_target_unsafe", exact || (mode & 0o020) !== 0 ? NEEDS_SETGID_ROOT : undefined);
   }
 }
 
@@ -128,8 +149,7 @@ async function tryOpenDir(p: string): Promise<FileHandle | undefined> {
 
 interface SegmentOptions {
   readonly create: boolean;
-  readonly mode: number;
-  /** Required exact mode+gid (the repo leaf); otherwise "no group/other write". */
+  /** Required exact mode+gid (the repo leaf); otherwise "no other write, group write only when setgid+executor gid". */
   readonly exact?: boolean;
   readonly missing: LocalTargetProblem;
 }
@@ -146,8 +166,11 @@ async function openSegment(
   let created = false;
   if (!fh) {
     if (!o.create) throw refuse(o.missing);
+    // New directories get setgid + the group only by inheritance, so refuse before creating under a parent without it.
+    const ps = await parent.stat({ bigint: true });
+    if ((Number(ps.mode) & S_ISGID) === 0 || Number(ps.gid) !== deps.executorGid) throw refuse("local_target_unsafe", NEEDS_SETGID_ROOT);
     try {
-      await mkdir(p, 0o700);
+      await (deps.mkdir ?? ((q, m) => mkdir(q, m)))(p, LOCAL_DIR_CREATE_MODE);
       created = true;
     } catch (e) {
       if (errno(e) !== "EEXIST") throw refuse(mapFsError(e));
@@ -157,8 +180,13 @@ async function openSegment(
   }
   track(fh);
   try {
-    if (created) await fh.chmod(o.mode); // fchmod on the held fd: mkdir's mode is umask-filtered
-    checkDirStat(await fh.stat({ bigint: true }), deps, o.exact ? o.mode : undefined);
+    const st = await fh.stat({ bigint: true });
+    // Never fchmod: a mode without S_ISGID would clear the inherited bit, one with it is refused by RestrictSUIDSGID.
+    if (created && ((Number(st.mode) & 0o7777) !== LOCAL_REPO_DIR_MODE || Number(st.gid) !== deps.executorGid)) {
+      await rmdir(p).catch(noop); // do not leave a directory the next call would keep refusing
+      throw refuse("local_target_unsafe", NEEDS_SETGID_ROOT);
+    }
+    checkDirStat(st, deps, o.exact);
   } catch (e) {
     if (e instanceof Refusal) throw e;
     throw refuse(mapFsError(e));
@@ -289,7 +317,7 @@ async function runGuard(
 ): Promise<GuardedLocalRepo> {
   const rootFh = await openRoot(deps, track);
   const root = deps.root as string;
-  const target = (await openSegment(deps, track, rootFh, req.targetId, { create: false, mode: LOCAL_TARGET_DIR_MODE, missing: "local_target_unmounted" })).fh;
+  const target = (await openSegment(deps, track, rootFh, req.targetId, { create: false, missing: "local_target_unmounted" })).fh;
   // An empty mountpoint of an unmounted disk has no marker.
   const marker = await readMarker(target, deps);
   if (marker !== localTargetMarkerContent(req.targetId)) throw refuse("local_target_unmounted");
@@ -302,7 +330,6 @@ async function runGuard(
     dir = (
       await openSegment(deps, track, dir, name, {
         create: write,
-        mode: isLeaf ? LOCAL_REPO_DIR_MODE : LOCAL_TARGET_DIR_MODE,
         exact: isLeaf,
         missing: "other",
       })
@@ -328,12 +355,12 @@ async function runGuard(
 
 async function withHandles<T>(
   fn: (track: (fh: FileHandle) => FileHandle) => Promise<T>,
-): Promise<{ readonly ok: true; readonly repo: T } | { readonly ok: false; readonly problem: LocalTargetProblem }> {
+): Promise<LocalTargetResult<T>> {
   const handles: FileHandle[] = [];
   try {
     return { ok: true, repo: await fn((fh) => (handles.push(fh), fh)) };
   } catch (e) {
-    if (e instanceof Refusal) return { ok: false, problem: e.problem };
+    if (e instanceof Refusal) return e.detail === undefined ? { ok: false, problem: e.problem } : { ok: false, problem: e.problem, detail: e.detail };
     throw e;
   } finally {
     await Promise.all(handles.map((h) => h.close().catch(noop)));
@@ -358,7 +385,7 @@ export async function guardLocalTarget(
 }
 
 /**
- * The only code path that creates `<root>/<targetId>`: directory 0700, marker (atomic), `sites/` 0700, `panel/` 2770,
+ * The only code path that creates `<root>/<targetId>`: directory, marker (atomic), `sites/`, `panel/` (all created 0770, setgid inherited from the prepared root),
  * then the full guard on the panel repo. Idempotent; a foreign marker or a non-empty unmarked directory is unsafe.
  */
 export async function initLocalTarget(
@@ -369,7 +396,7 @@ export async function initLocalTarget(
   assertIds(targetId, scope);
   return withHandles(async (track) => {
     const rootFh = await openRoot(deps, track);
-    const target = (await openSegment(deps, track, rootFh, targetId, { create: true, mode: LOCAL_TARGET_DIR_MODE, missing: "local_target_unmounted" })).fh;
+    const target = (await openSegment(deps, track, rootFh, targetId, { create: true, missing: "local_target_unmounted" })).fh;
     const expected = localTargetMarkerContent(targetId);
     const existing = await readMarker(target, deps);
     if (existing !== undefined) {
@@ -393,8 +420,8 @@ export async function initLocalTarget(
         throw refuse(mapFsError(e));
       }
     }
-    await openSegment(deps, track, target, "sites", { create: true, mode: LOCAL_TARGET_DIR_MODE, missing: "other" });
-    await openSegment(deps, track, target, "panel", { create: true, mode: LOCAL_REPO_DIR_MODE, exact: true, missing: "other" });
+    await openSegment(deps, track, target, "sites", { create: true, missing: "other" });
+    await openSegment(deps, track, target, "panel", { create: true, exact: true, missing: "other" });
     const guarded = await runGuard(deps, track, { targetId, scope, intent: "init", requiredExtraBytes: 0 });
     return guarded;
   });

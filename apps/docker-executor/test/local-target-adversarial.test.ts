@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { BackupsIpcRequestSchema, type BackupsIpcRequest } from "@hosting-panel/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { BACKUP_DISK_FREE_FLOOR_BYTES, BackupRunner, type BackupRunnerDeps, type DockerRequest } from "../src/index.js";
 
 const execFileAsync = promisify(execFile);
@@ -29,6 +29,19 @@ const FLOOR = BACKUP_DISK_FREE_FLOOR_BYTES;
 const SITE = "site1";
 
 const cleanups: Array<() => Promise<unknown>> = [];
+// The unit runs with UMask=0007; mkdir's 0770 must not be filtered further.
+let oldUmask: number | undefined;
+beforeAll(() => {
+  try {
+    oldUmask = process.umask(0o007);
+  } catch {
+    // worker threads cannot change the umask
+  }
+});
+afterAll(() => {
+  if (oldUmask !== undefined) process.umask(oldUmask);
+});
+
 afterEach(async () => {
   vi.restoreAllMocks();
   for (const task of cleanups.splice(0).reverse()) await task();
@@ -103,9 +116,9 @@ async function setup(opts?: {
   // The root lives one level down so a symlinked ancestor can be planted too.
   const base = path.join(tmp, "base");
   const root = path.join(base, "repos");
-  await mkdir(root, { recursive: true, mode: 0o700 });
+  await mkdir(root, { recursive: true, mode: 0o770 });
   await chmod(base, 0o700);
-  await chmod(root, 0o700);
+  await chmod(root, 0o2770); // as bootstrap-dedicated.sh: new directories inherit setgid (RestrictSUIDSGID forbids asking)
   const panelDumpDir = path.join(tmp, "panel-dump");
   await mkdir(panelDumpDir, { mode: 0o770 });
   const backupKeyFile = path.join(tmp, "backup.key");
@@ -1214,9 +1227,9 @@ describe("BKP-05: mounts, uid/gid and container hardening of the local branch", 
     await initTarget(env);
     expect(await ACTIONS[0]!.run(env, env.runner, 340)).toBeNull();
     const mode = async (p: string): Promise<number> => (await stat(p)).mode & 0o7777;
-    expect(await mode(env.root)).toBe(0o700);
-    expect(await mode(path.join(env.root, TARGET_ID))).toBe(0o700);
-    expect(await mode(path.join(env.root, TARGET_ID, "sites"))).toBe(0o700);
+    expect(await mode(env.root)).toBe(0o2770);
+    expect(await mode(path.join(env.root, TARGET_ID))).toBe(0o2770);
+    expect(await mode(path.join(env.root, TARGET_ID, "sites"))).toBe(0o2770);
     expect(await mode(siteDir(env))).toBe(0o2770);
     expect(await mode(panelDir(env))).toBe(0o2770);
     expect(await mode(path.join(env.root, TARGET_ID, MARKER))).toBe(0o600);

@@ -309,7 +309,7 @@ describe("update.sh", () => {
       "/run/hosting-panel/host-jobs",
       "/run/hosting-panel/acme-dns",
       "ingress/dynamic/manual-certs",
-      "/var/lib/hosting-panel/local-repos",
+      "/var/lib/hosting-panel/local-repos (2770 hp-executor:hp-executor, HP_BACKUP_LOCAL_ROOT)",
       "unattended-upgrades",
       "2222 (site SFTP)",
       "127.0.0.1:8306"

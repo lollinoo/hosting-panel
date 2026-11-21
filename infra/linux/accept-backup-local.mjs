@@ -701,9 +701,16 @@ async function main() {
         const mariadbDataDir = path.join(tmpRoot, "mariadb-data");
         const siteFilesDir = path.join(tmpRoot, "site-files");
         const extraDirs = ["sftp", "ingress", "site-mail", "phpmyadmin"].map((d) => path.join(tmpRoot, d));
-        for (const dir of [secretsRootDir, backupWorkDir, handoverDir, localRoot, mariadbDataDir, siteFilesDir, ...extraDirs]) {
+        for (const dir of [secretsRootDir, backupWorkDir, handoverDir, mariadbDataDir, siteFilesDir, ...extraDirs]) {
           await mkdir(dir, { mode: 0o700 });
         }
+        // As bootstrap-dedicated.sh makes HP_BACKUP_LOCAL_ROOT (2770, executor group): under RestrictSUIDSGID=yes the
+        // executor cannot ask for setgid, so the directories it creates below inherit it from here. The guard asks for
+        // 0770, so the shell's umask (the unit has UMask=0007) must not strip the group bits.
+        const currentUmask = process.umask();
+        assert((currentUmask & 0o070) === 0, "umask keeps the group bits (0002 or 0007)", currentUmask.toString(8));
+        await mkdir(localRoot, { mode: 0o770 });
+        await chmod(localRoot, 0o2770);
         await mkdir(verifySecretsDir, { mode: 0o755 });
 
         backupKeyFile = path.join(tmpRoot, "backup.key");
@@ -954,14 +961,14 @@ async function main() {
 
       const rootSt = await lstat(localRoot);
       const tSt = await lstat(targetDir());
-      assert(tSt.isDirectory() && (tSt.mode & 0o7777) === 0o700 && tSt.uid === execUid, "<targetId> is 0700 owned by the executor", `${(tSt.mode & 0o7777).toString(8)} uid ${String(tSt.uid)}`);
-      assert((rootSt.mode & 0o7777) === 0o700, "root untouched (0700)", (rootSt.mode & 0o7777).toString(8));
+      assert(tSt.isDirectory() && (tSt.mode & 0o7777) === 0o2770 && tSt.gid === execGid && tSt.uid === execUid, "<targetId> is 2770 (setgid inherited) owned by the executor", `${(tSt.mode & 0o7777).toString(8)} uid ${String(tSt.uid)}`);
+      assert((rootSt.mode & 0o7777) === 0o2770, "root untouched (2770)", (rootSt.mode & 0o7777).toString(8));
       const marker = path.join(targetDir(), MARKER_NAME);
       const mSt = await lstat(marker);
       assert(mSt.isFile() && mSt.uid === execUid, "marker is a regular file owned by the executor", JSON.stringify(mSt.mode));
       assert((await readFile(marker, "utf8")) === localTargetMarkerContent(targetId), "marker names exactly this target", await readFile(marker, "utf8"));
       const sitesSt = await lstat(path.join(targetDir(), "sites"));
-      assert((sitesSt.mode & 0o7777) === 0o700, "sites/ is 0700", (sitesSt.mode & 0o7777).toString(8));
+      assert((sitesSt.mode & 0o7777) === 0o2770, "sites/ is 2770 (setgid inherited)", (sitesSt.mode & 0o7777).toString(8));
       const pSt = await lstat(panelDir());
       assert(
         (pSt.mode & 0o7777) === 0o2770 && pSt.gid === execGid && pSt.uid === execUid,
@@ -1213,7 +1220,7 @@ async function main() {
           () => chmod(leafDir(), mode), () => chmod(leafDir(), 0o2770));
       }
       await refusal("root writable by others (0777)", "local_target_unsafe",
-        () => chmod(localRoot, 0o777), () => chmod(localRoot, 0o700));
+        () => chmod(localRoot, 0o777), () => chmod(localRoot, 0o2770));
       assert(((await lstat(leafDir())).mode & 0o7777) === 0o2770, "leaf back to 2770", "mode differs");
 
       // A root that is not there (disk not mounted) and a root the executor never accepted.
@@ -1248,7 +1255,7 @@ async function main() {
         const mnt = path.join(tmpRoot, "rootcase-mount");
         await mkdir(mnt, { mode: 0o700 });
         const mountTmpfs = async (size) => {
-          const r = await execCmd("mount", ["-t", "tmpfs", "-o", `size=${size},mode=0700`, "tmpfs", mnt]);
+          const r = await execCmd("mount", ["-t", "tmpfs", "-o", `size=${size},mode=2770`, "tmpfs", mnt]);
           assert(r.ok, `mount tmpfs ${size}`, r.stderr);
           if (!mounts.includes(mnt)) mounts.push(mnt);
         };

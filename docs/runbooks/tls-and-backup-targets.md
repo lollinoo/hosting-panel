@@ -145,13 +145,16 @@ The proxy keeps serving with the API and the database down, and `hp-update` neve
    write-only). Changing endpoint, bucket or prefix creates a new destination and archives the current one; its backups stay
    restorable and nothing is deleted from the bucket.
 2. **Local folder on the server**: the root is fixed by the executor (`HP_BACKUP_LOCAL_ROOT`, default
-   `/var/lib/hosting-panel/local-repos`, created `0700 hp-executor:hp-executor` by the bootstrap and by `hp-update`). Neither
-   the API nor a customer ever supplies a path. Only one local destination exists.
+   `/var/lib/hosting-panel/local-repos`, created `2770 hp-executor:hp-executor` (setgid) by the bootstrap and by `hp-update`). Neither
+   the API nor a customer ever supplies a path. Only one local destination exists. The executor runs with
+   `RestrictSUIDSGID=yes`, so it can never ask for the setgid bit: every folder it creates under the root (`<targetId>`,
+   `sites/`, `sites/<siteId>`, `panel/`) is made `0770` and inherits setgid and the group from its parent. A root or a
+   volume without `2770 hp-executor:hp-executor` is refused with `local_target_unsafe`.
 3. **Dedicated disk** (recommended: a local copy shares the disk's fate with the server). Mount it, then add a drop-in:
    ```bash
    sudo mkdir -p /srv/hp-backups
    sudo mount /dev/<device> /srv/hp-backups        # and add it to /etc/fstab
-   sudo chown hp-executor:hp-executor /srv/hp-backups && sudo chmod 0700 /srv/hp-backups
+   sudo chown hp-executor:hp-executor /srv/hp-backups && sudo chmod 2770 /srv/hp-backups
    sudo mkdir -p /etc/systemd/system/hp-docker-executor.service.d
    sudo tee /etc/systemd/system/hp-docker-executor.service.d/local-backups.conf >/dev/null <<'EOF'
    [Service]
@@ -160,13 +163,17 @@ The proxy keeps serving with the API and the database down, and `hp-update` neve
    EOF
    sudo systemctl daemon-reload && sudo systemctl restart hp-docker-executor
    ```
+   Run the `chown`/`chmod` as root on the **mounted** volume (the mode lives on the volume's own root, not on the empty
+   mountpoint). The same applies to a volume mounted at `<root>/<targetId>` instead of at the root: `chown
+   hp-executor:hp-executor` and `chmod 2770` it after mounting, otherwise `sites/` and `panel/` are not created and Inizializza
+   answers `local_target_unsafe`. The executor never runs `chmod` on these folders.
    The `-` before the path lets the executor start even if the disk is absent. Do **not** add `RequiresMountsFor=`: the safety
    is the per-destination marker, below. The path must be absolute, at least two levels deep, characters
    `A-Za-z0-9._@+/-` only, and not under `/etc`, `/proc`, `/sys`, `/dev`, `/run`, `/boot`, `/root` or `/var/lib/docker`;
    otherwise local destinations are disabled (`local_target_unsafe`) and S3 is unaffected.
 4. In **Destinazioni** choose «Aggiungi destinazione locale», then **Inizializza**. This writes the marker
    `<root>/<targetId>/.hp-local-target` (the only action that ever creates `<root>/<targetId>`), then the folders `sites/`
-   (0700) and `panel/` (2770). A backup never creates the folder: with the disk unmounted the job fails closed with
+   and `panel/` (both inherit `2770`). A backup never creates the folder: with the disk unmounted the job fails closed with
    `local_target_unmounted` instead of writing to the system disk. After mounting a **different** disk, initialise again.
 5. Verify: «Prova» runs the guard (marker, ownership, write probe, free space) and shows free space of total; the destination
    needs at least 1 GiB free plus the job's estimate for writing jobs (64 MiB margin for restore, archive and forget). The
@@ -251,7 +258,7 @@ page alerts (`backup_target_space_low`, `backup_site_without_target`, `backup_pa
 | --- | --- | --- |
 | `local_target_unmounted` | folder missing or marker absent: disk not mounted | `findmnt <root>`; mount the disk, then «Prova». If it is a new disk, «Inizializza» again |
 | `local_target_readonly` | filesystem is read-only | `dmesg \| tail`; remount read-write (`mount -o remount,rw <root>`), fsck if needed, «Prova» |
-| `local_target_unsafe` | root or folder with wrong owner/mode, symlink, or invalid `HP_BACKUP_LOCAL_ROOT` | correct to `hp-executor:hp-executor` (root `0700`, repository folders `2770`), or fix the drop-in; restart `hp-docker-executor` |
+| `local_target_unsafe` | root or folder with wrong owner/mode, symlink, or invalid `HP_BACKUP_LOCAL_ROOT` | as root run `chown hp-executor:hp-executor <root>` and `chmod 2770 <root>` (also on a volume mounted at `<root>/<targetId>`); repository folders must be `2770` with group `hp-executor`; a leftover folder with a wrong mode must be corrected or removed; or fix the drop-in; restart `hp-docker-executor` |
 | `no_space` | disk full | free space or enlarge the volume (`df -h <root>`); the 1 GiB floor and the alert warn earlier; no quotas exist |
 | `backup_copy_missing` | the copy is no longer where it was saved | restore from the other copy (procedure 7); the missing copy stays recorded |
 | `auth_failed` / `unreachable` (S3) | credentials expired or endpoint unreachable | rotate the keys at the provider, edit the destination (the secret field is write-only), «Prova» |

@@ -1,7 +1,7 @@
 import { chmod, lstat, lutimes, utimes, mkdir, mkdtemp, open, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { BACKUP_DISK_FREE_FLOOR_BYTES } from "../src/backup-jobs.js";
 import {
   guardLocalTarget,
@@ -44,17 +44,32 @@ const mode = async (p: string): Promise<number> => (await stat(p)).mode & 0o7777
 
 async function provisionTarget(targetId = TARGET): Promise<string> {
   const dir = path.join(root, targetId);
-  await mkdir(dir, { mode: 0o700 });
-  await chmod(dir, 0o700);
+  await mkdir(dir, { mode: 0o770 });
+  await chmod(dir, 0o2770);
   await writeFile(path.join(dir, LOCAL_TARGET_MARKER_NAME), localTargetMarkerContent(targetId), { mode: 0o600 });
   return dir;
 }
+
+// The unit runs with UMask=0007; mkdir's 0770 must not be filtered further.
+let oldUmask: number | undefined;
+beforeAll(() => {
+  try {
+    oldUmask = process.umask(0o007);
+  } catch {
+    // worker threads cannot change the umask
+  }
+});
+afterAll(() => {
+  if (oldUmask !== undefined) process.umask(oldUmask);
+});
 
 beforeEach(async () => {
   tmp = await mkdtemp(path.join(os.tmpdir(), "hp-guard-"));
   root = path.join(tmp, "root");
   outside = path.join(tmp, "outside");
-  await mkdir(root, { mode: 0o700 });
+  // What bootstrap-dedicated.sh does: the root is 2770 owned by the executor group, so new directories inherit setgid.
+  await mkdir(root, { mode: 0o770 });
+  await chmod(root, 0o2770);
   await mkdir(outside, { mode: 0o700 });
 });
 afterEach(async () => {
@@ -117,7 +132,7 @@ describe("guardLocalTarget", () => {
     expect(await guard(deps({ root: null }))).toEqual({ ok: false, problem: "local_target_unsafe" });
   });
 
-  it("creates sites/<siteId> 0700 and the leaf exactly 2770 for a write intent", async () => {
+  it("creates sites/<siteId> and the leaf by setgid inheritance (2770) for a write intent", async () => {
     await provisionTarget();
     const result = await guard(deps());
     expect(result.ok).toBe(true);
@@ -129,7 +144,7 @@ describe("guardLocalTarget", () => {
       availableBytes: Number(100n * GIB),
       totalBytes: Number(200n * GIB),
     });
-    expect(await mode(path.join(root, TARGET, "sites"))).toBe(0o700);
+    expect(await mode(path.join(root, TARGET, "sites"))).toBe(0o2770);
     expect(await mode(result.repo.hostDir)).toBe(0o2770);
     expect((await stat(result.repo.hostDir)).gid).toBe(gid);
     expect(await readdir(result.repo.hostDir)).toEqual([]); // probe removed
@@ -208,11 +223,11 @@ describe("guardLocalTarget", () => {
   it("refuses wrong modes and a foreign owner on root and target", async () => {
     await provisionTarget();
     await chmod(root, 0o777);
-    expect(await guard(deps())).toEqual({ ok: false, problem: "local_target_unsafe" });
-    await chmod(root, 0o700);
-    await chmod(path.join(root, TARGET), 0o770);
-    expect(await guard(deps())).toEqual({ ok: false, problem: "local_target_unsafe" });
-    await chmod(path.join(root, TARGET), 0o700);
+    expect(await guard(deps())).toMatchObject({ ok: false, problem: "local_target_unsafe" });
+    await chmod(root, 0o2770);
+    await chmod(path.join(root, TARGET), 0o770); // group-writable without setgid
+    expect(await guard(deps())).toMatchObject({ ok: false, problem: "local_target_unsafe" });
+    await chmod(path.join(root, TARGET), 0o2770);
     expect((await guard(deps({ executorUid: uid + 1 }))).ok).toBe(false);
     expect(await guard(deps({ executorUid: uid + 1 }))).toEqual({ ok: false, problem: "local_target_unsafe" });
   });
@@ -231,7 +246,8 @@ describe("guardLocalTarget", () => {
     expect(await readdir(outside)).toEqual([]);
 
     await rm(path.join(dir, "sites"));
-    await mkdir(path.join(dir, "sites"), { mode: 0o700 });
+    await mkdir(path.join(dir, "sites"), { mode: 0o770 });
+    await chmod(path.join(dir, "sites"), 0o2770);
     await symlink(outside, path.join(dir, "sites", SITE));
     expect(await guard(deps())).toEqual({ ok: false, problem: "local_target_unsafe" });
     expect(await guard(deps(), "restore")).toEqual({ ok: false, problem: "local_target_unsafe" });
@@ -241,18 +257,19 @@ describe("guardLocalTarget", () => {
 
   it.each([0o700, 0o777, 0o2750])("refuses an existing leaf with mode %o", async (leafMode) => {
     const dir = await provisionTarget();
-    await mkdir(path.join(dir, "sites"), { mode: 0o700 });
+    await mkdir(path.join(dir, "sites"), { mode: 0o770 });
+    await chmod(path.join(dir, "sites"), 0o2770);
     const leaf = path.join(dir, "sites", SITE);
     await mkdir(leaf);
     await chmod(leaf, leafMode);
-    expect(await guard(deps())).toEqual({ ok: false, problem: "local_target_unsafe" });
+    expect(await guard(deps())).toMatchObject({ ok: false, problem: "local_target_unsafe" });
     expect(await mode(leaf)).toBe(leafMode); // never auto-fixed
   });
 
   it("refuses an existing leaf whose gid is not the executor gid", async () => {
     await provisionTarget();
     expect((await guard(deps())).ok).toBe(true);
-    expect(await guard(deps({ executorGid: gid + 1 }))).toEqual({ ok: false, problem: "local_target_unsafe" });
+    expect(await guard(deps({ executorGid: gid + 1 }))).toMatchObject({ ok: false, problem: "local_target_unsafe" });
   });
 
   it("read intents never create a missing leaf and answer other", async () => {
@@ -261,7 +278,8 @@ describe("guardLocalTarget", () => {
       expect(await guard(deps(), intent)).toEqual({ ok: false, problem: "other" });
     }
     expect(await readdir(dir)).toEqual([LOCAL_TARGET_MARKER_NAME]);
-    await mkdir(path.join(dir, "sites"), { mode: 0o700 });
+    await mkdir(path.join(dir, "sites"), { mode: 0o770 });
+    await chmod(path.join(dir, "sites"), 0o2770);
     expect(await guard(deps(), "restore")).toEqual({ ok: false, problem: "other" });
     expect(await readdir(path.join(dir, "sites"))).toEqual([]);
   });
@@ -391,15 +409,68 @@ describe("guardLocalTarget", () => {
   });
 });
 
+describe("RestrictSUIDSGID (hp-docker-executor.service)", () => {
+  const SGID = 0o2000;
+  // Like the unit's sandbox: asking for S_ISGID in a mkdir mode fails; inheritance from the parent still works.
+  const restricted = async (p: string, m: number): Promise<unknown> => {
+    if ((m & (SGID | 0o4000)) !== 0) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    return mkdir(p, m);
+  };
+
+  it("never asks for S_ISGID: init and the first site copy work with a mkdir that refuses the bit", async () => {
+    const calls: number[] = [];
+    const seam = deps({ mkdir: async (p, m) => (calls.push(m), restricted(p, m)) });
+    expect((await initLocalTarget(seam, TARGET)).ok).toBe(true);
+    expect((await guard(seam)).ok).toBe(true);
+    expect(calls.length).toBeGreaterThanOrEqual(4); // target, sites, panel, sites/<siteId>
+    expect(calls.every((m) => (m & SGID) === 0)).toBe(true);
+    expect(await mode(path.join(root, TARGET, "sites", SITE))).toBe(0o2770);
+    expect(await mode(path.join(root, TARGET, "panel"))).toBe(0o2770);
+  });
+
+  it("refuses a root without setgid before creating anything and points to the documented fix", async () => {
+    await chmod(root, 0o770);
+    const result = await initLocalTarget(deps({ mkdir: restricted }), TARGET);
+    expect(result).toMatchObject({ ok: false, problem: "local_target_unsafe", detail: expect.stringContaining("chmod 2770") });
+    expect(await readdir(root)).toEqual([]);
+    await chmod(root, 0o700);
+    expect(await initLocalTarget(deps(), TARGET)).toMatchObject({ ok: false, problem: "local_target_unsafe" });
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it("refuses a root of another group and removes a directory that did not inherit the executor group", async () => {
+    expect(await initLocalTarget(deps({ executorGid: gid + 1 }), TARGET)).toMatchObject({ ok: false, problem: "local_target_unsafe" });
+    expect(await readdir(root)).toEqual([]);
+    await provisionTarget();
+    // a target directory that lost the bit is refused, never repaired with a chmod
+    await chmod(path.join(root, TARGET), 0o770);
+    expect(await guard(deps({ mkdir: restricted }))).toMatchObject({ ok: false, problem: "local_target_unsafe" });
+    expect(await readdir(path.join(root, TARGET))).toEqual([LOCAL_TARGET_MARKER_NAME]);
+  });
+
+  it("refuses a directory the filesystem created without the inherited bit and cleans it up", async () => {
+    await provisionTarget();
+    const noInherit = deps({
+      mkdir: async (p, m) => {
+        await mkdir(p, m);
+        await chmod(p, 0o770); // a filesystem that does not propagate setgid
+      },
+    });
+    expect(await guard(noInherit)).toMatchObject({ ok: false, problem: "local_target_unsafe" });
+    expect(await readdir(path.join(root, TARGET))).toEqual([LOCAL_TARGET_MARKER_NAME]);
+    expect((await guard(deps())).ok).toBe(true); // fixed root => works at once
+  });
+});
+
 describe("initLocalTarget", () => {
-  it("creates the target, marker, sites 0700 and panel 2770, then guards", async () => {
+  it("creates the target, marker, sites and panel 2770 (inherited), then guards", async () => {
     const result = await initLocalTarget(deps(), TARGET);
     expect(result).toMatchObject({ ok: true, repo: { hostDir: path.join(root, TARGET, "panel"), containerPath: "/backup/repository/panel" } });
     const dir = path.join(root, TARGET);
-    expect(await mode(dir)).toBe(0o700);
+    expect(await mode(dir)).toBe(0o2770);
     expect(await readFile(path.join(dir, LOCAL_TARGET_MARKER_NAME), "utf8")).toBe(localTargetMarkerContent(TARGET));
     expect(await mode(path.join(dir, LOCAL_TARGET_MARKER_NAME))).toBe(0o600);
-    expect(await mode(path.join(dir, "sites"))).toBe(0o700);
+    expect(await mode(path.join(dir, "sites"))).toBe(0o2770);
     expect(await mode(path.join(dir, "panel"))).toBe(0o2770);
     expect((await readdir(dir)).sort()).toEqual([LOCAL_TARGET_MARKER_NAME, "panel", "sites"]);
     expect((await guard(deps(), "backup")).ok).toBe(true);
@@ -411,7 +482,8 @@ describe("initLocalTarget", () => {
   });
 
   it("repairs a crash between mkdir and marker (empty directory)", async () => {
-    await mkdir(path.join(root, TARGET), { mode: 0o700 });
+    await mkdir(path.join(root, TARGET), { mode: 0o770 });
+    await chmod(path.join(root, TARGET), 0o2770);
     expect((await initLocalTarget(deps(), TARGET)).ok).toBe(true);
   });
 
