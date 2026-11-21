@@ -10,6 +10,9 @@ export default defineConfig({
     include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "infra/**/*.test.ts"],
     // Tests that hash passwords take 3 to 5 s here and more on a CI runner: the default of 5 s cut them.
     testTimeout: 30_000,
+    // One initdb per run instead of one per in-memory database (PGLITE_TEMPLATE_KEY in packages/database).
+    globalSetup: ["test/pglite-template.global-setup.ts"],
+    setupFiles: ["test/pglite-template.setup.ts"],
   },
   resolve: {
     alias: {

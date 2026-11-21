@@ -1,0 +1,91 @@
+name: devflow PR checks
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: devflow-pr-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && 'title' || 'code' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # check-pr.sh needs the merge-base with the base branch
+
+      - name: Workflow guardrails (commits, PR title, no version bump)
+        env:
+          # Passed through the environment, never interpolated into the script.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_REF: origin/${{ github.base_ref }}
+        run: bash scripts/devflow/check-pr.sh
+
+  # HCP-SPEC-001 §11.3: VERIFY_CMD in .devflow/config, split so the slow test suite runs in parallel
+  # shards (vitest --shard). A title edit only needs the guardrails above.
+  static:
+    name: Build, lint & typecheck
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Enable Corepack package manager
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      - name: Build monorepo packages and applications
+        run: corepack pnpm run build
+
+      - name: Lint codebase
+        run: corepack pnpm run lint
+
+      - name: Typecheck monorepo
+        run: corepack pnpm run typecheck
+
+  test:
+    name: Tests (shard ${{ matrix.shard }}/4)
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Check PHP is available (sendmail shim test)
+        run: php --version
+
+      - name: Check PHP ZipArchive extension is available
+        run: php -r 'exit(class_exists("ZipArchive")?0:1);'
+
+      - name: Enable Corepack package manager
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
+      # The tests read the built packages.
+      - name: Build monorepo packages and applications
+        run: corepack pnpm run build
+
+      - name: Run automated test suite (shard ${{ matrix.shard }}/4)
+        run: corepack pnpm run test --shard=${{ matrix.shard }}/4

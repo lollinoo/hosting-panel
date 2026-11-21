@@ -95,9 +95,27 @@ function loadMigrationFiles(): ReadonlyArray<{ readonly filename: string; readon
   }));
 }
 
+/**
+ * Tests only: the key under which the vitest setup publishes, on `globalThis`, a PGlite `dumpDataDir()`
+ * tarball of a freshly initialised empty cluster (`test/pglite-template.setup.ts`). An in-memory client
+ * loads it instead of running initdb, about 1 s less per database. Nothing sets it outside the tests.
+ */
+export const PGLITE_TEMPLATE_KEY = Symbol.for("hosting-panel.pglite-template");
+
+function pgliteTemplate(): Blob | undefined {
+  const template = (globalThis as unknown as Record<symbol, unknown>)[PGLITE_TEMPLATE_KEY];
+  return template instanceof Blob ? template : undefined;
+}
+
+function createPglite(dataDir: string | undefined): PGlite {
+  if (dataDir) return new PGlite(dataDir);
+  const template = pgliteTemplate();
+  return template ? new PGlite({ loadDataDir: template }) : new PGlite();
+}
+
 export function createDatabaseClient(config: DatabaseClientConfig): DatabaseClient {
   if (config.mode === "pglite") {
-    const pglite = config.dataDir ? new PGlite(config.dataDir) : new PGlite();
+    const pglite = createPglite(config.dataDir);
     const db = drizzlePglite(pglite, { schema }) as unknown as HostingPanelDatabase;
     let isClosed = false;
 

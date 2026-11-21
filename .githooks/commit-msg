@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Enforces a Conventional Commits subject.
+set -euo pipefail
+# shellcheck disable=SC1091
+. "$(git rev-parse --show-toplevel)/scripts/devflow/lib.sh"
+
+first_line=$(head -n 1 "$1")
+case $first_line in 'Merge '* | 'Revert '*) exit 0 ;; esac
+
+if ! [[ $first_line =~ $DF_CC_REGEX ]]; then
+  echo 'commit-msg: ERROR — the commit message does not follow Conventional Commits.' >&2
+  echo "  Received: $first_line" >&2
+  echo '  Expected: <type>(<scope>): <concise description in English>' >&2
+  echo "  Types:    ${DF_TYPES//|/, }" >&2
+  exit 1
+fi
+
+df_local_hook commit-msg "$@"
