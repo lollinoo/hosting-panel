@@ -34,17 +34,17 @@ jobs:
         run: bash scripts/devflow/release-main.sh
 
   # The release above is a draft tagged v<version> (RELEASE_TAG / RELEASE_DRAFT in .devflow/config).
-  # This job verifies the amended commit, attaches the installable archive and only then publishes
+  # The test shards and this job verify the amended commit; this job then attaches the installable archive and only then publishes
   # the release, so install.sh / hp-update never see a "latest" release without its archive.
   # If it fails the release stays a draft: fix main, or publish by hand after a manual rebuild.
-  archive:
-    name: Build and publish release archive
+  test:
+    name: Tests (shard ${{ matrix.shard }}/3)
     needs: release
     if: needs.release.outputs.superseded != 'true' && needs.release.outputs.release_tag != ''
     runs-on: ubuntu-latest
-    env:
-      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
-      TAG: ${{ needs.release.outputs.release_tag }}
+    strategy:
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - name: Checkout the released commit
         uses: actions/checkout@v4
@@ -69,6 +69,39 @@ jobs:
       - name: Install dependencies
         run: corepack pnpm install --frozen-lockfile
 
+      # The tests read the built packages.
+      - name: Build monorepo packages and applications
+        run: corepack pnpm run build
+
+      - name: Run automated test suite (shard ${{ matrix.shard }}/3)
+        run: corepack pnpm run test --shard=${{ matrix.shard }}/3
+
+  archive:
+    name: Build and publish release archive
+    needs: [release, test]
+    if: needs.release.outputs.superseded != 'true' && needs.release.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      TAG: ${{ needs.release.outputs.release_tag }}
+    steps:
+      - name: Checkout the released commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.build_sha }}
+          persist-credentials: false
+
+      - name: Setup Node.js runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      - name: Enable Corepack package manager
+        run: corepack enable
+
+      - name: Install dependencies
+        run: corepack pnpm install --frozen-lockfile
+
       - name: Check tag matches package.json version
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -78,7 +111,7 @@ jobs:
           fi
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
-      # The type check and the tests read the built packages.
+      # The type check reads the built packages. The tests ran in the test job.
       - name: Build monorepo packages and applications
         run: corepack pnpm run build
 
@@ -87,9 +120,6 @@ jobs:
 
       - name: Typecheck monorepo
         run: corepack pnpm run typecheck
-
-      - name: Run automated test suite
-        run: corepack pnpm run test
 
       - name: Build release archive
         run: corepack pnpm run release:build
