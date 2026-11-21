@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Post-merge version bumper. From the Conventional Commits since the last release it
-# derives one SemVer bump per package (type!: / BREAKING CHANGE → major, feat → minor,
+# derives one SemVer bump per package (type!: / a BREAKING CHANGE: footer → major, feat → minor,
 # anything else → patch), rewrites the version files and prepends CHANGELOG.md.
 #
 # Usage: bump-version.sh [--dry-run] [--amend-head] [--release-notes-out <file>]
@@ -62,7 +62,7 @@ while read -r sha; do
   subject=$(git log -1 --format=%s "$sha")
   case $subject in 'chore(release):'*) continue ;; esac
   level=1
-  if [[ $subject =~ $RE_BREAK ]] || git log -1 --format=%b "$sha" | grep -q 'BREAKING CHANGE'; then
+  if [[ $subject =~ $RE_BREAK ]] || git log -1 --format=%b "$sha" | grep -qE '^BREAKING[ -]CHANGE:'; then
     level=3
   elif [[ $subject =~ $RE_FEAT ]]; then
     level=2

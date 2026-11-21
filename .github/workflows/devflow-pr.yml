@@ -23,6 +23,7 @@ jobs:
         env:
           # Passed through the environment, never interpolated into the script.
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: origin/${{ github.base_ref }}
         run: bash scripts/devflow/check-pr.sh
 
