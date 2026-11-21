@@ -3,13 +3,17 @@ import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { Logger } from "@nestjs/common";
 import {
   BACKUP_FAILURE_CLASSES,
+  DEFAULT_BACKUP_HOUR_UTC,
+  DEFAULT_BACKUP_RETENTION_DAYS,
   type BackupJobStatus,
   type BackupsIpcRequest,
   type BackupsResultByAction,
 } from "@hosting-panel/contracts";
 import {
   auditEvents,
+  backupPolicies,
   backupSettings,
+  backupTargets,
   createDatabaseClient,
   eq,
   hostAllocations,
@@ -27,6 +31,7 @@ import {
   upsertBackupSettings,
   users,
   type DatabaseClient,
+  type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
@@ -81,6 +86,23 @@ interface BackupExecutorScript {
 }
 
 // Wraps sim.backups locally without importing another test file.
+/** Back to a fresh install: no target, no site policy, default schedule, no nightly cursor (history rows are deleted by the caller). */
+async function resetBackupConfiguration(db: HostingPanelDatabase): Promise<void> {
+  await db.delete(backupPolicies).where(eq(backupPolicies.scope, "site"));
+  await db.delete(backupSettings);
+  await db.execute(sql`DELETE FROM backup_policy_targets`);
+  await db.delete(backupTargets);
+  await db
+    .update(backupPolicies)
+    .set({
+      scheduleHourUtc: sql`CASE WHEN ${backupPolicies.scope} = 'default_site' THEN ${DEFAULT_BACKUP_HOUR_UTC}::int END`,
+      retentionDays: DEFAULT_BACKUP_RETENTION_DAYS,
+      lastNightlyRunOn: null,
+      nightlyRunStartedAt: null,
+    })
+    .where(sql`${backupPolicies.scope} <> 'site'`);
+}
+
 function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): BackupExecutorScript {
   const calls: BackupsIpcRequest[] = [];
   let handlers: ScriptedHandlers = {};
@@ -122,6 +144,7 @@ function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): BackupExecut
               },
         } as BackupsResultByAction[R["action"]];
       }
+      case "localInit":
       case "restore":
       case "archive":
       case "readArchive":
@@ -429,7 +452,7 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
     await dbClient.db.delete(outboxEvents);
     await dbClient.db.delete(operationSteps);
     await dbClient.db.delete(operations);
-    await dbClient.db.delete(backupSettings);
+    await resetBackupConfiguration(dbClient.db);
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteAId));
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteBId));
     await upsertBackupSettings(dbClient.db, KEY, {
@@ -617,12 +640,14 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
     // Confirm the only place it appears in clear is the executor IPC requests
     const testCall = executorScript.calls.find((c) => c.action === "test");
     const startCalls = executorScript.calls.filter((c) => c.action === "start");
-    expect(testCall && "target" in testCall ? testCall.target.secretAccessKey : null).toBe(
+    expect(
+      testCall && "target" in testCall && "secretAccessKey" in testCall.target ? testCall.target.secretAccessKey : null,
+    ).toBe(
       SENTINEL_SECRET,
     );
     expect(startCalls.length).toBeGreaterThanOrEqual(2);
     for (const call of startCalls) {
-      if ("target" in call) {
+      if ("target" in call && "secretAccessKey" in call.target) {
         expect(call.target.secretAccessKey).toBe(SENTINEL_SECRET);
       }
     }
@@ -998,11 +1023,19 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
     expect(adminRun.status).toBe(202);
     await app.outboxWorker.processPendingOnce();
 
-    // R60: changing bucket empties list and records targetChanged: true
+    // SPEC 7.2.5 (supersedes R60): changing the bucket creates a new target and archives the old one; the history is
+    // kept, still listed, with its copy on the old target, and records targetChanged: true.
     const beforeBucketChange = await rawRequest(app.baseUrl!, "GET", customerUrl(orgAId, siteAId), {
       token: ownerAToken,
     });
     expect(beforeBucketChange.body.data.backups.length).toBeGreaterThanOrEqual(2);
+    const backupIds = (res: { body: Json }): string[] =>
+      (res.body.data.backups as Array<Json>).map((b) => b.id as string).sort();
+    const adminSitesBefore = await rawRequest(app.baseUrl!, "GET", "/v1/admin/backups/sites", {
+      token: adminToken,
+    });
+    const siteRowBefore = (adminSitesBefore.body.data as Array<Json>).find((r) => r.siteId === siteAId);
+    expect(siteRowBefore?.lastStatus).toBe("succeeded");
 
     const changeBucket = await rawRequest(app.baseUrl!, "PATCH", "/v1/admin/backups", {
       token: adminToken,
@@ -1013,16 +1046,17 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
     const afterBucketChange = await rawRequest(app.baseUrl!, "GET", customerUrl(orgAId, siteAId), {
       token: ownerAToken,
     });
-    expect(afterBucketChange.body.data.backups).toEqual([]);
+    expect(backupIds(afterBucketChange)).toEqual(backupIds(beforeBucketChange));
+    expect(afterBucketChange.body.data.configured).toBe(true);
     const adminSitesAfterBucket = await rawRequest(app.baseUrl!, "GET", "/v1/admin/backups/sites", {
       token: adminToken,
     });
     const siteRowAfterBucket = (adminSitesAfterBucket.body.data as Array<Json>).find(
       (r) => r.siteId === siteAId,
     );
-    expect(siteRowAfterBucket?.lastStatus).toBeNull();
+    expect(siteRowAfterBucket?.lastStatus).toBe("succeeded");
 
-    // R60: DELETE clears settings -> configured: false and run returns 400 not_configured
+    // SPEC 7.2.5: DELETE archives the S3 targets -> configured: false and run returns 400 not_configured; history stays
     const delRes = await rawRequest(app.baseUrl!, "DELETE", "/v1/admin/backups", {
       token: adminToken,
     });
@@ -1033,6 +1067,7 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
       token: ownerAToken,
     });
     expect(custAfterDel.body.data.configured).toBe(false);
+    expect(backupIds(custAfterDel)).toEqual(backupIds(beforeBucketChange));
 
     const custPostAfterDel = await rawRequest(app.baseUrl!, "POST", customerUrl(orgAId, siteAId), {
       token: ownerAToken,
@@ -1060,16 +1095,26 @@ describe("backups QA integration (tenancy, secrets, hostile input, problems, R60
     // Verify exact audit events
     const audits = await newAudits();
     const actions = audits.map((a) => a.action);
-    expect(actions).toEqual([
-      "admin.backups.update",
-      "admin.backups.test",
-      "site.backups.create",
-      "admin.site.backups.create",
-      "admin.backups.update",
-      "admin.backups.clear",
-    ]);
-    const bucketAudit = audits[4]!;
-    expect((bucketAudit.details as Json).targetChanged).toBe(true);
+    // The audit table has no insertion order guarantee here: compare the multiset of actions.
+    expect([...actions].sort()).toEqual(
+      [
+        "admin.backups.update",
+        "admin.backup_target.test",
+        "admin.backups.test",
+        "site.backups.create",
+        "site.backups.copy_succeeded",
+        "admin.site.backups.create",
+        "site.backups.copy_succeeded",
+        "admin.backups.update",
+        "admin.backup_target.create",
+        "admin.backup_target.archive",
+        "admin.backups.clear",
+      ].sort(),
+    );
+    const bucketAudit = audits.find(
+      (a) => a.action === "admin.backups.update" && (a.details as Json).targetChanged === true,
+    );
+    expect(bucketAudit).toBeDefined();
     expect(JSON.stringify(audits)).not.toContain(SENTINEL_SECRET);
   });
 

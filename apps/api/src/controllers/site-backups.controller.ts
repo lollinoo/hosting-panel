@@ -1,22 +1,24 @@
-import { Body, Controller, Get, HttpCode, Inject, Param, Post, Query, Req } from "@nestjs/common";
+import { Body, Controller, Get, HttpCode, Inject, Param, Patch, Post, Query, Req } from "@nestjs/common";
 import {
+  CreateSiteBackupInputSchema,
+  PrepareDownloadInputSchema,
   RestoreBackupInputSchema,
   SiteFileReadQuerySchema,
   type BackupArchiveChunkDto,
   type ManagedSiteDto,
   type SiteBackupAcceptedDto,
+  type SiteBackupPolicyDto,
   type SiteBackupsDto,
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
-import { z } from "zod";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
+import { BackupPoliciesService } from "../backups/backup-policies.service.js";
 import { SiteBackupsService } from "../backups/site-backups.service.js";
 import { SiteRestoreService } from "../backups/site-restore.service.js";
 import { ControlPlaneError, requireIdempotencyKey } from "../common/control-plane.error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 import { ManagedSitesService } from "../sites/managed-sites.service.js";
 
-const EmptyBackupBodySchema = z.object({}).strict();
 const BackupArchiveReadQuerySchema = SiteFileReadQuerySchema.omit({ path: true });
 
 const headersOf = (req: FastifyRequest): Record<string, string | string[] | undefined> =>
@@ -31,6 +33,10 @@ interface SiteBackupAcceptedEnvelope {
   readonly links: { readonly operation: string };
 }
 
+interface SiteBackupPolicyEnvelope {
+  readonly data: SiteBackupPolicyDto;
+}
+
 interface BackupArchiveChunkEnvelope {
   readonly data: BackupArchiveChunkDto;
 }
@@ -43,6 +49,7 @@ export class SiteBackupsController {
     @Inject(ManagedSitesService) private readonly sitesService: ManagedSitesService,
     @Inject(SiteBackupsService) private readonly backupsService: SiteBackupsService,
     @Inject(SiteRestoreService) private readonly restoreService: SiteRestoreService,
+    @Inject(BackupPoliciesService) private readonly policies: BackupPoliciesService,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
   ) {}
 
@@ -57,6 +64,28 @@ export class SiteBackupsController {
     return { data };
   }
 
+  /** Where this site's backups go: its own destinations, else the inherited default, plus the offered choices. */
+  @Get("backup-policy")
+  public async getPolicy(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("siteId") siteId: string,
+  ): Promise<SiteBackupPolicyEnvelope> {
+    const { site } = await this.#authorize(req, orgId, siteId);
+    return { data: await this.policies.getSitePolicy(site) };
+  }
+
+  @Patch("backup-policy")
+  public async updatePolicy(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("siteId") siteId: string,
+    @Body() rawBody?: unknown,
+  ): Promise<SiteBackupPolicyEnvelope> {
+    const { auth, site } = await this.#authorize(req, orgId, siteId);
+    return { data: await this.policies.updateSitePolicy(site, rawBody, { auth, req }) };
+  }
+
   @Post("backups")
   @HttpCode(202)
   public async create(
@@ -67,9 +96,9 @@ export class SiteBackupsController {
   ): Promise<SiteBackupAcceptedEnvelope> {
     const { auth, site } = await this.#authorize(req, orgId, siteId);
     const idempotencyKey = requireIdempotencyKey(headersOf(req));
-    EmptyBackupBodySchema.parse(rawBody === undefined ? {} : rawBody);
+    const input = CreateSiteBackupInputSchema.parse(rawBody === undefined ? {} : rawBody);
 
-    const data = await this.backupsService.create(site, { auth, req }, idempotencyKey);
+    const data = await this.backupsService.create(site, { auth, req }, idempotencyKey, input);
     this.outboxWorker.triggerAsync();
 
     return this.#accepted(orgId, data);
@@ -105,9 +134,15 @@ export class SiteBackupsController {
   ): Promise<SiteBackupAcceptedEnvelope> {
     const { auth, site } = await this.#authorize(req, orgId, siteId);
     const idempotencyKey = requireIdempotencyKey(headersOf(req));
-    EmptyBackupBodySchema.parse(rawBody === undefined ? {} : rawBody);
+    const input = PrepareDownloadInputSchema.parse(rawBody === undefined ? {} : rawBody);
 
-    const data = await this.restoreService.prepareDownload(site, { auth, req }, backupId, idempotencyKey);
+    const data = await this.restoreService.prepareDownload(
+      site,
+      { auth, req },
+      backupId,
+      idempotencyKey,
+      input,
+    );
     this.outboxWorker.triggerAsync();
 
     return this.#accepted(orgId, data);

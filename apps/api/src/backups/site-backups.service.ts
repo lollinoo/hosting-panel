@@ -6,19 +6,27 @@ import {
   type BackupArchiveDto,
   type BackupKind,
   type BackupLastRestoreDto,
+  type CreateSiteBackupInput,
   type SiteBackupAcceptedDto,
+  type SiteBackupDto,
   type SiteBackupsDto,
 } from "@hosting-panel/contracts";
 import {
   enqueueOperationTransactional,
   eq,
-  getBackupSettingsPublic,
+  getBackupTargetRow,
+  getPolicy,
   insertSiteBackup,
+  insertSiteBackupCopies,
+  listSiteBackupCopies,
   listSiteBackups,
+  resolveEffectiveTargets,
   siteBackups,
   sites,
+  type CopyRow,
   type DatabaseClient,
   type DatabaseExecutor,
+  type EffectiveTarget,
   type HostingPanelDatabase,
   type SiteBackupRow,
 } from "@hosting-panel/database";
@@ -30,12 +38,9 @@ import {
   DATABASE_CLIENT_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { BackupPoliciesService } from "./backup-policies.service.js";
 import { BACKUP_LEASE_MS } from "./site-backups-applier.js";
-import {
-  appendUserBackupAudit,
-  assertBackupInfrastructureReady,
-  assertHeavyActionAllowed,
-} from "./site-restore.service.js";
+import { appendUserBackupAudit, assertHeavyActionAllowed } from "./site-restore.service.js";
 
 export const SITE_BACKUP_STEPS = [
   { key: "backup", label: "Back up files and databases" },
@@ -63,6 +68,9 @@ export interface EnqueueBackupTxInput {
   readonly kind: BackupKind;
   readonly requestedByUserId?: string;
   readonly idempotencyKey?: string;
+  /** One chosen destination instead of the site's effective ones (D-create); an administrator may pick any enabled one. */
+  readonly targetId?: string;
+  readonly adminSelection?: boolean;
 }
 
 export interface EnqueueBackupTxResult {
@@ -86,6 +94,18 @@ function mapBackupArchiveDto(row: SiteBackupRow, nowMs: number): BackupArchiveDt
     status: row.archiveStatus,
     readyUntil: row.archiveReadyUntil ? row.archiveReadyUntil.toISOString() : null,
     problem: row.archiveProblem,
+  };
+}
+
+function mapCopyDto(copy: CopyRow): SiteBackupDto["copies"][number] {
+  return {
+    targetId: copy.targetId,
+    kind: copy.targetKind,
+    status: copy.status,
+    sizeBytes: copy.sizeBytes,
+    problem: copy.problem,
+    startedAt: copy.startedAt.toISOString(),
+    finishedAt: copy.finishedAt ? copy.finishedAt.toISOString() : null,
   };
 }
 
@@ -122,6 +142,70 @@ function pickLastRestore(rows: readonly SiteBackupRow[]): BackupLastRestoreDto |
     finishedAt: latest.restoredAt!.toISOString(),
     problem: latest.restoreProblem,
   };
+}
+
+const notConfigured = (): ControlPlaneError =>
+  new ControlPlaneError("VALIDATION_ERROR", "not_configured", {
+    details: [{ message: "not_configured" }],
+  });
+
+/** A destination the caller named: one of the site's, or an enabled, live one (customers: only the offered ones). */
+async function resolveRequestedTarget(
+  tx: DatabaseExecutor,
+  siteId: string,
+  targetId: string,
+  adminSelection: boolean,
+): Promise<EffectiveTarget[]> {
+  const own = (await resolveEffectiveTargets(tx, siteId)).find((t) => t.targetId === targetId);
+  const row = own ? null : await getBackupTargetRow(tx, targetId);
+  const usable =
+    row !== null &&
+    row.enabled &&
+    row.archivedAt === null &&
+    (adminSelection || row.customerSelectable) &&
+    (!row.legacySettings || Object.keys(row.config).length > 0);
+  if (!own && !usable) {
+    throw new ControlPlaneError("NOT_FOUND", "Backup destination not found");
+  }
+  return [{ targetId, kind: own?.kind ?? row!.kind, priority: 1, required: true }];
+}
+
+/**
+ * Inserts the logical backup row and one running copy per destination, pinned now: the executor later dispatches from
+ * each copy's own target, never from the current settings (an in-flight job finishes on the repository it started on).
+ */
+export async function createBackupWithCopies(
+  tx: DatabaseExecutor,
+  site: { readonly id: string; readonly siteUrl?: string | null },
+  input: {
+    readonly kind: BackupKind;
+    readonly operationId: string;
+    readonly siteUrl?: string | null;
+    readonly targets?: readonly EffectiveTarget[];
+  },
+): Promise<{ id: string }> {
+  const targets = input.targets ?? (await resolveEffectiveTargets(tx, site.id));
+  if (targets.length === 0) {
+    throw notConfigured();
+  }
+  let siteUrl = input.siteUrl ?? site.siteUrl;
+  if (siteUrl === undefined) {
+    const [siteRow] = await tx
+      .select({ siteUrl: sites.siteUrl })
+      .from(sites)
+      .where(eq(sites.id, site.id))
+      .limit(1);
+    siteUrl = siteRow?.siteUrl ?? null;
+  }
+  const { id } = await insertSiteBackup(tx, {
+    siteId: site.id,
+    kind: input.kind,
+    status: "running",
+    operationId: input.operationId,
+    siteUrl,
+  });
+  await insertSiteBackupCopies(tx, id, input.operationId, targets);
+  return { id };
 }
 
 async function enqueueSiteBackupTx(
@@ -167,22 +251,14 @@ async function enqueueSiteBackupTx(
     };
   }
 
-  let siteUrl = site.siteUrl;
-  if (siteUrl === undefined) {
-    const [siteRow] = await tx
-      .select({ siteUrl: sites.siteUrl })
-      .from(sites)
-      .where(eq(sites.id, site.id))
-      .limit(1);
-    siteUrl = siteRow?.siteUrl ?? null;
-  }
-
-  const { id: backupId } = await insertSiteBackup(tx, {
-    siteId: site.id,
+  const targets =
+    input.targetId === undefined
+      ? undefined
+      : await resolveRequestedTarget(tx, site.id, input.targetId, input.adminSelection === true);
+  const { id: backupId } = await createBackupWithCopies(tx, site, {
     kind: input.kind,
-    status: "running",
     operationId: enqueued.operation.id,
-    siteUrl,
+    ...(targets ? { targets } : {}),
   });
 
   return {
@@ -221,10 +297,13 @@ export class SiteBackupsService {
 
   /** Returns backup availability, settings summary, and sanitized backup history for a site. */
   public async list(site: Pick<BackupSiteRef, "id">): Promise<SiteBackupsDto> {
+    const db = this.dbClient.db;
     const available = isBackupAvailable(this.config.runtimeBackend);
-    const settings = await getBackupSettingsPublic(this.dbClient.db);
-    const configured = settings !== null;
-    const retentionDays = settings?.retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
+    const effective = await resolveEffectiveTargets(db, site.id);
+    const configured = available && effective.length > 0;
+    const retentionDays =
+      (await getPolicy(db, "default_site")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
+    const targets = effective.map((t) => ({ id: t.targetId, kind: t.kind }));
 
     if (!available) {
       return {
@@ -235,10 +314,15 @@ export class SiteBackupsService {
         runningOperationId: null,
         lastRestore: null,
         backups: [],
+        targets,
       };
     }
 
-    const rows = await listSiteBackups(this.dbClient.db, site.id);
+    const rows = await listSiteBackups(db, site.id);
+    const copies = await listSiteBackupCopies(
+      db,
+      rows.map((row) => row.id),
+    );
     const runningOperationId = rows.find((row) => row.status === "running")?.operationId ?? null;
     const nowMs = Date.now();
 
@@ -258,7 +342,9 @@ export class SiteBackupsService {
         sizeBytes: row.sizeBytes,
         problem: row.problem,
         archive: mapBackupArchiveDto(row, nowMs),
+        copies: (copies.get(row.id) ?? []).map(mapCopyDto),
       })),
+      targets,
     };
   }
 
@@ -267,14 +353,38 @@ export class SiteBackupsService {
     site: BackupSiteRef,
     actor: SiteBackupActor,
     idempotencyKey: string,
+    body: CreateSiteBackupInput = {},
   ): Promise<SiteBackupAcceptedDto> {
-    await assertBackupInfrastructureReady(this.dbClient.db, this.config.runtimeBackend, site.status);
+    if (!isBackupAvailable(this.config.runtimeBackend)) {
+      throw new ControlPlaneError(
+        "NOT_SUPPORTED",
+        "Backups are only available on the linux-systemd runtime backend",
+      );
+    }
+    // A named destination is checked inside the transaction; otherwise the site must have a usable one.
+    if (
+      body.targetId === undefined &&
+      !(await BackupPoliciesService.isSiteBackupConfigured(
+        this.dbClient.db,
+        this.config.runtimeBackend,
+        site.id,
+      ))
+    ) {
+      throw notConfigured();
+    }
+    if (site.status === "deploying" || site.status === "maintenance") {
+      throw new ControlPlaneError("RESOURCE_LOCKED", "not_ready", {
+        details: [{ message: "not_ready", reason: "not_ready" }],
+      });
+    }
 
     const result = await this.dbClient.db.transaction(async (tx) => {
       const enqueued = await enqueueSiteBackupTx(tx, site, {
         kind: "manual",
         requestedByUserId: actor.auth.user.id,
         idempotencyKey,
+        ...(body.targetId !== undefined ? { targetId: body.targetId } : {}),
+        adminSelection: actor.actionPrefix === "admin.site.backups",
       });
 
       if (!enqueued.idempotentReplay) {

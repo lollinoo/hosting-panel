@@ -8,15 +8,24 @@ import {
   SITE_RESTART_QUIET_MS,
 } from "@hosting-panel/contracts";
 import {
+  archiveBackupTarget,
   auditEvents,
   backupSettings,
   createDatabaseClient,
   domains,
   eq,
+  getPolicy,
   hostAgentHeartbeats,
   hosts,
+  insertLocalTarget,
+  insertPanelBackupCopies,
+  insertS3Target,
   observedStates,
   operations,
+  recordTargetTest,
+  setPolicyTargets,
+  setSitePolicy,
+  settlePanelBackupCopy,
   recordObservedStateReconciliationTransactional,
   serviceInstances,
   siteBackups,
@@ -516,14 +525,101 @@ describe("admin health and alerts", () => {
       await dbClient.db.insert(backupSettings).values({
         id: "default", endpoint: "https://s3.example.test", region: "r", bucket: "b", accessKeyId: "sentinel",
         secretAccessKeyCiphertextBase64: "x", secretAccessKeyIvBase64: "x", secretAccessKeyAuthTagBase64: "x",
-        lastTestAt: at, lastTestOutcome: "failed", lastPanelBackupAt: at, lastPanelBackupStatus: "failed",
+        lastPanelBackupAt: at, lastPanelBackupStatus: "failed",
       });
+      const s3 = await insertS3Target(dbClient.db, KEY, {
+        name: "Offsite", endpoint: "https://s3.example.test", region: "r", bucket: "offsite", prefix: "", accessKeyId: "sentinel", secretAccessKey: "sentinel-secret", customerSelectable: false, actorId: null,
+      });
+      await recordTargetTest(dbClient.db, s3.id, { at, outcome: "failed", problem: "unreachable" });
       const { alerts } = await both();
       expect(alerts.find((a) => a.kind === "backup_failed")).toMatchObject({ subject: siteId, details: { siteId, siteName: SITE.name, failedAt: at.toISOString() } });
       expect(alerts.find((a) => a.kind === "panel_backup_failed")).toMatchObject({ subject: "panel", details: { failedAt: at.toISOString() } });
-      expect(alerts.find((a) => a.kind === "backup_storage_test_failed")).toMatchObject({ subject: "storage", details: { testedAt: at.toISOString() } });
+      expect(alerts.find((a) => a.kind === "backup_storage_test_failed")).toMatchObject({ subject: s3.id, details: { testedAt: at.toISOString(), targetId: s3.id, targetKind: "s3", problem: "unreachable" } });
       expect(alerts.find((a) => a.kind === "restore_undo_incomplete")).toMatchObject({ severity: "critical", subject: "bk_restored", details: { siteId, backupId: "bk_restored" } });
       expect(alerts[0]!.kind).toBe("restore_undo_incomplete");
+    });
+
+    describe("backup targets and panel copies", () => {
+      const GIB = 1024 ** 3;
+      const ago = (ms: number) => new Date(Date.now() - ms);
+      const local = async (test: { outcome: "ok" | "failed"; availableBytes?: number; totalBytes?: number }) => {
+        const { id } = await insertLocalTarget(dbClient.db, { name: "Local", customerSelectable: false, actorId: null });
+        await recordTargetTest(dbClient.db, id, { at: ago(5 * MIN), problem: test.outcome === "failed" ? "unreachable" : null, root: "/srv/secret-root", ...test });
+        return id;
+      };
+      const panelBackup = async (opId: string, targetId: string, status: "succeeded" | "failed", startedAt: Date) => {
+        await dbClient.db.insert(operations).values({ id: opId, organizationId: PLATFORM_OPS_ORG_ID, kind: "panel.backups.create", status: "succeeded", resourceType: "host", resourceId: hostId, startedAt, updatedAt: startedAt });
+        await insertPanelBackupCopies(dbClient.db, opId, [{ targetId, priority: 1, required: true }]);
+        const rows = await dbClient.db.query.panelBackupCopies.findMany({ where: (t, { eq: is }) => is(t.operationId, opId) });
+        await settlePanelBackupCopy(dbClient.db, rows[0]!.id, { status, snapshotId: status === "succeeded" ? "snap" : null, problem: status === "failed" ? "no_space" : null });
+      };
+
+      it("raises backup_storage_test_failed once per failing target and skips ok, untested, disabled and archived targets", async () => {
+        await start();
+        const bad = await local({ outcome: "failed" });
+        const ok = await insertS3Target(dbClient.db, KEY, { name: "Fine", endpoint: "https://ok.example.test", region: "r", bucket: "fine-bucket", prefix: "", accessKeyId: "k", secretAccessKey: "s", customerSelectable: false, actorId: null });
+        await recordTargetTest(dbClient.db, ok.id, { at: ago(MIN), outcome: "ok", problem: null });
+        await insertS3Target(dbClient.db, KEY, { name: "Never", endpoint: "https://never.example.test", region: "r", bucket: "never-bucket", prefix: "", accessKeyId: "k", secretAccessKey: "s", customerSelectable: false, actorId: null });
+        const { alerts } = await both();
+        const found = alerts.filter((a) => a.kind === "backup_storage_test_failed");
+        expect(found).toHaveLength(1);
+        expect(found[0]).toMatchObject({ severity: "warning", subject: bad, details: { targetId: bad, targetKind: "local", problem: "unreachable" } });
+        // No path, endpoint or bucket in any alert.
+        expect(JSON.stringify(alerts)).not.toMatch(/secret-root|example\.test\/|never-bucket|fine-bucket/);
+      });
+
+      it("raises backup_target_space_low under max(1 GiB, 10 % of total) and stays quiet above it", async () => {
+        await start();
+        const id = await local({ outcome: "ok", availableBytes: 5 * GIB, totalBytes: 100 * GIB });
+        let alert = (await both()).alerts.find((a) => a.kind === "backup_target_space_low");
+        expect(alert).toMatchObject({ severity: "warning", subject: id, details: { targetId: id, targetKind: "local", availableBytes: 5 * GIB, totalBytes: 100 * GIB } });
+        expect(Object.keys(alert!.details as object).sort()).toEqual(["availableBytes", "targetId", "targetKind", "testedAt", "totalBytes"]);
+        await recordTargetTest(dbClient.db, id, { at: new Date(), outcome: "ok", problem: null, availableBytes: 11 * GIB, totalBytes: 100 * GIB });
+        expect(kinds((await both()).alerts)).not.toContain("backup_target_space_low");
+        // The 1 GiB floor applies to a small disk where 10 % is under it.
+        await recordTargetTest(dbClient.db, id, { at: new Date(), outcome: "ok", problem: null, availableBytes: GIB - 1, totalBytes: 4 * GIB });
+        alert = (await both()).alerts.find((a) => a.kind === "backup_target_space_low");
+        expect(alert).toBeDefined();
+        await recordTargetTest(dbClient.db, id, { at: new Date(), outcome: "ok", problem: null, availableBytes: GIB, totalBytes: 4 * GIB });
+        expect(kinds((await both()).alerts)).not.toContain("backup_target_space_low");
+      });
+
+      it("raises backup_site_without_target for a site whose effective policy has no usable target, and stays quiet without any target", async () => {
+        await start();
+        const { siteId } = await createSite();
+        const without = async () => (await both()).alerts.filter((a) => a.kind === "backup_site_without_target");
+        // A fresh install with nothing configured is not an alert per site.
+        expect(await without()).toEqual([]);
+        // A usable target exists but the default policy names none: the site is skipped every night.
+        const id = await local({ outcome: "ok", availableBytes: 90 * GIB, totalBytes: 100 * GIB });
+        const [alert] = await without();
+        expect(alert).toMatchObject({ severity: "warning", subject: siteId, since: null, details: { siteId, siteName: SITE.name } });
+        expect(Object.keys(alert!.details as object).sort()).toEqual(["siteId", "siteName"]);
+        const defaultPolicy = await getPolicy(dbClient.db, "default_site");
+        await setPolicyTargets(dbClient.db, defaultPolicy.id, [id]);
+        expect(await without()).toEqual([]);
+        // Its own policy names only a target that is then archived (and so removed from the policy).
+        const s3 = await insertS3Target(dbClient.db, KEY, { name: "Gone", endpoint: "https://gone.example.test", region: "r", bucket: "gone-bucket", prefix: "", accessKeyId: "k", secretAccessKey: "s", customerSelectable: false, actorId: null });
+        await setSitePolicy(dbClient.db, siteId, [s3.id], null);
+        expect(await without()).toEqual([]);
+        await archiveBackupTarget(dbClient.db, s3.id);
+        expect(await without()).toHaveLength(1);
+        // Back to inheriting the default policy, which has a usable target.
+        await setSitePolicy(dbClient.db, siteId, null, null);
+        expect(await without()).toEqual([]);
+      });
+
+      it("reads panel_backup_failed from the newest panel copies and ignores an older failure", async () => {
+        await start();
+        await createSite();
+        const id = await local({ outcome: "ok", availableBytes: 90 * GIB, totalBytes: 100 * GIB });
+        await panelBackup("op_panel_old", id, "failed", ago(120 * MIN));
+        const old = (await both()).alerts.find((a) => a.kind === "panel_backup_failed");
+        expect(old).toMatchObject({ subject: "panel" });
+        expect(Date.now() - Date.parse((old!.details as { failedAt: string }).failedAt)).toBeLessThan(MIN);
+        await panelBackup("op_panel_new", id, "succeeded", ago(60 * MIN));
+        expect(kinds((await both()).alerts)).not.toContain("panel_backup_failed");
+      });
     });
 
     it("raises restore_stuck past the deadline, operation_unknown and operation_stuck, and nothing for a restore inside its deadline", async () => {

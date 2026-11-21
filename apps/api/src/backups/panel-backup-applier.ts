@@ -11,18 +11,24 @@ import {
 } from "@hosting-panel/contracts";
 import {
   ACTIVE_OPERATION_LOCK_STATUSES,
+  aggregateCopyStatuses,
   and,
   appendAuditEvent,
   eq,
-  getBackupSettingsPublic,
-  getBackupTarget,
+  getPolicy,
+  insertPanelBackupCopies,
+  listPanelBackupCopies,
   operationSteps,
   operations,
   recordPanelBackupOutcome,
   renewOperationLease,
+  resolveDispatchTarget,
+  resolvePanelTargets,
+  settlePanelBackupCopy,
   transitionOperation,
   type DatabaseClient,
   type HostingPanelDatabase,
+  type PanelCopyRow,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
@@ -74,8 +80,8 @@ export class PanelBackupApplier {
       await renewOperationLease(db, op.id, this.parent.leaseMs);
       await this.parent.safeUpdateStep(op.id, "dump", "running", "Copying the panel database");
 
-      const target = await getBackupTarget(db, this.config.secretsMasterKey);
-      if (!target) {
+      const copies = await this.#ensureCopies(op.id);
+      if (copies.length === 0) {
         await this.#fail(op, "other", "VALIDATION_ERROR", "not_configured");
       }
       if (!this.config.panelDump || !file) {
@@ -101,16 +107,25 @@ export class PanelBackupApplier {
       await this.parent.safeUpdateStep(op.id, "dump", "succeeded", "Panel database copied");
       await this.parent.safeUpdateStep(op.id, "upload", "running", "Sending the copy to the backup storage");
 
-      const settings = await getBackupSettingsPublic(db);
-      const startRes = await this.dockerExecutor.backups({
-        action: "panelStart",
-        jobId: op.id,
-        target: target!,
-        masterKey: this.config.secretsMasterKey.toString("hex"),
-        retentionDays: settings?.retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS,
-      });
-      const statusRes = await this.parent.pollJobStatus(op.id, op.id, startRes);
-      await this.#settleFromStatus(op, statusRes);
+      const retentionDays = (await getPolicy(db, "panel")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
+      // One copy per target, in priority order; a failed copy does not stop the next one (M3 has a single target).
+      for (const copy of copies.filter((c) => c.status === "running")) {
+        const jobId = copy.jobId ?? op.id;
+        const target = await resolveDispatchTarget(db, this.config.secretsMasterKey, copy.targetId);
+        if (!target) {
+          await this.#settleCopy(copy, "failed", "other");
+          continue;
+        }
+        const startRes = await this.dockerExecutor.backups({
+          action: "panelStart",
+          jobId,
+          target,
+          masterKey: this.config.secretsMasterKey.toString("hex"),
+          retentionDays,
+        });
+        await this.#settleCopyFromStatus(copy, await this.parent.pollJobStatus(op.id, jobId, startRes));
+      }
+      await this.#finish(op);
     } catch (err) {
       if (err instanceof PanelSettled) {
         throw err.causeError;
@@ -134,22 +149,30 @@ export class PanelBackupApplier {
     }
   }
 
-  /** Asks the executor for the job's status; never starts the copy again. */
+  /** Asks the executor for the status of each unfinished copy's job; never starts a copy again. */
   public async recover(op: BackupOperationRef): Promise<"settled" | "pending"> {
-    let statusRes: BackupJobStatus;
-    try {
-      statusRes = await this.dockerExecutor.backups({ action: "status", jobId: op.id });
-    } catch {
-      return "pending";
-    }
-    if (statusRes.state === "running") {
-      if (!(await this.parent.isPastPollDeadline(op.id))) {
+    // Only the copies recorded when the run started: a policy change since then must not add a never-run copy.
+    const copies = await listPanelBackupCopies(this.dbClient.db, op.id);
+    for (const copy of copies.filter((c) => c.status === "running")) {
+      let statusRes: BackupJobStatus;
+      try {
+        statusRes = await this.dockerExecutor.backups({ action: "status", jobId: copy.jobId ?? op.id });
+      } catch {
         return "pending";
       }
-      statusRes = { ...statusRes, state: "failed", failure: "timeout" };
+      if (statusRes.state === "running") {
+        if (!(await this.parent.isPastPollDeadline(op.id))) {
+          return "pending";
+        }
+        statusRes = { ...statusRes, state: "failed", failure: "timeout" };
+      }
+      await this.#settleCopyFromStatus(copy, statusRes);
     }
     try {
-      await this.#settleFromStatus(op, statusRes);
+      if (copies.length === 0) {
+        await this.#fail(op, "interrupted", "OPERATION_INTERRUPTED", INTERRUPTED_MSG);
+      }
+      await this.#finish(op);
     } catch (err) {
       if (!(err instanceof PanelSettled)) throw err;
     }
@@ -201,22 +224,63 @@ export class PanelBackupApplier {
     }
   }
 
-  async #settleFromStatus(op: BackupOperationRef, statusRes: BackupJobStatus): Promise<void> {
-    if (statusRes.state === "succeeded") {
+  /** The copies of an operation: the ones already recorded, plus one per panel policy target that has none yet. */
+  async #ensureCopies(operationId: string): Promise<PanelCopyRow[]> {
+    const db = this.dbClient.db;
+    const existing = await listPanelBackupCopies(db, operationId);
+    const missing = (await resolvePanelTargets(db)).filter((t) => !existing.some((c) => c.targetId === t.targetId));
+    if (missing.length === 0) {
+      return existing;
+    }
+    await insertPanelBackupCopies(db, operationId, missing);
+    return listPanelBackupCopies(db, operationId);
+  }
+
+  async #settleCopy(copy: PanelCopyRow, status: "failed", problem: BackupProblem): Promise<void> {
+    await settlePanelBackupCopy(this.dbClient.db, copy.id, { status, problem });
+  }
+
+  async #settleCopyFromStatus(copy: PanelCopyRow, statusRes: BackupJobStatus): Promise<void> {
+    const db = this.dbClient.db;
+    if (statusRes.state === "succeeded" && statusRes.snapshot) {
+      await settlePanelBackupCopy(db, copy.id, {
+        status: "succeeded",
+        snapshotId: statusRes.snapshot.snapshotId,
+        sizeBytes: statusRes.snapshot.totalBytes,
+      });
+    } else if (statusRes.state === "failed") {
+      await this.#settleCopy(copy, "failed", normalizeBackupProblem(statusRes.failure));
+    } else {
+      await this.#settleCopy(copy, "failed", statusRes.state === "succeeded" ? "other" : "interrupted");
+    }
+  }
+
+  /** Settles the operation from its copies: every required copy stored → succeeded, otherwise failed (succeeded copies stay). */
+  async #finish(op: BackupOperationRef): Promise<void> {
+    const copies = await listPanelBackupCopies(this.dbClient.db, op.id);
+    if (copies.length === 0 || aggregateCopyStatuses(copies) === "running") {
+      return;
+    }
+    if (aggregateCopyStatuses(copies) === "succeeded") {
       await this.parent.safeUpdateStep(op.id, "dump", "succeeded", "Panel database copied");
       await this.parent.safeUpdateStep(op.id, "upload", "succeeded", "Copy stored");
       await this.#settle(op, "succeeded", null, null, null);
       return;
     }
-    if (statusRes.state === "failed") {
-      const problem = normalizeBackupProblem(statusRes.failure);
-      await this.#fail(op, problem, problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR", FAILED_MSG);
+    const problem = copies.find((c) => c.required && c.status !== "succeeded")?.problem ?? "other";
+    if (problem === "interrupted") {
+      await this.#fail(op, problem, "OPERATION_INTERRUPTED", INTERRUPTED_MSG);
     }
-    await this.#fail(op, "interrupted", "OPERATION_INTERRUPTED", INTERRUPTED_MSG);
+    await this.#fail(op, problem, problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR", FAILED_MSG);
   }
 
-  /** Marks the steps failed, settles the operation failed, and throws PanelSettled. */
+  /** Marks the steps failed, settles the unfinished copies and the operation failed, and throws PanelSettled. */
   async #fail(op: BackupOperationRef, problem: BackupProblem, code: ErrorCode, message: string): Promise<never> {
+    for (const copy of await listPanelBackupCopies(this.dbClient.db, op.id)) {
+      if (copy.status === "running") {
+        await this.#settleCopy(copy, "failed", problem);
+      }
+    }
     const [dumpStep] = await this.dbClient.db
       .select({ status: operationSteps.status })
       .from(operationSteps)

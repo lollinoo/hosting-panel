@@ -5,24 +5,33 @@ import { join } from "node:path";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { PLATFORM_OPS_ORG_ID, type BackupsIpcRequest } from "@hosting-panel/contracts";
 import {
+  LEGACY_BACKUP_TARGET_ID,
   auditEvents,
+  backupPolicies,
   backupSettings,
+  backupTargets,
   createDatabaseClient,
   createSiteTransactional,
   deleteBackupSettings,
   eq,
   hostAllocations,
   hosts,
+  getPolicy,
+  insertLocalTarget,
   insertSiteBackup,
   listAdminBackupStatus,
+  listPanelBackupCopies,
   operationSteps,
   operations,
   organizations,
   outboxEvents,
   platformInstallations,
+  repairLegacyBackupCopies,
+  setPolicyTargets,
   settleSiteBackup,
   siteBackups,
   sites,
+  updatePolicySettings,
   upsertBackupSettings,
   type DatabaseClient,
 } from "@hosting-panel/database";
@@ -30,6 +39,8 @@ import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { Logger } from "@nestjs/common";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { AppModule } from "../src/app.module.js";
+import { BackupPoliciesService } from "../src/backups/backup-policies.service.js";
 import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "../src/backups/backup-settings.service.js";
 import { PANEL_BACKUP_STEPS } from "../src/backups/panel-backup-applier.js";
@@ -75,8 +86,20 @@ describe("nightly panel copy (panel.backups.create)", () => {
     databaseUrl: `postgresql://hosting_panel:${DB_PW}@127.0.0.1:5432/hosting_panel`,
   });
 
-  const makeApp = (panelDump: { dir: string; databaseUrl: string } | null = panelConfig()) =>
-    createControlPlaneApp({
+  // Until app.module.ts registers BackupPoliciesService (not part of this task) the site-backups controller cannot be built.
+  const registerPolicies = () => {
+    if (vi.isMockFunction(AppModule.register)) return;
+    const register = AppModule.register.bind(AppModule);
+    vi.spyOn(AppModule, "register").mockImplementation((options) => {
+      const mod = register(options);
+      const providers = mod.providers ?? [];
+      return { ...mod, providers: providers.includes(BackupPoliciesService) ? providers : [...providers, BackupPoliciesService] };
+    });
+  };
+
+  const makeApp = (panelDump: { dir: string; databaseUrl: string } | null = panelConfig()) => {
+    registerPolicies();
+    return createControlPlaneApp({
       listen: false,
       databaseClient: dbClient,
       secretsMasterKey: KEY,
@@ -94,6 +117,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
       recoverUnknownOnStart: false,
       panelDump,
     });
+  };
 
   const fakeDump = async (cmd: PanelDumpCommand) => {
     dumps.push(cmd);
@@ -102,12 +126,24 @@ describe("nightly panel copy (panel.backups.create)", () => {
 
   const panelOps = () =>
     dbClient.db.select().from(operations).where(eq(operations.kind, "panel.backups.create"));
+  /** Outcome audits only (succeeded|failed); the enqueue audit `panel.backups.create` (SPEC 15.1) is read by `panelCreateAudits`. */
   const panelAudits = async () =>
     (await dbClient.db.select().from(auditEvents)).filter(
-      (a) => !seenAudits.has(a.id) && a.action.startsWith("panel.backups."),
+      (a) => !seenAudits.has(a.id) && a.action.startsWith("panel.backups.") && a.action !== "panel.backups.create",
+    );
+  const panelCreateAudits = async () =>
+    (await dbClient.db.select().from(auditEvents)).filter(
+      (a) => !seenAudits.has(a.id) && a.action === "panel.backups.create",
     );
   const settingsRow = async () => (await dbClient.db.select().from(backupSettings))[0]!;
   const dumpFiles = () => readdir(dumpDir);
+  /** The nightly cursor lives on the default_site policy row (the backup_settings columns are only a mirror). */
+  const cursorRow = async () =>
+    (await dbClient.db.select().from(backupPolicies).where(eq(backupPolicies.scope, "default_site")))[0]!;
+  const panelCopies = async (opId: string) => listPanelBackupCopies(dbClient.db, opId);
+  async function setPanelTargets(ids: string[]): Promise<void> {
+    await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, "panel")).id, ids);
+  }
 
   async function queuePanel(): Promise<string> {
     await scheduler.tick(NIGHT);
@@ -206,8 +242,23 @@ describe("nightly panel copy (panel.backups.create)", () => {
     await dbClient.db.delete(operationSteps);
     await dbClient.db.delete(operations);
     seenAudits = new Set((await dbClient.db.select({ id: auditEvents.id }).from(auditEvents)).map((a) => a.id));
+    // Both policies on the legacy S3 target (the settings row below), no local target, a clean cursor.
+    for (const scope of ["default_site", "panel"] as const) {
+      await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, scope)).id, []);
+    }
+    // An archived legacy target is never revived: drop every target; the backup_settings trigger recreates the legacy one below.
+    await dbClient.db.delete(backupTargets);
+    await dbClient.db
+      .update(backupPolicies)
+      .set({ lastNightlyRunOn: null, nightlyRunStartedAt: null })
+      .where(eq(backupPolicies.scope, "default_site"));
     await deleteBackupSettings(dbClient.db);
     await upsertBackupSettings(dbClient.db, KEY, SETTINGS);
+    await repairLegacyBackupCopies(dbClient.db);
+    for (const scope of ["default_site", "panel"] as const) {
+      await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, scope)).id, [LEGACY_BACKUP_TARGET_ID]);
+    }
+    await updatePolicySettings(dbClient.db, "panel", { retentionDays: 21 }, null);
   });
 
   afterEach(async () => {
@@ -268,7 +319,7 @@ describe("nightly panel copy (panel.backups.create)", () => {
         .from(operationSteps)
         .where(eq(operationSteps.operationId, ops[0]!.id));
       expect(steps.map((s) => s.key)).toEqual(PANEL_BACKUP_STEPS.map((s) => s.key));
-      expect((await settingsRow()).nightlyRunStartedAt).toBeNull();
+      expect((await cursorRow()).nightlyRunStartedAt).toBeNull();
 
       // A second tick and a rebuilt app queue nothing new.
       await scheduler.tick(new Date(NIGHT.getTime() + 60_000));
@@ -291,9 +342,13 @@ describe("nightly panel copy (panel.backups.create)", () => {
     extraApps.push(noDump);
     await noDump.nestApp.get(BackupSchedulerService).tick(NIGHT);
     expect(await panelOps()).toHaveLength(0);
-    expect((await settingsRow()).lastNightlyRunOn).toBe("2026-11-15");
+    expect((await cursorRow()).lastNightlyRunOn).toBe("2026-11-15");
 
-    await dbClient.db.update(backupSettings).set({ lastNightlyRunOn: null });
+    await dbClient.db
+      .update(backupPolicies)
+      .set({ lastNightlyRunOn: null })
+      .where(eq(backupPolicies.scope, "default_site"));
+    registerPolicies();
     const disabled = await createControlPlaneApp({
       listen: false,
       databaseClient: dbClient,
@@ -320,6 +375,17 @@ describe("nightly panel copy (panel.backups.create)", () => {
     const row = await settingsRow();
     expect(row).toMatchObject({ lastPanelBackupStatus: "succeeded", lastPanelBackupProblem: null });
     expect(row.lastPanelBackupAt).toBeInstanceOf(Date);
+    // SPEC 15.1: the enqueue writes one system audit `panel.backups.create` with exactly {operationId}.
+    const created = await panelCreateAudits();
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({
+      action: "panel.backups.create",
+      actorType: "system",
+      organizationId: null,
+      targetType: "backups",
+    });
+    expect(Object.keys(created[0]!.details as object).sort()).toEqual(["operationId"]);
+    expect(created[0]!.details).toEqual({ operationId: opId });
     const audits = await panelAudits();
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
@@ -355,9 +421,101 @@ describe("nightly panel copy (panel.backups.create)", () => {
     expect(await dumpFiles()).toEqual([]);
 
     const dto = await app.nestApp.get(BackupSettingsService).get();
-    expect(dto.lastPanelBackup).toEqual({ at: row.lastPanelBackupAt!.toISOString(), status: "succeeded", problem: null });
+    // D4: the admin DTO's lastPanelBackup comes from panel_backup_copies (the copy's finishedAt), not the backup_settings mirror line.
+    const [copy] = await panelCopies(opId);
+    expect(dto.lastPanelBackup).toEqual({ at: copy!.finishedAt!.toISOString(), status: "succeeded", problem: null });
     await expectNoSecrets();
   });
+
+  it("Copies: the panel copy is recorded per target (job id = operation id, legacy S3 target) and settled with the snapshot", async () => {
+    const opId = await queuePanel();
+    await app.outboxWorker.processPendingOnce();
+
+    const copies = await panelCopies(opId);
+    expect(copies).toHaveLength(1);
+    expect(copies[0]).toMatchObject({
+      operationId: opId,
+      targetId: LEGACY_BACKUP_TARGET_ID,
+      targetKind: "s3",
+      priority: 1,
+      required: true,
+      jobId: opId,
+      status: "succeeded",
+      problem: null,
+    });
+    expect(copies[0]!.snapshotId).toMatch(/^[0-9a-f]{64}$/);
+    expect(copies[0]!.finishedAt).toBeInstanceOf(Date);
+    // The mirror on the settings row keeps the line the previous release reads.
+    expect(await settingsRow()).toMatchObject({ lastPanelBackupStatus: "succeeded" });
+  });
+
+  it("Copies: the retention of the panel policy travels with panelStart", async () => {
+    await updatePolicySettings(dbClient.db, "panel", { retentionDays: 30 }, null);
+    await queuePanel();
+    await app.outboxWorker.processPendingOnce();
+    expect(calls.filter((c) => c.action === "panelStart")).toEqual([expect.objectContaining({ retentionDays: 30 })]);
+  });
+
+  it("Copies: a local-only install copies the panel to the local target (dispatch target without S3 data)", async () => {
+    await deleteBackupSettings(dbClient.db);
+    const { id: localId } = await insertLocalTarget(dbClient.db, { name: "Server", customerSelectable: false, actorId: null });
+    await setPanelTargets([localId]);
+    await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, "default_site")).id, [localId]);
+
+    const opId = await queuePanel();
+    await app.outboxWorker.processPendingOnce();
+
+    const starts = calls.filter((c) => c.action === "panelStart");
+    expect(starts).toEqual([
+      expect.objectContaining({ jobId: opId, target: { kind: "local", targetId: localId }, retentionDays: 21 }),
+    ]);
+    expect(JSON.stringify(starts[0]!.target)).not.toContain("secretAccessKey");
+    expect((await panelOps())[0]!.status).toBe("succeeded");
+    expect((await panelCopies(opId)).map((c) => [c.targetId, c.targetKind, c.jobId, c.status])).toEqual([
+      [localId, "local", opId, "succeeded"],
+    ]);
+    expect((await panelAudits()).map((a) => a.action)).toEqual(["panel.backups.succeeded"]);
+    expect(await dumpFiles()).toEqual([]);
+    await expectNoSecrets();
+  });
+
+  it("Copies: a panel policy without usable targets fails with not_configured and writes no copy or dump", async () => {
+    const opId = await queuePanel();
+    await setPanelTargets([]);
+    await app.outboxWorker.processPendingOnce();
+
+    const [op] = await panelOps();
+    expect(op).toMatchObject({ status: "failed", errorCode: "VALIDATION_ERROR", errorMessage: "not_configured" });
+    expect(await panelCopies(opId)).toEqual([]);
+    expect(dumps).toEqual([]);
+    expect(calls.filter((c) => c.action === "panelStart")).toEqual([]);
+    expect(await settingsRow()).toMatchObject({ lastPanelBackupStatus: "failed", lastPanelBackupProblem: "other" });
+    expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Copies: rows exist before the dump, and a replayed apply adds no second row", async () => {
+    let seen = -1;
+    applier.panel.dump = async (cmd) => {
+      const [op] = await panelOps();
+      seen = (await panelCopies(op!.id)).length;
+      await fakeDump(cmd);
+    };
+    const opId = await queuePanel();
+    await app.outboxWorker.processPendingOnce();
+    expect(seen).toBe(1);
+    expect(await panelCopies(opId)).toHaveLength(1);
+  });
+
+  it("Copies: a failed executor copy is recorded failed with its problem, the operation fails", async () => {
+    sim.backupState.failNext("panel_dump_missing");
+    const opId = await queuePanel();
+    await app.outboxWorker.processPendingOnce();
+    expect((await panelOps())[0]!.status).toBe("failed");
+    expect(await panelCopies(opId)).toEqual([
+      expect.objectContaining({ status: "failed", problem: "panel_dump_missing", snapshotId: null }),
+    ]);
+  });
+
 
   const dumpFailures: [string, () => Promise<void>, string][] = [
     ["absent tool", () => Promise.reject(new PanelDumpError("tool_missing")), "panel_dump_tool_missing"],
@@ -569,6 +727,23 @@ describe("nightly panel copy (panel.backups.create)", () => {
     await scheduler.tick(nextNight);
     expect((await panelOps()).filter((o) => o.id !== opId)).toHaveLength(1);
     await expectNoSecrets();
+  });
+
+  it("Copies (recovery): the copy stays running while the job runs and settles from the status, with no second start", async () => {
+    const opId = await runUntilAmbiguous();
+    expect((await panelCopies(opId))[0]!.status).toBe("running");
+    sim.backupState.finishHeld();
+    await app.outboxWorker.recoverUnknownOperations();
+    expect((await panelOps())[0]!.status).toBe("succeeded");
+    expect((await panelCopies(opId))[0]).toMatchObject({ status: "succeeded" });
+    expect(calls.filter((c) => c.action === "panelStart")).toHaveLength(1);
+  });
+
+  it("Copies (recovery): a job the executor lost settles the copy failed with interrupted", async () => {
+    const opId = await runUntilAmbiguous();
+    sim.backupState.simulateRestart();
+    await app.outboxWorker.recoverUnknownOperations();
+    expect((await panelCopies(opId))[0]).toMatchObject({ status: "failed", problem: "interrupted" });
   });
 
   it("Dump file: the start sweep keeps an active operation's file and removes a finished one's", async () => {

@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post, Req } from "@nestjs/common";
 import {
   AdminRestoreBackupInputSchema,
+  CreateSiteBackupInputSchema,
   isBackupAvailable,
   type AdminSiteBackupStatusDto,
   type BackupSettingsDto,
@@ -8,7 +9,6 @@ import {
   type SiteBackupAcceptedDto,
 } from "@hosting-panel/contracts";
 import type { FastifyRequest } from "fastify";
-import { z } from "zod";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { requireServerAdmin } from "../auth/server-admin.guard.js";
 import { BackupSettingsService } from "../backups/backup-settings.service.js";
@@ -20,7 +20,6 @@ import { ManagedSitesService } from "../sites/managed-sites.service.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 
 const TARGET = "backups";
-const EmptyRunBodySchema = z.object({}).strict();
 
 const headersOf = (req: FastifyRequest): Record<string, string | string[] | undefined> =>
   req.headers as Record<string, string | string[] | undefined>;
@@ -94,7 +93,7 @@ export class AdminBackupsController {
     }
 
     const idempotencyKey = requireIdempotencyKey(headersOf(req));
-    EmptyRunBodySchema.parse(rawBody === undefined ? {} : rawBody);
+    const input = CreateSiteBackupInputSchema.parse(rawBody === undefined ? {} : rawBody);
 
     const orgId = await this.sitesService.ownerOf(siteId);
     const site = await this.sitesService.get(siteId, orgId);
@@ -102,6 +101,7 @@ export class AdminBackupsController {
       site,
       { auth, req, actionPrefix: "admin.site.backups" },
       idempotencyKey,
+      input,
     );
     this.outboxWorker.triggerAsync();
 

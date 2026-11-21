@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
   backupArchiveFileName,
@@ -5,26 +6,33 @@ import {
   type AdminRestoreBackupInput,
   type BackupArchiveChunk,
   type BackupArchiveChunkDto,
+  type BackupTargetKind,
+  type PrepareDownloadInput,
   type RestoreBackupInput,
   type SiteBackupAcceptedDto,
 } from "@hosting-panel/contracts";
 import {
   and,
+  anyUsableTarget,
   appendAuditEvent,
   clearSiteArchive,
   enqueueOperationTransactional,
   eq,
-  getBackupSettingsPublic,
   getSiteBackup,
   heavyActionRetryAt,
+  LEGACY_BACKUP_TARGET_ID,
+  listSiteBackupCopies,
   listSiteBackups,
   markSiteArchivePreparing,
   markSiteRestoreRunning,
   operations,
   organizations,
   outboxEvents,
+  resolveEffectiveTargets,
+  siteBackups,
   sites,
   sql,
+  type CopyRow,
   type DatabaseClient,
   type DatabaseExecutor,
   type HostingPanelDatabase,
@@ -52,6 +60,8 @@ import {
 import type { BackupSiteRef, SiteBackupActor } from "./site-backups.service.js";
 
 const BACKUP_ID_PATTERN = /^bkp_[0-9a-f]{32}$/;
+/** Backup statuses with something to read; `partial` arrives with two destinations (M4). */
+const READABLE_STATUSES: ReadonlySet<string> = new Set(["succeeded", "partial"]);
 
 /** Byte-range query accepted when reading a prepared backup archive chunk. */
 export interface BackupArchiveReadQuery {
@@ -104,26 +114,71 @@ function assertBackupRuntimeAvailable(
   }
 }
 
-/** Validates backend availability, target settings configuration, and site readiness before queuing a backup mutation. */
-export async function assertBackupInfrastructureReady(
-  db: DatabaseExecutor,
+/** Restore and download need the runtime and an idle site, not a configured destination: archived targets stay restorable. */
+export function assertBackupRuntimeReady(
   runtimeBackend: ControlPlaneRuntimeConfig["runtimeBackend"],
   siteStatus: string,
-): Promise<void> {
+): void {
   assertBackupRuntimeAvailable(runtimeBackend);
-
-  const settings = await getBackupSettingsPublic(db);
-  if (!settings) {
-    throw new ControlPlaneError("VALIDATION_ERROR", "not_configured", {
-      details: [{ message: "not_configured" }],
-    });
-  }
-
   if (siteStatus === "deploying" || siteStatus === "maintenance") {
     throw new ControlPlaneError("RESOURCE_LOCKED", "not_ready", {
       details: [{ message: "not_ready", reason: "not_ready" }],
     });
   }
+}
+
+/**
+ * Backups to create: the runtime offers them, a destination is usable (the site's effective ones when `siteId` is
+ * given, else any), and the site is idle.
+ */
+export async function assertBackupInfrastructureReady(
+  db: DatabaseExecutor,
+  runtimeBackend: ControlPlaneRuntimeConfig["runtimeBackend"],
+  siteStatus: string,
+  siteId?: string,
+): Promise<void> {
+  assertBackupRuntimeAvailable(runtimeBackend);
+
+  const configured = siteId
+    ? (await resolveEffectiveTargets(db, siteId)).length > 0
+    : await anyUsableTarget(db);
+  if (!configured) {
+    throw new ControlPlaneError("VALIDATION_ERROR", "not_configured", {
+      details: [{ message: "not_configured" }],
+    });
+  }
+
+  assertBackupRuntimeReady(runtimeBackend, siteStatus);
+}
+
+/** The copy a restore or download reads: its target (null = the legacy S3 target of an older release) and kind. */
+interface SelectedCopy {
+  readonly targetId: string | null;
+  readonly targetKind: BackupTargetKind | null;
+}
+
+/**
+ * The requested target must hold a succeeded copy of this backup; without one, the lowest-priority succeeded copy.
+ * A backup without copy rows but with a snapshot is the legacy S3 copy. Null: nothing restorable matches.
+ */
+function selectCopy(
+  row: SiteBackupRow,
+  copies: readonly CopyRow[],
+  requested: string | undefined,
+): SelectedCopy | null {
+  if (copies.length === 0) {
+    return row.snapshotId !== null && (requested === undefined || requested === LEGACY_BACKUP_TARGET_ID)
+      ? { targetId: null, targetKind: "s3" }
+      : null;
+  }
+  const succeeded = copies.filter((c) => c.status === "succeeded");
+  const copy = requested === undefined ? succeeded[0] : succeeded.find((c) => c.targetId === requested);
+  return copy ? { targetId: copy.targetId, targetKind: copy.targetKind } : null;
+}
+
+/** Canonical request identity of a restore or download: replaying a key with another backup or target conflicts. */
+function requestHashOf(backupId: string, targetId: string | null): string {
+  return createHash("sha256").update(JSON.stringify({ backupId, targetId })).digest("hex");
 }
 
 /** Appends a standardized user-initiated backup audit event inside or after the calling unit of work. */
@@ -207,8 +262,8 @@ export class SiteRestoreService {
     input: RestoreBackupInput,
     idempotencyKey: string,
   ): Promise<SiteBackupAcceptedDto> {
-    const row = await this.#requireManagedBackup(site.id, backupId);
-    await assertBackupInfrastructureReady(this.dbClient.db, this.config.runtimeBackend, site.status);
+    const { row, copy } = await this.#requireManagedBackup(site.id, backupId, input.targetId);
+    assertBackupRuntimeReady(this.config.runtimeBackend, site.status);
 
     if (input.confirmName.trim() !== site.name) {
       throw confirmNameError();
@@ -218,10 +273,14 @@ export class SiteRestoreService {
       site,
       actor,
       backupId: row.id,
+      copy,
       idempotencyKey,
       kind: "site.backups.restore",
       steps: SITE_RESTORE_STEPS,
-      markRunning: (tx, operationId) => markSiteRestoreRunning(tx, row.id, operationId),
+      markRunning: async (tx, operationId) => {
+        await markSiteRestoreRunning(tx, row.id, operationId);
+        await tx.update(siteBackups).set({ restoreTargetId: copy.targetId }).where(eq(siteBackups.id, row.id));
+      },
       auditSuffix: "restore",
     });
   }
@@ -236,31 +295,42 @@ export class SiteRestoreService {
     // A replay keeps the copy the first request chose, even when a newer one exists now.
     const backupId =
       input.backupId ?? (await this.#replayedBackupId(site, idempotencyKey)) ?? null;
-    let row: SiteBackupRow | undefined;
+    let found: { row: SiteBackupRow; copy: SelectedCopy } | undefined;
     if (backupId !== null) {
-      row = await this.#requireManagedBackup(site.id, backupId).catch(() => undefined);
+      found = await this.#requireManagedBackup(site.id, backupId, input.targetId).catch(() => undefined);
     } else {
-      row = (await listSiteBackups(this.dbClient.db, site.id)).find(
-        (b) => b.status === "succeeded" && b.snapshotId !== null,
-      );
+      const rows = await listSiteBackups(this.dbClient.db, site.id);
+      const copies = await listSiteBackupCopies(this.dbClient.db, rows.map((r) => r.id));
+      for (const candidate of rows) {
+        const copy = this.#restorableCopy(candidate, copies.get(candidate.id) ?? [], input.targetId);
+        if (copy) {
+          found = { row: candidate, copy };
+          break;
+        }
+      }
     }
-    if (!row) {
+    if (!found) {
       throw noSucceededBackupError();
     }
-    await assertBackupInfrastructureReady(this.dbClient.db, this.config.runtimeBackend, site.status);
+    assertBackupRuntimeReady(this.config.runtimeBackend, site.status);
     if (input.confirmName.trim() !== site.name) {
       throw confirmNameError();
     }
 
-    const backupRowId = row.id;
+    const backupRowId = found.row.id;
+    const copy = found.copy;
     return await this.#enqueueBackupAction({
       site,
       actor,
       backupId: backupRowId,
+      copy,
       idempotencyKey,
       kind: "site.backups.restore",
       steps: ADMIN_SITE_RESTORE_STEPS,
-      markRunning: (tx, operationId) => markSiteRestoreRunning(tx, backupRowId, operationId),
+      markRunning: async (tx, operationId) => {
+        await markSiteRestoreRunning(tx, backupRowId, operationId);
+        await tx.update(siteBackups).set({ restoreTargetId: copy.targetId }).where(eq(siteBackups.id, backupRowId));
+      },
       auditSuffix: "restore.requested",
     });
   }
@@ -271,13 +341,16 @@ export class SiteRestoreService {
     actor: SiteBackupActor,
     backupId: string,
     idempotencyKey: string,
+    input: PrepareDownloadInput = {},
   ): Promise<SiteBackupAcceptedDto> {
-    const row = await this.#requireManagedBackup(site.id, backupId);
-    await assertBackupInfrastructureReady(this.dbClient.db, this.config.runtimeBackend, site.status);
+    const { row, copy } = await this.#requireManagedBackup(site.id, backupId, input.targetId);
+    assertBackupRuntimeReady(this.config.runtimeBackend, site.status);
 
     const nowMs = Date.now();
+    // An archive prepared from another copy is not this request's: queue a new one.
     const isActiveArchive =
       row.archiveOperationId !== null &&
+      row.archiveTargetId === copy.targetId &&
       (row.archiveStatus === "preparing" ||
         (row.archiveStatus === "ready" &&
           row.archiveReadyUntil !== null &&
@@ -295,10 +368,14 @@ export class SiteRestoreService {
       site,
       actor,
       backupId: row.id,
+      copy,
       idempotencyKey,
       kind: "site.backups.download",
       steps: SITE_ARCHIVE_STEPS,
-      markRunning: (tx, operationId) => markSiteArchivePreparing(tx, site.id, row.id, operationId),
+      markRunning: async (tx, operationId) => {
+        await markSiteArchivePreparing(tx, site.id, row.id, operationId);
+        await tx.update(siteBackups).set({ archiveTargetId: copy.targetId }).where(eq(siteBackups.id, row.id));
+      },
       auditSuffix: "download",
     });
   }
@@ -311,7 +388,8 @@ export class SiteRestoreService {
     query: BackupArchiveReadQuery,
   ): Promise<BackupArchiveChunkDto> {
     assertBackupRuntimeAvailable(this.config.runtimeBackend);
-    const row = await this.#requireManagedBackup(site.id, backupId);
+    // A row with no restorable copy is the same 404 as on POST: "prepare it again" could never succeed.
+    const { row } = await this.#requireManagedBackup(site.id, backupId, undefined);
 
     if (row.archiveStatus === "preparing") {
       throw archivePreparingError();
@@ -384,15 +462,39 @@ export class SiteRestoreService {
     };
   }
 
-  async #requireManagedBackup(siteId: string, backupId: string): Promise<SiteBackupRow> {
+  /** A backup of this site that finished with at least one copy: succeeded or partial. */
+  async #requireBackupRow(siteId: string, backupId: string): Promise<SiteBackupRow> {
     if (!BACKUP_ID_PATTERN.test(backupId)) {
       throw backupNotFoundError();
     }
     const row = await getSiteBackup(this.dbClient.db, siteId, backupId);
-    if (!row || row.status !== "succeeded" || row.snapshotId === null) {
+    if (!row || !READABLE_STATUSES.has(row.status)) {
       throw backupNotFoundError();
     }
     return row;
+  }
+
+  /** The backup and the copy to read; a foreign, failed or absent copy is the same 404 (no oracle on other targets). */
+  async #requireManagedBackup(
+    siteId: string,
+    backupId: string,
+    targetId: string | undefined,
+  ): Promise<{ row: SiteBackupRow; copy: SelectedCopy }> {
+    const row = await this.#requireBackupRow(siteId, backupId);
+    const copies = (await listSiteBackupCopies(this.dbClient.db, [row.id])).get(row.id) ?? [];
+    const copy = selectCopy(row, copies, targetId);
+    if (!copy) {
+      throw backupNotFoundError();
+    }
+    return { row, copy };
+  }
+
+  #restorableCopy(
+    row: SiteBackupRow,
+    copies: readonly CopyRow[],
+    targetId: string | undefined,
+  ): SelectedCopy | null {
+    return READABLE_STATUSES.has(row.status) ? selectCopy(row, copies, targetId) : null;
   }
 
   /** Backup id of an earlier restore of this site queued with the same idempotency key, if any. */
@@ -417,6 +519,7 @@ export class SiteRestoreService {
     readonly site: BackupSiteRef & { name: string };
     readonly actor: SiteBackupActor;
     readonly backupId: string;
+    readonly copy: SelectedCopy;
     readonly idempotencyKey: string;
     readonly kind: "site.backups.restore" | "site.backups.download";
     readonly steps: readonly { readonly key: string; readonly label: string }[];
@@ -436,6 +539,7 @@ export class SiteRestoreService {
           lockKey: `site:${opts.site.id}`,
           leaseDurationMs: BACKUP_LEASE_MS,
           steps: opts.steps,
+          requestHash: requestHashOf(opts.backupId, opts.copy.targetId),
           outboxPayload: { siteId: opts.site.id, backupId: opts.backupId },
         },
       );
@@ -478,6 +582,8 @@ export class SiteRestoreService {
       await appendUserBackupAudit(tx, opts.site, opts.actor, opts.auditSuffix, {
         requestId: resolveRequestId(opts.actor.req),
         backupId: opts.backupId,
+        targetId: opts.copy.targetId,
+        targetKind: opts.copy.targetKind,
         operationId: enqueued.operation.id,
       });
 

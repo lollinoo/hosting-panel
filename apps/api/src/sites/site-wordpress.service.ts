@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { Inject, Injectable } from "@nestjs/common";
 import {
-  isBackupAvailable,
   isWordpressSite,
   isWordpressToolsAvailable,
   SiteWordpressLastUpdateDtoSchema,
@@ -24,19 +23,18 @@ import {
   asc,
   enqueueOperationTransactional,
   eq,
-  getBackupSettingsPublic,
   getSiteWordpressState,
   inArray,
-  insertSiteBackup,
   operations,
   operationSteps,
   serviceInstances,
-  sites,
   type DatabaseClient,
   type DatabaseExecutor,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import { BackupPoliciesService } from "../backups/backup-policies.service.js";
+import { createBackupWithCopies } from "../backups/site-backups.service.js";
 import { assertHeavyActionAllowed } from "../backups/site-restore.service.js";
 import {
   ControlPlaneError,
@@ -117,7 +115,7 @@ export class SiteWordpressService {
       };
     }
     return {
-      backupsConfigured: await this.backupsConfigured(),
+      backupsConfigured: await this.backupsConfigured(site.id),
       state: this.#state(stored?.state),
       runningOperation,
       lastUpdate: SiteWordpressLastUpdateDtoSchema.safeParse(stored?.lastUpdate).data ?? null,
@@ -151,12 +149,11 @@ export class SiteWordpressService {
         );
       }
     }
-    const backupsConfigured = await this.backupsConfigured();
+    const backupsConfigured = await this.backupsConfigured(site.id);
     return this.#enqueue(site, actor, idempotencyKey, "site.wordpress.update", async (tx, operationId, submittedAt) => {
       await assertHeavyActionAllowed(tx, site.id, actor, { id: operationId, submittedAt });
       if (backupsConfigured) {
-        const [row] = await tx.select({ siteUrl: sites.siteUrl }).from(sites).where(eq(sites.id, site.id)).limit(1);
-        await insertSiteBackup(tx, { siteId: site.id, kind: "pre_update", status: "running", operationId, siteUrl: row?.siteUrl ?? null });
+        await createBackupWithCopies(tx, site, { kind: "pre_update", operationId });
       }
       await this.#audit(tx, site, actor, "site.wordpress.update", { outcome: "requested", operationId, target });
     }, { target });
@@ -275,8 +272,8 @@ export class SiteWordpressService {
   }
 
   /** Whether a copy is taken before a change. */
-  public async backupsConfigured(): Promise<boolean> {
-    return isBackupAvailable(this.config.runtimeBackend) && (await getBackupSettingsPublic(this.dbClient.db)) !== null;
+  public async backupsConfigured(siteId: string): Promise<boolean> {
+    return BackupPoliciesService.isSiteBackupConfigured(this.dbClient.db, this.config.runtimeBackend, siteId);
   }
 
   async #audit(

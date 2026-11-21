@@ -222,6 +222,9 @@ describe("support access tenancy over every organization route", () => {
     expect(orgRoutes().length).toBeGreaterThanOrEqual(54);
     expect(orgRoutes()).toContainEqual({ method: "GET", path: "/v1/organizations/:orgId/managed-sites/:siteId/files" });
     expect(orgRoutes()).toContainEqual({ method: "GET", path: "/v1/organizations/:orgId/members" });
+    for (const method of ["GET", "PATCH"]) {
+      expect(orgRoutes()).toContainEqual({ method, path: "/v1/organizations/:orgId/managed-sites/:siteId/backup-policy" });
+    }
     for (const [method, path] of [
       ["GET", "/tls-certificates"],
       ["POST", "/tls-certificates"],

@@ -26,14 +26,18 @@ import {
 } from "@hosting-panel/contracts";
 import {
   and,
+  anyUsableTarget,
   asc,
+  backupPolicies,
   backupSettings,
   desc,
   eq,
   gte,
   hostAgentHeartbeats,
   inArray,
+  latestPanelBackupOutcome,
   listAdminBackupStatus,
+  listBackupTargets,
   listUnsettledOperations,
   lte,
   not,
@@ -41,6 +45,7 @@ import {
   operations,
   or,
   organizations,
+  resolveEffectiveTargets,
   serviceInstances,
   sites,
   stackRevisions,
@@ -61,6 +66,7 @@ type DownSite = { siteId: string; siteName: string; observed: AdminHealthDto["si
 const PanelContainersSnapshotSchema = z.object({ containers: z.array(PanelContainerStatusWireSchema) });
 const DisksSnapshotSchema = z.object({ disks: z.array(HostDiskWireSchema) });
 const HOST_SERVICES_READ_MS = 3_000;
+const LOW_SPACE_FLOOR_BYTES = 1024 ** 3;
 const DRIFT_REASONS = [
   ["OUT_OF_BAND_MODIFIED", "out_of_band_modified"],
   ["STATUS_MISMATCH", "status_mismatch"],
@@ -162,14 +168,46 @@ export class AdminHealthService {
         push({ kind: "restore_undo_incomplete", subject: r.backupId, since: r.finishedAt, details: { siteId: b.siteId, siteName: b.siteName, backupId: r.backupId, failedAt: r.finishedAt } });
       }
     }
-    const [settings] = await db.select().from(backupSettings).limit(1);
-    if (settings?.lastPanelBackupStatus === "failed" && settings.lastPanelBackupAt) {
-      const failedAt = settings.lastPanelBackupAt.toISOString();
-      push({ kind: "panel_backup_failed", subject: "panel", since: failedAt, details: { failedAt } });
+    // Panel copies are the source once any panel backup has settled; backup_settings only covers a panel that never wrote copies.
+    const panelOutcome = await latestPanelBackupOutcome(db);
+    if (panelOutcome) {
+      if (panelOutcome.status !== "succeeded") {
+        const failedAt = panelOutcome.at.toISOString();
+        push({ kind: "panel_backup_failed", subject: "panel", since: failedAt, details: { failedAt } });
+      }
+    } else {
+      const [settings] = await db.select().from(backupSettings).limit(1);
+      if (settings?.lastPanelBackupStatus === "failed" && settings.lastPanelBackupAt) {
+        const failedAt = settings.lastPanelBackupAt.toISOString();
+        push({ kind: "panel_backup_failed", subject: "panel", since: failedAt, details: { failedAt } });
+      }
     }
-    if (settings?.lastTestOutcome === "failed" && settings.lastTestAt) {
-      const testedAt = settings.lastTestAt.toISOString();
-      push({ kind: "backup_storage_test_failed", subject: "storage", since: testedAt, details: { testedAt } });
+    // One alert per live target from its stored last test; paths, endpoints and buckets never leave the row.
+    for (const t of (await listBackupTargets(db)).filter((t) => t.enabled && t.archivedAt === null && t.lastTestAt !== null)) {
+      const testedAt = t.lastTestAt!.toISOString();
+      if (t.lastTestOutcome === "failed") {
+        push({ kind: "backup_storage_test_failed", subject: t.id, since: testedAt, details: { testedAt, targetId: t.id, targetKind: t.kind, problem: t.lastTestProblem } });
+      } else if (t.kind === "local" && t.lastTestAvailableBytes !== null && t.lastTestTotalBytes !== null &&
+        t.lastTestAvailableBytes < Math.max(LOW_SPACE_FLOOR_BYTES, t.lastTestTotalBytes / 10)) {
+        push({ kind: "backup_target_space_low", subject: t.id, since: testedAt, details: { targetId: t.id, targetKind: "local", availableBytes: t.lastTestAvailableBytes, totalBytes: t.lastTestTotalBytes, testedAt } });
+      }
+    }
+    // The nightly run skips these sites without a trace, so the administrator is told: same site eligibility and effective-target
+    // resolution as the scheduler, and only once some target is usable (a fresh install is not an alert per site).
+    if (await anyUsableTarget(db)) {
+      const own = new Set((await db.select({ siteId: backupPolicies.siteId }).from(backupPolicies).where(eq(backupPolicies.scope, "site"))).map((p) => p.siteId));
+      let inheritedUsable: boolean | null = null;
+      const eligible = await db
+        .select({ id: sites.id, name: sites.name })
+        .from(sites)
+        .where(and(inArray(sites.status, ["ready", "degraded", "stopped"]), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
+        .orderBy(asc(sites.id));
+      for (const s of eligible) {
+        const hasOwn = own.has(s.id);
+        const usable: boolean = !hasOwn && inheritedUsable !== null ? inheritedUsable : (await resolveEffectiveTargets(db, s.id)).length > 0;
+        if (!hasOwn) inheritedUsable = usable;
+        if (!usable) push({ kind: "backup_site_without_target", subject: s.id, since: null, details: { siteId: s.id, siteName: s.name } });
+      }
     }
     const stuckRestores = await db
       .select({ operationId: operations.id, startedAt: operations.startedAt, siteId: sites.id, siteName: sites.name })

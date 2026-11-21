@@ -8,13 +8,18 @@ import { PLATFORM_OPS_ORG_ID, type BackupsIpcRequest } from "@hosting-panel/cont
 import {
   asc,
   auditEvents,
+  backupPolicies,
   backupSettings,
+  backupTargets,
   createDatabaseClient,
   deleteBackupSettings,
   eq,
+  getPolicy,
   hostAllocations,
   hosts,
+  insertS3Target,
   insertSiteBackup,
+  listPanelBackupCopies,
   membershipRoles,
   memberships,
   operationSteps,
@@ -23,6 +28,7 @@ import {
   outboxEvents,
   platformInstallations,
   serviceInstances,
+  setPolicyTargets,
   siteBackups,
   sites,
   upsertBackupSettings,
@@ -201,6 +207,22 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
       .set({ status: "succeeded", snapshotId: status.snapshot.snapshotId as string, sizeBytes, finishedAt: startedAt })
       .where(eq(siteBackups.id, id));
     return id;
+  }
+
+  /**
+   * Resets every backup setting: policies emptied and cursor cleared, all targets deleted (an archived legacy target is never
+   * revived), then the settings row removed. The backup_settings trigger recreates the live legacy target on the next upsert.
+   */
+  async function resetBackupConfig(): Promise<void> {
+    for (const scope of ["default_site", "panel"] as const) {
+      await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, scope)).id, []);
+    }
+    await dbClient.db.delete(backupTargets);
+    await dbClient.db
+      .update(backupPolicies)
+      .set({ lastNightlyRunOn: null, nightlyRunStartedAt: null })
+      .where(eq(backupPolicies.scope, "default_site"));
+    await deleteBackupSettings(dbClient.db);
   }
 
   const panelOps = () => dbClient.db.select().from(operations).where(eq(operations.kind, "panel.backups.create"));
@@ -427,7 +449,7 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     await dbClient.db.delete(operations);
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA));
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteB));
-    await deleteBackupSettings(dbClient.db);
+    await resetBackupConfig();
     await upsertBackupSettings(dbClient.db, KEY, { ...SETTINGS, updatedByUserId: adminId });
     auditBaseline = new Set((await dbClient.db.select({ id: auditEvents.id }).from(auditEvents)).map((r) => r.id));
   });
@@ -525,7 +547,7 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
   });
 
   it("Never twice: no copy when backups are not configured", async () => {
-    await deleteBackupSettings(dbClient.db);
+    await resetBackupConfig();
     for (let i = 0; i < 5; i += 1) {
       await scheduler.tick(NIGHT);
       await app.outboxWorker.processPendingOnce();
@@ -579,8 +601,35 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     expect((await panelOps())[0]!.status).toBe("succeeded");
     expect(sim.backupState.panelJobIds().filter((id) => id === opId)).toHaveLength(1);
     expect(countCalls("panelStart")).toBe(1);
-    expect((await newAudits()).filter((a) => a.action.startsWith("panel.backups."))).toHaveLength(1);
+    // One outcome audit; the enqueue audit panel.backups.create (SPEC 15.1) is the second.
+    expect((await newAudits()).filter((a) => a.action.startsWith("panel.backups.") && a.action !== "panel.backups.create")).toHaveLength(1);
     expect(await dumpFiles()).toEqual([]);
+  });
+
+  it("Recovery uses only the copies recorded at enqueue: a panel policy change meanwhile adds no never-run copy and the operation still succeeds", async () => {
+    const opId = await panelUntilAmbiguous();
+    const recorded = (await listPanelBackupCopies(dbClient.db, opId)).map((c) => c.targetId);
+    expect(recorded).toHaveLength(1);
+    const second = await insertS3Target(dbClient.db, KEY, {
+      name: "Second",
+      endpoint: "https://second.example.com",
+      region: "eu-south-1",
+      bucket: "second-bucket",
+      prefix: "",
+      accessKeyId: "AKIASECONDTEST001",
+      secretAccessKey: "second-secret",
+      customerSelectable: false,
+      actorId: null,
+    });
+    await setPolicyTargets(dbClient.db, (await getPolicy(dbClient.db, "panel")).id, [...recorded, second.id]);
+
+    sim.backupState.finishHeld();
+    await app.outboxWorker.recoverUnknownOperations();
+    await app.outboxWorker.recoverUnknownOperations();
+
+    expect((await panelOps())[0]!.status).toBe("succeeded");
+    expect((await listPanelBackupCopies(dbClient.db, opId)).map((c) => c.targetId)).toEqual(recorded);
+    expect(countCalls("panelStart")).toBe(1);
   });
 
   it("Never twice: recovery of a job that failed settles failed with its problem, without panelStart", async () => {
@@ -607,7 +656,12 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     const opId = await queuePanel();
     await app.outboxWorker.processPendingOnce();
     await app.outboxWorker.processPendingOnce();
-    const audits = (await newAudits()).filter((a) => a.action.startsWith("panel.backups."));
+    // SPEC 15.1: the enqueue wrote exactly one panel.backups.create with the single key operationId; the outcome audit is separate.
+    const created = (await newAudits()).filter((a) => a.action === "panel.backups.create");
+    expect(created).toHaveLength(1);
+    expect(created[0]).toMatchObject({ actorType: "system", actorId: null, organizationId: null, targetType: "backups" });
+    expect(created[0]!.details).toEqual({ operationId: opId });
+    const audits = (await newAudits()).filter((a) => a.action.startsWith("panel.backups.") && a.action !== "panel.backups.create");
     expect(audits).toHaveLength(1);
     expect(audits[0]).toMatchObject({
       action: "panel.backups.succeeded",
@@ -621,7 +675,9 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     expect(row.lastPanelBackupProblem).toBeNull();
     expect(row.lastPanelBackupAt).toBeInstanceOf(Date);
     const dto = (await request(app.baseUrl!, "GET", "/v1/admin/backups", { token: adminToken })).body.data;
-    expect(dto.lastPanelBackup).toEqual({ at: row.lastPanelBackupAt!.toISOString(), status: "succeeded", problem: null });
+    // D4: the DTO's lastPanelBackup is read from panel_backup_copies (the copy's finishedAt), not the backup_settings mirror line.
+    const copies = await listPanelBackupCopies(dbClient.db, opId);
+    expect(dto.lastPanelBackup).toEqual({ at: copies[0]!.finishedAt!.toISOString(), status: "succeeded", problem: null });
   });
 
   it("Outcome: before any copy the settings line is null", async () => {

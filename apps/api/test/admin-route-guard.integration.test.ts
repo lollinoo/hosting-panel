@@ -178,6 +178,8 @@ describe("every administrator route refuses a customer before it does anything",
       hostId: host!.id,
       opId: `op_${randomUUID()}`,
       backupId: `bkp_${randomUUID()}`,
+      targetId: `bkt_${randomUUID().replace(/-/g, "")}`,
+      scope: "default",
       secretId: `sec_${randomUUID()}`,
       serviceId: `svc_${randomUUID()}`,
       memberId: `mem_${randomUUID()}`,
@@ -225,6 +227,18 @@ describe("every administrator route refuses a customer before it does anything",
       ["POST", "/v1/admin/os-packages/refresh"],
       ["POST", "/v1/admin/os-packages/upgrade"],
       ["POST", "/v1/admin/host-services/:service/restart"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/backup-targets"],
+      ["POST", "/v1/admin/backup-targets"],
+      ["PATCH", "/v1/admin/backup-targets/:targetId"],
+      ["DELETE", "/v1/admin/backup-targets/:targetId"],
+      ["POST", "/v1/admin/backup-targets/:targetId/test"],
+      ["POST", "/v1/admin/backup-targets/:targetId/initialize"],
+      ["GET", "/v1/admin/backup-policies/:scope"],
+      ["PATCH", "/v1/admin/backup-policies/:scope"],
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }

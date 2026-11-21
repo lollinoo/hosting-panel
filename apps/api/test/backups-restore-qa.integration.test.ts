@@ -15,6 +15,7 @@ import {
   backupSettings,
   createDatabaseClient,
   deleteBackupSettings,
+  repairLegacyBackupCopies,
   eq,
   hostAllocations,
   hosts,
@@ -801,24 +802,44 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
     }
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA1Id));
 
-    // 5. Storage settings removed -> 400 VALIDATION_ERROR not_configured
-    await deleteBackupSettings(dbClient.db);
-    for (const [path, body] of [
-      [restoreUrl(orgAId, siteA1Id, goodBkp1), { confirmName: "Site Alpha" }],
-      [downloadUrl(orgAId, siteA1Id, goodBkp1), {}],
-    ] as const) {
-      const res = await rawRequest(app.baseUrl!, "POST", path, {
-        token: ownerAToken,
-        headers: { "Idempotency-Key": randomUUID() },
-        body,
-      });
-      expect(res.status, `no settings ${path}`).toBe(400);
-      expect(res.body.error.code).toBe("VALIDATION_ERROR");
-      expect(JSON.stringify(res.body.error)).toContain("not_configured");
-    }
-
     expect((await dbClient.db.select().from(operations)).length).toBe(opsAfterSetup);
     expect(await newAudits()).toHaveLength(0);
+
+    // 5. D7 (arch-backup-api): restore and download of an existing copy never need "configured". With the settings row removed
+    // the copy's target stays (SPEC 6.4: a backup on a deleted or archived target stays restorable), so both are accepted (202)
+    // instead of the former 400 not_configured. Only a backup without any usable copy would still be refused.
+    const goodBkpA2 = await createSucceededBackup(siteA2Id);
+    await deleteBackupSettings(dbClient.db);
+    const restoreNoSettings = await rawRequest(app.baseUrl!, "POST", restoreUrl(orgAId, siteA1Id, goodBkp1), {
+      token: ownerAToken,
+      headers: { "Idempotency-Key": randomUUID() },
+      body: { confirmName: "Site Alpha" },
+    });
+    expect(restoreNoSettings.status, restoreNoSettings.raw).toBe(202);
+    const downloadNoSettings = await rawRequest(app.baseUrl!, "POST", downloadUrl(orgAId, siteA2Id, goodBkpA2), {
+      token: ownerAToken,
+      headers: { "Idempotency-Key": randomUUID() },
+      body: {},
+    });
+    expect(downloadNoSettings.status, downloadNoSettings.raw).toBe(202);
+    // Undo the two accepted actions so the sections below start from the same state.
+    sim.backupState.holdJobs(false);
+    await dbClient.db.delete(outboxEvents);
+    await dbClient.db.delete(operationSteps);
+    await dbClient.db.delete(operations);
+    await dbClient.db
+      .update(siteBackups)
+      .set({
+        restoreOperationId: null,
+        restoreStatus: null,
+        restoreTargetId: null,
+        archiveOperationId: null,
+        archiveStatus: null,
+        archiveTargetId: null,
+      });
+    await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA1Id));
+    await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA2Id));
+    await snapshotAudits();
 
     // Restore settings for replay, whitespace-trimmed confirmName, and concurrency checks
     await upsertBackupSettings(dbClient.db, KEY, {
@@ -1737,6 +1758,8 @@ describe("backups restore & download QA integration (tenancy, refusals, problems
       const { id } = await insertSiteBackup(dbClient.db, { siteId: siteA2Id, kind: "nightly", status: "running", operationId: null, startedAt: new Date(Date.now() - (i + 1) * 60_000) });
       await dbClient.db.update(siteBackups).set({ status: "succeeded", snapshotId: i.toString(16).padStart(64, "c"), finishedAt: new Date() }).where(eq(siteBackups.id, id));
     }
+    // Retention is per target and reads copies (D10): the hand-seeded rows need their legacy-target copies (boot repair).
+    await repairLegacyBackupCopies(dbClient.db);
 
     executorScript.reset();
     // Run retention via a new admin backup run

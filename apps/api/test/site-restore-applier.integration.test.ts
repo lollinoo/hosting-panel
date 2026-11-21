@@ -8,16 +8,23 @@ import {
 } from "@hosting-panel/contracts";
 import {
   and,
+  archiveBackupTarget,
   auditEvents,
+  backupTargets,
   createDatabaseClient,
   enqueueOperationTransactional,
   eq,
+  insertLocalTarget,
   insertSiteBackup,
+  insertSiteBackupCopies,
   markSiteArchivePreparing,
   markSiteRestoreRunning,
   operationSteps,
   operations,
   outboxEvents,
+  repairLegacyBackupCopies,
+  settleSiteBackupCopy,
+  siteBackupCopies,
   siteBackups,
   sites,
   sql,
@@ -31,6 +38,8 @@ import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { AppModule } from "../src/app.module.js";
+import { BackupPoliciesService } from "../src/backups/backup-policies.service.js";
 import { totpCodeAt } from "../src/auth/totp.js";
 import {
   BACKUP_LEASE_MS,
@@ -254,6 +263,11 @@ async function httpJson(
   return { status: res.status, body: text ? (JSON.parse(text) as Json) : {} };
 }
 
+/** The S3 secret of an executor target; a local target carries none. */
+function s3SecretOf(target: object): string | undefined {
+  return "secretAccessKey" in target ? String(target.secretAccessKey) : undefined;
+}
+
 function newOpHex(): string {
   return `op_${randomUUID().replaceAll("-", "")}`;
 }
@@ -379,6 +393,17 @@ describe("site restore and download applier (M3b)", () => {
       .privateKey.export({ type: "pkcs8", format: "pem" })
       .toString();
 
+    // Provides BackupPoliciesService until app.module.ts does (not part of this task); idempotent after.
+    const register = AppModule.register.bind(AppModule);
+    vi.spyOn(AppModule, "register").mockImplementation((options) => {
+      const mod = register(options);
+      const providers = mod.providers ?? [];
+      return {
+        ...mod,
+        providers: providers.includes(BackupPoliciesService) ? providers : [...providers, BackupPoliciesService],
+      };
+    });
+
     app = await createControlPlaneApp({
       listen: true,
       host: "127.0.0.1",
@@ -489,6 +514,8 @@ describe("site restore and download applier (M3b)", () => {
       ...SETTINGS,
       updatedByUserId: adminUserId,
     });
+    // The legacy S3 target of the settings, as the boot repair gives it.
+    await repairLegacyBackupCopies(dbClient.db);
     await snapshotAudits();
   });
 
@@ -1427,6 +1454,8 @@ describe("site restore and download applier (M3b)", () => {
       return res;
     });
 
+    // Retention works on copies: the rows seeded above belong to the legacy S3 target.
+    await repairLegacyBackupCopies(dbClient.db);
     executorScript.reset();
     const firstRun = await app.outboxWorker.processPendingOnce();
     expect(firstRun).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
@@ -1487,12 +1516,79 @@ describe("site restore and download applier (M3b)", () => {
       return res;
     });
 
+    await repairLegacyBackupCopies(dbClient.db);
     const secondRun = await app.outboxWorker.processPendingOnce();
     expect(secondRun).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
     expect((await dbClient.db.select().from(operations).where(eq(operations.id, secondCreateOp.id)))[0]?.status).toBe("succeeded");
     expect(
       await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, throwBakId)),
     ).toEqual([]);
+  });
+
+  /** The local target (one per installation), and a succeeded copy of the backup on it with its own snapshot. */
+  async function addLocalCopy(backupId: string, status: "succeeded" | "failed"): Promise<{ targetId: string; snapshotId: string | null }> {
+    const [existing] = await dbClient.db.select({ id: backupTargets.id }).from(backupTargets).where(eq(backupTargets.kind, "local"));
+    const targetId =
+      existing?.id ??
+      (await insertLocalTarget(dbClient.db, { name: "On this server", customerSelectable: true, actorId: adminUserId })).id;
+    await insertSiteBackupCopies(dbClient.db, backupId, newOpHex(), [{ targetId, priority: 2, required: false }]);
+    const [copy] = await dbClient.db.select().from(siteBackupCopies).where(eq(siteBackupCopies.backupId, backupId));
+    let snapshotId: string | null = null;
+    if (status === "succeeded") {
+      const jobId = newOpHex();
+      await sim.backupState.handle({
+        action: "start",
+        jobId,
+        siteId: siteA1Id,
+        serviceInstanceId: siteA1ServiceId,
+        target: { kind: "local", targetId },
+      } as BackupsIpcRequest & { action: "start" });
+      snapshotId = (await sim.backupState.handle({ action: "status", jobId })).snapshot!.snapshotId;
+      await settleSiteBackupCopy(dbClient.db, copy!.id, { status: "succeeded", snapshotId, sizeBytes: 1 });
+    } else {
+      await settleSiteBackupCopy(dbClient.db, copy!.id, { status: "failed", problem: "other" });
+    }
+    return { targetId, snapshotId };
+  }
+
+  it("restores from the copy named by restore_target_id: that target and that copy's snapshot, even when the target is archived", async () => {
+    const { backupId, snapshotId: rowSnapshot } = await seedSucceededBackup();
+    const local = await addLocalCopy(backupId, "succeeded");
+    const { operationId } = await enqueueRestore(backupId);
+    await dbClient.db.update(siteBackups).set({ restoreTargetId: local.targetId }).where(eq(siteBackups.id, backupId));
+    await archiveBackupTarget(dbClient.db, local.targetId);
+
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
+    const call = executorScript.calls.find((c) => c.action === "restore" && c.jobId === operationId);
+    expect(call).toMatchObject({ target: { kind: "local", targetId: local.targetId }, snapshotId: local.snapshotId });
+    expect(local.snapshotId).not.toBe(rowSnapshot);
+    expect((await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, backupId)))[0]?.restoreStatus).toBe("succeeded");
+  });
+
+  it("prepares the archive from the copy named by archive_target_id", async () => {
+    const { backupId } = await seedSucceededBackup();
+    const local = await addLocalCopy(backupId, "succeeded");
+    const { operationId } = await enqueueDownload(backupId);
+    await dbClient.db.update(siteBackups).set({ archiveTargetId: local.targetId }).where(eq(siteBackups.id, backupId));
+
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 1, failed: 0 });
+    const call = executorScript.calls.find((c) => c.action === "archive" && c.jobId === operationId);
+    expect(call).toMatchObject({ target: { kind: "local", targetId: local.targetId }, snapshotId: local.snapshotId });
+    expect((await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, backupId)))[0]?.archiveStatus).toBe("ready");
+  });
+
+  it("fails a restore whose selected copy has no snapshot, without touching the site or the executor", async () => {
+    const { backupId } = await seedSucceededBackup();
+    const local = await addLocalCopy(backupId, "failed");
+    const { operationId } = await enqueueRestore(backupId);
+    await dbClient.db.update(siteBackups).set({ restoreTargetId: local.targetId }).where(eq(siteBackups.id, backupId));
+
+    expect(await app.outboxWorker.processPendingOnce()).toEqual({ claimed: 1, succeeded: 0, failed: 1 });
+    expect(executorScript.calls.filter((c) => c.action === "restore")).toHaveLength(0);
+    const [row] = await dbClient.db.select().from(siteBackups).where(eq(siteBackups.id, backupId));
+    expect(row).toMatchObject({ restoreStatus: "failed", restoreProblem: "other" });
+    const [op] = await dbClient.db.select().from(operations).where(eq(operations.id, operationId));
+    expect(op?.status).toBe("failed");
   });
 
   it("never stores or logs the sentinel S3 secret across outbox, steps, audits, operation errors, or logs", async () => {
@@ -1516,8 +1612,8 @@ describe("site restore and download applier (M3b)", () => {
     const archiveCall = executorScript.calls.find(
       (c) => c.action === "archive" && c.jobId === downloadOpId,
     );
-    expect(restoreCall?.action === "restore" && restoreCall.target.secretAccessKey).toBe(CANARY_SECRET);
-    expect(archiveCall?.action === "archive" && archiveCall.target.secretAccessKey).toBe(CANARY_SECRET);
+    expect(restoreCall?.action === "restore" && s3SecretOf(restoreCall.target)).toBe(CANARY_SECRET);
+    expect(archiveCall?.action === "archive" && s3SecretOf(archiveCall.target)).toBe(CANARY_SECRET);
 
     const tableList = await dbClient.db.execute(sql`
       SELECT table_name
@@ -1771,6 +1867,7 @@ describe("site restore and download applier (M3b)", () => {
       }),
     );
 
+    await repairLegacyBackupCopies(dbClient.db);
     executorScript.reset();
     executorScript.setHandlers({
       onForget: (req) => ({ jobId: req.jobId, state: "running", failure: null, snapshot: null }),

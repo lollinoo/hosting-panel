@@ -15,6 +15,8 @@ import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
+import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
+import { AdminBackupTargetsController } from "./controllers/admin-backup-targets.controller.js";
 import { AdminBackupsController } from "./controllers/admin-backups.controller.js";
 import { AdminMailRelayController } from "./controllers/admin-mail-relay.controller.js";
 import { AdminDnsProviderController } from "./controllers/admin-dns-provider.controller.js";
@@ -50,8 +52,10 @@ import { DriftReconcilerService } from "./runtime/drift-reconciler.service.js";
 import { AdminTerminalService } from "./terminal/admin-terminal.service.js";
 import { OutboxWorkerService } from "./runtime/outbox-worker.service.js";
 import { SiteProvisioner } from "./runtime/site-provisioner.js";
+import { BackupPoliciesService } from "./backups/backup-policies.service.js";
 import { BackupSchedulerService } from "./backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "./backups/backup-settings.service.js";
+import { BackupTargetsService } from "./backups/backup-targets.service.js";
 import { SiteBackupsApplier } from "./backups/site-backups-applier.js";
 import { SiteBackupsService } from "./backups/site-backups.service.js";
 import { SiteRestoreService } from "./backups/site-restore.service.js";
@@ -129,6 +133,8 @@ export class AppModule {
         AdminMailRelayController,
         AdminDnsProviderController,
         AdminBackupsController,
+        AdminBackupTargetsController,
+        AdminBackupPoliciesController,
         PasswordResetController,
         SupportAccessController,
         AdminHealthController,
@@ -182,6 +188,8 @@ export class AppModule {
         SiteWordpressService,
         SiteWordpressImportService,
         BackupSettingsService,
+        BackupTargetsService,
+        BackupPoliciesService,
         BackupSchedulerService,
         DriftReconcilerService,
         DomainReconcilerService,

@@ -22,6 +22,7 @@ import {
   isNotNull,
   isNull,
   parseSecretsMasterKey,
+  repairLegacyBackupCopies,
   seedPhase1Dataset,
   sites,
   type DatabaseClient,
@@ -357,6 +358,8 @@ export async function createControlPlaneApp(
   }
   // A release rolled back by hp-update writes sites with a PHP version and no type: give them the legacy one.
   await dbClient.db.update(sites).set({ siteType: LEGACY_SITE_TYPE }).where(and(isNotNull(sites.phpVersion), isNull(sites.siteType)));
+  // The same rollback can leave backups without a copies ledger or an S3 target row: rebuild both (idempotent).
+  await repairLegacyBackupCopies(dbClient.db);
 
   const oidcIssuer =
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";

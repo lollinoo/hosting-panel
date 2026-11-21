@@ -15,11 +15,13 @@ import {
 } from "@hosting-panel/contracts";
 import {
   BACKUP_SECRET_AAD,
+  LEGACY_BACKUP_TARGET_ID,
   auditEvents,
+  backupPolicies,
   backupSettings,
+  backupTargets,
   createDatabaseClient,
   decryptSecretAesGcm,
-  deleteBackupSettings,
   eq,
   hostAllocations,
   hosts,
@@ -31,7 +33,9 @@ import {
   organizations,
   outboxEvents,
   platformInstallations,
+  repairLegacyBackupCopies,
   settleSiteBackup,
+  siteBackupCopies,
   siteBackups,
   sites,
   sql,
@@ -173,6 +177,7 @@ function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): BackupExecut
               },
         } as BackupsResultByAction[R["action"]];
       }
+      case "localInit":
       case "restore":
       case "archive":
       case "readArchive":
@@ -271,6 +276,23 @@ async function scanAllTablesForSecret(db: HostingPanelDatabase, secret: string):
       `table ${tableName} leaked sentinel secret`,
     ).not.toContain(secret);
   }
+}
+
+/** Back to a fresh install: no target, no site policy, default schedule, no nightly cursor (history rows are deleted by the caller). */
+async function resetBackupConfiguration(db: HostingPanelDatabase): Promise<void> {
+  await db.delete(backupPolicies).where(eq(backupPolicies.scope, "site"));
+  await db.delete(backupSettings);
+  await db.execute(sql`DELETE FROM backup_policy_targets`);
+  await db.delete(backupTargets);
+  await db
+    .update(backupPolicies)
+    .set({
+      scheduleHourUtc: sql`CASE WHEN ${backupPolicies.scope} = 'default_site' THEN ${DEFAULT_BACKUP_HOUR_UTC}::int END`,
+      retentionDays: DEFAULT_BACKUP_RETENTION_DAYS,
+      lastNightlyRunOn: null,
+      nightlyRunStartedAt: null,
+    })
+    .where(sql`${backupPolicies.scope} <> 'site'`);
 }
 
 describe("admin backups API, settings service, and nightly scheduler", () => {
@@ -488,7 +510,7 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
     await dbClient.db.delete(operationSteps);
     await dbClient.db.delete(operations);
     await dbClient.db.delete(organizations).where(eq(organizations.id, PLATFORM_OPS_ORG_ID));
-    await deleteBackupSettings(dbClient.db);
+    await resetBackupConfiguration(dbClient.db);
     await dbClient.db.update(organizations).set({ status: "active" }).where(eq(organizations.id, orgAId));
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA1Id));
     await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteA2Id));
@@ -649,19 +671,20 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
     expect(JSON.stringify(audits)).not.toContain(CANARY_SECRET);
   });
 
-  it("T2: keeps secret when omitted, resets lastTest and empties site_backups on target change, and clears on DELETE", async () => {
+  it("T2: keeps secret when omitted, resets lastTest, and (SPEC 7.2.5) a location change archives the old target and a DELETE archives, never deleting history", async () => {
     await upsertBackupSettings(dbClient.db, KEY, { ...SETTINGS, updatedByUserId: adminUserId });
     const tested = await callAdmin("POST", `${ADMIN_BACKUPS_BASE}/test`, { body: {} });
     expect(tested.status).toBe(200);
     expect((await callAdmin("GET")).body.data.lastTest).not.toBeNull();
 
-    await insertSiteBackup(dbClient.db, {
+    const { id: kept } = await insertSiteBackup(dbClient.db, {
       siteId: siteA1Id,
       kind: "manual",
       status: "running",
       operationId: null,
     });
-    expect(await dbClient.db.select().from(siteBackups)).toHaveLength(1);
+    const keptIds = async () => (await dbClient.db.select({ id: siteBackups.id }).from(siteBackups)).map((r) => r.id);
+    expect(await keptIds()).toEqual([kept]);
 
     // Update retention/hour without secret or target change: keeps key, test result, and backup rows
     const { secretAccessKey: _omitted, ...withoutSecret } = SETTINGS;
@@ -675,15 +698,17 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       retentionDays: 30,
     });
     expect(partial.body.data.lastTest).not.toBeNull();
-    expect(await dbClient.db.select().from(siteBackups)).toHaveLength(1);
+    expect(await keptIds()).toEqual([kept]);
 
     // Verify original canary secret is still preserved in IPC calls
     executorScript.reset();
     await callAdmin("POST", `${ADMIN_BACKUPS_BASE}/test`);
     const testCall = executorScript.calls.find((c) => c.action === "test");
-    expect(testCall?.action === "test" && testCall.target.secretAccessKey).toBe(CANARY_SECRET);
+    expect(testCall?.action === "test" && "secretAccessKey" in testCall.target && testCall.target.secretAccessKey).toBe(
+      CANARY_SECRET,
+    );
 
-    // Bucket change without secret: clears site_backups rows and resets lastTest
+    // Bucket change without secret: a NEW target (secret re-encrypted under its own AAD), lastTest reset, history kept
     const targetChange = await callAdmin("PATCH", ADMIN_BACKUPS_BASE, {
       body: { ...withoutSecret, bucket: "hotel-backups-v2" },
     });
@@ -693,7 +718,19 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       secretAccessKeySet: true,
       lastTest: null,
     });
-    expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
+    expect(await keptIds()).toEqual([kept]);
+    const afterBucket = await dbClient.db.select().from(backupTargets);
+    expect(afterBucket.filter((t) => t.archivedAt === null)).toHaveLength(1);
+    const archivedLegacy = afterBucket.find((t) => t.id === LEGACY_BACKUP_TARGET_ID);
+    expect(archivedLegacy).toMatchObject({ legacySettings: true, enabled: false });
+    expect(archivedLegacy?.archivedAt).not.toBeNull();
+    const [frozen] = await dbClient.db.select().from(backupSettings);
+    expect(frozen).toMatchObject({ bucket: SETTINGS.bucket, prefix: SETTINGS.prefix });
+    executorScript.reset();
+    expect((await callAdmin("POST", `${ADMIN_BACKUPS_BASE}/test`)).status).toBe(200);
+    expect(executorScript.calls.find((c) => c.action === "test")).toMatchObject({
+      target: { bucket: "hotel-backups-v2", prefix: SETTINGS.prefix, secretAccessKey: CANARY_SECRET },
+    });
 
     const updateAudits = (await newAudits()).filter((a) => a.action === "admin.backups.update");
     expect(updateAudits.map((a) => a.details)).toEqual([
@@ -701,26 +738,21 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       { secretChanged: false, targetChanged: true, scheduleHourUtc: 2, retentionDays: 14 },
     ]);
 
-    // Prefix change also clears site_backups rows
-    await insertSiteBackup(dbClient.db, {
-      siteId: siteA1Id,
-      kind: "manual",
-      status: "running",
-      operationId: null,
-    });
+    // Prefix change with a new secret: another new target, history still kept
     const prefixChange = await callAdmin("PATCH", ADMIN_BACKUPS_BASE, {
       body: { ...withoutSecret, bucket: "hotel-backups-v2", prefix: "panel-2", secretAccessKey: SECOND_SECRET },
     });
     expect(prefixChange.status).toBe(200);
-    expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
-
-    // DELETE clears settings row and all site_backups rows and audits admin.backups.clear
-    await insertSiteBackup(dbClient.db, {
-      siteId: siteA1Id,
-      kind: "nightly",
-      status: "running",
-      operationId: null,
+    expect(prefixChange.body.data).toMatchObject({ prefix: "panel-2", lastTest: null });
+    expect(await keptIds()).toEqual([kept]);
+    expect((await dbClient.db.select().from(backupTargets)).filter((t) => t.archivedAt === null)).toHaveLength(1);
+    executorScript.reset();
+    await callAdmin("POST", `${ADMIN_BACKUPS_BASE}/test`);
+    expect(executorScript.calls.find((c) => c.action === "test")).toMatchObject({
+      target: { prefix: "panel-2", secretAccessKey: SECOND_SECRET },
     });
+
+    // DELETE archives every S3 target; the settings row (frozen storage of the legacy target) and the history stay
     const deleted = await callAdmin("DELETE");
     expect(deleted.status).toBe(200);
     expect(BackupSettingsDtoSchema.parse(deleted.body.data)).toMatchObject({
@@ -730,13 +762,18 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       bucket: null,
       lastTest: null,
     });
-    expect(await dbClient.db.select().from(backupSettings)).toEqual([]);
-    expect(await dbClient.db.select().from(siteBackups)).toEqual([]);
+    expect((await dbClient.db.select().from(backupTargets)).every((t) => t.archivedAt !== null && !t.enabled)).toBe(true);
+    expect(await dbClient.db.select().from(backupSettings)).toHaveLength(1);
+    expect(await keptIds()).toEqual([kept]);
 
     const clearAudits = (await newAudits()).filter((a) => a.action === "admin.backups.clear");
     expect(clearAudits).toHaveLength(1);
     expect(clearAudits[0]!.targetType).toBe("backups");
-    expect(clearAudits[0]!.details).toEqual({});
+    const liveBeforeClear = (await newAudits())
+      .filter((a) => a.action === "admin.backup_target.create")
+      .map((a) => (a.details as Json).targetId as string);
+    expect(liveBeforeClear).toHaveLength(2);
+    expect(clearAudits[0]!.details).toEqual({ archivedTargetIds: [liveBeforeClear[1]] });
   });
 
   it("T3: tests connectivity against decrypted target, records lastTest, handles not_configured and safe executor errors without leaking secrets", async () => {
@@ -954,7 +991,7 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
     }
   });
 
-  it("T10: scheduler runs nightly backups one site at a time, skips waiting locks, isolates busy sites, finishes overdue runs before starting next day, and re-runs on target change", async () => {
+  it("T10: scheduler runs nightly backups one site at a time, skips waiting locks, isolates busy sites, finishes overdue runs before starting next day, and keeps history and continues on the new target on a location change", async () => {
     const triggerSpy = vi.spyOn(app.outboxWorker, "triggerAsync");
 
     // 1. No target configured -> does nothing.
@@ -1195,7 +1232,9 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
     expect(day4Started?.nightlyRunStartedAt).not.toBeNull();
     await app.outboxWorker.processPendingOnce();
 
-    // 7. Target change in the middle of a run clears prior rows and re-runs the site in the same run.
+    // 7. SPEC 7.2.5: a location change in the middle of a run keeps every row and copy (their target is archived, not
+    //    deleted); the run goes on with the next site of the same night, whose copy is on the NEW target.
+    const rowsBeforeChange = await dbClient.db.select().from(siteBackups);
     const patchTarget = await callAdmin("PATCH", ADMIN_BACKUPS_BASE, {
       body: { ...SETTINGS, bucket: "hotel-backups-v2" },
     });
@@ -1203,12 +1242,20 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
 
     await scheduler.tick(new Date("2026-11-18T02:00:15Z"));
     const rowsAfterTargetChange = await dbClient.db.select().from(siteBackups);
-    expect(rowsAfterTargetChange).toHaveLength(1);
-    expect(rowsAfterTargetChange[0]).toMatchObject({
-      siteId: day1Order[0],
-      kind: "nightly",
-      status: "running",
-    });
+    expect(rowsAfterTargetChange).toHaveLength(rowsBeforeChange.length + 1);
+    const before = new Set(rowsBeforeChange.map((r) => r.id));
+    expect(rowsAfterTargetChange.filter((r) => before.has(r.id))).toHaveLength(rowsBeforeChange.length);
+    const [fresh] = rowsAfterTargetChange.filter((r) => !before.has(r.id));
+    expect(fresh).toMatchObject({ kind: "nightly", status: "running" });
+    expect(fresh!.siteId).not.toBe(day1Order[0]);
+    const targets = await dbClient.db.select().from(backupTargets);
+    const live = targets.find((t) => t.archivedAt === null)!;
+    expect(live.legacySettings).toBe(false);
+    const copies = await dbClient.db.select().from(siteBackupCopies);
+    expect(copies.find((c) => c.backupId === fresh!.id)?.targetId).toBe(live.id);
+    expect(
+      copies.filter((c) => before.has(c.backupId)).every((c) => c.targetId === LEGACY_BACKUP_TARGET_ID),
+    ).toBe(true);
   });
 
   it("R74: after a forward clock jump is corrected, subsequent nights still queue the site and count only the new run", async () => {
@@ -1230,7 +1277,10 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       snapshotId: SNAP_HEX_OLD,
       sizeBytes: 2048,
     });
-    await dbClient.db.update(backupSettings).set({ lastNightlyRunOn: "2026-12-01" });
+    await dbClient.db
+      .update(backupPolicies)
+      .set({ lastNightlyRunOn: "2026-12-01" })
+      .where(eq(backupPolicies.scope, "default_site"));
 
     // Night 1 after clock correction (2026-11-15): must queue siteA1Id and finish with enqueued: 1.
     await scheduler.tick(new Date("2026-11-15T02:00:00.000Z"));
@@ -1302,6 +1352,8 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
       .update(siteBackups)
       .set({ status: "succeeded", snapshotId: SNAP_HEX_OLD, sizeBytes: 4096, finishedAt: oldDate })
       .where(eq(siteBackups.id, orphanRowId));
+    // Retention works per copy: the hand-seeded row gets its legacy copy, as the boot repair does after a rollback.
+    await repairLegacyBackupCopies(dbClient.db);
 
     // Also add a recent orphan row within retention that must NOT trigger prune
     const recentOrphanSiteId = `sit_${randomUUID()}`;
@@ -1354,7 +1406,7 @@ describe("admin backups API, settings service, and nightly scheduler", () => {
     expect(forgetCall).toBeDefined();
     if (forgetCall?.action === "forget") {
       expect(forgetCall.snapshotIds).toEqual([SNAP_HEX_OLD]);
-      expect(forgetCall.target.secretAccessKey).toBe(CANARY_SECRET);
+      expect("secretAccessKey" in forgetCall.target && forgetCall.target.secretAccessKey).toBe(CANARY_SECRET);
     }
 
     expect(

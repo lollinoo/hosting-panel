@@ -5,26 +5,38 @@ import {
   ERROR_CODES,
   siteTypeKeyOf,
   type BackupJobStatus,
+  type BackupKind,
   type BackupProblem,
   type ErrorCode,
 } from "@hosting-panel/contracts";
 import {
   and,
+  appendAuditEvent,
   asc,
-  deleteSiteBackups,
+  deleteEmptySiteBackups,
+  deleteSiteBackupCopies,
   eq,
-  getBackupSettingsPublic,
-  getBackupTarget,
+  getPolicy,
+  listRetentionCopies,
+  listSiteBackupCopies,
   listSiteBackups,
+  listTargetsWithCopiesForSite,
   operationSteps,
   operations,
   renewOperationLease,
+  repairLegacyBackupCopies,
+  resolveDispatchTarget,
   settleOperation,
   settleSiteBackup,
+  settleSiteBackupAggregate,
+  settleSiteBackupCopy,
   siteBackups,
   sites,
   updateOperationStepTransactional,
+  type CopyRow,
+  type CopySettlement,
   type DatabaseClient,
+  type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { ControlPlaneError } from "../common/control-plane.error.js";
@@ -36,7 +48,7 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
-import { selectExpired } from "./backup-retention.js";
+import { selectExpired, type RetentionRow } from "./backup-retention.js";
 import { PanelBackupApplier } from "./panel-backup-applier.js";
 import { SiteRestoreApplier } from "./site-restore-applier.js";
 
@@ -60,6 +72,8 @@ export type BackupOperationRef = Pick<
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const FAILURE_CLASS_SET: ReadonlySet<string> = new Set(BACKUP_FAILURE_CLASSES);
 const MAX_FORGET_BATCH = 100;
+/** Job ids -forget and -forget-t2 … -forget-t9 (BACKUP_JOB_ID_PATTERN). */
+const MAX_RETENTION_TARGETS = 9;
 
 /** Accepts only known executor failure classes, falling back to 'other'. @internal */
 export function normalizeBackupProblem(failure: unknown): BackupProblem {
@@ -67,6 +81,18 @@ export function normalizeBackupProblem(failure: unknown): BackupProblem {
     ? (failure as BackupProblem)
     : "other";
 }
+
+interface CopyFailure {
+  readonly code: ErrorCode;
+  readonly message: string;
+  readonly stepMessage: string;
+}
+
+const INTERRUPTED_FAILURE: CopyFailure = {
+  code: "OPERATION_INTERRUPTED",
+  message: SITE_BACKUPS_INTERRUPTED,
+  stepMessage: SITE_BACKUPS_INTERRUPTED,
+};
 
 /** @internal */
 export class BackupSettledFailure extends Error {
@@ -196,52 +222,153 @@ export class SiteBackupsApplier {
     return "settled";
   }
 
-  /** Settles the backup row and steps of an interrupted job; the error is what the operation fails with. */
+  /**
+   * Settles the copies, the backup row and the steps of an interrupted backup; the error is what the operation fails
+   * with. Reads executor status per open copy job id and never starts anything (BKP-14): a copy whose job the
+   * executor does not know (never started, or lost) fails as interrupted.
+   */
   public async settleBackupJob(opId: string): Promise<"pending" | "succeeded" | ControlPlaneError> {
     const db = this.dbClient.db;
-    let statusRes: BackupJobStatus;
-    try {
-      statusRes = await this.dockerExecutor.backups({ action: "status", jobId: opId });
-    } catch {
-      return "pending";
+    const [backup] = await db
+      .select({ id: siteBackups.id })
+      .from(siteBackups)
+      .where(eq(siteBackups.operationId, opId))
+      .limit(1);
+    const [op] = await db
+      .select({ organizationId: operations.organizationId, kind: operations.kind, resourceId: operations.resourceId })
+      .from(operations)
+      .where(eq(operations.id, opId))
+      .limit(1);
+    const copies = backup ? await this.#copiesOf(backup.id) : [];
+    if (!backup || !op || copies.length === 0) {
+      await settleSiteBackup(db, opId, { status: "failed", problem: "interrupted" });
+      await this.#failSteps(opId, SITE_BACKUPS_INTERRUPTED);
+      return new ControlPlaneError("OPERATION_INTERRUPTED", SITE_BACKUPS_INTERRUPTED);
     }
 
-    if (statusRes.state === "running") {
-      if (!(await this.isPastPollDeadline(opId))) {
+    let interrupted = false;
+    for (const copy of copies.filter((c) => c.status === "running")) {
+      let statusRes: BackupJobStatus;
+      try {
+        statusRes = await this.dockerExecutor.backups({ action: "status", jobId: copy.jobId ?? opId });
+      } catch {
         return "pending";
       }
-      statusRes = { ...statusRes, state: "failed", failure: "timeout" };
+      if (statusRes.state === "running") {
+        if (!(await this.isPastPollDeadline(opId))) {
+          return "pending";
+        }
+        statusRes = { ...statusRes, state: "failed", failure: "timeout" };
+      }
+      const outcome = this.#copyOutcome(statusRes);
+      interrupted ||= outcome.interrupted;
+      await this.#settleCopy(op, backup.id, copy, outcome.settlement);
     }
 
-    if (statusRes.state === "succeeded") {
-      await settleSiteBackup(db, opId, {
-        status: "succeeded",
-        snapshotId: statusRes.snapshot?.snapshotId ?? null,
-        sizeBytes: statusRes.snapshot?.totalBytes ?? null,
-        problem: null,
-      });
+    const aggregate = await settleSiteBackupAggregate(db, backup.id);
+    const settled = (await listSiteBackupCopies(db, [backup.id])).get(backup.id) ?? [];
+    if (aggregate === "succeeded" || (aggregate === "partial" && op.kind === "site.backups.create")) {
       await this.safeUpdateStep(opId, "backup", "succeeded", "Backup uploaded");
-      await this.safeUpdateStep(
-        opId,
-        "retention",
-        "skipped",
-        "Skipped after recovery; will run next night",
-      );
+      await this.safeUpdateStep(opId, "retention", "skipped", "Skipped after recovery; will run next night");
       return "succeeded";
     }
-
-    if (statusRes.state === "failed") {
-      const problem = normalizeBackupProblem(statusRes.failure);
-      const code: ErrorCode =
-        problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR";
-      await settleSiteBackup(db, opId, { status: "failed", problem });
-      await this.#failSteps(opId, "Backup did not finish");
-      return new ControlPlaneError(code, "Backup did not finish.");
+    const failedCopy = settled.find((c) => c.status !== "succeeded");
+    const problem = failedCopy?.problem ?? "other";
+    await this.#failSteps(opId, interrupted ? SITE_BACKUPS_INTERRUPTED : "Backup did not finish");
+    if (interrupted) {
+      return new ControlPlaneError("OPERATION_INTERRUPTED", SITE_BACKUPS_INTERRUPTED);
     }
+    return new ControlPlaneError(
+      problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR",
+      "Backup did not finish.",
+    );
+  }
 
-    await settleSiteBackup(db, opId, { status: "failed", problem: "interrupted" });
-    await this.#failSteps(opId, SITE_BACKUPS_INTERRUPTED);
-    return new ControlPlaneError("OPERATION_INTERRUPTED", SITE_BACKUPS_INTERRUPTED);
+  /**
+   * The copies of a backup. A row an older release wrote has none: it is given its legacy-target copy here, as the boot
+   * repair does, so an operation in flight across a rollback still runs and recovers.
+   */
+  async #copiesOf(backupId: string): Promise<CopyRow[]> {
+    const db = this.dbClient.db;
+    const read = async () => (await listSiteBackupCopies(db, [backupId])).get(backupId) ?? [];
+    const copies = await read();
+    if (copies.length > 0) {
+      return copies;
+    }
+    await repairLegacyBackupCopies(db);
+    return read();
+  }
+
+  /** Maps an executor answer for one copy to what the ledger records. */
+  #copyOutcome(statusRes: BackupJobStatus): { settlement: CopySettlement; interrupted: boolean } {
+    if (statusRes.state === "succeeded") {
+      return {
+        interrupted: false,
+        settlement: {
+          status: "succeeded",
+          snapshotId: statusRes.snapshot?.snapshotId ?? null,
+          sizeBytes: statusRes.snapshot?.totalBytes ?? null,
+          problem: null,
+        },
+      };
+    }
+    if (statusRes.state === "failed") {
+      return {
+        interrupted: false,
+        settlement: { status: "failed", problem: normalizeBackupProblem(statusRes.failure) },
+      };
+    }
+    return { interrupted: true, settlement: { status: "failed", problem: "interrupted" } };
+  }
+
+  /** Settles one running copy and records it in the audit log in the same transaction; a copy already settled changes nothing. */
+  async #settleCopy(
+    op: Pick<BackupOperationRef, "organizationId" | "resourceId">,
+    backupId: string,
+    copy: CopyRow,
+    settlement: CopySettlement,
+  ): Promise<void> {
+    await this.dbClient.db.transaction(async (tx) => {
+      if (!(await settleSiteBackupCopy(tx, copy.id, settlement))) {
+        return;
+      }
+      await appendAuditEvent(tx as unknown as HostingPanelDatabase, {
+        actorId: null,
+        actorType: "system",
+        organizationId: op.organizationId,
+        action: settlement.status === "succeeded" ? "site.backups.copy_succeeded" : "site.backups.copy_failed",
+        targetType: "site",
+        targetId: op.resourceId,
+        details: {
+          backupId,
+          targetId: copy.targetId,
+          targetKind: copy.targetKind,
+          problem: settlement.problem ?? null,
+        },
+      });
+    });
+  }
+
+  /** Fails every still-running copy of the operation's backup and settles the row (a backup without copies directly). */
+  async #failOpenCopies(op: BackupOperationRef, problem: BackupProblem): Promise<void> {
+    const db = this.dbClient.db;
+    const [backup] = await db
+      .select({ id: siteBackups.id })
+      .from(siteBackups)
+      .where(eq(siteBackups.operationId, op.id))
+      .limit(1);
+    if (!backup) {
+      return;
+    }
+    const copies = (await listSiteBackupCopies(db, [backup.id])).get(backup.id) ?? [];
+    for (const copy of copies.filter((c) => c.status === "running")) {
+      await this.#settleCopy(op, backup.id, copy, { status: "failed", problem });
+    }
+    if (copies.length === 0) {
+      await settleSiteBackup(db, op.id, { status: "failed", problem });
+    } else {
+      await settleSiteBackupAggregate(db, backup.id);
+    }
   }
 
   async #applyCreate(op: BackupOperationRef): Promise<void> {
@@ -250,14 +377,18 @@ export class SiteBackupsApplier {
     await this.succeedOperation(op.id);
   }
 
-  /** Takes the backup of the operation's site; on failure settles the row, fails the operation and throws. */
+  /**
+   * Takes the backup of the operation's site, copy by copy, each against the target pinned at enqueue (never the
+   * current settings); then settles the row from its copies. A failed backup fails the operation and throws; a partial
+   * one only for the kinds that gate a change (pre_update), a requested backup keeps what it saved.
+   */
   public async runBackupStep(op: BackupOperationRef): Promise<void> {
     const db = this.dbClient.db;
     await renewOperationLease(db, op.id, this.leaseMs);
     await this.safeUpdateStep(op.id, "backup", "running", "Backing up site files and databases");
 
     try {
-      await this.#ensureBackupRowStillRunning(op.id);
+      const backupId = await this.#ensureBackupRowStillRunning(op.id);
 
       const [site] = await db
         .select({
@@ -271,19 +402,9 @@ export class SiteBackupsApplier {
         .limit(1);
       const siteType = siteTypeKeyOf(site?.siteType);
       if (!site || !siteType) {
-        await settleSiteBackup(db, op.id, { status: "failed", problem: "other" });
+        await this.#failOpenCopies(op, "other");
         const err = new ControlPlaneError("NOT_FOUND", "Site not found for backup");
         await this.#failStepAndOperation(op.id, err.message, err.code, err.message);
-        throw new BackupSettledFailure(err);
-      }
-
-      const target = await getBackupTarget(db, this.config.secretsMasterKey);
-      if (!target) {
-        await settleSiteBackup(db, op.id, { status: "failed", problem: "other" });
-        const err = new ControlPlaneError("VALIDATION_ERROR", "not_configured", {
-          details: [{ message: "not_configured" }],
-        });
-        await this.#failStepAndOperation(op.id, "Backup target is not configured", err.code, err.message);
         throw new BackupSettledFailure(err);
       }
 
@@ -294,44 +415,37 @@ export class SiteBackupsApplier {
         site,
       );
 
-      await this.#ensureBackupRowStillRunning(op.id);
-
-      const startRes = await this.dockerExecutor.backups({
-        action: "start",
-        jobId: op.id,
-        siteId: site.id,
-        serviceInstanceId,
-        siteType,
-        target,
-      });
-
-      const statusRes = await this.pollJobStatus(op.id, op.id, startRes);
-
-      if (statusRes.state === "succeeded") {
-        await settleSiteBackup(db, op.id, {
-          status: "succeeded",
-          snapshotId: statusRes.snapshot?.snapshotId ?? null,
-          sizeBytes: statusRes.snapshot?.totalBytes ?? null,
-          problem: null,
+      const failures: CopyFailure[] = [];
+      for (const copy of (await this.#copiesOf(backupId)).filter((c) => c.status === "running")) {
+        await this.#ensureBackupRowStillRunning(op.id);
+        const failure = await this.#runCopy(op, backupId, copy, {
+          siteId: site.id,
+          serviceInstanceId,
+          siteType,
         });
+        if (failure) {
+          failures.push(failure);
+        }
+      }
+
+      const aggregate = await settleSiteBackupAggregate(db, backupId);
+      if (aggregate === "succeeded") {
         await this.safeUpdateStep(op.id, "backup", "succeeded", "Backup uploaded");
-      } else if (statusRes.state === "failed") {
-        const problem = normalizeBackupProblem(statusRes.failure);
-        const code: ErrorCode =
-          problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR";
-        await settleSiteBackup(db, op.id, { status: "failed", problem });
-        const err = new ControlPlaneError(code, "Backup did not finish.");
-        await this.#failStepAndOperation(op.id, "Backup did not finish", code, err.message);
-        throw new BackupSettledFailure(err);
+      } else if (aggregate === "partial") {
+        await this.#audit(op, "site.backups.partial", { backupId });
+        if (op.kind !== "site.backups.create") {
+          const err = new ControlPlaneError("INTERNAL_ERROR", "Backup did not finish.");
+          await this.#failStepAndOperation(op.id, "Backup did not finish", err.code, err.message);
+          throw new BackupSettledFailure(err);
+        }
+        await this.safeUpdateStep(op.id, "backup", "succeeded", "Backup saved on some destinations");
       } else {
-        await settleSiteBackup(db, op.id, { status: "failed", problem: "interrupted" });
-        const err = new ControlPlaneError("OPERATION_INTERRUPTED", SITE_BACKUPS_INTERRUPTED);
-        await this.#failStepAndOperation(
-          op.id,
-          SITE_BACKUPS_INTERRUPTED,
-          err.code,
-          SITE_BACKUPS_INTERRUPTED,
-        );
+        if (aggregate !== "failed") {
+          await this.#failOpenCopies(op, "interrupted");
+        }
+        const failure = failures[0] ?? INTERRUPTED_FAILURE;
+        const err = new ControlPlaneError(failure.code, failure.message);
+        await this.#failStepAndOperation(op.id, failure.stepMessage, failure.code, failure.message);
         throw new BackupSettledFailure(err);
       }
     } catch (err) {
@@ -339,7 +453,7 @@ export class SiteBackupsApplier {
         throw err.causeError;
       }
       if (isAmbiguousError(err)) {
-        // Leave site_backups running so OutboxWorker moves the op to unknown for recover().
+        // Leave the copies running so OutboxWorker moves the op to unknown for recover().
         throw new ControlPlaneError(
           "OPERATION_AMBIGUOUS",
           "Backup outcome is unknown; recovery will check job status.",
@@ -347,7 +461,7 @@ export class SiteBackupsApplier {
       }
       const code = extractKnownErrorCode(err) ?? "INTERNAL_ERROR";
       const problem: BackupProblem = code === "RESOURCE_LOCKED" ? "site_busy" : "other";
-      await settleSiteBackup(db, op.id, { status: "failed", problem });
+      await this.#failOpenCopies(op, problem);
       const safeMessage =
         err instanceof ControlPlaneError ? err.message : "Backup did not finish.";
       await this.#failStepAndOperation(op.id, safeMessage, code, safeMessage);
@@ -355,10 +469,68 @@ export class SiteBackupsApplier {
     }
   }
 
-  /** Fails the operation as interrupted when its backup row is gone or no longer running. */
-  async #ensureBackupRowStillRunning(operationId: string): Promise<void> {
+  /** Runs one copy against its own target and settles it; null when it succeeded. An ambiguous outcome is rethrown. */
+  async #runCopy(
+    op: BackupOperationRef,
+    backupId: string,
+    copy: CopyRow,
+    job: { siteId: string; serviceInstanceId: string; siteType: NonNullable<ReturnType<typeof siteTypeKeyOf>> },
+  ): Promise<CopyFailure | null> {
+    const target = await resolveDispatchTarget(this.dbClient.db, this.config.secretsMasterKey, copy.targetId);
+    if (!target) {
+      await this.#settleCopy(op, backupId, copy, { status: "failed", problem: "other" });
+      return {
+        code: "VALIDATION_ERROR",
+        message: "not_configured",
+        stepMessage: "Backup target is not configured",
+      };
+    }
+    let statusRes: BackupJobStatus;
+    try {
+      const jobId = copy.jobId ?? op.id;
+      const startRes = await this.dockerExecutor.backups({ action: "start", jobId, ...job, target });
+      statusRes = await this.pollJobStatus(op.id, jobId, startRes);
+    } catch (err) {
+      if (isAmbiguousError(err)) {
+        throw err;
+      }
+      const code = extractKnownErrorCode(err) ?? "INTERNAL_ERROR";
+      const message = err instanceof ControlPlaneError ? err.message : "Backup did not finish.";
+      await this.#settleCopy(op, backupId, copy, {
+        status: "failed",
+        problem: code === "RESOURCE_LOCKED" ? "site_busy" : "other",
+      });
+      return { code, message, stepMessage: message };
+    }
+    const { settlement, interrupted } = this.#copyOutcome(statusRes);
+    await this.#settleCopy(op, backupId, copy, settlement);
+    if (settlement.status === "succeeded") {
+      return null;
+    }
+    if (interrupted) {
+      return INTERRUPTED_FAILURE;
+    }
+    const code: ErrorCode =
+      settlement.problem === "unreachable" ? "DOCKER_ENGINE_UNAVAILABLE" : "INTERNAL_ERROR";
+    return { code, message: "Backup did not finish.", stepMessage: "Backup did not finish" };
+  }
+
+  async #audit(op: BackupOperationRef, action: string, details: Record<string, unknown>): Promise<void> {
+    await appendAuditEvent(this.dbClient.db, {
+      actorId: null,
+      actorType: "system",
+      organizationId: op.organizationId,
+      action,
+      targetType: "site",
+      targetId: op.resourceId,
+      details,
+    });
+  }
+
+  /** Fails the operation as interrupted when its backup row is gone or no longer running; returns the row id. */
+  async #ensureBackupRowStillRunning(operationId: string): Promise<string> {
     const [backupRow] = await this.dbClient.db
-      .select({ status: siteBackups.status })
+      .select({ id: siteBackups.id, status: siteBackups.status })
       .from(siteBackups)
       .where(eq(siteBackups.operationId, operationId))
       .limit(1);
@@ -367,6 +539,7 @@ export class SiteBackupsApplier {
       await this.#failStepAndOperation(operationId, SITE_BACKUPS_INTERRUPTED, err.code, err.message);
       throw new BackupSettledFailure(err);
     }
+    return backupRow.id;
   }
 
   async #applyPrune(op: BackupOperationRef): Promise<void> {
@@ -375,68 +548,139 @@ export class SiteBackupsApplier {
     await this.succeedOperation(op.id);
   }
 
+  /**
+   * Retention runs once per target that holds copies of the site, over that target's copies only: it never forgets
+   * the last good copies on a target because another target has newer ones, and forgets only on the target that
+   * holds the snapshot. A logical backup goes only when its last copy is gone (BKP-09).
+   */
   async #runRetentionStep(op: BackupOperationRef): Promise<void> {
     const db = this.dbClient.db;
     await renewOperationLease(db, op.id, this.leaseMs);
     await this.safeUpdateStep(op.id, "retention", "running", "Removing old backups");
 
+    let retry = false;
     try {
-      const settings = await getBackupSettingsPublic(db);
-      const retentionDays = settings?.retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
+      const retentionDays =
+        (await getPolicy(db, "default_site")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
       const [siteRow] = await db
         .select({ id: sites.id })
         .from(sites)
         .where(eq(sites.id, op.resourceId))
         .limit(1);
+      // A release rolled back by hp-update can leave copy-less rows: give them their legacy copy first, so their
+      // snapshots are forgotten on the legacy target instead of being orphaned (idempotent, never deletes).
+      await repairLegacyBackupCopies(db);
       const rows = await listSiteBackups(db, op.resourceId);
       const rowsById = new Map(rows.map((row) => [row.id, row]));
-      const { forget, drop } = selectExpired(rows, new Date(), retentionDays, Boolean(siteRow));
+      const siteExists = Boolean(siteRow);
 
-      await this.#discardAndDeleteBackupRows(
-        drop.map((row) => row.id),
-        rowsById,
-      );
-
-      if (forget.length > 0) {
-        const batch = forget.slice(0, MAX_FORGET_BATCH);
-        const snapshotIds = batch
-          .map((row) => row.snapshotId)
-          .filter((id): id is string => typeof id === "string" && id.length > 0);
-
-        if (snapshotIds.length > 0) {
-          const target = await getBackupTarget(db, this.config.secretsMasterKey);
-          if (!target) {
-            throw new ControlPlaneError("VALIDATION_ERROR", "not_configured");
-          }
-          const forgetJobId = `${op.id}-forget`;
-          const startForget = await this.dockerExecutor.backups({
-            action: "forget",
-            jobId: forgetJobId,
-            siteId: op.resourceId,
-            target,
-            snapshotIds,
-          });
-          const forgetStatus = await this.pollJobStatus(op.id, forgetJobId, startForget);
-          if (forgetStatus.state !== "succeeded") {
-            throw new ControlPlaneError("INTERNAL_ERROR", "retention_forget_failed");
-          }
-          await this.#discardAndDeleteBackupRows(
-            batch.map((row) => row.id),
+      // Every target of the run needs its own executor job id (a repeated id answers the cached status): -forget,
+      // -forget-t2 … -forget-t9. The targets past the ninth wait for the next run.
+      const targetIds = (await listTargetsWithCopiesForSite(db, op.resourceId)).slice(0, MAX_RETENTION_TARGETS);
+      for (const [index, targetId] of targetIds.entries()) {
+        try {
+          await this.#retainTarget(op, targetId, index === 0 ? "-forget" : `-forget-t${String(index + 1)}`, {
+            retentionDays,
+            siteExists,
             rowsById,
-          );
+          });
+        } catch (err) {
+          if (isAmbiguousError(err)) {
+            throw err;
+          }
+          retry = true;
+          const code = extractKnownErrorCode(err) ?? "RETENTION_ERROR";
+          // Never log secrets, snapshot IDs, or host paths from retention failures.
+          this.#logger.warn(`Retention step skipped for ${op.id} (${code}); will retry next night`);
         }
       }
 
-      await this.safeUpdateStep(op.id, "retention", "succeeded", "Old backups checked");
+      // Rows with no copy (written by an older release, nothing to forget) expire like failed ones.
+      const withCopies = await listSiteBackupCopies(db, [...rowsById.keys()]);
+      const copyless = rows.filter((row) => !withCopies.has(row.id) && row.status !== "running");
+      const { drop } = selectExpired(
+        copyless.map((row) => ({ ...row, snapshotId: null })),
+        new Date(),
+        retentionDays,
+        siteExists,
+      );
+      await this.#removeCopies(
+        [],
+        drop.map((row) => row.id),
+        rowsById,
+      );
     } catch (err) {
       if (isAmbiguousError(err)) {
         throw err;
       }
+      retry = true;
       const code = extractKnownErrorCode(err) ?? "RETENTION_ERROR";
-      // Never log secrets, snapshot IDs, or host paths from retention failures.
       this.#logger.warn(`Retention step skipped for ${op.id} (${code}); will retry next night`);
-      await this.safeUpdateStep(op.id, "retention", "succeeded", "Will retry next night");
     }
+    await this.safeUpdateStep(
+      op.id,
+      "retention",
+      "succeeded",
+      retry ? "Will retry next night" : "Old backups checked",
+    );
+  }
+
+  async #retainTarget(
+    op: BackupOperationRef,
+    targetId: string,
+    forgetSuffix: string,
+    ctx: {
+      retentionDays: number;
+      siteExists: boolean;
+      rowsById: ReadonlyMap<string, typeof siteBackups.$inferSelect>;
+    },
+  ): Promise<void> {
+    const db = this.dbClient.db;
+    const copies = await listRetentionCopies(db, op.resourceId, targetId);
+    const byCopyId = new Map(copies.map((copy) => [copy.copyId, copy]));
+    // A running or unknown copy is never touched; a missing one is dropped, its snapshot is not in the repository.
+    const rows: RetentionRow[] = copies.map((copy) => ({
+      id: copy.copyId,
+      kind: copy.kind as BackupKind,
+      status:
+        copy.status === "succeeded"
+          ? "succeeded"
+          : copy.status === "running" || copy.status === "unknown"
+            ? "running"
+            : "failed",
+      snapshotId: copy.status === "missing" ? null : copy.snapshotId,
+      startedAt: copy.startedAt,
+    }));
+    const { forget, drop } = selectExpired(rows, new Date(), ctx.retentionDays, ctx.siteExists);
+    const backupIdsOf = (list: readonly RetentionRow[]): string[] =>
+      list.map((row) => byCopyId.get(row.id)!.backupId);
+
+    await this.#removeCopies(drop.map((row) => row.id), backupIdsOf(drop), ctx.rowsById);
+
+    const batch = forget.slice(0, MAX_FORGET_BATCH);
+    const snapshotIds = batch
+      .map((row) => row.snapshotId)
+      .filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (snapshotIds.length === 0) {
+      return;
+    }
+    const target = await resolveDispatchTarget(db, this.config.secretsMasterKey, targetId);
+    if (!target) {
+      throw new ControlPlaneError("VALIDATION_ERROR", "not_configured");
+    }
+    const forgetJobId = `${op.id}${forgetSuffix}`;
+    const startForget = await this.dockerExecutor.backups({
+      action: "forget",
+      jobId: forgetJobId,
+      siteId: op.resourceId,
+      target,
+      snapshotIds,
+    });
+    const forgetStatus = await this.pollJobStatus(op.id, forgetJobId, startForget);
+    if (forgetStatus.state !== "succeeded") {
+      throw new ControlPlaneError("INTERNAL_ERROR", "retention_forget_failed");
+    }
+    await this.#removeCopies(batch.map((row) => row.id), backupIdsOf(batch), ctx.rowsById);
   }
 
   /** @internal */
@@ -554,14 +798,23 @@ export class SiteBackupsApplier {
     await settleOperation(this.dbClient.db, operationId, { status: "failed", errorCode, errorMessage });
   }
 
-  async #discardAndDeleteBackupRows(
-    ids: readonly string[],
+  /**
+   * Deletes the given copies and, in the same transaction, the logical backups left with none: a crash between the
+   * two steps must not leave an empty row for the boot repair to attach a phantom copy to. The archive prepared for a
+   * backup about to go is released first.
+   */
+  async #removeCopies(
+    copyIds: readonly string[],
+    backupIds: readonly string[],
     rowsById: ReadonlyMap<string, typeof siteBackups.$inferSelect>,
   ): Promise<void> {
-    if (ids.length === 0) {
+    if (copyIds.length === 0 && backupIds.length === 0) {
       return;
     }
-    for (const id of ids) {
+    const ids = [...new Set(backupIds)];
+    const removing = new Set(copyIds);
+    const remaining = await listSiteBackupCopies(this.dbClient.db, ids);
+    for (const id of ids.filter((x) => (remaining.get(x) ?? []).every((c) => removing.has(c.id)))) {
       const row = rowsById.get(id);
       if (row && row.archiveStatus !== null && row.archiveOperationId !== null) {
         try {
@@ -574,7 +827,10 @@ export class SiteBackupsApplier {
         }
       }
     }
-    await deleteSiteBackups(this.dbClient.db, [...ids]);
+    await this.dbClient.db.transaction(async (tx) => {
+      await deleteSiteBackupCopies(tx, [...copyIds]);
+      await deleteEmptySiteBackups(tx, ids);
+    });
   }
 
   /** Converts lease-renewal failures during polling into ambiguous operation errors. */

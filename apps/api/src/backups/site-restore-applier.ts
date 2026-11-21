@@ -10,16 +10,19 @@ import {
   asc,
   eq,
   getBackupTarget,
+  listSiteBackupCopies,
   listSiteDatabases,
   operationSteps,
   renewOperationLease,
   resolveDecryptedSecretRefs,
+  resolveDispatchTarget,
   serviceInstances,
   settleSiteArchive,
   settleSiteRestore,
   siteBackups,
   sites,
   type DatabaseClient,
+  type DispatchTarget,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
@@ -138,7 +141,7 @@ export class SiteRestoreApplier {
 
     let restored = false;
     try {
-      await this.#ensureRestoreRowStillRunning(op.id);
+      const firstRow = await this.#ensureRestoreRowStillRunning(op.id);
 
       const site = await this.#findRestoreSite(op.resourceId);
       if (!site) {
@@ -148,7 +151,7 @@ export class SiteRestoreApplier {
         throw new BackupSettledFailure(err);
       }
 
-      const target = await getBackupTarget(db, this.config.secretsMasterKey);
+      const target = await this.#dispatchTargetOf(firstRow.restoreTargetId);
       if (!target) {
         await this.#settleRestoreRowAndAudit(op, "failed", "other");
         const err = new ControlPlaneError("VALIDATION_ERROR", "not_configured", {
@@ -172,7 +175,8 @@ export class SiteRestoreApplier {
 
       // Re-check row ownership as the last DB read before mutating the site via executor.
       const row = await this.#ensureRestoreRowStillRunning(op.id);
-      if (!row.snapshotId) {
+      const snapshotId = await this.#snapshotOf(row, row.restoreTargetId);
+      if (!snapshotId) {
         await this.#settleRestoreRowAndAudit(op, "failed", "other");
         const err = new ControlPlaneError("VALIDATION_ERROR", "Backup snapshot is missing.");
         await this.#failRestoreStepsAndOp(op.id, err.message, err.code, err.message);
@@ -193,7 +197,7 @@ export class SiteRestoreApplier {
         serviceInstanceId,
         siteType: siteTypeOf(site),
         target,
-        snapshotId: row.snapshotId,
+        snapshotId,
         ...(createVolume ? { createVolume: true as const } : {}),
       });
 
@@ -235,9 +239,9 @@ export class SiteRestoreApplier {
     await renewOperationLease(db, op.id, this.parent.leaseMs);
 
     try {
-      await this.#ensureArchiveRowPreparing(op.id);
+      const firstRow = await this.#ensureArchiveRowPreparing(op.id);
 
-      const target = await getBackupTarget(db, this.config.secretsMasterKey);
+      const target = await this.#dispatchTargetOf(firstRow.archiveTargetId);
       if (!target) {
         await settleSiteArchive(db, op.id, {
           status: "failed",
@@ -259,7 +263,8 @@ export class SiteRestoreApplier {
 
       // Re-check row ownership as the last DB read before requesting archive creation.
       const row = await this.#ensureArchiveRowPreparing(op.id);
-      if (!row.snapshotId) {
+      const snapshotId = await this.#snapshotOf(row, row.archiveTargetId);
+      if (!snapshotId) {
         await settleSiteArchive(db, op.id, {
           status: "failed",
           readyUntil: null,
@@ -276,7 +281,7 @@ export class SiteRestoreApplier {
         jobId: op.id,
         siteId: op.resourceId,
         target,
-        snapshotId: row.snapshotId,
+        snapshotId,
       });
 
       const statusRes = await this.parent.pollJobStatus(op.id, op.id, startRes);
@@ -869,11 +874,17 @@ export class SiteRestoreApplier {
   /** Aborts without touching any superseded/missing row if restore_status is no longer running. */
   async #ensureRestoreRowStillRunning(
     operationId: string,
-  ): Promise<{ id: string; snapshotId: string | null; siteUrl: string | null }> {
+  ): Promise<{
+    id: string;
+    snapshotId: string | null;
+    siteUrl: string | null;
+    restoreTargetId: string | null;
+  }> {
     const [row] = await this.dbClient.db
       .select({
         id: siteBackups.id,
         restoreStatus: siteBackups.restoreStatus,
+        restoreTargetId: siteBackups.restoreTargetId,
         snapshotId: siteBackups.snapshotId,
         siteUrl: siteBackups.siteUrl,
       })
@@ -893,11 +904,12 @@ export class SiteRestoreApplier {
   /** Aborts without touching any superseded/missing row if archive_status is no longer preparing. */
   async #ensureArchiveRowPreparing(
     operationId: string,
-  ): Promise<{ id: string; snapshotId: string | null }> {
+  ): Promise<{ id: string; snapshotId: string | null; archiveTargetId: string | null }> {
     const [row] = await this.dbClient.db
       .select({
         id: siteBackups.id,
         archiveStatus: siteBackups.archiveStatus,
+        archiveTargetId: siteBackups.archiveTargetId,
         snapshotId: siteBackups.snapshotId,
       })
       .from(siteBackups)
@@ -912,6 +924,28 @@ export class SiteRestoreApplier {
     }
 
     return row;
+  }
+
+  /**
+   * Where the selected copy lives. A null id is a request queued by an older release: the legacy S3 target.
+   * Archived and disabled targets still resolve, so history stays restorable.
+   */
+  async #dispatchTargetOf(targetId: string | null): Promise<DispatchTarget | null> {
+    const db = this.dbClient.db;
+    return targetId === null
+      ? getBackupTarget(db, this.config.secretsMasterKey)
+      : resolveDispatchTarget(db, this.config.secretsMasterKey, targetId);
+  }
+
+  /** The snapshot of the selected copy; the row's own snapshot when the request carries no target (older release). */
+  async #snapshotOf(
+    row: { id: string; snapshotId: string | null },
+    targetId: string | null,
+  ): Promise<string | null> {
+    if (targetId === null) return row.snapshotId;
+    const copies = await listSiteBackupCopies(this.dbClient.db, [row.id]);
+    const copy = copies.get(row.id)?.find((c) => c.targetId === targetId && c.status === "succeeded");
+    return copy?.snapshotId ?? null;
   }
 
   async #findRestoreSite(siteId: string): Promise<RestoreSiteRef | undefined> {
