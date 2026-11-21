@@ -38,6 +38,10 @@ import type {
   BackupTargetsDto,
   BackupPolicyDto,
   SiteBackupPolicyDto,
+  AdminSiteTemplatesListDto,
+  AdminSiteTemplateDetailDto,
+  AdminSiteTemplateVersionDto,
+  CustomerSiteTypesDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -251,4 +255,30 @@ export async function fetchServerAdminBackupPolicy(scope: "default" | "panel"): 
 /** The site's destination choice; 403/404 → null (the chooser stays hidden). */
 export async function fetchServerSiteBackupPolicy(orgId: string, siteId: string): Promise<SiteBackupPolicyDto | null> {
   return orNull(await serverGet<SiteBackupPolicyDto>(`v1/organizations/${orgId}/managed-sites/${siteId}/backup-policy`));
+}
+
+/** The administrator's site templates (with the module facts); null = could not be loaded. */
+export async function fetchServerAdminSiteTemplates(): Promise<AdminSiteTemplatesListDto | null> {
+  return orNull(await serverGet<AdminSiteTemplatesListDto>("v1/admin/site-templates", { timeoutMs: 20_000 }));
+}
+
+/** notFound stays distinguishable: the page renders notFound(). */
+export async function fetchServerAdminSiteTemplate(templateId: string): Promise<ServerResult<AdminSiteTemplateDetailDto>> {
+  return serverGet<AdminSiteTemplateDetailDto>(`v1/admin/site-templates/${encodeURIComponent(templateId)}`);
+}
+
+export async function fetchServerAdminSiteTemplateVersion(
+  templateId: string,
+  versionId: string,
+): Promise<AdminSiteTemplateVersionDto | null> {
+  return orNull(
+    await serverGet<AdminSiteTemplateVersionDto>(
+      `v1/admin/site-templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}`,
+    ),
+  );
+}
+
+/** null = could not be loaded: the page behaves as today (no chooser, legacy body). */
+export async function fetchServerCustomerSiteTypes(orgId: string): Promise<CustomerSiteTypesDto | null> {
+  return orNull(await serverGet<CustomerSiteTypesDto>(`v1/organizations/${orgId}/site-types`));
 }
