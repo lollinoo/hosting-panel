@@ -820,7 +820,42 @@ export const it = {
         actions: "Azioni",
       },
       kind: { nightly: "Notturno", manual: "Fatto a mano", pre_update: "Prima di un aggiornamento o di un'importazione" },
-      status: { running: "In corso", succeeded: "Completato", failed: "Non riuscito" },
+      status: {
+        running: "In corso",
+        succeeded: "Completato",
+        failed: "Non riuscito",
+        partial: "Parziale",
+        partialLong: "Parziale: una copia non è riuscita",
+      },
+      target: {
+        title: "Dove salvare i backup di questo sito",
+        intro:
+          "Scegli dove tenere le copie dei prossimi backup. Quelli già fatti restano dove sono.",
+        inherit: "Usa la scelta del tuo fornitore",
+        offServer: "Copia esterna",
+        thisServer: "Copia su questo server",
+        offServerN: "Copia esterna {n}",
+        localWarning:
+          "Le copie su questo server non proteggono dalla perdita del server o del disco. Conserva anche una copia esterna.",
+        save: "Salva la scelta",
+        saving: "Salvataggio\u2026",
+        saved: "Scelta salvata.",
+        failed: "Non siamo riusciti a salvare la scelta. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
+      },
+      copies: {
+        title: "Dove è conservato",
+        status: {
+          running: "In corso",
+          succeeded: "Riuscita",
+          failed: "Non riuscita",
+          unknown: "Esito non confermato",
+          missing: "Non più disponibile",
+        },
+        withSize: "{label}: {status}, {size}",
+        withoutSize: "{label}: {status}",
+        partialHelp:
+          "Una copia non è riuscita, ma puoi ripristinare o scaricare da quella riuscita.",
+      },
       keptLatest: "Finché non ne riesce uno più recente",
       problem: {
         unreachable:
@@ -874,6 +909,14 @@ export const it = {
           "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
         site_not_started:
           "I file e i database del sito sono tornati, ma il sito non è ripartito. Contatta il tuo fornitore di hosting.",
+        local_target_unmounted:
+          "Il disco dove salviamo i backup su questo server non risulta collegato. Contatta il tuo fornitore di hosting.",
+        local_target_readonly:
+          "Non riusciamo a scrivere nello spazio dei backup su questo server. Contatta il tuo fornitore di hosting.",
+        local_target_unsafe:
+          "Lo spazio dei backup su questo server non è configurato in modo sicuro, quindi non è stato usato. Contatta il tuo fornitore di hosting.",
+        backup_copy_missing:
+          "Questa copia non si trova più dove era salvata. Usa un'altra copia, se c'è, oppure contatta il tuo fornitore di hosting.",
       } satisfies Record<BackupProblem, string>,
       copyProblem: {
         unreachable:
@@ -926,6 +969,14 @@ export const it = {
           "Qualcosa non ha funzionato sul server. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
         site_not_started:
           "I file e i database del sito sono tornati, ma il sito non è ripartito. Contatta il tuo fornitore di hosting.",
+        local_target_unmounted:
+          "Il disco dove sono salvati i backup su questo server non risulta collegato. Contatta il tuo fornitore di hosting.",
+        local_target_readonly:
+          "Non riusciamo a usare lo spazio dei backup su questo server. Contatta il tuo fornitore di hosting.",
+        local_target_unsafe:
+          "Lo spazio dei backup su questo server non è configurato in modo sicuro, quindi non è stato usato. Contatta il tuo fornitore di hosting.",
+        backup_copy_missing:
+          "Questa copia non si trova più dove era salvata. Usa un'altra copia, se c'è, oppure contatta il tuo fornitore di hosting.",
       } satisfies Record<BackupProblem, string>,
       restore: {
         button: "Ripristina",
@@ -938,6 +989,7 @@ export const it = {
         backupFirst:
           "Per conservare una copia del sito com'è adesso, annulla e usa prima «Fai un backup adesso».",
         typeName: "Per confermare, scrivi il nome del sito {name}",
+        fromLabel: "Ripristina da",
         cancel: "Annulla",
         confirm: "Ripristina questo backup",
         starting: "Avvio\u2026",
@@ -1491,6 +1543,8 @@ export const it = {
         backup_failed: "{site}: l'ultimo backup non è riuscito il {date}. Apri Backup per vedere il motivo, poi usa Riprova nella riga del sito.",
         panel_backup_failed: "L'ultimo backup del pannello non è riuscito il {date}. Apri Backup per vedere il motivo e controlla lì lo spazio di backup; viene ritentato la notte successiva.",
         backup_storage_test_failed: "L'ultima prova dello spazio di backup non è riuscita il {date}. Apri Backup, controlla le impostazioni dello spazio, poi usa di nuovo Prova la connessione.",
+        backup_target_space_low: "La cartella dei backup su questo server sta finendo lo spazio ({free} liberi su {total}). Apri Backup, libera spazio o monta un disco più grande, poi usa di nuovo Prova la connessione.",
+        backup_site_without_target: "Il sito {site} non ha una destinazione di backup utilizzabile, quindi ogni notte viene saltato. Apri Backup, scegli una destinazione attiva per il sito (o per tutti i siti) e salva.",
         component_down: "{part}: {state}. {reason}. {fix}",
         site_container_down: "{site}: il sito dovrebbe essere attivo, ma il suo container è \"{observed}\". Controlla il suo log nella pagina Log, poi usa Riavvia nella sua riga in Container dei siti.",
         restore_undo_incomplete: "{site}: un ripristino non è riuscito il {date} e il sito non è stato rimesso com'era, quindi potrebbe non funzionare. Un ripristino del sito che riesce lo ripara: usa Ripristina nella pagina Backup.",
@@ -2182,7 +2236,145 @@ export const it = {
       retention: "Giorni di conservazione",
       retentionHint: "Da 1 a 365. Il backup riuscito più recente di ogni sito viene sempre tenuto.",
       changeWarning:
-        "Cambiando endpoint, bucket o percorso il pannello dimentica i backup registrati finora e i clienti non li vedranno più. Nel bucket non viene cancellato nulla.",
+        "Cambiando endpoint, bucket o percorso viene creata una nuova destinazione e quella attuale viene archiviata: i suoi backup restano ripristinabili. Nel bucket non viene cancellato nulla.",
+      localWarning:
+        "I backup locali sullo stesso server non proteggono dalla perdita del server o del disco. Per disaster recovery conserva una copia fuori dal server e la chiave di recupero.",
+      tabs: {
+        label: "Sezioni dei backup",
+        destinations: "Destinazioni",
+        policy: "Regole",
+        recovery: "Server perso",
+      },
+      targets: {
+        title: "Tutte le destinazioni",
+        intro:
+          "Ogni destinazione conserva i propri backup. Archiviarla la toglie dall'uso ma i suoi backup restano leggibili e ripristinabili.",
+        loadFailed: "Non riusciamo a caricare le destinazioni. Ricarica la pagina.",
+        empty: "Nessuna destinazione salvata.",
+        columns: { name: "Nome", kind: "Tipo", state: "Stato", backups: "Backup", actions: "Azioni" },
+        kind: { s3: "S3", local: "Locale" },
+        legacy: "Impostazioni storiche",
+        copiesCount: "{count} backup",
+        state: {
+          enabled: "Attiva",
+          disabled: "Disattivata",
+          archived: "Archiviata",
+          neverTested: "Mai provata",
+          testOk: "Ultima prova riuscita ({when})",
+          testFailed: "Ultima prova non riuscita ({when}):",
+        },
+        switches: {
+          enabled: "Attiva",
+          customerSelectable: "I clienti possono sceglierla",
+          enabledHint: "Una destinazione disattivata non riceve nuovi backup ma resta leggibile.",
+          customerSelectableHint: "I clienti la vedono come «Copia esterna» o «Copia su questo server», mai con questo nome.",
+          label: "Impostazioni di {name}",
+        },
+        saved: "Destinazione aggiornata.",
+        saveFailed: "Non siamo riusciti ad aggiornare la destinazione. Riprova.",
+        archive: {
+          button: "Archivia",
+          title: "Archiviare la destinazione {name}?",
+          body: "Non riceverà più nuovi backup e non si potrà più scegliere. I suoi backup restano leggibili e ripristinabili.",
+          confirm: "Archivia",
+          cancel: "Annulla",
+          done: "Destinazione archiviata.",
+        },
+        delete: {
+          button: "Elimina",
+          title: "Eliminare la destinazione {name}?",
+          body: "Viene eliminata solo la voce nel pannello. Non contiene backup, quindi i dati su disco o sul bucket non vengono toccati.",
+          confirm: "Elimina",
+          cancel: "Annulla",
+          done: "Destinazione eliminata.",
+          notAllowed: "Non si può eliminare: contiene backup oppure sono le impostazioni storiche. Archiviala.",
+        },
+        inUse:
+          "Questa destinazione è ancora usata da una regola o contiene backup, quindi non si può eliminare. Archiviala: i suoi backup restano ripristinabili.",
+        capacity: "Spazio libero {free} su {total}",
+        capacityUnknown: "Spazio non ancora misurato: usa «Prova» per leggerlo.",
+        lowSpace:
+          "Lo spazio libero sta finendo ({free} su {total}). Libera spazio o monta un disco più grande, altrimenti i backup possono non riuscire.",
+        test: {
+          button: "Prova",
+          testing: "Prova in corso…",
+          ok: "Funziona: la destinazione è pronta.",
+          ambiguous: "Non sappiamo come è finita la prova. Ricarica la pagina e riprova.",
+        },
+        local: {
+          title: "Backup su questo server",
+          intro:
+            "Una cartella gestita dal pannello su questo server, anche su un disco esterno montato. Il percorso lo decide il server, non si inserisce qui.",
+          add: "Aggiungi destinazione locale",
+          adding: "Aggiunta in corso…",
+          name: "Nome",
+          defaultName: "Questo server",
+          alreadyExists: "Esiste già una destinazione locale: ne è ammessa una sola.",
+          addFailed: "Non siamo riusciti ad aggiungere la destinazione. Riprova.",
+          root: "Cartella gestita dal pannello",
+          rootHint: "Sola lettura. Per usare un disco esterno montalo su questa cartella prima di inizializzare.",
+          initialised: "Inizializzata il {when}",
+          notInitialised: "Non ancora inizializzata: i backup su questa destinazione non partono.",
+          initialise: "Inizializza",
+          initialising: "Inizializzazione in corso…",
+          initialiseTitle: "Inizializzare la destinazione locale?",
+          initialiseBody:
+            "Il pannello scrive un file marcatore nella cartella gestita, per riconoscere che il disco giusto è montato. Se in seguito monti un disco nuovo, ripeti l'inizializzazione.",
+          initialiseConfirm: "Inizializza",
+          initialiseCancel: "Annulla",
+          initialiseDone: "Destinazione inizializzata.",
+        },
+      },
+      policy: {
+        title: "Regole di backup",
+        intro: "Quando e dove vengono fatti i backup. Le modifiche valgono dal prossimo backup.",
+        loadFailed: "Non riusciamo a caricare le regole. Ricarica la pagina.",
+        noTargets: "Non c'è ancora nessuna destinazione attiva: aggiungine una nella scheda Destinazioni.",
+        sites: {
+          title: "Backup dei siti",
+          hint: "Valgono per tutti i siti che non hanno una scelta propria.",
+          hour: "Ora del backup notturno",
+          retention: "Giorni di conservazione",
+          destination: "Destinazione",
+        },
+        panel: {
+          title: "Copia del pannello",
+          hint: "Account, siti e impostazioni del pannello.",
+          schedule: "La copia parte dopo i backup dei siti, alle {utc} UTC, e viene conservata {days} giorni.",
+          destination: "Destinazione",
+        },
+        option: "{name} ({kind})",
+        targetRequired: "Scegli una destinazione.",
+        save: "Salva",
+        saving: "Salvataggio…",
+        saved: "Regole salvate.",
+        unchanged: "Nessuna modifica da salvare.",
+      },
+      recovery: {
+        title: "Se il server è perso",
+        intro:
+          "Come riportare il pannello su un server nuovo. Questa pagina è solo informativa: il recupero si fa dalla riga di comando del nuovo server, come root, dopo l'installazione.",
+        key: {
+          title: "La chiave di recupero",
+          body: "Tutti i backup sono cifrati con il file {backupKeyPath} di questo server. Conservane subito una copia fuori dal server: senza questa chiave nessun backup, dei siti o del pannello, può essere letto.",
+        },
+        s3: {
+          title: "Da una destinazione S3 ({targetId})",
+          body: "Usa gli stessi dati della destinazione. Le chiavi di accesso non si scrivono nel comando: passale con HP_S3_ACCESS_KEY_ID e HP_S3_SECRET_ACCESS_KEY, oppure inseriscile quando il comando le chiede.",
+          command: "hp-restore-panel --endpoint {endpoint} --region {region} --bucket {bucket} --prefix {prefix}",
+          noPrefix: "Se la destinazione non ha un percorso, togli --prefix.",
+          empty: "Nessuna destinazione S3 salvata.",
+        },
+        local: {
+          title: "Da una destinazione locale ({targetId})",
+          body: "Monta sul nuovo server lo stesso disco, nella stessa cartella gestita, prima di lanciare il comando. Il comando legge la copia del pannello in sola lettura.",
+          command: "hp-restore-panel --local-repo {root}/{targetId}/panel",
+          exits: "Se il comando esce con 7 il disco non è montato; con 8 la cartella non è sicura. Correggi e riprova.",
+          lostDisk:
+            "Se il disco è andato perso insieme al server, quella copia non si può recuperare: per questo serve anche una copia fuori dal server.",
+          empty: "Nessuna destinazione locale salvata.",
+        },
+      },
       save: "Salva",
       saving: "Salvataggio\u2026",
       saved: "Impostazioni salvate.",
@@ -2262,11 +2454,19 @@ export const it = {
           "La copia del pannello non ha potuto leggere il file del database. Controlla lo spazio libero su disco e journalctl -u hp-docker-executor; la copia viene ritentata la notte successiva.",
         site_not_started:
           "File e database sono tornati, ma il sito non è partito. Controlla i log dell'executor (journalctl -u hp-docker-executor) e riprova il ripristino.",
+        local_target_unmounted:
+          "Il disco della destinazione locale non è montato sulla cartella gestita. Monta il disco, poi usa «Prova» e, se hai cambiato disco, «Inizializza».",
+        local_target_readonly:
+          "La cartella gestita è in sola lettura. Controlla come è montato il disco e i permessi, poi riprova.",
+        local_target_unsafe:
+          "La cartella gestita non è sicura (collegamenti simbolici, proprietario o permessi non attesi), quindi non viene usata. Controlla proprietario e permessi della cartella, poi usa «Prova».",
+        backup_copy_missing:
+          "La copia non è più nella destinazione: è stata cancellata o il disco è stato sostituito. Controlla la destinazione; le copie in altre destinazioni restano utilizzabili.",
       } satisfies Record<BackupProblem, string>,
       removeButton: "Rimuovi destinazione",
       removeTitle: "Rimuovere la destinazione dei backup?",
       removeConfirm:
-        "Nel bucket non viene cancellato nulla. I backup notturni si fermano e il pannello dimentica i backup registrati: i clienti non li vedranno più.",
+        "Nel bucket non viene cancellato nulla. I backup notturni verso di esso si fermano; i backup registrati restano e i clienti possono ancora ripristinarli.",
       removeCancel: "Annulla",
       removeAction: "Rimuovi",
       removed: "Destinazione rimossa.",

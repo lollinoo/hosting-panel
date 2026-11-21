@@ -128,6 +128,7 @@ function makeBackupRow(overrides: Partial<SiteBackupDto> = {}): SiteBackupDto {
     sizeBytes: 12_345_678,
     problem: null,
     archive: null,
+    copies: [],
     ...overrides,
   };
 }
@@ -141,6 +142,7 @@ function makeBackupsDto(overrides: Partial<SiteBackupsDto> = {}): SiteBackupsDto
     runningOperationId: null,
     lastRestore: null,
     backups: [],
+    targets: [],
     ...overrides,
   };
 }
@@ -560,7 +562,13 @@ describe("Site backups restore & download BFF routes", () => {
   it("download POST accepts empty or {} body, rejects other bodies, and forwards upstream call", async () => {
     const url = `http://localhost:3000/api/bff/orgs/${ORG_ID}/managed-sites/${SITE_ID}/backups/bak_1/download`;
 
-    for (const badBody of [JSON.stringify({ extra: 1 }), "[]", '"str"']) {
+    for (const badBody of [
+      JSON.stringify({ extra: 1 }),
+      JSON.stringify({ targetId: "nope" }),
+      JSON.stringify({ targetId: 5 }),
+      "[]",
+      '"str"',
+    ]) {
       const badRes = await backupDownloadPost(
         new Request(url, {
           method: "POST",
@@ -607,6 +615,19 @@ describe("Site backups restore & download BFF routes", () => {
       backupRouteContext(),
     );
     expect(resEmpty.status).toBe(202);
+
+    const targetId = `bkt_${"a".repeat(32)}`;
+    mockUpstream.fetchUpstream.mockResolvedValueOnce({ ok: true, status: 202, data: accepted });
+    const resTarget = await backupDownloadPost(
+      new Request(url, {
+        method: "POST",
+        headers: { origin: "http://localhost:3000", "x-csrf-token": ADMIN_SESSION.csrfToken },
+        body: JSON.stringify({ targetId }),
+      }),
+      backupRouteContext(),
+    );
+    expect(resTarget.status).toBe(202);
+    expect(mockUpstream.fetchUpstream.mock.lastCall?.[1]).toMatchObject({ body: { targetId } });
   });
 
   it("download GET streams 3 chunks unchanged with 40s limit, pull-based, and sets archive headers", async () => {

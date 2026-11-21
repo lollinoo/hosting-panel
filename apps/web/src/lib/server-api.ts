@@ -35,6 +35,9 @@ import type {
   AdminTlsInventoryItemDto,
   TlsCertificateAlertDto,
   TlsInventoryFilter,
+  BackupTargetsDto,
+  BackupPolicyDto,
+  SiteBackupPolicyDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -234,4 +237,18 @@ export async function fetchServerAdminTlsCertificates(
 
 export async function fetchServerAdminTlsAlerts(): Promise<TlsCertificateAlertDto[] | null> {
   return orNull(await serverGet<TlsCertificateAlertDto[]>("v1/admin/tls-certificates/alerts"));
+}
+
+/** The administrator's backup destinations; null = could not be loaded. */
+export async function fetchServerAdminBackupTargets(): Promise<BackupTargetsDto | null> {
+  return orNull(await serverGet<BackupTargetsDto>("v1/admin/backup-targets", { timeoutMs: 20_000 }));
+}
+
+export async function fetchServerAdminBackupPolicy(scope: "default" | "panel"): Promise<BackupPolicyDto | null> {
+  return orNull(await serverGet<BackupPolicyDto>(`v1/admin/backup-policies/${scope}`));
+}
+
+/** The site's destination choice; 403/404 → null (the chooser stays hidden). */
+export async function fetchServerSiteBackupPolicy(orgId: string, siteId: string): Promise<SiteBackupPolicyDto | null> {
+  return orNull(await serverGet<SiteBackupPolicyDto>(`v1/organizations/${orgId}/managed-sites/${siteId}/backup-policy`));
 }

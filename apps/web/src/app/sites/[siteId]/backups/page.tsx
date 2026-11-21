@@ -1,4 +1,4 @@
-import type { SiteBackupsDto } from "@hosting-panel/contracts";
+import type { SiteBackupPolicyDto, SiteBackupsDto } from "@hosting-panel/contracts";
 import { notFound } from "next/navigation";
 import { getCustomerContext, getSite } from "@/app/sites/data";
 import { SiteBackups } from "@/components/customer/site-backups";
@@ -6,7 +6,16 @@ import { LoadError } from "@/components/shared/load-error";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { errorMessage, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { serverGet } from "@/lib/server-api";
+import { fetchServerSiteBackupPolicy, serverGet } from "@/lib/server-api";
+
+// The destination chooser is optional: any failure to read the policy simply hides it.
+async function loadPolicy(orgId: string, siteId: string): Promise<SiteBackupPolicyDto | null> {
+  try {
+    return await fetchServerSiteBackupPolicy(orgId, siteId);
+  } catch {
+    return null;
+  }
+}
 
 // Render the customer site Backups tab by loading site ownership and backup state server-side.
 export async function SiteBackupsPage({
@@ -39,6 +48,8 @@ export async function SiteBackupsPage({
     return <LoadError m={m} />;
   }
 
+  // Started first so the backups read stays the page's main (and last) request.
+  const policyPromise = loadPolicy(orgId, siteId);
   const backupsRes = await serverGet<SiteBackupsDto>(
     `v1/organizations/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(siteId)}/backups`,
     { timeoutMs: 20_000 },
@@ -72,6 +83,8 @@ export async function SiteBackupsPage({
     );
   }
 
+
+  const policy = await policyPromise;
   const basePath = `/api/bff/orgs/${encodeURIComponent(orgId)}/managed-sites/${encodeURIComponent(siteId)}/backups`;
   return (
     <div className="space-y-4">
@@ -82,6 +95,7 @@ export async function SiteBackupsPage({
         csrfToken={session.csrfToken}
         siteName={siteRes.data.name}
         initialDownloadError={initialDownloadError}
+        policy={policy}
       />
     </div>
   );

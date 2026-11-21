@@ -1,5 +1,6 @@
 import { PANEL_CONTAINERS, type AdminAlertDto, type AlertSeverity } from "@hosting-panel/contracts";
 import { format, type Messages } from "@/i18n";
+import { formatSize } from "@/lib/file-browser";
 
 /** A date and time with its zone: the server formats it, so the browser's zone may differ. */
 export function formatZonedDate(iso: string, locale: string): string {
@@ -39,6 +40,13 @@ export function alertText(m: Messages, a: AdminAlertDto): string {
       return format(t.alerts.panel_backup_failed, { date: date(a.details.failedAt) });
     case "backup_storage_test_failed":
       return format(t.alerts.backup_storage_test_failed, { date: date(a.details.testedAt) });
+    case "backup_site_without_target":
+      return format(t.alerts.backup_site_without_target, { site: a.details.siteName });
+    case "backup_target_space_low":
+      return format(t.alerts.backup_target_space_low, {
+        free: formatSize(a.details.availableBytes, m.common.dateLocale),
+        total: formatSize(a.details.totalBytes, m.common.dateLocale),
+      });
     case "component_down": {
       const d = a.details;
       return format(t.alerts.component_down, {
@@ -77,6 +85,8 @@ export function alertLink(a: AdminAlertDto): AlertLink | null {
     case "backup_failed":
     case "panel_backup_failed":
     case "backup_storage_test_failed":
+    case "backup_target_space_low":
+    case "backup_site_without_target":
     case "restore_undo_incomplete":
     case "restore_stuck":
       return { href: "/admin/backups", label: "openBackups" };

@@ -531,12 +531,12 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
     }
   });
 
-  it("documents exact passthrough vs stripping behavior when upstream emits secretAccessKey or a host path", async () => {
+  it("redacts both secretAccessKey and a host path (forbidden DTO keys, SPEC 0.2.5) when upstream emits them", async () => {
     const leakedSecret = "LEAKED-S3-SECRET-123";
     const leakedPath = "/var/lib/hosting-panel/backups/op_123.zip";
 
-    // POST restore & POST download: bffJsonResponse redacts forbidden DTO keys (hostPath -> [REDACTED])
-    // but forwards other extra upstream JSON fields such as secretAccessKey verbatim.
+    // POST restore & POST download: bffJsonResponse redacts forbidden DTO keys (hostPath and, since c3f1,
+    // secretAccessKey -> [REDACTED], SPEC 0.2.5).
     mockUpstream.fetchUpstream.mockResolvedValue({
       ok: true,
       status: 202,
@@ -551,18 +551,18 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
       backupCtx(),
     );
     const postRestoreText = await postRestoreRes.text();
-    expect(postRestoreText).toContain(leakedSecret);
+    expect(postRestoreText).not.toContain(leakedSecret);
     expect(postRestoreText).not.toContain(leakedPath);
-    expect(postRestoreText).toContain('"[REDACTED]"');
+    expect(JSON.parse(postRestoreText)).toMatchObject({ secretAccessKey: "[REDACTED]", hostPath: "[REDACTED]" });
 
     const postDlRes = await downloadPost(
       makeRequest(`${BASE_BFF}/download`, "POST", { body: "{}" }),
       backupCtx(),
     );
     const postDlText = await postDlRes.text();
-    expect(postDlText).toContain(leakedSecret);
+    expect(postDlText).not.toContain(leakedSecret);
     expect(postDlText).not.toContain(leakedPath);
-    expect(postDlText).toContain('"[REDACTED]"');
+    expect(JSON.parse(postDlText)).toMatchObject({ secretAccessKey: "[REDACTED]", hostPath: "[REDACTED]" });
 
     // GET download 200: only streams decoded dataBase64 bytes and validated fileName -> strips extra JSON fields & path filenames
     mockUpstream.fetchUpstream.mockResolvedValueOnce({
@@ -607,7 +607,7 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
     expect(await getErrRes.text()).toBe("");
   });
 
-  it("enforces E15 wording, IT/EN key parity, next-step advice on all 26 problems, and E12(c) key_file_missing texts", () => {
+  it("enforces E15 wording, IT/EN key parity, next-step advice on all 30 problems, and E12(c) key_file_missing texts", () => {
     const forbiddenE15 =
       /snapshot|schema|restic|docker|container|image|volume|network|revision|files\/|databases\//i;
     const enNext = /check|fix|use|put|free|try|give|create|reload|save|enter|set up|contact|make|restore|wait/i;
@@ -636,8 +636,8 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
       expect(Object.keys(en.site.backups[section]).length).toBeGreaterThan(0);
     }
 
-    // 3. All 26 BACKUP_PROBLEMS exist in site.backups.problem, site.backups.copyProblem, and admin.backups.problem with next steps
-    expect(BACKUP_PROBLEMS).toHaveLength(26);
+    // 3. All 30 BACKUP_PROBLEMS exist in site.backups.problem, site.backups.copyProblem, and admin.backups.problem with next steps
+    expect(BACKUP_PROBLEMS).toHaveLength(30);
     for (const problem of BACKUP_PROBLEMS) {
       for (const [localeName, catalog, re] of [
         ["en", en, enNext],
@@ -722,6 +722,7 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
       sizeBytes: 2048,
       problem: null,
       archive: null,
+      copies: [],
     };
     const dtoUndoIncomplete: SiteBackupsDto = {
       available: true,
@@ -737,6 +738,7 @@ describe("backups restore & download web QA (BFF guards, Location, streaming, le
         problem: "undo_incomplete",
       },
       backups: [row],
+      targets: [],
     };
 
     const htmlEn = renderWithLocale(

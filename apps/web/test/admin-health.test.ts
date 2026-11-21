@@ -58,7 +58,7 @@ const T = "2026-11-14T10:00:00Z";
 const site = { siteId: "s1", siteName: "wp-a.example.test" };
 const op = { operationId: "op1", kind: "site.backups.restore", siteId: "s1", siteName: "wp-a.example.test" } as const;
 
-// One contract-valid alert per kind: a fourteenth kind without a fixture fails the type check and (a).
+// One contract-valid alert per kind: a sixteenth kind without a fixture fails the type check and (a).
 const raw: Record<AlertKind, unknown> = {
   disk_high: { severity: "critical", subject: "docker_data", since: T, kind: "disk_high", details: { paths: ["docker_data", "root"], usedPercent: 93 } },
   certificate_expiring: { severity: "warning", subject: "wp-a.example.test", since: null, kind: "certificate_expiring", details: { ...site, hostname: "wp-a.example.test", expiresAt: T, problem: "port_80_blocked" } },
@@ -67,7 +67,9 @@ const raw: Record<AlertKind, unknown> = {
   manual_certificate_expiring: { severity: "warning", subject: "v1", since: null, kind: "manual_certificate_expiring", details: { ...site, certificateId: "c1", certificateName: "hotel-cert", notAfter: T, tier: "warning" } },
   backup_failed: { severity: "warning", subject: "s1", since: T, kind: "backup_failed", details: { ...site, failedAt: T } },
   panel_backup_failed: { severity: "warning", subject: "panel", since: T, kind: "panel_backup_failed", details: { failedAt: T } },
-  backup_storage_test_failed: { severity: "warning", subject: "storage", since: T, kind: "backup_storage_test_failed", details: { testedAt: T } },
+  backup_storage_test_failed: { severity: "warning", subject: "storage", since: T, kind: "backup_storage_test_failed", details: { testedAt: T, targetId: "bkt_" + "a".repeat(32), targetKind: "s3", problem: null } },
+  backup_target_space_low: { severity: "warning", subject: "bkt_" + "b".repeat(32), since: T, kind: "backup_target_space_low", details: { targetId: "bkt_" + "b".repeat(32), targetKind: "local", availableBytes: 2_000_000_000, totalBytes: 100_000_000_000, testedAt: T } },
+  backup_site_without_target: { severity: "warning", subject: "site_1", since: null, kind: "backup_site_without_target", details: { siteId: "site_1", siteName: "Shop" } },
   component_down: { severity: "critical", subject: "sftp", since: T, kind: "component_down", details: { component: "sftp", state: "down", reason: "stopped" } },
   site_container_down: { severity: "critical", subject: "s1", since: T, kind: "site_container_down", details: { ...site, observed: "stopped" } },
   restore_undo_incomplete: { severity: "critical", subject: "b1", since: T, kind: "restore_undo_incomplete", details: { ...site, backupId: "b1", failedAt: null } },
@@ -184,6 +186,8 @@ describe("alert sentences and links (a, b, c)", () => {
       backup_failed: { href: "/admin/backups", label: "openBackups" },
       panel_backup_failed: { href: "/admin/backups", label: "openBackups" },
       backup_storage_test_failed: { href: "/admin/backups", label: "openBackups" },
+      backup_target_space_low: { href: "/admin/backups", label: "openBackups" },
+      backup_site_without_target: { href: "/admin/backups", label: "openBackups" },
       component_down: { href: "/admin/logs?source=sftp", label: "openLog" },
       site_container_down: { href: "/admin/logs?source=site:s1", label: "openLog" },
       restore_undo_incomplete: { href: "/admin/backups", label: "openBackups" },

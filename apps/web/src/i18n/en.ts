@@ -811,7 +811,42 @@ export const en: Messages = {
         actions: "Actions",
       },
       kind: { nightly: "Nightly", manual: "Made by hand", pre_update: "Before an update or an import" },
-      status: { running: "In progress", succeeded: "Completed", failed: "Failed" },
+      status: {
+        running: "In progress",
+        succeeded: "Completed",
+        failed: "Failed",
+        partial: "Partial",
+        partialLong: "Partial: one copy failed",
+      },
+      target: {
+        title: "Where to save this site's backups",
+        intro:
+          "Choose where to keep the copies of the next backups. The ones already made stay where they are.",
+        inherit: "Use your provider's choice",
+        offServer: "Off-server copy",
+        thisServer: "Copy on this server",
+        offServerN: "Off-server copy {n}",
+        localWarning:
+          "Copies on this server do not protect against losing the server or its disk. Keep an off-server copy too.",
+        save: "Save the choice",
+        saving: "Saving\u2026",
+        saved: "Choice saved.",
+        failed: "We couldn't save the choice. Try again in a few minutes; if it keeps happening, contact your hosting provider.",
+      },
+      copies: {
+        title: "Where it is kept",
+        status: {
+          running: "In progress",
+          succeeded: "Succeeded",
+          failed: "Failed",
+          unknown: "Result not confirmed",
+          missing: "No longer available",
+        },
+        withSize: "{label}: {status}, {size}",
+        withoutSize: "{label}: {status}",
+        partialHelp:
+          "One copy failed, but you can restore or download from the one that succeeded.",
+      },
       keptLatest: "Until a newer one succeeds",
       problem: {
         unreachable:
@@ -863,6 +898,14 @@ export const en: Messages = {
           "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
         site_not_started:
           "Your site's files and databases are back, but the site could not be started. Contact your hosting provider.",
+        local_target_unmounted:
+          "The disk where backups are saved on this server isn't connected. Contact your hosting provider.",
+        local_target_readonly:
+          "We can't write to the backup space on this server. Contact your hosting provider.",
+        local_target_unsafe:
+          "The backup space on this server isn't set up safely, so it wasn't used. Contact your hosting provider.",
+        backup_copy_missing:
+          "This copy is no longer where it was saved. Use another copy, if there is one, or contact your hosting provider.",
       },
       copyProblem: {
         unreachable:
@@ -912,6 +955,14 @@ export const en: Messages = {
           "Something went wrong on the server. Try again later; if it happens again, contact your hosting provider.",
         site_not_started:
           "Your site's files and databases are back, but the site could not be started. Contact your hosting provider.",
+        local_target_unmounted:
+          "The disk where backups are saved on this server isn't connected. Contact your hosting provider.",
+        local_target_readonly:
+          "We can't use the backup space on this server. Contact your hosting provider.",
+        local_target_unsafe:
+          "The backup space on this server isn't set up safely, so it wasn't used. Contact your hosting provider.",
+        backup_copy_missing:
+          "This copy is no longer where it was saved. Use another copy, if there is one, or contact your hosting provider.",
       } satisfies Record<BackupProblem, string>,
       restore: {
         button: "Restore",
@@ -924,6 +975,7 @@ export const en: Messages = {
         backupFirst:
           'To keep a copy of the site as it is now, cancel and use "Back up now" first.',
         typeName: "To confirm, type the site name {name}",
+        fromLabel: "Restore from",
         cancel: "Cancel",
         confirm: "Restore this backup",
         starting: "Starting\u2026",
@@ -1466,6 +1518,8 @@ export const en: Messages = {
         backup_failed: "{site}: the last backup failed on {date}. Open Backups to see why, then use Retry on the site's row.",
         panel_backup_failed: "The last backup of the panel itself failed on {date}. Open Backups to see why and check the backup storage there; it is tried again next night.",
         backup_storage_test_failed: "The last test of the backup storage failed on {date}. Open Backups, check the storage settings, then use Test the connection again.",
+        backup_target_space_low: "The backup folder on this server is running low on space ({free} free of {total}). Open Backups, free up space or mount a larger disk, then use Test the connection again.",
+        backup_site_without_target: "The site {site} has no backup destination it can use, so it is skipped every night. Open Backups, choose an active destination for it (or for all sites) and save.",
         component_down: "{part}: {state}. {reason}. {fix}",
         site_container_down: "{site}: the site should be running, but its container is \"{observed}\". Check its log on the Logs page, then use Restart on its row under Sites' containers.",
         restore_undo_incomplete: "{site}: a restore failed on {date} and the site was not put back, so the site may not work. A restore of this site that succeeds repairs it: use Restore on the Backups page.",
@@ -2157,7 +2211,145 @@ export const en: Messages = {
       retention: "Days to keep",
       retentionHint: "From 1 to 365. The newest successful backup of each site is always kept.",
       changeWarning:
-        "Changing the endpoint, bucket or path makes the panel forget the backups recorded so far, and customers will no longer see them. Nothing is deleted from the bucket.",
+        "Changing the endpoint, bucket or path creates a new destination and archives the current one: its backups stay restorable. Nothing is deleted in the bucket.",
+      localWarning:
+        "Local backups on the same server do not protect against losing the server or its disk. For disaster recovery, keep a copy off the server and the recovery key.",
+      tabs: {
+        label: "Backup sections",
+        destinations: "Destinations",
+        policy: "Policy",
+        recovery: "Lost server",
+      },
+      targets: {
+        title: "All destinations",
+        intro:
+          "Each destination keeps its own backups. Archiving one takes it out of use, but its backups stay readable and restorable.",
+        loadFailed: "We can't load the destinations. Reload the page.",
+        empty: "No destination saved.",
+        columns: { name: "Name", kind: "Type", state: "Status", backups: "Backups", actions: "Actions" },
+        kind: { s3: "S3", local: "Local" },
+        legacy: "Original settings",
+        copiesCount: "{count} backups",
+        state: {
+          enabled: "Enabled",
+          disabled: "Disabled",
+          archived: "Archived",
+          neverTested: "Never tested",
+          testOk: "Last test passed ({when})",
+          testFailed: "Last test failed ({when}):",
+        },
+        switches: {
+          enabled: "Enabled",
+          customerSelectable: "Customers can choose it",
+          enabledHint: "A disabled destination gets no new backups but stays readable.",
+          customerSelectableHint: "Customers see it as “Off-server copy” or “Copy on this server”, never by this name.",
+          label: "Settings of {name}",
+        },
+        saved: "Destination updated.",
+        saveFailed: "We couldn't update the destination. Try again.",
+        archive: {
+          button: "Archive",
+          title: "Archive the destination {name}?",
+          body: "It stops receiving new backups and can no longer be chosen. Its backups stay readable and restorable.",
+          confirm: "Archive",
+          cancel: "Cancel",
+          done: "Destination archived.",
+        },
+        delete: {
+          button: "Delete",
+          title: "Delete the destination {name}?",
+          body: "Only the entry in the panel is deleted. It holds no backups, so data on disk or in the bucket is not touched.",
+          confirm: "Delete",
+          cancel: "Cancel",
+          done: "Destination deleted.",
+          notAllowed: "It can't be deleted: it holds backups or it is the original settings. Archive it instead.",
+        },
+        inUse:
+          "This destination is still used by a policy or holds backups, so it can't be deleted. Archive it: its backups stay restorable.",
+        capacity: "{free} free of {total}",
+        capacityUnknown: "Space not measured yet: use “Test” to read it.",
+        lowSpace:
+          "Free space is running out ({free} of {total}). Free up space or mount a larger disk, otherwise backups may fail.",
+        test: {
+          button: "Test",
+          testing: "Testing…",
+          ok: "It works: the destination is ready.",
+          ambiguous: "We don't know how the test ended. Reload the page and try again.",
+        },
+        local: {
+          title: "Backups on this server",
+          intro:
+            "A folder managed by the panel on this server, also on a mounted external disk. The server decides the path; you don't enter it here.",
+          add: "Add local destination",
+          adding: "Adding…",
+          name: "Name",
+          defaultName: "This server",
+          alreadyExists: "A local destination already exists: only one is allowed.",
+          addFailed: "We couldn't add the destination. Try again.",
+          root: "Folder managed by the panel",
+          rootHint: "Read only. To use an external disk, mount it on this folder before initialising.",
+          initialised: "Initialised on {when}",
+          notInitialised: "Not initialised yet: backups to this destination do not start.",
+          initialise: "Initialise",
+          initialising: "Initialising…",
+          initialiseTitle: "Initialise the local destination?",
+          initialiseBody:
+            "The panel writes a marker file into the managed folder, to recognise that the right disk is mounted. If you later mount a new disk, initialise again.",
+          initialiseConfirm: "Initialise",
+          initialiseCancel: "Cancel",
+          initialiseDone: "Destination initialised.",
+        },
+      },
+      policy: {
+        title: "Backup policy",
+        intro: "When and where backups are made. Changes apply from the next backup.",
+        loadFailed: "We can't load the policy. Reload the page.",
+        noTargets: "There is no active destination yet: add one in the Destinations tab.",
+        sites: {
+          title: "Site backups",
+          hint: "They apply to every site without a choice of its own.",
+          hour: "Nightly backup hour",
+          retention: "Days to keep",
+          destination: "Destination",
+        },
+        panel: {
+          title: "Panel copy",
+          hint: "The panel's accounts, sites and settings.",
+          schedule: "The copy runs after the site backups, at {utc} UTC, and is kept for {days} days.",
+          destination: "Destination",
+        },
+        option: "{name} ({kind})",
+        targetRequired: "Choose a destination.",
+        save: "Save",
+        saving: "Saving…",
+        saved: "Policy saved.",
+        unchanged: "No changes to save.",
+      },
+      recovery: {
+        title: "If the server is lost",
+        intro:
+          "How to bring the panel back on a new server. This page is informational only: recovery is done from the command line of the new server, as root, after installing.",
+        key: {
+          title: "The recovery key",
+          body: "All backups are encrypted with the file {backupKeyPath} of this server. Keep a copy off the server now: without this key no backup, of the sites or of the panel, can be read.",
+        },
+        s3: {
+          title: "From an S3 destination ({targetId})",
+          body: "Use the same details as the destination. Never write the access keys in the command: pass them with HP_S3_ACCESS_KEY_ID and HP_S3_SECRET_ACCESS_KEY, or type them when the command asks.",
+          command: "hp-restore-panel --endpoint {endpoint} --region {region} --bucket {bucket} --prefix {prefix}",
+          noPrefix: "If the destination has no path, drop --prefix.",
+          empty: "No S3 destination saved.",
+        },
+        local: {
+          title: "From a local destination ({targetId})",
+          body: "Mount the same disk on the new server, on the same managed folder, before running the command. The command reads the panel copy read only.",
+          command: "hp-restore-panel --local-repo {root}/{targetId}/panel",
+          exits: "If the command exits with 7 the disk is not mounted; with 8 the folder is not safe. Fix it and try again.",
+          lostDisk:
+            "If the disk was lost together with the server, that copy cannot be recovered: this is why you also need a copy off the server.",
+          empty: "No local destination saved.",
+        },
+      },
       save: "Save",
       saving: "Saving\u2026",
       saved: "Settings saved.",
@@ -2235,11 +2427,19 @@ export const en: Messages = {
           "The panel's copy could not read its database file. Check free disk space and journalctl -u hp-docker-executor; the copy is tried again next night.",
         site_not_started:
           "The files and databases are back, but the site could not be started. Check the executor logs (journalctl -u hp-docker-executor) and try the restore again.",
+        local_target_unmounted:
+          "The local destination's disk is not mounted on the managed folder. Mount the disk, then use Test and, if you changed disk, Initialise.",
+        local_target_readonly:
+          "The managed folder is read only. Check how the disk is mounted and its permissions, then try again.",
+        local_target_unsafe:
+          "The managed folder is not safe (symbolic links, or an unexpected owner or permissions), so it is not used. Check the folder's owner and permissions, then use Test.",
+        backup_copy_missing:
+          "The copy is no longer in the destination: it was deleted or the disk was replaced. Check the destination; copies in other destinations stay usable.",
       },
       removeButton: "Remove destination",
       removeTitle: "Remove the backup destination?",
       removeConfirm:
-        "Nothing is deleted from the bucket. Nightly backups stop and the panel forgets the recorded backups: customers will no longer see them.",
+        "Nothing is deleted from the bucket. Nightly backups to it stop; the recorded backups are kept and customers can still restore them.",
       removeCancel: "Cancel",
       removeAction: "Remove",
       removed: "Destination removed.",

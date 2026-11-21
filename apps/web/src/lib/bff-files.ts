@@ -85,7 +85,7 @@ export async function forwardSiteCall(
   req: Request,
   context: SiteCtx,
   sub: string,
-  method: "GET" | "POST" | "PUT" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   opts: ForwardSiteCallOptions,
 ): Promise<Response> {
   const params = await context.params;
