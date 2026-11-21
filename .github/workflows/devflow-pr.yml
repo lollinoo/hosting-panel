@@ -56,13 +56,13 @@ jobs:
         run: corepack pnpm run typecheck
 
   test:
-    name: Tests (shard ${{ matrix.shard }}/3)
+    name: Tests (shard ${{ matrix.shard }}/4)
     if: github.event.action != 'edited'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
 
@@ -87,5 +87,5 @@ jobs:
       - name: Build monorepo packages and applications
         run: corepack pnpm run build
 
-      - name: Run automated test suite (shard ${{ matrix.shard }}/3)
-        run: corepack pnpm run test --shard=${{ matrix.shard }}/3
+      - name: Run automated test suite (shard ${{ matrix.shard }}/4)
+        run: corepack pnpm run test --shard=${{ matrix.shard }}/4

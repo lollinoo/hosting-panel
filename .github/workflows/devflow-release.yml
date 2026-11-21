@@ -38,13 +38,13 @@ jobs:
   # the release, so install.sh / hp-update never see a "latest" release without its archive.
   # If it fails the release stays a draft: fix main, or publish by hand after a manual rebuild.
   test:
-    name: Tests (shard ${{ matrix.shard }}/3)
+    name: Tests (shard ${{ matrix.shard }}/4)
     needs: release
     if: needs.release.outputs.superseded != 'true' && needs.release.outputs.release_tag != ''
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout the released commit
         uses: actions/checkout@v4
@@ -73,8 +73,8 @@ jobs:
       - name: Build monorepo packages and applications
         run: corepack pnpm run build
 
-      - name: Run automated test suite (shard ${{ matrix.shard }}/3)
-        run: corepack pnpm run test --shard=${{ matrix.shard }}/3
+      - name: Run automated test suite (shard ${{ matrix.shard }}/4)
+        run: corepack pnpm run test --shard=${{ matrix.shard }}/4
 
   archive:
     name: Build and publish release archive
