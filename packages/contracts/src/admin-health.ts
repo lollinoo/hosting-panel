@@ -85,7 +85,7 @@ export type AdminHealthDto = z.infer<typeof AdminHealthDtoSchema>;
 export const ALERT_KINDS = [
   "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
   "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "backup_target_space_low",
-  "backup_site_without_target", "component_down",
+  "backup_site_without_target", "backup_partial", "component_down",
   "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
 ] as const;
 export type AlertKind = (typeof ALERT_KINDS)[number];
@@ -97,7 +97,7 @@ export const ALERT_SEVERITY: Readonly<Record<AlertKind, AlertSeverity>> = {
   // Default only: the emitter overrides it per tier (critical at 7 days and once expired).
   manual_certificate_expiring: "warning",
   backup_failed: "warning", panel_backup_failed: "warning", backup_storage_test_failed: "warning",
-  backup_target_space_low: "warning", backup_site_without_target: "warning",
+  backup_target_space_low: "warning", backup_site_without_target: "warning", backup_partial: "warning",
   restore_stuck: "warning", operation_unknown: "warning", operation_stuck: "warning",
 };
 
@@ -136,6 +136,7 @@ export const AdminAlertDtoSchema = z.discriminatedUnion("kind", [
     testedAt: IsoDateTimeSchema,
   }),
   alert("backup_site_without_target", { ...site }),
+  alert("backup_partial", { ...site, backupId: z.string(), at: IsoDateTimeSchema }),
   alert("component_down", { component: z.enum(PANEL_COMPONENTS), state: z.enum(["down", "degraded"]), reason: z.enum(HEALTH_REASONS).nullable() }),
   alert("site_container_down", { ...site, observed: z.enum(SITE_CONTAINER_STATES) }),
   alert("restore_undo_incomplete", { ...site, backupId: z.string(), failedAt: IsoDateTimeSchema.nullable() }),

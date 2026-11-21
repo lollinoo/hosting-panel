@@ -11,6 +11,7 @@ import {
   BACKUP_TARGET_ID_PATTERN,
   CreateSiteBackupInputSchema,
   PrepareDownloadInputSchema,
+  isAgeRecipient,
   BackupTargetChoiceDtoSchema,
   SiteBackupCopyDtoSchema,
   isLocalBackupTarget,
@@ -490,9 +491,9 @@ describe("backups IPC schemas and constants", () => {
 });
 
 describe("backups public contracts (R55, R56)", () => {
-  it("BACKUP_PROBLEMS has 30 distinct names: BACKUP_FAILURE_CLASSES plus six API problems", () => {
-    expect(BACKUP_PROBLEMS).toHaveLength(30);
-    expect(new Set(BACKUP_PROBLEMS).size).toBe(30);
+  it("BACKUP_PROBLEMS has 31 distinct names: BACKUP_FAILURE_CLASSES plus seven API problems", () => {
+    expect(BACKUP_PROBLEMS).toHaveLength(31);
+    expect(new Set(BACKUP_PROBLEMS).size).toBe(31);
     expect(BACKUP_FAILURE_CLASSES.at(-1)).toBe("local_target_unsafe");
     expect(BACKUP_PROBLEMS).toEqual([
       ...BACKUP_FAILURE_CLASSES,
@@ -502,6 +503,7 @@ describe("backups public contracts (R55, R56)", () => {
       "panel_dump_tool_missing",
       "site_not_started",
       "backup_copy_missing",
+      "invalid_recipient",
     ]);
     for (const p of BACKUP_PROBLEMS) {
       expect(BackupProblemSchema.safeParse(p).success).toBe(true);
@@ -519,7 +521,7 @@ describe("backups public contracts (R55, R56)", () => {
       "site.wordpress.import",
     ]);
     expect(BACKUP_KINDS).toEqual(["nightly", "manual", "pre_update"]);
-    expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed"]);
+    expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed", "partial"]);
   });
 
   it("BackupSettingsInputSchema and BackupTargetSchema agree on R56 edge cases", () => {
@@ -1077,13 +1079,44 @@ describe("M3 local target: copies, target choice and IPC dispatch", () => {
       expect(schema.safeParse({ targetId: TARGET_ID }).success).toBe(true);
       expect(schema.safeParse({ targetId: "bkt_nope" }).success).toBe(false);
       expect(schema.safeParse({ targetId: TARGET_ID, force: true }).success).toBe(false);
-      expect(schema.safeParse({ format: "zip.age" }).success).toBe(false);
+      expect(schema.safeParse({ format: "tar" }).success).toBe(false);
       expect(schema.safeParse(null).success).toBe(false);
     }
   });
 
-  it("does not add partial to BACKUP_STATUSES (M4)", () => {
-    expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed"]);
+  it("partial is a backup status; list rows and the last status accept it (BKP-07)", () => {
+    expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed", "partial"]);
+  });
+
+  it("download-prepare takes format zip (default) or zip.age with an age recipient (BKP-13)", () => {
+    const recipient = `age1${"q".repeat(58)}`;
+    expect(PrepareDownloadInputSchema.safeParse({ format: "zip" }).success).toBe(true);
+    expect(PrepareDownloadInputSchema.safeParse({ format: "zip.age", recipient }).success).toBe(true);
+    expect(PrepareDownloadInputSchema.safeParse({ format: "zip.age", recipient, targetId: TARGET_ID }).success).toBe(true);
+    expect(PrepareDownloadInputSchema.safeParse({ format: "zip.age" }).success).toBe(false);
+    expect(PrepareDownloadInputSchema.safeParse({ recipient }).success).toBe(false);
+    expect(PrepareDownloadInputSchema.safeParse({ format: "zip", recipient }).success).toBe(false);
+    for (const bad of ["", "age1", `age1${"q".repeat(57)}`, `age1${"q".repeat(59)}`, `AGE1${"q".repeat(58)}`, `age1${"b".repeat(58)}`, `age1${"q".repeat(57)}\n`]) {
+      expect(PrepareDownloadInputSchema.safeParse({ format: "zip.age", recipient: bad }).success, bad).toBe(false);
+    }
+    expect(PrepareDownloadInputSchema.parse({}).format).toBeUndefined();
+  });
+
+  it("isAgeRecipient accepts only the age1 bech32 shape", () => {
+    expect(isAgeRecipient(`age1${"qpzry9x8gf2tvdw0s3jn54khce6mua7l".slice(0, 32)}${"q".repeat(26)}`)).toBe(true);
+    expect(isAgeRecipient("age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p")).toBe(true);
+    for (const bad of ["", "age1", "ssh-ed25519 AAAA", `age1${"q".repeat(58)} `, `age1${"i".repeat(58)}`, `age1${"o".repeat(58)}`, `age1${"1".repeat(58)}`, `age1${"b".repeat(58)}`]) {
+      expect(isAgeRecipient(bad), bad).toBe(false);
+    }
+  });
+
+  it("admin health: backup_partial is a warning with siteId, siteName, backupId and at", () => {
+    const alert = { severity: "warning", subject: "site_1", since: null, kind: "backup_partial", details: { siteId: "site_1", siteName: "Shop", backupId: "bkp_1", at: "2026-11-15T01:00:00.000Z" } };
+    expect(ALERT_KINDS).toContain("backup_partial");
+    expect(ALERT_SEVERITY.backup_partial).toBe("warning");
+    expect(AdminAlertDtoSchema.safeParse(alert).success).toBe(true);
+    expect(AdminAlertDtoSchema.safeParse({ ...alert, details: { siteId: "site_1", siteName: "Shop" } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...alert, details: { ...alert.details, path: "/x" } }).success).toBe(false);
   });
 
   it("admin health: backup_target_space_low and the widened backup_storage_test_failed", () => {

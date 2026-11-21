@@ -32,6 +32,8 @@ export const BACKUP_PROBLEMS = [
   "site_not_started",
   // A copy's snapshot is gone from its repository (API-only: the executor never reports it).
   "backup_copy_missing",
+  // The age recipient of an encrypted export is not a valid age1 public key.
+  "invalid_recipient",
 ] as const;
 export const BackupProblemSchema = z.enum(BACKUP_PROBLEMS);
 export type BackupProblem = z.infer<typeof BackupProblemSchema>;
@@ -39,7 +41,7 @@ export type BackupProblem = z.infer<typeof BackupProblemSchema>;
 export const BACKUP_KINDS = ["nightly", "manual", "pre_update"] as const;
 export type BackupKind = (typeof BACKUP_KINDS)[number];
 
-export const BACKUP_STATUSES = ["running", "succeeded", "failed"] as const;
+export const BACKUP_STATUSES = ["running", "succeeded", "failed", "partial"] as const;
 export type BackupStatus = (typeof BACKUP_STATUSES)[number];
 
 function deriveTargetField(schema: z.ZodType<string>, message: string) {
@@ -156,10 +158,26 @@ export const AdminRestoreBackupInputSchema = z
   .strict();
 export type AdminRestoreBackupInput = z.infer<typeof AdminRestoreBackupInputSchema>;
 
-/** Body of the download-prepare route; `{}` stays valid. */
+/** age X25519 public key: `age1` plus 58 bech32 characters (pure TS, no age binary involved). */
+export function isAgeRecipient(value: string): boolean {
+  return /^age1[02-9ac-hj-np-z]{58}$/.test(value);
+}
+
+export const BACKUP_DOWNLOAD_FORMATS = ["zip", "zip.age"] as const;
+export type BackupDownloadFormat = (typeof BACKUP_DOWNLOAD_FORMATS)[number];
+
+/** Body of the download-prepare route; `{}` stays valid. `zip.age` needs a recipient and `zip` refuses one. */
 export const PrepareDownloadInputSchema = z
-  .object({ targetId: BackupCopyTargetIdSchema.optional() })
-  .strict();
+  .object({
+    targetId: BackupCopyTargetIdSchema.optional(),
+    format: z.enum(BACKUP_DOWNLOAD_FORMATS).optional(),
+    recipient: z.string().refine(isAgeRecipient, { error: "invalid_recipient" }).optional(),
+  })
+  .strict()
+  .refine((body) => (body.format === "zip.age") === (body.recipient !== undefined), {
+    error: "recipient_format_mismatch",
+    path: ["recipient"],
+  });
 export type PrepareDownloadInput = z.infer<typeof PrepareDownloadInputSchema>;
 
 /** Body of POST .../backups and the admin run route; `{}` stays valid. */

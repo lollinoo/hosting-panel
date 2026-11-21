@@ -1138,7 +1138,7 @@ describe("@hosting-panel/contracts — Admin health and alerts", () => {
     expect(ALERT_KINDS).toEqual([
       "disk_high", "certificate_expiring", "certificate_not_issued", "panel_certificate_expiring",
       "manual_certificate_expiring", "backup_failed", "panel_backup_failed", "backup_storage_test_failed", "backup_target_space_low",
-      "backup_site_without_target", "component_down",
+      "backup_site_without_target", "backup_partial", "component_down",
       "site_container_down", "restore_undo_incomplete", "restore_stuck", "operation_unknown", "operation_stuck",
     ]);
     expect(PANEL_COMPONENTS).toEqual([

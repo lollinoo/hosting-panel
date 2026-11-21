@@ -998,7 +998,9 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("panelStart"),
-      jobId: BackupOpJobIdSchema,
+      jobId: BackupCopyJobIdSchema,
+      // The dump file the API keeps until both copies settle; the second copy (`op_x-t2`) re-reads the first one's.
+      dumpId: BackupOpJobIdSchema.optional(),
       target: BackupDispatchTargetSchema,
       masterKey: z.string().regex(/^[0-9a-f]{64}$/),
       retentionDays: z.number().int().min(1).max(365),
