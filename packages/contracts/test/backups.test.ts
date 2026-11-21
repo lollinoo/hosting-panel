@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
   AdminRestoreBackupInputSchema,
+  BACKUP_COPY_STATUSES,
+  BACKUP_TARGET_KINDS,
+  BackupDispatchTargetSchema,
+  BackupRepositoryTargetSchema,
+  ALERT_KINDS,
+  ALERT_SEVERITY,
+  AdminAlertDtoSchema,
+  BACKUP_TARGET_ID_PATTERN,
+  CreateSiteBackupInputSchema,
+  PrepareDownloadInputSchema,
+  BackupTargetChoiceDtoSchema,
+  SiteBackupCopyDtoSchema,
+  isLocalBackupTarget,
   AdminSiteBackupStatusDtoSchema,
   BACKUP_FAILURE_CLASSES,
   BACKUP_JOB_ID_PATTERN,
@@ -86,8 +99,11 @@ describe("backups IPC schemas and constants", () => {
       "undo_incomplete",
       "definer_missing",
       "panel_dump_missing",
+      "local_target_unmounted",
+      "local_target_readonly",
+      "local_target_unsafe",
     ]);
-    expect(BACKUP_FAILURE_CLASSES).toHaveLength(21);
+    expect(BACKUP_FAILURE_CLASSES).toHaveLength(24);
     expect(BACKUP_JOB_STATES).toEqual(["running", "succeeded", "failed", "unknown"]);
     expect(BACKUP_JOB_ID_PATTERN.test(VALID_JOB_ID)).toBe(true);
     expect(BACKUP_JOB_ID_PATTERN.test(FORGET_JOB_ID)).toBe(true);
@@ -474,10 +490,10 @@ describe("backups IPC schemas and constants", () => {
 });
 
 describe("backups public contracts (R55, R56)", () => {
-  it("BACKUP_PROBLEMS has 26 distinct names: BACKUP_FAILURE_CLASSES plus five API problems", () => {
-    expect(BACKUP_PROBLEMS).toHaveLength(26);
-    expect(new Set(BACKUP_PROBLEMS).size).toBe(26);
-    expect(BACKUP_FAILURE_CLASSES.at(-1)).toBe("panel_dump_missing");
+  it("BACKUP_PROBLEMS has 30 distinct names: BACKUP_FAILURE_CLASSES plus six API problems", () => {
+    expect(BACKUP_PROBLEMS).toHaveLength(30);
+    expect(new Set(BACKUP_PROBLEMS).size).toBe(30);
+    expect(BACKUP_FAILURE_CLASSES.at(-1)).toBe("local_target_unsafe");
     expect(BACKUP_PROBLEMS).toEqual([
       ...BACKUP_FAILURE_CLASSES,
       "site_busy",
@@ -485,6 +501,7 @@ describe("backups public contracts (R55, R56)", () => {
       "panel_dump_failed",
       "panel_dump_tool_missing",
       "site_not_started",
+      "backup_copy_missing",
     ]);
     for (const p of BACKUP_PROBLEMS) {
       expect(BackupProblemSchema.safeParse(p).success).toBe(true);
@@ -672,6 +689,7 @@ describe("backups public contracts (R55, R56)", () => {
         sizeBytes: 1024,
         problem: null,
         archive: null,
+        copies: [],
       }).success,
     ).toBe(true);
     expect(
@@ -688,6 +706,7 @@ describe("backups public contracts (R55, R56)", () => {
           readyUntil: "2026-11-15T02:00:00.000Z",
           problem: null,
         },
+        copies: [],
       }).success,
     ).toBe(true);
     expect(
@@ -699,6 +718,7 @@ describe("backups public contracts (R55, R56)", () => {
         runningOperationId: null,
         lastRestore: null,
         backups: [],
+        targets: [],
       }).success,
     ).toBe(true);
     expect(
@@ -716,6 +736,7 @@ describe("backups public contracts (R55, R56)", () => {
           problem: "address_not_updated",
         },
         backups: [],
+        targets: [],
       }).success,
     ).toBe(true);
     expect(
@@ -936,5 +957,154 @@ describe("M3c panel copy and admin restore contracts", () => {
     expect(
       siteOk({ lastSuccessBackupId: null, lastSuccessSizeBytes: -1, lastRestore: null }),
     ).toBe(false);
+  });
+});
+
+describe("M3 local target: copies, target choice and IPC dispatch", () => {
+  const TARGET_ID = `bkt_${"1".repeat(32)}`;
+  const LOCAL = { kind: "local", targetId: TARGET_ID } as const;
+  const ok = (body: unknown) => BackupsIpcRequestSchema.safeParse(body).success;
+  const copy = { targetId: TARGET_ID, kind: "local", status: "succeeded", sizeBytes: 10, problem: null, startedAt: "2026-11-15T01:00:00.000Z", finishedAt: "2026-11-15T01:01:00.000Z" };
+
+  it("accepts a local target in every repository action and keeps the S3 object without kind valid", () => {
+    const start = { action: "start", jobId: VALID_JOB_ID, siteId: "site_01", serviceInstanceId: "svc_01" };
+    for (const target of [VALID_TARGET, LOCAL]) {
+      expect(ok({ action: "test", target })).toBe(true);
+      expect(ok({ ...start, target })).toBe(true);
+      expect(ok({ action: "forget", jobId: FORGET_JOB_ID, siteId: "site_01", target, snapshotIds: [SNAPSHOT_ID] })).toBe(true);
+      expect(ok({ action: "restore", jobId: VALID_JOB_ID, siteId: "site_01", serviceInstanceId: "svc_01", target, snapshotId: SNAPSHOT_ID })).toBe(true);
+      expect(ok({ action: "archive", jobId: VALID_JOB_ID, siteId: "site_01", target, snapshotId: SNAPSHOT_ID })).toBe(true);
+      expect(ok({ action: "panelStart", jobId: VALID_JOB_ID, target, masterKey: "a".repeat(64), retentionDays: 14 })).toBe(true);
+    }
+    expect(BackupRepositoryTargetSchema).toBe(BackupDispatchTargetSchema);
+    expect(isLocalBackupTarget(LOCAL)).toBe(true);
+    expect(isLocalBackupTarget(VALID_TARGET)).toBe(false);
+  });
+
+  it("refuses hostile local targets: paths, extra keys, S3 mixing, bad ids", () => {
+    const test = (target: unknown) => ok({ action: "test", target });
+    expect(test({ ...LOCAL, root: "/srv" })).toBe(false);
+    expect(test({ ...LOCAL, path: "/etc" })).toBe(false);
+    expect(test({ ...LOCAL, secretAccessKey: "x" })).toBe(false);
+    expect(test({ ...VALID_TARGET, kind: "local" })).toBe(false);
+    expect(test({ kind: "local" })).toBe(false);
+    expect(test({ kind: "s3", targetId: TARGET_ID })).toBe(false);
+    for (const targetId of ["bkt_../../etc", `bkt_${"A".repeat(32)}`, `bkt_${"1".repeat(31)}`, `${TARGET_ID}/x`, `../${TARGET_ID}`, ""]) {
+      expect(test({ kind: "local", targetId }), targetId).toBe(false);
+    }
+  });
+
+  it("widens job ids to the -t2 copy grammar: start takes op_x[-t2], restore/archive stay op_x, status/forget take all four", () => {
+    const T2 = `${VALID_JOB_ID}-t2`;
+    const start = { action: "start", siteId: "site_01", serviceInstanceId: "svc_01", target: LOCAL };
+    expect(ok({ ...start, jobId: VALID_JOB_ID })).toBe(true);
+    expect(ok({ ...start, jobId: T2 })).toBe(true);
+    expect(ok({ ...start, jobId: `${VALID_JOB_ID}-forget` })).toBe(false);
+    expect(ok({ ...start, jobId: `${T2}-t2` })).toBe(false);
+    for (const id of [VALID_JOB_ID, T2, `${VALID_JOB_ID}-forget`, `${T2}-forget`.replace("-t2-forget", "-forget-t2")]) {
+      expect(BACKUP_JOB_ID_PATTERN.test(id), id).toBe(true);
+      expect(ok({ action: "status", jobId: id }), id).toBe(true);
+    }
+    for (let n = 2; n <= 9; n += 1) {
+      expect(BACKUP_JOB_ID_PATTERN.test(`${VALID_JOB_ID}-forget-t${String(n)}`), String(n)).toBe(true);
+    }
+    for (const id of [`${VALID_JOB_ID}-forget-t1`, `${VALID_JOB_ID}-forget-t10`, `${VALID_JOB_ID}-forget-t0`, `${VALID_JOB_ID}-t3`, `${VALID_JOB_ID}-t2-forget`, `${VALID_JOB_ID}-forget-t2-forget`, `${VALID_JOB_ID}-t2-t2`, `${VALID_JOB_ID}-FORGET`]) {
+      expect(BACKUP_JOB_ID_PATTERN.test(id), id).toBe(false);
+    }
+    expect(ok({ action: "restore", jobId: T2, siteId: "site_01", serviceInstanceId: "svc_01", target: LOCAL, snapshotId: SNAPSHOT_ID })).toBe(false);
+    expect(ok({ action: "archive", jobId: T2, siteId: "site_01", target: LOCAL, snapshotId: SNAPSHOT_ID })).toBe(false);
+    expect(ok({ action: "forget", jobId: `${VALID_JOB_ID}-forget-t2`, siteId: "site_01", target: LOCAL, snapshotIds: [SNAPSHOT_ID] })).toBe(true);
+  });
+
+  it("localInit takes only a strict local target and answers with the test result space", () => {
+    expect(ok({ action: "localInit", target: LOCAL })).toBe(true);
+    expect(ok({ action: "localInit", target: VALID_TARGET })).toBe(false);
+    expect(ok({ action: "localInit", target: LOCAL, root: "/srv" })).toBe(false);
+    expect(ok({ action: "localInit" })).toBe(false);
+    expect(BACKUPS_RESULT_SCHEMAS.localInit).toBe(BackupTestResultSchema);
+    const good = { outcome: "ok", problem: null, availableBytes: 5, totalBytes: 10, localRoot: "/var/lib/hosting-panel/local-repos" };
+    expect(BackupTestResultSchema.safeParse(good).success).toBe(true);
+    expect(BackupTestResultSchema.safeParse({ outcome: "ok", problem: null }).success).toBe(true);
+    expect(BackupTestResultSchema.safeParse({ outcome: "failed", problem: "local_target_unmounted" }).success).toBe(true);
+    for (const bad of [{ availableBytes: -1 }, { totalBytes: 1.5 }, { localRoot: "relative" }, { localRoot: "/a b" }, { localRoot: `/${"a".repeat(255)}` }, { extra: 1 }]) {
+      expect(BackupTestResultSchema.safeParse({ ...good, ...bad }).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("copies are required on the site backup DTO and targets on the list DTO; copy DTO is strict and public-safe", () => {
+    const backup = { id: "bk_01", kind: "manual", status: "succeeded", startedAt: "2026-11-15T01:00:00.000Z", finishedAt: null, sizeBytes: null, problem: null, archive: null };
+    expect(SiteBackupDtoSchema.safeParse(backup).success).toBe(false);
+    expect(SiteBackupDtoSchema.safeParse({ ...backup, copies: [copy] }).success).toBe(true);
+    expect(SiteBackupDtoSchema.safeParse({ ...backup, copies: [{ ...copy, status: "partial" }] }).success).toBe(false);
+    expect(SiteBackupCopyDtoSchema.safeParse({ ...copy, problem: "backup_copy_missing", status: "missing" }).success).toBe(true);
+    expect(SiteBackupCopyDtoSchema.safeParse({ ...copy, problem: "local_target_readonly" }).success).toBe(true);
+    for (const key of ["endpoint", "bucket", "prefix", "accessKeyId", "secretAccessKey", "path", "root", "localRoot", "snapshotId", "jobId", "name"]) {
+      expect(SiteBackupCopyDtoSchema.safeParse({ ...copy, [key]: "x" }).success, key).toBe(false);
+      expect(Object.keys(SiteBackupCopyDtoSchema.shape)).not.toContain(key);
+    }
+    const list = { available: true, configured: true, retentionDays: 14, manualKept: MANUAL_BACKUPS_KEPT, runningOperationId: null, lastRestore: null, backups: [] };
+    expect(SiteBackupsDtoSchema.safeParse(list).success).toBe(false);
+    expect(SiteBackupsDtoSchema.safeParse({ ...list, targets: [{ id: TARGET_ID, kind: "local" }] }).success).toBe(true);
+    expect(SiteBackupsDtoSchema.safeParse({ ...list, targets: [{ id: TARGET_ID, kind: "local", name: "x" }] }).success).toBe(false);
+    expect(SiteBackupsDtoSchema.safeParse({ ...list, targets: [{ id: TARGET_ID, kind: "nas" }] }).success).toBe(false);
+  });
+
+  it("the private copy/choice schemas in backups.ts accept exactly what backup-targets.ts defines", () => {
+    // Literals are duplicated because backup-targets.ts imports backups.ts (ESM cycle).
+    expect(SiteBackupCopyDtoSchema.shape.kind.options).toEqual([...BACKUP_TARGET_KINDS]);
+    expect(SiteBackupCopyDtoSchema.shape.status.options).toEqual([...BACKUP_COPY_STATUSES]);
+    const backup = { id: "bk_01", kind: "manual", status: "succeeded", startedAt: "2026-11-15T01:00:00.000Z", finishedAt: null, sizeBytes: null, problem: null, archive: null };
+    const list = { available: true, configured: true, retentionDays: 14, manualKept: MANUAL_BACKUPS_KEPT, runningOperationId: null, lastRestore: null, backups: [] };
+    for (const kind of BACKUP_TARGET_KINDS) {
+      for (const status of BACKUP_COPY_STATUSES) {
+        const line = { ...copy, kind, status };
+        expect(SiteBackupCopyDtoSchema.safeParse(line).success).toBe(true);
+        expect(SiteBackupDtoSchema.safeParse({ ...backup, copies: [line] }).success, `${kind}/${status}`).toBe(true);
+      }
+      expect(BackupTargetChoiceDtoSchema.safeParse({ id: TARGET_ID, kind }).success).toBe(true);
+      expect(SiteBackupsDtoSchema.safeParse({ ...list, targets: [{ id: TARGET_ID, kind }] }).success).toBe(true);
+    }
+  });
+
+  it("restore, admin restore, download and create bodies take an optional targetId; empty bodies stay valid (BKP-19)", () => {
+    expect(RestoreBackupInputSchema.safeParse({ confirmName: "x", targetId: TARGET_ID }).success).toBe(true);
+    expect(RestoreBackupInputSchema.safeParse({ confirmName: "x" }).success).toBe(true);
+    expect(RestoreBackupInputSchema.safeParse({ confirmName: "x", targetId: "bkt_nope" }).success).toBe(false);
+    expect(AdminRestoreBackupInputSchema.safeParse({ confirmName: "x", targetId: TARGET_ID }).success).toBe(true);
+    expect(AdminRestoreBackupInputSchema.safeParse({ confirmName: "x", targetId: "../x" }).success).toBe(false);
+    for (const schema of [PrepareDownloadInputSchema, CreateSiteBackupInputSchema]) {
+      expect(schema.safeParse({}).success).toBe(true);
+      expect(schema.safeParse({ targetId: TARGET_ID }).success).toBe(true);
+      expect(schema.safeParse({ targetId: "bkt_nope" }).success).toBe(false);
+      expect(schema.safeParse({ targetId: TARGET_ID, force: true }).success).toBe(false);
+      expect(schema.safeParse({ format: "zip.age" }).success).toBe(false);
+      expect(schema.safeParse(null).success).toBe(false);
+    }
+  });
+
+  it("does not add partial to BACKUP_STATUSES (M4)", () => {
+    expect(BACKUP_STATUSES).toEqual(["running", "succeeded", "failed"]);
+  });
+
+  it("admin health: backup_target_space_low and the widened backup_storage_test_failed", () => {
+    const base = { severity: "warning", subject: TARGET_ID, since: null };
+    const failed = { ...base, kind: "backup_storage_test_failed", details: { testedAt: "2026-11-15T01:00:00.000Z", targetId: TARGET_ID, targetKind: "local", problem: "local_target_unmounted" } };
+    const low = { ...base, kind: "backup_target_space_low", details: { targetId: TARGET_ID, targetKind: "local", availableBytes: 5, totalBytes: 100, testedAt: "2026-11-15T01:00:00.000Z" } };
+    expect(ALERT_KINDS).toContain("backup_target_space_low");
+    expect(ALERT_SEVERITY.backup_target_space_low).toBe("warning");
+    expect(AdminAlertDtoSchema.safeParse(failed).success).toBe(true);
+    expect(AdminAlertDtoSchema.safeParse({ ...failed, details: { ...failed.details, problem: null, targetKind: "s3" } }).success).toBe(true);
+    expect(AdminAlertDtoSchema.safeParse({ ...failed, details: { testedAt: failed.details.testedAt } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...failed, details: { ...failed.details, targetId: "bkt_x" } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...failed, details: { ...failed.details, endpoint: "https://s3.example.com" } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse(low).success).toBe(true);
+    expect(AdminAlertDtoSchema.safeParse({ ...low, details: { ...low.details, targetKind: "s3" } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...low, details: { ...low.details, availableBytes: -1 } }).success).toBe(false);
+    expect(AdminAlertDtoSchema.safeParse({ ...low, details: { ...low.details, path: "/srv" } }).success).toBe(false);
+    // The health file repeats the id/problem shapes (import cycle); they must accept every real value.
+    for (const problem of BACKUP_PROBLEMS) {
+      expect(AdminAlertDtoSchema.safeParse({ ...failed, details: { ...failed.details, problem } }).success, problem).toBe(true);
+    }
+    expect(BACKUP_TARGET_ID_PATTERN.source).toBe("^bkt_[0-9a-f]{32}$");
   });
 });

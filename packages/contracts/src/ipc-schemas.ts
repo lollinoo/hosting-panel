@@ -843,6 +843,9 @@ export const BACKUP_FAILURE_CLASSES = [
   "undo_incomplete",
   "definer_missing",
   "panel_dump_missing",
+  "local_target_unmounted",
+  "local_target_readonly",
+  "local_target_unsafe",
 ] as const;
 
 export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
@@ -850,7 +853,7 @@ export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
 export const BACKUP_JOB_STATES = ["running", "succeeded", "failed", "unknown"] as const;
 export type BackupJobState = (typeof BACKUP_JOB_STATES)[number];
 
-export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-forget)?$/;
+export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2|-forget|-forget-t[2-9])?$/;
 const BackupOpJobIdSchema = z.string().regex(/^op_[0-9a-f]{32}$/);
 const BackupSnapshotIdSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const BackupPathIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
@@ -903,25 +906,37 @@ export type LocalBackupTarget = z.infer<typeof LocalBackupTargetSchema>;
 /** The S3 object stays the frozen one (no `kind`), so single-target S3 requests keep their bytes. */
 export const BackupDispatchTargetSchema = z.union([BackupTargetSchema, LocalBackupTargetSchema]);
 export type BackupDispatchTarget = z.infer<typeof BackupDispatchTargetSchema>;
+/** Same schema under the name the executor designs use. */
+export const BackupRepositoryTargetSchema = BackupDispatchTargetSchema;
+export type BackupRepositoryTarget = BackupDispatchTarget;
+export const isLocalBackupTarget = (target: BackupDispatchTarget): target is LocalBackupTarget =>
+  "kind" in target && target.kind === "local";
 
 /** Job id of one copy of a logical backup: the first copy keeps `op_x`, the second is `op_x-t2`. */
 export const BACKUP_COPY_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2)?$/;
+const BackupCopyJobIdSchema = z.string().regex(BACKUP_COPY_JOB_ID_PATTERN);
 
 export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
   z
     .object({
       action: z.literal("test"),
-      target: BackupTargetSchema,
+      target: BackupDispatchTargetSchema,
     })
     .strict(),
   z
     .object({
       action: z.literal("start"),
-      jobId: z.string().regex(/^op_[0-9a-f]{32}$/),
+      jobId: BackupCopyJobIdSchema,
       siteId: BackupPathIdSchema,
       serviceInstanceId: BackupPathIdSchema,
-      target: BackupTargetSchema,
+      target: BackupDispatchTargetSchema,
       siteType: SiteTypeKeySchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("localInit"),
+      target: LocalBackupTargetSchema,
     })
     .strict(),
   z
@@ -935,7 +950,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       action: z.literal("forget"),
       jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
       siteId: BackupPathIdSchema,
-      target: BackupTargetSchema,
+      target: BackupDispatchTargetSchema,
       snapshotIds: z.array(z.string().regex(/^[0-9a-f]{64}$/)).min(1).max(100),
     })
     .strict(),
@@ -945,7 +960,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       jobId: BackupOpJobIdSchema,
       siteId: BackupPathIdSchema,
       serviceInstanceId: BackupPathIdSchema,
-      target: BackupTargetSchema,
+      target: BackupDispatchTargetSchema,
       snapshotId: BackupSnapshotIdSchema,
       createVolume: z.literal(true).optional(),
       siteType: SiteTypeKeySchema.optional(),
@@ -956,7 +971,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       action: z.literal("archive"),
       jobId: BackupOpJobIdSchema,
       siteId: BackupPathIdSchema,
-      target: BackupTargetSchema,
+      target: BackupDispatchTargetSchema,
       snapshotId: BackupSnapshotIdSchema,
     })
     .strict(),
@@ -984,7 +999,7 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
     .object({
       action: z.literal("panelStart"),
       jobId: BackupOpJobIdSchema,
-      target: BackupTargetSchema,
+      target: BackupDispatchTargetSchema,
       masterKey: z.string().regex(/^[0-9a-f]{64}$/),
       retentionDays: z.number().int().min(1).max(365),
     })
@@ -1005,6 +1020,10 @@ export const BackupTestResultSchema = z
   .object({
     outcome: z.enum(["ok", "failed"]),
     problem: z.enum(BACKUP_FAILURE_CLASSES).nullable(),
+    // Local targets only: free/total bytes of the volume and the executor's own root, for the admin card.
+    availableBytes: BackupCountSchema.optional(),
+    totalBytes: BackupCountSchema.optional(),
+    localRoot: z.string().max(255).regex(/^\/[A-Za-z0-9._@+/-]*$/).optional(),
   })
   .strict();
 
@@ -1059,6 +1078,7 @@ export type BackupsAction = BackupsIpcRequest["action"];
 
 export const BACKUPS_RESULT_SCHEMAS = {
   test: BackupTestResultSchema,
+  localInit: BackupTestResultSchema,
   start: BackupJobStatusSchema,
   status: BackupJobStatusSchema,
   forget: BackupJobStatusSchema,

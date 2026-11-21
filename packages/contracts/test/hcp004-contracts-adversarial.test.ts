@@ -800,8 +800,13 @@ describe("BackupDispatchTargetSchema is an exclusive union", () => {
     expect(BackupDispatchTargetSchema.safeParse(withoutSecret).success).toBe(false);
   });
 
-  it("the S3-only IPC actions still refuse a local target (a local run is dispatched elsewhere)", () => {
-    expect(BackupsIpcRequestSchema.safeParse({ action: "test", target: LOCAL }).success).toBe(false);
+  it("the IPC test action accepts a local target as exactly {kind, targetId} and still refuses any path", () => {
+    const ok = BackupsIpcRequestSchema.safeParse({ action: "test", target: LOCAL });
+    expect(ok.success).toBe(true);
+    if (ok.success && ok.data.action === "test") expect(ok.data.target).toEqual({ kind: "local", targetId: TARGET_A });
+    for (const key of ["path", "root", "localRoot", "hostPath", "directory"]) {
+      expect(BackupsIpcRequestSchema.safeParse({ action: "test", target: { ...LOCAL, [key]: "/srv" } }).success, key).toBe(false);
+    }
     expect(BackupsIpcRequestSchema.safeParse({ action: "test", target: { ...S3_TARGET, kind: "s3" } }).success).toBe(false);
     expect(BackupsIpcRequestSchema.safeParse({ action: "test", target: S3_TARGET }).success).toBe(true);
   });

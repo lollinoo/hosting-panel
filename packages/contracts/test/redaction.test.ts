@@ -77,6 +77,16 @@ describe("PEM redaction in strings", () => {
   });
 });
 
+describe("S3 secret key names", () => {
+  it("treat secretAccessKey (camel and snake case) as forbidden DTO keys", () => {
+    expect(FORBIDDEN_PUBLIC_DTO_KEYS).toContain("secretAccessKey");
+    expect(findForbiddenPublicDtoKeys({ target: { secretAccessKey: "x", secret_access_key: "y", accessKeyId: "ok" } })).toEqual([
+      "target.secretAccessKey",
+      "target.secret_access_key",
+    ]);
+  });
+});
+
 describe("PEM key names", () => {
   it("treat privateKeyPem and keyPem (camel and snake case) as forbidden DTO keys", () => {
     expect(FORBIDDEN_PUBLIC_DTO_KEYS).toContain("privateKeyPem");
