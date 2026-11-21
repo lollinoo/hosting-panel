@@ -2150,7 +2150,8 @@ paths:
         The site type is the built-in WordPress unless `templateId` names one from the site types route; the
         site is created from that site type's default version. `HP_SITE_DOMAIN` and `HP_SITE_URL` in a
         template are fixed at creation. The PHP settings of the site type are applied to the site but never
-        appear in a response.
+        appear in a site response (the generic service revisions route returns the stored configuration,
+        which is not secret).
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/IdempotencyKeyHeader"
@@ -4786,7 +4787,8 @@ paths:
       summary: Archive a site template (server administrator only; audited as admin.site_template.archive)
       description: >-
         Nothing is deleted: an archived template is no longer offered, cannot get new versions, and the sites
-        that run on it keep their version. The built-in WordPress template cannot be archived
+        that run on it keep their version. Archiving an archived template changes nothing and writes no
+        second audit row. The built-in WordPress template cannot be archived
         (`RESOURCE_LOCKED`, `details[0].reason: built_in`).
       parameters:
         - $ref: "#/components/parameters/SiteTemplateIdParam"
@@ -4888,7 +4890,8 @@ paths:
       summary: Move a site to a newer version of its template (server administrator only; audited as admin.site.template_version)
       description: >-
         Redeploys the site with the new version's configuration; the stored parameter values are kept when
-        the new version still accepts them. Only a newer version of the same template is accepted, and the
+        the new version still accepts them, except that an admin-only parameter (`customer: false`) whose
+        stored value equals the old version's default takes the new version's default. Only a newer version of the same template is accepted, and the
         site must not be stopped. Refusals are `VALIDATION_ERROR` with
         `details[0].reason` `stopped`, `other_template`, `already_current`, `not_newer`, or
         `parameters.<key>` (a stored value the new version refuses, or a new parameter without a default);
@@ -6545,9 +6548,10 @@ paths:
         `never_checked`. `panel.running` is a panel update still queued or running; `panel.last` is
         the end of the last one. `components` come from the panel-container row the drift pass
         writes every 15 seconds; `imageCurrent` is `null` when nothing was seen. `sites` lists the
-        sites whose container runs another image than the one pinned for their PHP version, by name,
-        at most 200; `sitesTotal` counts them all. No registry is asked: an image is behind only when
-        a panel release changed its pin.
+        sites whose container runs another image than the one their template version renders (the pin of
+        their PHP version for a site without a template version), by name, at most 200; `sitesTotal`
+        counts them all. No registry is asked: an image is behind only when a panel release changed a pin
+        or the site's template version renders another image.
       responses:
         "200":
           description: The update view
@@ -6690,11 +6694,12 @@ paths:
     post:
       tags: [Admin Updates]
       operationId: adminUpdateSiteImage
-      summary: Move one site to the image pinned for its PHP version (server administrator; audited as admin.update.site_image)
+      summary: Move one site to the image its template version renders (server administrator; audited as admin.update.site_image)
       description: >-
         Uses the same path as the owner's PHP version change, with the same version: it queues
-        `service.deploy` under the site lock and the site's container is created again on the pinned
-        image. The site does not answer for a short while. A replayed key answers the first
+        `service.deploy` under the site lock and the site's container is created again on the expected
+        image: the one the site's template version renders (the pin of its PHP version for a site without
+        a template version). The site does not answer for a short while. A replayed key answers the first
         operation without any check and writes no second row. The row `admin.update.site_image`
         keeps `outcome`, `requestId`, `operationId`, `siteId`, `organizationId`, `fromImage` and
         `toImage` in `details`; its organisation is the site's owner.
@@ -10629,7 +10634,9 @@ components:
           description: >-
             Values for the parameters of the site type that this caller may set; one entry per key. A parameter
             left out takes its default. A value the parameter refuses, an unknown key, or a missing required
-            value is `VALIDATION_ERROR` (`details[].field: parameters.<key>`).
+            value is `VALIDATION_ERROR` (`details[].field: parameters.<key>`). So is a value the executor
+            would refuse in an environment variable (for example a Docker socket path): the request is refused
+            with 400 and nothing is stored.
           items:
             $ref: "#/components/schemas/SiteTemplateParameterEntry"
         title:
