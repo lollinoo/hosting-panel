@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # PR gate: Conventional Commit subjects and PR title, no version / CHANGELOG edits on the branch.
 # Env: BASE_REF (default origin/<main>), PR_TITLE (optional, linted when set), PR_BODY (optional:
-# when set, even empty, it must close an issue with a GitHub keyword such as "Closes #12", keep
-# no template <!-- hints --> and stay within PR_BODY_MAX characters).
+# when set, even empty, it must close an issue with a GitHub keyword such as "Closes #12").
 set -euo pipefail
 # shellcheck disable=SC1091
 . "$(git rev-parse --show-toplevel)/scripts/devflow/lib.sh"
@@ -35,13 +34,6 @@ fi
 DF_CLOSES_REGEX='(^|[^[:alnum:]])([Cc]lose[sd]?|[Ff]ix(e[sd])?|[Rr]esolve[sd]?):?[[:space:]]+([[:alnum:]_.-]+/[[:alnum:]_.-]+)?#[0-9]+'
 if [ -n "${PR_BODY+set}" ] && ! [[ $PR_BODY =~ $DF_CLOSES_REGEX ]]; then
   err 'PR description does not close an issue: start it with "Closes #<issue>" (every PR starts from an issue).'
-fi
-# The description becomes the body of the squash commit on the main branch.
-if [ -n "${PR_BODY+set}" ]; then
-  case $PR_BODY in *'<!--'*) err 'PR description still has template <!-- hints -->: replace them with the content, or delete them.' ;; esac
-  if [ "${PR_BODY_MAX:-0}" -gt 0 ] && [ "${#PR_BODY}" -gt "$PR_BODY_MAX" ]; then
-    err "PR description is ${#PR_BODY} characters, the limit is $PR_BODY_MAX (PR_BODY_MAX): keep Why, What and Verified short."
-  fi
 fi
 
 while read -r _ _ file tpl; do

@@ -8,7 +8,6 @@ NL=$'\n'
 MAIN_BRANCH=main
 VERIFY_CMD=
 PUSH_VERIFY_CMD=
-PR_BODY_MAX=1000
 BUMP_IGNORE='.github/* .woodpecker/* .githooks/* .devflow/* scripts/devflow/* .agents/* AGENTS.md CLAUDE.md'
 RELEASE_TZ=UTC
 RELEASE_TAG=

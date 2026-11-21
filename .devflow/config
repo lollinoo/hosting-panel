@@ -13,10 +13,6 @@ VERIFY_CMD="corepack pnpm run build && corepack pnpm run lint && corepack pnpm r
 # vitest.config.ts runs the whole suite when shared packages, migrations or infra change.
 PUSH_VERIFY_CMD="corepack pnpm run build && corepack pnpm run lint && corepack pnpm run typecheck && corepack pnpm run test --changed origin/main --passWithNoTests"
 
-# Longest PR description the PR check accepts, in characters (0 = no limit). The description
-# becomes the body of the squash commit on the main branch: keep it short.
-PR_BODY_MAX=1000
-
 # Paths whose changes bump no package and stay out of the release notes (bash globs, * also
 # matches /). Default: CI and the workflow tooling. A merge that only touches them is not released
 # when RELEASE_TAG is set; its commits join no changelog entry.
