@@ -206,9 +206,11 @@ describe("@hosting-panel/database - site templates repository", () => {
     const { template } = await createSiteTemplate(db(), { module: "wordpress", name: "To archive", source: "# z\n", spec: HEAVY, createdBy: null });
     await updateSiteTemplate(db(), template.id, { enabled: true });
     const archived = await archiveSiteTemplate(db(), template.id);
-    expect(archived).toMatchObject({ enabled: false });
-    expect(archived.archivedAt).toBeInstanceOf(Date);
-    expect(await archiveSiteTemplate(db(), template.id)).toEqual(archived);
+    expect(archived.changed).toBe(true);
+    expect(archived.template).toMatchObject({ enabled: false });
+    expect(archived.template.archivedAt).toBeInstanceOf(Date);
+    // A repeat reports that it changed nothing, so the caller writes no audit row.
+    expect(await archiveSiteTemplate(db(), template.id)).toEqual({ template: archived.template, changed: false });
     expect((await listCustomerSiteTemplates(db())).map((r) => r.template.id)).not.toContain(template.id);
     expect((await listSiteTemplates(db())).map((r) => r.id)).not.toContain(template.id);
     expect((await listSiteTemplates(db(), { includeArchived: true })).map((r) => r.id)).toContain(template.id);

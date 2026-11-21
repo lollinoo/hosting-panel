@@ -307,25 +307,22 @@ export class SiteTemplatesService {
     }
     if (changes.length === 0) return detailOf(existing);
 
-    // A template that will be offered must pass today's validator: a stricter release must not let an old version out.
-    const offered = patch.enabled ?? template.enabled;
-    if (offered && (patch.enabled === true || patch.defaultVersionId !== undefined)) {
-      const versionId = patch.defaultVersionId ?? template.defaultVersionId;
-      const version = versionId === null ? null : await getSiteTemplateVersion(this.dbClient.db, templateId, versionId);
-      if (!version) throw mapRepositoryError(new SiteTemplateRepositoryError("INVALID_DEFAULT", "unknown default version"));
-      const checked = validateSiteTemplateSource(version.source, template.module);
-      if (!checked.ok) {
-        throw refusal("VALIDATION_ERROR", "This site type does not pass the current checks and cannot be offered.", {
-          field: "enabled",
-          message: "This site type does not pass the current checks and cannot be offered.",
-          reason: "template_invalid",
-        });
-      }
-    }
-
     await guarded(() =>
       this.dbClient.db.transaction(async (tx) => {
-        await updateSiteTemplate(tx as unknown as HostingPanelDatabase, templateId, patch);
+        const updated = await updateSiteTemplate(tx as unknown as HostingPanelDatabase, templateId, patch);
+        // Under the row lock the update took, on the default now in effect: a template that is offered must pass today's
+        // validator (a stricter release must not let an old version out). A refusal rolls the whole update back.
+        if (updated.enabled && (patch.enabled === true || patch.defaultVersionId !== undefined)) {
+          const version = updated.defaultVersionId === null ? null : await getSiteTemplateVersion(tx, templateId, updated.defaultVersionId);
+          if (!version) throw new SiteTemplateRepositoryError("INVALID_DEFAULT", "unknown default version");
+          if (!validateSiteTemplateSource(version.source, updated.module).ok) {
+            throw refusal("VALIDATION_ERROR", "This site type does not pass the current checks and cannot be offered.", {
+              field: "enabled",
+              message: "This site type does not pass the current checks and cannot be offered.",
+              reason: "template_invalid",
+            });
+          }
+        }
         await actor.audit(tx, { action: "admin.site_template.update", targetType: TARGET_TYPE, targetId: templateId, details: { templateId, changes } });
       }),
     );
@@ -340,7 +337,9 @@ export class SiteTemplatesService {
     const summary = detailOf(existing);
     await guarded(() =>
       this.dbClient.db.transaction(async (tx) => {
-        await archiveSiteTemplate(tx as unknown as HostingPanelDatabase, templateId);
+        // A concurrent archive that got there first leaves nothing to audit: a repeat stays idempotent.
+        const { changed } = await archiveSiteTemplate(tx as unknown as HostingPanelDatabase, templateId);
+        if (!changed) return;
         await actor.audit(tx, {
           action: "admin.site_template.archive",
           targetType: TARGET_TYPE,

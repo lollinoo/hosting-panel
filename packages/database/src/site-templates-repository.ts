@@ -342,18 +342,21 @@ export async function updateSiteTemplate(db: HostingPanelDatabase, templateId: s
   }
 }
 
-/** Disables and archives a custom template; idempotent. Sites keep their version (versions are never touched). */
-export async function archiveSiteTemplate(db: HostingPanelDatabase, templateId: string): Promise<SiteTemplateRow> {
+/**
+ * Disables and archives a custom template; idempotent: an archived one is returned with `changed: false` (decided under
+ * the lock, so exactly one of two concurrent calls reports a change). Sites keep their version (versions are never touched).
+ */
+export async function archiveSiteTemplate(db: HostingPanelDatabase, templateId: string): Promise<{ template: SiteTemplateRow; changed: boolean }> {
   return db.transaction(async (tx) => {
     const template = await lockTemplate(tx, templateId);
     if (template.builtIn) throw new SiteTemplateRepositoryError("BUILT_IN", "The built-in template cannot be archived.");
-    if (template.archivedAt) return template;
+    if (template.archivedAt) return { template, changed: false };
     const [archived] = await tx
       .update(siteTemplates)
       .set({ archivedAt: new Date(), enabled: false, updatedAt: new Date() })
       .where(eq(siteTemplates.id, templateId))
       .returning();
-    return archived!;
+    return { template: archived!, changed: true };
   });
 }
 

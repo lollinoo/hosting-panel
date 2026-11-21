@@ -116,6 +116,20 @@ describe("site template routes", () => {
   const patch = (templateId: string, body: unknown) => call(admin, "PATCH", `${BASE}/${templateId}`, body);
   const newTemplate = async (name = "Custom") => (await createTemplate(name)).body.data.id as string;
   const siteTypesOf = async (token: string, orgId: string) => call(token, "GET", `/v1/organizations/${orgId}/site-types`);
+  /**
+   * PGlite runs one transaction at a time and queues every other query behind it. Holding one parks both requests at
+   * their first query, so they then run in lockstep: each reads before either writes (the race of two admins).
+   */
+  async function sentTogether<T>(requests: readonly [() => Promise<T>, () => Promise<T>]): Promise<[T, T]> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    const gate = dbClient.db.transaction(async () => held);
+    const pending = [requests[0](), requests[1]()] as const;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    release();
+    await gate;
+    return Promise.all(pending);
+  }
 
   beforeEach(async () => {
     dbClient = createDatabaseClient({ mode: "pglite" });
@@ -505,6 +519,24 @@ describe("site template routes", () => {
       expect(await counts()).toEqual(before);
       expect((await call(admin, "GET", `${BASE}/${id}`)).body.data.enabled).toBe(false);
     });
+
+    it("never leaves a template enabled on a default version the validator refuses, when the default changes at the same time", async () => {
+      const id = await newTemplate();
+      await dbClient.db.insert(siteTemplateVersions).values({
+        id: "stv_stale",
+        templateId: id,
+        versionNumber: 2,
+        source: customSource().replace("  app:\n", "  app:\n    privileged: true\n"),
+        spec: BUILT_IN_WORDPRESS_SPEC,
+        specHash: "0".repeat(64),
+        createdBy: null,
+      });
+      // The template is disabled and its default passes: the enabling request must still see the default the other one sets.
+      const [enable, setDefault] = await sentTogether([() => patch(id, { enabled: true }), () => patch(id, { defaultVersionId: "stv_stale" })]);
+      const final = (await dbClient.db.select().from(siteTemplates).where(eq(siteTemplates.id, id)))[0]!;
+      expect(final.enabled && final.defaultVersionId === "stv_stale").toBe(false);
+      expect([setDefault.status, enable.status].sort()).toEqual([200, 400]);
+    });
   });
 
   describe("archive", () => {
@@ -525,6 +557,14 @@ describe("site template routes", () => {
       // The admin still sees it in the list and in the detail.
       const list = await call(admin, "GET", BASE);
       expect(list.body.data.templates.find((t: Json) => t.id === id).archivedAt).toEqual(expect.any(String));
+    });
+
+    it("writes exactly one audit row when two archive requests arrive at once", async () => {
+      const id = await newTemplate();
+      const [a, b] = await sentTogether([() => call(admin, "DELETE", `${BASE}/${id}`), () => call(admin, "DELETE", `${BASE}/${id}`)]);
+      expect([a.status, b.status]).toEqual([200, 200]);
+      expect(a.body.data.archivedAt).toBe(b.body.data.archivedAt);
+      expect(await auditRows("admin.site_template.archive")).toHaveLength(1);
     });
 
     it("refuses the built-in template with 409 built_in and an unknown one with 404", async () => {
