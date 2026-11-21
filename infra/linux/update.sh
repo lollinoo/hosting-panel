@@ -233,7 +233,7 @@ main() {
       ((allow_feature_loss)) || die 8 "Cannot tell whether this panel uses a feature that ${version} lacks (the database check failed); refusing the downgrade. Pass --allow-feature-loss to install it anyway."
       printf '[WARN] could not check the features in use; continuing because of --allow-feature-loss\n' >&2
     elif [[ -n "${blockers}" ]]; then
-      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt, archive the non-legacy backup targets and move sites on custom templates back to the built-in WordPress version, or keep ${prev}; --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
+      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt, archive the non-legacy backup targets and delete or re-create on built-in WordPress version 1 the sites on a custom template or a newer built-in version (a site cannot be moved back), or keep ${prev}; --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
       printf '[WARN] --allow-feature-loss: %s stays unreachable until you upgrade again\n' "${blockers}" >&2
     fi
   fi
