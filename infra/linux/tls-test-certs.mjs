@@ -22,7 +22,14 @@ const len = (n) => {
 const tlv = (tag, body) => Buffer.concat([Buffer.from([tag]), len(body.length), body]);
 const seq = (...parts) => tlv(0x30, Buffer.concat(parts));
 const set = (...parts) => tlv(0x31, Buffer.concat(parts));
-const int = (buf) => tlv(0x02, buf[0] & 0x80 ? Buffer.concat([Buffer.from([0]), buf]) : buf);
+// DER INTEGERs are minimal: drop redundant leading zero bytes (OpenSSL refuses them as
+// "illegal padding"), then add one back only when the high bit would make the value negative.
+const int = (raw) => {
+  let start = 0;
+  while (start < raw.length - 1 && raw[start] === 0 && (raw[start + 1] & 0x80) === 0) start += 1;
+  const buf = raw.subarray(start);
+  return tlv(0x02, buf[0] & 0x80 ? Buffer.concat([Buffer.from([0]), buf]) : buf);
+};
 const oid = (dotted) => {
   const arcs = dotted.split(".").map(Number);
   const out = [40 * arcs[0] + arcs[1]];
