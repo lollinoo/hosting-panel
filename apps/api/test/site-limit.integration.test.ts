@@ -437,6 +437,7 @@ describe("per-customer site limit", () => {
 
       const op = await opRow(queued.body.data.operationId as string);
       expect(op.status).toBe("failed");
+      expect(op.errorCode).toBe("QUOTA_EXCEEDED");
       expect(op.steps["move_ownership"]).toBe("failed");
       expect((await dbClient.db.select().from(sites).where(eq(sites.id, siteId)))[0]!.organizationId).toBe(OPS);
     });

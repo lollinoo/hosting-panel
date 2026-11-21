@@ -42,6 +42,7 @@ import {
 import { findApiSiteType, type ApiSiteType } from "../site-types/index.js";
 import { routePlanHash } from "../sites/domain-policy.js";
 import { generateDatabasePassword } from "../sites/site-databases.service.js";
+import { siteLimitError } from "../sites/site-limit.js";
 import { SiteSftpService } from "../sites/site-sftp.service.js";
 import { buildApprovedServiceSpec, recordDeployedState } from "./service-spec.js";
 
@@ -413,6 +414,9 @@ export class SiteProvisioner {
               toOrganizationId: to,
               toHostAllocationId: allocation.id,
               masterKey: this.config.secretsMasterKey.toString("hex"),
+            }).catch((err: unknown) => {
+              // The target may have filled up since the move was queued: record QUOTA_EXCEEDED, not INTERNAL_ERROR.
+              throw siteLimitError(err);
             });
             owner = to;
           }
