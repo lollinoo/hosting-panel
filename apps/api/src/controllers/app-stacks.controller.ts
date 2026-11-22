@@ -7,12 +7,16 @@ import {
   CreateAppStackInputSchema,
   DeleteAppStackInputSchema,
   DeployAppStackInputSchema,
+  PlanAppStackInputSchema,
+  RollbackAppStackInputSchema,
   SetAppStackSecretInputSchema,
+  UpgradeAppStackInputSchema,
   type AppStackAcceptedEnvelope,
   type AppStackComponentHealthDto,
   type AppStackComponentLogsDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
+  type AppStackPlanDiffDto,
   type AppStackSecretStateDto,
   type AppStackSummaryDto,
   type CursorPage,
@@ -77,6 +81,19 @@ export class AppStacksController {
     return { data: await this.stacks.detail(stack) };
   }
 
+  /** Writes nothing: the diff whose `planHash` an upgrade or rollback must send back; secrets appear by name only. */
+  @Post(":stackId/plan")
+  @HttpCode(HttpStatus.OK)
+  public async plan(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: AppStackPlanDiffDto }> {
+    const stack = await this.#read(req, orgId, stackId, "app.update");
+    return { data: await this.stacks.plan(stack, PlanAppStackInputSchema.parse(raw ?? {})) };
+  }
+
   /** Builds a new revision only when the plan or the given settings changed (a rotated secret changes the plan). */
   @Post(":stackId/deploy")
   @HttpCode(HttpStatus.ACCEPTED)
@@ -107,6 +124,32 @@ export class AppStacksController {
   @HttpCode(HttpStatus.ACCEPTED)
   public restart(@Req() req: FastifyRequest, @Param("orgId") orgId: string, @Param("stackId") stackId: string, @Body() raw: unknown) {
     return this.#act(req, orgId, stackId, raw, "stack.restart");
+  }
+
+  @Post(":stackId/upgrade")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public upgrade(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+    @Body() raw: unknown,
+  ): Promise<AppStackAcceptedEnvelope> {
+    return this.#queue(req, orgId, stackId, "app.update", (ctx, stack) =>
+      this.stacks.upgrade(ctx, stack, UpgradeAppStackInputSchema.parse(raw ?? {})),
+    );
+  }
+
+  @Post(":stackId/rollback")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public rollback(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+    @Body() raw: unknown,
+  ): Promise<AppStackAcceptedEnvelope> {
+    return this.#queue(req, orgId, stackId, "app.update", (ctx, stack) =>
+      this.stacks.rollback(ctx, stack, RollbackAppStackInputSchema.parse(raw ?? {})),
+    );
   }
 
   /** The name must be typed exactly; volumes are kept unless `destroyData` is true. */

@@ -1,10 +1,12 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
   APP_AUDIT_ACTIONS,
+  APP_IMAGE_ALLOWLIST,
   APP_STACK_HEALTH_STALE_AFTER_MS,
   AppTemplateSpecSchema,
   ApprovedStackPlanSchema,
   appStackLockKey,
+  appStackPlanImageProblems,
   effectiveComponentHealth,
   redactSensitiveString,
   resolveAppTemplateParameters,
@@ -13,15 +15,20 @@ import {
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackOperationKind,
+  type AppStackPlanDiffDto,
   type AppStackSecretStateDto,
   type AppStackSummaryDto,
+  type AppTemplateParameterEntry,
   type AppTemplateSpec,
   type ApprovedStackPlan,
   type CreateAppStackInput,
   type CursorPage,
   type DeleteAppStackInput,
   type DeployAppStackInput,
+  type PlanAppStackInput,
+  type RollbackAppStackInput,
   type SetAppStackSecretInput,
+  type UpgradeAppStackInput,
 } from "@hosting-panel/contracts";
 import {
   ACTIVE_OPERATION_LOCK_STATUSES,
@@ -65,6 +72,7 @@ import {
   type NewAppStackRevision,
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import { verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { appNotFound, appRefusal, guardedApp } from "../app-templates/app-template-errors.js";
 import { APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN } from "../app-templates/app-template-validation-options.js";
@@ -73,14 +81,17 @@ import { canonicalRequestHash } from "../common/request-hash.js";
 import { LogReadGate } from "../sites/log-read-gate.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
 import {
+  carryOverParameters,
   compileRevision,
   domainTargetsMissing,
   entriesOf,
   parameterValuesOf,
+  revisionFromPlan,
   sameEntries,
   secretVersionsOf,
   validatedSpec,
 } from "./app-stack-compile.js";
+import { diffAppStackPlans } from "./app-stack-diff.js";
 import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto } from "./app-stack-dto.js";
 import { customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
@@ -97,6 +108,14 @@ export interface AppStackRequestContext {
 }
 
 type Paged<T> = { data: T[]; total: number; page: CursorPage };
+/** What deploy, upgrade or rollback would install, after its preflight. */
+type Candidate = {
+  readonly version: AppTemplateVersionRow;
+  readonly plan: ApprovedStackPlan;
+  readonly revision: NewAppStackRevision;
+  readonly entries: readonly AppTemplateParameterEntry[];
+  readonly newRevision: boolean;
+};
 const EMPTY_PAGE: CursorPage = { nextCursor: null, hasMore: false };
 const ACTIONS: Readonly<Record<AppStackOperationKind, string>> = {
   "stack.deploy": APP_AUDIT_ACTIONS.stackDeploy,
@@ -111,6 +130,11 @@ const ACTIONS: Readonly<Record<AppStackOperationKind, string>> = {
 const damaged = (message: string) => new ControlPlaneError("INTERNAL_ERROR", message);
 function refusal(field: string, reason: string, message: string): ControlPlaneError {
   return appRefusal("VALIDATION_ERROR", message, { field, message, reason });
+}
+function assertReviewed(candidate: Candidate, planHash: string): void {
+  if (candidate.plan.planHash !== planHash) {
+    throw refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
+  }
 }
 function statusLocked(status: string): ControlPlaneError {
   const message = `This action is not possible while the application is ${status}.`;
@@ -301,43 +325,59 @@ export class AppStacksService {
     });
   }
 
+  /** Diff and preflight of a deploy, upgrade (another version) or rollback (a revision), without any write or lock. */
+  public async plan(stack: AppStackRow, input: PlanAppStackInput): Promise<AppStackPlanDiffDto> {
+    const candidate =
+      input.revisionId !== undefined
+        ? await this.#rollbackCandidate(stack, input.revisionId)
+        : input.templateVersionId !== undefined && input.templateVersionId !== stack.templateVersionId
+          ? await this.#upgradeCandidate(stack, input.templateVersionId, input.parameters)
+          : await this.#deployCandidate(stack, input.parameters);
+    if (candidate.newRevision) await this.#assertDomainTargets(stack, candidate.plan);
+    const desired = await this.#desired(stack);
+    return {
+      planHash: candidate.plan.planHash,
+      fromRevisionId: desired?.revision.id ?? null,
+      fromVersionNumber: desired ? (await this.#version(stack, desired.revision.templateVersionId)).versionNumber : null,
+      toTemplateVersionId: candidate.version.id,
+      toVersionNumber: candidate.version.versionNumber,
+      newRevision: candidate.newRevision,
+      ...diffAppStackPlans({
+        from: desired?.plan ?? null,
+        to: candidate.plan,
+        fromParameters: desired?.revision.parameters ?? [],
+        toParameters: candidate.entries,
+      }),
+    };
+  }
+
   /** "Make it match the current inputs": a new revision only when the plan or the given parameters changed. */
   public async deploy(ctx: AppStackRequestContext, stack: AppStackRow, input: DeployAppStackInput): Promise<AppStackWriteResult> {
-    const db = this.dbClient.db;
-    const scope = { organizationId: stack.organizationId, stackId: stack.id };
-    const version = await this.#version(stack);
-    const stored = entriesOf(await listAppStackParameters(db, scope));
-    const c = compileRevision(
-      {
-        source: version.source,
-        parameters: input.parameters ?? stored,
-        secretVersions: secretVersionsOf(await listAppStackSecretMetadata(db, scope)),
-        ids: {
-          stackId: stack.id,
-          organizationId: stack.organizationId,
-          hostAllocationId: stack.hostAllocationId,
-          templateVersionId: stack.templateVersionId,
-          revisionId: newAppEntityId("srev"),
-        },
-      },
-      this.validation,
-    );
-    const desired = await this.#desired(stack);
-    const needsRevision =
-      desired === null || desired.revision.planHash !== c.plan.planHash || (input.parameters !== undefined && !sameEntries(c.entries, stored));
-    if (needsRevision) {
-      if (!(await getPublishedAppTemplateVersion(db, { templateVersionId: stack.templateVersionId, lock: false }))) {
-        throw refusal("templateVersionId", "STACK_TEMPLATE_UNPUBLISHED", "Install the current version with an upgrade first.");
-      }
-      if (domainTargetsMissing(await listAppStackDomains(db, scope), c.plan.ingress).length > 0) {
-        throw refusal("domains", "domain_target_removed", "A web address still points at a part this version removes. Remove the address first.");
-      }
-    }
-    return this.#enqueue(ctx, stack, "stack.deploy", input, needsRevision ? c.revision : null);
+    const candidate = await this.#deployCandidate(stack, input.parameters);
+    if (candidate.newRevision) await this.#assertDomainTargets(stack, candidate.plan);
+    return this.#enqueue(ctx, stack, "stack.deploy", input, candidate.newRevision ? candidate.revision : null);
   }
 
   public act(ctx: AppStackRequestContext, stack: AppStackRow, kind: "stack.start" | "stack.stop" | "stack.restart"): Promise<AppStackWriteResult> {
     return this.#enqueue(ctx, stack, kind, {}, null);
+  }
+
+  /** To the newer default version of the same template, as reviewed: `planHash` is the one the plan route returned. */
+  public async upgrade(ctx: AppStackRequestContext, stack: AppStackRow, input: UpgradeAppStackInput): Promise<AppStackWriteResult> {
+    // The upgrade a retry replays has already moved the stack to that version, so the preflight would refuse it as not newer.
+    if (await this.#keyUsed(ctx)) return this.#enqueue(ctx, stack, "stack.upgrade", input, null);
+    const candidate = await this.#upgradeCandidate(stack, input.templateVersionId, input.parameters);
+    assertReviewed(candidate, input.planHash);
+    await this.#assertDomainTargets(stack, candidate.plan);
+    return this.#enqueue(ctx, stack, "stack.upgrade", input, candidate.revision);
+  }
+
+  /** A new revision with the plan and public parameters of an earlier one; volumes and their data are left as they are. */
+  public async rollback(ctx: AppStackRequestContext, stack: AppStackRow, input: RollbackAppStackInput): Promise<AppStackWriteResult> {
+    const candidate = await this.#rollbackCandidate(stack, input.revisionId);
+    assertReviewed(candidate, input.planHash);
+    await this.#assertDomainTargets(stack, candidate.plan);
+    return this.#enqueue(ctx, stack, "stack.rollback", input, candidate.revision);
   }
 
   public async remove(ctx: AppStackRequestContext, stack: AppStackRow, input: DeleteAppStackInput): Promise<AppStackWriteResult> {
@@ -473,6 +513,99 @@ export class AppStacksService {
       }
       return r;
     });
+  }
+
+  async #deployCandidate(stack: AppStackRow, parameters: DeployAppStackInput["parameters"]): Promise<Candidate> {
+    const db = this.dbClient.db;
+    const scope = { organizationId: stack.organizationId, stackId: stack.id };
+    const version = await this.#version(stack);
+    const stored = entriesOf(await listAppStackParameters(db, scope));
+    const c = compileRevision(
+      {
+        source: version.source,
+        parameters: parameters ?? stored,
+        secretVersions: secretVersionsOf(await listAppStackSecretMetadata(db, scope)),
+        ids: this.#ids(stack, stack.templateVersionId),
+      },
+      this.validation,
+    );
+    const desired = await this.#desired(stack);
+    const newRevision =
+      desired === null || desired.revision.planHash !== c.plan.planHash || (parameters !== undefined && !sameEntries(c.entries, stored));
+    if (newRevision && !(await getPublishedAppTemplateVersion(db, { templateVersionId: stack.templateVersionId, lock: false }))) {
+      throw refusal("templateVersionId", "STACK_TEMPLATE_UNPUBLISHED", "Install the current version with an upgrade first.");
+    }
+    return { version, ...c, newRevision };
+  }
+
+  async #upgradeCandidate(
+    stack: AppStackRow,
+    templateVersionId: string,
+    parameters: UpgradeAppStackInput["parameters"],
+  ): Promise<Candidate> {
+    const db = this.dbClient.db;
+    const scope = { organizationId: stack.organizationId, stackId: stack.id };
+    const version = await getAppTemplateVersion(db, { templateId: stack.templateId, versionId: templateVersionId });
+    if (!version) throw refusal("templateVersionId", "unknown_version", "Choose a version of this application.");
+    if (version.versionNumber <= (await this.#version(stack)).versionNumber) {
+      throw refusal("templateVersionId", "not_newer", "Choose a newer version.");
+    }
+    if (!(await getPublishedAppTemplateVersion(db, { templateVersionId: version.id, lock: false }))) {
+      throw refusal("templateVersionId", "STACK_TEMPLATE_UNPUBLISHED", "This version can no longer be installed. Choose the current version.");
+    }
+    const spec = validatedSpec(version.source, this.validation);
+    const c = compileRevision(
+      {
+        source: version.source,
+        parameters: parameters ?? carryOverParameters(spec, entriesOf(await listAppStackParameters(db, scope))),
+        secretVersions: secretVersionsOf(await listAppStackSecretMetadata(db, scope)),
+        ids: this.#ids(stack, version.id),
+      },
+      this.validation,
+    );
+    return { version, ...c, newRevision: true };
+  }
+
+  /** Today's checks must still accept the earlier revision (spec §10.3); its plan is reused under a new revision id. */
+  async #rollbackCandidate(stack: AppStackRow, revisionId: string): Promise<Candidate> {
+    const revision = await getAppStackRevision(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id, revisionId });
+    if (!revision) throw refusal("revisionId", "unknown_revision", "Choose an earlier version of this application.");
+    if (revision.id === stack.desiredRevisionId) throw refusal("revisionId", "already_current", "This is the current version.");
+    const version = await this.#version(stack, revision.templateVersionId);
+    validatedSpec(version.source, this.validation);
+    const old = ApprovedStackPlanSchema.safeParse(revision.plan);
+    if (!old.success || !verifyAppStackPlanHash(old.data)) throw damaged("The stored revision is damaged.");
+    if (appStackPlanImageProblems(old.data, this.validation.allowlist ?? APP_IMAGE_ALLOWLIST).length > 0) {
+      throw refusal("revisionId", "STACK_IMAGE_NOT_ALLOWED", "A component of that revision uses software that is no longer allowed.");
+    }
+    const plan = { ...old.data, revisionId: newAppEntityId("srev") };
+    return { version, plan, revision: revisionFromPlan(plan, revision.parameters), entries: revision.parameters, newRevision: true };
+  }
+
+  async #assertDomainTargets(stack: AppStackRow, plan: ApprovedStackPlan): Promise<void> {
+    const domains = await listAppStackDomains(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id });
+    if (domainTargetsMissing(domains, plan.ingress).length > 0) {
+      throw refusal("domains", "domain_target_removed", "A web address still points at a part this version removes. Remove the address first.");
+    }
+  }
+
+  async #keyUsed(ctx: AppStackRequestContext): Promise<boolean> {
+    const [prior] = await this.dbClient.db
+      .select({ id: operations.id })
+      .from(operations)
+      .where(and(eq(operations.organizationId, ctx.organizationId), eq(operations.idempotencyKey, ctx.idempotencyKey)))
+      .limit(1);
+    return prior !== undefined;
+  }
+
+  #ids(stack: AppStackRow, templateVersionId: string) {
+    return {
+      stackId: stack.id,
+      organizationId: stack.organizationId,
+      hostAllocationId: stack.hostAllocationId,
+      templateVersionId,
+      revisionId: newAppEntityId("srev"),
+    };
   }
 
   #write<T>(work: (tx: HostingPanelDatabase) => Promise<T>): Promise<T> {

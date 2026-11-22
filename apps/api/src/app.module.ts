@@ -8,6 +8,7 @@ import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
+import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
@@ -28,6 +29,7 @@ import { AdminSiteTemplatesController } from "./controllers/admin-site-templates
 import { AdminAppTemplatesController } from "./controllers/admin-app-templates.controller.js";
 import { AppTemplatesController } from "./controllers/app-templates.controller.js";
 import { AppStacksController } from "./controllers/app-stacks.controller.js";
+import { AppStackDomainsController } from "./controllers/app-stack-domains.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -170,6 +172,7 @@ export class AppModule {
         AdminAppTemplatesController,
         AppTemplatesController,
         AppStacksController,
+        AppStackDomainsController,
       ],
       providers: [
         {
@@ -243,6 +246,7 @@ export class AppModule {
         UpdatesService,
         AppTemplatesService,
         AppStacksService,
+        AppStackDomainsService,
         AppStackRuntime,
         AppStackObserverService,
         // One per app: site and stack log reads share the panel-wide caps (ADR 0026 limit 27).

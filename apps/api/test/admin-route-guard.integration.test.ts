@@ -194,6 +194,8 @@ describe("every administrator route refuses a customer before it does anything",
       operationId: `op_${randomUUID()}`,
       blockId: `fwb_${randomUUID().replace(/-/g, "")}`,
       service: "api",
+      stackId: `stk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      componentKey: "web",
     };
   });
 

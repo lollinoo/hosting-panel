@@ -5433,6 +5433,860 @@ paths:
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
           $ref: "#/components/responses/ErrorResponse"
 
+  /v1/organizations/{orgId}/app-stacks:
+    post:
+      tags: [App Stacks]
+      operationId: createAppStack
+      summary: Install an application from a published template, or save it as a draft (app.create; audited as app.stack.create)
+      description: >-
+        `deploy: true` queues the first deployment and answers 202; `deploy: false` saves a draft and answers 201 with
+        `operationId: null`, so the secret parameters can be set first. `parameters` carries the public values only;
+        a secret is set with `POST .../secrets`, never here. A required secret missing from a deploying request is
+        refused (`VALIDATION_ERROR`, `details[0].field: parameters.<key>`, `details[0].reason: STACK_SECRET_MISSING`).
+        Each web address in `domains` must be an entry point of the template (`details[0].reason: unknown_ingress`)
+        and is audited as `app.stack.domain.assign`. A failure writes nothing. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false, or when the
+        organization has no dedicated server.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppStackInput"
+      responses:
+        "201":
+          description: The draft was saved; nothing is queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          description: "Invalid body, a version that is not published (`details[0].reason: STACK_TEMPLATE_UNPUBLISHED`), or invalid parameters (`STACK_PARAMETER_INVALID`, `STACK_SECRET_MISSING`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: "The name is taken (`ALREADY_EXISTS`, `details[0].reason: name_taken`), a web address is in use (`DOMAIN_CONFLICT`, `CERTIFICATE_IN_USE`), the application limit is reached (`QUOTA_EXCEEDED`, `details[0].reason: STACK_QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet, or need a dedicated server (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    get:
+      tags: [App Stacks]
+      operationId: listAppStacks
+      summary: List the organization's applications, newest first (app.read)
+      description: >-
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false. An unknown query parameter is refused (`VALIDATION_ERROR`).
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated applications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackSummaryDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}:
+    get:
+      tags: [App Stacks]
+      operationId: getAppStack
+      summary: Show an application with its components, settings, secret states, volumes and the upgrade or rollback on offer (app.read)
+      description: >-
+        Secret parameters say only whether a value is set, its version and when; never the value. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
+        false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "200":
+          description: The application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackDetailDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    delete:
+      tags: [App Stacks]
+      operationId: deleteAppStack
+      summary: Delete an application; confirmName must equal its name (app.delete; audited as app.stack.delete)
+      description: >-
+        Volumes are kept unless `destroyData` is true. A name that does not match exactly is refused
+        (`VALIDATION_ERROR`, `details[0].field: confirmName`, `details[0].reason: confirmation_mismatch`) and nothing
+        is written. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeleteAppStackInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running (`RESOURCE_LOCKED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/plan:
+    post:
+      tags: [App Stacks]
+      operationId: planAppStack
+      summary: Preview what a deploy, an upgrade or a rollback would change, without changing anything (app.update)
+      description: >-
+        With `templateVersionId` the preview is an upgrade to that version, with `revisionId` a rollback to that
+        revision (both together are refused, and a rollback takes no `parameters`), otherwise a deploy with the given
+        or the stored settings. Nothing is written and nothing is audited; no Idempotency-Key. The answer names the
+        changed components, volumes, parameters (secrets by name only) and entry points, and carries the `planHash`
+        an upgrade or rollback must send back. The same refusals as the verb it previews (`planHash` aside).
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlanAppStackInput"
+      responses:
+        "200":
+          description: The changes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackPlanDiffDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/deploy:
+    post:
+      tags: [App Stacks]
+      operationId: deployAppStack
+      summary: Deploy an application with its current settings, or with new ones (app.control; audited as app.stack.deploy)
+      description: >-
+        A new revision is built only when the settings or the plan changed (a rotated secret changes the plan);
+        otherwise the current revision is deployed again. A required secret that is not set is refused
+        (`VALIDATION_ERROR`, `details[0].reason: STACK_SECRET_MISSING`). Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployAppStackInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/start:
+    post:
+      tags: [App Stacks]
+      operationId: startAppStack
+      summary: Start a stopped application (app.control; audited as app.stack.start)
+      description: >-
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/stop:
+    post:
+      tags: [App Stacks]
+      operationId: stopAppStack
+      summary: Stop an application; its data is kept (app.control; audited as app.stack.stop)
+      description: >-
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/restart:
+    post:
+      tags: [App Stacks]
+      operationId: restartAppStack
+      summary: Restart an application (app.control; audited as app.stack.restart)
+      description: >-
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/upgrade:
+    post:
+      tags: [App Stacks]
+      operationId: upgradeAppStack
+      summary: Move an application to a newer version of its template (app.update; audited as app.stack.upgrade)
+      description: >-
+        Send the `planHash` of the preview (`POST .../plan` with the same `templateVersionId` and `parameters`); a
+        plan that changed since is refused (`VALIDATION_ERROR`, `details[0].field: planHash`,
+        `details[0].reason: plan_changed`). Without `parameters` the stored settings the new version still declares
+        are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
+        `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
+        drops is refused with `domain_target_removed`. Volumes are never removed by an upgrade. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
+        false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpgradeAppStackInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/rollback:
+    post:
+      tags: [App Stacks]
+      operationId: rollbackAppStack
+      summary: Deploy an earlier revision of an application again, with the settings it had (app.update; audited as app.stack.rollback)
+      description: >-
+        Send the `planHash` of the preview (`POST .../plan` with the same `revisionId`); a plan that changed since is
+        refused (`details[0].reason: plan_changed`). Other refusals on `revisionId` are `unknown_revision`,
+        `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
+        template version no longer passes today's checks); a web address whose entry point that revision lacks is
+        refused with `domain_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RollbackAppStackInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), the plan exceeds the allocation (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/deployments:
+    get:
+      tags: [App Stacks]
+      operationId: listAppStackDeployments
+      summary: List the deployments of an application, newest first (app.read)
+      description: >-
+        The steps of each one are read through its operation. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/CursorQuery"
+        - $ref: "#/components/parameters/LimitQuery"
+      responses:
+        "200":
+          description: Paginated deployments
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, meta, page]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDeploymentDto"
+                  meta:
+                    $ref: "#/components/schemas/ReadMeta"
+                  page:
+                    $ref: "#/components/schemas/CursorPage"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/components/{componentKey}/logs:
+    get:
+      tags: [App Stacks]
+      operationId: getAppStackComponentLogs
+      summary: Read the last log lines of one component of an application (app.read)
+      description: >-
+        At most 500 lines (200 by default), read from the server on demand; secret values are masked. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
+        false, or when the server's Docker executor cannot read application logs.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackComponentKeyParam"
+        - in: query
+          name: tail
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 200
+      responses:
+        "200":
+          description: The log lines, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackComponentLogsDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown application or component (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "429":
+          description: Too many log reads at once (`RATE_LIMITED`); try again shortly
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: The logs are not available right now (`DOCKER_ENGINE_UNAVAILABLE`)
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/components/{componentKey}/health:
+    get:
+      tags: [App Stacks]
+      operationId: getAppStackComponentHealth
+      summary: Show the last observed health of one component of an application (app.read)
+      description: >-
+        An observation older than five minutes reads as `unknown` with `stale: true`. Returns 422 NOT_SUPPORTED
+        (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/AppStackComponentKeyParam"
+      responses:
+        "200":
+          description: The health
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackComponentHealthDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          description: Unknown application or component (`NOT_FOUND`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/secrets:
+    post:
+      tags: [App Stacks]
+      operationId: setAppStackSecret
+      summary: Set or replace the value of a secret parameter of an application (app.update; audited as app.stack.secret.rotate)
+      description: >-
+        Write-only: the value is stored encrypted as a new version and is never returned, logged or audited; the
+        answer says only that a value is set, its version and when. Nothing is queued: the next deploy uses it. A key
+        that is not a secret of the application is refused (`VALIDATION_ERROR`, `details[0].field: parameterKey`,
+        `details[0].reason: STACK_PARAMETER_INVALID`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetAppStackSecretInput"
+      responses:
+        "200":
+          description: The secret's state, without its value
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackSecretStateDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The application is being deleted (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/backups:
+    post:
+      tags: [App Stacks]
+      operationId: backupAppStack
+      summary: Back up an application; not available yet (app.control)
+      description: >-
+        Always refused with 422 NOT_SUPPORTED ("Application backups are not available yet.", reason
+        STACK_UNSUPPORTED_FEATURE), after the permission check and the application lookup; the body is never read.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Application backups are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/domains:
+    get:
+      tags: [App Stacks]
+      operationId: listAppStackDomains
+      summary: List the web addresses of an application, by hostname (app.read)
+      description: >-
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      responses:
+        "200":
+          description: The web addresses
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [App Stacks]
+      operationId: addAppStackDomain
+      summary: Point a web address at an entry point of an application (app.update; audited as app.stack.domain.assign)
+      description: >-
+        The component and port must be an entry point of the application (`VALIDATION_ERROR`,
+        `details[0].reason: unknown_ingress`); at most 8 web addresses (`details[0].field: domains`,
+        `details[0].reason: STACK_QUOTA_EXCEEDED`). A hostname already on this application adds nothing and writes no
+        audit row. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the
+        capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddAppStackDomainInput"
+      responses:
+        "201":
+          description: The web addresses of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The hostname is used elsewhere (`DOMAIN_CONFLICT`, `CERTIFICATE_IN_USE`; the other owner is never named), or the application is being deleted (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}:
+    delete:
+      tags: [App Stacks]
+      operationId: removeAppStackDomain
+      summary: Remove a web address from an application (app.update; audited as app.stack.domain.remove)
+      description: >-
+        Its route is withdrawn. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        while the capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "200":
+          description: The web addresses left
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}/check:
+    post:
+      tags: [App Stacks]
+      operationId: checkAppStackDomain
+      summary: Check the DNS of a web address of an application again now (app.read)
+      description: >-
+        At most one check every 10 seconds per address; a sooner request answers the list unchanged. Not audited.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStackActionInput"
+      responses:
+        "200":
+          description: The web addresses of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
   /v1/admin/sites/{siteId}/actions:
     post:
       tags: [Admin Sites]
@@ -8243,6 +9097,18 @@ components:
     AppTemplateVersionIdParam:
       in: path
       name: versionId
+      required: true
+      schema:
+        type: string
+    AppStackIdParam:
+      in: path
+      name: stackId
+      required: true
+      schema:
+        type: string
+    AppStackComponentKeyParam:
+      in: path
+      name: componentKey
       required: true
       schema:
         type: string
@@ -12259,6 +13125,565 @@ components:
                   memoryBytes:
                     type: string
                     pattern: "^[0-9]{1,20}$"
+
+    AppStackComponentHealth:
+      type: string
+      enum: [unknown, starting, healthy, unhealthy, stopped, missing]
+
+    AppStackDeploymentStatus:
+      type: string
+      enum: [queued, running, succeeded, failed, unknown, cancelled]
+
+    AppStackVolumeStatus:
+      type: string
+      enum: [pending, present, retained, removed, missing]
+
+    AppStackRetentionPolicy:
+      type: string
+      enum: [retain, destroy]
+      description: "`destroy` once a delete with `destroyData: true` was requested"
+
+    AppStackDiffChange:
+      type: string
+      enum: [added, updated, removed, unchanged]
+
+    AppTemplateParameterEntry:
+      type: object
+      additionalProperties: false
+      required: [key, value]
+      properties:
+        key:
+          $ref: "#/components/schemas/AppTemplateParameterKey"
+        value:
+          oneOf:
+            - type: string
+              maxLength: 256
+            - type: integer
+            - type: boolean
+
+    AppTemplateParameterEntries:
+      type: array
+      maxItems: 32
+      description: Public parameter values, each key once; a list, never a keyed object
+      items:
+        $ref: "#/components/schemas/AppTemplateParameterEntry"
+
+    AppStackDomainEntry:
+      type: object
+      additionalProperties: false
+      required: [hostname, componentKey, port]
+      properties:
+        hostname:
+          type: string
+          description: Lower-cased; an international name is stored as punycode
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+
+    CreateAppStackInput:
+      type: object
+      additionalProperties: false
+      required: [templateVersionId, name, deploy]
+      properties:
+        templateVersionId:
+          $ref: "#/components/schemas/AppEntityId"
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Trimmed; no control characters; unique in the organization
+        parameters:
+          $ref: "#/components/schemas/AppTemplateParameterEntries"
+        domains:
+          type: array
+          maxItems: 8
+          default: []
+          description: Each hostname once
+          items:
+            $ref: "#/components/schemas/AppStackDomainEntry"
+        deploy:
+          type: boolean
+          description: "`false` saves a draft: set its secrets, then deploy"
+
+    DeployAppStackInput:
+      type: object
+      additionalProperties: false
+      properties:
+        parameters:
+          $ref: "#/components/schemas/AppTemplateParameterEntries"
+
+    AppStackActionInput:
+      type: object
+      additionalProperties: false
+      description: An empty object, or no body
+
+    PlanAppStackInput:
+      type: object
+      additionalProperties: false
+      description: "`templateVersionId` previews an upgrade, `revisionId` a rollback (not both; a rollback takes no `parameters`), neither a deploy"
+      properties:
+        templateVersionId:
+          $ref: "#/components/schemas/AppEntityId"
+        revisionId:
+          $ref: "#/components/schemas/AppEntityId"
+        parameters:
+          $ref: "#/components/schemas/AppTemplateParameterEntries"
+
+    UpgradeAppStackInput:
+      type: object
+      additionalProperties: false
+      required: [templateVersionId, planHash]
+      properties:
+        templateVersionId:
+          $ref: "#/components/schemas/AppEntityId"
+        parameters:
+          $ref: "#/components/schemas/AppTemplateParameterEntries"
+        planHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: The `planHash` of the preview the customer confirmed
+
+    RollbackAppStackInput:
+      type: object
+      additionalProperties: false
+      required: [revisionId, planHash]
+      properties:
+        revisionId:
+          $ref: "#/components/schemas/AppEntityId"
+        planHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: The `planHash` of the preview the customer confirmed
+
+    DeleteAppStackInput:
+      type: object
+      additionalProperties: false
+      required: [confirmName, destroyData]
+      properties:
+        confirmName:
+          type: string
+          maxLength: 64
+          description: The name of the application, exactly
+        destroyData:
+          type: boolean
+          description: "`true` also removes the volumes and the secrets; `false` keeps them"
+
+    SetAppStackSecretInput:
+      type: object
+      additionalProperties: false
+      required: [parameterKey, value]
+      description: Write-only; `value` is never returned
+      properties:
+        parameterKey:
+          $ref: "#/components/schemas/AppTemplateParameterKey"
+        value:
+          type: string
+          minLength: 1
+          maxLength: 16384
+          writeOnly: true
+
+    AddAppStackDomainInput:
+      $ref: "#/components/schemas/AppStackDomainEntry"
+
+    AppStackAcceptedDto:
+      type: object
+      required: [stackId, operationId, deploymentId, status]
+      properties:
+        stackId:
+          $ref: "#/components/schemas/AppEntityId"
+        operationId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          nullable: true
+          description: "`null` only for a draft"
+        deploymentId:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        status:
+          $ref: "#/components/schemas/AppStackStatus"
+
+    AppStackAcceptedEnvelope:
+      type: object
+      required: [data, links]
+      properties:
+        data:
+          $ref: "#/components/schemas/AppStackAcceptedDto"
+        links:
+          type: object
+          required: [stack, operation]
+          properties:
+            stack:
+              type: string
+            operation:
+              type: string
+              nullable: true
+
+    AppStackSummaryDto:
+      type: object
+      required: [id, name, status, templateId, templateName, templateVersionNumber, componentCount, unhealthyCount, primaryHostname, updatedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        name:
+          type: string
+        status:
+          $ref: "#/components/schemas/AppStackStatus"
+        templateId:
+          $ref: "#/components/schemas/AppEntityId"
+        templateName:
+          type: string
+        templateVersionNumber:
+          type: integer
+          minimum: 1
+        componentCount:
+          type: integer
+          minimum: 0
+        unhealthyCount:
+          type: integer
+          minimum: 0
+          description: Components observed unhealthy or missing; a stale observation is not counted
+        primaryHostname:
+          type: string
+          nullable: true
+          description: The first active web address by hostname, else the first one
+        updatedAt:
+          type: string
+          format: date-time
+
+    AppStackDetailDto:
+      allOf:
+        - $ref: "#/components/schemas/AppStackSummaryDto"
+        - type: object
+          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, cpuMilli, memoryBytes, upgrade, rollback]
+          properties:
+            templateVersionId:
+              $ref: "#/components/schemas/AppEntityId"
+            createdAt:
+              type: string
+              format: date-time
+            activeOperationId:
+              type: string
+              nullable: true
+            revisionNumber:
+              type: integer
+              minimum: 1
+              nullable: true
+              description: "`null` for a draft"
+            components:
+              type: array
+              description: In deployment order; a draft's by key
+              items:
+                type: object
+                required: [key, health, healthObservedAt, dependsOn, ingress, cpuMilli, memoryBytes]
+                properties:
+                  key:
+                    $ref: "#/components/schemas/AppStackKey"
+                  health:
+                    $ref: "#/components/schemas/AppStackComponentHealth"
+                  healthObservedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  dependsOn:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackKey"
+                  ingress:
+                    type: boolean
+                  cpuMilli:
+                    type: integer
+                  memoryBytes:
+                    type: string
+                    pattern: "^[0-9]{1,20}$"
+            parameters:
+              type: array
+              description: The public settings; secret ones are never listed here
+              items:
+                type: object
+                required: [key, label, value]
+                properties:
+                  key:
+                    $ref: "#/components/schemas/AppTemplateParameterKey"
+                  label:
+                    type: string
+                  value:
+                    oneOf:
+                      - type: string
+                      - type: integer
+                      - type: boolean
+            secretParameters:
+              type: array
+              description: Whether each secret is set, never its value
+              items:
+                type: object
+                required: [key, label, required, isSet, version, setAt]
+                properties:
+                  key:
+                    $ref: "#/components/schemas/AppTemplateParameterKey"
+                  label:
+                    type: string
+                  required:
+                    type: boolean
+                  isSet:
+                    type: boolean
+                  version:
+                    type: integer
+                    minimum: 1
+                    nullable: true
+                  setAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+            volumes:
+              type: array
+              items:
+                type: object
+                required: [key, status, retentionPolicy]
+                properties:
+                  key:
+                    $ref: "#/components/schemas/AppStackKey"
+                  status:
+                    $ref: "#/components/schemas/AppStackVolumeStatus"
+                  retentionPolicy:
+                    $ref: "#/components/schemas/AppStackRetentionPolicy"
+            ingress:
+              type: array
+              items:
+                $ref: "#/components/schemas/AppStackPlanIngress"
+            cpuMilli:
+              type: integer
+              minimum: 0
+            memoryBytes:
+              type: string
+              pattern: "^[0-9]{1,20}$"
+            upgrade:
+              type: object
+              nullable: true
+              description: The newer published version on offer, if any
+              required: [templateVersionId, versionNumber]
+              properties:
+                templateVersionId:
+                  $ref: "#/components/schemas/AppEntityId"
+                versionNumber:
+                  type: integer
+                  minimum: 1
+            rollback:
+              type: object
+              nullable: true
+              description: The revision before the current one, if any
+              required: [revisionId, revisionNumber, templateVersionNumber]
+              properties:
+                revisionId:
+                  $ref: "#/components/schemas/AppEntityId"
+                revisionNumber:
+                  type: integer
+                  minimum: 1
+                templateVersionNumber:
+                  type: integer
+                  minimum: 1
+
+    AppStackSecretStateDto:
+      type: object
+      required: [key, isSet, version, setAt]
+      properties:
+        key:
+          $ref: "#/components/schemas/AppTemplateParameterKey"
+        isSet:
+          type: boolean
+          enum: [true]
+        version:
+          type: integer
+          minimum: 1
+        setAt:
+          type: string
+          format: date-time
+
+    AppStackDeploymentDto:
+      type: object
+      required: [id, operationId, kind, revisionNumber, status, problem, startedAt, endedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        operationId:
+          type: string
+        kind:
+          type: string
+          enum: [stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete]
+        revisionNumber:
+          type: integer
+          minimum: 1
+          nullable: true
+        status:
+          $ref: "#/components/schemas/AppStackDeploymentStatus"
+        problem:
+          type: string
+          nullable: true
+          description: An UPPER_SNAKE reason or error code, never free text
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AppStackDomainDto:
+      type: object
+      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        hostname:
+          type: string
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        port:
+          type: integer
+        status:
+          type: string
+          enum: [pending, active, failed]
+        certificateStatus:
+          type: string
+          enum: [none, requested, active, failed]
+        certificateProblem:
+          type: string
+          nullable: true
+        certificateExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        checkedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the DNS was last checked
+
+    AppStackPlanDiffDto:
+      type: object
+      required: [planHash, fromRevisionId, fromVersionNumber, toTemplateVersionId, toVersionNumber, newRevision, components, volumes, parameters, ingress, downtime, dataRisk]
+      properties:
+        planHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+          description: What an upgrade or rollback must send back
+        fromRevisionId:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        fromVersionNumber:
+          type: integer
+          minimum: 1
+          nullable: true
+        toTemplateVersionId:
+          $ref: "#/components/schemas/AppEntityId"
+        toVersionNumber:
+          type: integer
+          minimum: 1
+        newRevision:
+          type: boolean
+          description: "`false` when a deploy would deploy the current revision again as it is"
+        components:
+          type: array
+          items:
+            type: object
+            required: [key, change, restart]
+            properties:
+              key:
+                $ref: "#/components/schemas/AppStackKey"
+              change:
+                $ref: "#/components/schemas/AppStackDiffChange"
+              restart:
+                type: boolean
+        volumes:
+          type: array
+          description: "`removed` means no longer mounted; the data is kept"
+          items:
+            type: object
+            required: [key, change]
+            properties:
+              key:
+                $ref: "#/components/schemas/AppStackKey"
+              change:
+                $ref: "#/components/schemas/AppStackDiffChange"
+        parameters:
+          type: array
+          description: Names only, secrets included; never a value
+          items:
+            type: object
+            required: [key, change]
+            properties:
+              key:
+                $ref: "#/components/schemas/AppTemplateParameterKey"
+              change:
+                $ref: "#/components/schemas/AppStackDiffChange"
+        ingress:
+          type: array
+          items:
+            type: object
+            required: [componentKey, port, change]
+            properties:
+              componentKey:
+                $ref: "#/components/schemas/AppStackKey"
+              port:
+                type: integer
+              change:
+                $ref: "#/components/schemas/AppStackDiffChange"
+        downtime:
+          type: boolean
+          description: A component behind a web address restarts or goes away
+        dataRisk:
+          type: boolean
+          description: A component changes while the application has volumes
+
+    AppStackLogLineDto:
+      type: object
+      required: [at, stream, text]
+      properties:
+        at:
+          type: string
+          format: date-time
+          nullable: true
+        stream:
+          type: string
+          enum: [stdout, stderr]
+        text:
+          type: string
+
+    AppStackComponentLogsDto:
+      type: object
+      required: [componentKey, lines]
+      properties:
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppStackLogLineDto"
+
+    AppStackComponentHealthDto:
+      type: object
+      required: [componentKey, health, observedAt, stale, source]
+      properties:
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        health:
+          $ref: "#/components/schemas/AppStackComponentHealth"
+        observedAt:
+          type: string
+          format: date-time
+          nullable: true
+        stale:
+          type: boolean
+          description: The last observation is older than five minutes (health then reads `unknown`)
+        source:
+          type: string
+          enum: [tcp, http, running_state]
+          description: The component's health check, or `running_state` when it declares none
 
     SiteActionInput:
       type: object
