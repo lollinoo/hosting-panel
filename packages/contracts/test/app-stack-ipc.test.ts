@@ -53,7 +53,7 @@ import {
   type AppStackStopIpcResult,
 } from "../src/app-templates/stack-ipc.js";
 import { ERROR_CODES } from "../src/errors.js";
-import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys } from "../src/resources.js";
+import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys, redactSensitiveValue } from "../src/resources.js";
 
 const PLAN = JSON.parse(
   readFileSync(new URL("./fixtures/app-stack-notes-demo/plan.json", import.meta.url), "utf8"),
@@ -74,6 +74,26 @@ const remove: AppStackRemoveIpcRequest = { ...REF, removeVolumes: false };
 const componentsRemove: AppStackComponentsRemoveIpcRequest = { plan: PLAN, componentKeys: ["old-web", "cache"] };
 const logs: AppStackLogsIpcRequest = { ...REF, componentKey: "app", tail: 100 };
 const routes: AppStackRoutesIpcRequest = { plan: PLAN, routes: [ROUTE] };
+const VERIFIER = "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/";
+/** ADR-0037: every option of a host at once, next to a host that redirects to it. */
+const routesWithOptions: AppStackRoutesIpcRequest = {
+  plan: PLAN,
+  routes: [
+    {
+      componentKey: "app",
+      internalPort: 8080,
+      hosts: [
+        {
+          ...host("shop.example.org"),
+          compress: true,
+          protection: { username: "team", passwordHash: VERIFIER },
+          paths: [{ pathPrefix: "/api", componentKey: "app", internalPort: 8080, stripPrefix: true }],
+        },
+        { hostname: "www.example.org", tls: true, httpsRedirect: true, redirectTo: "https://shop.example.org" },
+      ],
+    },
+  ],
+};
 
 const pullResult: AppStackPullIpcResult = { image: pull.image, pulled: true };
 const prepareResult: AppStackPrepareIpcResult = {
@@ -152,6 +172,7 @@ const INSTANCES: [string, z.ZodType, unknown][] = [
   ["components remove request", AppStackComponentsRemoveIpcRequestSchema, componentsRemove],
   ["logs request", AppStackLogsIpcRequestSchema, logs],
   ["routes request", AppStackRoutesIpcRequestSchema, routes],
+  ["routes request with options", AppStackRoutesIpcRequestSchema, routesWithOptions],
   ["pull result", AppStackPullIpcResultSchema, pullResult],
   ["prepare result", AppStackPrepareIpcResultSchema, prepareResult],
   ["create result", AppStackCreateIpcResultSchema, createResult],
@@ -188,8 +209,10 @@ const WIRE_KEY_NAMES = (
   "internalPort hosts hostname tls httpsRedirect redirectTo challenge source routes pulled networks role created volumes " +
   "volumeKey components outcome removedComponents routeCount hostnames changed removedNetworks removedVolumes " +
   "retainedVolumes componentKeys state health probe componentHash revisionId startedAt restartCount exitCode oomKilled " +
-  "observedAt internal edge published at stream text"
+  "observedAt internal edge published at stream text compress protection username paths pathPrefix stripPrefix"
 ).split(" ");
+/** ADR-0037 R3: the one wire key that is forbidden in a public DTO on purpose, so a leak of it is blocked and redacted. */
+const VERIFIER_KEY = "passwordHash";
 
 const issuesText = (result: { success: boolean; error?: { issues: unknown; message: string } }): string =>
   JSON.stringify(result.error?.issues) + String(result.error?.message);
@@ -331,10 +354,12 @@ describe("application stack IPC wire", () => {
 
   it("no wire key name is a forbidden public or plaintext secret key", () => {
     for (const [name, , value] of INSTANCES) {
-      expect(findForbiddenPublicDtoKeys(value), name).toEqual([]);
+      const forbidden = name === "routes request with options" ? ["routes[0].hosts[0].protection.passwordHash"] : [];
+      expect(findForbiddenPublicDtoKeys(value), name).toEqual(forbidden);
       expect(findPlaintextSecretKeys(value), name).toEqual([]);
-      for (const key of wireKeys(value)) expect(WIRE_KEY_NAMES, `${name}: ${key}`).toContain(key);
+      for (const key of wireKeys(value)) expect([...WIRE_KEY_NAMES, VERIFIER_KEY], `${name}: ${key}`).toContain(key);
     }
+    expect(redactSensitiveValue(routesWithOptions.routes[0]!.hosts[0]!.protection)).toEqual({ username: "team", passwordHash: "[REDACTED]" });
     const keyObject = Object.fromEntries(WIRE_KEY_NAMES.map((key) => [key, "value"]));
     expect(findForbiddenPublicDtoKeys(keyObject)).toEqual([]);
     expect(findPlaintextSecretKeys(keyObject)).toEqual([]);
