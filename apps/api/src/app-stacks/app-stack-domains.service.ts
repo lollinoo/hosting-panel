@@ -2,6 +2,7 @@ import { Inject, Injectable, Optional } from "@nestjs/common";
 import { APP_AUDIT_ACTIONS, ApprovedStackPlanSchema, type AppStackDomainDto, type AppStackDomainEntry } from "@hosting-panel/contracts";
 import {
   addAppStackDomainsTransactional,
+  getAppStack,
   getAppStackRevision,
   getAppTemplateVersion,
   listAppStackDomains,
@@ -10,6 +11,7 @@ import {
   type AppStackDomainRow,
   type AppStackRow,
   type DatabaseClient,
+  type DatabaseExecutor,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
@@ -48,10 +50,7 @@ export class AppStackDomainsService {
       const message = `This action is not possible while the application is ${stack.status}.`;
       throw appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: stack.status }, false);
     }
-    if (!(await this.#targets(stack)).some((t) => t.componentKey === input.componentKey && t.port === input.port)) {
-      const message = "This web address cannot point at that part of the application.";
-      throw appRefusal("VALIDATION_ERROR", message, { field: "componentKey", message, reason: "unknown_ingress" });
-    }
+    await this.#assertTarget(this.dbClient.db, stack, input);
     const inserted = await guardedApp(mapAppStackError, () =>
       this.dbClient.db.transaction(async (tx) => {
         const t = tx as unknown as HostingPanelDatabase;
@@ -60,6 +59,8 @@ export class AppStackDomainsService {
           stackId: stack.id,
           entries: [{ hostname: input.hostname, componentKey: input.componentKey, internalPort: input.port }],
         });
+        // The stack row is locked now: an upgrade or rollback committed since the first check is the plan to match.
+        await this.#assertTarget(t, (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack, input);
         for (const row of rows) {
           await ctx.audit(t, {
             action: APP_AUDIT_ACTIONS.domainAssign,
@@ -104,9 +105,15 @@ export class AppStackDomainsService {
     return this.list(stack);
   }
 
-  /** The desired plan's ingress, or the template's for a draft. */
-  async #targets(stack: AppStackRow): Promise<readonly { componentKey: string; port: number }[]> {
-    const db = this.dbClient.db;
+  /** The pair must be an ingress of the desired plan, or of the template for a draft. */
+  async #assertTarget(db: DatabaseExecutor, stack: AppStackRow, input: AppStackDomainEntry): Promise<void> {
+    if (!(await this.#targets(db, stack)).some((t) => t.componentKey === input.componentKey && t.port === input.port)) {
+      const message = "This web address cannot point at that part of the application.";
+      throw appRefusal("VALIDATION_ERROR", message, { field: "componentKey", message, reason: "unknown_ingress" });
+    }
+  }
+
+  async #targets(db: DatabaseExecutor, stack: AppStackRow): Promise<readonly { componentKey: string; port: number }[]> {
     if (stack.desiredRevisionId !== null) {
       const revision = await getAppStackRevision(db, {
         organizationId: stack.organizationId,

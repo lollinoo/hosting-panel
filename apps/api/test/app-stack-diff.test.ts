@@ -170,6 +170,14 @@ describe("diffAppStackPlans", () => {
     expect(diff(stateless, plan({ components: [{ ...db, volumes: [] }, changed], volumes: [] })).dataRisk).toBe(false);
   });
 
+  it("warns about data when only the target plan mounts it (a rollback that mounts retained data again)", () => {
+    const stateless = plan({ components: [{ ...db, volumes: [] }, web], volumes: [] });
+    const result = diff(stateless, plan());
+    expect(result.volumes).toEqual([{ key: "data", change: "added" }]);
+    expect(result.components[0]).toMatchObject({ key: "db", change: "updated" });
+    expect(result.dataRisk).toBe(true);
+  });
+
   it("two calls give identical JSON", () => {
     const from = plan();
     const to = plan({ components: [{ ...db, image: OTHER_IMAGE }, web], ingress: [{ componentKey: "web", port: 9000 }] });

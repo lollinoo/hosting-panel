@@ -51,6 +51,8 @@ export const APP_STACK_STEP_RUNNING_TEXT = "In progress";
 export const APP_STACK_STEP_FAILED_TEXT = "Could not finish this step";
 export const APP_STACK_STEP_SKIPPED_TEXT = "Skipped";
 export const APP_STACK_NO_ADDRESS_TEXT = "No web address to publish";
+/** Start step done text when the readiness budget ran out before every component was started. */
+export const APP_STACK_START_INCOMPLETE_TEXT = "Some components were not started in time";
 /** Operation errorMessage while the outcome is in doubt (thrown as OPERATION_AMBIGUOUS). */
 export const APP_STACK_UNCERTAIN_TEXT = "The result of this action is being checked.";
 
@@ -286,6 +288,8 @@ export function appStackRecoveryVerdict(input: {
   readonly kind: AppStackOperationKind;
   /** Deploy kinds: the deployment's revision plan; lifecycle: applied ?? desired; null when none. */
   readonly plan: ApprovedStackPlan | null;
+  /** Deploy kinds: the applied revision's plan, if any. */
+  readonly previous?: ApprovedStackPlan | null;
   readonly observed: ObservedAppStack;
   readonly domainCount: number;
   /** Delete: some volume has retention_policy 'destroy'. */
@@ -303,7 +307,11 @@ export function appStackRecoveryVerdict(input: {
       ? { outcome: "succeeded", stackStatus: "deleted", applied: false, health: [], problem: null }
       : { outcome: "failed", stackStatus: "delete_failed", applied: false, health: [], problem: "OPERATION_INTERRUPTED" };
   }
-  if (plan === null) return { outcome: "succeeded", stackStatus: "stopped", applied: false, health: [], problem: null };
+  if (plan === null) {
+    return kind === "stack.stop"
+      ? { outcome: "succeeded", stackStatus: "stopped", applied: false, health: [], problem: null }
+      : { outcome: "failed", stackStatus: "failed", applied: false, health: [], problem: "OPERATION_INTERRUPTED" };
+  }
   if (kind === "stack.stop") {
     const health = appStackHealthRows(plan, observed, "observer");
     const active = plan.components.some((c) => {
@@ -314,11 +322,22 @@ export function appStackRecoveryVerdict(input: {
       ? { outcome: "failed", stackStatus: "degraded", applied: false, health, problem: "OPERATION_INTERRUPTED" }
       : { outcome: "succeeded", stackStatus: "stopped", applied: false, health, problem: null };
   }
+  const matches = (p: ApprovedStackPlan) =>
+    p.components.every((c) => appStackObservedComponent(observed, c.key)?.componentHash === computeAppStackComponentHash(p, c.key));
   const health = appStackHealthRows(plan, observed, "final");
-  const match = plan.components.every(
-    (c) => appStackObservedComponent(observed, c.key)?.componentHash === computeAppStackComponentHash(plan, c.key),
-  );
-  if (!match) return { outcome: "failed", stackStatus: "failed", applied: false, health, problem: "OPERATION_INTERRUPTED" };
+  if (!matches(plan)) {
+    const { previous } = input;
+    if (!previous || !matches(previous)) return { outcome: "failed", stackStatus: "failed", applied: false, health, problem: "OPERATION_INTERRUPTED" };
+    // Nothing of the new revision replaced the applied one, which still serves: settled like a pre-flight failure.
+    const before = appStackHealthRows(previous, observed, "observer");
+    const stackStatus = appStackAggregate({
+      plan: previous,
+      health: new Map(before.map((h) => [h.componentKey, h.health])),
+      domainCount: input.domainCount,
+      routesPublished: observed.routes.published,
+    });
+    return { outcome: "failed", stackStatus, applied: false, health: before, problem: "OPERATION_INTERRUPTED" };
+  }
   const aggregate = appStackAggregate({
     plan,
     health: new Map(health.map((h) => [h.componentKey, h.health])),

@@ -20,6 +20,7 @@ import {
   APP_STACK_STEP_FAILED_TEXT,
   APP_STACK_STEP_RUNNING_TEXT,
   APP_STACK_STEP_SKIPPED_TEXT,
+  APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
   appStackAggregate,
   appStackDisplayStatus,
@@ -142,6 +143,7 @@ describe("fixed texts, problems and codes", () => {
       APP_STACK_STEP_FAILED_TEXT,
       APP_STACK_STEP_SKIPPED_TEXT,
       APP_STACK_NO_ADDRESS_TEXT,
+      APP_STACK_START_INCOMPLETE_TEXT,
       APP_STACK_UNCERTAIN_TEXT,
       ...Object.values(APP_STACK_FAILURE).map((f) => f.text),
     ];
@@ -373,6 +375,8 @@ describe("appStackRecoveryVerdict", () => {
     ["rollback: accessory unhealthy", "stack.rollback", p, observed(matching("unhealthy")), false, { outcome: "succeeded", stackStatus: "degraded", applied: true, health: finalRows("unhealthy", "healthy"), problem: null }],
     ["start: essential down", "stack.start", p, observed([seen("cache", "running", "healthy", hash("cache")), seen("web", "exited", "stopped", hash("web"))]), false, { outcome: "failed", stackStatus: "failed", applied: true, health: finalRows("healthy", "stopped"), problem: "OPERATION_INTERRUPTED" }],
     ["restart: routes not published", "stack.restart", p, observed(matching(), { routes: { published: false, hostnames: [] } }), false, { outcome: "succeeded", stackStatus: "degraded", applied: true, health: finalRows("healthy", "healthy"), problem: null }],
+    ["deploy: no readable plan", "stack.deploy", null, observed(matching()), false, { outcome: "failed", stackStatus: "failed", applied: false, health: [], problem: "OPERATION_INTERRUPTED" }],
+    ["start: no readable plan", "stack.start", null, observed(matching()), false, { outcome: "failed", stackStatus: "failed", applied: false, health: [], problem: "OPERATION_INTERRUPTED" }],
   ] as const)("%s", (_name, kind, stackPlan, observation, destroyVolumes, verdict) => {
     expect(appStackRecoveryVerdict({ kind, plan: stackPlan, observed: observation, domainCount: 1, destroyVolumes })).toEqual(verdict);
   });
@@ -391,6 +395,23 @@ describe("appStackRecoveryVerdict", () => {
       destroyVolumes: false,
     });
     expect(result).toMatchObject({ outcome: "failed", stackStatus: "failed", applied: false, problem: "OPERATION_INTERRUPTED" });
+  });
+
+  it("a new revision that never ran while the applied one still serves settles like a pre-flight failure", () => {
+    const v2 = { environment: [{ name: "MODE", value: "v2" }] };
+    const next = plan([component("cache", [], v2), component("web", ["cache"], v2)], p.ingress);
+    const input = { kind: "stack.upgrade", plan: next, previous: p, domainCount: 1, destroyVolumes: false } as const;
+    expect(appStackRecoveryVerdict({ ...input, observed: observed(matching()) })).toEqual({
+      outcome: "failed",
+      stackStatus: "running",
+      applied: false,
+      health: finalRows("healthy", "healthy"),
+      problem: "OPERATION_INTERRUPTED",
+    });
+    expect(appStackRecoveryVerdict({ ...input, observed: observed(matching("unhealthy")) })).toMatchObject({ outcome: "failed", stackStatus: "degraded", applied: false });
+    // One component already replaced: neither revision is whole.
+    const mixed = observed([seen("cache", "running", "healthy", hash("cache")), seen("web", "running", "healthy", computeAppStackComponentHash(next, "web"))]);
+    expect(appStackRecoveryVerdict({ ...input, observed: mixed })).toMatchObject({ outcome: "failed", stackStatus: "failed", applied: false });
   });
 
   it("a retained volume finishes a delete unless the data is destroyed", () => {

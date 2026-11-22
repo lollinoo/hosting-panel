@@ -212,7 +212,10 @@ export class AppStackObserverService {
     if (enqueued) this.outboxWorker.triggerAsync();
   }
 
-  /** Oldest observation first, at most APP_STACK_OBSERVE_BATCH stacks; a failed read leaves the row to go stale. */
+  /**
+   * Oldest observation first, at most APP_STACK_OBSERVE_BATCH applied stacks; a failed read records `unknown` now, so
+   * the stack moves to the back of the queue instead of starving the others.
+   */
   async #observeHealth(now: Date): Promise<void> {
     const port = this.executor;
     if (!isStackExecutor(port)) return;
@@ -221,7 +224,9 @@ export class AppStackObserverService {
     const candidates: StackRef[] = await db
       .select({ stackId: appStacks.id, organizationId: appStacks.organizationId, appliedRevisionId: appStacks.appliedRevisionId })
       .from(appStacks)
-      .where(and(isNull(appStacks.deletedAt), inArray(appStacks.status, OBSERVED_STATUSES), noActiveOperation))
+      .where(
+        and(isNull(appStacks.deletedAt), isNotNull(appStacks.appliedRevisionId), inArray(appStacks.status, OBSERVED_STATUSES), noActiveOperation),
+      )
       .orderBy(sql`${oldest} ASC NULLS FIRST`, asc(appStacks.id))
       .limit(APP_STACK_OBSERVE_BATCH);
     const passStart = Date.now();
@@ -230,13 +235,16 @@ export class AppStackObserverService {
       const work = async () => {
         const plan = await this.#appliedPlan(stack);
         if (plan === null) return;
-        const observed = await port.getAppStackStatus({ stackId: stack.stackId, organizationId: stack.organizationId });
+        const observed = await port.getAppStackStatus({ stackId: stack.stackId, organizationId: stack.organizationId }).catch(() => null);
         await db.transaction((tx) =>
           recordAppStackComponentHealthTransactional(tx, {
             organizationId: stack.organizationId,
             stackId: stack.stackId,
             observedAt: now,
-            components: appStackHealthRows(plan, observed, "observer"),
+            components:
+              observed === null
+                ? plan.components.map((c) => ({ componentKey: c.key, health: "unknown" as const }))
+                : appStackHealthRows(plan, observed, "observer"),
           }),
         );
       };
@@ -403,11 +411,13 @@ export class AppStackObserverService {
     if (appliedRevisionId === null || appliedRevisionId !== stack.desiredRevisionId) return false;
     const db = this.dbClient.db;
     const [last] = await db
-      .select({ status: operations.status, completedAt: operations.completedAt })
+      .select({ kind: operations.kind, status: operations.status, completedAt: operations.completedAt })
       .from(operations)
       .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stack.stackId)))
       .orderBy(desc(operations.submittedAt))
       .limit(1);
+    // A deploy would start what the customer last asked to stop.
+    if (last?.kind === "stack.stop") return false;
     if (last && !isTerminalOperationStatus(last.status)) return false;
     if (last?.status === "failed" && last.completedAt && now.getTime() - last.completedAt.getTime() < APP_STACK_ROUTE_REFRESH_BACKOFF_MS) {
       return false;

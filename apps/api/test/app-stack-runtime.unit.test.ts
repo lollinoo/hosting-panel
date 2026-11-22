@@ -46,6 +46,7 @@ import {
   APP_STACK_STEP_DONE_TEXT,
   APP_STACK_STEP_FAILED_TEXT,
   APP_STACK_STEP_SKIPPED_TEXT,
+  APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
   appStackRoutesHash,
 } from "../src/app-stacks/app-stack-runtime-policy.js";
@@ -159,11 +160,11 @@ describe("AppStackRuntime (RT3)", () => {
   }
 
   /** What the worker does around apply: processing first, then the handler; returns what it threw. */
-  async function run(write: AppStackWriteResult, rt = runtime()): Promise<unknown> {
+  async function run(write: AppStackWriteResult, rt = runtime(), payload?: Json): Promise<unknown> {
     const op = write.operation!;
     await transitionOperation(db(), op.id, "processing");
     try {
-      await rt.apply(op, { operationId: op.id, stackId: write.stack.id, deploymentId: write.deployment!.id, revisionId: write.deployment!.revisionId });
+      await rt.apply(op, payload ?? { operationId: op.id, stackId: write.stack.id, deploymentId: write.deployment!.id, revisionId: write.deployment!.revisionId });
       return undefined;
     } catch (err) {
       return err;
@@ -324,7 +325,7 @@ describe("AppStackRuntime (RT3)", () => {
         errorMessage: APP_STACK_FAILURE.STACK_HEALTH_TIMEOUT.text,
       });
       const steps = await stepsOf(write);
-      expect(steps["start"]![0]).toBe("succeeded");
+      expect(steps["start"]).toEqual(["succeeded", APP_STACK_START_INCOMPLETE_TEXT]);
       expect(steps["health"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
       expect(steps["publish"]).toEqual(["skipped", APP_STACK_STEP_SKIPPED_TEXT]);
       expect(steps["settle"]).toEqual(["skipped", APP_STACK_STEP_SKIPPED_TEXT]);
@@ -435,6 +436,20 @@ describe("AppStackRuntime (RT3)", () => {
       expect(stack.appliedRoutesHash).toBeNull();
       expect((await stepsOf(write))["publish"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
       expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+      // No route was written, so the address is not live.
+      const [domain] = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stackId));
+      expect(domain!.status).toBe("pending");
+    });
+
+    it("a corrupt payload closes the deployment and fails the stack", async () => {
+      const { stackId, write } = await create([CACHE, WEB]);
+
+      expectFailure(await run(write, runtime(), { operationId: write.operation!.id, stackId: "stk_other" }), "STACK_TEMPLATE_INVALID");
+
+      expect(fake.calls).toEqual([]);
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: "STACK_TEMPLATE_INVALID" });
+      expect((await opOf(write.operation!.id)).status).toBe("failed");
     });
   });
 
@@ -486,6 +501,21 @@ describe("AppStackRuntime (RT3)", () => {
       expect(stack.appliedRevisionId).toBe(rev.revisionId);
       expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "missing" });
       expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
+    });
+
+    it("a cleanup that fails for sure records the component as observed, not missing", async () => {
+      const webFirst = component("web");
+      const { stackId } = await running([webFirst, CACHE]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", revision(stackId, [{ ...webFirst, environment: [{ name: "CACHE_HOST", value: "cache" }] }, CACHE]));
+      fake.failNext("startAppStackComponent", "definite");
+      fake.failNext("removeAppStackComponents", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toContain("removeAppStackComponents");
+      expect([...fake.stack(stackId).components.keys()].sort()).toEqual(["cache", "web"]);
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "stopped" });
     });
 
     it("a pre-flight failure of an upgrade touches no component and the stack keeps its observed status", async () => {
@@ -549,6 +579,19 @@ describe("AppStackRuntime (RT3)", () => {
       expect((await stackOf(stackId)).status).toBe("running");
       expect((await stackOf(stackId)).appliedRoutesHash).toBe(routesHash);
       expect(await stepsOf(start)).toEqual(done("stack.start"));
+    });
+
+    it("stop withdraws the routes even when no routes hash is stored", async () => {
+      const { stackId } = await running();
+      await db().update(appStacks).set({ appliedRoutesHash: null }).where(eq(appStacks.id, stackId));
+      expect(fake.stack(stackId).routes).toHaveLength(1);
+      const stop = await enqueue(stackId, "stack.stop");
+
+      expect(await run(stop)).toBeUndefined();
+
+      expect(trace()).toEqual(["unpublishAppStackRoutes", "stopAppStack"]);
+      expect(fake.stack(stackId).routes).toEqual([]);
+      expect(await stepsOf(stop)).toEqual(done("stack.stop"));
     });
 
     it("restart restarts every component and keeps the published routes", async () => {
@@ -616,6 +659,19 @@ describe("AppStackRuntime (RT3)", () => {
       expect((await stackOf(stackId)).deletedAt).toBeNull();
       expect(await deploymentOf(del)).toMatchObject({ status: "failed", problem: "STACK_VOLUME_IN_USE" });
       expect((await opOf(del.operation!.id)).errorCode).toBe("RESOURCE_LOCKED");
+    });
+
+    it("a delete with a corrupt payload ends delete_failed with its deployment closed, so it can be asked again", async () => {
+      const { stackId } = await running();
+      const del = await enqueue(stackId, "stack.delete");
+
+      expectFailure(await run(del, runtime(), {}), "STACK_TEMPLATE_INVALID");
+
+      expect(fake.calls).toEqual([]);
+      expect((await stackOf(stackId)).status).toBe("delete_failed");
+      expect(await deploymentOf(del)).toMatchObject({ status: "failed", problem: "STACK_TEMPLATE_INVALID" });
+      expect(await run(await enqueue(stackId, "stack.delete"))).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("deleted");
     });
 
     it("an ambiguous delete keeps the stack deleting", async () => {

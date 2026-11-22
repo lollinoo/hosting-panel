@@ -188,14 +188,19 @@ describe("AppStackObserverService (PGlite)", () => {
     return { id, revisionId, plan };
   }
 
-  async function insertOperation(stackId: string, status: "unknown" | "failed", completedAt: Date | null) {
+  async function insertOperation(
+    stackId: string,
+    status: "unknown" | "failed" | "succeeded",
+    completedAt: Date | null,
+    kind: "stack.deploy" | "stack.stop" = "stack.deploy",
+  ) {
     counter += 1;
     await db()
       .insert(operations)
       .values({
         id: `op_obs_${String(counter)}`,
         organizationId: ORG,
-        kind: "stack.deploy",
+        kind,
         status,
         resourceType: "stack",
         resourceId: stackId,
@@ -327,7 +332,7 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(statusReads()).toEqual(stacks.map((s) => s.id));
     });
 
-    it("a failed read leaves the old row, which reads unknown once stale", async () => {
+    it("a failed read records every component unknown at the current time", async () => {
       const stack = await seedStack({ status: "running", observedAt: NOW });
       failing.add(stack.id);
 
@@ -335,13 +340,38 @@ describe("AppStackObserverService (PGlite)", () => {
 
       const rows = await health(stack.id);
       expect(rows).toEqual([
-        { componentKey: "app", health: "healthy", healthObservedAt: NOW },
-        { componentKey: "cache", health: "healthy", healthObservedAt: NOW },
+        { componentKey: "app", health: "unknown", healthObservedAt: at(6) },
+        { componentKey: "cache", health: "unknown", healthObservedAt: at(6) },
       ]);
-      const view = (now: Date) =>
-        appStackDisplayStatus({ stack: { status: "running", appliedRoutesHash: null }, plan: stack.plan, components: rows, domainCount: 0, now });
-      expect(view(at(1))).toBe("running");
-      expect(view(at(6))).toBe("unknown");
+      expect(
+        appStackDisplayStatus({ stack: { status: "running", appliedRoutesHash: null }, plan: stack.plan, components: rows, domainCount: 0, now: at(6) }),
+      ).toBe("unknown");
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("stacks whose reads keep failing do not starve the others: a healthy stack is read within two passes", async () => {
+      for (let i = 0; i < 25; i += 1) failing.add((await seedStack({ status: "running", observedAt: null })).id);
+      const healthy = await seedStack({ status: "running", observedAt: at(-1) });
+
+      await observer().reconcileOnce(NOW);
+      await observer().reconcileOnce(at(1));
+
+      expect(statusReads()).toContain(healthy.id);
+      expect(await health(healthy.id)).toEqual([
+        { componentKey: "app", health: "healthy", healthObservedAt: at(1) },
+        { componentKey: "cache", health: "stopped", healthObservedAt: at(1) },
+      ]);
+    });
+
+    it("never selects a stack with no applied revision", async () => {
+      const unapplied: Seeded[] = [];
+      for (let i = 0; i < APP_STACK_OBSERVE_BATCH; i += 1) unapplied.push(await seedStack({ status: "failed", observedAt: null, applied: false }));
+      const running = await seedStack({ status: "running", observedAt: at(-1) });
+
+      await observer().reconcileOnce(NOW);
+
+      expect(statusReads()).toEqual([running.id]);
+      for (const stack of unapplied) expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([null, null]);
     });
 
     it("does nothing at all when the runtime is disabled", async () => {
@@ -571,6 +601,18 @@ describe("AppStackObserverService (PGlite)", () => {
 
       await observer().reconcileOnce(at(6));
       expect(await deploys(stack.id)).toHaveLength(1);
+    });
+
+    it("never undoes a stop: a stop that failed after unpublish or that recovery settled as degraded gets no deploy on any later pass", async () => {
+      const failedStop = await seedStack({ status: "degraded", domains: [{ hostname: "failed-stop.example.com" }] });
+      await insertOperation(failedStop.id, "failed", at(-5), "stack.stop");
+      const recoveredStop = await seedStack({ status: "degraded", domains: [{ hostname: "recovered-stop.example.com" }] });
+      await insertOperation(recoveredStop.id, "succeeded", at(-5), "stack.stop");
+
+      for (const now of [NOW, at(11), at(120)]) await observer().reconcileOnce(now);
+
+      expect(await db().select().from(operations).where(eq(operations.kind, "stack.deploy"))).toEqual([]);
+      expect(triggerAsync).not.toHaveBeenCalled();
     });
   });
 });

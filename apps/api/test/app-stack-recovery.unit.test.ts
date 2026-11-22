@@ -166,7 +166,7 @@ describe("recoverAppStackOperation (RT4)", () => {
     return { stackId, rev, write };
   }
 
-  function enqueue(stackId: string, kind: AppStackOperationKind) {
+  function enqueue(stackId: string, kind: AppStackOperationKind, rev: NewAppStackRevision | null = null) {
     n += 1;
     return enqueueAppStackOperationTransactional(db(), {
       organizationId: ORG,
@@ -175,7 +175,7 @@ describe("recoverAppStackOperation (RT4)", () => {
       requestedByUserId: null,
       idempotencyKey: `rt4-${String(n)}`,
       requestHash: hex(`enqueue ${String(n)}`),
-      revision: null,
+      revision: rev,
       destroyData: false,
     });
   }
@@ -334,7 +334,7 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect(await recovered()).toHaveLength(1);
   });
 
-  it("(2) everything running with matching hashes and healthy settles succeeded, routes hash cleared", async () => {
+  it("(2) everything running with matching hashes and healthy settles succeeded, routes hash as it was", async () => {
     const { stackId, rev, write } = await create();
     fake.failNext("publishAppStackRoutes", "ambiguous");
     await parked(write);
@@ -461,6 +461,38 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect(await stackOf(stackId)).toMatchObject({ status: "delete_failed", deletedAt: null });
     const steps = await db().select().from(operationSteps).where(eq(operationSteps.operationId, del.operation!.id));
     expect(steps.filter((s) => s.status === "failed").every((s) => s.message === APP_STACK_STEP_FAILED_TEXT)).toBe(true);
+  });
+
+  it("(8) an upgrade in doubt at pull, the previous revision still serving: failed, the stack keeps its status and revision", async () => {
+    const { stackId, rev } = await running();
+    const routesHash = (await stackOf(stackId)).appliedRoutesHash;
+    expect(routesHash).not.toBeNull();
+    const v2 = revision(stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    fake.failNext("pullAppStackImage", "ambiguous");
+    await parked(upgrade);
+    expect((await stackOf(stackId)).status).toBe("unknown");
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, appliedRoutesHash: routesHash });
+    expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+    expect(fake.stack(stackId).routes).toHaveLength(1);
+  });
+
+  it("(9) routes observed published keep the stored routes hash", async () => {
+    const { stackId } = await running();
+    const routesHash = (await stackOf(stackId)).appliedRoutesHash;
+    const restart = await enqueue(stackId, "stack.restart");
+    fake.failNext("restartAppStackComponent", "ambiguous");
+    await parked(restart);
+
+    expect(await recover(restart)).toBe("settled");
+
+    expect(await opOf(restart)).toMatchObject({ status: "succeeded" });
+    expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: routesHash });
   });
 
   it("(7) no mutating call: every recovery above went through a port that throws on all but the two reads", () => {

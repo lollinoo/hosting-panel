@@ -10,7 +10,10 @@ import {
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
 import {
+  and,
   AppStackSecretError,
+  appStackDeployments,
+  eq,
   getAppStack,
   getAppStackRevision,
   listAppStackDomains,
@@ -39,6 +42,7 @@ import {
   APP_STACK_HEALTH_BUDGET_MS,
   APP_STACK_HEALTH_POLL_MS,
   APP_STACK_NO_ADDRESS_TEXT,
+  APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_STEP_DONE_TEXT,
   APP_STACK_STEP_LEASE_MS,
   APP_STACK_STEP_RUNNING_TEXT,
@@ -137,12 +141,21 @@ export class AppStackRuntime {
     const parsed = AppStackOperationPayloadSchema.safeParse(payload);
     if (!parsed.success || parsed.data.stackId !== op.resourceId) {
       const failure = APP_STACK_FAILURE.STACK_TEMPLATE_INVALID;
-      await settleAppStackOperation(this.#deps.db, op, null, {
-        outcome: "failed",
-        problem: "STACK_TEMPLATE_INVALID",
-        stackStatus: "failed",
-        failedStep: "validate",
-      }).catch(() => undefined);
+      const { db } = this.#deps;
+      // The deployment is found from the operation, as recovery does, so it is closed too.
+      await db
+        .select({ id: appStackDeployments.id })
+        .from(appStackDeployments)
+        .where(and(eq(appStackDeployments.operationId, op.id), eq(appStackDeployments.organizationId, op.organizationId)))
+        .then(([deployment]) =>
+          settleAppStackOperation(db, op, deployment?.id ?? null, {
+            outcome: "failed",
+            problem: "STACK_TEMPLATE_INVALID",
+            stackStatus: op.kind === "stack.delete" ? "delete_failed" : "failed",
+            failedStep: "validate",
+          }),
+        )
+        .catch(() => undefined);
       throw new ControlPlaneError(failure.code, failure.text);
     }
     const ctx: StackContext = {
@@ -184,12 +197,17 @@ export class AppStackRuntime {
     return renewOperationLease(this.#deps.db, ctx.op.id, APP_STACK_STEP_LEASE_MS);
   }
 
-  async #step<T>(ctx: StackContext, key: AppStackStepKey, work: () => Promise<T>, doneText = APP_STACK_STEP_DONE_TEXT[key]): Promise<T> {
+  async #step<T>(
+    ctx: StackContext,
+    key: AppStackStepKey,
+    work: () => Promise<T>,
+    doneText: string | ((result: T) => string) = APP_STACK_STEP_DONE_TEXT[key],
+  ): Promise<T> {
     ctx.current = key;
     await this.#renew(ctx);
     await updateOperationStepTransactional(this.#deps.db, ctx.op.id, key, "running", APP_STACK_STEP_RUNNING_TEXT);
     const result = await work();
-    await updateOperationStepTransactional(this.#deps.db, ctx.op.id, key, "succeeded", doneText);
+    await updateOperationStepTransactional(this.#deps.db, ctx.op.id, key, "succeeded", typeof doneText === "function" ? doneText(result) : doneText);
     return result;
   }
 
@@ -337,22 +355,27 @@ export class AppStackRuntime {
           await clock.sleep(APP_STACK_HEALTH_POLL_MS);
         }
       };
-      const budgetSpent = await this.#step(ctx, "start", async () => {
-        const files = await this.#secretFiles(ctx, plan);
-        const again = deploy ? (st.previous === null ? [] : appStackRestartSet(plan, st.created ?? [])) : restart ? plan.components.map((c) => c.key) : [];
-        for (const component of plan.components) {
-          const depsReady = (o: ObservedAppStack) => component.dependsOn.every((d) => appStackComponentReady(appStackObservedComponent(o, d)));
-          if (component.dependsOn.length > 0 && !(await readyWithin(depsReady))) return true;
-          const request = {
-            plan,
-            componentKey: component.key,
-            secretFileContents: files.filter((f) => component.secretFiles.some((s) => s.parameterKey === f.parameterKey && s.version === f.version)),
-          };
-          await this.#renew(ctx);
-          await (again.includes(component.key) ? port.restartAppStackComponent(request) : port.startAppStackComponent(request));
-        }
-        return false;
-      });
+      const budgetSpent = await this.#step(
+        ctx,
+        "start",
+        async () => {
+          const files = await this.#secretFiles(ctx, plan);
+          const again = deploy ? (st.previous === null ? [] : appStackRestartSet(plan, st.created ?? [])) : restart ? plan.components.map((c) => c.key) : [];
+          for (const component of plan.components) {
+            const depsReady = (o: ObservedAppStack) => component.dependsOn.every((d) => appStackComponentReady(appStackObservedComponent(o, d)));
+            if (component.dependsOn.length > 0 && !(await readyWithin(depsReady))) return true;
+            const request = {
+              plan,
+              componentKey: component.key,
+              secretFileContents: files.filter((f) => component.secretFiles.some((s) => s.parameterKey === f.parameterKey && s.version === f.version)),
+            };
+            await this.#renew(ctx);
+            await (again.includes(component.key) ? port.restartAppStackComponent(request) : port.startAppStackComponent(request));
+          }
+          return false;
+        },
+        (spent) => (spent ? APP_STACK_START_INCOMPLETE_TEXT : APP_STACK_STEP_DONE_TEXT.start),
+      );
       const final = await this.#step(ctx, "health", async () => {
         if (!budgetSpent) await readyWithin((o) => plan.components.every((c) => appStackComponentReady(appStackObservedComponent(o, c.key))));
         const observed = await this.#poll(ctx, plan, "final");
@@ -373,17 +396,18 @@ export class AppStackRuntime {
           const ready = new Set(
             plan.ingress.map((r) => r.componentKey).filter((key) => appStackComponentReady(appStackObservedComponent(final, key))),
           );
-          for (const row of domains) {
-            if (row.status === "pending" && ready.has(row.componentKey)) {
-              await updateAppStackDomainState(db, { domainId: row.id, set: { status: "active" } });
-            }
-          }
           const acmeEnabled = await this.#acmeEnabled();
           const { entries } = appStackRoutePlan({ plan, domains, include: ready, now: this.#now(), acmeEnabled });
           const hash = entries.length > 0 ? appStackRoutesHash(entries) : null;
           if (hash !== stack.appliedRoutesHash) {
             await this.#renew(ctx);
             await (entries.length > 0 ? port.publishAppStackRoutes({ plan, routes: entries }) : port.unpublishAppStackRoutes(ctx.ref));
+          }
+          // An address goes live (and gets its certificate) only once its route is written.
+          for (const row of domains) {
+            if (row.status === "pending" && ready.has(row.componentKey)) {
+              await updateAppStackDomainState(db, { domainId: row.id, set: { status: "active" } });
+            }
           }
           return hash;
         },
@@ -443,16 +467,17 @@ export class AppStackRuntime {
             (key) => appStackObservedComponent(observed, key)?.componentHash === computeAppStackComponentHash(plan, key),
           )
         : [];
+      let removed: readonly string[] = [];
       if (cleanup.length > 0) {
         try {
           await this.#renew(ctx);
-          await ctx.port!.removeAppStackComponents({ plan, componentKeys: [...cleanup] });
+          removed = (await ctx.port!.removeAppStackComponents({ plan, componentKeys: [...cleanup] })).removedComponents;
         } catch (err) {
           if (isAmbiguousFailure(err)) throw err;
         }
       }
       const health = (observed ? appStackHealthRows(plan, observed, "final") : ctx.lastHealth)?.map((h) =>
-        cleanup.includes(h.componentKey) ? { ...h, health: "missing" as const } : h,
+        removed.includes(h.componentKey) ? { ...h, health: "missing" as const } : h,
       );
       return settle({ stackStatus: "failed" }, health);
     });
@@ -462,11 +487,11 @@ export class AppStackRuntime {
     const { db } = this.#deps;
     const st = { unpublished: false };
     const body = async () => {
-      const { stack, plan, planned } = await this.#step(ctx, "validate", async () => {
+      const { plan, planned } = await this.#step(ctx, "validate", async () => {
         const stack = await this.#begin(ctx, false);
         const revisionId = stack.appliedRevisionId ?? stack.desiredRevisionId;
         if (revisionId !== null && !ctx.port) throw new AppStackStepRefusal("STACK_UNSUPPORTED_FEATURE");
-        return { stack, plan: await this.#planOf(ctx, revisionId), planned: revisionId !== null };
+        return { plan: await this.#planOf(ctx, revisionId), planned: revisionId !== null };
       });
       if (!planned) {
         ctx.current = "settle";
@@ -474,8 +499,9 @@ export class AppStackRuntime {
         return;
       }
       const port = ctx.port!;
+      // Always asked (idempotent): the stored routes hash can be null while a route file is still in place.
       await this.#step(ctx, "unpublish", async () => {
-        if (stack.appliedRoutesHash !== null) await port.unpublishAppStackRoutes(ctx.ref);
+        await port.unpublishAppStackRoutes(ctx.ref);
         st.unpublished = true;
       });
       await this.#step(ctx, "stop", () => port.stopAppStack(ctx.ref));

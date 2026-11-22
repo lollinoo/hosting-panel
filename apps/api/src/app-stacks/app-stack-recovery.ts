@@ -59,12 +59,14 @@ export async function recoverAppStackOperation(
     return "settled";
   }
 
-  const revisionId = (APP_STACK_REVISION_KINDS as readonly string[]).includes(kind)
-    ? deployment.revisionId
-    : (stack.appliedRevisionId ?? stack.desiredRevisionId);
-  const revision = revisionId === null ? null : await getAppStackRevision(db, { ...scope, revisionId });
-  const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
-  const plan = parsed.success ? parsed.data : null;
+  const planOf = async (revisionId: string | null) => {
+    const revision = revisionId === null ? null : await getAppStackRevision(db, { ...scope, revisionId });
+    const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
+    return parsed.success ? parsed.data : null;
+  };
+  const deploys = (APP_STACK_REVISION_KINDS as readonly string[]).includes(kind);
+  const plan = await planOf(deploys ? deployment.revisionId : (stack.appliedRevisionId ?? stack.desiredRevisionId));
+  const previous = deploys ? await planOf(stack.appliedRevisionId) : null;
 
   let observed: ObservedAppStack;
   try {
@@ -77,17 +79,19 @@ export async function recoverAppStackOperation(
   const v = appStackRecoveryVerdict({
     kind,
     plan,
+    previous,
     observed,
     domainCount: (await listAppStackDomains(db, scope)).length,
     destroyVolumes: (await listAppStackVolumes(db, scope)).some((volume) => volume.retentionPolicy === "destroy"),
   });
-  // The published route content is unknown: the observer republishes a fresh plan through a tracked operation.
+  // Routes seen published keep the stored hash; else none is published. The observer republishes a stale route set
+  // through a tracked operation.
   await settleAppStackOperation(db, op, deployment.id, {
     outcome: v.outcome,
     problem: v.problem,
     stackStatus: v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
-    ...(kind === "stack.delete" ? {} : { appliedRoutesHash: null }),
+    ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),
     ...(v.health.length > 0 ? { health: { observedAt: new Date(deps.clock.now()), components: v.health } } : {}),
     failedStep: null,
   });

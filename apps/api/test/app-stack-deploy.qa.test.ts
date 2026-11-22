@@ -188,7 +188,7 @@ describe("application stacks deploy end to end on the simulator (Q1: A14, A15, B
 
     await drain(stackId);
 
-    expect(atPublish).toEqual({ web: "running", cache: "running", routes: [], domain: "active" });
+    expect(atPublish).toEqual({ web: "running", cache: "running", routes: [], domain: "pending" });
     const row = await stackRow(stackId);
     expect(row.status).toBe("running");
     expect(row.appliedRevisionId).not.toBeNull();

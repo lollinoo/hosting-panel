@@ -62,6 +62,6 @@ export function diffAppStackPlans(input: {
       const c = byKey.get(r.componentKey);
       return c !== undefined && (c.change === "removed" || c.restart);
     }),
-    dataRisk: from !== null && from.volumes.length > 0 && components.some((c) => c.change !== "unchanged"),
+    dataRisk: from !== null && (from.volumes.length > 0 || to.volumes.length > 0) && components.some((c) => c.change !== "unchanged"),
   };
 }

@@ -276,6 +276,34 @@ describe("application stack plan, upgrade and rollback (H8)", () => {
     expect((await revisions(stackId)).length).toBe(1);
   });
 
+  it("a draft on a version that is no longer the default is never offered or given an upgrade: it is installed again", async () => {
+    const { templateId, versionId: v1 } = await h.publish(STORAGE_SOURCE);
+    const draftId = await create({ templateVersionId: v1, name: "draft-behind", deploy: false });
+    const deployedId = await create({ templateVersionId: v1, name: "deployed-behind", deploy: true });
+    await settle(deployedId);
+    const v2 = await addVersion(templateId, STORAGE_V2, true);
+    const detail = (stackId: string) => h.call(h.a.token, "GET", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}`);
+    expect((await detail(draftId)).body.data.upgrade).toBeNull();
+    expect((await detail(deployedId)).body.data.upgrade).toEqual({ templateVersionId: v2, versionNumber: 2 });
+
+    const before = await h.counts();
+    const message = "This version can no longer be installed. Remove this draft and install the application again: a draft has no data, so nothing is lost.";
+    const outdated = (res: Reply) => {
+      expectRefusal(res, 400, "VALIDATION_ERROR", { field: "templateVersionId", reason: "STACK_TEMPLATE_UNPUBLISHED", message });
+      expect(res.body.error.message).toBe(message);
+    };
+    outdated(await queue(draftId, "deploy", {}));
+    outdated(await plan(draftId, {}));
+    outdated(await plan(draftId, { templateVersionId: v2 }));
+    outdated(await queue(draftId, "upgrade", { templateVersionId: v2, planHash: OTHER_HASH }));
+    expect(await h.counts()).toEqual(before);
+    expect((await stackRow(draftId)).status).toBe("draft");
+
+    // A stack that was deployed keeps the way forward it always had.
+    const changed = await queue(deployedId, "deploy", { parameters: [{ key: "worker_interval_seconds", value: 25 }] });
+    expectRefusal(changed, 400, "VALIDATION_ERROR", { reason: "STACK_TEMPLATE_UNPUBLISHED", message: "Install the current version with an upgrade first." });
+  });
+
   it("rollback refuses an unknown or current revision, a changed plan, software no longer allowed and a removed target, writing nothing", async () => {
     const { templateId, versionId: v1 } = await h.publish();
     const stackId = await notesRunning(v1);

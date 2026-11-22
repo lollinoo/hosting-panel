@@ -136,6 +136,13 @@ function assertReviewed(candidate: Candidate, planHash: string): void {
     throw refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
   }
 }
+/** A draft (no revision yet) is never upgraded: it reaches the current version by being installed again. */
+const draftOutdated = () =>
+  refusal(
+    "templateVersionId",
+    "STACK_TEMPLATE_UNPUBLISHED",
+    "This version can no longer be installed. Remove this draft and install the application again: a draft has no data, so nothing is lost.",
+  );
 function statusLocked(status: string): ControlPlaneError {
   const message = `This action is not possible while the application is ${status}.`;
   return appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: status }, false);
@@ -298,7 +305,11 @@ export class AppStacksService {
     ]);
     const { defaultVersionId } = template;
     const latest =
-      template.enabled && template.archivedAt === null && defaultVersionId !== null && defaultVersionId !== stack.templateVersionId
+      desired !== null &&
+      template.enabled &&
+      template.archivedAt === null &&
+      defaultVersionId !== null &&
+      defaultVersionId !== stack.templateVersionId
         ? await getAppTemplateVersion(db, { templateId: template.id, versionId: defaultVersionId })
         : null;
     const previous = desired ? revisions.find((r) => r.revisionNumber < desired.revision.revisionNumber) : undefined;
@@ -533,7 +544,9 @@ export class AppStacksService {
     const newRevision =
       desired === null || desired.revision.planHash !== c.plan.planHash || (parameters !== undefined && !sameEntries(c.entries, stored));
     if (newRevision && !(await getPublishedAppTemplateVersion(db, { templateVersionId: stack.templateVersionId, lock: false }))) {
-      throw refusal("templateVersionId", "STACK_TEMPLATE_UNPUBLISHED", "Install the current version with an upgrade first.");
+      throw desired === null
+        ? draftOutdated()
+        : refusal("templateVersionId", "STACK_TEMPLATE_UNPUBLISHED", "Install the current version with an upgrade first.");
     }
     return { version, ...c, newRevision };
   }
@@ -553,6 +566,7 @@ export class AppStacksService {
     if (!(await getPublishedAppTemplateVersion(db, { templateVersionId: version.id, lock: false }))) {
       throw refusal("templateVersionId", "STACK_TEMPLATE_UNPUBLISHED", "This version can no longer be installed. Choose the current version.");
     }
+    if (stack.desiredRevisionId === null) throw draftOutdated();
     const spec = validatedSpec(version.source, this.validation);
     const c = compileRevision(
       {

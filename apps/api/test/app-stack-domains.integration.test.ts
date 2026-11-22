@@ -3,9 +3,11 @@ import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST } from "@hosting-panel/cont
 import {
   and,
   appStackDomains,
+  appStackRevisions,
   appStacks,
   auditEvents,
   eq,
+  newAppEntityId,
   resourceQuotas,
   tlsCertificates,
   tlsCertificateVersions,
@@ -109,6 +111,40 @@ describe("application stack domains HTTP API (H6)", () => {
     const stackId = created.body.data.stackId as string;
     expect((await add(stackId, { hostname: "web.example.test", componentKey: "web", port: 8080 })).status).toBe(201);
     expectRefusal(await add(stackId, appDomain("web2.example.test")), 400, "VALIDATION_ERROR", { reason: "unknown_ingress" });
+  });
+
+  it("checks the target again under the stack lock: a plan committed after the first check decides", async () => {
+    const created = await createStack(h.a, web, true);
+    expect(created.status, created.raw).toBe(202);
+    const stackId = created.body.data.stackId as string;
+    const db = h.dbClient.db;
+    const [current] = await db.select().from(appStackRevisions).where(eq(appStackRevisions.stackId, stackId));
+    const plan = current!.plan as Json;
+    const revisionId = newAppEntityId("srev");
+    const moved = {
+      ...plan,
+      revisionId,
+      components: (plan.components as Json[]).map((c) => (c.key === "web" ? { ...c, expose: [8080, 8081] } : c)),
+      ingress: [{ componentKey: "web", port: 8081 }],
+    };
+    // An upgrade that moves the address to port 8081 commits after the first check, before the add's transaction.
+    const transaction = db.transaction.bind(db);
+    const spy = vi.spyOn(db, "transaction").mockImplementationOnce(async (work, config) => {
+      await db.insert(appStackRevisions).values({ ...current!, id: revisionId, revisionNumber: 2, plan: moved, createdAt: new Date() });
+      await db.update(appStacks).set({ desiredRevisionId: revisionId }).where(eq(appStacks.id, stackId));
+      return transaction(work, config);
+    });
+    try {
+      expectRefusal(await add(stackId, { hostname: "moved.example.test", componentKey: "web", port: 8080 }), 400, "VALIDATION_ERROR", {
+        field: "componentKey",
+        reason: "unknown_ingress",
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await rows(stackId)).toHaveLength(0);
+    expect(await audits("app.stack.domain.assign", stackId)).toHaveLength(0);
+    expect((await add(stackId, { hostname: "moved.example.test", componentKey: "web", port: 8081 })).status).toBe(201);
   });
 
   it("refuses a pair that is not an ingress of the application", async () => {
