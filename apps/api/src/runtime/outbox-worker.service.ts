@@ -1,5 +1,6 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
+  APP_STACK_OPERATION_KINDS,
   ERROR_CODES,
   HOST_JOB_KIND,
   PANEL_CONTAINER_APPLY_KIND,
@@ -70,6 +71,7 @@ import { SITE_BACKUPS_INTERRUPTED, SiteBackupsApplier } from "../backups/site-ba
 import { SITE_WORDPRESS_INTERRUPTED, SiteWordpressApplier } from "../sites/site-wordpress-applier.js";
 import { SiteWordpressImportApplier } from "../sites/site-wordpress-import-applier.js";
 import { SiteProvisioner, isAmbiguousFailure } from "./site-provisioner.js";
+import { AppStackRuntime } from "../app-stacks/app-stack-runtime.js";
 
 const ERROR_CODE_SET: ReadonlySet<string> = new Set(ERROR_CODES);
 const DEPLOY_LEASE_MS = 6 * 60_000;
@@ -91,6 +93,7 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
 // The import runs in the WordPress lane: its copy step is the update's own.
 const WORDPRESS_LANE_KINDS = [...WORDPRESS_OPERATION_KINDS, WORDPRESS_IMPORT_KIND] as const satisfies readonly OperationKind[];
 const HOST_LANE_KINDS = [HOST_JOB_KIND, PANEL_CONTAINER_APPLY_KIND] as const satisfies readonly OperationKind[];
+const STACK_LANE_KINDS: readonly OperationKind[] = APP_STACK_OPERATION_KINDS;
 // host-jobs.ts imports this file for the backup kinds, so a static import back would be an ESM cycle.
 const hostJobs = () => import("../host/host-jobs.js");
 export const BACKUP_OPERATION_KINDS = [
@@ -162,6 +165,7 @@ export class OutboxWorkerService {
         ...BACKUP_OPERATION_KINDS,
         ...WORDPRESS_LANE_KINDS,
         ...HOST_LANE_KINDS,
+        ...STACK_LANE_KINDS,
       ],
     },
     activePromise: null,
@@ -193,10 +197,18 @@ export class OutboxWorkerService {
     scheduledImmediate: null,
     pendingTrigger: false,
   };
+  // A ten-minute application deploy never holds up site work; stacks run one after another here.
+  readonly #stackLane: OutboxLaneState = {
+    filter: { includeKinds: STACK_LANE_KINDS },
+    activePromise: null,
+    scheduledImmediate: null,
+    pendingTrigger: false,
+  };
 
   readonly #backupsApplier: SiteBackupsApplier;
   readonly #wordpressApplier: SiteWordpressApplier;
   readonly #wordpressImportApplier: SiteWordpressImportApplier;
+  readonly #appStacks: AppStackRuntime;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -210,6 +222,7 @@ export class OutboxWorkerService {
     @Optional() @Inject(FirewallService) private readonly firewall?: FirewallService,
     // Last and optional, like the others: unit tests build the worker positionally without it.
     @Optional() @Inject(SiteTlsApplier) private readonly siteTlsApplier?: SiteTlsApplier,
+    @Optional() @Inject(AppStackRuntime) appStackRuntime?: AppStackRuntime,
   ) {
     this.#backupsApplier =
       siteBackupsApplier ?? new SiteBackupsApplier(dbClient, dockerExecutor, config);
@@ -226,6 +239,7 @@ export class OutboxWorkerService {
       dockerExecutor,
       config,
     );
+    this.#appStacks = appStackRuntime ?? new AppStackRuntime(dbClient, dockerExecutor, config);
   }
 
   public startBackgroundLoop(): void {
@@ -254,13 +268,14 @@ export class OutboxWorkerService {
     this.#triggerLane(this.#backupLane);
     this.#triggerLane(this.#wordpressLane);
     this.#triggerLane(this.#hostLane);
+    this.#triggerLane(this.#stackLane);
   }
 
   public async stop(): Promise<void> {
     this.#stopped = true;
     this.#stopping.abort();
 
-    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane, this.#hostLane]) {
+    for (const lane of [this.#mainLane, this.#fileLane, this.#backupLane, this.#wordpressLane, this.#hostLane, this.#stackLane]) {
       lane.pendingTrigger = false;
       if (lane.scheduledImmediate !== null) {
         clearImmediate(lane.scheduledImmediate);
@@ -279,6 +294,7 @@ export class OutboxWorkerService {
       this.#backupLane.activePromise?.catch(() => undefined),
       this.#wordpressLane.activePromise?.catch(() => undefined),
       this.#hostLane.activePromise?.catch(() => undefined),
+      this.#stackLane.activePromise?.catch(() => undefined),
       this.#activeRecoveryPromise?.catch(() => undefined),
     ]);
   }
@@ -332,6 +348,7 @@ export class OutboxWorkerService {
       this.#runLane(this.#backupLane, batchSize),
       this.#runLane(this.#wordpressLane, batchSize),
       this.#runLane(this.#hostLane, batchSize),
+      this.#runLane(this.#stackLane, batchSize),
     ]);
     return {
       claimed: results.reduce((n, r) => n + r.claimed, 0),
@@ -404,8 +421,8 @@ export class OutboxWorkerService {
       return "skipped";
     }
 
-    // Customer-visible operations (a site's or a generic service's): fixed friendly step texts only.
-    const siteOp = /^(site|svc):/.test(op.lockKey ?? "");
+    // Customer-visible operations (a site's, a generic service's or an application's): fixed friendly step texts only.
+    const siteOp = /^(site|svc|stack):/.test(op.lockKey ?? "");
     if (siteOp) this.#siteOperationIds.add(op.id);
     try {
       await transitionOperation(db, op.id, "processing");
@@ -449,6 +466,8 @@ export class OutboxWorkerService {
         await this.#wordpressImportApplier.apply(op);
       } else if ((WORDPRESS_OPERATION_KINDS as readonly string[]).includes(op.kind)) {
         await this.#wordpressApplier.apply(op);
+      } else if (STACK_LANE_KINDS.includes(op.kind)) {
+        await this.#appStacks.apply(op, payload);
       } else {
         throw new ControlPlaneError(
           "NOT_SUPPORTED",
@@ -987,11 +1006,14 @@ export class OutboxWorkerService {
           (BACKUP_OPERATION_KINDS as readonly string[]).includes(op.kind) ||
           op.kind === "site.wordpress.update" ||
           op.kind === WORDPRESS_IMPORT_KIND ||
-          op.kind === HOST_JOB_KIND
+          op.kind === HOST_JOB_KIND ||
+          STACK_LANE_KINDS.includes(op.kind)
         ) {
           // Backup, update, import and host job recovery never replay a change; each settles what it can.
           const outcome =
-            op.kind === HOST_JOB_KIND
+            STACK_LANE_KINDS.includes(op.kind)
+              ? await this.#appStacks.recover(op)
+              : op.kind === HOST_JOB_KIND
               ? await (await hostJobs()).recoverHostJob(db, this.hostAgent, op)
               : op.kind === "site.wordpress.update"
               ? await this.#wordpressApplier.recover(op)

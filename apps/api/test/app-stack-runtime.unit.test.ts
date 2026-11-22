@@ -136,7 +136,6 @@ describe("AppStackRuntime (RT3)", () => {
       hostAllocationId: ALLOC,
       templateVersionId: versionId,
       name: `Stack ${String(n)}`,
-      parameters: [],
       createdBy: null,
       idempotencyKey: `rt3-${String(n)}`,
       requestHash: hex(`create ${String(n)}`),
@@ -155,7 +154,6 @@ describe("AppStackRuntime (RT3)", () => {
       idempotencyKey: `rt3-${String(n)}`,
       requestHash: hex(`enqueue ${String(n)}`),
       revision: rev,
-      parameters: rev?.parameters ?? null,
       destroyData,
     });
   }

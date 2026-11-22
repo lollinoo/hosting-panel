@@ -439,7 +439,6 @@ export class AppStackObserverService {
             body: { revisionId: appliedRevisionId, trigger: "routes" },
           }),
           revision: null,
-          parameters: null,
           destroyData: false,
         });
         if (queued.idempotentReplay) return;

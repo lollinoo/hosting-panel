@@ -406,7 +406,8 @@ describe("appStackSettleTarget", () => {
     ["queued", "failed", "failed"],
     ["queued", "running", "failed"],
     ["deploying", "running", "running"],
-    ["stopping", "failed", null],
+    ["stopping", "failed", "failed"],
+    ["stopped", "failed", null],
     ["unknown", "degraded", "degraded"],
     ["running", "running", "running"],
   ] as const)("%s → %s = %s", (current, wanted, target) => {
