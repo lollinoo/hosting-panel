@@ -158,6 +158,16 @@ describe("maskAppStackLogLines", () => {
     expect(lines[0]?.text).toBe("key=abcdefgh and abcdef twice abcdef");
   });
 
+  it("masks each line of six characters or more of a multi-line value", () => {
+    const pem = "-----BEGIN TEST KEY-----\r\nMIIBOgIBAAJBAKj34GkxFhD9\nend";
+    const lines = [line("-----BEGIN TEST KEY-----"), line("key MIIBOgIBAAJBAKj34GkxFhD9 read"), line("end")];
+    expect(maskAppStackLogLines(lines, [pem])).toEqual([line("[REDACTED]"), line("key [REDACTED] read"), line("end")]);
+  });
+
+  it("leaves no tail of two values that partly overlap", () => {
+    expect(maskAppStackLogLines([line("a abcdefghijk b defghijk")], ["abcdefgh", "defghijk"])).toEqual([line("a [REDACTED] b [REDACTED]")]);
+  });
+
   it("returns the lines unchanged without values", () => {
     expect(maskAppStackLogLines([line("plain text")], [])).toEqual([line("plain text")]);
   });

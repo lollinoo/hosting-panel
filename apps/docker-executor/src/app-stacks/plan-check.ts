@@ -52,8 +52,13 @@ export function assertAppStackSecretContents(
     throw new AppStackExecutorError("STACK_PLAN_INVALID", `The component ${componentKey} is not part of the plan`);
   }
   const contents: Record<string, string> = {};
+  const versions = new Map<string, number>();
   for (const file of component.secretFiles) {
-    const entry = entries.find((e) => e.parameterKey === file.parameterKey && e.version === file.version);
+    const [entry, ...more] = entries.filter((e) => e.parameterKey === file.parameterKey && e.version === file.version);
+    if (more.length > 0 || (versions.get(file.parameterKey) ?? file.version) !== file.version) {
+      throw new AppStackExecutorError("STACK_PLAN_INVALID", `A secret of component ${componentKey} has more than one entry`);
+    }
+    versions.set(file.parameterKey, file.version);
     if (entry === undefined) {
       throw new AppStackExecutorError("STACK_SECRET_MISSING", `A secret of component ${componentKey} is missing`);
     }

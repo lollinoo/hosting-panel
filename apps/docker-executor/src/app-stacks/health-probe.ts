@@ -61,19 +61,10 @@ export const probeAppStackHealth: AppStackHealthProbe = (target) =>
     });
     connection = request;
     request.on("error", () => settle("failed"));
+    // The status decides; the body is never read (settle destroys the socket).
     request.once("response", (response) => {
       const status = response.statusCode ?? 0;
-      if (status < 200 || status > 399) {
-        settle("failed");
-        return;
-      }
-      let bytes = 0;
-      response.on("error", () => settle("failed"));
-      response.on("data", (chunk: Buffer) => {
-        bytes += chunk.length;
-        if (bytes >= APP_STACK_HTTP_PROBE_BODY_MAX_BYTES) settle("passed");
-      });
-      response.once("end", () => settle("passed"));
+      settle(status >= 200 && status <= 399 ? "passed" : "failed");
     });
     request.end();
   });

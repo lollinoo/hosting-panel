@@ -251,6 +251,27 @@ describe("assertAppStackSecretContents", () => {
     expect(result.message).not.toContain("s3cr3t");
   });
 
+  it("accepts one parameter mounted twice at the same version", () => {
+    const twice = appStackTestPlan({
+      components: [web, { ...worker, secretFiles: [{ envName: "COPY_FILE", parameterKey: "shared_key", version: 1 }, ...worker.secretFiles] }],
+    });
+    expect(assertAppStackSecretContents(twice, "worker", [entry])).toEqual({ shared_key: "s3cr3t-content" });
+  });
+
+  it("refuses one parameter of a component pinned at two versions instead of keeping the last", () => {
+    const twoVersions = appStackTestPlan({
+      components: [web, { ...worker, secretFiles: [{ envName: "NEXT_FILE", parameterKey: "shared_key", version: 2 }, ...worker.secretFiles] }],
+    });
+    const result = refusal(() => assertAppStackSecretContents(twoVersions, "worker", [entry, { ...entry, version: 2, content: "s3cr3t-next" }]));
+    expect(result).toEqual({ reason: "STACK_PLAN_INVALID", code: "VALIDATION_ERROR", message: "A secret of component worker has more than one entry" });
+  });
+
+  it("refuses two entries for the same secret of the component", () => {
+    const result = refusal(() => assertAppStackSecretContents(plan, "worker", [entry, { ...entry, content: "s3cr3t-other" }]));
+    expect(result).toEqual({ reason: "STACK_PLAN_INVALID", code: "VALIDATION_ERROR", message: "A secret of component worker has more than one entry" });
+    expect(result.message).not.toContain("s3cr3t");
+  });
+
   it("refuses a missing secret", () => {
     expect(refusal(() => assertAppStackSecretContents(plan, "worker", []))).toEqual({
       reason: "STACK_SECRET_MISSING",

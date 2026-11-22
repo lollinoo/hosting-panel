@@ -58,13 +58,29 @@ export async function readAppStackComponentSecretValues(
   }
 }
 
-/** Each value of length >= 6, longest first, replaced by "[REDACTED]" in every line's text. Pure. */
+/** Every match of each value (and of each line of a multi-line value) of length >= 6 becomes "[REDACTED]";
+ *  overlapping matches are merged first, so no part of either value stays visible. Pure. */
 export function maskAppStackLogLines(lines: readonly ServiceLogLine[], values: readonly string[]): ServiceLogLine[] {
-  const masked = [...new Set(values)]
-    .filter((value) => value.length >= APP_STACK_LOG_MASK_MIN_LENGTH)
-    .sort((a, b) => b.length - a.length);
-  return lines.map((line) => ({
-    ...line,
-    text: masked.reduce((text, value) => text.split(value).join(APP_STACK_LOG_MASK), line.text),
-  }));
+  const needles = [...new Set(values.flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter(
+    (needle) => needle.length >= APP_STACK_LOG_MASK_MIN_LENGTH,
+  );
+  return lines.map((line) => {
+    const matches: [number, number][] = [];
+    for (const needle of needles) {
+      for (let at = line.text.indexOf(needle); at !== -1; at = line.text.indexOf(needle, at + 1)) matches.push([at, at + needle.length]);
+    }
+    const merged: [number, number][] = [];
+    for (const [start, end] of matches.sort((a, b) => a[0] - b[0])) {
+      const last = merged.at(-1);
+      if (last !== undefined && start < last[1]) last[1] = Math.max(last[1], end);
+      else merged.push([start, end]);
+    }
+    let text = "";
+    let cursor = 0;
+    for (const [start, end] of merged) {
+      text += line.text.slice(cursor, start) + APP_STACK_LOG_MASK;
+      cursor = end;
+    }
+    return { ...line, text: text + line.text.slice(cursor) };
+  });
 }

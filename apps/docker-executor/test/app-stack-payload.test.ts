@@ -187,9 +187,46 @@ describe("assertAppStackPayloadHardening", () => {
     ["a foreign volume", mutate({ Mounts: [{ Type: "volume", Source: "site_data", Target: "/data", ReadOnly: false }] })],
     ["another stack's volume", mutate({ Mounts: [{ Type: "volume", Source: "hp_appvol_stk_other_data", Target: "/data", ReadOnly: false }] })],
     ["the docker socket", mutate({}, { Env: ["SOCK=/run/docker.sock"] })],
-    ["a /var/run path", mutate({}, { Env: ["STATE=/var/run/x"] })],
+    ["the docker socket in Cmd", mutate({}, { Cmd: ["--socket=/run/Docker.sock"] })],
+    ["a secret root under /var/run", mutate({ Binds: [`/var/run/x/app_${ID}__worker/shared_key:/run/secrets/shared_key:ro`] })],
+    ["a second SecurityOpt entry", mutate({ SecurityOpt: ["no-new-privileges:true", "seccomp=unconfined"] })],
+    ["UsernsMode", mutate({ UsernsMode: "host" })],
+    ["Sysctls", mutate({ Sysctls: { "net.ipv4.ip_forward": "1" } })],
+    ["PublishAllPorts", mutate({ PublishAllPorts: true })],
+    ["CgroupParent", mutate({ CgroupParent: "/" })],
+    ["ExtraHosts", mutate({ ExtraHosts: ["metadata:169.254.169.254"] })],
+    ["Entrypoint", mutate({}, { Entrypoint: ["/bin/sh"] })],
+    ["an extra label", mutate({}, { Labels: { ...body.Labels, x: "y" } })],
+    ["a volume with driver options", mutate({ Mounts: [{ ...body.HostConfig.Mounts[0], VolumeOptions: { DriverConfig: { Name: "local" } } }] })],
+    ["an executable /tmp", mutate({ Tmpfs: { "/tmp": "rw,exec,size=64m" } })],
+    ["a second tmpfs", mutate({ Tmpfs: { ...APP_STACK_TMPFS, "/data": "rw" } })],
+    ["no pids limit", mutate({ PidsLimit: -1 })],
+    ["another pids limit", mutate({ PidsLimit: 4096 })],
+    ["no memory limit", mutate({ Memory: 0, MemorySwap: 0 })],
+    ["memory above the plan ceiling", mutate({ Memory: 2 ** 35, MemorySwap: 2 ** 35 })],
+    ["unlimited swap", mutate({ MemorySwap: -1 })],
+    ["no CPU limit", mutate({ NanoCpus: 0 })],
+    ["CPU above the plan ceiling", mutate({ NanoCpus: 32_000_000_000 })],
+    ["a CPU value that is not whole millicores", mutate({ NanoCpus: 250_000_001 })],
   ])("refuses %s", (_name, mutated) => {
     expect(() => assertAppStackPayloadHardening(mutated, ctx)).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
+  });
+
+  it("accepts /var/run and docker.sock text the plan schema accepts outside host paths", () => {
+    const texts = appStackTestPlan({
+      components: [
+        { ...web, healthcheck: { kind: "http", port: 8080, path: "/var/run/status", intervalSeconds: 10, timeoutSeconds: 3 } },
+        {
+          ...worker,
+          argv: ["worker", "--pid=/var/run/app.pid"],
+          environment: [{ name: "PIDFILE", value: "/var/run/app.pid" }],
+          volumes: [{ volumeKey: "data", containerPath: "/srv/docker.sock", readOnly: false }],
+        },
+      ],
+    });
+    for (const key of ["web", "worker"]) {
+      expect(() => assertAppStackPayloadHardening(buildAppStackContainerCreatePayload(texts, key, ctx), ctx)).not.toThrow();
+    }
   });
 });
 

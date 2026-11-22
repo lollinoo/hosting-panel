@@ -101,6 +101,18 @@ describe("probeAppStackHealth", () => {
     await serverSocketClosed;
   });
 
+  it("passes a 200 as soon as the head arrives, even when the body never ends", async () => {
+    const port = await listen(
+      http.createServer((_request, response) => {
+        response.writeHead(200, { "Content-Length": "100" });
+        response.write("0123456789");
+      }),
+    );
+    const started = Date.now();
+    await expect(probeAppStackHealth(httpTarget(port))).resolves.toBe("passed");
+    expect(Date.now() - started).toBeLessThan(900);
+  });
+
   it.each(["0.0.0.0", "169.254.169.254", "224.0.0.1", "not-an-ip"])("refuses %s with no connection attempt", async (address) => {
     let connections = 0;
     const server = net.createServer();

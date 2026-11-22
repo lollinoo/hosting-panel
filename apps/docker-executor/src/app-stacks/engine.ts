@@ -30,7 +30,12 @@ import {
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import type { ServiceLogLine, StackExecutorPort } from "@hosting-panel/executor-contracts";
 import { ExecutorCodedError, type AppStackRouteEntry } from "../traefik-config.js";
-import { assertAppStackPayloadHardening, buildAppStackContainerCreatePayload, decodeAppStackHealthLabel } from "./container-payload.js";
+import {
+  assertAppStackPayloadHardening,
+  buildAppStackContainerCreatePayload,
+  decodeAppStackHealthLabel,
+  type AppStackContainerCreatePayload,
+} from "./container-payload.js";
 import { AppStackExecutorError } from "./errors.js";
 import { probeAppStackHealth, type AppStackHealthProbe } from "./health-probe.js";
 import {
@@ -267,6 +272,20 @@ export class AppStackEngine implements StackExecutorPort {
         }
       }
       const listed = await this.listContainers(plan);
+      // Every body and every derived name is checked before the first removal or create.
+      const ctx = { secretsRootDir: this.deps.secretsRootDir };
+      const bodies = new Map<string, AppStackContainerCreatePayload>();
+      for (const { key } of plan.components) {
+        const existing = listed.find((c) => c.key === key);
+        if (existing?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) continue;
+        const name = appStackContainerName(plan.stackId, key);
+        if (existing === undefined && (await this.get(`/containers/${enc(name)}/json`, "inspect an application container")) !== null) {
+          throw conflict();
+        }
+        const body = buildAppStackContainerCreatePayload(plan, key, ctx);
+        assertAppStackPayloadHardening(body, ctx);
+        bodies.set(key, body);
+      }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents: string[] = [];
       for (const stale of listed.filter((c) => !keys.has(c.key)).sort(byKey)) {
@@ -276,15 +295,14 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const components: AppStackCreateIpcResult["components"] = [];
       for (const { key } of plan.components) {
-        const name = appStackContainerName(plan.stackId, key);
-        const existing = listed.find((c) => c.key === key);
-        if (existing?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) {
+        const body = bodies.get(key);
+        if (body === undefined) {
           components.push({ componentKey: key, outcome: "unchanged" });
           continue;
         }
+        const existing = listed.find((c) => c.key === key);
         if (existing !== undefined) await this.removeContainer(existing.id);
-        else if ((await this.get(`/containers/${enc(name)}/json`, "inspect an application container")) !== null) throw conflict();
-        await this.createContainer(plan, key, name);
+        await this.createContainer(key, appStackContainerName(plan.stackId, key), body);
         components.push({ componentKey: key, outcome: existing === undefined ? "created" : "replaced" });
       }
       return { components, removedComponents };
@@ -547,10 +565,7 @@ export class AppStackEngine implements StackExecutorPort {
     throw engineError("create a stack volume", res.statusCode);
   }
 
-  private async createContainer(plan: ApprovedStackPlan, key: string, name: string): Promise<void> {
-    const ctx = { secretsRootDir: this.deps.secretsRootDir };
-    const body = buildAppStackContainerCreatePayload(plan, key, ctx);
-    assertAppStackPayloadHardening(body, ctx);
+  private async createContainer(key: string, name: string, body: AppStackContainerCreatePayload): Promise<void> {
     const res = await this.deps.request("POST", `/containers/create?name=${enc(name)}`, body);
     if (res.statusCode === 201) return;
     if (res.statusCode === 409) throw conflict();

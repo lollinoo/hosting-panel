@@ -424,7 +424,40 @@ describe("createAppStackComponents (5.10)", () => {
     await foreignContainer(h, WORKER);
     await expect(h.engine.createAppStackComponents({ plan })).rejects.toMatchObject({ reason: "STACK_NAMESPACE_CONFLICT" });
     expect(h.fake.containers.has(WORKER)).toBe(true);
-    expect(mutations(h.fake.log)).toEqual([`POST /containers/create?name=${WEB}`]);
+    expect(h.fake.containers.has(WEB)).toBe(false);
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
+  it("a body refused by the hardening check removes and creates nothing", async () => {
+    const h = await setup({ secretsRootDir: "/var/run/hp-app-engine-test" });
+    const [webComponent, workerComponent] = plan.components;
+    await prepared(h, appStackTestPlan({ components: [webComponent!, { ...workerComponent!, secretFiles: [] }] }));
+    const oldWeb = idOf(h, WEB);
+    const oldWorker = idOf(h, WORKER);
+    const webWithSecret = { ...webComponent!, secretFiles: [{ envName: "SHARED_KEY_FILE", parameterKey: "shared_key", version: 1 }] };
+    await expect(h.engine.createAppStackComponents({ plan: appStackTestPlan({ components: [webWithSecret], volumes: [] }) })).rejects.toMatchObject({
+      code: "HOST_POLICY_DENIED",
+    });
+    expect(mutations(h.fake.log)).toEqual([]);
+    expect([idOf(h, WEB), idOf(h, WORKER)]).toEqual([oldWeb, oldWorker]);
+  });
+
+  it("replaces a component whose environment holds a /var/run path", async () => {
+    const h = await setup();
+    await deployed(h);
+    const base = appStackTestPlan();
+    const pidFile = rehash({
+      ...base,
+      components: base.components.map((c) => (c.key === "worker" ? { ...c, environment: [{ name: "PIDFILE", value: "/var/run/app.pid" }] } : c)),
+    });
+    await expect(h.engine.createAppStackComponents({ plan: pidFile })).resolves.toEqual({
+      components: [
+        { componentKey: "web", outcome: "unchanged" },
+        { componentKey: "worker", outcome: "replaced" },
+      ],
+      removedComponents: [],
+    });
+    expect(h.fake.bodies.get(`POST /containers/create?name=${WORKER}`)?.at(-1)).toMatchObject({ Env: ["PIDFILE=/var/run/app.pid", "SHARED_KEY_FILE=/run/secrets/shared_key"] });
   });
 
   it("refuses when a container labelled with the stack id belongs to another organisation", async () => {

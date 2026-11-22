@@ -118,6 +118,27 @@ export function buildAppStackContainerCreatePayload(
 }
 
 const SECRET_BIND_PATTERN = /:\/run\/secrets\/([a-z][a-z0-9_]{0,31}):ro$/;
+const TOP_LEVEL_KEYS = new Set(["Image", "User", "Cmd", "Env", "Labels", "ExposedPorts", "StopTimeout", "HostConfig", "NetworkingConfig"]);
+const HOST_CONFIG_KEYS = new Set([
+  "Privileged",
+  "CapDrop",
+  "SecurityOpt",
+  "ReadonlyRootfs",
+  "Tmpfs",
+  "PidsLimit",
+  "NanoCpus",
+  "Memory",
+  "MemorySwap",
+  "RestartPolicy",
+  "NetworkMode",
+  "Binds",
+  "Mounts",
+  "LogConfig",
+]);
+const MOUNT_KEYS = new Set(["Type", "Source", "Target", "ReadOnly"]);
+
+const onlyKeys = (value: object, allowed: ReadonlySet<string>) => Object.keys(value).every((key) => allowed.has(key));
+const inRange = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 
 /** Run on every body before POST /containers/create: refuses a body that lost any hardening property. */
 export function assertAppStackPayloadHardening(
@@ -134,26 +155,51 @@ export function assertAppStackPayloadHardening(
     appStackSecretDirKey(stackId, payload.Labels[APP_STACK_LABELS.component] ?? ""),
   );
   const volumePrefix = `hp_appvol_${stackId}_`;
+  const hostPath = (source: string) => source.includes("docker.sock") || source.includes("/var/run");
 
+  if (!onlyKeys(payload, TOP_LEVEL_KEYS)) refuse("body keys");
+  if (!onlyKeys(host, HOST_CONFIG_KEYS)) refuse("HostConfig keys");
+  const label = APP_STACK_LABELS; // read here, not at load: names.ts imports this module back
+  const labelKeys = new Set([
+    label.managed,
+    label.role,
+    label.stackId,
+    label.organizationId,
+    label.component,
+    label.componentHash,
+    label.revisionId,
+    label.startIndex,
+    label.health,
+  ]);
+  if (!onlyKeys(payload.Labels, labelKeys)) refuse("Labels");
   if (host.Privileged !== false) refuse("Privileged");
   if (!isDeepStrictEqual(host.CapDrop, ["ALL"])) refuse("CapDrop");
-  for (const forbidden of ["CapAdd", "PortBindings", "Devices", "PidMode", "IpcMode"]) {
-    if (forbidden in host) refuse(forbidden);
-  }
-  if (!host.SecurityOpt.includes("no-new-privileges:true")) refuse("SecurityOpt");
+  if (!isDeepStrictEqual(host.SecurityOpt, ["no-new-privileges:true"])) refuse("SecurityOpt");
   if (host.ReadonlyRootfs !== true) refuse("ReadonlyRootfs");
+  if (!isDeepStrictEqual(host.Tmpfs, APP_STACK_TMPFS)) refuse("Tmpfs");
+  if (host.PidsLimit !== APP_STACK_PIDS_LIMIT) refuse("PidsLimit");
+  // The body carries no plan: the limits must be ones a plan can hold (memory = swap, whole millicores).
+  const { memoryBytesMin, memoryBytesMax, cpuMilliMin, cpuMilliMax } = APP_TEMPLATE_LIMITS;
+  if (!inRange(host.Memory, memoryBytesMin, memoryBytesMax) || host.MemorySwap !== host.Memory) refuse("Memory");
+  if (!inRange(host.NanoCpus / 1_000_000, cpuMilliMin, cpuMilliMax)) refuse("NanoCpus");
   if (host.NetworkMode !== appStackInternalNetworkName(stackId)) refuse("NetworkMode");
   for (const bind of host.Binds) {
     const k = SECRET_BIND_PATTERN.exec(bind)?.[1];
-    if (k === undefined || bind !== `${path.join(secretDir, k)}:${appStackSecretFilePath(k)}:ro`) refuse("Binds");
+    if (k === undefined || bind !== `${path.join(secretDir, k)}:${appStackSecretFilePath(k)}:ro` || hostPath(bind)) refuse("Binds");
   }
   for (const mount of host.Mounts) {
-    if (mount.Type !== "volume" || !mount.Source.startsWith(volumePrefix) || !APP_STACK_KEY_PATTERN.test(mount.Source.slice(volumePrefix.length))) {
+    if (
+      !onlyKeys(mount, MOUNT_KEYS) ||
+      mount.Type !== "volume" ||
+      !mount.Source.startsWith(volumePrefix) ||
+      !APP_STACK_KEY_PATTERN.test(mount.Source.slice(volumePrefix.length)) ||
+      hostPath(mount.Source)
+    ) {
       refuse("Mounts");
     }
   }
-  const json = JSON.stringify(payload);
-  if (json.includes("docker.sock") || json.includes("/var/run")) refuse("host socket");
+  // The plan schema's text rule for environment values and argv.
+  if ([...payload.Env, ...(payload.Cmd ?? [])].some((text) => /docker\.sock/i.test(text))) refuse("host socket");
 }
 
 export type AppStackHealthLabel =

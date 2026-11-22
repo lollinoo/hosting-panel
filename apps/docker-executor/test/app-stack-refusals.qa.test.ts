@@ -259,7 +259,7 @@ const CEILINGS: ReadonlyArray<readonly [name: string, limit: number, build: (n: 
   ],
   [
     "component key length",
-    32,
+    27,
     (n) =>
       edit((p) => {
         worker(p).key = "k".repeat(n);
