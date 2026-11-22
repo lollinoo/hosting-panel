@@ -399,3 +399,83 @@ describe("HCP-SPEC-004 rollback compatibility: the previous release moves, delet
     expect(await rows(pg, "SELECT 1 FROM site_backup_copies WHERE backup_id = 'bkp_nosettings'")).toEqual([]);
   });
 });
+
+describe("0025 app stacks", () => {
+  // HCP-SPEC-005: after 0025 the previous release (0024-era code) keeps running on the migrated schema.
+  const M0025 = "0025_app_stacks.sql";
+  const HASH = "a".repeat(64);
+  let pg: PGlite;
+  const SEED_0024 = `
+    INSERT INTO platform_installations (id, name) VALUES ('pi','pi');
+    INSERT INTO hosts (id, platform_installation_id, name, hostname, ipv4_address, total_cpu_milli, total_memory_bytes, total_storage_bytes)
+      VALUES ('h','pi','h','h.example','192.0.2.1',1000,'1','1');
+    INSERT INTO organizations (id, platform_installation_id, name, slug, max_sites) VALUES ('o','pi','o','o',5);
+    INSERT INTO host_allocations (id, host_id, organization_id) VALUES ('a','h','o');
+    INSERT INTO sites (id, organization_id, host_allocation_id, name, slug) VALUES ('s1','o','a','s1','s1');
+    INSERT INTO domains (id, site_id, organization_id, hostname) VALUES ('d_old','s1','o','old.example');`;
+  // A stack written by the new release before the rollback.
+  const STACK_ROWS = `
+    INSERT INTO app_templates (id, slug, name, category) VALUES ('atpl_a','alpha','Alpha','web');
+    INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
+      VALUES ('atv_a1','atpl_a',1,'x',1,'{}','${HASH}');
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_a','o','a','atpl_a','atv_a1','Stack A','running');
+    INSERT INTO app_stack_components (stack_id, organization_id, component_key) VALUES ('stk_a','o','web');
+    INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname)
+      VALUES ('sdom_a','stk_a','o','web',8080,'stack.example');`;
+  // The statements the previous release runs: none names a table, column or trigger added by 0025.
+  const OLD_RELEASE_WRITES = `
+    INSERT INTO organizations (id, platform_installation_id, name, slug, max_sites) VALUES ('o_rb','pi','rb','rb',3);
+    UPDATE organizations SET name = 'renamed', max_sites = 4 WHERE id = 'o_rb';
+    INSERT INTO sites (id, organization_id, host_allocation_id, name, slug) VALUES ('s_rb','o','a','rb','rb');
+    UPDATE sites SET status = 'ready' WHERE id = 's_rb';
+    INSERT INTO domains (id, site_id, organization_id, hostname) VALUES ('d_rb','s_rb','o','rb.example');
+    UPDATE domains SET status = 'active', hostname = 'rb2.example' WHERE id = 'd_rb';
+    INSERT INTO operations (id, organization_id, kind, resource_type, resource_id) VALUES ('op_rb','o','site.create','site','s_rb');
+    UPDATE operations SET status = 'succeeded' WHERE id = 'op_rb';
+    INSERT INTO outbox_events (id, event_type, aggregate_type, aggregate_id, payload)
+      VALUES ('ev_rb','operation.requested','operation','op_rb','{"operationId":"op_rb"}');
+    UPDATE outbox_events SET status = 'published', published_at = NOW() WHERE id = 'ev_rb';
+    INSERT INTO encrypted_secrets (id, organization_id, site_id, secret_key, ciphertext_base64, iv_base64, auth_tag_base64)
+      VALUES ('sec_rb','o','s_rb','db_password','c','i','t');
+    UPDATE encrypted_secrets SET version = 2, ciphertext_base64 = 'c2' WHERE id = 'sec_rb';
+    DELETE FROM encrypted_secrets WHERE id = 'sec_rb';
+    DELETE FROM outbox_events WHERE id = 'ev_rb';
+    DELETE FROM operations WHERE id = 'op_rb';
+    DELETE FROM domains WHERE id = 'd_rb';
+    DELETE FROM sites WHERE id = 's_rb';`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0025);
+    await pg.exec(SEED_0024);
+    await pg.exec(read(M0025));
+    await pg.exec(STACK_ROWS);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("runs the previous release's writes on sites, domains, organizations, operations, outbox and secrets", async () => {
+    await pg.exec(OLD_RELEASE_WRITES);
+    expect(await rows(pg, "SELECT id, max_sites, max_app_stacks FROM organizations ORDER BY id")).toEqual([
+      { id: "o", max_sites: 5, max_app_stacks: null },
+      { id: "o_rb", max_sites: 4, max_app_stacks: null },
+    ]);
+    await pg.exec("DELETE FROM organizations WHERE id = 'o_rb'");
+  });
+
+  it("refuses the previous release a site domain that a stack holds with the 23505 its unique index already raises", async () => {
+    await expect(pg.exec("INSERT INTO domains (id, site_id, organization_id, hostname) VALUES ('d_taken','s1','o','stack.example')")).rejects.toMatchObject({
+      code: "23505",
+    });
+  });
+
+  it("runs 0025 again on a database with site and stack rows without harm", async () => {
+    await pg.exec(read(M0025));
+    expect(await rows(pg, "SELECT id, status FROM app_stacks")).toEqual([{ id: "stk_a", status: "running" }]);
+    expect(await rows(pg, "SELECT hostname FROM app_stack_domains")).toEqual([{ hostname: "stack.example" }]);
+    expect(await rows(pg, "SELECT hostname FROM domains ORDER BY hostname")).toEqual([{ hostname: "old.example" }]);
+  });
+});

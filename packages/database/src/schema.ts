@@ -1,4 +1,5 @@
 import {
+  type AnyPgColumn,
   bigint,
   boolean,
   date,
@@ -15,6 +16,12 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type {
+  AppStackComponentHealth,
+  AppStackDeploymentStatus,
+  AppStackRetentionPolicy,
+  AppStackStatus,
+  AppStackVolumeStatus,
+  AppTemplateParameterEntry,
   AuditActorType,
   BackupCopyStatus,
   BackupKind,
@@ -103,6 +110,7 @@ export const organizations = pgTable(
     slug: text("slug").notNull().unique(),
     status: text("status").$type<OrganizationStatus>().notNull().default("active"),
     maxSites: integer("max_sites"),
+    maxAppStacks: integer("max_app_stacks"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -336,6 +344,251 @@ export const siteTemplateVersions = pgTable(
   (t) => [
     unique("uq_site_template_versions_number").on(t.templateId, t.versionNumber),
     unique("uq_site_template_versions_id_template").on(t.id, t.templateId),
+  ],
+);
+
+// Application stacks (ADR-0035). Circular FKs (default/desired/applied version or revision), user FKs and the hostname
+// triggers live in the SQL (0025), which is the source of truth, like siteTemplates.defaultVersionId.
+export const appTemplates = pgTable(
+  "app_templates",
+  {
+    id: text("id").primaryKey(),
+    slug: text("slug").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    category: text("category").notNull(),
+    builtIn: boolean("built_in").notNull().default(false),
+    enabled: boolean("enabled").notNull().default(false),
+    defaultVersionId: text("default_version_id"),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("uq_app_templates_slug").on(t.slug)],
+);
+
+export const appTemplateVersions = pgTable(
+  "app_template_versions",
+  {
+    id: text("id").primaryKey(),
+    templateId: text("template_id").notNull().references(() => appTemplates.id, { onDelete: "restrict" }),
+    versionNumber: integer("version_number").notNull(),
+    source: text("source").notNull(),
+    specVersion: integer("spec_version").notNull(),
+    compiledSchema: jsonb("compiled_schema").$type<Readonly<Record<string, unknown>>>().notNull(),
+    specHash: text("spec_hash").notNull(),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_template_versions_number").on(t.templateId, t.versionNumber),
+    unique("uq_app_template_versions_id_template").on(t.id, t.templateId),
+  ],
+);
+
+export const appStacks = pgTable(
+  "app_stacks",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    hostAllocationId: text("host_allocation_id").notNull(),
+    templateId: text("template_id").notNull(),
+    templateVersionId: text("template_version_id").notNull(),
+    name: text("name").notNull(),
+    status: text("status").$type<AppStackStatus>().notNull().default("draft"),
+    desiredRevisionId: text("desired_revision_id"),
+    appliedRevisionId: text("applied_revision_id"),
+    resourceQuotaId: text("resource_quota_id").references(() => resourceQuotas.id, { onDelete: "set null" }),
+    appliedRoutesHash: text("applied_routes_hash"),
+    idempotencyKey: text("idempotency_key"),
+    requestHash: text("request_hash"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("uq_app_stacks_id_org").on(t.id, t.organizationId),
+    foreignKey({
+      columns: [t.hostAllocationId, t.organizationId],
+      foreignColumns: [hostAllocations.id, hostAllocations.organizationId],
+      name: "fk_app_stacks_host_allocation_org",
+    }),
+    foreignKey({
+      columns: [t.templateVersionId, t.templateId],
+      foreignColumns: [appTemplateVersions.id, appTemplateVersions.templateId],
+      name: "fk_app_stacks_template_version",
+    }),
+    uniqueIndex("uq_app_stacks_name_live").on(t.organizationId, sql`lower(${t.name})`).where(sql`${t.deletedAt} IS NULL`),
+    uniqueIndex("uq_app_stacks_org_idempotency").on(t.organizationId, t.idempotencyKey).where(sql`${t.idempotencyKey} IS NOT NULL`),
+    index("idx_app_stacks_org_created").on(t.organizationId, t.createdAt),
+    index("idx_app_stacks_template_version").on(t.templateVersionId),
+  ],
+);
+
+const stackOrg = (name: string, t: { stackId: AnyPgColumn; organizationId: AnyPgColumn }) =>
+  foreignKey({ columns: [t.stackId, t.organizationId], foreignColumns: [appStacks.id, appStacks.organizationId], name })
+    .onDelete("cascade");
+
+export const appStackParameters = pgTable(
+  "app_stack_parameters",
+  {
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    parameterKey: text("parameter_key").notNull(),
+    publicValue: jsonb("public_value").$type<string | number | boolean>().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "app_stack_parameters_pkey", columns: [t.stackId, t.parameterKey] }),
+    stackOrg("fk_app_stack_parameters_stack_org", t),
+  ],
+);
+
+export const appStackSecrets = pgTable(
+  "app_stack_secrets",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    parameterKey: text("parameter_key").notNull(),
+    version: integer("version").notNull(),
+    ciphertextBase64: text("ciphertext_base64").notNull(),
+    ivBase64: text("iv_base64").notNull(),
+    authTagBase64: text("auth_tag_base64").notNull(),
+    keyVersion: text("key_version").notNull().default("v1"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_stack_secrets_version").on(t.stackId, t.parameterKey, t.version),
+    stackOrg("fk_app_stack_secrets_stack_org", t),
+  ],
+);
+
+export const appStackRevisions = pgTable(
+  "app_stack_revisions",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    revisionNumber: integer("revision_number").notNull(),
+    templateVersionId: text("template_version_id").notNull().references(() => appTemplateVersions.id),
+    plan: jsonb("plan").$type<Readonly<Record<string, unknown>>>().notNull(),
+    planHash: text("plan_hash").notNull(),
+    parameters: jsonb("parameters").$type<AppTemplateParameterEntry[]>().notNull().default([]),
+    componentCount: integer("component_count").notNull(),
+    cpuMilli: integer("cpu_milli").notNull(),
+    memoryBytes: bigint("memory_bytes", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_stack_revisions_number").on(t.stackId, t.revisionNumber),
+    unique("uq_app_stack_revisions_id_stack").on(t.id, t.stackId),
+    stackOrg("fk_app_stack_revisions_stack_org", t),
+  ],
+);
+
+export const appStackComponents = pgTable(
+  "app_stack_components",
+  {
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    componentKey: text("component_key").notNull(),
+    health: text("health").$type<AppStackComponentHealth>().notNull().default("unknown"),
+    healthObservedAt: timestamp("health_observed_at", { withTimezone: true }),
+    appliedRevisionId: text("applied_revision_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "app_stack_components_pkey", columns: [t.stackId, t.componentKey] }),
+    stackOrg("fk_app_stack_components_stack_org", t),
+    foreignKey({
+      columns: [t.appliedRevisionId, t.stackId],
+      foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
+      name: "fk_app_stack_components_applied_revision",
+    }),
+  ],
+);
+
+export const appStackVolumes = pgTable(
+  "app_stack_volumes",
+  {
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    volumeKey: text("volume_key").notNull(),
+    retentionPolicy: text("retention_policy").$type<AppStackRetentionPolicy>().notNull().default("retain"),
+    status: text("status").$type<AppStackVolumeStatus>().notNull().default("pending"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: "app_stack_volumes_pkey", columns: [t.stackId, t.volumeKey] }),
+    stackOrg("fk_app_stack_volumes_stack_org", t),
+  ],
+);
+
+export const appStackDomains = pgTable(
+  "app_stack_domains",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    componentKey: text("component_key").notNull(),
+    internalPort: integer("internal_port").notNull(),
+    hostname: text("hostname").notNull(),
+    status: text("status").$type<DomainStatus>().notNull().default("pending"),
+    dnsStatus: text("dns_status").$type<DnsStatus>().notNull().default("unchecked"),
+    dnsObserved: jsonb("dns_observed").$type<{ a: string[]; aaaa: string[] }>().notNull().default({ a: [], aaaa: [] }),
+    dnsCheckedAt: timestamp("dns_checked_at", { withTimezone: true }),
+    dnsNextCheckAt: timestamp("dns_next_check_at", { withTimezone: true }).notNull().defaultNow(),
+    dnsAttempts: integer("dns_attempts").notNull().default(0),
+    certStatus: text("cert_status").$type<CertStatus>().notNull().default("none"),
+    certProblem: text("cert_problem").$type<CertProblem>(),
+    certChallenge: text("cert_challenge").$type<CertChallenge>().notNull().default("http-01"),
+    certRequestedAt: timestamp("cert_requested_at", { withTimezone: true }),
+    certRetryAt: timestamp("cert_retry_at", { withTimezone: true }),
+    certAttempts: integer("cert_attempts").notNull().default(0),
+    certExpiresAt: timestamp("cert_expires_at", { withTimezone: true }),
+    certTrusted: boolean("cert_trusted").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_stack_domains_hostname").on(t.hostname),
+    stackOrg("fk_app_stack_domains_stack_org", t),
+    foreignKey({
+      columns: [t.stackId, t.componentKey],
+      foreignColumns: [appStackComponents.stackId, appStackComponents.componentKey],
+      name: "fk_app_stack_domains_component",
+    }),
+    index("idx_app_stack_domains_stack").on(t.stackId),
+    index("idx_app_stack_domains_dns_due").on(t.dnsNextCheckAt),
+  ],
+);
+
+export const appStackDeployments = pgTable(
+  "app_stack_deployments",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    operationId: text("operation_id").notNull(),
+    revisionId: text("revision_id"),
+    status: text("status").$type<AppStackDeploymentStatus>().notNull().default("queued"),
+    problem: text("problem"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("uq_app_stack_deployments_operation").on(t.operationId),
+    stackOrg("fk_app_stack_deployments_stack_org", t),
+    foreignKey({
+      columns: [t.revisionId, t.stackId],
+      foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
+      name: "fk_app_stack_deployments_revision",
+    }),
+    index("idx_app_stack_deployments_stack").on(t.stackId, t.startedAt),
   ],
 );
 

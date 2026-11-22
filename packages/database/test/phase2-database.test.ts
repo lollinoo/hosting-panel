@@ -75,6 +75,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0022_backup_targets_and_copies.sql",
       "0023_organization_site_limit.sql",
       "0024_site_templates.sql",
+      "0025_app_stacks.sql",
     ]);
     await seedPhase1Dataset(client.db);
   });
@@ -110,6 +111,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0022_backup_targets_and_copies.sql",
       "0023_organization_site_limit.sql",
       "0024_site_templates.sql",
+      "0025_app_stacks.sql",
     ]);
 
     const firstTimestamps = firstRows.map((r) => r.appliedAt.getTime());
@@ -141,6 +143,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0022_backup_targets_and_copies.sql",
       "0023_organization_site_limit.sql",
       "0024_site_templates.sql",
+      "0025_app_stacks.sql",
     ]);
 
     const secondRows = await client.db.select().from(schemaMigrations);
