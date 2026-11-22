@@ -10,35 +10,48 @@
  * that ends up in them, data that outlives a stop, a start and the replacement of the database container, a removal
  * that keeps the data and one that deletes it.
  *
+ * With `--imported` the same run is made for the draft the Compose importer writes (§2.8) from the WordPress and MariaDB
+ * file of the importer's tests, pasted as an administrator would: other component and volume names, a database account
+ * the platform generates too, a health check that asks WordPress for a page. The import needs the digest of every image
+ * tag, which the API asks the registry for: here the file names the versions the built-in template pins and the answers
+ * are the digests recorded with them, so the run is repeatable and downloads nothing new. With
+ * HP_ACCEPT_REGISTRY_CASES=1 it also asks the registry for those tags through the product (read-only, needs the network).
+ *
  * Machine safety (this machine may run a live panel):
  *  - Every object is named after this run: stack id stk_swarmtest_<hex>_a, so every container, network and volume name
  *    the engine derives contains swarmtest_<hex>; the script's own names and paths use hp_swarmtest_stk_<hex>.
  *  - The adapter talks only to a gate socket in the temp dir. Its default-deny judge() forwards a request to
  *    /var/run/docker.sock only when every hp_ name in the URL and body is this run's, the object is this run's (name or
- *    an id the gate saw created), the create bodies keep the profile, and a pull names a seed digest of the template;
- *    list answers are filtered to this run's objects. A secret of the run may travel in one place only, the Env of a
- *    container of the application: anywhere else the gate denies the request. The first step proves these denials.
- *    The script's own changes (proxy removal, cleanup) go through the same gate.
+ *    an id the gate saw created), the create bodies keep the profile, a pull names a digest of the plan and a registry
+ *    lookup a tag of the imported file (only with HP_ACCEPT_REGISTRY_CASES=1); list answers are filtered to this run's
+ *    objects. A secret of the run may travel in one place only, the Env of a container of the application: anywhere
+ *    else the gate denies the request. The gate-self-test step proves these denials. The script's own changes (proxy
+ *    removal, cleanup) go through the same gate.
  *  - Every adapter directory and name option points into the temp dir, /dev/shm/hp_swarmtest_stk_<hex>-secrets or a
  *    nonexistent own *_unused name. The only proxy is a throwaway one created through the ingressProxyContainerName /
  *    ingressNetworkName seams, published on 127.0.0.1:16780/16743 only; the gate denies a connect or disconnect of a
- *    container that is not this run's, so no live proxy can be attached.
+ *    container that is not this run's, so this run attaches no live proxy.
+ *  - A live panel's own executor attaches its proxy to every network whose role label is app_edge, whoever created
+ *    it (it did so to a run of this script on 2026-11-22). The gate therefore writes another value of that label for
+ *    this run's edge network and translates it in both directions, so a live executor never finds the network;
+ *    network-shape proves it and remove-keeps-volumes checks that only this run's containers are on it.
  *  - The docker CLI (an independent observer) is called with an argv array only and refuses any argument naming an hp_
  *    object of another run; inspect/logs and the commands run inside a container only ever name this run's objects.
- *    The two secrets are random values of this run that die with it; the login checks pass them as arguments.
- *  - Images: the digest-pinned refs of the wordpress-mariadb seed in APP_BUILT_IN_TEMPLATES, pulled by the product
- *    through the gate when missing (offline run: docker pull each <repository>@sha256:<digest> first). traefik:v3.7
- *    must be local.
+ *    The secrets are random values of this run that die with it; the login checks pass them as arguments.
+ *  - Images: the digest-pinned refs of the wordpress-mariadb seed in APP_BUILT_IN_TEMPLATES (the imported draft pins
+ *    the same two), pulled by the product through the gate when missing (offline run: docker pull each
+ *    <repository>@sha256:<digest> first). traefik:v3.7 must be local.
  *  - Cleanup (memoised, in `finally` and on SIGINT/SIGTERM): removeAppStack(..., removeVolumes: true), then leftovers by
  *    exact own names through the gate, gate closed, temp dirs removed.
  *
- * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-wordpress.mjs
+ * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-wordpress.mjs [--imported]
  * Steps: gate-self-test, preflight, snapshot-before, plan-compiles-from-seed, refused-before-docker,
  * deploy-creates-exact-set, container-standard-profile, secrets-reach-only-their-component, network-shape,
  * no-control-plane-reach, route-published-after-health, wordpress-installs, logs-mask-environment-secrets,
  * data-survives-stop-and-start, idempotent-reapply, upgrade-keeps-data, recovery-reads-only, remove-keeps-volumes,
  * destroy-data-removes-volume, host-nft-metadata-drop-on-stack-net (root only: HP_ACCEPT_ROOT_CASES=1 as root),
- * gate-clean, nothing-left.
+ * gate-clean, nothing-left. With --imported: compose-imports-to-draft first, plan-compiles-from-draft in place of
+ * plan-compiles-from-seed and, after it, registry-lookup-reads-only (HP_ACCEPT_REGISTRY_CASES=1 only).
  * Each prints PASS/FAIL/SKIP <step>; final line RESULT n/m passed (a skipped step is never a pass and is not counted).
  */
 import { execFile } from "node:child_process";
@@ -78,7 +91,7 @@ const {
   appStackSecretDirKey,
   appStackVolumeName,
 } = executor;
-const { compileAppStackPlan } = policy;
+const { compileAppStackPlan, importComposeToAppTemplate, listComposeImages, validateAppTemplateSource } = policy;
 const { APP_BUILT_IN_TEMPLATES, ApprovedStackPlanSchema, appStackComponentSecretRefs } = contracts;
 const { computeAppStackPlanHash } = domain;
 
@@ -87,6 +100,11 @@ const HOST = "127.0.0.1";
 const PORT = { http: 16780, https: 16743 };
 const DOCKER_SOCK = "/var/run/docker.sock";
 const ROLE_LABEL = "io.hostingpanel.network_role";
+// The executor of a live panel on this machine attaches its own proxy to every network whose role label is app_edge,
+// whoever created it. Docker therefore holds another value for this run's edge network, and the gate translates it in
+// both directions: the adapter writes and reads app_edge, a live executor never finds the network.
+const EDGE_ROLE = "app_edge";
+const EDGE_ROLE_IN_DOCKER = "app_edge_under_test";
 const hex = randomBytes(6).toString("hex");
 const marker = `swarmtest_${hex}`;
 const runPrefix = `hp_swarmtest_stk_${hex}`;
@@ -99,41 +117,99 @@ const HOST1 = `wp-${hex}.hp-stk.test`;
 const TITLE = `Acceptance ${hex}`;
 const HEALTH_MS = 180_000;
 const rootCasesEnabled = process.env.HP_ACCEPT_ROOT_CASES === "1" && process.getuid() === 0;
+/** `--imported`: the run is made for the draft the Compose importer writes, not for the built-in template. */
+const IMPORTED = process.argv.slice(2).includes("--imported");
+const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--imported");
+if (unknownArgs.length > 0) {
+  console.log(`FAIL preflight: unknown argument ${unknownArgs[0]} (the only one is --imported)`);
+  console.log("RESULT 0/1 passed in 0.0s");
+  process.exit(1);
+}
+/** The lookup of the image tags asks the public registry: only on request. */
+const registryCasesEnabled = IMPORTED && process.env.HP_ACCEPT_REGISTRY_CASES === "1";
+const COMPOSE_FILE = "packages/policy-engine/test/fixtures/compose-import/wordpress-mariadb.yml";
 /** This run's: the stack-derived names carry the marker, the script's own names and paths the prefix. */
 const ours = (s) => s.includes(marker) || s.includes(runPrefix);
 const OURS_FILTER = ["--filter", `name=${marker}`, "--filter", `name=${runPrefix}`];
 
-// ---- secrets (the API generates them at install; here two random values that die with the run) ----
+// ---- secrets (the API generates them at install; here random values that die with the run) ----
 const DB_PASSWORD = randomBytes(16).toString("hex");
 const ROOT_PASSWORD = randomBytes(16).toString("hex");
 const ADMIN_PASSWORD = randomBytes(12).toString("hex");
+/** What the two templates name differently. The imported file has the platform generate the database account too
+ *  (kind `user`: a lowercase letter, then lowercase letters and digits, 16 in all); the built-in one fixes it. */
+const T = IMPORTED
+  ? {
+      what: "the draft imported from the Compose file",
+      db: "mariadb",
+      volumes: { database: "mariadb-data", site: "wordpress-data" },
+      dbUser: `u${randomBytes(8).toString("hex").slice(1)}`,
+      keys: { user: "user_wordpress", password: "password_wordpress", root: "password_root" },
+    }
+  : {
+      what: "the wordpress-mariadb seed",
+      db: "db",
+      volumes: { database: "database", site: "site" },
+      dbUser: "wordpress",
+      keys: { user: null, password: "db_password", root: "db_root_password" },
+    };
+const WORDPRESS = "wordpress";
 const SECRET_CONTENTS = [
-  { parameterKey: "db_password", version: 1, content: DB_PASSWORD },
-  { parameterKey: "db_root_password", version: 1, content: ROOT_PASSWORD },
+  ...(T.keys.user === null ? [] : [{ parameterKey: T.keys.user, version: 1, content: T.dbUser }]),
+  { parameterKey: T.keys.password, version: 1, content: DB_PASSWORD },
+  { parameterKey: T.keys.root, version: 1, content: ROOT_PASSWORD },
 ];
+/** "<variable><-<secret>" per component, in the plan's order (by variable name). */
+const READS = {
+  db: [`MARIADB_PASSWORD<-${T.keys.password}`, `MARIADB_ROOT_PASSWORD<-${T.keys.root}`, ...(T.keys.user === null ? [] : [`MARIADB_USER<-${T.keys.user}`])],
+  wordpress: [`WORDPRESS_DB_PASSWORD<-${T.keys.password}`, ...(T.keys.user === null ? [] : [`WORDPRESS_DB_USER<-${T.keys.user}`])],
+};
+/** The same reads as the "<variable>=<value>" a container holds. */
+const heldBy = (reads) =>
+  reads.map((read) => {
+    const [name, key] = read.split("<-");
+    return `${name}=${SECRET_CONTENTS.find((e) => e.parameterKey === key).content}`;
+  });
 /** How many 8-character windows of the secret occur in a text (0 = no part of it leaked). */
 function leakedWindows(text, secret) {
   let n = 0;
   for (let i = 0; i + 8 <= secret.length; i++) if (text.includes(secret.slice(i, i + 8))) n++;
   return n;
 }
-const leaks = (text) => [DB_PASSWORD, ROOT_PASSWORD].some((secret) => leakedWindows(text, secret) > 0);
+const leaks = (text) => SECRET_CONTENTS.some((e) => leakedWindows(text, e.content) > 0);
 
-// ---- plans (the seed of the extended format: no allowlist row, two generated secrets) ----
+// ---- plans (the extended format: no allowlist row, generated secrets) ----
 const seed = APP_BUILT_IN_TEMPLATES.find((t) => t.slug === "wordpress-mariadb");
+/** The tag and the digest the seed pins for a repository. */
+const pinned = (repository) => {
+  const m = seed.source.match(new RegExp(`image: (${repository}:[\\w.-]+)@(sha256:[0-9a-f]{64})`));
+  return { tag: m?.[1] ?? "", digest: m?.[2] ?? "" };
+};
+/**
+ * The imported run: the Compose file as an administrator would paste it, with its two image tags set to the versions
+ * the seed pins. The digest of each tag, which the API asks the registry for, is here the one the seed records.
+ */
+let imported = null;
+const LOOKUPS = new Set();
+if (IMPORTED) {
+  const file = await readFile(path.resolve(repoRoot, COMPOSE_FILE), "utf8");
+  const compose = file.replace(/^(\s+image: )(wordpress|mariadb):\S+$/gm, (_all, lead, repository) => `${lead}${pinned(repository).tag}`);
+  for (const image of listComposeImages(compose)) LOOKUPS.add(image);
+  imported = importComposeToAppTemplate({ compose, digests: new Map([...LOOKUPS].map((image) => [image, pinned(image.split(":")[0]).digest])) });
+}
 const first = compileAppStackPlan({
-  source: seed.source,
+  source: IMPORTED ? (imported.source ?? "") : seed.source,
   parameters: [],
   secretVersions: new Map(SECRET_CONTENTS.map((e) => [e.parameterKey, e.version])),
   ids: {
     stackId: A,
     organizationId: ORG,
     hostAllocationId: `alloc_swarmtest_${hex}`,
-    templateVersionId: seed.versionId,
+    templateVersionId: IMPORTED ? `atv_swarmtest_${hex}` : seed.versionId,
     revisionId: `srev_swarmtest_${hex}_1`,
   },
 });
-/** The seed digest refs: the only images the gate inspects or pulls (besides the proxy image). */
+/** The digest refs of the plan: the only images the gate inspects or pulls (besides the proxy image). */
 const IMAGES = new Set(first.ok ? first.plan.components.map((c) => c.image) : []);
 const rehash = (plan) => ({ ...plan, planHash: computeAppStackPlanHash(plan) });
 const withComponent = (plan, key, over) => rehash({ ...plan, components: plan.components.map((c) => (c.key === key ? { ...c, ...over } : c)) });
@@ -294,21 +370,24 @@ function judge(method, rawUrl, bodyText) {
   let m;
   if (method === "GET" && (p === "/_ping" || p === "/version" || p === "/info")) return fwd();
   if (method === "GET" && (m = p.match(/^\/images\/(.+)\/json$/))) return IMAGES.has(m[1]) || m[1] === TRAEFIK_IMAGE ? fwd() : deny("image");
+  if (method === "GET" && (m = p.match(/^\/distribution\/(.+)\/json$/))) return registryCasesEnabled && LOOKUPS.has(m[1]) ? fwd() : deny("registry lookup");
   if (method === "POST" && p === "/images/create") {
     const from = u.searchParams.get("fromImage") ?? "";
     const tag = u.searchParams.get("tag") ?? "";
     const ref = tag === "" ? from : tag.startsWith("sha256:") ? `${from}@${tag}` : null;
     return ref !== null && ref.includes("@sha256:") && IMAGES.has(ref) ? fwd() : deny("image pull");
   }
-  if (method === "GET" && ["/containers/json", "/networks", "/volumes"].includes(p)) return fwd({ filterList: p });
+  if (method === "GET" && ["/containers/json", "/networks", "/volumes"].includes(p)) return fwd({ filterList: p, url: p === "/networks" ? edgeRoleFilterForDocker(rawUrl) : undefined });
   if (method === "POST" && p === "/networks/create") {
     const role = body.Labels?.[ROLE_LABEL];
     const ok =
       [undefined, "bridge"].includes(body.Driver) &&
       body.Options?.["com.docker.network.bridge.name"] === undefined &&
       body.IPAM === undefined &&
-      ((String(body.Name).includes(marker) && ["app_internal", "app_edge"].includes(role)) || (body.Name === ingressNet && role === "ingress_public"));
-    return ok ? fwd() : deny("network create");
+      ((String(body.Name).includes(marker) && ["app_internal", EDGE_ROLE].includes(role)) || (body.Name === ingressNet && role === "ingress_public"));
+    if (!ok) return deny("network create");
+    if (role !== EDGE_ROLE) return fwd();
+    return fwd({ body: JSON.stringify({ ...body, Labels: { ...body.Labels, [ROLE_LABEL]: EDGE_ROLE_IN_DOCKER } }) });
   }
   if (method === "POST" && p === "/volumes/create") {
     const ok = String(body.Name).includes(marker) && body.DriverOpts === undefined && [undefined, "local"].includes(body.Driver);
@@ -333,16 +412,32 @@ function judge(method, rawUrl, bodyText) {
     if (method === (sub === undefined ? "DELETE" : sub === "json" || sub === "logs" ? "GET" : "POST")) return fwd({ inspect: sub === "json" });
   }
   if ((m = p.match(/^\/(networks|volumes)\/([^/]+)$/)) && isOwn(m[2])) {
-    if (method === "GET" || (method === "DELETE" && !(m[1] === "volumes" && u.searchParams.has("force")))) return fwd();
+    if (method === "GET" || (method === "DELETE" && !(m[1] === "volumes" && u.searchParams.has("force")))) return fwd({ network: method === "GET" && m[1] === "networks" });
   }
   return deny("not an allowed request");
 }
 
+/** The address Docker receives: a label filter for the edge role names the value Docker holds. */
+function edgeRoleFilterForDocker(rawUrl) {
+  const u = new URL(rawUrl, "http://docker");
+  const filters = JSON.parse(u.searchParams.get("filters") ?? "{}");
+  const asked = `${ROLE_LABEL}=${EDGE_ROLE}`;
+  if (!Array.isArray(filters.label) || !filters.label.includes(asked)) return undefined;
+  filters.label = filters.label.map((l) => (l === asked ? `${ROLE_LABEL}=${EDGE_ROLE_IN_DOCKER}` : l));
+  u.searchParams.set("filters", JSON.stringify(filters));
+  return `${u.pathname}${u.search}`;
+}
+/** A network as the adapter wrote it: the edge role under its own name. */
+function edgeRoleForAdapter(network) {
+  if (network?.Labels?.[ROLE_LABEL] !== EDGE_ROLE_IN_DOCKER) return network;
+  return { ...network, Labels: { ...network.Labels, [ROLE_LABEL]: EDGE_ROLE } };
+}
 /** A list answer with this run's objects only. */
 function ownOnly(listPath, text) {
   const data = JSON.parse(text);
   if (listPath === "/volumes") return { ...data, Volumes: (data.Volumes ?? []).filter((v) => ours(String(v.Name))) };
-  return data.filter((x) => ours(String(listPath === "/networks" ? x.Name : x.Names?.[0])));
+  if (listPath === "/networks") return data.filter((x) => ours(String(x.Name))).map(edgeRoleForAdapter);
+  return data.filter((x) => ours(String(x.Names?.[0])));
 }
 
 function startGate(socketPath) {
@@ -368,13 +463,14 @@ function startGate(socketPath) {
       const headers = { ...req.headers, host: "docker" };
       delete headers["transfer-encoding"];
       if (out.length > 0 || req.method === "POST") headers["content-length"] = String(out.length);
-      const up = http.request({ socketPath: DOCKER_SOCK, method: req.method, path: req.url, headers }, (ures) => {
+      const up = http.request({ socketPath: DOCKER_SOCK, method: req.method, path: verdict.url ?? req.url, headers }, (ures) => {
         const parts = [];
         ures.on("data", (c) => parts.push(c));
         ures.on("end", () => {
           let body = Buffer.concat(parts);
           if (verdict.register && ures.statusCode === 201) ownIds.add(JSON.parse(body.toString("utf8")).Id);
           if (verdict.filterList && ures.statusCode === 200) body = Buffer.from(JSON.stringify(ownOnly(verdict.filterList, body.toString("utf8"))));
+          if (verdict.network && ures.statusCode === 200) body = Buffer.from(JSON.stringify(edgeRoleForAdapter(JSON.parse(body.toString("utf8")))));
           // The proxy's ports are loopback in Docker: show the executor the HostIp its payload asked for.
           if (verdict.inspect) body = Buffer.from(body.toString("utf8").replaceAll('"HostIp":"127.0.0.1"', '"HostIp":"0.0.0.0"'));
           const rh = { ...ures.headers, "content-length": String(body.length) };
@@ -568,6 +664,23 @@ async function main() {
   const bridges = [];
 
   try {
+    if (IMPORTED) {
+      // Nothing is sent anywhere by this step: the importer is a function of the file and of the digests it is given.
+      const importOk = await step("compose-imports-to-draft", async () => {
+        const count = (level) => imported.report.filter((n) => n.level === level).length;
+        const refused = imported.report.filter((n) => n.level === "refused").map((n) => `${n.path} ${n.code}`);
+        assert(same([...LOOKUPS], [pinned("wordpress").tag, pinned("mariadb").tag]), "the file names the two versions the built-in template pins", [...LOOKUPS].join(","));
+        assert(imported.ok && refused.length === 0, `${COMPOSE_FILE} imports to a draft`, refused.join(" | ") || "no draft");
+        info(`import of ${[...LOOKUPS].join(" and ")}: ${count("dropped")} dropped, ${count("changed")} changed, ${count("info")} remarks`);
+        const draft = validateAppTemplateSource(imported.source);
+        assert(draft.ok && draft.spec.schemaVersion === 2, "the draft is a valid template of the extended format", JSON.stringify(draft.ok ? draft.spec.schemaVersion : draft.errors).slice(0, 300));
+        const secrets = draft.spec.parameters.filter((p) => p.type === "secret");
+        assert(same(secrets.map((p) => p.key).sort(), Object.values(T.keys).sort()), "its secrets are the three the file asks the platform for", secrets.map((p) => p.key).join(","));
+        assert(secrets.every((p) => p.generate != null), "the platform generates every one of them", JSON.stringify(secrets.map((p) => p.generate ?? null)));
+        assert(draft.spec.parameters.every((p) => p.customer === false), "the customer's form has no field of this template (a name and a domain are all they give)", draft.spec.parameters.filter((p) => p.customer !== false).map((p) => p.key).join(","));
+      });
+      if (!importOk) return;
+    }
     await startGate(gateSocket);
     adapter = new DockerEngineSocketAdapter(adapterOptions);
     const gateOk = await step("gate-self-test", async () => {
@@ -578,8 +691,8 @@ async function main() {
       const foreignVol = (await lines(["volume", "ls", "--format", "{{.Name}}"]))[0] ?? `selftest_${hex}`;
       const image = [...IMAGES][0] ?? "none";
       const ownNet = appStackInternalNetworkName(A);
-      const wp = cName(A, "wordpress");
-      const siteVolume = appStackVolumeName(A, "site");
+      const wp = cName(A, WORDPRESS);
+      const siteVolume = appStackVolumeName(A, T.volumes.site);
       const standard = {
         Image: image,
         HostConfig: { CapDrop: ["ALL"], CapAdd: [...APP_STACK_STANDARD_CAP_ADD], SecurityOpt: ["no-new-privileges:true"], ReadonlyRootfs: false, NetworkMode: ownNet },
@@ -605,6 +718,7 @@ async function main() {
         ["POST", "/v1.45/images/create?fromImage=wordpress&tag=7-apache", ""],
         ["POST", `/v1.45/images/create?fromImage=mariadb&tag=sha256:${"e".repeat(64)}`, ""],
         ["GET", "/v1.45/images/alpine:3/json", ""],
+        ["GET", "/v1.45/distribution/alpine:3/json", ""],
         ["POST", "/v1.45/containers/prune", ""],
         ["POST", "/v1.45/volumes/prune", ""],
         ["GET", "/v1.45/system/df", ""],
@@ -662,7 +776,7 @@ async function main() {
       const stale = (await lines(["ps", "-a", "--format", "{{.Names}}"])).filter(ours);
       assert(stale.length === 0, "no object name contains the run marker", stale.join(","));
       assert(CAP_MASK === "00000000000004cb", "the capability list of the standard profile is the one this script knows", `${CAP_MASK} ${APP_STACK_STANDARD_CAP_ADD.join(",")}`);
-      info(`engine ${engineVersion}, marker ${marker}, images ${[...IMAGES].join(" ")}`);
+      info(`engine ${engineVersion}, marker ${marker}, template: ${T.what}, images ${[...IMAGES].join(" ")}`);
     });
 
     await step("snapshot-before", async () => {
@@ -672,42 +786,66 @@ async function main() {
       info(`S0: ${S0.containers.length} containers, ${S0.networks.length} networks, ${S0.volumes.length} volumes`);
     });
 
-    const planOk = await step("plan-compiles-from-seed", async () => {
-      assert(first.ok, "the wordpress-mariadb seed compiles with [] parameters", JSON.stringify(first.issues));
+    const planOk = await step(IMPORTED ? "plan-compiles-from-draft" : "plan-compiles-from-seed", async () => {
+      assert(first.ok, `${T.what} compiles with [] parameters`, JSON.stringify(first.issues));
       planA = ApprovedStackPlanSchema.parse(first.plan);
       assert(planA.schemaVersion === 2, "a plan of the extended format", String(planA.schemaVersion));
-      assert(same(planA.components.map((c) => c.key), ["db", "wordpress"]), "components [db, wordpress]", planA.components.map((c) => c.key).join(","));
-      assert(same(planA.ingress, [{ componentKey: "wordpress", port: 80 }]), "ingress wordpress:80", JSON.stringify(planA.ingress));
-      assert(same(planA.volumes.map((v) => v.key), ["database", "site"]), "volumes [database, site]", JSON.stringify(planA.volumes));
+      assert(same(planA.components.map((c) => c.key), [T.db, WORDPRESS]), `components [${T.db}, ${WORDPRESS}]`, planA.components.map((c) => c.key).join(","));
+      assert(same(planA.ingress, [{ componentKey: WORDPRESS, port: 80 }]), "ingress wordpress:80", JSON.stringify(planA.ingress));
+      assert(same(planA.volumes.map((v) => v.key), [T.volumes.database, T.volumes.site]), `volumes [${T.volumes.database}, ${T.volumes.site}]`, JSON.stringify(planA.volumes));
       assert(planA.components.every((c) => /^[a-z0-9./-]+@sha256:[0-9a-f]{64}$/.test(c.image)), "every image is a digest reference", planA.components.map((c) => c.image).join(" "));
       assert(planA.components.every((c) => c.profile === "standard" && c.runAsUser === null && c.argv === null), "both on the standard profile, image user and command", "other");
       assert(planA.components.every((c) => c.secretFiles.length === 0), "no secretFiles", "some");
       const reads = (key) => componentOf(planA, key).secretEnvironment.map((e) => `${e.name}<-${e.pieces.map((x) => x.parameterKey ?? "literal").join("+")}`);
-      assert(same(reads("db"), ["MARIADB_PASSWORD<-db_password", "MARIADB_ROOT_PASSWORD<-db_root_password"]), "db reads both secrets", reads("db").join(","));
-      assert(same(reads("wordpress"), ["WORDPRESS_DB_PASSWORD<-db_password"]), "wordpress reads the database password only", reads("wordpress").join(","));
+      assert(same(reads(T.db), READS.db), "the database reads its account and the root password", reads(T.db).join(","));
+      assert(same(reads(WORDPRESS), READS.wordpress), "wordpress reads the database account only", reads(WORDPRESS).join(","));
       const written = planA.components.flatMap((c) => c.environment.map((e) => e.name)).filter((name) => /PASSWORD|SECRET|TOKEN|KEY/.test(name));
       assert(written.length === 0, "no written value under a secret-looking name", written.join(","));
     });
     if (!planOk) return;
     const route = (plan, hosts) => ({ plan, routes: [{ componentKey: plan.ingress[0].componentKey, internalPort: plan.ingress[0].port, hosts: hosts.map(hostRoute) }] });
-    const DB = cName(A, "db");
-    const WP = cName(A, "wordpress");
+    const DB = cName(A, T.db);
+    const WP = cName(A, WORDPRESS);
+
+    if (IMPORTED && !registryCasesEnabled) {
+      skip(
+        "registry-lookup-reads-only",
+        "asks the public registry for the tags of the file (run with HP_ACCEPT_REGISTRY_CASES=1 on a machine with the network); this run imports with the digests the built-in template pins",
+      );
+    } else if (IMPORTED) {
+      await step("registry-lookup-reads-only", async () => {
+        // What the API does for the administrator's import: tag to digest through the Engine, with no credentials.
+        const mark = gateLog.length;
+        for (const image of LOOKUPS) {
+          const answer = await adapter.resolveAppStackImage({ image });
+          assert(answer.image === image && /^sha256:[0-9a-f]{64}$/.test(answer.digest), `the registry answers a digest for ${image}`, JSON.stringify(answer));
+          const used = pinned(image.split(":")[0]).digest;
+          info(`${image} -> ${answer.digest}${answer.digest === used ? " (the digest of this run)" : ` (the tag was published again after it was pinned: this run keeps ${used})`}`);
+        }
+        const sent = gateLog.slice(mark).filter((l) => !/^GET \/(v[\d.]+\/)?(_ping|version) /.test(l));
+        assert(
+          sent.length === LOOKUPS.size && sent.every((l) => /^GET \/(v[\d.]+\/)?distribution\//.test(l) && l.endsWith(" -> forward")),
+          "one read per tag and no other request",
+          sent.join(" | "),
+        );
+      });
+    }
 
     await step("refused-before-docker", async () => {
       const mark = gateLog.length;
-      const db = componentOf(planA, "db");
+      const db = componentOf(planA, T.db);
       const refusals = [
-        ["a capability list on a component", withComponent(planA, "db", { capAdd: ["NET_ADMIN"] }), "STACK_PLAN_INVALID"],
-        ["a run profile outside the closed list", withComponent(planA, "db", { profile: "privileged" }), "STACK_PLAN_INVALID"],
-        ["an image named by tag", withComponent(planA, "db", { image: `${db.image.split("@")[0]}:1` }), "STACK_PLAN_INVALID"],
-        ["a host path", withComponent(planA, "db", { volumes: [{ ...db.volumes[0], hostPath: "/" }] }), "STACK_PLAN_INVALID"],
-        ["the Docker socket as a mount target", withComponent(planA, "db", { volumes: [{ ...db.volumes[0], containerPath: DOCKER_SOCK }] }), "STACK_PLAN_INVALID"],
-        ["a published host port", withComponent(planA, "db", { publish: [{ hostPort: 3306 }] }), "STACK_PLAN_INVALID"],
-        ["a password written in the plan", withComponent(planA, "db", { environment: [...db.environment, { name: "MARIADB_PASSWORD", value: "x" }] }), "STACK_PLAN_INVALID"],
-        ["memory over the ceiling", withComponent(planA, "db", { resources: { ...db.resources, memoryBytes: "17179869185" } }), "STACK_PLAN_INVALID"],
+        ["a capability list on a component", withComponent(planA, T.db, { capAdd: ["NET_ADMIN"] }), "STACK_PLAN_INVALID"],
+        ["a run profile outside the closed list", withComponent(planA, T.db, { profile: "privileged" }), "STACK_PLAN_INVALID"],
+        ["an image named by tag", withComponent(planA, T.db, { image: `${db.image.split("@")[0]}:1` }), "STACK_PLAN_INVALID"],
+        ["a host path", withComponent(planA, T.db, { volumes: [{ ...db.volumes[0], hostPath: "/" }] }), "STACK_PLAN_INVALID"],
+        ["the Docker socket as a mount target", withComponent(planA, T.db, { volumes: [{ ...db.volumes[0], containerPath: DOCKER_SOCK }] }), "STACK_PLAN_INVALID"],
+        ["a published host port", withComponent(planA, T.db, { publish: [{ hostPort: 3306 }] }), "STACK_PLAN_INVALID"],
+        ["a password written in the plan", withComponent(planA, T.db, { environment: [...db.environment, { name: "MARIADB_PASSWORD", value: "x" }] }), "STACK_PLAN_INVALID"],
+        ["memory over the ceiling", withComponent(planA, T.db, { resources: { ...db.resources, memoryBytes: "17179869185" } }), "STACK_PLAN_INVALID"],
         [
           "content changed after approval",
-          { ...planA, components: planA.components.map((c) => (c.key === "db" ? { ...c, resources: { ...c.resources, cpuMilli: 2000 } } : c)) },
+          { ...planA, components: planA.components.map((c) => (c.key === T.db ? { ...c, resources: { ...c.resources, cpuMilli: 2000 } } : c)) },
           "STACK_PLAN_HASH_MISMATCH",
         ],
       ];
@@ -717,7 +855,7 @@ async function main() {
       }
       const entries = [
         ["a create without the secrets", undefined, "STACK_SECRET_MISSING"],
-        ["a create with one secret of two", SECRET_CONTENTS.slice(0, 1), "STACK_SECRET_MISSING"],
+        ["a create with one secret only", SECRET_CONTENTS.slice(0, 1), "STACK_SECRET_MISSING"],
         ["a create with a secret the plan does not name", [...SECRET_CONTENTS, { parameterKey: "other", version: 1, content: "x" }], "STACK_PLAN_INVALID"],
         ["a create with two entries for one secret", [...SECRET_CONTENTS, SECRET_CONTENTS[0]], "STACK_PLAN_INVALID"],
       ];
@@ -733,9 +871,9 @@ async function main() {
       const out = await deploy(planA);
       info(`pull: ${out.pulls.map((p) => `${p.image} pulled=${String(p.pulled)}`).join(", ")}`);
       assert(same(out.prepare.networks.map((n) => n.created), [true, true]), "two networks created", JSON.stringify(out.prepare.networks));
-      assert(same(out.prepare.volumes.map((v) => `${v.volumeKey}:${String(v.created)}`).sort(), ["database:true", "site:true"]), "two volumes created", JSON.stringify(out.prepare.volumes));
+      assert(same(out.prepare.volumes.map((v) => `${v.volumeKey}:${String(v.created)}`).sort(), [`${T.volumes.database}:true`, `${T.volumes.site}:true`]), "two volumes created", JSON.stringify(out.prepare.volumes));
       assert(out.create.components.every((c) => c.outcome === "created") && out.create.components.length === 2, "two components created", JSON.stringify(out.create));
-      assert(out.starts.every((s) => s.outcome === "started"), "db then wordpress started", JSON.stringify(out.starts));
+      assert(out.starts.every((s) => s.outcome === "started"), "the database, then wordpress started", JSON.stringify(out.starts));
       assert(!leaks(JSON.stringify(out)), "no adapter result holds a part of a secret", "found");
       const S1 = await snapshot();
       assert(same(ownNames(S1), namesOf(planA)), "own delta: exactly 2 containers, 2 networks, 2 volumes", JSON.stringify(ownNames(S1)));
@@ -788,8 +926,8 @@ async function main() {
       const envOf = async (name) => (await inspectOf(name)).Config.Env ?? [];
       const dbEnv = await envOf(DB);
       const wpEnv = await envOf(WP);
-      assert(dbEnv.includes(`MARIADB_PASSWORD=${DB_PASSWORD}`) && dbEnv.includes(`MARIADB_ROOT_PASSWORD=${ROOT_PASSWORD}`), "db holds both secrets in its environment", "missing");
-      assert(wpEnv.includes(`WORDPRESS_DB_PASSWORD=${DB_PASSWORD}`), "wordpress holds the database password in its environment", "missing");
+      assert(heldBy(READS.db).every((e) => dbEnv.includes(e)), "the database holds its account and the root password in its environment", "missing");
+      assert(heldBy(READS.wordpress).every((e) => wpEnv.includes(e)), "wordpress holds the database account in its environment", "missing");
       assert(leakedWindows(wpEnv.join("\n"), ROOT_PASSWORD) === 0, "wordpress holds no part of the root password", "found");
       for (const name of [DB, WP]) {
         const c = await inspectOf(name);
@@ -797,12 +935,13 @@ async function main() {
         assert(!leaks(outside), `${name}: a secret appears in its environment only (no label, command, mount or path)`, "found elsewhere");
       }
       // The values work, each for the account the template gave it and for no other.
-      const login = (user, password) => phpIn(WP, DB_LOGIN, ["db", user, password]);
-      await until("the database accepts the application account", 60_000, () => login("wordpress", DB_PASSWORD), 2_000);
+      const login = (user, password) => phpIn(WP, DB_LOGIN, [T.db, user, password]);
+      await until("the database accepts the application account", 60_000, () => login(T.dbUser, DB_PASSWORD), 2_000);
       assert(await login("root", ROOT_PASSWORD), "the root password opens the root account", "refused");
-      const wrong = [["wordpress", ROOT_PASSWORD], ["root", DB_PASSWORD], ["root", ""], ["wordpress", ""]];
+      const wrong = [[T.dbUser, ROOT_PASSWORD], ["root", DB_PASSWORD], ["root", ""], [T.dbUser, ""]];
       for (const [user, password] of wrong) {
-        assert(!(await login(user, password)), `${user} is refused with ${password === "" ? "no password" : "the other secret"}`, "accepted");
+        const who = user === "root" ? "root" : "the application account";
+        assert(!(await login(user, password)), `${who} is refused with ${password === "" ? "no password" : "the other secret"}`, "accepted");
       }
       // The copies the executor keeps to mask the logs: one per reference, readable by the executor only, mounted nowhere.
       const expected = planA.components.flatMap((c) => entriesFor(planA, c.key).map((e) => `${appStackSecretDirKey(A, c.key)}/${e.parameterKey}`)).sort();
@@ -813,7 +952,8 @@ async function main() {
     });
 
     await step("network-shape", async () => {
-      for (const [name, role, internal] of [[appStackInternalNetworkName(A), "app_internal", true], [appStackEdgeNetworkName(A), "app_edge", false]]) {
+      // Docker holds the edge role under the name the gate gives it (see EDGE_ROLE_IN_DOCKER); the adapter read app_edge.
+      for (const [name, role, internal] of [[appStackInternalNetworkName(A), "app_internal", true], [appStackEdgeNetworkName(A), EDGE_ROLE_IN_DOCKER, false]]) {
         const n = await networkOf(name);
         assert(
           n.Driver === "bridge" && n.Internal === internal && Object.keys(n.Options ?? {}).length === 0 && n.Labels?.[ROLE_LABEL] === role,
@@ -825,8 +965,11 @@ async function main() {
         bridges.push(bridge);
       }
       const nets = async (key) => Object.keys((await inspectOf(cName(A, key))).NetworkSettings.Networks).sort();
-      assert(same(await nets("db"), [appStackInternalNetworkName(A)]), "db is on the private network only", (await nets("db")).join(","));
-      assert(same(await nets("wordpress"), namesOf(planA).networks), "wordpress is on the private and the edge network", (await nets("wordpress")).join(","));
+      assert(same(await nets(T.db), [appStackInternalNetworkName(A)]), "the database is on the private network only", (await nets(T.db)).join(","));
+      assert(same(await nets(WORDPRESS), namesOf(planA).networks), "wordpress is on the private and the edge network", (await nets(WORDPRESS)).join(","));
+      // What the executor of a live panel asks Docker before it attaches its proxy: this run's network is not in the answer.
+      const edgeRoleList = await lines(["network", "ls", "--filter", `label=${ROLE_LABEL}=${EDGE_ROLE}`, "--format", "{{.Name}}"]);
+      assert(!edgeRoleList.some(ours), "Docker's own list of the networks with the edge role does not hold this run's network", edgeRoleList.filter(ours).join(","));
     });
 
     await step("no-control-plane-reach", async () => {
@@ -837,7 +980,7 @@ async function main() {
         if (gw) gateways.push(gw);
       }
       assert(gateways.length > 0, "wordpress has at least one network gateway to probe", "none");
-      assert(await opens("db", 3306), "control: wordpress reaches its own database by the component name (so a refusal below is a real one)", "failed");
+      assert(await opens(T.db, 3306), "control: wordpress reaches its own database by the component name (so a refusal below is a real one)", "failed");
       for (const gw of gateways) {
         for (const port of [5432, 3306, 4000]) assert(!(await opens(gw, port)), `wordpress cannot reach ${gw}:${String(port)}`, "connected");
         info(`wordpress -> ${gw}:3000 ${(await opens(gw, 3000)) ? "reachable (known limit T15)" : "refused"}`);
@@ -858,7 +1001,7 @@ async function main() {
         JSON.stringify(bindings),
       );
       assert(!(await exists(routeFile)), "no route file before the publish", "present");
-      assert(healthOf(await status(), "wordpress") === "healthy", "wordpress is healthy before its route is published", "not healthy");
+      assert(healthOf(await status(), WORDPRESS) === "healthy", "wordpress is healthy before its route is published", "not healthy");
       const r = await adapter.publishAppStackRoutes(route(planA, [HOST1]));
       assert(r.changed === true && same(r.hostnames, [HOST1]), "the publish wrote one host", JSON.stringify(r));
       const text = await readFile(routeFile, "utf8");
@@ -909,26 +1052,31 @@ async function main() {
         return text.includes(tag) ? text : null;
       });
       assert(raw.includes(DB_PASSWORD), "control: the engine's own log holds the password in clear", "absent");
-      const masked = JSON.stringify(await adapter.getAppStackComponentLogs({ stackId: A, organizationId: ORG, componentKey: "wordpress", tail: 50 }));
+      const masked = JSON.stringify(await adapter.getAppStackComponentLogs({ stackId: A, organizationId: ORG, componentKey: WORDPRESS, tail: 50 }));
       assert(masked.includes(tag), "the product's log reader returns the line of that request", "absent");
       assert(!leaks(masked) && masked.includes("[REDACTED]"), "with the password hidden", leaks(masked) ? "password found" : "no mask");
-      const dbLog = JSON.stringify(await adapter.getAppStackComponentLogs({ stackId: A, organizationId: ORG, componentKey: "db", tail: 200 }));
+      const dbLog = JSON.stringify(await adapter.getAppStackComponentLogs({ stackId: A, organizationId: ORG, componentKey: T.db, tail: 200 }));
       assert(!leaks(dbLog), "the database log holds no part of a secret", "found");
+      if (T.keys.user !== null) {
+        // The database image writes the account it creates on its output: a generated account is a secret like the others.
+        const own = await docker(["logs", DB]);
+        info(`the database's own log ${own.includes(T.dbUser) ? "names the generated account, the product's reader hides it" : "does not name the generated account"}`);
+      }
     });
 
     await step("data-survives-stop-and-start", async () => {
       const stop = await adapter.stopAppStack({ stackId: A, organizationId: ORG });
-      assert(same(stop.components.map((c) => `${c.componentKey}:${c.outcome}`), ["wordpress:stopped", "db:stopped"]), "stop: wordpress, then db", JSON.stringify(stop));
+      assert(same(stop.components.map((c) => `${c.componentKey}:${c.outcome}`), [`${WORDPRESS}:stopped`, `${T.db}:stopped`]), "stop: wordpress, then the database", JSON.stringify(stop));
       const s = await status();
-      assert(["db", "wordpress"].every((k) => healthOf(s, k) === "stopped"), "both reported stopped", JSON.stringify(s.components));
-      const noSecret = await rejection(adapter.startAppStackComponent({ plan: planA, componentKey: "db", secretFileContents: [] }));
+      assert([T.db, WORDPRESS].every((k) => healthOf(s, k) === "stopped"), "both reported stopped", JSON.stringify(s.components));
+      const noSecret = await rejection(adapter.startAppStackComponent({ plan: planA, componentKey: T.db, secretFileContents: [] }));
       assert(noSecret?.reason === "STACK_SECRET_MISSING", "a start without the secrets is refused as STACK_SECRET_MISSING", noSecret ? reasonOf(noSecret) : "accepted");
       for (const c of planA.components) {
         if (c.dependsOn.length > 0) await waitHealthy(c.dependsOn);
         const started = await adapter.startAppStackComponent(startReq(planA, c.key));
         assert(started.outcome === "started", `${c.key} starts again`, JSON.stringify(started));
       }
-      await waitHealthy(["db", "wordpress"]);
+      await waitHealthy([T.db, WORDPRESS]);
       await siteAnswers();
     });
 
@@ -947,20 +1095,20 @@ async function main() {
 
     await step("upgrade-keeps-data", async () => {
       // A new revision that changes the database component only: its container is replaced, its volume is not.
-      const db = componentOf(planA, "db");
-      const next = withComponent({ ...planA, revisionId: `srev_swarmtest_${hex}_2` }, "db", { resources: { ...db.resources, memoryBytes: String(640 * 1024 * 1024) } });
+      const db = componentOf(planA, T.db);
+      const next = withComponent({ ...planA, revisionId: `srev_swarmtest_${hex}_2` }, T.db, { resources: { ...db.resources, memoryBytes: String(640 * 1024 * 1024) } });
       const ids0 = await idsOf(planA);
       const file0 = await fileState(routeFile);
-      const created0 = (await volumeOf(appStackVolumeName(A, "database"))).CreatedAt;
+      const created0 = (await volumeOf(appStackVolumeName(A, T.volumes.database))).CreatedAt;
       const out = await deploy(next, planA);
       planA = next;
       const outcomes = out.create.components.map((c) => `${c.componentKey}:${c.outcome}`);
-      assert(same(outcomes, ["db:replaced", "wordpress:unchanged"]), "only the database is replaced", outcomes.join(","));
-      assert(same(out.starts.map((s) => s.outcome), ["started", "restarted"]), "db started, wordpress restarted after it", JSON.stringify(out.starts));
+      assert(same(outcomes, [`${T.db}:replaced`, `${WORDPRESS}:unchanged`]), "only the database is replaced", outcomes.join(","));
+      assert(same(out.starts.map((s) => s.outcome), ["started", "restarted"]), "the database started, wordpress restarted after it", JSON.stringify(out.starts));
       const ids1 = await idsOf(planA);
-      assert(ids1[DB] !== ids0[DB] && ids1[WP] === ids0[WP], "db Id changes, wordpress Id stays", JSON.stringify({ ids0, ids1 }));
+      assert(ids1[DB] !== ids0[DB] && ids1[WP] === ids0[WP], "the database Id changes, the wordpress Id stays", JSON.stringify({ ids0, ids1 }));
       assert((await inspectOf(DB)).HostConfig.Memory === 640 * 1024 * 1024, "the new database container has the new memory limit", "other");
-      assert((await volumeOf(appStackVolumeName(A, "database"))).CreatedAt === created0, "the database volume is the one created at install", "recreated");
+      assert((await volumeOf(appStackVolumeName(A, T.volumes.database))).CreatedAt === created0, "the database volume is the one created at install", "recreated");
       assert(same(await fileState(routeFile), file0), "the route file is unchanged", "changed");
       await siteAnswers();
     });
@@ -969,7 +1117,7 @@ async function main() {
       const fresh = new DockerEngineSocketAdapter(adapterOptions);
       const mark = gateLog.length;
       const s = await status(fresh);
-      assert(same(s.components.map((c) => c.componentKey), ["db", "wordpress"]), "a fresh adapter reports both components", JSON.stringify(s.components));
+      assert(same(s.components.map((c) => c.componentKey), [T.db, WORDPRESS]), "a fresh adapter reports both components", JSON.stringify(s.components));
       const other = gateLog.slice(mark).filter((l) => !l.startsWith("GET "));
       assert(gateLog.length > mark && other.length === 0, "the recovery read sends GET requests only", other.join(" | "));
     });
@@ -977,13 +1125,15 @@ async function main() {
     await step("remove-keeps-volumes", async () => {
       const volumes = namesOf(planA).volumes;
       const created = await Promise.all(volumes.map(async (v) => (await volumeOf(v)).CreatedAt));
+      const attached = Object.values((await networkOf(appStackEdgeNetworkName(A))).Containers ?? {}).map((c) => String(c.Name));
+      assert(attached.every(ours), "only this run's containers are on the edge network", attached.filter((n) => !ours(n)).join(","));
       const unpublished = await adapter.unpublishAppStackRoutes({ stackId: A, organizationId: ORG });
       assert(unpublished.changed === true && !(await exists(routeFile)), "the route file is withdrawn", JSON.stringify(unpublished));
       const mark = gateLog.length;
       const r = await adapter.removeAppStack({ stackId: A, organizationId: ORG, removeVolumes: false });
-      assert(same(r.removedComponents, ["wordpress", "db"]), "wordpress and db removed", JSON.stringify(r));
+      assert(same(r.removedComponents, [WORDPRESS, T.db]), "wordpress and the database removed", JSON.stringify(r));
       assert(same([...r.removedNetworks].sort(), ["app_edge", "app_internal"]), "both networks removed", JSON.stringify(r.removedNetworks));
-      assert(same([...r.retainedVolumes].sort(), ["database", "site"]) && r.removedVolumes.length === 0, "both volumes kept", JSON.stringify(r));
+      assert(same([...r.retainedVolumes].sort(), [T.volumes.database, T.volumes.site]) && r.removedVolumes.length === 0, "both volumes kept", JSON.stringify(r));
       assert(volumeDeletesIn(mark).length === 0, "no volume delete was sent", volumeDeletesIn(mark).join(" | "));
       for (const [i, v] of volumes.entries()) {
         const vol = await volumeOf(v);
@@ -998,7 +1148,7 @@ async function main() {
       const volumes = namesOf(planA).volumes;
       const mark = gateLog.length;
       const r = await adapter.removeAppStack({ stackId: A, organizationId: ORG, removeVolumes: true });
-      assert(same([...r.removedVolumes].sort(), ["database", "site"]) && r.removedComponents.length === 0, "the second removal deletes the two volumes", JSON.stringify(r));
+      assert(same([...r.removedVolumes].sort(), [T.volumes.database, T.volumes.site]) && r.removedComponents.length === 0, "the second removal deletes the two volumes", JSON.stringify(r));
       const deletes = volumeDeletesIn(mark);
       assert(
         deletes.length === 2 && volumes.every((v) => deletes.some((l) => l.includes(encodeURIComponent(v)))) && deletes.every((l) => !l.includes("force")),

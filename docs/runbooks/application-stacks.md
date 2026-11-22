@@ -219,11 +219,32 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
    ```
+   The WordPress script has a second run, for a template that comes from **Importa da Compose**: it imports the
+   WordPress and MariaDB Compose file of the importer's tests and makes the same checks on the draft (three generated
+   values: the database account too). The file names the versions the built-in template pins and the import is given
+   the digests recorded with them, so nothing new is downloaded. With `HP_ACCEPT_REGISTRY_CASES=1` it also asks the
+   public registry for the two tags through the product, a read that needs the network; without it that step is
+   skipped:
+   ```bash
+   node infra/linux/accept-app-stack-wordpress.mjs --imported
+   ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
    prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
    throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`),
    never prune, and clean up at the end, also on Ctrl-C.
+   One exception (#52): the executor of the server's own panel attaches its proxy to every network whose role label
+   is `app_edge`, whoever created it, each time it checks its proxy. The WordPress script hides its edge network from
+   it (in Docker that label has another value, which the script's gate translates in both directions). The engine
+   script and the HTTP cache script do not yet: when such a check falls inside their run, the server's proxy joins
+   the run's edge network, the removal steps fail with "A stack network is still used by another container" and
+   `nothing-left` reports a network. The server's proxy keeps serving and is not restarted. Repair: find the
+   network the run left (its name contains `swarmtest_<hex>`), detach the server's proxy from it, remove it:
+   ```bash
+   sudo docker network ls --filter name=swarmtest_
+   sudo docker network disconnect <network> hp_ingress_proxy
+   sudo docker network rm <network>
+   ```
 3. Each step prints one line: `PASS <step>`, `FAIL <step>: <reason>` or `SKIP <step>: <why>`. A step that needs root is
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
