@@ -15,6 +15,7 @@ import { describe, expect, it } from "vitest";
 import {
   APP_STACK_FAILURE,
   APP_STACK_NO_ADDRESS_TEXT,
+  APP_STACK_ROUTES_KEY_PREFIX,
   APP_STACK_RUNTIME_PROBLEMS,
   APP_STACK_STEP_DONE_TEXT,
   APP_STACK_STEP_FAILED_TEXT,
@@ -34,6 +35,7 @@ import {
   appStackRoutePlan,
   appStackRoutesHash,
   appStackRoutesHealthOnly,
+  appStackRoutesRefresh,
   appStackSettleTarget,
 } from "../src/app-stacks/app-stack-runtime-policy.js";
 import { ControlPlaneError } from "../src/common/control-plane.error.js";
@@ -336,6 +338,17 @@ describe("routes", () => {
     expect(healthOnly([], routed([admin]))).toBe(false);
     expect(healthOnly([www, admin], routed([domain("www.example.com", "admin", 9000)]))).toBe(false);
     expect(healthOnly([domain("www.example.com", "web", 8080, { certStatus: "requested" })], routed([www]))).toBe(false);
+  });
+});
+
+describe("appStackRoutesRefresh", () => {
+  it("is a system stack.deploy under the routes key prefix only", () => {
+    const refresh = { kind: "stack.deploy", requestedByUserId: null, idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}abc` };
+    expect(appStackRoutesRefresh(refresh)).toBe(true);
+    expect(appStackRoutesRefresh({ ...refresh, requestedByUserId: "usr_1" })).toBe(false);
+    expect(appStackRoutesRefresh({ ...refresh, idempotencyKey: "abc" })).toBe(false);
+    expect(appStackRoutesRefresh({ ...refresh, idempotencyKey: null })).toBe(false);
+    expect(appStackRoutesRefresh({ ...refresh, kind: "stack.restart" })).toBe(false);
   });
 });
 

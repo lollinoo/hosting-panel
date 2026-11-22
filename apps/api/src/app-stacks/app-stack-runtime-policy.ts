@@ -278,6 +278,15 @@ export function appStackRoutesHealthOnly(input: {
   return false;
 }
 
+/** The observer's route refresh: a system stack.deploy under the routes key prefix (a customer request carries a user id). */
+export function appStackRoutesRefresh(op: {
+  readonly kind: string;
+  readonly requestedByUserId: string | null;
+  readonly idempotencyKey: string | null;
+}): boolean {
+  return op.kind === "stack.deploy" && op.requestedByUserId === null && op.idempotencyKey?.startsWith(APP_STACK_ROUTES_KEY_PREFIX) === true;
+}
+
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */
 export function appStackDisplayStatus(input: {
   readonly stack: Pick<AppStackRow, "status" | "appliedRoutesHash">;

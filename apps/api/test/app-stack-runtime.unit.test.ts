@@ -38,7 +38,7 @@ import {
 } from "@hosting-panel/database";
 import { Phase1DisabledDockerExecutor, type DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { computeAppStackComponentHash, computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppStackRuntime } from "../src/app-stacks/app-stack-runtime.js";
 import {
   APP_STACK_FAILURE,
@@ -795,6 +795,67 @@ describe("AppStackRuntime (RT3)", () => {
       expect(routedHosts(stackId)).toHaveLength(1);
       expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRoutesHash: before.appliedRoutesHash, appliedRevisionId: before.appliedRevisionId });
       expect(await stepsOf(op)).toEqual({ ...refreshSteps(["failed", APP_STACK_STEP_FAILED_TEXT]), settle: ["skipped", APP_STACK_STEP_SKIPPED_TEXT] });
+    });
+
+    /** The refresh parked unknown as the worker does, then recovered. */
+    async function recovered(op: AppStackWriteResult) {
+      expect(((await run(op)) as ControlPlaneError).code).toBe("OPERATION_AMBIGUOUS");
+      await transitionOperation(db(), op.operation!.id, "unknown");
+      fake.calls.length = 0;
+      expect(await runtime().recover(await opOf(op.operation!.id))).toBe("settled");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      fake.calls.length = 0;
+    }
+
+    it("an unpublish in doubt while the target is unhealthy: recovered degraded, never failed, and the next refresh restores the routes", async () => {
+      const { stackId } = await running();
+      fake.setHealth("web", "unhealthy");
+      fake.failNext("unpublishAppStackRoutes", "ambiguous");
+      const op = await refresh(stackId);
+
+      await recovered(op);
+
+      expect(await opOf(op.operation!.id)).toMatchObject({ status: "succeeded" });
+      expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRoutesHash: null });
+      fake.setHealth("web", "healthy");
+      expect(await run(await refresh(stackId))).toBeUndefined();
+      expect(trace()).toEqual(["getAppStackStatus", "publishAppStackRoutes"]);
+      expect(routedHosts(stackId)).toHaveLength(1);
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: appStackRoutesHash(fake.stack(stackId).routes) });
+    });
+
+    it("a publish in doubt with an accessory missing: recovered degraded with a routes hash the next refresh rewrites", async () => {
+      const { stackId } = await running();
+      await addHost(stackId, `added${String(n)}.example.test`);
+      fake.stack(stackId).components.delete("cache");
+      fake.failNext("publishAppStackRoutes", "ambiguous");
+      const op = await refresh(stackId);
+
+      await recovered(op);
+
+      expect(await opOf(op.operation!.id)).toMatchObject({ status: "succeeded" });
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("degraded");
+      expect(routedHosts(stackId)).toHaveLength(2);
+      expect(stack.appliedRoutesHash).not.toBeNull();
+      expect(stack.appliedRoutesHash).not.toBe(appStackRoutesHash(fake.stack(stackId).routes));
+      expect(await run(await refresh(stackId))).toBeUndefined();
+      expect(trace()).toEqual(["getAppStackStatus", "publishAppStackRoutes"]);
+      expect((await stackOf(stackId)).appliedRoutesHash).toBe(appStackRoutesHash(fake.stack(stackId).routes));
+    });
+
+    it("the last address removed while the certificate read fails: no certificate read, the routes unpublished", async () => {
+      const { stackId } = await running();
+      await db().delete(appStackDomains).where(eq(appStackDomains.stackId, stackId));
+      const certificates = vi.spyOn(fake, "getCertificateStatus").mockRejectedValue(new Error("certificate read failed"));
+      const op = await refresh(stackId);
+
+      expect(await run(op)).toBeUndefined();
+
+      expect(certificates).not.toHaveBeenCalled();
+      expect(trace()).toEqual(["getAppStackStatus", "unpublishAppStackRoutes"]);
+      expect(fake.stack(stackId).routes).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: null });
     });
   });
 

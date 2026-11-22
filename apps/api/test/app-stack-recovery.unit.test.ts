@@ -38,7 +38,12 @@ import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AppStackRuntime } from "../src/app-stacks/app-stack-runtime.js";
-import { APP_STACK_FAILURE, APP_STACK_STEP_DONE_TEXT, APP_STACK_STEP_FAILED_TEXT } from "../src/app-stacks/app-stack-runtime-policy.js";
+import {
+  APP_STACK_FAILURE,
+  APP_STACK_ROUTES_KEY_PREFIX,
+  APP_STACK_STEP_DONE_TEXT,
+  APP_STACK_STEP_FAILED_TEXT,
+} from "../src/app-stacks/app-stack-runtime-policy.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import type { SiteProvisioner } from "../src/runtime/site-provisioner.js";
 import type { SiteDomainsApplier } from "../src/sites/site-domains-applier.js";
@@ -493,6 +498,57 @@ describe("recoverAppStackOperation (RT4)", () => {
 
     expect(await opOf(restart)).toMatchObject({ status: "succeeded" });
     expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: routesHash });
+  });
+
+  /** The observer's route refresh: a system stack.deploy under the routes key prefix. */
+  function refresh(stackId: string) {
+    n += 1;
+    return enqueueAppStackOperationTransactional(db(), {
+      organizationId: ORG,
+      stackId,
+      kind: "stack.deploy",
+      requestedByUserId: null,
+      idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}${hex(String(n)).slice(0, 32)}`,
+      requestHash: hex(`routes ${String(n)}`),
+      revision: null,
+      destroyData: false,
+    });
+  }
+
+  it("(10) a route refresh in doubt while its target is unhealthy settles as the refresh would have: degraded, never failed", async () => {
+    const { stackId, rev } = await running();
+    fake.setHealth("web", "unhealthy");
+    fake.failNext("unpublishAppStackRoutes", "ambiguous");
+    const write = await refresh(stackId);
+    await parked(write);
+
+    expect(await recover(write)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    expect(await opOf(write)).toMatchObject({ status: "succeeded" });
+    expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRevisionId: rev.revisionId, appliedRoutesHash: null });
+    expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "unhealthy" });
+  });
+
+  it("(11) a route refresh whose routes are not seen as recorded fails, the stack degraded and its routes hash rewritten on the next pass", async () => {
+    const { stackId } = await running();
+    const before = await stackOf(stackId);
+    const added = `added${String(n)}.example.test`;
+    await addAppStackDomainsTransactional(db(), { organizationId: ORG, stackId, entries: [{ hostname: added, componentKey: "web", internalPort: 8080 }] });
+    fake.failNext("publishAppStackRoutes", "ambiguous");
+    const write = await refresh(stackId);
+    await parked(write);
+    // Removed while the outcome was in doubt: the route written for it must still be withdrawn.
+    await db().delete(appStackDomains).where(eq(appStackDomains.hostname, added));
+
+    expect(await recover(write)).toBe("settled");
+
+    await expectInterrupted(write);
+    const stack = await stackOf(stackId);
+    expect(stack).toMatchObject({ status: "degraded", appliedRevisionId: before.appliedRevisionId });
+    // Neither none nor the hash of today's addresses: the observer refreshes again and withdraws the address.
+    expect(stack.appliedRoutesHash).not.toBeNull();
+    expect(stack.appliedRoutesHash).not.toBe(before.appliedRoutesHash);
   });
 
   it("(7) no mutating call: every recovery above went through a port that throws on all but the two reads", () => {

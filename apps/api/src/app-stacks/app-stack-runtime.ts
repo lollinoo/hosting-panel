@@ -42,7 +42,6 @@ import {
   APP_STACK_HEALTH_BUDGET_MS,
   APP_STACK_HEALTH_POLL_MS,
   APP_STACK_NO_ADDRESS_TEXT,
-  APP_STACK_ROUTES_KEY_PREFIX,
   APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_STEP_DONE_TEXT,
   APP_STACK_STEP_LEASE_MS,
@@ -59,6 +58,7 @@ import {
   appStackRestartSet,
   appStackRoutePlan,
   appStackRoutesHash,
+  appStackRoutesRefresh,
   type AppStackRuntimeProblem,
   type ObservedAppStack,
 } from "./app-stack-runtime-policy.js";
@@ -172,7 +172,7 @@ export class AppStackRuntime {
     };
     switch (op.kind) {
       case "stack.deploy":
-        if (op.requestedByUserId === null && op.idempotencyKey?.startsWith(APP_STACK_ROUTES_KEY_PREFIX)) return this.#routes(ctx);
+        if (appStackRoutesRefresh(op)) return this.#routes(ctx);
         return this.#rollout(ctx, null);
       case "stack.upgrade":
       case "stack.rollback":
@@ -480,7 +480,8 @@ export class AppStackRuntime {
   ): Promise<string | null> {
     const port = ctx.port!;
     const ready = new Set(plan.ingress.map((r) => r.componentKey).filter((key) => appStackComponentReady(appStackObservedComponent(observed, key))));
-    const acmeEnabled = await this.#acmeEnabled();
+    // With no address nothing is published: no certificate read can block the withdrawal.
+    const acmeEnabled = domains.length > 0 && (await this.#acmeEnabled());
     const { entries } = appStackRoutePlan({ plan, domains, include: ready, now: this.#now(), acmeEnabled });
     const hash = entries.length > 0 ? appStackRoutesHash(entries) : null;
     if (hash !== stack.appliedRoutesHash) {

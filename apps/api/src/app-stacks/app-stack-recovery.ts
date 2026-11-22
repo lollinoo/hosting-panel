@@ -11,13 +11,24 @@ import {
   type operations,
 } from "@hosting-panel/database";
 import { appStackPort, type AppStackRuntimeDeps } from "./app-stack-runtime.js";
-import { APP_STACK_FAILURE, appStackRecoveryVerdict, type ObservedAppStack } from "./app-stack-runtime-policy.js";
+import {
+  APP_STACK_FAILURE,
+  appStackAggregate,
+  appStackHealthRows,
+  appStackRecoveryVerdict,
+  appStackRoutePlan,
+  appStackRoutesHash,
+  appStackRoutesRefresh,
+  type ObservedAppStack,
+} from "./app-stack-runtime-policy.js";
 import { parkAppStackOperationUnknown, settleAppStackOperation } from "./app-stack-settle.js";
 
 // Spec §10.1, A17: an operation in doubt is settled from what the executor shows, never by continuing or replaying it.
 // A failed read keeps it unknown (lock and quota held) for the next pass; the read is a GET, never in doubt itself.
 
 const INTERRUPTED = APP_STACK_FAILURE.OPERATION_INTERRUPTED;
+// No route set hashes to this (an empty one is null): the observer's next pass rewrites routes of unconfirmed content.
+const ROUTES_UNCONFIRMED = appStackRoutesHash([]);
 
 /** Read-only: one getAppStackStatus, a pure verdict, one settle transaction. Never a mutating StackExecutorPort call. */
 export async function recoverAppStackOperation(
@@ -64,7 +75,9 @@ export async function recoverAppStackOperation(
     const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
     return parsed.success ? parsed.data : null;
   };
-  const deploys = (APP_STACK_REVISION_KINDS as readonly string[]).includes(kind);
+  // A route refresh judges the applied revision, as its handler does.
+  const refresh = appStackRoutesRefresh(op);
+  const deploys = !refresh && (APP_STACK_REVISION_KINDS as readonly string[]).includes(kind);
   const plan = await planOf(deploys ? deployment.revisionId : (stack.appliedRevisionId ?? stack.desiredRevisionId));
   const previous = deploys ? await planOf(stack.appliedRevisionId) : null;
 
@@ -76,12 +89,39 @@ export async function recoverAppStackOperation(
     return "pending";
   }
 
+  const domains = await listAppStackDomains(db, scope);
+  const now = new Date(deps.clock.now());
+  if (refresh) {
+    // Settled as the refresh would have: done when the routes seen are today's addresses of the ready targets (the
+    // hostnames do not depend on ACME); a route change judges no component, so the stack stays one the observer refreshes.
+    const health = plan ? appStackHealthRows(plan, observed, "final") : [];
+    const ready = new Set(health.filter((h) => h.health === "healthy").map((h) => h.componentKey));
+    const wanted = plan
+      ? appStackRoutePlan({ plan, domains, include: ready, now, acmeEnabled: false }).entries.flatMap((e) => e.hosts.map((h) => h.hostname))
+      : [];
+    const { published, hostnames } = observed.routes;
+    const done =
+      plan !== null && published === wanted.length > 0 && hostnames.length === wanted.length && wanted.every((h) => hostnames.includes(h));
+    const aggregate =
+      plan &&
+      appStackAggregate({ plan, health: new Map(health.map((h) => [h.componentKey, h.health])), domainCount: domains.length, routesPublished: true });
+    await settleAppStackOperation(db, op, deployment.id, {
+      outcome: done ? "succeeded" : "failed",
+      problem: done ? null : "OPERATION_INTERRUPTED",
+      stackStatus: done && aggregate === "running" ? "running" : "degraded",
+      appliedRoutesHash: published ? ROUTES_UNCONFIRMED : null,
+      ...(health.length > 0 ? { health: { observedAt: now, components: health } } : {}),
+      failedStep: null,
+    });
+    return "settled";
+  }
+
   const v = appStackRecoveryVerdict({
     kind,
     plan,
     previous,
     observed,
-    domainCount: (await listAppStackDomains(db, scope)).length,
+    domainCount: domains.length,
     destroyVolumes: (await listAppStackVolumes(db, scope)).some((volume) => volume.retentionPolicy === "destroy"),
   });
   // Routes seen published keep the stored hash; else none is published. The observer republishes a stale route set
@@ -92,7 +132,7 @@ export async function recoverAppStackOperation(
     stackStatus: v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
     ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),
-    ...(v.health.length > 0 ? { health: { observedAt: new Date(deps.clock.now()), components: v.health } } : {}),
+    ...(v.health.length > 0 ? { health: { observedAt: now, components: v.health } } : {}),
     failedStep: null,
   });
   return "settled";
