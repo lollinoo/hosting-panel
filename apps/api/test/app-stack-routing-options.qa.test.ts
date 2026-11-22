@@ -391,4 +391,83 @@ describe("routing options of an application address over HTTP (ADR-0037)", () =>
       expect((await rowOf(stackId, ids.leaving)).compression).toBe(false);
     });
   });
+
+  describe("compression chosen when the address is created", () => {
+    const assigned = (stackId: string) =>
+      h.dbClient.db
+        .select()
+        .from(auditEvents)
+        .where(and(eq(auditEvents.action, "app.stack.domain.assign"), eq(auditEvents.targetId, stackId)))
+        .orderBy(asc(auditEvents.timestamp));
+
+    it("an added address takes compression in the same request; left out or false it stays off and the audit row is as before", async () => {
+      const stackId = await draft();
+      const [on, plain, off] = [host("on"), host("plain"), host("off")];
+      for (const body of [
+        { hostname: on, componentKey: "app", port: 8080, compression: true },
+        { hostname: plain, componentKey: "app", port: 8080 },
+        { hostname: off, componentKey: "app", port: 8080, compression: false },
+      ]) {
+        const res = await h.call(h.a.token, "POST", base(h.a, stackId), body);
+        expect(res.status, res.raw).toBe(201);
+        expect((res.body.data as Json[]).find((d) => d.hostname === body.hostname)).toMatchObject({
+          compression: body.compression === true,
+          redirectToDomainId: null,
+          protection: null,
+          pathRoutes: [],
+        });
+      }
+      const byHost = new Map((await rows(stackId)).map((r) => [r.hostname, r]));
+      expect([on, plain, off].map((name) => byHost.get(name)!.compression)).toEqual([true, false, false]);
+      const details = new Map((await assigned(stackId)).map((a) => [(a.details as Json).hostname as string, a.details as Json]));
+      const expected = (name: string) => ({
+        domainId: byHost.get(name)!.id,
+        hostname: name,
+        componentKey: "app",
+        internalPort: 8080,
+        outcome: "succeeded",
+        requestId: expect.stringMatching(/^req_/),
+      });
+      expect(details.get(on)).toEqual({ ...expected(on), compression: true });
+      expect(details.get(plain)).toEqual(expected(plain));
+      expect(details.get(off)).toEqual(expected(off));
+    });
+
+    it("an application created with its addresses takes it per address", async () => {
+      const [on, plain] = [host("made-on"), host("made-plain")];
+      const res = await h.call(
+        h.a.token,
+        "POST",
+        `/v1/organizations/${h.a.orgId}/app-stacks`,
+        {
+          templateVersionId: notes,
+          name: `app-${randomUUID().slice(0, 8)}`,
+          deploy: false,
+          domains: [
+            { hostname: on, componentKey: "app", port: 8080, compression: true },
+            { hostname: plain, componentKey: "app", port: 8080 },
+          ],
+        },
+        { "Idempotency-Key": randomUUID() },
+      );
+      expect(res.status, res.raw).toBe(201);
+      const stackId = res.body.data.stackId as string;
+      const byHost = new Map((await rows(stackId)).map((r) => [r.hostname, r.compression]));
+      expect([byHost.get(on), byHost.get(plain)]).toEqual([true, false]);
+      const details = (await assigned(stackId)).map((a) => a.details as Json);
+      expect(details.find((d) => d.hostname === on)).toMatchObject({ compression: true });
+      expect(details.find((d) => d.hostname === plain)).not.toHaveProperty("compression");
+    });
+
+    it("anything but true or false is refused and adds nothing", async () => {
+      const stackId = await draft();
+      const before = await h.counts();
+      for (const compression of ["yes", 1, null]) {
+        const res = await h.call(h.a.token, "POST", base(h.a, stackId), { hostname: host("bad"), componentKey: "app", port: 8080, compression });
+        expectRefusal(res, 400, "VALIDATION_ERROR");
+      }
+      expect(await h.counts()).toEqual(before);
+      expect(await rows(stackId)).toEqual([]);
+    });
+  });
 });

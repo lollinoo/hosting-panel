@@ -93,7 +93,7 @@ import {
   validatedSpec,
 } from "./app-stack-compile.js";
 import { diffAppStackPlans } from "./app-stack-diff.js";
-import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto } from "./app-stack-dto.js";
+import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
 
@@ -232,13 +232,18 @@ export class AppStacksService {
       );
       if (r.idempotentReplay) return r;
       if (input.domains.length > 0) {
-        const entries = input.domains.map((d) => ({ hostname: d.hostname, componentKey: d.componentKey, internalPort: d.port }));
+        const entries = input.domains.map((d) => ({
+          hostname: d.hostname,
+          componentKey: d.componentKey,
+          internalPort: d.port,
+          compression: d.compression,
+        }));
         for (const row of await addAppStackDomainsTransactional(tx, { organizationId, stackId, entries })) {
           await ctx.audit(tx, {
             action: APP_AUDIT_ACTIONS.domainAssign,
             targetType: "app_stack",
             targetId: stackId,
-            details: { domainId: row.id, hostname: row.hostname, componentKey: row.componentKey, internalPort: row.internalPort },
+            details: assignedAddressDetails(row),
           });
         }
       }

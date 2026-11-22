@@ -191,3 +191,14 @@ export function appStackAcceptedEnvelope(organizationId: string, r: AppStackWrit
     },
   };
 }
+
+/** Audit details of a new address; `compression` is named only when the address is created with it on (ADR-0037). */
+export function assignedAddressDetails(row: AppStackDomainRow): Record<string, unknown> {
+  return {
+    domainId: row.id,
+    hostname: row.hostname,
+    componentKey: row.componentKey,
+    internalPort: row.internalPort,
+    ...(row.compression ? { compression: true } : {}),
+  };
+}

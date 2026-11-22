@@ -13326,6 +13326,9 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        compression:
+          type: boolean
+          description: "true creates the address with compression on (ADR-0037); left out, it is off"
 
     CreateAppStackInput:
       type: object

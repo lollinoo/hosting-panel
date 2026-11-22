@@ -297,6 +297,25 @@ describe("@hosting-panel/database — app stack domains repository", () => {
     expect(options(cleared.after)).toEqual(options(row!));
   });
 
+  it("a new address is created with compression on only when its entry says so", async () => {
+    const id = await stack();
+    const made = await addAppStackDomainsTransactional(db(), {
+      organizationId: orgA,
+      stackId: id,
+      entries: [
+        { hostname: "gz-on.example", componentKey: "web", internalPort: 8080, compression: true },
+        { hostname: "gz-off.example", componentKey: "web", internalPort: 8080, compression: false },
+        { hostname: "gz-none.example", componentKey: "web", internalPort: 8080 },
+      ],
+    });
+    expect(Object.fromEntries(made.map((row) => [row.hostname, row.compression]))).toEqual({
+      "gz-on.example": true,
+      "gz-off.example": false,
+      "gz-none.example": false,
+    });
+    for (const row of made) expect({ ...options(row), compression: false }).toEqual({ redirectToDomainId: null, compression: false, accessUsername: null, accessPasswordHash: null, pathRoutes: [] });
+  });
+
   it("keeps the stored verifier when none is sent, replaces it when one is, and refuses to keep one that was never set", async () => {
     const id = await stack();
     const [row] = await add(id, ["pw.example"]);

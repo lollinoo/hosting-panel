@@ -29,7 +29,7 @@ import { ControlPlaneError } from "../common/control-plane.error.js";
 import { MANUAL_CHECK_MIN_INTERVAL_MS } from "../sites/domain-policy.js";
 import { DATABASE_CLIENT_TOKEN } from "../tokens.js";
 import { validatedSpec } from "./app-stack-compile.js";
-import { appStackDomainDto } from "./app-stack-dto.js";
+import { appStackDomainDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { mapAppStackError } from "./app-stack-errors.js";
 import { AppStackObserverService } from "./app-stack-observer.service.js";
 import { apr1Verifier } from "./apr1.js";
@@ -71,7 +71,7 @@ export class AppStackDomainsService {
         const rows = await addAppStackDomainsTransactional(t, {
           organizationId: ctx.organizationId,
           stackId: stack.id,
-          entries: [{ hostname: input.hostname, componentKey: input.componentKey, internalPort: input.port }],
+          entries: [{ hostname: input.hostname, componentKey: input.componentKey, internalPort: input.port, compression: input.compression }],
         });
         // The stack row is locked now: an upgrade or rollback committed since the first check is the plan to match.
         await this.#assertTarget(t, (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack, input);
@@ -80,7 +80,7 @@ export class AppStackDomainsService {
             action: APP_AUDIT_ACTIONS.domainAssign,
             targetType: "app_stack",
             targetId: stack.id,
-            details: { domainId: row.id, hostname: row.hostname, componentKey: row.componentKey, internalPort: row.internalPort },
+            details: assignedAddressDetails(row),
           });
         }
         return rows;

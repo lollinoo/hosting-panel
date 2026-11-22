@@ -54,8 +54,9 @@ export type CustomerAppTemplateDto = z.infer<typeof CustomerAppTemplateDtoSchema
 
 // ---- inputs ----
 export const AppStackNameSchema = z.string().trim().min(1).max(64).refine(noControl); // = 0025 CHECK 1..64
+/** `compression: true` creates the address with compression on (ADR-0037 R4); left out, it is off. */
 export const AppStackDomainEntrySchema = z
-  .object({ hostname: SiteDomainSchema, componentKey: AppStackKeySchema, port: AppStackPortSchema })
+  .object({ hostname: SiteDomainSchema, componentKey: AppStackKeySchema, port: AppStackPortSchema, compression: z.boolean().optional() })
   .strict();
 export type AppStackDomainEntry = z.infer<typeof AppStackDomainEntrySchema>;
 export const CreateAppStackInputSchema = z

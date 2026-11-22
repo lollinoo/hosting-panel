@@ -37,6 +37,8 @@ export interface NewAppStackDomain {
   readonly hostname: string;
   readonly componentKey: string;
   readonly internalPort: number;
+  /** Left out: off, as before ADR-0037. */
+  readonly compression?: boolean | undefined;
 }
 
 /** Same text as a site domain add that collides: it never names the other owner. */
@@ -115,6 +117,7 @@ export async function addAppStackDomainsTransactional(
             componentKey: entry.componentKey,
             internalPort: entry.internalPort,
             hostname: entry.hostname,
+            compression: entry.compression === true,
           })),
         )
         .returning();
