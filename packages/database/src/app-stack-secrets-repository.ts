@@ -118,6 +118,69 @@ export async function setAppStackSecretTransactional(
   });
 }
 
+/**
+ * Version 1 of secrets the platform generated (ADR-0036), in the caller's transaction: the one that creates the stack
+ * or queues the revision that first needs them. A key that already has a version 1 keeps it. No hourly limit applies
+ * (a key gets one such row in its life), but the rows count in the customer's rolling hour like any other version.
+ * Returns the metadata of the rows it inserted.
+ */
+export async function insertGeneratedAppStackSecrets(
+  tx: DatabaseExecutor,
+  input: {
+    readonly organizationId: string;
+    readonly stackId: string;
+    readonly masterKey: string | Buffer | Uint8Array;
+    readonly keyVersion?: string;
+    readonly values: readonly { readonly parameterKey: string; readonly value: string }[];
+  },
+): Promise<AppStackSecretMetadata[]> {
+  if (input.values.length === 0) return [];
+  const keys = input.values.map((entry) => entry.parameterKey);
+  if (
+    new Set(keys).size !== keys.length ||
+    input.values.some(
+      ({ parameterKey, value }) =>
+        !APP_TEMPLATE_PARAMETER_KEY_PATTERN.test(parameterKey) ||
+        value.length < 1 ||
+        value.length > APP_STACK_SECRET_CONTENT_MAX_CHARS ||
+        Buffer.byteLength(value, "utf8") > VALUE_MAX_UTF8_BYTES,
+    )
+  ) {
+    throw new AppStackSecretError("VALIDATION_ERROR", "The secret parameter key or value length is invalid.");
+  }
+  const [stack] = await tx
+    .select({ id: appStacks.id })
+    .from(appStacks)
+    .where(and(eq(appStacks.id, input.stackId), eq(appStacks.organizationId, input.organizationId), isNull(appStacks.deletedAt)))
+    .for("no key update");
+  if (!stack) throw new AppStackSecretError("NOT_FOUND", "Application stack not found.");
+  return tx
+    .insert(appStackSecrets)
+    .values(
+      input.values.map(({ parameterKey, value }) => {
+        const envelope = encryptSecretAesGcm({
+          ...appStackSecretAad(input.organizationId, input.stackId, parameterKey, 1),
+          plaintext: value,
+          masterKey: input.masterKey,
+          keyVersion: input.keyVersion,
+        });
+        return {
+          id: newId(APP_ID_PREFIXES.secret),
+          stackId: input.stackId,
+          organizationId: input.organizationId,
+          parameterKey,
+          version: 1,
+          ciphertextBase64: envelope.ciphertextBase64,
+          ivBase64: envelope.ivBase64,
+          authTagBase64: envelope.authTagBase64,
+          keyVersion: envelope.keyVersion,
+        };
+      }),
+    )
+    .onConflictDoNothing({ target: [appStackSecrets.stackId, appStackSecrets.parameterKey, appStackSecrets.version] })
+    .returning(metadataColumns);
+}
+
 /** Latest version per key, ORDER BY parameter_key. */
 export async function listAppStackSecretMetadata(
   db: DatabaseExecutor,
