@@ -179,4 +179,23 @@ describe("maskAppStackLogLines", () => {
   it("returns the lines unchanged without values", () => {
     expect(maskAppStackLogLines([line("plain text")], [])).toEqual([line("plain text")]);
   });
+
+  it.each([8_000, 16_000])("masks 2 MiB of %i-character access lines against a crafted value in linear time", (urlLength) => {
+    const value = `${"a".repeat(4_000)}b${"a".repeat(4_000)}`;
+    const text = `GET /${"a".repeat(urlLength)} HTTP/1.1`;
+    const lines = Array.from({ length: Math.ceil((2 * 1024 * 1024) / text.length) }, () => line(text));
+    const started = performance.now();
+    const masked = maskAppStackLogLines(lines, [value]);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(masked).toEqual(lines);
+  });
+
+  it("masks 2 MiB of repeated text against a long value and thousands of value lines in linear time", () => {
+    const multiLine = Array.from({ length: 7 }, (_, v) => Array.from({ length: 2_300 }, (_, i) => `${v}${String(i).padStart(5, "0")}`).join("\n"));
+    const lines = Array.from({ length: 128 }, () => line("a".repeat(16_384)));
+    const started = performance.now();
+    const masked = maskAppStackLogLines(lines, ["a".repeat(4_000), ...multiLine]);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(masked).toEqual(lines.map(() => line(APP_STACK_LOG_MASK)));
+  });
 });

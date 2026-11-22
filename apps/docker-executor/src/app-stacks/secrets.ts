@@ -58,33 +58,81 @@ export async function readAppStackComponentSecretValues(
   }
 }
 
+/** Aho-Corasick automaton: an edge is next.get(charCode).get(node); node 0 is the root. */
+interface Automaton {
+  readonly next: Map<number, Map<number, number>>;
+  readonly fail: number[];
+  readonly depth: number[];
+  /** Length of the longest needle that ends the node's string, 0 for none. */
+  readonly found: number[];
+}
+
+function step(automaton: Automaton, from: number, code: number): number {
+  const children = automaton.next.get(code);
+  if (children === undefined) return 0;
+  for (let node = from; ; node = automaton.fail[node] ?? 0) {
+    const child = children.get(node);
+    if (child !== undefined) return child;
+    if (node === 0) return 0;
+  }
+}
+
+function buildAutomaton(needles: readonly string[]): Automaton {
+  const automaton: Automaton = { next: new Map(), fail: [0], depth: [0], found: [0] };
+  const { next, fail, depth, found } = automaton;
+  const levels: [number, number, number][][] = [];
+  for (const needle of needles) {
+    let node = 0;
+    for (let i = 0; i < needle.length; i++) {
+      const code = needle.charCodeAt(i);
+      let children = next.get(code);
+      if (children === undefined) next.set(code, (children = new Map()));
+      let child = children.get(node);
+      if (child === undefined) {
+        child = depth.length;
+        children.set(node, child);
+        (levels[i] ??= []).push([child, node, code]);
+        fail.push(0);
+        depth.push(i + 1);
+        found.push(0);
+      }
+      node = child;
+    }
+    found[node] = needle.length;
+  }
+  for (const [node, parent, code] of levels.slice(1).flat()) {
+    const suffix = step(automaton, fail[parent] ?? 0, code);
+    fail[node] = suffix;
+    if (found[node] === 0) found[node] = found[suffix] ?? 0;
+  }
+  return automaton;
+}
+
 /** Every match of each value (and of each line of a multi-line value) of length >= 6 becomes "[REDACTED]", and so
  *  does a line end of >= 6 characters that starts a value or a line start that ends one (a value cut by a split frame
- *  or by the read limit); overlapping matches are merged first, so no part of either value stays visible. Pure. */
+ *  or by the read limit); overlapping matches are merged first, so no part of either value stays visible. Pure; one
+ *  pass over each line in each direction, whatever the values. */
 export function maskAppStackLogLines(lines: readonly ServiceLogLine[], values: readonly string[]): ServiceLogLine[] {
   const min = APP_STACK_LOG_MASK_MIN_LENGTH;
   const needles = [...new Set(values.flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter((needle) => needle.length >= min);
+  const forward = buildAutomaton(needles);
+  const backward = buildAutomaton(needles.map((needle) => needle.split("").reverse().join("")));
+  const longest = needles.reduce((max, needle) => Math.max(max, needle.length), 0);
   return lines.map((line) => {
     const source = line.text;
-    const lead = source.slice(0, min);
     const matches: [number, number][] = [];
-    for (const needle of needles) {
-      for (let at = source.indexOf(needle); at !== -1; at = source.indexOf(needle, at + 1)) matches.push([at, at + needle.length]);
-      const head = needle.slice(0, min);
-      for (let at = source.indexOf(head, Math.max(0, source.length - needle.length)); at !== -1; at = source.indexOf(head, at + 1)) {
-        if (needle.startsWith(source.slice(at))) {
-          matches.push([at, source.length]);
-          break;
-        }
-      }
-      if (lead.length < min) continue;
-      for (let at = needle.indexOf(lead, Math.max(0, needle.length - source.length)); at !== -1; at = needle.indexOf(lead, at + 1)) {
-        if (source.startsWith(needle.slice(at))) {
-          matches.push([0, needle.length - at]);
-          break;
-        }
-      }
+    let node = 0;
+    for (let i = 0; i < source.length; i++) {
+      node = step(forward, node, source.charCodeAt(i));
+      const length = forward.found[node] ?? 0;
+      if (length > 0) matches.push([i + 1 - length, i + 1]);
     }
+    const tail = forward.depth[node] ?? 0;
+    if (tail >= min) matches.push([source.length - tail, source.length]);
+    node = 0;
+    for (let i = Math.min(source.length, longest) - 1; i >= 0; i--) node = step(backward, node, source.charCodeAt(i));
+    const head = backward.depth[node] ?? 0;
+    if (head >= min) matches.push([0, head]);
     const merged: [number, number][] = [];
     for (const [start, end] of matches.sort((a, b) => a[0] - b[0])) {
       const last = merged.at(-1);
