@@ -299,6 +299,20 @@ export function isEncryptedBackupExportAvailable(_runtimeBackend: RuntimeBackend
   return false;
 }
 
+/** HCP-SPEC-005 feature switches. Production: all false; only a test injects another value. */
+export interface AppFeatureFlags {
+  readonly applicationTemplatesAvailable: boolean;
+  readonly applicationStacksAvailable: boolean;
+  readonly stackPublicPortsAvailable: boolean;
+  readonly gitBuildsAvailable: boolean;
+}
+export const APP_FEATURES_OFF: AppFeatureFlags = Object.freeze({
+  applicationTemplatesAvailable: false,
+  applicationStacksAvailable: false,
+  stackPublicPortsAvailable: false,
+  gitBuildsAvailable: false,
+});
+
 export const PlatformCapabilitiesDtoSchema = z.object({
   phase: z.enum(["phase-1", "phase-2"]),
   runtimeBackend: RuntimeBackendSchema.default("disabled"),
@@ -314,6 +328,10 @@ export const PlatformCapabilitiesDtoSchema = z.object({
   manualTlsCertificatesAvailable: z.boolean().default(false),
   localBackupTargetsAvailable: z.boolean().default(false),
   encryptedBackupExportAvailable: z.boolean().default(false),
+  applicationTemplatesAvailable: z.boolean().default(false),
+  applicationStacksAvailable: z.boolean().default(false),
+  stackPublicPortsAvailable: z.boolean().default(false),
+  gitBuildsAvailable: z.boolean().default(false),
 });
 export type PlatformCapabilitiesDto = z.infer<typeof PlatformCapabilitiesDtoSchema>;
 
@@ -332,12 +350,17 @@ export const DEFAULT_PLATFORM_CAPABILITIES: PlatformCapabilitiesDto = Object.fre
   manualTlsCertificatesAvailable: false,
   localBackupTargetsAvailable: false,
   encryptedBackupExportAvailable: false,
+  applicationTemplatesAvailable: false,
+  applicationStacksAvailable: false,
+  stackPublicPortsAvailable: false,
+  gitBuildsAvailable: false,
 });
 
 export interface CreatePlatformCapabilitiesOptions {
   readonly runtimeBackend: RuntimeBackend;
   readonly dockerExecutorRuntimeAvailable?: boolean;
   readonly hostAgentRuntimeAvailable?: boolean;
+  readonly appFeatures?: AppFeatureFlags;
 }
 
 export function createPlatformCapabilities(
@@ -364,6 +387,10 @@ export function createPlatformCapabilities(
       manualTlsCertificatesAvailable: isManualTlsAvailable(options.runtimeBackend),
       localBackupTargetsAvailable: isLocalBackupTargetsAvailable(options.runtimeBackend),
       encryptedBackupExportAvailable: isEncryptedBackupExportAvailable(options.runtimeBackend),
+      applicationTemplatesAvailable: options.appFeatures?.applicationTemplatesAvailable === true,
+      applicationStacksAvailable: options.appFeatures?.applicationStacksAvailable === true,
+      stackPublicPortsAvailable: options.appFeatures?.stackPublicPortsAvailable === true,
+      gitBuildsAvailable: options.appFeatures?.gitBuildsAvailable === true,
     }),
   );
 }
@@ -381,6 +408,10 @@ export const OrganizationCapabilitiesDtoSchema = z.object({
   manualTlsCertificatesAvailable: z.boolean().default(false),
   localBackupTargetsAvailable: z.boolean().default(false),
   encryptedBackupExportAvailable: z.boolean().default(false),
+  applicationTemplatesAvailable: z.boolean().default(false),
+  applicationStacksAvailable: z.boolean().default(false),
+  stackPublicPortsAvailable: z.boolean().default(false),
+  gitBuildsAvailable: z.boolean().default(false),
 });
 export type OrganizationCapabilitiesDto = z.infer<typeof OrganizationCapabilitiesDtoSchema>;
 
@@ -593,6 +624,19 @@ export const OrganizationSiteLimitDtoSchema = z.object({
   usedSites: z.number().int().nonnegative(),
 });
 export type OrganizationSiteLimitDto = z.infer<typeof OrganizationSiteLimitDtoSchema>;
+
+/** Upper bound accepted by the admin limit route. */
+export const MAX_APP_STACKS_CEILING = 1_000;
+export const UpdateOrganizationAppStackLimitInputSchema = z
+  .object({ maxAppStacks: z.number().int().min(0).max(MAX_APP_STACKS_CEILING).nullable() })
+  .strict();
+export type UpdateOrganizationAppStackLimitInput = z.infer<typeof UpdateOrganizationAppStackLimitInputSchema>;
+export const OrganizationAppStackLimitDtoSchema = z.object({
+  organizationId: EntityIdSchema,
+  maxAppStacks: z.number().int().nonnegative().nullable(),
+  usedAppStacks: z.number().int().nonnegative(),
+});
+export type OrganizationAppStackLimitDto = z.infer<typeof OrganizationAppStackLimitDtoSchema>;
 
 export const MemberDtoSchema = z.object({
   id: EntityIdSchema,

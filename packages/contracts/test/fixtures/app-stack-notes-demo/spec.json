@@ -1,0 +1,20 @@
+{"schemaVersion":1,"name":"Notes Demo","category":"productivity",
+ "description":"Two components with private cache and HTTP ingress",
+ "parameters":[
+  {"key":"worker_count","label":"Worker count","type":"integer","min":1,"max":4,"default":2,"customer":true},
+  {"key":"app_secret","label":"Application secret","type":"secret","required":true,"customer":true}],
+ "services":[
+  {"key":"app",
+   "image":{"name":"registry.example.invalid/demo/app","tag":"1.2.3","digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+   "command":["serve","--workers","${worker_count}"],
+   "environment":[{"name":"CACHE_HOST","value":"cache"},{"name":"APP_SECRET_FILE","secretParameter":"app_secret"}],
+   "volumes":[{"volumeKey":"data","containerPath":"/app/data","readOnly":false}],
+   "expose":[8080],"dependsOn":["cache"],
+   "healthcheck":{"kind":"tcp","port":8080,"intervalSeconds":15,"timeoutSeconds":3},
+   "limits":{"cpuMilli":1000,"memoryBytes":"536870912"}},
+  {"key":"cache",
+   "image":{"name":"registry.example.invalid/demo/cache","tag":"4.5.6","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+   "command":null,"environment":[],"volumes":[],"expose":[6379],"dependsOn":[],"healthcheck":null,
+   "limits":{"cpuMilli":500,"memoryBytes":"268435456"}}],
+ "volumes":[{"key":"data"}],
+ "ingress":[{"service":"app","port":8080}]}

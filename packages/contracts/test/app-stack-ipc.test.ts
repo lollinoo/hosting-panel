@@ -1,0 +1,297 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import type { z } from "zod";
+import * as appTemplates from "../src/app-templates/index.js";
+import { APP_STACK_REASONS } from "../src/app-templates/issues.js";
+import type { ApprovedStackPlan } from "../src/app-templates/plan.js";
+import {
+  APP_STACK_EXECUTOR_REASON_CODES,
+  APP_STACK_EXECUTOR_REASONS,
+  APP_STACK_LOG_TAIL_MAX,
+  APP_STACK_SECRET_CONTENT_MAX_CHARS,
+  AppStackComponentActionIpcResultSchema,
+  AppStackComponentIpcRequestSchema,
+  AppStackComponentsRemoveIpcRequestSchema,
+  AppStackComponentsRemoveIpcResultSchema,
+  AppStackCreateIpcResultSchema,
+  AppStackExecutorReasonSchema,
+  AppStackLogsIpcRequestSchema,
+  AppStackLogsIpcResultSchema,
+  AppStackPlanIpcRequestSchema,
+  AppStackPrepareIpcResultSchema,
+  AppStackPullIpcRequestSchema,
+  AppStackPullIpcResultSchema,
+  AppStackRefIpcRequestSchema,
+  AppStackRemoveIpcRequestSchema,
+  AppStackRemoveIpcResultSchema,
+  AppStackRoutesIpcRequestSchema,
+  AppStackRoutesIpcResultSchema,
+  AppStackSecretFileContentSchema,
+  AppStackSecretFileContentsSchema,
+  AppStackStatusIpcResultSchema,
+  AppStackStopIpcResultSchema,
+  type AppStackComponentActionIpcResult,
+  type AppStackComponentIpcRequest,
+  type AppStackComponentsRemoveIpcRequest,
+  type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcResult,
+  type AppStackLogLineWire,
+  type AppStackLogsIpcRequest,
+  type AppStackPlanIpcRequest,
+  type AppStackPrepareIpcResult,
+  type AppStackPullIpcRequest,
+  type AppStackPullIpcResult,
+  type AppStackRefIpcRequest,
+  type AppStackRemoveIpcRequest,
+  type AppStackRemoveIpcResult,
+  type AppStackRouteWire,
+  type AppStackRoutesIpcRequest,
+  type AppStackRoutesIpcResult,
+  type AppStackSecretFileContent,
+  type AppStackStatusIpcResult,
+  type AppStackStopIpcResult,
+} from "../src/app-templates/stack-ipc.js";
+import { ERROR_CODES } from "../src/errors.js";
+import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys } from "../src/resources.js";
+
+const PLAN = JSON.parse(
+  readFileSync(new URL("./fixtures/app-stack-notes-demo/plan.json", import.meta.url), "utf8"),
+) as ApprovedStackPlan;
+const REF: AppStackRefIpcRequest = { stackId: PLAN.stackId, organizationId: PLAN.organizationId };
+const SECRET: AppStackSecretFileContent = { parameterKey: "app_secret", version: 1, content: "s3cr3t-file-content" };
+const host = (hostname: string) => ({ hostname, tls: true, httpsRedirect: true, redirectTo: null, challenge: "http-01" as const });
+const ROUTE: AppStackRouteWire = {
+  componentKey: "app",
+  internalPort: 8080,
+  hosts: [host("shop.example.org"), { hostname: "www.example.org", tls: false, httpsRedirect: false, redirectTo: null, source: "manual" }],
+};
+
+const pull: AppStackPullIpcRequest = { plan: PLAN, image: PLAN.components[0]!.image };
+const planOnly: AppStackPlanIpcRequest = { plan: PLAN };
+const component: AppStackComponentIpcRequest = { plan: PLAN, componentKey: "app", secretFileContents: [SECRET] };
+const remove: AppStackRemoveIpcRequest = { ...REF, removeVolumes: false };
+const componentsRemove: AppStackComponentsRemoveIpcRequest = { plan: PLAN, componentKeys: ["old-web", "cache"] };
+const logs: AppStackLogsIpcRequest = { ...REF, componentKey: "app", tail: 100 };
+const routes: AppStackRoutesIpcRequest = { plan: PLAN, routes: [ROUTE] };
+
+const pullResult: AppStackPullIpcResult = { image: pull.image, pulled: true };
+const prepareResult: AppStackPrepareIpcResult = {
+  networks: [
+    { role: "app_internal", created: true },
+    { role: "app_edge", created: false },
+  ],
+  volumes: [{ volumeKey: "data", created: true }],
+};
+const createResult: AppStackCreateIpcResult = {
+  components: [
+    { componentKey: "cache", outcome: "unchanged" },
+    { componentKey: "app", outcome: "replaced" },
+  ],
+  removedComponents: ["old-web"],
+};
+const actionResult: AppStackComponentActionIpcResult = { componentKey: "app", outcome: "restarted" };
+const stopResult: AppStackStopIpcResult = {
+  components: [
+    { componentKey: "app", outcome: "stopped" },
+    { componentKey: "cache", outcome: "already_stopped" },
+  ],
+};
+const routesResult: AppStackRoutesIpcResult = { routeCount: 1, hostnames: ["shop.example.org", "www.example.org"], changed: true };
+const componentsRemoveResult: AppStackComponentsRemoveIpcResult = { removedComponents: ["old-web"] };
+const removeResult: AppStackRemoveIpcResult = {
+  removedComponents: ["app", "cache"],
+  removedNetworks: ["app_internal", "app_edge"],
+  removedVolumes: [],
+  retainedVolumes: ["data"],
+};
+const statusResult: AppStackStatusIpcResult = {
+  stackId: PLAN.stackId,
+  observedAt: "2026-11-22T02:10:00.000Z",
+  components: [
+    {
+      componentKey: "app",
+      state: "running",
+      health: "healthy",
+      probe: "passed",
+      componentHash: "a".repeat(64),
+      revisionId: PLAN.revisionId,
+      startedAt: "2026-11-22T02:09:00+01:00",
+      restartCount: 0,
+      exitCode: null,
+      oomKilled: false,
+    },
+    {
+      componentKey: "cache",
+      state: "exited",
+      health: "stopped",
+      probe: "not_run",
+      componentHash: null,
+      revisionId: null,
+      startedAt: null,
+      restartCount: 3,
+      exitCode: 137,
+      oomKilled: true,
+    },
+  ],
+  networks: { internal: true, edge: false },
+  volumes: ["data"],
+  routes: { published: true, hostnames: ["shop.example.org"] },
+};
+const logsResult: AppStackLogLineWire[] = [
+  { at: "2026-11-22T02:09:01.000000000Z", stream: "stdout", text: "listening on 8080" },
+  { at: null, stream: "stderr", text: "" },
+];
+
+const INSTANCES: [string, z.ZodType, unknown][] = [
+  ["pull request", AppStackPullIpcRequestSchema, pull],
+  ["plan request", AppStackPlanIpcRequestSchema, planOnly],
+  ["component request", AppStackComponentIpcRequestSchema, component],
+  ["ref request", AppStackRefIpcRequestSchema, REF],
+  ["remove request", AppStackRemoveIpcRequestSchema, remove],
+  ["components remove request", AppStackComponentsRemoveIpcRequestSchema, componentsRemove],
+  ["logs request", AppStackLogsIpcRequestSchema, logs],
+  ["routes request", AppStackRoutesIpcRequestSchema, routes],
+  ["pull result", AppStackPullIpcResultSchema, pullResult],
+  ["prepare result", AppStackPrepareIpcResultSchema, prepareResult],
+  ["create result", AppStackCreateIpcResultSchema, createResult],
+  ["component action result", AppStackComponentActionIpcResultSchema, actionResult],
+  ["stop result", AppStackStopIpcResultSchema, stopResult],
+  ["routes result", AppStackRoutesIpcResultSchema, routesResult],
+  ["components remove result", AppStackComponentsRemoveIpcResultSchema, componentsRemoveResult],
+  ["remove result", AppStackRemoveIpcResultSchema, removeResult],
+  ["status result", AppStackStatusIpcResultSchema, statusResult],
+  ["logs result", AppStackLogsIpcResultSchema, logsResult],
+];
+
+/** Path of every plain object in the wire value; the plan has its own tests. */
+const objectPaths = (value: unknown, path: (string | number)[] = []): (string | number)[][] => {
+  if (Array.isArray(value)) return value.flatMap((item, index) => objectPaths(item, [...path, index]));
+  if (value === null || typeof value !== "object") return [];
+  return [
+    path,
+    ...Object.entries(value).flatMap(([key, nested]) => (key === "plan" ? [] : objectPaths(nested, [...path, key]))),
+  ];
+};
+const at = (value: unknown, path: (string | number)[]): Record<string, unknown> =>
+  path.reduce<unknown>((current, step) => (current as Record<string | number, unknown>)[step], value) as Record<string, unknown>;
+const withExtraKeyAt = (value: unknown, path: (string | number)[]): unknown => {
+  const copy = JSON.parse(JSON.stringify(value)) as unknown;
+  at(copy, path).unexpected = true;
+  return copy;
+};
+const wireKeys = (value: unknown): string[] => objectPaths(value).flatMap((path) => Object.keys(at(value, path)));
+
+/** §2.4 key list of arch-executor. */
+const WIRE_KEY_NAMES = (
+  "plan image componentKey secretFileContents parameterKey version content stackId organizationId removeVolumes tail " +
+  "internalPort hosts hostname tls httpsRedirect redirectTo challenge source routes pulled networks role created volumes " +
+  "volumeKey components outcome removedComponents routeCount hostnames changed removedNetworks removedVolumes " +
+  "retainedVolumes componentKeys state health probe componentHash revisionId startedAt restartCount exitCode oomKilled " +
+  "observedAt internal edge published at stream text"
+).split(" ");
+
+const issuesText = (result: { success: boolean; error?: { issues: unknown; message: string } }): string =>
+  JSON.stringify(result.error?.issues) + String(result.error?.message);
+
+describe("application stack IPC wire", () => {
+  it("one valid instance of every request and result schema round-trips", () => {
+    for (const [name, schema, value] of INSTANCES) expect(schema.parse(value), name).toEqual(value);
+    expect(appTemplates.AppStackStatusIpcResultSchema).toBe(AppStackStatusIpcResultSchema);
+  });
+
+  it("an extra key is refused at every object", () => {
+    for (const [name, schema, value] of INSTANCES) {
+      const paths = objectPaths(value);
+      expect(paths.length, name).toBeGreaterThan(0);
+      for (const path of paths) {
+        expect(schema.safeParse(withExtraKeyAt(value, path)).success, `${name} at ${JSON.stringify(path)}`).toBe(false);
+      }
+    }
+  });
+
+  it("bounds the secret content and never echoes it in an issue", () => {
+    const sentinel = "SENTINEL-SECRET-CONTENT";
+    expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, content: "x".repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS) }).success).toBe(true);
+    for (const content of ["", sentinel + "x".repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS), `${sentinel}\u0000tail`]) {
+      const result = AppStackComponentIpcRequestSchema.safeParse({ ...component, secretFileContents: [{ ...SECRET, content }] });
+      expect(result.success).toBe(false);
+      expect(issuesText(result)).not.toContain(sentinel);
+    }
+    for (const version of [0, 1.5, 2_147_483_648]) {
+      expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, version }).success).toBe(false);
+    }
+    expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, parameterKey: "hp_secret" }).success).toBe(false);
+  });
+
+  it("refuses a duplicate parameterKey and more than eight secret entries", () => {
+    const duplicate = AppStackSecretFileContentsSchema.safeParse([SECRET, { ...SECRET, version: 2, content: "other" }]);
+    expect(duplicate.success).toBe(false);
+    expect(duplicate.error?.issues.map(({ path, message }) => ({ path, message }))).toEqual([
+      { path: [1, "parameterKey"], message: "Duplicate secret entry" },
+    ]);
+    const entries = (n: number) => Array.from({ length: n }, (_, i) => ({ ...SECRET, parameterKey: `secret_${i}` }));
+    expect(AppStackSecretFileContentsSchema.safeParse(entries(8)).success).toBe(true);
+    expect(AppStackSecretFileContentsSchema.safeParse(entries(9)).success).toBe(false);
+    expect(AppStackComponentIpcRequestSchema.safeParse({ ...component, secretFileContents: [] }).success).toBe(true);
+  });
+
+  it("refuses duplicate, empty and too many component keys to remove", () => {
+    const parse = (componentKeys: string[]) => AppStackComponentsRemoveIpcRequestSchema.safeParse({ plan: PLAN, componentKeys }).success;
+    expect(parse(["a", "b", "c", "d", "e", "f", "g", "h"])).toBe(true);
+    expect(parse([])).toBe(false);
+    expect(parse(["a", "a"])).toBe(false);
+    expect(parse(["a", "b", "c", "d", "e", "f", "g", "h", "i"])).toBe(false);
+    expect(parse(["old_web"])).toBe(false);
+  });
+
+  it("refuses empty hosts, more than eight hostnames, duplicate hostnames and duplicate routes", () => {
+    const parse = (list: AppStackRouteWire[]) => AppStackRoutesIpcRequestSchema.safeParse({ plan: PLAN, routes: list }).success;
+    const hosts = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => host(`${prefix}${i}.example.org`));
+    expect(parse([])).toBe(true);
+    expect(parse([{ ...ROUTE, hosts: [] }])).toBe(false);
+    expect(parse([{ ...ROUTE, hosts: hosts("a", 5) }, { ...ROUTE, internalPort: 8081, hosts: hosts("b", 3) }])).toBe(true);
+    expect(parse([{ ...ROUTE, hosts: hosts("a", 5) }, { ...ROUTE, internalPort: 8081, hosts: hosts("b", 4) }])).toBe(false);
+    expect(parse([{ ...ROUTE, hosts: hosts("a", 9) }])).toBe(false);
+    expect(parse([{ ...ROUTE, hosts: hosts("a", 2) }, { ...ROUTE, internalPort: 8081, hosts: hosts("a", 1) }])).toBe(false);
+    expect(parse([{ ...ROUTE, hosts: hosts("a", 1) }, { ...ROUTE, hosts: hosts("b", 1) }])).toBe(false);
+    expect(parse([{ ...ROUTE, hosts: hosts("a", 1) }, { ...ROUTE, componentKey: "cache", hosts: hosts("b", 1) }])).toBe(true);
+    expect(parse([{ ...ROUTE, internalPort: 0 }])).toBe(false);
+  });
+
+  it("bounds the log tail", () => {
+    const parse = (tail: unknown) => AppStackLogsIpcRequestSchema.safeParse({ ...logs, tail }).success;
+    expect([1, APP_STACK_LOG_TAIL_MAX].map(parse)).toEqual([true, true]);
+    expect([0, APP_STACK_LOG_TAIL_MAX + 1, 1.5, "10"].map(parse)).toEqual([false, false, false, false]);
+    expect(AppStackLogsIpcResultSchema.safeParse(Array.from({ length: APP_STACK_LOG_TAIL_MAX + 1 }, () => logsResult[0])).success).toBe(false);
+  });
+
+  it("lists twelve executor reasons, each mapped to an error code by a total frozen map", () => {
+    expect(APP_STACK_EXECUTOR_REASONS).toHaveLength(12);
+    expect(new Set(APP_STACK_EXECUTOR_REASONS).size).toBe(12);
+    for (const reason of APP_STACK_EXECUTOR_REASONS) {
+      expect(reason).toMatch(/^STACK_[A-Z_]{1,40}$/);
+      expect(AppStackExecutorReasonSchema.parse(reason)).toBe(reason);
+      expect(ERROR_CODES).toContain(APP_STACK_EXECUTOR_REASON_CODES[reason]);
+    }
+    expect(Object.keys(APP_STACK_EXECUTOR_REASON_CODES).sort()).toEqual([...APP_STACK_EXECUTOR_REASONS].sort());
+    expect(Object.isFrozen(APP_STACK_EXECUTOR_REASON_CODES)).toBe(true);
+    expect(APP_STACK_EXECUTOR_REASONS.filter((r) => (APP_STACK_REASONS as readonly string[]).includes(r))).toEqual([
+      "STACK_IMAGE_NOT_ALLOWED",
+      "STACK_SECRET_MISSING",
+      "STACK_VOLUME_IN_USE",
+      "STACK_UNSUPPORTED_FEATURE",
+    ]);
+    expect(AppStackExecutorReasonSchema.safeParse("TLS_FOO").success).toBe(false);
+  });
+
+  it("no wire key name is a forbidden public or plaintext secret key", () => {
+    for (const [name, , value] of INSTANCES) {
+      expect(findForbiddenPublicDtoKeys(value), name).toEqual([]);
+      expect(findPlaintextSecretKeys(value), name).toEqual([]);
+      for (const key of wireKeys(value)) expect(WIRE_KEY_NAMES, `${name}: ${key}`).toContain(key);
+    }
+    const keyObject = Object.fromEntries(WIRE_KEY_NAMES.map((key) => [key, "value"]));
+    expect(findForbiddenPublicDtoKeys(keyObject)).toEqual([]);
+    expect(findPlaintextSecretKeys(keyObject)).toEqual([]);
+  });
+});
