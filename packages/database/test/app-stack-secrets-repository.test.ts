@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   and,
+  APP_STACK_SECRET_VERSIONS_PER_HOUR,
   appStacks,
   appStackSecretAad,
   AppStackSecretError,
@@ -171,6 +172,34 @@ describe("@hosting-panel/database - app stack secrets repository", () => {
     ]);
     expect(Object.keys(list[0] ?? {}).sort()).toEqual(["parameterKey", "rotatedAt", "version"]);
     expect(await listAppStackSecretMetadata(db(), { organizationId: "org_b", stackId })).toEqual([]);
+  });
+
+  it("refuses the 11th version of a stack within an hour with RATE_LIMITED, any key, and stores nothing", async () => {
+    expect(APP_STACK_SECRET_VERSIONS_PER_HOUR).toBe(10);
+    const stackId = await newStack();
+    const other = await newStack();
+    for (let i = 1; i <= 10; i += 1) await set(stackId, i % 2 === 0 ? "db_password" : "api_key", `v${String(i)}`);
+    const err = await set(stackId, "third_key", SENTINEL).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AppStackSecretError);
+    expect((err as AppStackSecretError).code).toBe("RATE_LIMITED");
+    expect((err as AppStackSecretError).retryAfterMs).toBeGreaterThan(3_500_000);
+    expect((err as Error).message).not.toMatch(/db_password|api_key|third_key/);
+    expect(await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, stackId))).toHaveLength(10);
+    expect(await set(other, "db_password", "x")).toMatchObject({ version: 1 });
+  });
+
+  it("accepts a version again once the earlier ones are older than an hour", async () => {
+    const stackId = await newStack();
+    const old = new Date(Date.now() - 61 * 60_000);
+    const [seed] = await db().select().from(appStackSecrets).limit(1);
+    if (!seed) throw new Error("seed row missing");
+    const envelope = { ciphertextBase64: seed.ciphertextBase64, ivBase64: seed.ivBase64, authTagBase64: seed.authTagBase64 };
+    await db().insert(appStackSecrets).values(
+      Array.from({ length: 10 }, (_, i) => ({
+        id: `ssec_old_${String(i)}`, stackId, organizationId: "org_a", parameterKey: "db_password", version: i + 1, createdAt: old, ...envelope,
+      })),
+    );
+    expect(await set(stackId, "db_password", "fresh")).toMatchObject({ version: 11 });
   });
 
   it("numbers two concurrent sets 1 and 2", async () => {

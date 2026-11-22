@@ -589,7 +589,7 @@ export async function transitionAppStackTransactional(
 /**
  * Deployment progress/outcome plus the stack status in one call. `ended_at` is set on a terminal deployment status.
  * appliedRevisionId: sets app_stacks.applied_revision_id and applied_revision_id of every component row.
- * stackStatus "deleted" finalises: quota released, domain rows deleted, volumes retain→retained / destroy or pending→removed,
+ * stackStatus "deleted" finalises: quota released, domain rows deleted, volumes retain→retained / destroy, pending or missing→removed,
  * component rows deleted, status + deleted_at set, then secret versions purged when no volume is `retained`.
  */
 export async function updateAppStackDeploymentTransactional(
@@ -635,7 +635,7 @@ export async function updateAppStackDeploymentTransactional(
     await db
       .update(appStackVolumes)
       .set({
-        status: sql`CASE WHEN ${appStackVolumes.retentionPolicy} = 'destroy' OR ${appStackVolumes.status} = 'pending' THEN 'removed' ELSE 'retained' END`,
+        status: sql`CASE WHEN ${appStackVolumes.retentionPolicy} = 'destroy' OR ${appStackVolumes.status} IN ('pending', 'missing') THEN 'removed' ELSE 'retained' END`,
         updatedAt: now,
       })
       .where(eq(appStackVolumes.stackId, stack.id));

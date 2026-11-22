@@ -3,7 +3,7 @@
 
 import { randomUUID } from "node:crypto";
 import { APP_ID_PREFIXES, APP_STACK_SECRET_CONTENT_MAX_CHARS, APP_TEMPLATE_PARAMETER_KEY_PATTERN } from "@hosting-panel/contracts";
-import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { appStacks, appStackSecrets } from "./schema.js";
 import { decryptSecretAesGcm, encryptSecretAesGcm, type SecretAesGcmAadContext } from "./secrets-crypto.js";
@@ -15,12 +15,17 @@ export interface AppStackSecretMetadata {
   readonly rotatedAt: Date;
 }
 
-export type AppStackSecretErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "SECRET_MISSING";
+export type AppStackSecretErrorCode = "NOT_FOUND" | "VALIDATION_ERROR" | "SECRET_MISSING" | "RATE_LIMITED";
+
+/** New versions per stack (all keys) in a rolling hour: every version is immutable and kept while the stack lives. */
+export const APP_STACK_SECRET_VERSIONS_PER_HOUR = 10;
 
 export class AppStackSecretError extends Error {
   constructor(
     readonly code: AppStackSecretErrorCode,
     message: string,
+    /** RATE_LIMITED: until the oldest version of the window is an hour old. */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = "AppStackSecretError";
@@ -29,6 +34,7 @@ export class AppStackSecretError extends Error {
 
 /** The 0025 CHECK caps ciphertext_base64 at 32768 chars, i.e. 24576 plaintext bytes. */
 const VALUE_MAX_UTF8_BYTES = 24_576;
+const HOUR_MS = 3_600_000;
 const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
 const metadataColumns = {
   parameterKey: appStackSecrets.parameterKey,
@@ -73,6 +79,16 @@ export async function setAppStackSecretTransactional(
       .where(and(eq(appStacks.id, input.stackId), eq(appStacks.organizationId, input.organizationId), isNull(appStacks.deletedAt)))
       .for("no key update");
     if (!stack) throw new AppStackSecretError("NOT_FOUND", "Application stack not found.");
+    const recent = await tx
+      .select({ at: appStackSecrets.createdAt })
+      .from(appStackSecrets)
+      .where(and(eq(appStackSecrets.stackId, input.stackId), gt(appStackSecrets.createdAt, sql`now() - interval '1 hour'`)))
+      .orderBy(desc(appStackSecrets.createdAt))
+      .limit(APP_STACK_SECRET_VERSIONS_PER_HOUR);
+    if (recent.length >= APP_STACK_SECRET_VERSIONS_PER_HOUR) {
+      const freesAt = recent[recent.length - 1]!.at.getTime() + HOUR_MS;
+      throw new AppStackSecretError("RATE_LIMITED", "Too many secret versions in the last hour.", Math.max(1_000, freesAt - Date.now()));
+    }
     const [latest] = await tx
       .select({ max: sql<number>`coalesce(max(${appStackSecrets.version}), 0)` })
       .from(appStackSecrets)

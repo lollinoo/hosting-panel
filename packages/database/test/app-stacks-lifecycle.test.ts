@@ -587,6 +587,43 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect(await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, pendingOnly.id))).toEqual([]);
   });
 
+  it("finalises a delete of volumes missing after a restore as removed, so they keep no secret alive", async () => {
+    const deleteWith = async (statuses: Record<string, "missing" | "present">) => {
+      const stack = await ready((await create(orgA, { volumes: Object.keys(statuses) })).stack.id);
+      const scope = { organizationId: orgA, stackId: stack.id };
+      for (const [volumeKey, status] of Object.entries(statuses)) {
+        await setAppStackVolumeStatusTransactional(db(), { ...scope, volumeKeys: [volumeKey], status });
+      }
+      await setAppStackSecretTransactional(db(), { ...scope, parameterKey: "app_secret", value: "s3cr3t-value", masterKey: "e".repeat(64) });
+      const deletion = await enqueue(stack, "stack.delete");
+      await updateAppStackDeploymentTransactional(db(), {
+        ...scope,
+        deploymentId: deletion.deployment!.id,
+        deploymentStatus: "succeeded",
+        problem: null,
+        stackStatus: "deleted",
+      });
+      return {
+        volumes: (await listAppStackVolumes(db(), { ...scope, includeDeleted: true })).map((v) => [v.volumeKey, v.status]),
+        secrets: await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, stack.id)),
+      };
+    };
+
+    const restored = await deleteWith({ data: "missing", logs: "missing" });
+    expect(restored.volumes).toEqual([
+      ["data", "removed"],
+      ["logs", "removed"],
+    ]);
+    expect(restored.secrets).toEqual([]);
+
+    const mixed = await deleteWith({ data: "missing", logs: "present" });
+    expect(mixed.volumes).toEqual([
+      ["data", "removed"],
+      ["logs", "retained"],
+    ]);
+    expect(mixed.secrets).toHaveLength(1);
+  });
+
   it("records component health and volume status, ignoring unknown keys", async () => {
     const { stack } = await create();
     const observedAt = new Date("2026-11-22T10:00:00.000Z");
