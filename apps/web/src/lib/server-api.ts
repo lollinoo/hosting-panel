@@ -3,6 +3,7 @@ import { TLS_INVENTORY_FILTERS } from "@hosting-panel/contracts";
 import { getServerSession } from "./server-session";
 import { fetchUpstream } from "./upstream";
 import { FIREWALL_BFF_TIMEOUT_MS } from "./admin-firewall";
+import { isValidPathSegment } from "./bff-guard";
 import type {
   HostDto,
   HostAllocationDto,
@@ -42,6 +43,17 @@ import type {
   AdminSiteTemplateDetailDto,
   AdminSiteTemplateVersionDto,
   CustomerSiteTypesDto,
+  AdminAppTemplateSummaryDto,
+  AdminAppTemplateDetailDto,
+  AdminAppTemplateVersionDto,
+  AdminAppTemplateUsageDto,
+  AdminAppStacksDto,
+  CustomerAppTemplatesDto,
+  CustomerAppTemplateDto,
+  AppStackSummaryDto,
+  AppStackDetailDto,
+  AppStackDeploymentDto,
+  AppStackDomainDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -281,4 +293,70 @@ export async function fetchServerAdminSiteTemplateVersion(
 /** null = could not be loaded: the page behaves as today (no chooser, legacy body). */
 export async function fetchServerCustomerSiteTypes(orgId: string): Promise<CustomerSiteTypesDto | null> {
   return orNull(await serverGet<CustomerSiteTypesDto>(`v1/organizations/${orgId}/site-types`));
+}
+
+// Application templates and stacks: results keep notFound and the flag-off code (NOT_SUPPORTED) apart.
+const enc = encodeURIComponent;
+/** An id that is not one path segment (`..`, `a/b`) is never put in a path: it reads as not found. */
+const NOT_ONE_SEGMENT = { ok: false, outcome: "notFound" } as const;
+const segments = (...ids: string[]) => ids.every(isValidPathSegment);
+
+export async function fetchServerAdminAppTemplates(): Promise<ServerResult<AdminAppTemplateSummaryDto[]>> {
+  return serverGet<AdminAppTemplateSummaryDto[]>("v1/admin/app-templates", { timeoutMs: 20_000 });
+}
+
+export async function fetchServerAdminAppTemplate(templateId: string): Promise<ServerResult<AdminAppTemplateDetailDto>> {
+  if (!segments(templateId)) return NOT_ONE_SEGMENT;
+  return serverGet<AdminAppTemplateDetailDto>(`v1/admin/app-templates/${enc(templateId)}`, { timeoutMs: 20_000 });
+}
+
+export async function fetchServerAdminAppTemplateVersion(
+  templateId: string,
+  versionId: string,
+): Promise<ServerResult<AdminAppTemplateVersionDto>> {
+  if (!segments(templateId, versionId)) return NOT_ONE_SEGMENT;
+  return serverGet<AdminAppTemplateVersionDto>(
+    `v1/admin/app-templates/${enc(templateId)}/versions/${enc(versionId)}`,
+    { timeoutMs: 20_000 },
+  );
+}
+
+export async function fetchServerAdminAppTemplateUsage(templateId: string): Promise<ServerResult<AdminAppTemplateUsageDto>> {
+  if (!segments(templateId)) return NOT_ONE_SEGMENT;
+  return serverGet<AdminAppTemplateUsageDto>(`v1/admin/app-templates/${enc(templateId)}/usage`);
+}
+
+export async function fetchServerAdminAppStacks(): Promise<ServerResult<AdminAppStacksDto>> {
+  return serverGet<AdminAppStacksDto>("v1/admin/app-stacks");
+}
+
+export async function fetchServerOrgAppTemplates(orgId: string): Promise<ServerResult<CustomerAppTemplatesDto>> {
+  return serverGet<CustomerAppTemplatesDto>(`v1/organizations/${enc(orgId)}/app-templates`);
+}
+
+export async function fetchServerOrgAppTemplate(orgId: string, templateId: string): Promise<ServerResult<CustomerAppTemplateDto>> {
+  if (!segments(templateId)) return NOT_ONE_SEGMENT;
+  return serverGet<CustomerAppTemplateDto>(`v1/organizations/${enc(orgId)}/app-templates/${enc(templateId)}`);
+}
+
+export async function fetchServerOrgAppStacks(orgId: string): Promise<ServerResult<AppStackSummaryDto[]>> {
+  return serverGet<AppStackSummaryDto[]>(`v1/organizations/${enc(orgId)}/app-stacks`);
+}
+
+export async function fetchServerOrgAppStack(orgId: string, stackId: string): Promise<ServerResult<AppStackDetailDto>> {
+  if (!segments(stackId)) return NOT_ONE_SEGMENT;
+  return serverGet<AppStackDetailDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}`);
+}
+
+/** The newest 20 entries; null = could not be loaded. */
+export async function fetchServerOrgAppStackDeployments(orgId: string, stackId: string): Promise<AppStackDeploymentDto[] | null> {
+  if (!segments(stackId)) return null;
+  return orNull(
+    await serverGet<AppStackDeploymentDto[]>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/deployments?limit=20`),
+  );
+}
+
+export async function fetchServerOrgAppStackDomains(orgId: string, stackId: string): Promise<AppStackDomainDto[] | null> {
+  if (!segments(stackId)) return null;
+  return orNull(await serverGet<AppStackDomainDto[]>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/domains`));
 }

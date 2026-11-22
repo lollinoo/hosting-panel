@@ -3,8 +3,9 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { AdminSiteDto } from "@hosting-panel/contracts";
+import type { AdminAppStacksDto, AdminSiteDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ChangeOwnerDialog, type Customers } from "@/components/admin/change-owner-dialog";
@@ -20,7 +21,17 @@ export function canUpgradeTemplate(s: AdminSiteDto): boolean {
   return upgradeTarget(s) !== null && (s.status === "ready" || s.status === "degraded");
 }
 
-export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDto[]; customers: Customers; csrfToken: string }) {
+export function SitesTable({
+  sites,
+  stacks = [],
+  customers,
+  csrfToken,
+}: {
+  sites: AdminSiteDto[];
+  stacks?: AdminAppStacksDto["stacks"];
+  customers: Customers;
+  csrfToken: string;
+}) {
   const m = useMessages();
   const t = m.admin.sites;
   const router = useRouter();
@@ -60,7 +71,7 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
     return null;
   };
 
-  if (sites.length === 0) return <p className="text-sm text-muted-foreground">{t.empty}</p>;
+  if (sites.length === 0 && stacks.length === 0) return <p className="text-sm text-muted-foreground">{t.empty}</p>;
 
   return (
     <div className="space-y-3">
@@ -73,6 +84,7 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
         <TableHeader>
           <TableRow>
             <TableHead>{t.colName}</TableHead>
+            <TableHead>{t.colKind}</TableHead>
             <TableHead>{t.colDomain}</TableHead>
             <TableHead>{t.colOwner}</TableHead>
             <TableHead>{t.colPhp}</TableHead>
@@ -85,6 +97,7 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
           {sites.map((s) => (
             <TableRow key={s.id}>
               <TableCell className="font-medium">{s.name}</TableCell>
+              <TableCell>{s.siteType === null ? "-" : ((m.admin.templates.modules as Record<string, string>)[s.siteType] ?? s.siteType)}</TableCell>
               <TableCell>{s.primaryDomain ?? "-"}</TableCell>
               <TableCell>{s.owner?.name ?? t.unassigned}</TableCell>
               <TableCell>{s.phpVersion ?? "-"}</TableCell>
@@ -125,6 +138,20 @@ export function SitesTable({ sites, customers, csrfToken }: { sites: AdminSiteDt
                   </Button>
                 </div>
               </TableCell>
+            </TableRow>
+          ))}
+          {stacks.map((s) => (
+            <TableRow key={s.id}>
+              <TableCell className="font-medium">{s.name}</TableCell>
+              <TableCell>{s.templateName}</TableCell>
+              <TableCell>{s.primaryHostname ?? "-"}</TableCell>
+              <TableCell>{s.organizationName}</TableCell>
+              <TableCell>{"-"}</TableCell>
+              <TableCell>{format(t.templateVersion, { name: s.templateName, version: s.versionNumber })}</TableCell>
+              <TableCell>
+                <Badge variant="outline">{m.admin.appTemplates.stackStatus[s.status]}</Badge>
+              </TableCell>
+              <TableCell />
             </TableRow>
           ))}
         </TableBody>

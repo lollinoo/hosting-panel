@@ -92,6 +92,16 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(existsSync(join(f.root, "releases/0.1.0"))).toBe(false);
   });
 
+  it("refuses a downgrade while an application stack exists (exit 8), naming only that feature", () => {
+    const f = gated("echo app-stacks", "manual-tls backup-targets site-templates app-stacks");
+    const r = update(["--archive", old(), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["app-stacks", "--allow-feature-loss", "application stacks"]) expect(r.err).toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates"]) expect(r.err).not.toContain(t);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
   it("--allow-feature-loss lets the downgrade through", () => {
     const f = gated("echo manual-tls");
     const r = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], f.env);

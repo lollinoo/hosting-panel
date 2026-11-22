@@ -51,4 +51,14 @@ UPDATE backup_targets SET last_test_at = NULL, last_test_outcome = NULL, last_te
        last_test_available_bytes = NULL, last_test_total_bytes = NULL
  WHERE kind = 'local';
 UPDATE sites SET status = 'degraded', updated_at = now() WHERE status IN ('deploying', 'maintenance');
+-- Application stacks: the new host has no containers, volumes or routes. Revisions, secrets and deleted stacks stay.
+UPDATE app_stack_deployments SET status = 'failed', problem = 'OPERATION_INTERRUPTED', ended_at = COALESCE(ended_at, now())
+ WHERE status IN ('queued','running','unknown');
+UPDATE app_stack_components SET health = 'missing', health_observed_at = NULL, updated_at = now() WHERE health <> 'missing';
+UPDATE app_stack_volumes SET status = 'missing', updated_at = now() WHERE status IN ('pending','present','retained');
+UPDATE app_stack_domains SET status = 'pending', cert_status = 'none', cert_expires_at = NULL, dns_next_check_at = now(),
+       updated_at = now() WHERE status <> 'pending' OR cert_status <> 'none';
+UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, updated_at = now() WHERE status = 'deleting';
+UPDATE app_stacks SET status = 'failed', applied_routes_hash = NULL, updated_at = now()
+ WHERE deleted_at IS NULL AND status NOT IN ('draft','failed','delete_failed','deleting');
 DELETE FROM user_sessions;

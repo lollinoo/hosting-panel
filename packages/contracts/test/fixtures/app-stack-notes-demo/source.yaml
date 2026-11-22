@@ -1,0 +1,58 @@
+x-hp-stack:
+  schemaVersion: 1
+  name: Notes Demo
+  category: productivity
+  description: Two components with private cache and HTTP ingress
+x-hp-parameters:
+  - key: worker_count
+    label: Worker count
+    type: integer
+    min: 1
+    max: 4
+    default: 2
+    customer: true
+  - key: app_secret
+    label: Application secret
+    type: secret
+    required: true
+    customer: true
+services:
+  app:
+    image: registry.example.invalid/demo/app:1.2.3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    command: ["serve", "--workers", "${worker_count}"]
+    environment:
+      - name: CACHE_HOST
+        value: cache
+      - name: APP_SECRET_FILE
+        secret: app_secret
+    volumes:
+      - data:/app/data
+    expose:
+      - 8080
+    depends_on:
+      - cache
+    healthcheck:
+      kind: tcp
+      port: 8080
+      intervalSeconds: 15
+      timeoutSeconds: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+  cache:
+    image: registry.example.invalid/demo/cache:4.5.6@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    expose:
+      - 6379
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+volumes:
+  data: {}
+x-hp-ingress:
+  - service: app
+    port: 8080
+    protocol: http

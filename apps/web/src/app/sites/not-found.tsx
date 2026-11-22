@@ -13,7 +13,7 @@ export default async function SitesNotFound() {
       <p className="mt-2 text-sm text-muted-foreground">{t.body}</p>
       <div className="mt-6 flex justify-center gap-3">
         <Button asChild size="sm">
-          <Link href="/sites">{t.back}</Link>
+          <Link href="/apps">{t.back}</Link>
         </Button>
       </div>
     </div>

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -14,6 +15,8 @@ const DATABASE_URL = `postgresql://hosting_panel:${PGPW}@127.0.0.1:5432/hosting_
 const TARGET = ["--endpoint", "https://s3.example.test", "--region", "eu-test-1", "--bucket", "bkt", "--prefix", "hp/old"];
 const ARGS = [...TARGET, "--yes"];
 const COPY_TIME = "2026-11-14T02:00:00.000Z";
+const COUNT_SQL =
+  "SELECT (SELECT count(*) FROM public.sites), CASE WHEN to_regclass('public.app_stacks') IS NULL THEN 0 ELSE (xpath('/row/n/text()', query_to_xml('SELECT count(*) AS n FROM public.app_stacks WHERE deleted_at IS NULL', false, true, '')))[1]::text::bigint END";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -39,7 +42,7 @@ printf 'PGDMP-stub' > "$HP_PANEL_DUMP_DIR/restore.pgdump"; printf '%s' "\${STUB_
   install: `fail install; cp -- "\${@: -2:1}" "\${@: -1}"`,
   systemctl: `fail "$1"; exit 0`,
   health: `exit 0`,
-  psql: `if [[ "$*" == *"count(*)"* ]]; then fail count; echo "\${STUB_SITES:-0}"; else cat > "$STUB_DIR/psql.stdin"; fail psql; fi`,
+  psql: `if [[ "$*" == *"count(*)"* ]]; then fail count; echo "\${STUB_SITES:-0}|\${STUB_STACKS:-0}"; else cat > "$STUB_DIR/psql.stdin"; fail psql; fi`,
   pg_restore: `if [[ "$*" == *--data-only* ]]; then
   echo 'COPY public.schema_migrations (filename, applied_at) FROM stdin;'
   IFS=, read -ra ms <<<"\${STUB_MIGRATIONS:-0001_a.sql,0002_b.sql}"; for x in "\${ms[@]}"; do printf '%s\\t2026-11-15\\n' "$x"; done
@@ -98,7 +101,7 @@ function fixture() {
 const named = (calls: string[], name: string) => calls.filter((c) => c.split(" ")[1] === name);
 
 const ORDER = [
-  "root psql -X -tAc SELECT count(*) FROM public.sites -h 127.0.0.1 -U hosting_panel -d hosting_panel",
+  `root psql -X -tAc ${COUNT_SQL} -h 127.0.0.1 -U hosting_panel -d hosting_panel`,
   "hp-executor node $R/opt/hosting-panel/current/apps/docker-executor/dist/cli/panel-fetch.js --endpoint https://s3.example.test --region eu-test-1 --bucket bkt --prefix hp/old",
   "root pg_restore --data-only --table=schema_migrations --file=- $R/var/lib/hosting-panel/panel-dump/restore.pgdump",
   "root systemctl stop hp-web hp-api",
@@ -143,6 +146,13 @@ describe("restore-panel.sh refusals", () => {
     const r = f.run(ARGS, { STUB_SITES: "3" });
     expect(r.code).toBe(2);
     expect(r.out).toContain("already has 3 site(s)");
+    expect(r.calls).toEqual([ORDER[0]]);
+  });
+
+  it("(d) a panel with live applications and no site is refused before the fetch", () => {
+    const r = fixture().run(ARGS, { STUB_STACKS: "2" });
+    expect(r.code).toBe(2);
+    expect(r.out).toContain("already has 2 application(s)");
     expect(r.calls).toEqual([ORDER[0]]);
   });
 
@@ -628,6 +638,25 @@ describe("restore-panel.sh --local-repo", () => {
   it("(s) the local messages differ from the S3 ones for the same exit", () => {
     for (const rc of ["2", "4"]) {
       expect(localFixture().runLocal([], { STUB_FETCH_RC: rc }).out).not.toBe(fixture().run(ARGS, { STUB_FETCH_RC: rc }).out);
+    }
+  });
+});
+
+describe("the fresh-server count on PostgreSQL", () => {
+  it("(d) counts live application stacks, and only sites on a database older than them", async () => {
+    // The root package does not depend on PGlite: load the database package's own copy.
+    const require = createRequire(resolve(__dirname, "../../packages/database/package.json"));
+    const { PGlite } = (await import(require.resolve("@electric-sql/pglite"))) as typeof import("@electric-sql/pglite");
+    const db = new PGlite();
+    try {
+      const count = async () => (await db.query<unknown[]>(COUNT_SQL, [], { rowMode: "array" })).rows[0]?.map(Number);
+      await db.exec("CREATE TABLE public.sites (id text); INSERT INTO public.sites VALUES ('s1'), ('s2');");
+      expect(await count()).toEqual([2, 0]);
+      await db.exec("DELETE FROM public.sites; CREATE TABLE public.app_stacks (id text, deleted_at timestamptz);");
+      await db.exec("INSERT INTO public.app_stacks VALUES ('a', NULL), ('b', now()), ('c', NULL);");
+      expect(await count()).toEqual([0, 2]);
+    } finally {
+      await db.close();
     }
   });
 });

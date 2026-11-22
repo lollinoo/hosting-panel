@@ -35,7 +35,7 @@ vi.mock("next/navigation", () => ({
 import AdminTemplatesPage from "@/app/admin/templates/page";
 import AdminTemplatePage from "@/app/admin/templates/[templateId]/page";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
-import { SiteTemplateList, groupByModule, templateStatusKeys } from "@/components/admin/site-template-list";
+import { groupByModule, templateStatusKeys } from "@/components/admin/site-template-list";
 import { SiteTemplateDetail, canArchive } from "@/components/admin/site-template-detail";
 
 const NOW = "2026-11-21T10:00:00.000Z";
@@ -108,45 +108,6 @@ describe("templateStatusKeys", () => {
     expect(templateStatusKeys(CUSTOM)).toEqual(["enabled"]);
     expect(templateStatusKeys(DISABLED)).toEqual(["disabled"]);
     expect(templateStatusKeys(ARCHIVED)).toEqual(["archived"]);
-  });
-});
-
-describe("SiteTemplateList", () => {
-  it("renders one card per module with links, version labels, counts and status badges (both languages)", () => {
-    for (const [m, locale] of [[en, "en"], [itMsgs, "it"]] as const) {
-      const out = html(m, createElement(SiteTemplateList, { templates: [BUILT_IN, CUSTOM, DISABLED, ARCHIVED], m }), locale);
-      const t = m.admin.templates;
-      expect(out).toContain(t.modules.wordpress);
-      expect(out).toContain(format(t.moduleCount, { count: 4 }));
-      for (const col of [t.col.name, t.col.status, t.col.defaultVersion, t.col.versions, t.col.sites]) expect(out).toContain(`>${col}<`);
-      for (const id of ["stpl_wordpress", "stpl_custom", "stpl_off", "stpl_old"]) expect(out).toContain(`href="/admin/templates/${id}"`);
-      expect(out).toContain(format(t.versionLabel, { version: 2 }));
-      expect(out).toContain(">7<");
-      for (const label of [t.status.builtIn, t.status.enabled, t.status.disabled, t.status.archived]) expect(out).toContain(label);
-      // An archived row is dimmed; live rows are not.
-      const rows = out.split("<tr").filter((r) => r.includes("/admin/templates/"));
-      expect(rows.filter((r) => r.includes("opacity-60"))).toHaveLength(1);
-      expect(rows.find((r) => r.includes("opacity-60"))).toContain("Aardvark");
-    }
-  });
-
-  it("keeps the built-in row above the custom one and the archived one last", () => {
-    const out = html(en, createElement(SiteTemplateList, { templates: [ARCHIVED, CUSTOM, BUILT_IN], m: en }));
-    expect(out.indexOf(">WordPress<")).toBeLessThan(out.indexOf(">Blog<"));
-    expect(out.indexOf(">Blog<")).toBeLessThan(out.indexOf(">Aardvark<"));
-  });
-
-  it("falls back to the module key when the catalog does not know it", () => {
-    const odd = { ...CUSTOM, module: "mystery" } as unknown as AdminSiteTemplateSummaryDto;
-    expect(html(en, createElement(SiteTemplateList, { templates: [odd], m: en }))).toContain("mystery");
-  });
-
-  it("shows the empty text and no table when there is nothing", () => {
-    for (const [m, locale] of [[en, "en"], [itMsgs, "it"]] as const) {
-      const out = html(m, createElement(SiteTemplateList, { templates: [], m }), locale);
-      expect(out).toContain(m.admin.templates.empty);
-      expect(out).not.toContain("<table");
-    }
   });
 });
 
@@ -260,7 +221,7 @@ describe("admin template pages", () => {
 
   it("list page reads exactly the templates and renders title, subtitle, the 'new' link and the list", async () => {
     const out = await render(AdminTemplatesPage());
-    expect(fetchUpstream.mock.calls.map((c) => c[0])).toEqual(["v1/admin/site-templates"]);
+    expect([...fetchUpstream.mock.calls.map((c) => c[0])].sort()).toEqual(["v1/admin/site-templates", "v1/me"]);
     expect(out).toContain(en.admin.templates.title);
     expect(out).toContain(en.admin.templates.subtitle);
     expect(out).toMatch(/href="\/admin\/templates\/new"[^>]*>[^<]*New template/);

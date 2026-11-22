@@ -1,0 +1,13 @@
+{"components":[
+  {"key":"cache","image":"registry.example.invalid/demo/cache@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+   "runAsUser":null,"argv":null,"environment":[],"secretFiles":[],
+   "resources":{"cpuMilli":500,"memoryBytes":"268435456"},"expose":[6379],"dependsOn":[],"volumes":[],"healthcheck":null},
+  {"key":"app","image":"registry.example.invalid/demo/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "runAsUser":null,"argv":["serve","--workers","2"],
+   "environment":[{"name":"CACHE_HOST","value":"cache"}],
+   "secretFiles":[{"envName":"APP_SECRET_FILE","parameterKey":"app_secret"}],
+   "resources":{"cpuMilli":1000,"memoryBytes":"536870912"},"expose":[8080],"dependsOn":["cache"],
+   "volumes":[{"volumeKey":"data","containerPath":"/app/data","readOnly":false}],
+   "healthcheck":{"kind":"tcp","port":8080,"intervalSeconds":15,"timeoutSeconds":3}}],
+ "volumes":[{"key":"data"}],
+ "ingress":[{"componentKey":"app","port":8080}]}

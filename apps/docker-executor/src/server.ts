@@ -4,6 +4,14 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
+  AppStackComponentIpcRequestSchema,
+  AppStackComponentsRemoveIpcRequestSchema,
+  AppStackLogsIpcRequestSchema,
+  AppStackPlanIpcRequestSchema,
+  AppStackPullIpcRequestSchema,
+  AppStackRefIpcRequestSchema,
+  AppStackRemoveIpcRequestSchema,
+  AppStackRoutesIpcRequestSchema,
   BackupsIpcRequestSchema,
   CertificateStatusIpcRequestSchema,
   DeployServiceIpcRequestSchema,
@@ -48,10 +56,13 @@ import {
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
+  isStackExecutor,
   type DockerExecutionResult,
   type DockerExecutorPort,
+  type StackExecutorPort,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
+import { AppStackExecutorError } from "./app-stacks/errors.js";
 import { parseSiteFilesRequest } from "./site-files-helper.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
@@ -690,6 +701,11 @@ export class DockerExecutorIpcServer {
         return;
       }
 
+      if (pathname.startsWith("/v1/app-stacks/")) {
+        await this.handleAppStackRoute(method, pathname, parsedUrl, rawBody, res);
+        return;
+      }
+
       writeJson(
         res,
         404,
@@ -728,6 +744,116 @@ export class DockerExecutorIpcServer {
       dockerEngineReachable,
       checkedAt: new Date().toISOString(),
     });
+  }
+
+  /** Application stacks (ADR-0035): route, then capability, then a strict parse, then one port call. */
+  private async handleAppStackRoute(
+    method: string,
+    pathname: string,
+    parsedUrl: URL,
+    rawBody: Buffer,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const route = this.appStackRoute(method, pathname, parsedUrl, rawBody);
+    if (route === null) {
+      throw new ExecutorCodedError(`Unknown executor IPC route: ${method} ${pathname}`, "NOT_FOUND");
+    }
+    if (!isStackExecutor(this.executor)) {
+      throw new ExecutorCodedError("Application stacks are not supported by the active executor backend", "NOT_SUPPORTED");
+    }
+    writeJson(res, 200, { data: await route(this.executor) });
+  }
+
+  private appStackRoute(
+    method: string,
+    pathname: string,
+    parsedUrl: URL,
+    rawBody: Buffer,
+  ): ((stacks: StackExecutorPort) => Promise<unknown>) | null {
+    const post =
+      <S extends z.ZodType>(schema: S, what: string, call: (stacks: StackExecutorPort, req: z.infer<S>) => Promise<unknown>) =>
+      (stacks: StackExecutorPort) =>
+        call(stacks, this.parseAppStackValue(schema, this.parseJsonBody(rawBody), what));
+    if (method === "POST") {
+      switch (pathname) {
+        case "/v1/app-stacks/pull":
+          return post(AppStackPullIpcRequestSchema, "pull", (s, req) => s.pullAppStackImage(req));
+        case "/v1/app-stacks/prepare":
+          return post(AppStackPlanIpcRequestSchema, "prepare", (s, req) => s.prepareAppStack(req));
+        case "/v1/app-stacks/create":
+          return post(AppStackPlanIpcRequestSchema, "create", (s, req) => s.createAppStackComponents(req));
+        case "/v1/app-stacks/start":
+          return post(AppStackComponentIpcRequestSchema, "start", (s, req) => s.startAppStackComponent(req));
+        case "/v1/app-stacks/restart":
+          return post(AppStackComponentIpcRequestSchema, "restart", (s, req) => s.restartAppStackComponent(req));
+        case "/v1/app-stacks/stop":
+          return post(AppStackRefIpcRequestSchema, "stop", (s, req) => s.stopAppStack(req));
+        case "/v1/app-stacks/routes":
+          return post(AppStackRoutesIpcRequestSchema, "routes", (s, req) => s.publishAppStackRoutes(req));
+        case "/v1/app-stacks/unpublish":
+          return post(AppStackRefIpcRequestSchema, "unpublish", (s, req) => s.unpublishAppStackRoutes(req));
+        case "/v1/app-stacks/remove":
+          return post(AppStackRemoveIpcRequestSchema, "remove", (s, req) => s.removeAppStack(req));
+        case "/v1/app-stacks/remove-components":
+          return post(AppStackComponentsRemoveIpcRequestSchema, "remove-components", (s, req) => s.removeAppStackComponents(req));
+        default:
+          return null;
+      }
+    }
+    if (method !== "GET") return null;
+    // A name given twice reaches the schema as an array, which it refuses; a malformed escape stays as sent and fails the id pattern.
+    const param = (name: string) => {
+      const all = parsedUrl.searchParams.getAll(name);
+      return all.length > 1 ? all : (all[0] ?? null);
+    };
+    const segment = (value: string) => {
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    };
+    const status = /^\/v1\/app-stacks\/([^/]+)\/status$/.exec(pathname);
+    if (status?.[1] !== undefined) {
+      const stackId = segment(status[1]);
+      return (s) =>
+        s.getAppStackStatus(
+          this.parseAppStackValue(AppStackRefIpcRequestSchema, { stackId, organizationId: param("organizationId") }, "status"),
+        );
+    }
+    const logs = /^\/v1\/app-stacks\/([^/]+)\/components\/([^/]+)\/logs$/.exec(pathname);
+    if (logs?.[1] !== undefined && logs[2] !== undefined) {
+      const stackId = segment(logs[1]);
+      const componentKey = segment(logs[2]);
+      return (s) => {
+        const tail = param("tail");
+        const req = this.parseAppStackValue(
+          AppStackLogsIpcRequestSchema,
+          { stackId, organizationId: param("organizationId"), componentKey, tail: Array.isArray(tail) ? tail : Number(tail) },
+          "logs",
+        );
+        return s.getAppStackComponentLogs(req);
+      };
+    }
+    return null;
+  }
+
+  /** A failure inside the plan is STACK_PLAN_INVALID (the path only, as the engine says it); any other is the usual refusal. */
+  private parseAppStackValue<S extends z.ZodType>(schema: S, value: unknown, what: string): z.infer<S> {
+    const parsed = schema.safeParse(value);
+    if (parsed.success) return parsed.data;
+    const issue = parsed.error.issues[0];
+    if (issue?.path[0] === "plan") {
+      const at = issue.path.slice(1).map(String).join(".").slice(0, 128);
+      throw new AppStackExecutorError(
+        "STACK_PLAN_INVALID",
+        at === "" ? "The application plan is invalid" : `The application plan is invalid at ${at}`,
+      );
+    }
+    throw new ExecutorCodedError(
+      issue ? `Invalid application stack ${what} payload: ${issue.message}` : `Invalid application stack ${what} payload`,
+      "VALIDATION_ERROR",
+    );
   }
 
   private parseJsonBody(rawBody: Buffer): unknown {
@@ -890,12 +1016,12 @@ export class DockerExecutorIpcServer {
   }
 
   /**
-   * The executor-internal condition behind a coded error (the manual TLS store's TLS_* names are not public error
-   * codes): details[0].reason, then one `versionId` detail per missing certificate version.
+   * The executor-internal condition behind a coded error (the manual TLS store's TLS_* and the stack engine's STACK_*
+   * names are not public error codes): details[0].reason, then one `versionId` detail per missing certificate version.
    */
   private errorDetails(err: unknown, message: string): ErrorDetail[] {
     const reason = (err as { reason?: unknown } | null)?.reason;
-    if (typeof reason !== "string" || !/^TLS_[A-Z_]{1,40}$/.test(reason)) return [];
+    if (typeof reason !== "string" || !/^(?:TLS|STACK)_[A-Z_]{1,40}$/.test(reason)) return [];
     const ids = (err as { versionIds?: unknown }).versionIds;
     return [
       { message, reason },

@@ -1,0 +1,2 @@
+[{"repository":"registry.example.invalid/demo/app","runAsUser":null,"note":"test fixture"},
+ {"repository":"registry.example.invalid/demo/cache","runAsUser":null,"note":"test fixture"}]

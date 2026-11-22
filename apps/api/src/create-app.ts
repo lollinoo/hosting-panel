@@ -11,18 +11,22 @@ import {
 import {
   LEGACY_SITE_TYPE,
   findForbiddenPublicDtoKeys,
+  type AppFeatureFlags,
   type IpcSigningKey,
   type RuntimeBackend,
 } from "@hosting-panel/contracts";
 import {
   and,
+  builtInAppTemplateItems,
   createDatabaseClient,
+  ensureBuiltInAppTemplates,
   ensurePresetRolesAndPermissions,
   ensureWordpressTemplate,
   isNotNull,
   isNull,
   parseSecretsMasterKey,
   repairLegacyBackupCopies,
+  repairOrphanedAppStackStatusesTransactional,
   seedPhase1Dataset,
   sites,
   type DatabaseClient,
@@ -37,6 +41,7 @@ import {
   InMemoryHostSimulatorAdapter,
   SignedHostAgentIpcClient,
 } from "@hosting-panel/host-agent";
+import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import type { DnsLookup } from "./sites/dns-check.js";
 import type { TlsValidatorOptions } from "./certificates/tls-certificate-validator.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
@@ -50,6 +55,7 @@ import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { FastifyInstance } from "fastify";
 import { AppModule } from "./app.module.js";
+import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { OidcService } from "./auth/oidc.service.js";
 import { deferMalformedBody } from "./common/deferred-body-error.js";
@@ -228,6 +234,10 @@ export interface CreateControlPlaneAppOptions {
   readonly dnsLookup?: DnsLookup;
   /** Tests only: the certificate validator's clock and trust anchors. No environment variable widens them. */
   readonly tlsValidatorOptions?: TlsValidatorOptions;
+  /** Tests only: HCP-SPEC-005 feature switches; production passes nothing, so every flag is false. No environment variable sets them. */
+  readonly appFeatures?: Partial<AppFeatureFlags>;
+  /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production passes nothing. No environment variable sets it. */
+  readonly appTemplateValidation?: AppTemplateValidationOptions;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
   readonly jwtSigningKeyPem?: string;
@@ -355,12 +365,15 @@ export async function createControlPlaneApp(
   if (ownsDatabaseClient) {
     await dbClient.migrate();
     await ensureWordpressTemplate(dbClient.db);
+    await ensureBuiltInAppTemplates(dbClient.db, builtInAppTemplateItems());
     await ensurePresetRolesAndPermissions(dbClient.db);
   }
   // A release rolled back by hp-update writes sites with a PHP version and no type: give them the legacy one.
   await dbClient.db.update(sites).set({ siteType: LEGACY_SITE_TYPE }).where(and(isNotNull(sites.phpVersion), isNull(sites.siteType)));
   // The same rollback can leave backups without a copies ledger or an S3 target row: rebuild both (idempotent).
   await repairLegacyBackupCopies(dbClient.db);
+  // Stacks left busy by an operation that no longer runs (API stopped mid-step) get a settled status (idempotent).
+  await repairOrphanedAppStackStatusesTransactional(dbClient.db);
 
   const oidcIssuer =
     options?.oidcIssuer ?? process.env["OIDC_ISSUER"] ?? "https://auth.hcp.local";
@@ -528,6 +541,8 @@ export async function createControlPlaneApp(
       hostAgent,
       ...(options?.dnsLookup ? { dnsLookup: options.dnsLookup } : {}),
       ...(options?.tlsValidatorOptions ? { tlsValidatorOptions: options.tlsValidatorOptions } : {}),
+      ...(options?.appFeatures ? { appFeatures: options.appFeatures } : {}),
+      ...(options?.appTemplateValidation ? { appTemplateValidation: options.appTemplateValidation } : {}),
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },
@@ -560,6 +575,7 @@ export async function createControlPlaneApp(
   const outboxWorker = nestApp.get(OutboxWorkerService);
   const driftReconciler = nestApp.get(DriftReconcilerService);
   const domainReconciler = nestApp.get(DomainReconcilerService);
+  const appStackObserver = nestApp.get(AppStackObserverService);
   const mailRelay = nestApp.get(MailRelayService);
   const dnsProvider = nestApp.get(DnsProviderService);
   const siteSftp = nestApp.get(SiteSftpService);
@@ -579,6 +595,7 @@ export async function createControlPlaneApp(
   }
   driftReconciler.startBackgroundLoop();
   domainReconciler.startBackgroundLoop();
+  appStackObserver.startBackgroundLoop();
   mailRelay.startBackgroundLoop();
   dnsProvider.startBackgroundLoop(mailRelayRetryIntervalMs);
   if (runtimeBackend !== "disabled") void firewall.syncAtStart();
@@ -621,6 +638,7 @@ export async function createControlPlaneApp(
       await outboxWorker.stop();
       await driftReconciler.stop();
       await domainReconciler.stop();
+      await appStackObserver.stop();
       await mailRelay.stop();
       await dnsProvider.stop();
       await siteSftp.stop();

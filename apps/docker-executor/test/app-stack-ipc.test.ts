@@ -1,0 +1,485 @@
+import { randomBytes } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import http from "node:http";
+import net, { type AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { signIpcRequest, type IpcSigningKey, type IpcVerificationKey } from "@hosting-panel/contracts";
+import { APP_STACK_EXECUTOR_METHODS, Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  APP_STACK_COMPONENT_TIMEOUT_MS,
+  APP_STACK_CREATE_TIMEOUT_MS,
+  APP_STACK_LOGS_TIMEOUT_MS,
+  APP_STACK_PREPARE_TIMEOUT_MS,
+  APP_STACK_PULL_TIMEOUT_MS,
+  APP_STACK_REMOVE_TIMEOUT_MS,
+  APP_STACK_ROUTES_TIMEOUT_MS,
+  APP_STACK_STATUS_TIMEOUT_MS,
+  APP_STACK_STOP_TIMEOUT_MS,
+  AppStackExecutorError,
+  DockerEngineSocketAdapter,
+  DockerExecutorIpcServer,
+  ExecutorCodedError,
+  ExecutorIpcClientError,
+  SignedDockerExecutorIpcClient,
+  type IngressCapableDockerExecutor,
+} from "../src/index.js";
+import { startMockDockerDaemon } from "./mock-docker-daemon.js";
+import { TEST_ALLOWLIST, appStackTestPlan } from "./support/app-stack-plans.js";
+
+const SECRET = "0123456789abcdef0123456789abcdef-app-stack-ipc";
+const SIGNING_KEY: IpcSigningKey = { keyId: "hmac-v1", algorithm: "hmac-sha256", secret: SECRET };
+const VERIFICATION_KEY: IpcVerificationKey = { keyId: "hmac-v1", algorithm: "hmac-sha256", secret: SECRET };
+const CANARY = "CANARY-secret-7d41e9";
+
+const plan = appStackTestPlan();
+const ref = { stackId: plan.stackId, organizationId: plan.organizationId };
+const image = plan.components[0]!.image;
+const secret = { parameterKey: "shared_key", version: 1, content: CANARY };
+const routes = [
+  { componentKey: "web", internalPort: 8080, hosts: [{ hostname: "shop.example.org", tls: true, httpsRedirect: true, redirectTo: null }] },
+];
+const at = "2026-11-22T03:00:00.000Z";
+
+const RESULTS = {
+  pullAppStackImage: { image, pulled: true },
+  prepareAppStack: { networks: [{ role: "app_internal", created: true }], volumes: [{ volumeKey: "data", created: true }] },
+  createAppStackComponents: { components: [{ componentKey: "web", outcome: "created" }], removedComponents: [] },
+  startAppStackComponent: { componentKey: "web", outcome: "started" },
+  restartAppStackComponent: { componentKey: "worker", outcome: "restarted" },
+  stopAppStack: { components: [{ componentKey: "web", outcome: "stopped" }] },
+  publishAppStackRoutes: { routeCount: 1, hostnames: ["shop.example.org"], changed: true },
+  unpublishAppStackRoutes: { routeCount: 0, hostnames: [], changed: true },
+  removeAppStack: { removedComponents: ["web"], removedNetworks: ["app_internal"], removedVolumes: [], retainedVolumes: ["data"] },
+  removeAppStackComponents: { removedComponents: ["worker"] },
+  getAppStackStatus: {
+    stackId: plan.stackId,
+    observedAt: at,
+    components: [
+      {
+        componentKey: "web",
+        state: "running",
+        health: "healthy",
+        probe: "passed",
+        componentHash: "a".repeat(64),
+        revisionId: plan.revisionId,
+        startedAt: at,
+        restartCount: 0,
+        exitCode: null,
+        oomKilled: false,
+      },
+    ],
+    networks: { internal: true, edge: true },
+    volumes: ["data"],
+    routes: { published: true, hostnames: ["shop.example.org"] },
+  },
+  getAppStackComponentLogs: [{ at, stream: "stdout", text: "ready" }],
+} as const;
+
+type StackMethod = (typeof APP_STACK_EXECUTOR_METHODS)[number];
+
+/** A DockerExecutorPort (the Phase 1 refusals) with the 12 stack methods as spies. */
+function stackStub() {
+  const fns = Object.fromEntries(
+    APP_STACK_EXECUTOR_METHODS.map((m) => [m, vi.fn(async (_req: unknown): Promise<unknown> => structuredClone(RESULTS[m]))]),
+  ) as Record<StackMethod, ReturnType<typeof vi.fn<(req: unknown) => Promise<unknown>>>>;
+  const executor: IngressCapableDockerExecutor = Object.assign(
+    Object.create(new Phase1DisabledDockerExecutor()) as Phase1DisabledDockerExecutor,
+    fns,
+  );
+  return { executor, fns };
+}
+
+const cleanup: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  vi.restoreAllMocks();
+  while (cleanup.length > 0) await cleanup.pop()?.();
+});
+
+const socketPathFor = () => `/tmp/hp-exec-stk-${randomBytes(5).toString("hex")}.sock`;
+
+async function serve(executor: IngressCapableDockerExecutor) {
+  const socketPath = socketPathFor();
+  const server = new DockerExecutorIpcServer({ executor, keyring: { "hmac-v1": VERIFICATION_KEY }, socketPath });
+  await server.start();
+  cleanup.push(() => server.stop());
+  const client = new SignedDockerExecutorIpcClient({ signingKey: SIGNING_KEY, socketPath });
+  return { client, socketPath };
+}
+
+function raw(
+  socketPath: string,
+  method: "GET" | "POST",
+  pathWithQuery: string,
+  options: { body?: unknown; signed?: boolean; nonce?: string } = {},
+): Promise<{ status: number; text: string; json: { error?: { code: string; message: string; details?: { reason?: string }[] } } }> {
+  const body = options.body === undefined ? null : JSON.stringify(options.body);
+  const headers =
+    options.signed === false
+      ? {}
+      : signIpcRequest({ method, pathWithQuery, body, key: SIGNING_KEY, nonce: options.nonce ?? randomBytes(8).toString("hex") });
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        socketPath,
+        method,
+        path: pathWithQuery,
+        headers: { ...headers, ...(body === null ? {} : { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }) },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status: res.statusCode ?? 0, text, json: JSON.parse(text) as never });
+        });
+      },
+    );
+    req.on("error", reject);
+    if (body !== null) req.write(body);
+    req.end();
+  });
+}
+
+async function failure(work: Promise<unknown>): Promise<ExecutorIpcClientError> {
+  try {
+    await work;
+  } catch (err) {
+    expect(err).toBeInstanceOf(ExecutorIpcClientError);
+    return err as ExecutorIpcClientError;
+  }
+  throw new Error("expected the call to fail");
+}
+
+type Client = SignedDockerExecutorIpcClient;
+const CALLS: ReadonlyArray<{ method: StackMethod; request: unknown; call: (c: Client) => Promise<unknown> }> = [
+  { method: "pullAppStackImage", request: { plan, image }, call: (c) => c.pullAppStackImage({ plan, image }) },
+  { method: "prepareAppStack", request: { plan }, call: (c) => c.prepareAppStack({ plan }) },
+  { method: "createAppStackComponents", request: { plan }, call: (c) => c.createAppStackComponents({ plan }) },
+  {
+    method: "startAppStackComponent",
+    request: { plan, componentKey: "web", secretFileContents: [] },
+    call: (c) => c.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }),
+  },
+  {
+    method: "restartAppStackComponent",
+    request: { plan, componentKey: "worker", secretFileContents: [secret] },
+    call: (c) => c.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: [secret] }),
+  },
+  { method: "stopAppStack", request: ref, call: (c) => c.stopAppStack(ref) },
+  { method: "publishAppStackRoutes", request: { plan, routes }, call: (c) => c.publishAppStackRoutes({ plan, routes }) },
+  { method: "unpublishAppStackRoutes", request: ref, call: (c) => c.unpublishAppStackRoutes(ref) },
+  { method: "removeAppStack", request: { ...ref, removeVolumes: false }, call: (c) => c.removeAppStack({ ...ref, removeVolumes: false }) },
+  {
+    method: "removeAppStackComponents",
+    request: { plan, componentKeys: ["worker"] },
+    call: (c) => c.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
+  },
+  { method: "getAppStackStatus", request: ref, call: (c) => c.getAppStackStatus(ref) },
+  {
+    method: "getAppStackComponentLogs",
+    request: { ...ref, componentKey: "web", tail: 50 },
+    call: (c) => c.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 50 }),
+  },
+];
+
+describe("application stack IPC routes", () => {
+  it("each client method reaches its executor method with the parsed request and returns its result", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    expect(CALLS.map((c) => c.method)).toEqual([...APP_STACK_EXECUTOR_METHODS]);
+    for (const { method, request, call } of CALLS) {
+      await expect(call(client), method).resolves.toEqual(RESULTS[method]);
+      expect(fns[method], method).toHaveBeenCalledTimes(1);
+      expect(fns[method].mock.calls[0]?.[0], method).toEqual(request);
+    }
+  });
+
+  it("refuses unsigned (401) and replayed (409) requests before any executor call", async () => {
+    const { executor, fns } = stackStub();
+    const { socketPath } = await serve(executor);
+    const unsigned = await raw(socketPath, "POST", "/v1/app-stacks/prepare", { body: { plan }, signed: false });
+    expect(unsigned.status).toBe(401);
+    expect(unsigned.json.error?.code).toBe("UNAUTHENTICATED");
+
+    const nonce = "nonce-app-stack-replay-1";
+    const first = await raw(socketPath, "GET", `/v1/app-stacks/${plan.stackId}/status?organizationId=${plan.organizationId}`, { nonce });
+    expect(first.status).toBe(200);
+    const replay = await raw(socketPath, "GET", `/v1/app-stacks/${plan.stackId}/status?organizationId=${plan.organizationId}`, { nonce });
+    expect(replay.status).toBe(409);
+    expect(replay.json.error?.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(fns.prepareAppStack).not.toHaveBeenCalled();
+    expect(fns.getAppStackStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("an executor without the stack methods answers 422 NOT_SUPPORTED on every route", async () => {
+    const { client } = await serve(new Phase1DisabledDockerExecutor());
+    for (const { method, call } of CALLS) {
+      const err = await failure(call(client));
+      expect([err.statusCode, err.code], method).toEqual([422, "NOT_SUPPORTED"]);
+      expect(err.message).toBe("Application stacks are not supported by the active executor backend");
+    }
+  });
+
+  it("an unknown stack route answers 404 with the usual envelope", async () => {
+    const { executor } = stackStub();
+    const { socketPath } = await serve(executor);
+    for (const [method, path] of [
+      ["GET", "/v1/app-stacks/x"],
+      ["POST", "/v1/app-stacks/deploy"],
+      ["GET", "/v1/app-stacks/pull"],
+      ["POST", `/v1/app-stacks/${plan.stackId}/status`],
+      ["GET", `/v1/app-stacks/${plan.stackId}/components/web/logs/more`],
+    ] as const) {
+      const res = await raw(socketPath, method, path, method === "POST" ? { body: {} } : {});
+      expect(res.status, path).toBe(404);
+      expect(res.json.error?.code).toBe("NOT_FOUND");
+      expect(res.json.error?.message).toBe(`Unknown executor IPC route: ${method} ${path}`);
+    }
+    const unsupported = await serve(new Phase1DisabledDockerExecutor());
+    expect((await raw(unsupported.socketPath, "GET", "/v1/app-stacks/x")).status).toBe(404);
+  });
+
+  it("a plan schema failure is STACK_PLAN_INVALID; any other shape failure is a plain VALIDATION_ERROR", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    const badPlan = { ...plan, schemaVersion: 2 } as unknown as typeof plan;
+    const planErr = await failure(client.prepareAppStack({ plan: badPlan }));
+    expect([planErr.statusCode, planErr.code, planErr.reason]).toEqual([400, "VALIDATION_ERROR", "STACK_PLAN_INVALID"]);
+    expect(planErr.message).toBe("The application plan is invalid at schemaVersion");
+    const missing = await failure(client.createAppStackComponents({} as never));
+    expect([missing.code, missing.reason]).toEqual(["VALIDATION_ERROR", "STACK_PLAN_INVALID"]);
+
+    const keyErr = await failure(client.startAppStackComponent({ plan, componentKey: "Bad_Key", secretFileContents: [secret] }));
+    expect([keyErr.statusCode, keyErr.code, keyErr.reason]).toEqual([400, "VALIDATION_ERROR", undefined]);
+    expect(keyErr.message).toMatch(/^Invalid application stack start payload: /);
+    const extra = await failure(client.stopAppStack({ ...ref, force: true } as never));
+    expect([extra.code, extra.reason]).toEqual(["VALIDATION_ERROR", undefined]);
+    for (const m of APP_STACK_EXECUTOR_METHODS) expect(fns[m], m).not.toHaveBeenCalled();
+  });
+
+  it("secret content never appears in an error envelope", async () => {
+    const { executor, fns } = stackStub();
+    const { client, socketPath } = await serve(executor);
+    const bodies: unknown[] = [
+      { plan, componentKey: "Bad_Key", secretFileContents: [secret] },
+      { plan, componentKey: "worker", secretFileContents: [{ ...secret, content: `${CANARY}\u0000` }] },
+      { plan, componentKey: "worker", secretFileContents: [secret, secret] },
+      { plan: { ...plan, stackId: CANARY }, componentKey: "worker", secretFileContents: [secret] },
+      { plan, componentKey: "worker", secretFileContents: [{ ...secret, version: 0 }] },
+      { plan, componentKey: "worker", secretFileContents: [{ ...secret, content: CANARY.repeat(2_000) }] },
+    ];
+    for (const body of bodies) {
+      const res = await raw(socketPath, "POST", "/v1/app-stacks/restart", { body });
+      expect(res.status).toBe(400);
+      expect(res.text).not.toContain(CANARY);
+    }
+    fns.restartAppStackComponent.mockRejectedValueOnce(new AppStackExecutorError("STACK_SECRET_MISSING", "A secret of component worker is missing"));
+    const err = await failure(client.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: [secret] }));
+    expect(JSON.stringify({ message: err.message, details: err.details })).not.toContain(CANARY);
+  });
+
+  it("forwards a STACK_* or TLS_* reason as details[0].reason and drops any other", async () => {
+    const { executor, fns } = stackStub();
+    const { client } = await serve(executor);
+    fns.startAppStackComponent.mockRejectedValueOnce(new AppStackExecutorError("STACK_BUSY", "Another change of this application stack is running"));
+    const busy = await failure(client.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }));
+    expect([busy.statusCode, busy.code, busy.reason, busy.message]).toEqual([
+      409,
+      "RESOURCE_LOCKED",
+      "STACK_BUSY",
+      "Another change of this application stack is running",
+    ]);
+    expect(busy.ambiguousOutcome).toBe(false);
+
+    fns.removeAppStack.mockRejectedValueOnce(new AppStackExecutorError("STACK_VOLUME_IN_USE", "A stack volume is in use"));
+    expect((await failure(client.removeAppStack({ ...ref, removeVolumes: true }))).reason).toBe("STACK_VOLUME_IN_USE");
+
+    fns.getAppStackStatus.mockRejectedValueOnce(new AppStackExecutorError("STACK_NAMESPACE_CONFLICT", "An object on this server uses the name"));
+    const conflict = await failure(client.getAppStackStatus(ref));
+    expect([conflict.statusCode, conflict.code, conflict.reason]).toEqual([403, "HOST_POLICY_DENIED", "STACK_NAMESPACE_CONFLICT"]);
+
+    fns.prepareAppStack.mockRejectedValueOnce(Object.assign(new ExecutorCodedError("Manifest moved", "RESOURCE_LOCKED"), { reason: "TLS_MANIFEST_CONFLICT" }));
+    expect((await failure(client.prepareAppStack({ plan }))).reason).toBe("TLS_MANIFEST_CONFLICT");
+
+    fns.prepareAppStack.mockRejectedValueOnce(Object.assign(new ExecutorCodedError("Odd", "RESOURCE_LOCKED"), { reason: "FOO_BAR" }));
+    const dropped = await failure(client.prepareAppStack({ plan }));
+    expect([dropped.code, dropped.reason, dropped.details]).toEqual(["RESOURCE_LOCKED", undefined, []]);
+
+    fns.createAppStackComponents.mockRejectedValueOnce(new ExecutorCodedError("Failed to create (HTTP 500)", "DOCKER_ENGINE_UNAVAILABLE"));
+    const engine = await failure(client.createAppStackComponents({ plan }));
+    expect([engine.statusCode, engine.code, engine.reason]).toEqual([503, "DOCKER_ENGINE_UNAVAILABLE", undefined]);
+  });
+
+  it("a query name given twice, a bad tail or a bad path id answers 400", async () => {
+    const { executor, fns } = stackStub();
+    const { socketPath } = await serve(executor);
+    const id = plan.stackId;
+    const org = plan.organizationId;
+    for (const path of [
+      `/v1/app-stacks/${id}/status?organizationId=${org}&organizationId=${org}`,
+      `/v1/app-stacks/${id}/status`,
+      `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}&tail=5&tail=5`,
+      `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}&organizationId=${org}&tail=5`,
+      `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}&tail=1.5`,
+      `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}&tail=501`,
+      `/v1/app-stacks/${id}/components/web/logs?organizationId=${org}`,
+      `/v1/app-stacks/${id}/components/Web_1/logs?organizationId=${org}&tail=5`,
+      `/v1/app-stacks/BAD%2Fid/status?organizationId=${org}`,
+    ]) {
+      const res = await raw(socketPath, "GET", path);
+      expect([res.status, res.json.error?.code], path).toEqual([400, "VALIDATION_ERROR"]);
+      expect(res.json.error?.details, path).toEqual([]);
+    }
+    expect(fns.getAppStackStatus).not.toHaveBeenCalled();
+    expect(fns.getAppStackComponentLogs).not.toHaveBeenCalled();
+  });
+
+  it("client budgets equal the design and the two reads are GET", async () => {
+    expect({
+      APP_STACK_PULL_TIMEOUT_MS,
+      APP_STACK_PREPARE_TIMEOUT_MS,
+      APP_STACK_CREATE_TIMEOUT_MS,
+      APP_STACK_COMPONENT_TIMEOUT_MS,
+      APP_STACK_STOP_TIMEOUT_MS,
+      APP_STACK_ROUTES_TIMEOUT_MS,
+      APP_STACK_REMOVE_TIMEOUT_MS,
+      APP_STACK_STATUS_TIMEOUT_MS,
+      APP_STACK_LOGS_TIMEOUT_MS,
+    }).toEqual({
+      APP_STACK_PULL_TIMEOUT_MS: 270_000,
+      APP_STACK_PREPARE_TIMEOUT_MS: 60_000,
+      APP_STACK_CREATE_TIMEOUT_MS: 180_000,
+      APP_STACK_COMPONENT_TIMEOUT_MS: 60_000,
+      APP_STACK_STOP_TIMEOUT_MS: 150_000,
+      APP_STACK_ROUTES_TIMEOUT_MS: 300_000,
+      APP_STACK_REMOVE_TIMEOUT_MS: 180_000,
+      APP_STACK_STATUS_TIMEOUT_MS: 60_000,
+      APP_STACK_LOGS_TIMEOUT_MS: 35_000,
+    });
+    const client = new SignedDockerExecutorIpcClient({ signingKey: SIGNING_KEY, socketPath: socketPathFor() });
+    const seen: Array<[string | undefined, string | null | undefined, number | undefined]> = [];
+    vi.spyOn(http, "request").mockImplementation(((opts: http.RequestOptions) => {
+      seen.push([opts.method, opts.path, opts.timeout]);
+      throw new Error("stop");
+    }) as never);
+    for (const { call } of CALLS) await call(client).catch(() => undefined);
+    const q = `organizationId=${plan.organizationId}`;
+    expect(seen).toEqual([
+      ["POST", "/v1/app-stacks/pull", 270_000],
+      ["POST", "/v1/app-stacks/prepare", 60_000],
+      ["POST", "/v1/app-stacks/create", 180_000],
+      ["POST", "/v1/app-stacks/start", 60_000],
+      ["POST", "/v1/app-stacks/restart", 60_000],
+      ["POST", "/v1/app-stacks/stop", 150_000],
+      ["POST", "/v1/app-stacks/routes", 300_000],
+      ["POST", "/v1/app-stacks/unpublish", 300_000],
+      ["POST", "/v1/app-stacks/remove", 180_000],
+      ["POST", "/v1/app-stacks/remove-components", 180_000],
+      ["GET", `/v1/app-stacks/${plan.stackId}/status?${q}`, 60_000],
+      ["GET", `/v1/app-stacks/${plan.stackId}/components/web/logs?${q}&tail=50`, 35_000],
+    ]);
+  });
+
+  it("a server that never answers makes a POST ambiguous and a GET a plain unavailable", async () => {
+    const socketPath = socketPathFor();
+    let hits = 0;
+    const silent = http.createServer(() => {
+      hits += 1;
+    });
+    await new Promise<void>((resolve) => silent.listen(socketPath, () => resolve()));
+    cleanup.push(async () => {
+      silent.closeAllConnections();
+      await new Promise<void>((resolve) => silent.close(() => resolve()));
+      await rm(socketPath, { force: true });
+    });
+    const client = new SignedDockerExecutorIpcClient({ signingKey: SIGNING_KEY, socketPath, timeoutMs: 150 });
+
+    const post = await failure(client.createAppStackComponents({ plan }));
+    expect([post.code, post.statusCode, post.ambiguousOutcome]).toEqual(["OPERATION_AMBIGUOUS", 502, true]);
+    const component = await failure(client.startAppStackComponent({ plan, componentKey: "worker", secretFileContents: [secret] }));
+    expect([component.code, component.ambiguousOutcome]).toEqual(["OPERATION_AMBIGUOUS", true]);
+    expect(component.message).not.toContain(CANARY);
+
+    const status = await failure(client.getAppStackStatus(ref));
+    expect([status.code, status.statusCode, status.ambiguousOutcome]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", 503, false]);
+    const logs = await failure(client.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 10 }));
+    expect([logs.code, logs.ambiguousOutcome]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", false]);
+    expect(hits).toBe(4);
+  });
+
+  it("drives the socket adapter through the signed client against the mock Engine", async () => {
+    const daemon = await startMockDockerDaemon();
+    cleanup.push(() => daemon.close());
+    const dir = await mkdtemp(path.join(os.tmpdir(), "hp-stk-ipc-"));
+    cleanup.push(() => rm(dir, { recursive: true, force: true }));
+    const listener = net.createServer((socket) => socket.end());
+    await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", () => resolve()));
+    cleanup.push(() => new Promise<void>((resolve) => listener.close(() => resolve())));
+    const port = (listener.address() as AddressInfo).port;
+    const [web, worker] = plan.components;
+    const tcpPlan = appStackTestPlan({
+      components: [{ ...web!, expose: [8080, port], healthcheck: { kind: "tcp", port, intervalSeconds: 10, timeoutSeconds: 3 } }, worker!],
+    });
+    const adapter = new DockerEngineSocketAdapter({
+      dockerSocketPath: daemon.socketPath,
+      secretsRootDir: path.join(dir, "secrets"),
+      ingressRootDir: path.join(dir, "ingress"),
+      pullMissingImages: false,
+      appImageAllowlist: TEST_ALLOWLIST,
+    });
+    const { client } = await serve(adapter);
+
+    await expect(client.pullAppStackImage({ plan: tcpPlan, image })).resolves.toEqual({ image, pulled: false });
+    const prepared = {
+      networks: [
+        { role: "app_internal", created: true },
+        { role: "app_edge", created: true },
+      ],
+      volumes: [{ volumeKey: "data", created: true }],
+    };
+    await expect(client.prepareAppStack({ plan: tcpPlan })).resolves.toEqual(prepared);
+    await expect(client.prepareAppStack({ plan: tcpPlan })).resolves.toEqual({
+      networks: prepared.networks.map((n) => ({ ...n, created: false })),
+      volumes: [{ volumeKey: "data", created: false }],
+    });
+    await expect(client.createAppStackComponents({ plan: tcpPlan })).resolves.toEqual({
+      components: [
+        { componentKey: "web", outcome: "created" },
+        { componentKey: "worker", outcome: "created" },
+      ],
+      removedComponents: [],
+    });
+    await expect(client.startAppStackComponent({ plan: tcpPlan, componentKey: "web", secretFileContents: [] })).resolves.toEqual({
+      componentKey: "web",
+      outcome: "started",
+    });
+
+    const status = await client.getAppStackStatus(ref);
+    expect(status.components.map((c) => [c.componentKey, c.state, c.health, c.probe])).toEqual([
+      ["web", "running", "healthy", "passed"],
+      ["worker", "created", "stopped", "not_run"],
+    ]);
+    expect([status.networks, status.volumes, status.routes]).toEqual([{ internal: true, edge: true }, ["data"], { published: false, hostnames: [] }]);
+
+    const volume = `hp_appvol_${plan.stackId}_data`;
+    daemon.containers.set("foreign", {
+      id: "foreign",
+      name: "someone_else",
+      image: "x",
+      env: [],
+      labels: {},
+      running: true,
+      status: "running",
+      restartCount: 0,
+      hostConfig: { Mounts: [{ Type: "volume", Source: volume }] } as never,
+      networks: {},
+    });
+    const inUse = await failure(client.removeAppStack({ ...ref, removeVolumes: true }));
+    expect([inUse.statusCode, inUse.code, inUse.reason]).toEqual([409, "RESOURCE_LOCKED", "STACK_VOLUME_IN_USE"]);
+    expect(daemon.deletedNetworks).toEqual([`hp_appedge_${plan.stackId}`, `hp_appnet_${plan.stackId}`]);
+    expect(daemon.deletedVolumes).toEqual([]);
+    expect(daemon.requestedPaths.some((p) => p.includes("/images/create"))).toBe(false);
+  });
+});

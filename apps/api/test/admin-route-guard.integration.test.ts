@@ -194,6 +194,8 @@ describe("every administrator route refuses a customer before it does anything",
       operationId: `op_${randomUUID()}`,
       blockId: `fwb_${randomUUID().replace(/-/g, "")}`,
       service: "api",
+      stackId: `stk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      componentKey: "web",
     };
   });
 
@@ -260,6 +262,20 @@ describe("every administrator route refuses a customer before it does anything",
       ["POST", "/v1/admin/firewall/ports/:name/close"],
       ["POST", "/v1/admin/firewall/blocks"],
       ["DELETE", "/v1/admin/firewall/blocks/:blockId"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
+    }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/app-templates"],
+      ["POST", "/v1/admin/app-templates/validate"],
+      ["POST", "/v1/admin/app-templates"],
+      ["GET", "/v1/admin/app-templates/:templateId"],
+      ["PATCH", "/v1/admin/app-templates/:templateId"],
+      ["POST", "/v1/admin/app-templates/:templateId/versions"],
+      ["GET", "/v1/admin/app-templates/:templateId/versions/:versionId"],
+      ["POST", "/v1/admin/app-templates/:templateId/archive"],
+      ["GET", "/v1/admin/app-templates/:templateId/usage"],
+      ["GET", "/v1/admin/app-stacks"],
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }

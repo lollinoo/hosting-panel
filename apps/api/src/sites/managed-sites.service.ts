@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   BUILT_IN_VERSION_BY_MODULE,
   PHP_VERSION_PARAMETER_KEY,
@@ -156,7 +156,7 @@ function slugify(name: string): string {
 
 @Injectable()
 export class ManagedSitesService {
-  readonly #logReads = new LogReadGate();
+  readonly #logReads: LogReadGate;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -164,7 +164,10 @@ export class ManagedSitesService {
     private readonly config: ControlPlaneRuntimeConfig,
     @Inject(DOCKER_EXECUTOR_TOKEN)
     private readonly executor: DockerExecutorPort,
-  ) {}
+    @Optional() @Inject(LogReadGate) logReads?: LogReadGate,
+  ) {
+    this.#logReads = logReads ?? new LogReadGate();
+  }
 
   public async create(input: {
     organizationId: string;
@@ -360,6 +363,31 @@ export class ManagedSitesService {
       createdAt: site.createdAt.toISOString(),
       updatedAt: site.updatedAt.toISOString(),
     };
+  }
+
+  public async list(organizationId: string): Promise<ManagedSiteDto[]> {
+    const db = this.dbClient.db;
+    const rows = await db
+      .select({ site: sites, primaryDomain: domains.hostname })
+      .from(sites)
+      .leftJoin(domains, and(eq(domains.siteId, sites.id), eq(domains.isPrimary, true)))
+      .where(and(eq(sites.organizationId, organizationId), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
+      .orderBy(asc(sites.name), asc(sites.id))
+      .limit(200);
+    const stopped = await stoppedSiteIds(db, rows.map(({ site }) => site.id));
+    return rows.map(({ site, primaryDomain }) => ({
+      id: site.id,
+      organizationId: site.organizationId,
+      hostAllocationId: site.hostAllocationId,
+      name: site.name,
+      slug: site.slug,
+      status: shownSiteStatus(site.status, stopped.has(site.id)),
+      phpVersion: site.phpVersion,
+      siteType: siteTypeKeyOf(site.siteType),
+      primaryDomain: primaryDomain ?? null,
+      createdAt: site.createdAt.toISOString(),
+      updatedAt: site.updatedAt.toISOString(),
+    }));
   }
 
   public async act(

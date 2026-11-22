@@ -138,7 +138,7 @@ describe("sites layout", () => {
     getServerSession.mockResolvedValue(session({ isServerAdmin: true }));
     fetchServerMe.mockResolvedValue(me({ supportAccess: visit }));
     const html = render(await SitesLayout({ children: null }));
-    expect(html).toContain("Support view: you are seeing the sites of Customer A until");
+    expect(html).toContain("Support view: you are seeing the applications of Customer A until");
     expect(fetchServerOrgSites).toHaveBeenCalledWith(ORG_A);
 
     getServerSession.mockResolvedValue(session());
@@ -153,10 +153,10 @@ describe("sites not-found page", () => {
     getServerSession.mockResolvedValue(session({ isServerAdmin: true }));
     fetchServerMe.mockResolvedValue(me({ supportAccess: visit }));
     const html = render(await SitesLayout({ children: await SitesNotFound() }));
-    expect(html).toContain("Support view: you are seeing the sites of Customer A until");
+    expect(html).toContain("Support view: you are seeing the applications of Customer A until");
     expect(html).toContain(en.shell.support.leave);
     expect(html).toContain(en.notFound.title);
-    expect(html).toContain('href="/sites"');
+    expect([...render(await SitesNotFound()).matchAll(/href="([^"]*)"/g)].map((x) => x[1])).toEqual(["/apps"]);
     expect(html).not.toContain('href="/"');
     expect(html.match(/<main/g)).toHaveLength(1);
 
@@ -180,7 +180,7 @@ describe("support banner", () => {
 
   it("shows the unassigned text for the holding organisation", () => {
     const html = render(createElement(SupportBanner, { support: { ...visit, organizationId: PLATFORM_OPS_ORG_ID, organizationName: "Ops" }, csrfToken: "csrf" }));
-    expect(html).toContain("Support view: you are seeing the sites not assigned to any customer, until");
+    expect(html).toContain("Support view: you are seeing the applications not assigned to any customer, until");
     expect(html).not.toContain("Ops");
   });
 });

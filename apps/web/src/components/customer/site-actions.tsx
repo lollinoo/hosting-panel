@@ -110,7 +110,7 @@ export function SiteActions({
   async function confirmDelete(confirmName: string): Promise<string | null> {
     const sent = await send(`delete:${confirmName}`, "DELETE", base, { confirmName });
     if (!sent.ok) return errorMessage(m, sent.code);
-    router.push("/sites");
+    router.push("/apps");
     return null;
   }
 

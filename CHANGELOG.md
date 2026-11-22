@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Application stacks and template catalog (2026-11-22)
+*hosting-panel v0.9.0*
+
+**New Features**
+- **apps**: Application stacks and template catalog
+
+---
+
 ### Site templates and per-customer site limits (2026-11-21)
 *hosting-panel v0.8.0*
 

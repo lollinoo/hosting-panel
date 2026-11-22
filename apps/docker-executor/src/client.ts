@@ -1,6 +1,33 @@
 import http from "node:http";
 import {
   ApiErrorEnvelopeSchema,
+  AppStackComponentActionIpcResultSchema,
+  AppStackComponentsRemoveIpcResultSchema,
+  AppStackCreateIpcResultSchema,
+  AppStackLogsIpcResultSchema,
+  AppStackPrepareIpcResultSchema,
+  AppStackPullIpcResultSchema,
+  AppStackRemoveIpcResultSchema,
+  AppStackRoutesIpcResultSchema,
+  AppStackStatusIpcResultSchema,
+  AppStackStopIpcResultSchema,
+  type AppStackComponentActionIpcResult,
+  type AppStackComponentIpcRequest,
+  type AppStackComponentsRemoveIpcRequest,
+  type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcResult,
+  type AppStackLogsIpcRequest,
+  type AppStackPlanIpcRequest,
+  type AppStackPrepareIpcResult,
+  type AppStackPullIpcRequest,
+  type AppStackPullIpcResult,
+  type AppStackRefIpcRequest,
+  type AppStackRemoveIpcRequest,
+  type AppStackRemoveIpcResult,
+  type AppStackRoutesIpcRequest,
+  type AppStackRoutesIpcResult,
+  type AppStackStatusIpcResult,
+  type AppStackStopIpcResult,
   type ErrorDetail,
   BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
@@ -68,6 +95,7 @@ import type {
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  StackExecutorPort,
   TerminalEnded,
   TerminalOpenRequest,
   TerminalOpenResult,
@@ -157,6 +185,15 @@ export const TERMINAL_CLOSE_TIMEOUT_MS = 20_000;
 export const TERMINAL_LIST_TIMEOUT_MS = 10_000;
 export const PANEL_RESTART_TIMEOUT_MS = 35_000;
 export const PANEL_APPLY_TIMEOUT_MS = 900_000; // an image pull can take minutes
+export const APP_STACK_PULL_TIMEOUT_MS = 270_000; // one image: engine pull budget 240 s + inspect
+export const APP_STACK_PREPARE_TIMEOUT_MS = 60_000;
+export const APP_STACK_CREATE_TIMEOUT_MS = 180_000; // <= 8 x (stop 10 s + remove + create)
+export const APP_STACK_COMPONENT_TIMEOUT_MS = 60_000; // start, restart (t=10) of one component
+export const APP_STACK_STOP_TIMEOUT_MS = 150_000; // <= 8 x stop t=10
+export const APP_STACK_ROUTES_TIMEOUT_MS = 300_000; // may run ensureIngressProxy (= DEPLOY_TIMEOUT_MS)
+export const APP_STACK_REMOVE_TIMEOUT_MS = 180_000;
+export const APP_STACK_STATUS_TIMEOUT_MS = 60_000; // GET; probes run in parallel, each <= 30 s
+export const APP_STACK_LOGS_TIMEOUT_MS = 35_000; // GET
 
 const ObservedStateDataEnvelopeSchema = z.object({
   data: ObservedServiceStateWireSchema.nullable(),
@@ -215,7 +252,7 @@ export interface SignedDockerExecutorIpcClientOptions {
 
 const handledIpcSockets = new WeakSet<object>();
 
-export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
+export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort {
   public readonly isRuntimeAvailable: boolean;
   private readonly signingKey: IpcSigningKey;
   private readonly transport: IpcTransportMode;
@@ -590,6 +627,71 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort {
     const pathWithQuery = `/v1/services/${encodeURIComponent(serviceInstanceId)}/observed-state`;
     const json = await this.sendSignedJsonRequest("GET", pathWithQuery);
     return ObservedStateDataEnvelopeSchema.parse(json).data;
+  }
+
+  public async pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/pull", req, APP_STACK_PULL_TIMEOUT_MS);
+    return z.object({ data: AppStackPullIpcResultSchema }).parse(json).data;
+  }
+
+  public async prepareAppStack(req: AppStackPlanIpcRequest): Promise<AppStackPrepareIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/prepare", req, APP_STACK_PREPARE_TIMEOUT_MS);
+    return z.object({ data: AppStackPrepareIpcResultSchema }).parse(json).data;
+  }
+
+  public async createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/create", req, APP_STACK_CREATE_TIMEOUT_MS);
+    return z.object({ data: AppStackCreateIpcResultSchema }).parse(json).data;
+  }
+
+  public async startAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/start", req, APP_STACK_COMPONENT_TIMEOUT_MS);
+    return z.object({ data: AppStackComponentActionIpcResultSchema }).parse(json).data;
+  }
+
+  public async restartAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/restart", req, APP_STACK_COMPONENT_TIMEOUT_MS);
+    return z.object({ data: AppStackComponentActionIpcResultSchema }).parse(json).data;
+  }
+
+  public async stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/stop", req, APP_STACK_STOP_TIMEOUT_MS);
+    return z.object({ data: AppStackStopIpcResultSchema }).parse(json).data;
+  }
+
+  public async publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/routes", req, APP_STACK_ROUTES_TIMEOUT_MS);
+    return z.object({ data: AppStackRoutesIpcResultSchema }).parse(json).data;
+  }
+
+  /** Waits in the same route-file line as publish, so it shares its budget. */
+  public async unpublishAppStackRoutes(req: AppStackRefIpcRequest): Promise<AppStackRoutesIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/unpublish", req, APP_STACK_ROUTES_TIMEOUT_MS);
+    return z.object({ data: AppStackRoutesIpcResultSchema }).parse(json).data;
+  }
+
+  public async removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/remove", req, APP_STACK_REMOVE_TIMEOUT_MS);
+    return z.object({ data: AppStackRemoveIpcResultSchema }).parse(json).data;
+  }
+
+  public async removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/remove-components", req, APP_STACK_REMOVE_TIMEOUT_MS);
+    return z.object({ data: AppStackComponentsRemoveIpcResultSchema }).parse(json).data;
+  }
+
+  public async getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult> {
+    const query = new URLSearchParams({ organizationId: req.organizationId });
+    const pathWithQuery = `/v1/app-stacks/${encodeURIComponent(req.stackId)}/status?${query}`;
+    const json = await this.sendSignedJsonRequest("GET", pathWithQuery, undefined, APP_STACK_STATUS_TIMEOUT_MS);
+    return z.object({ data: AppStackStatusIpcResultSchema }).parse(json).data;
+  }
+
+  public async getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
+    const query = new URLSearchParams({ organizationId: req.organizationId, tail: String(req.tail) });
+    const pathWithQuery = `/v1/app-stacks/${encodeURIComponent(req.stackId)}/components/${encodeURIComponent(req.componentKey)}/logs?${query}`;
+    const json = await this.sendSignedJsonRequest("GET", pathWithQuery, undefined, APP_STACK_LOGS_TIMEOUT_MS);
+    return z.object({ data: AppStackLogsIpcResultSchema }).parse(json).data;
   }
 
   private async sendServiceAction(

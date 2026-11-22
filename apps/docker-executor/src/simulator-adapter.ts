@@ -28,6 +28,15 @@ import {
   type WordpressImportLoadResult,
   type WordpressStateResult,
   type WordpressUpdateResult,
+  type AppImageAllowlistEntry,
+  type AppStackComponentIpcRequest,
+  type AppStackComponentsRemoveIpcRequest,
+  type AppStackLogsIpcRequest,
+  type AppStackPlanIpcRequest,
+  type AppStackPullIpcRequest,
+  type AppStackRefIpcRequest,
+  type AppStackRemoveIpcRequest,
+  type AppStackRoutesIpcRequest,
 } from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
@@ -53,6 +62,7 @@ import type {
   SiteJobRequest,
   SiteJobResult,
   SiteRoutesRequest,
+  StackExecutorPort,
   StoredCertificate,
   TerminalEnded,
   TerminalOpenRequest,
@@ -64,6 +74,7 @@ import { ManualTlsStoreError, normaliseEntries, type ManualTlsEntry } from "./ma
 import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
+import { SimulatedAppStacks } from "./simulator-app-stacks.js";
 import { resolveSimulatorSiteType, type SimulatorSiteType } from "./simulator-site-types.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
 import { renderPhpIni } from "./site-php.js";
@@ -134,6 +145,8 @@ export interface InMemoryDockerSimulatorAdapterOptions {
   readonly terminalLimits?: Partial<TerminalLimits>;
   /** The simulator's type for a key; tests set their own type here. */
   readonly resolveSiteType?: (key: SiteTypeKey) => SimulatorSiteType;
+  /** TEST SEAM: images the stack plan check accepts instead of APP_IMAGE_ALLOWLIST. Never set in production. */
+  readonly appImageAllowlist?: readonly AppImageAllowlistEntry[];
 }
 
 interface MutableSimulatedContainer {
@@ -207,7 +220,7 @@ function simulatedLeafNames(cert: X509Certificate): string[] {
   return traefikCertificateNames({ commonName: cn, dnsNames, ipAddresses });
 }
 
-export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
+export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
   private readonly virtualSecretsRoot: string;
@@ -281,6 +294,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
   private readonly terminals: TerminalSessions;
   private readonly resolveSiteType: (key: SiteTypeKey) => SimulatorSiteType;
   private readonly terminalSinks = new Map<string, TerminalShellSink>();
+  public readonly appStacks: SimulatedAppStacks;
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
     this.secretsRootDir = options?.secretsRootDir ? path.resolve(options.secretsRootDir) : null;
@@ -295,6 +309,12 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
     this.terminals = new TerminalSessions(options?.terminalLimits);
     this.resolveSiteType = options?.resolveSiteType ?? resolveSimulatorSiteType;
     this.files = new SimulatedSiteFiles(this.resolveSiteType);
+    this.appStacks = new SimulatedAppStacks({
+      secretsRootDir: this.secretsRootDir,
+      ingress: this.ingressFileManager,
+      ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
+      assertEngineAvailable: () => this.assertEngineAvailable(),
+    });
   }
 
   public setEngineReachable(reachable: boolean): void {
@@ -1325,6 +1345,19 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort {
       siteRouteOptions(this.panel),
     );
   }
+
+  public pullAppStackImage(req: AppStackPullIpcRequest) { return this.appStacks.pullAppStackImage(req); }
+  public prepareAppStack(req: AppStackPlanIpcRequest) { return this.appStacks.prepareAppStack(req); }
+  public createAppStackComponents(req: AppStackPlanIpcRequest) { return this.appStacks.createAppStackComponents(req); }
+  public startAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.startAppStackComponent(req); }
+  public restartAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.restartAppStackComponent(req); }
+  public stopAppStack(req: AppStackRefIpcRequest) { return this.appStacks.stopAppStack(req); }
+  public publishAppStackRoutes(req: AppStackRoutesIpcRequest) { return this.appStacks.publishAppStackRoutes(req); }
+  public unpublishAppStackRoutes(req: AppStackRefIpcRequest) { return this.appStacks.unpublishAppStackRoutes(req); }
+  public removeAppStack(req: AppStackRemoveIpcRequest) { return this.appStacks.removeAppStack(req); }
+  public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest) { return this.appStacks.removeAppStackComponents(req); }
+  public getAppStackStatus(req: AppStackRefIpcRequest) { return this.appStacks.getAppStackStatus(req); }
+  public getAppStackComponentLogs(req: AppStackLogsIpcRequest) { return this.appStacks.getAppStackComponentLogs(req); }
 
   public hasActiveVirtualSecret(serviceInstanceId: string, envName?: string): boolean {
     const set = this.virtualSecretFiles.get(serviceInstanceId);

@@ -111,9 +111,9 @@ import {
 const SAMPLE_TIMESTAMP = "2026-11-07T10:00:00.000Z";
 
 describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
-  it("defines exactly 39 canonical HCP-SPEC-002 permission keys", () => {
-    expect(PERMISSION_KEYS).toHaveLength(39);
-    expect(new Set(PERMISSION_KEYS).size).toBe(39);
+  it("defines exactly 44 canonical HCP-SPEC-002 permission keys", () => {
+    expect(PERMISSION_KEYS).toHaveLength(44);
+    expect(new Set(PERMISSION_KEYS).size).toBe(44);
     expect(PERMISSION_KEYS[PERMISSION_KEYS.indexOf("site.backups.manage") + 1]).toBe(
       "site.certificates.manage",
     );
@@ -216,6 +216,8 @@ describe("@hosting-panel/contracts — Permissions & RBAC Presets", () => {
     expect(isMutatingPermission("site.certificates.manage")).toBe(true);
     expect(isMutatingPermission("service.deploy")).toBe(true);
     expect(isMutatingPermission("host.maintenance.execute")).toBe(true);
+    expect(isMutatingPermission("app.read")).toBe(false);
+    expect(isMutatingPermission("app.control")).toBe(true);
   });
 
   it("validates GrantEffect schema", () => {
@@ -582,6 +584,10 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(DEFAULT_PLATFORM_CAPABILITIES.manualTlsCertificatesAvailable).toBe(false);
     expect(DEFAULT_PLATFORM_CAPABILITIES.localBackupTargetsAvailable).toBe(false);
     expect(DEFAULT_PLATFORM_CAPABILITIES.encryptedBackupExportAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.applicationTemplatesAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.applicationStacksAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.stackPublicPortsAvailable).toBe(false);
+    expect(DEFAULT_PLATFORM_CAPABILITIES.gitBuildsAvailable).toBe(false);
 
     // Legacy payloads omitting runtimeBackend default cleanly to "disabled"
     const legacyParsed = PlatformCapabilitiesDtoSchema.parse({
@@ -601,6 +607,10 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
     expect(legacyParsed.manualTlsCertificatesAvailable).toBe(false);
     expect(legacyParsed.localBackupTargetsAvailable).toBe(false);
     expect(legacyParsed.encryptedBackupExportAvailable).toBe(false);
+    expect(legacyParsed.applicationTemplatesAvailable).toBe(false);
+    expect(legacyParsed.applicationStacksAvailable).toBe(false);
+    expect(legacyParsed.stackPublicPortsAvailable).toBe(false);
+    expect(legacyParsed.gitBuildsAvailable).toBe(false);
 
     const disabledCaps = createPlatformCapabilities({
       runtimeBackend: "disabled",
@@ -659,6 +669,10 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
+      applicationTemplatesAvailable: false,
+      applicationStacksAvailable: false,
+      stackPublicPortsAvailable: false,
+      gitBuildsAvailable: false,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
     expect(
@@ -690,6 +704,10 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       manualTlsCertificatesAvailable: false,
       localBackupTargetsAvailable: false,
       encryptedBackupExportAvailable: false,
+      applicationTemplatesAvailable: false,
+      applicationStacksAvailable: false,
+      stackPublicPortsAvailable: false,
+      gitBuildsAvailable: false,
     });
 
     // Shared hosting remains strictly gated false (AC-F2-10)

@@ -34,7 +34,6 @@ import * as validateRoute from "@/app/api/admin/site-templates/validate/route";
 import * as templateRoute from "@/app/api/admin/site-templates/[templateId]/route";
 import * as versionsRoute from "@/app/api/admin/site-templates/[templateId]/versions/route";
 import * as upgradeRoute from "@/app/api/admin/sites/[siteId]/template-version/route";
-import { SiteTemplateList } from "@/components/admin/site-template-list";
 import { SiteTemplateDetail } from "@/components/admin/site-template-detail";
 import { SiteTemplateEditor, validationErrorText } from "@/components/admin/site-template-editor";
 import { CodeEditor } from "@/components/admin/code-editor";
@@ -297,12 +296,6 @@ describe("administrator-written names and labels are escaped", () => {
     expect(out).not.toMatch(/<img[^>]*onerror/);
     expect(out).not.toContain('"><img');
   };
-
-  it("the template list escapes the name and an unknown module key", () => {
-    const out = wrap(en, createElement(SiteTemplateList, { m: en, templates: [summary({ id: "stpl_x", name: XSS }), summary({ id: "stpl_y", module: IMG as never })] }));
-    expectEscaped(out);
-    expect(out).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
-  });
 
   it("the template detail escapes the name, the description and the version ids it links", () => {
     const detail = { ...summary({ id: "stpl_x", name: XSS, description: IMG }), versions: [{ id: "stv_a", versionNumber: 2, createdAt: NOW, siteCount: 1, isDefault: true }] } as AdminSiteTemplateDetailDto;

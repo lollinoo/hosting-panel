@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Patch, Post, Query, Req } from "@nestjs/common";
+import { filterAuthorizedResources } from "@hosting-panel/authz";
 import {
   ChangeSiteRuntimeInputSchema,
   CreateManagedSiteInputSchema,
@@ -55,6 +56,18 @@ export class ManagedSitesController {
     });
     this.outboxWorker.triggerAsync();
     return this.#accepted(orgId, accepted);
+  }
+
+  @Get()
+  public async list(@Req() req: FastifyRequest, @Param("orgId") orgId: string): Promise<{ data: ManagedSiteDto[] }> {
+    const auth = await this.authzService.authenticateRequest(req);
+    await this.authzService.requireOrgPermission(auth, req, {
+      organizationId: orgId,
+      permission: "site.read",
+      targetType: "site",
+    });
+    const rows = await this.sitesService.list(orgId);
+    return { data: filterAuthorizedResources(auth.principal, orgId, "site.read", rows) };
   }
 
   @Get(":siteId")

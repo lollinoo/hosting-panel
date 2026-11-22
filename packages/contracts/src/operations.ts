@@ -60,6 +60,13 @@ export const OPERATION_KINDS = [
   "host.job",
   "panel.container.apply",
   "site.tls.apply",
+  "stack.deploy",
+  "stack.start",
+  "stack.stop",
+  "stack.restart",
+  "stack.upgrade",
+  "stack.rollback",
+  "stack.delete",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);
@@ -117,6 +124,7 @@ export const OPERATION_RESOURCE_TYPES = [
   "service",
   "domain",
   "quota",
+  "stack",
 ] as const;
 
 export const OperationResourceTypeSchema = z.enum(OPERATION_RESOURCE_TYPES);

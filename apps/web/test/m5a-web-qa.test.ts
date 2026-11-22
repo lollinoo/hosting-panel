@@ -86,7 +86,6 @@ import { CreateAdministratorDialog, AdministratorCreatedBody } from "@/component
 import { UsersTable } from "@/components/admin/users-table";
 import { SupportBanner } from "@/components/customer/support-banner";
 import { getCustomerContext } from "@/app/sites/data";
-import { pickLandingSite } from "@/app/sites/landing";
 import { I18nProvider } from "@/i18n/provider";
 
 const root = path.resolve(__dirname, "../../..");
@@ -409,11 +408,8 @@ describe("5. the support view cannot be reached sideways", () => {
       expect(code, rel).not.toMatch(/params\b[^\n;]*\b(orgId|organizationId|orgSlug)\b|\b(orgId|organizationId|orgSlug)\b[^\n;]*=\s*await\s+(params|searchParams)/i);
       expect(rel.includes("[org")).toBe(false);
       if (/\borgId\b/.test(code) && !rel.endsWith("data.ts")) expect(code, rel).toMatch(/getCustomerContext\(\)/);
-      for (const c of code.matchAll(/cookies\(\)\)?\.get\(([^)]+)\)/g)) expect(c[1], rel).toBe("LAST_SITE_COOKIE");
+      expect(code, rel).not.toMatch(/cookies\(\)/);
     }
-    // The last-site cookie only picks among the organisation's own sites.
-    const own = [{ id: "s-own" }] as never[];
-    expect(pickLandingSite(own, "s-foreign")).toBe("s-own");
   });
 
   it("both support routes refuse a site id of a wrong shape, a missing session, a bad CSRF token and a foreign Origin before the upstream", async () => {

@@ -374,6 +374,10 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
+      applicationTemplatesAvailable: false,
+      applicationStacksAvailable: false,
+      stackPublicPortsAvailable: false,
+      gitBuildsAvailable: false,
     });
 
     const orgRes = await requestJson<{ data: OrganizationDetailDto }>(
@@ -394,6 +398,10 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
       manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
+      applicationTemplatesAvailable: false,
+      applicationStacksAvailable: false,
+      stackPublicPortsAvailable: false,
+      gitBuildsAvailable: false,
     });
 
     const capRes = await requestJson<{ data: OrganizationCapabilitiesDto }>(

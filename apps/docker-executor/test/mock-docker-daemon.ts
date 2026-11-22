@@ -121,6 +121,16 @@ export async function startMockDockerDaemon(options?: {
   const pulledImages = new Set<string>();
   let seq = 1;
 
+  /** Application stack objects (hp_app*) get the Engine's container addresses and in-use refusals; other names keep the old answers. */
+  const isStackObject = (name: string) => name.startsWith("hp_app");
+  const inUse = (name: string, isVolume: boolean) =>
+    isStackObject(name) &&
+    [...containers.values()].some((c) =>
+      isVolume
+        ? ((c.hostConfig as { Mounts?: Array<{ Source?: string }> }).Mounts ?? []).some((m) => m.Source === name)
+        : name in c.networks,
+    );
+
   const findByRef = (ref: string): MockDockerContainerRecord | undefined => {
     const byId = containers.get(ref);
     if (byId) {
@@ -160,6 +170,12 @@ export async function startMockDockerDaemon(options?: {
       if (method === "GET" && routePath === "/_ping") {
         res.writeHead(200, { "Content-Type": "text/plain" });
         res.end("OK");
+        return;
+      }
+
+      if (method === "GET" && routePath === "/info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ NCPU: 16 }));
         return;
       }
 
@@ -246,7 +262,7 @@ export async function startMockDockerDaemon(options?: {
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Id: "sha256:mockimage" }));
+        res.end(JSON.stringify({ Id: "sha256:mockimage", ...(imageName.includes("@sha256:") ? { RepoDigests: [imageName] } : {}) }));
         return;
       }
 
@@ -262,7 +278,11 @@ export async function startMockDockerDaemon(options?: {
           }),
         );
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(matches.map((n) => ({ Name: n.Name, Labels: n.Labels ?? {} }))));
+        res.end(
+          JSON.stringify(
+            matches.map((n) => ({ Name: n.Name, Labels: n.Labels ?? {}, Internal: n.Internal ?? false, Driver: "bridge", Options: {} })),
+          ),
+        );
         return;
       }
 
@@ -272,8 +292,11 @@ export async function startMockDockerDaemon(options?: {
           res.writeHead(500, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message: "engine broke" }));
         } else if (networkNames.has(netName)) {
+          const record = createdNetworks.findLast((n) => n.Name === netName);
           res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ Name: netName }));
+          res.end(
+            JSON.stringify({ Name: netName, Labels: record?.Labels ?? {}, Internal: record?.Internal ?? false, Driver: "bridge", Options: {} }),
+          );
         } else {
           res.writeHead(404, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ message: "network not found" }));
@@ -361,7 +384,7 @@ export async function startMockDockerDaemon(options?: {
               return v === undefined ? k in labels : labels[k] === v;
             }),
           )
-          .map(([Name, Labels]) => ({ Name, Labels }));
+          .map(([Name, Labels]) => ({ Name, Labels, Driver: "local", Options: {} }));
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ Volumes, Warnings: null }));
         return;
@@ -377,7 +400,7 @@ export async function startMockDockerDaemon(options?: {
           return;
         }
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ Name: name, Labels: labels }));
+        res.end(JSON.stringify({ Name: name, Labels: labels, Driver: "local", Options: {} }));
         return;
       }
 
@@ -386,6 +409,11 @@ export async function startMockDockerDaemon(options?: {
         const name = decodeURIComponent(resourceDeleteMatch[2]);
         const isVolume = resourceDeleteMatch[1] === "volumes";
         const exists = isVolume ? volumeLabels.has(name) : networkNames.has(name);
+        if (exists && inUse(name, isVolume)) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: isVolume ? "volume is in use" : "network has active endpoints" }));
+          return;
+        }
         if (exists) {
           (isVolume ? deletedVolumes : deletedNetworks).push(name);
           if (isVolume) {
@@ -465,7 +493,12 @@ export async function startMockDockerDaemon(options?: {
           status: "created",
           restartCount: 0,
           hostConfig: payload.HostConfig,
-          networks: { ...(payload.NetworkingConfig?.EndpointsConfig ?? {}) },
+          networks: Object.fromEntries(
+            Object.entries(payload.NetworkingConfig?.EndpointsConfig ?? {}).map(([net, endpoint]) => [
+              net,
+              isStackObject(net) ? { ...(endpoint as object), IPAddress: "127.0.0.1" } : endpoint,
+            ]),
+          ),
         });
         res.writeHead(201, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ Id: id, Warnings: [] }));

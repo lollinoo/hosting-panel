@@ -205,6 +205,9 @@ describe("support access tenancy over every organization route", () => {
       name: "db_a",
       database: "db_a",
       slot: "1",
+      templateId: `atpl_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      stackId: `stk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      componentKey: "app",
     };
   });
 
@@ -329,6 +332,8 @@ describe("support access tenancy over every organization route", () => {
     expect((await open(siteA)).status).toBe(201);
     await dbClient.db.update(supportAccessGrants).set({ expiresAt: new Date(Date.now() - 1000) });
     const permissionOf = new Map((await walk(orgA, adminToken)).map((a) => [a.route, a.rows[0]?.action ?? "?"]));
+    // Two walks of every route write more denied rows than the per-actor budget of one minute.
+    (app.nestApp.get(AuthzContextService) as unknown as { deniedWindows: Map<string, unknown> }).deniedWindows.clear();
 
     expect((await open(siteA)).status).toBe(201);
     const answers = await walk(orgA, adminToken);

@@ -49,6 +49,24 @@ import {
   findUnsafeDockerInputFields,
   validateServiceVolumeMount,
   type ObservedServiceStateWire,
+  type AppImageAllowlistEntry,
+  type AppStackComponentActionIpcResult,
+  type AppStackComponentIpcRequest,
+  type AppStackComponentsRemoveIpcRequest,
+  type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcResult,
+  type AppStackLogsIpcRequest,
+  type AppStackPlanIpcRequest,
+  type AppStackPrepareIpcResult,
+  type AppStackPullIpcRequest,
+  type AppStackPullIpcResult,
+  type AppStackRefIpcRequest,
+  type AppStackRemoveIpcRequest,
+  type AppStackRemoveIpcResult,
+  type AppStackRoutesIpcRequest,
+  type AppStackRoutesIpcResult,
+  type AppStackStatusIpcResult,
+  type AppStackStopIpcResult,
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
@@ -70,12 +88,14 @@ import {
   type SiteJobRequest,
   type SiteJobResult,
   type SiteRoutesRequest,
+  type StackExecutorPort,
   type TerminalEnded,
   type TerminalOpenRequest,
   type TerminalOpenResult,
   type TerminalReadResult,
   type TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
+import { AppStackEngine } from "./app-stacks/engine.js";
 import {
   DEFAULT_PHPMYADMIN_CONFIG_DIR,
   PHPMYADMIN_CONTAINER_NAME,
@@ -1216,6 +1236,8 @@ export interface DockerEngineSocketAdapterOptions {
    */
   readonly ingressProxyContainerName?: string;
   readonly ingressNetworkName?: string;
+  /** TEST SEAM: images the stack engine accepts instead of APP_IMAGE_ALLOWLIST. Never set in production (main.ts does not pass it). */
+  readonly appImageAllowlist?: readonly AppImageAllowlistEntry[];
   /** Shorter terminal limits (tests and the real-Docker script). */
   readonly terminalLimits?: Partial<TerminalLimits>;
   /** Turns a request's site-type key into its definition (default: the executor's registry). */
@@ -1251,7 +1273,7 @@ interface ManualColdInput {
 const ACME_PLAN_READ_RETRIES = 3;
 const ACME_PLAN_READ_RETRY_MS = 50;
 
-export class DockerEngineSocketAdapter implements DockerExecutorPort {
+export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly dockerClient: DockerSocketHttpClient;
   private readonly secretsRootDir: string;
@@ -1316,6 +1338,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   private readonly resolveSiteType: (key: SiteTypeKey) => ExecutorSiteType;
   private readonly ingressProxyContainerName: string;
   private readonly ingressNetworkName: string;
+  private readonly appStackEngine: AppStackEngine;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.ingressProxyContainerName = options?.ingressProxyContainerName ?? INGRESS_PROXY_CONTAINER_NAME;
@@ -1451,6 +1474,72 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       panelDumpDir: path.resolve(options?.panelDumpDir ?? DEFAULT_PANEL_DUMP_DIR),
       localRepoRoot: options?.backupLocalRoot ?? null,
     });
+    this.appStackEngine = new AppStackEngine({
+      request: (method, endpointPath, body, o) => this.dockerClient.request(method, endpointPath, body, o),
+      secretsRootDir: this.secretsRootDir,
+      pullMissingImages: this.pullMissingImages,
+      ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
+      routes: {
+        write: (id, r) => this.ingressManager.writeAppStackRoutes(id, r),
+        remove: (id) => this.ingressManager.removeAppStackRoutes(id),
+        read: (id) => this.ingressManager.readAppStackRoutes(id),
+      },
+      proxy: {
+        containerName: this.ingressProxyContainerName,
+        ensure: async () => {
+          await this.ensureIngressProxy();
+        },
+      },
+      readLogs: (ref, tail) => this.readContainerLogs(ref, tail),
+    });
+  }
+
+  public pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
+    return this.appStackEngine.pullAppStackImage(req);
+  }
+
+  public prepareAppStack(req: AppStackPlanIpcRequest): Promise<AppStackPrepareIpcResult> {
+    return this.appStackEngine.prepareAppStack(req);
+  }
+
+  public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+    return this.appStackEngine.createAppStackComponents(req);
+  }
+
+  public startAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
+    return this.appStackEngine.startAppStackComponent(req);
+  }
+
+  public restartAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
+    return this.appStackEngine.restartAppStackComponent(req);
+  }
+
+  public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
+    return this.appStackEngine.stopAppStack(req);
+  }
+
+  public publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult> {
+    return this.appStackEngine.publishAppStackRoutes(req);
+  }
+
+  public unpublishAppStackRoutes(req: AppStackRefIpcRequest): Promise<AppStackRoutesIpcResult> {
+    return this.appStackEngine.unpublishAppStackRoutes(req);
+  }
+
+  public removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult> {
+    return this.appStackEngine.removeAppStack(req);
+  }
+
+  public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
+    return this.appStackEngine.removeAppStackComponents(req);
+  }
+
+  public getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult> {
+    return this.appStackEngine.getAppStackStatus(req);
+  }
+
+  public getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
+    return this.appStackEngine.getAppStackComponentLogs(req);
   }
 
   public async pingEngine(): Promise<boolean> {
@@ -1603,6 +1692,17 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
     // A new proxy starts on hp_ingress_net only, and a site edge network may have been detached
     // while the proxy kept running: reattach every one on each ensure (idempotent, CP-01).
     await this.reconnectProxyToSiteEdgeNetworks();
+    // Application stacks (ADR-0035): best effort, a stack network must never fail the site ingress.
+    await this.reconnectToRoleNetworks("app_edge", this.ingressProxyContainerName).catch((err: unknown) => {
+      console.warn(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "app_edge_reconnect_failed",
+          code: (err as { code?: unknown } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
 
     return {
       component: "ingress_proxy",
@@ -3660,7 +3760,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
   }
 
   private async reconnectToRoleNetworks(
-    role: "site_edge" | "site_internal",
+    role: "site_edge" | "site_internal" | "app_edge",
     containerRef: string,
     aliases?: readonly string[],
   ): Promise<void> {
@@ -3676,10 +3776,19 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
       );
     }
     const networks = JSON.parse(res.body.toString("utf8")) as Array<{ readonly Name: string }>;
+    let appEdgeError: unknown;
     for (const network of networks) {
-      const connected = await this.connectContainerToNetwork(network.Name, containerRef, aliases, {
-        skipMissingNetwork: true,
-      });
+      let connected: boolean;
+      try {
+        connected = await this.connectContainerToNetwork(network.Name, containerRef, aliases, {
+          skipMissingNetwork: true,
+        });
+      } catch (err) {
+        // A failing stack network never keeps the proxy off the others; the caller logs the first error.
+        if (role !== "app_edge") throw err;
+        appEdgeError ??= err;
+        continue;
+      }
       if (!connected) {
         // Removed between the list and the connect (site deleted): skip it, keep the rest.
         console.warn(
@@ -3692,6 +3801,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort {
         );
       }
     }
+    if (appEdgeError !== undefined) throw appEdgeError;
   }
 
   private async connectContainerToNetwork(

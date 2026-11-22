@@ -68,7 +68,27 @@ const SEED = `
     ('v_inactive','c1','o',3,'l','c','k','i','t','CN=a','CN=ca','3','${"3".repeat(64)}','2026-01-01','2027-01-01','["a.example"]','ec',256,'inactive');
   UPDATE tls_publish_state SET desired_generation = 5, confirmed_generation = 3;
 
-  UPDATE backup_policies SET nightly_run_started_at = now(), last_nightly_run_on = '2026-11-20' WHERE scope = 'default_site';`;
+  UPDATE backup_policies SET nightly_run_started_at = now(), last_nightly_run_on = '2026-11-20' WHERE scope = 'default_site';
+
+  INSERT INTO app_templates (id, slug, name, category) VALUES ('tpl','notes','Notes','tools');
+  INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
+    VALUES ('atv','tpl',1,'x',1,'{}','${"d".repeat(64)}');
+  INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status,
+    applied_routes_hash, deleted_at, updated_at) VALUES
+    ('stk_run','o','a','tpl','atv','run','running','${"c".repeat(64)}',NULL,'2026-11-01T00:00:00Z'),
+    ('stk_del','o','a','tpl','atv','del','deleting','${"c".repeat(64)}',NULL,'2026-11-01T00:00:00Z'),
+    ('stk_gone','o','a','tpl','atv','gone','deleted',NULL,'2026-11-01T00:00:00Z','2026-11-01T00:00:00Z');
+  INSERT INTO app_stack_revisions (id, stack_id, organization_id, revision_number, template_version_id, plan, plan_hash,
+    component_count, cpu_milli, memory_bytes) VALUES ('rev_run','stk_run','o',1,'atv','{}','${"e".repeat(64)}',1,500,1);
+  INSERT INTO app_stack_secrets (id, stack_id, organization_id, parameter_key, version, ciphertext_base64, iv_base64,
+    auth_tag_base64) VALUES ('sec_run','stk_run','o','db_password',1,'c','i','t'), ('sec_gone','stk_gone','o','db_password',1,'c','i','t');
+  INSERT INTO app_stack_deployments (id, stack_id, organization_id, operation_id, revision_id, status)
+    VALUES ('dep_run','stk_run','o','op_stack','rev_run','running');
+  INSERT INTO app_stack_components (stack_id, organization_id, component_key, health, health_observed_at, applied_revision_id)
+    VALUES ('stk_run','o','app','healthy', now(),'rev_run');
+  INSERT INTO app_stack_volumes (stack_id, organization_id, volume_key, status) VALUES ('stk_run','o','data','present');
+  INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname, status, cert_status,
+    cert_expires_at, dns_next_check_at) VALUES ('dom_run','stk_run','o','app',8080,'app.example','active','active', now(), '2027-01-01');`;
 
 const LEGACY_SETTINGS = `
   INSERT INTO backup_settings (id, endpoint, region, bucket, prefix, access_key_id, secret_access_key_ciphertext_base64,
@@ -97,6 +117,11 @@ const LEDGER = `
   UNION ALL SELECT 'bt', id, last_test_outcome, last_test_problem, concat_ws('|', last_test_at, last_test_available_bytes, last_test_total_bytes) FROM backup_targets
   UNION ALL SELECT 'bp', id, nightly_run_started_at::text, last_nightly_run_on::text, NULL FROM backup_policies
   UNION ALL SELECT 'bs', id, nightly_run_started_at::text, last_panel_backup_status, NULL FROM backup_settings
+  UNION ALL SELECT 'as', id, status, NULL, applied_routes_hash FROM app_stacks
+  UNION ALL SELECT 'ad', id, status, problem, ended_at::text FROM app_stack_deployments
+  UNION ALL SELECT 'ac', component_key, health, NULL, health_observed_at::text FROM app_stack_components
+  UNION ALL SELECT 'av', volume_key, status, NULL, NULL FROM app_stack_volumes
+  UNION ALL SELECT 'am', id, status, cert_status, concat_ws('|', cert_expires_at, dns_next_check_at <= now()) FROM app_stack_domains
   ORDER BY 1, 2`;
 
 describe.each([
@@ -176,6 +201,25 @@ describe.each([
     } else {
       expect(first.some((r) => r.t === "bs")).toBe(false);
     }
+  });
+
+  it("tells the truth about application stacks: nothing runs on the new host (HCP-SPEC-005)", async () => {
+    expect(byId("as", "stk_run")).toMatchObject({ status: "failed", x: null });
+    expect(byId("as", "stk_del")).toMatchObject({ status: "delete_failed", x: null });
+    expect(byId("as", "stk_gone")).toEqual(before.find((r) => r.t === "as" && r.id === "stk_gone"));
+    expect(byId("ad", "dep_run")).toMatchObject({ status: "failed", problem: "OPERATION_INTERRUPTED" });
+    expect(byId("ad", "dep_run")?.x).not.toBeNull();
+    expect(byId("ac", "app")).toMatchObject({ status: "missing", x: null });
+    expect(byId("av", "data")).toMatchObject({ status: "missing" });
+    expect(byId("am", "dom_run")).toMatchObject({ status: "pending", problem: "none", x: "t" });
+    expect(
+      await rows(pg, `SELECT id, updated_at = '2026-11-01T00:00:00Z' AS same FROM app_stacks WHERE deleted_at IS NOT NULL`),
+    ).toEqual([{ id: "stk_gone", same: true }]);
+    expect(await rows(pg, "SELECT id FROM app_stack_revisions")).toEqual([{ id: "rev_run" }]);
+    expect(await rows(pg, "SELECT id, version FROM app_stack_secrets ORDER BY id")).toEqual([
+      { id: "sec_gone", version: 1 },
+      { id: "sec_run", version: 1 },
+    ]);
   });
 
   it("is idempotent: a second run changes nothing", async () => {

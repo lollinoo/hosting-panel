@@ -88,4 +88,49 @@ describe("controller routes and docs/api/openapi.yaml agree", () => {
       expect(routes.has(route), route).toBe(true);
     }
   });
+
+  it("documents the managed sites list", () => {
+    expect(operations.has("GET /v1/organizations/{orgId}/managed-sites")).toBe(true);
+    expect(routes.has("GET /v1/organizations/{orgId}/managed-sites")).toBe(true);
+  });
+
+  it("documents the application template and stack routes", () => {
+    for (const route of [
+      "GET /v1/admin/app-templates",
+      "POST /v1/admin/app-templates/validate",
+      "POST /v1/admin/app-templates",
+      "GET /v1/admin/app-templates/{templateId}",
+      "PATCH /v1/admin/app-templates/{templateId}",
+      "POST /v1/admin/app-templates/{templateId}/versions",
+      "GET /v1/admin/app-templates/{templateId}/versions/{versionId}",
+      "POST /v1/admin/app-templates/{templateId}/archive",
+      "GET /v1/admin/app-templates/{templateId}/usage",
+      "GET /v1/admin/app-stacks",
+      "GET /v1/organizations/{orgId}/app-templates",
+      "GET /v1/organizations/{orgId}/app-templates/{templateId}",
+      "POST /v1/organizations/{orgId}/app-stacks",
+      "GET /v1/organizations/{orgId}/app-stacks",
+      "GET /v1/organizations/{orgId}/app-stacks/{stackId}",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/deploy",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/start",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/stop",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/restart",
+      "DELETE /v1/organizations/{orgId}/app-stacks/{stackId}",
+      "GET /v1/organizations/{orgId}/app-stacks/{stackId}/deployments",
+      "GET /v1/organizations/{orgId}/app-stacks/{stackId}/components/{componentKey}/logs",
+      "GET /v1/organizations/{orgId}/app-stacks/{stackId}/components/{componentKey}/health",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/secrets",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/backups",
+      "GET /v1/organizations/{orgId}/app-stacks/{stackId}/domains",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/domains",
+      "DELETE /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}/check",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/plan",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/upgrade",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/rollback",
+    ]) {
+      expect(operations.has(route), route).toBe(true);
+      expect(routes.has(route), route).toBe(true);
+    }
+  });
 });
