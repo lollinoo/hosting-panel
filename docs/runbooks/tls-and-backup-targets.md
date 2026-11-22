@@ -214,8 +214,8 @@ The proxy keeps serving with the API and the database down, and `hp-update` neve
    disk read-only (no lock, no network) and accepts only a canonical absolute path with no symlink, not owned by root, not
    world-writable.
 5. Exit codes: `0` restored, `1` a step failed (safe to run again), `2` refused (bad arguments, not root, `backup.key` missing,
-   sites already present, copy from a newer panel, question not answered `y`), `7` local destination not mounted, `8` local
-   folder unsafe (only with `--local-repo`).
+   sites already present, applications already present, copy from a newer panel, question not answered `y`), `7` local
+   destination not mounted, `8` local folder unsafe (only with `--local-repo`).
 6. Then sign in with the old administrator account, point the domains to the new server, and use **Ripristina** on each site.
    The panel copy is the one of the last night: later changes are lost. If the disk was lost together with the server, a
    local-only copy is lost too, which is why an off-server copy is required.

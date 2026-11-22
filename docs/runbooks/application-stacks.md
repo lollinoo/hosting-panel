@@ -68,6 +68,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
      `degraded` (`failed` if an essential component is not healthy); if instead the previous revision is still the one
      running, the operation fails (`OPERATION_INTERRUPTED`) and the stack keeps the status of that revision; otherwise
      the stack is `failed` with `OPERATION_INTERRUPTED`;
+   - route refresh (the panel's own `stack.deploy`, no user, which only changes routes): done when the routes seen are
+     today's addresses of the healthy targets, otherwise it fails with `OPERATION_INTERRUPTED`; the stack is `running`
+     when it is done and every component is healthy, otherwise `degraded`, never `failed`; a later route refresh
+     rewrites the routes (ten minutes later when this one failed);
    - stop: a component still running → `degraded`; none → `stopped`;
    - delete: no container, network or route file left (and no volume, when the data was to be destroyed) → `deleted`;
      otherwise `delete_failed`.
@@ -156,8 +160,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo docker stop hp_app_<stackId>_<componentKey>
    ```
    Only `stop`, never `rm`. The containers stay stopped after a reboot (`unless-stopped`), the panel shows them not
-   healthy and never restarts them itself; **Riavvia** starts them again. The routes stay published until the customer
-   stops the stack.
+   healthy and never restarts them itself; **Riavvia** starts them again. The panel's next route refresh withdraws the
+   addresses whose target component is stopped and publishes them again once it reads healthy; the refresh only reads
+   the stack's state and changes routes, it never starts anything. While only health changes, a stack gets at most one
+   refresh every five minutes; a removed address is withdrawn on the next pass.
 2. **Nobody installs it again.** In **Modelli applicazione**, disable the template (archive it if it is not built-in).
    Installed stacks keep running; a deploy or upgrade that needs a new revision of that template is refused
    (`STACK_TEMPLATE_UNPUBLISHED`).
@@ -200,8 +206,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    node infra/linux/accept-app-stack-engine.mjs
    ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
-   remove only objects whose name contains `swarmtest_<hex>` (a random value per run), never prune, and clean up at
-   the end, also on Ctrl-C.
+   remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
+   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the two template scripts: their
+   throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`),
+   never prune, and clean up at the end, also on Ctrl-C.
 3. Each step prints one line: `PASS <step>`, `FAIL <step>: <reason>` or `SKIP <step>: <why>`. A step that needs root is
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
