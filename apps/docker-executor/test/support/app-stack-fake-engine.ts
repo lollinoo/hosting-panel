@@ -55,6 +55,8 @@ export interface AppStackFakeEngine {
   readonly images: Map<string, FakeImage>;
   /** Refs a pull succeeds for (RepoDigests = [ref]); any other pull answers 200 with an "error" line. */
   readonly pullable: Set<string>;
+  /** GET /distribution/<reference>/json: reference -> the body answered with 200; any other reference answers 404. */
+  readonly registry: Map<string, unknown>;
   readonly networks: Map<string, FakeNetwork>;
   readonly volumes: Map<string, FakeVolume>;
   /** By container name. */
@@ -87,6 +89,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
   const bodies = new Map<string, unknown[]>();
   const images = new Map<string, FakeImage>();
   const pullable = new Set<string>();
+  const registry = new Map<string, unknown>();
   const networks = new Map<string, FakeNetwork>();
   const volumes = new Map<string, FakeVolume>();
   const containers = new Map<string, FakeContainer>();
@@ -110,6 +113,10 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     const input = (body ?? {}) as Record<string, unknown>;
 
     if (kind === "info" && method === "GET") return reply(200, info);
+
+    if (kind === "distribution" && method === "GET" && action === "json" && parts.length === 3) {
+      return registry.has(ref) ? reply(200, registry.get(ref)) : reply(404, { message: "manifest unknown" });
+    }
 
     if (kind === "images") {
       if (method === "GET" && action === "json") {
@@ -309,6 +316,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     bodies,
     images,
     pullable,
+    registry,
     networks,
     volumes,
     containers,

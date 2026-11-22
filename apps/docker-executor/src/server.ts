@@ -6,6 +6,8 @@ import path from "node:path";
 import {
   AppStackComponentIpcRequestSchema,
   AppStackComponentsRemoveIpcRequestSchema,
+  AppStackCreateIpcRequestSchema,
+  AppStackImageResolveIpcRequestSchema,
   AppStackLogsIpcRequestSchema,
   AppStackPlanIpcRequestSchema,
   AppStackPullIpcRequestSchema,
@@ -781,7 +783,7 @@ export class DockerExecutorIpcServer {
         case "/v1/app-stacks/prepare":
           return post(AppStackPlanIpcRequestSchema, "prepare", (s, req) => s.prepareAppStack(req));
         case "/v1/app-stacks/create":
-          return post(AppStackPlanIpcRequestSchema, "create", (s, req) => s.createAppStackComponents(req));
+          return post(AppStackCreateIpcRequestSchema, "create", (s, req) => s.createAppStackComponents(req));
         case "/v1/app-stacks/start":
           return post(AppStackComponentIpcRequestSchema, "start", (s, req) => s.startAppStackComponent(req));
         case "/v1/app-stacks/restart":
@@ -813,6 +815,9 @@ export class DockerExecutorIpcServer {
         return value;
       }
     };
+    if (pathname === "/v1/app-stacks/image-digest") {
+      return (s) => s.resolveAppStackImage(this.parseAppStackValue(AppStackImageResolveIpcRequestSchema, { image: param("image") }, "image"));
+    }
     const status = /^\/v1\/app-stacks\/([^/]+)\/status$/.exec(pathname);
     if (status?.[1] !== undefined) {
       const stackId = segment(status[1]);

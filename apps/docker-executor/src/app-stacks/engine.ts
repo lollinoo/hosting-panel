@@ -1,18 +1,23 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  APP_STACK_DIGEST_PATTERN,
   APP_STACK_HASH_PATTERN,
   APP_STACK_ID_PATTERN,
   APP_STACK_KEY_PATTERN,
   APP_STACK_LOG_TAIL_MAX,
   APP_STACK_NETWORK_ROLES,
+  appStackImageLookupProblem,
   type AppImageAllowlistEntry,
   type AppStackComponentActionIpcResult,
   type AppStackComponentIpcRequest,
   type AppStackComponentObservation,
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcRequest,
   type AppStackCreateIpcResult,
   type AppStackExecutorReason,
+  type AppStackImageResolveIpcRequest,
+  type AppStackImageResolveIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackNetworkRole,
   type AppStackPlanIpcRequest,
@@ -51,7 +56,12 @@ import {
   appStackVolumeName,
   isOwnAppStackResource,
 } from "./names.js";
-import { appStackImageDigestMatches, assertAppStackSecretContents, assertExecutableAppStackPlan } from "./plan-check.js";
+import {
+  appStackImageDigestMatches,
+  assertAppStackCreateSecretContents,
+  assertAppStackSecretContents,
+  assertExecutableAppStackPlan,
+} from "./plan-check.js";
 import {
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
@@ -87,6 +97,7 @@ export interface AppStackEngineDeps {
 }
 
 export const APP_STACK_PULL_ENGINE_TIMEOUT_MS = 240_000;
+export const APP_STACK_RESOLVE_ENGINE_TIMEOUT_MS = 30_000;
 
 const REMOVAL_POLL_MS = 100;
 const REMOVAL_WAIT_MS = 5_000;
@@ -123,6 +134,9 @@ interface VolumeView {
   readonly Driver?: string;
   readonly Labels?: Labels | null;
   readonly Options?: Labels | null;
+}
+interface RegistryLookup {
+  readonly Descriptor?: { readonly digest?: unknown } | null;
 }
 interface OwnContainer {
   readonly id: string;
@@ -293,6 +307,25 @@ export class AppStackEngine implements StackExecutorPort {
     });
   }
 
+  /** Tag to digest through the Engine's registry lookup: no stack, no change on the server, no credentials. */
+  public async resolveAppStackImage(req: AppStackImageResolveIpcRequest): Promise<AppStackImageResolveIpcResult> {
+    const { image } = req;
+    if (appStackImageLookupProblem(image) !== null) refuse("STACK_PLAN_INVALID", "The image reference is not valid");
+    const res = await this.deps.request("GET", `/distribution/${enc(image)}/json`, undefined, {
+      timeoutMs: APP_STACK_RESOLVE_ENGINE_TIMEOUT_MS,
+    });
+    let digest: unknown;
+    try {
+      digest = res.statusCode === 200 ? (JSON.parse(res.body.toString("utf8")) as RegistryLookup | null)?.Descriptor?.digest : undefined;
+    } catch {
+      digest = undefined;
+    }
+    if (typeof digest !== "string" || !APP_STACK_DIGEST_PATTERN.test(digest)) {
+      refuse("STACK_IMAGE_PULL_FAILED", "Could not find the software of the application in its registry");
+    }
+    return { image, digest };
+  }
+
   public prepareAppStack(req: AppStackPlanIpcRequest): Promise<AppStackPrepareIpcResult> {
     return this.locked(req.plan.stackId, async () => {
       const plan = this.check(req.plan);
@@ -304,9 +337,11 @@ export class AppStackEngine implements StackExecutorPort {
     });
   }
 
-  public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
     return this.locked(req.plan.stackId, async () => {
       const plan = this.check(req.plan);
+      // Environment secrets (version 2) live only in this call and in the create bodies built from it.
+      const secretContents = assertAppStackCreateSecretContents(plan, req.secretContents);
       // The Engine refuses a CPU limit above its processor count only at create, after a replaced container is gone.
       const { NCPU } = await this.list<{ NCPU?: unknown }>("/info", "read the server information");
       if (typeof NCPU !== "number") throw malformed();
@@ -330,7 +365,7 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const listed = await this.listContainers(plan);
       // Every body and every derived name is checked before the first removal or create.
-      const ctx = { secretsRootDir: this.deps.secretsRootDir, plan };
+      const ctx = { secretsRootDir: this.deps.secretsRootDir, plan, secretContents };
       const bodies = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
         const existing = listed.find((c) => c.key === key);
@@ -676,7 +711,8 @@ export class AppStackEngine implements StackExecutorPort {
       }
       if (action === "start" && target.State?.Running === true) return { componentKey: key, outcome: "already_running" };
       try {
-        if (component.secretFiles.length > 0) await writeAppStackComponentSecrets(this.deps.secretsRootDir, plan.stackId, key, contents);
+        // Environment secrets are written beside the file ones (never mounted) so that the log reader masks them too.
+        if (Object.keys(contents).length > 0) await writeAppStackComponentSecrets(this.deps.secretsRootDir, plan.stackId, key, contents);
         else await purgeAppStackComponentSecrets(this.deps.secretsRootDir, plan.stackId, key);
       } catch {
         throw new ExecutorCodedError(`Could not prepare the secret files of component ${key}`, "DOCKER_ENGINE_UNAVAILABLE");

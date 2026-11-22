@@ -3,13 +3,19 @@ import { isDeepStrictEqual } from "node:util";
 import {
   APP_STACK_KEY_PATTERN,
   APP_STACK_PIDS_LIMIT,
+  APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_STANDARD_PIDS_LIMIT,
   APP_TEMPLATE_LIMITS,
+  appStackComponentProfile,
+  appStackComponentSecretEnvironment,
   appStackHealthPathProblem,
   appStackSecretFilePath,
   type AppStackHealthcheck,
+  type AppStackPlanComponent,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
 import { ExecutorCodedError } from "../traefik-config.js";
+import { AppStackExecutorError } from "./errors.js";
 import {
   APP_STACK_COMPONENT_ROLE,
   APP_STACK_LABELS,
@@ -22,6 +28,16 @@ import {
 } from "./names.js";
 
 export const APP_STACK_TMPFS = Object.freeze({ "/tmp": "rw,noexec,nosuid,nodev,size=64m" });
+/** The whole capability set of the "standard" run profile (ADR-0036): what an image that starts as root and then drops
+ *  to its own user needs to take over its data directory and listen on a low port. A template never names a capability. */
+export const APP_STACK_STANDARD_CAP_ADD: readonly string[] = Object.freeze([
+  "CHOWN",
+  "DAC_OVERRIDE",
+  "FOWNER",
+  "SETGID",
+  "SETUID",
+  "NET_BIND_SERVICE",
+]);
 export const APP_STACK_STOP_TIMEOUT_SECONDS = 10;
 export const APP_STACK_RESTART_POLICY = Object.freeze({ Name: "unless-stopped" });
 export const APP_STACK_LOG_CONFIG = Object.freeze({
@@ -40,9 +56,12 @@ export interface AppStackContainerCreatePayload {
   readonly HostConfig: {
     readonly Privileged: boolean;
     readonly CapDrop: readonly string[];
+    /** Only in the "standard" profile, and then exactly APP_STACK_STANDARD_CAP_ADD. */
+    readonly CapAdd?: readonly string[];
     readonly SecurityOpt: readonly string[];
     readonly ReadonlyRootfs: boolean;
-    readonly Tmpfs: Readonly<Record<string, string>>;
+    /** Only in the "strict" profile (the root filesystem of "standard" is writable). */
+    readonly Tmpfs?: Readonly<Record<string, string>>;
     readonly PidsLimit: number;
     readonly NanoCpus: number;
     readonly Memory: number;
@@ -63,14 +82,41 @@ export interface AppStackContainerCreatePayload {
   };
 }
 
-/** The stack container create body (L16): no CapAdd, no ports, no Entrypoint, read-only root filesystem. */
+/** The environment secrets of a version 2 component as "NAME=value" entries, in plan order; [] for a version 1 one.
+ *  The values exist only in the returned strings: no message of this function carries one. */
+export function expandAppStackSecretEnvironment(
+  component: AppStackPlanComponent,
+  contents: Readonly<Record<string, string>>,
+): string[] {
+  return appStackComponentSecretEnvironment(component).map((entry) => {
+    const value = entry.pieces
+      .map((piece) => {
+        if ("literal" in piece) return piece.literal;
+        const content = Object.hasOwn(contents, piece.parameterKey) ? contents[piece.parameterKey] : undefined;
+        if (content === undefined) {
+          throw new AppStackExecutorError("STACK_SECRET_MISSING", `A secret of component ${component.key} is missing`);
+        }
+        return content;
+      })
+      .join("");
+    if (Buffer.byteLength(value, "utf8") > APP_STACK_SECRET_ENV_LIMITS.expandedBytes) {
+      throw new AppStackExecutorError("STACK_PLAN_INVALID", `An environment value of component ${component.key} is too long`);
+    }
+    return `${entry.name}=${value}`;
+  });
+}
+
+/** The stack container create body (L16): no ports, no Entrypoint; the run profile decides the root filesystem, /tmp,
+ *  the process limit and the fixed capability set ("strict": read-only, no CapAdd). `secretContents` (parameterKey ->
+ *  value) is needed only by a component with environment secrets. */
 export function buildAppStackContainerCreatePayload(
   plan: ApprovedStackPlan,
   componentKey: string,
-  ctx: { readonly secretsRootDir: string },
+  ctx: { readonly secretsRootDir: string; readonly secretContents?: Readonly<Record<string, string>> },
 ): AppStackContainerCreatePayload {
   const c = plan.components.find((component) => component.key === componentKey);
   if (c === undefined) throw new RangeError(`Unknown stack component: ${componentKey}`);
+  const standard = appStackComponentProfile(c) === "standard";
   const root = path.resolve(ctx.secretsRootDir);
   const net = appStackInternalNetworkName(plan.stackId);
   const isEdge = plan.ingress.some((route) => route.componentKey === c.key);
@@ -82,6 +128,7 @@ export function buildAppStackContainerCreatePayload(
     Env: [
       ...c.environment.map((entry) => `${entry.name}=${entry.value}`),
       ...c.secretFiles.map((file) => `${file.envName}=${appStackSecretFilePath(file.parameterKey)}`),
+      ...expandAppStackSecretEnvironment(c, ctx.secretContents ?? {}),
     ],
     Labels: appStackComponentLabels(plan, c.key),
     ExposedPorts: Object.fromEntries(c.expose.map((port) => [`${port}/tcp`, {}])),
@@ -89,10 +136,11 @@ export function buildAppStackContainerCreatePayload(
     HostConfig: {
       Privileged: false,
       CapDrop: ["ALL"],
+      ...(standard ? { CapAdd: [...APP_STACK_STANDARD_CAP_ADD] } : {}),
       SecurityOpt: ["no-new-privileges:true"],
-      ReadonlyRootfs: true,
-      Tmpfs: { ...APP_STACK_TMPFS },
-      PidsLimit: APP_STACK_PIDS_LIMIT,
+      ReadonlyRootfs: !standard,
+      ...(standard ? {} : { Tmpfs: { ...APP_STACK_TMPFS } }),
+      PidsLimit: standard ? APP_STACK_STANDARD_PIDS_LIMIT : APP_STACK_PIDS_LIMIT,
       NanoCpus: c.resources.cpuMilli * 1_000_000,
       Memory: Number(c.resources.memoryBytes),
       MemorySwap: Number(c.resources.memoryBytes),
@@ -136,13 +184,16 @@ const HOST_CONFIG_KEYS = new Set([
   "Mounts",
   "LogConfig",
 ]);
+/** "standard": the fixed capability set instead of the /tmp tmpfs. */
+const STANDARD_HOST_CONFIG_KEYS = new Set([...[...HOST_CONFIG_KEYS].filter((key) => key !== "Tmpfs"), "CapAdd"]);
 const MOUNT_KEYS = new Set(["Type", "Source", "Target", "ReadOnly"]);
 
 const onlyKeys = (value: object, allowed: ReadonlySet<string>) => Object.keys(value).every((key) => allowed.has(key));
 const inRange = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 
 /** Run on every body before POST /containers/create: refuses a body that lost any hardening property.
- *  With the plan, the User and the edge network must also be the plan component's. */
+ *  With the plan, the User, the edge network, the run profile and the environment names must also be the plan
+ *  component's; without it only the "strict" body passes. */
 export function assertAppStackPayloadHardening(
   payload: AppStackContainerCreatePayload,
   ctx: { readonly secretsRootDir: string; readonly plan?: ApprovedStackPlan },
@@ -158,7 +209,6 @@ export function assertAppStackPayloadHardening(
   const hostPath = (source: string) => source.includes("docker.sock") || source.includes("/var/run");
 
   if (!onlyKeys(payload, TOP_LEVEL_KEYS)) refuse("body keys");
-  if (!onlyKeys(host, HOST_CONFIG_KEYS)) refuse("HostConfig keys");
   const label = APP_STACK_LABELS; // read here, not at load: names.ts imports this module back
   const labelKeys = new Set([
     label.managed,
@@ -175,13 +225,22 @@ export function assertAppStackPayloadHardening(
   const { plan } = ctx;
   const component = plan?.stackId === stackId ? plan.components.find((c) => c.key === key) : undefined;
   if (plan !== undefined && component === undefined) refuse("Labels");
+  const standard = component !== undefined && appStackComponentProfile(component) === "standard";
+  if (!onlyKeys(host, standard ? STANDARD_HOST_CONFIG_KEYS : HOST_CONFIG_KEYS)) refuse("HostConfig keys");
   if (component !== undefined && (payload.User ?? null) !== component.runAsUser) refuse("User");
   if (host.Privileged !== false) refuse("Privileged");
   if (!isDeepStrictEqual(host.CapDrop, ["ALL"])) refuse("CapDrop");
   if (!isDeepStrictEqual(host.SecurityOpt, ["no-new-privileges:true"])) refuse("SecurityOpt");
-  if (host.ReadonlyRootfs !== true) refuse("ReadonlyRootfs");
-  if (!isDeepStrictEqual(host.Tmpfs, APP_STACK_TMPFS)) refuse("Tmpfs");
-  if (host.PidsLimit !== APP_STACK_PIDS_LIMIT) refuse("PidsLimit");
+  if (standard) {
+    // The closed "standard" profile: exactly its capability set, a writable root filesystem, its own process limit.
+    if (!isDeepStrictEqual(host.CapAdd, [...APP_STACK_STANDARD_CAP_ADD])) refuse("CapAdd");
+    if (host.ReadonlyRootfs !== false) refuse("ReadonlyRootfs");
+    if (host.PidsLimit !== APP_STACK_STANDARD_PIDS_LIMIT) refuse("PidsLimit");
+  } else {
+    if (host.ReadonlyRootfs !== true) refuse("ReadonlyRootfs");
+    if (!isDeepStrictEqual(host.Tmpfs, APP_STACK_TMPFS)) refuse("Tmpfs");
+    if (host.PidsLimit !== APP_STACK_PIDS_LIMIT) refuse("PidsLimit");
+  }
   // The body carries no plan: the limits must be ones a plan can hold (memory = swap, whole millicores).
   const { memoryBytesMin, memoryBytesMax, cpuMilliMin, cpuMilliMax } = APP_TEMPLATE_LIMITS;
   if (!inRange(host.Memory, memoryBytesMin, memoryBytesMax) || host.MemorySwap !== host.Memory) refuse("Memory");
@@ -211,8 +270,27 @@ export function assertAppStackPayloadHardening(
       refuse("Mounts");
     }
   }
+  // With the plan: its plain entries exactly and in order, then one entry per environment secret under the plan's name.
+  // The value of an environment secret is opaque here; the text around it is the plan's and is checked as such.
+  const secretEntries = component === undefined ? [] : appStackComponentSecretEnvironment(component);
+  const plainCount = payload.Env.length - secretEntries.length;
+  if (component !== undefined) {
+    const plain = [
+      ...component.environment.map((entry) => `${entry.name}=${entry.value}`),
+      ...component.secretFiles.map((file) => `${file.envName}=${appStackSecretFilePath(file.parameterKey)}`),
+    ];
+    if (
+      !isDeepStrictEqual(payload.Env.slice(0, Math.max(0, plainCount)), plain) ||
+      secretEntries.some((entry, index) => payload.Env[plain.length + index]?.startsWith(`${entry.name}=`) !== true)
+    ) {
+      refuse("Env");
+    }
+  }
   // The plan schema's text rule for environment values and argv.
-  if ([...payload.Env, ...(payload.Cmd ?? [])].some((text) => /docker\.sock/i.test(text))) refuse("host socket");
+  const literals = secretEntries.flatMap((entry) => entry.pieces.flatMap((piece) => ("literal" in piece ? [piece.literal] : [])));
+  if ([...payload.Env.slice(0, Math.max(0, plainCount)), ...literals, ...(payload.Cmd ?? [])].some((text) => /docker\.sock/i.test(text))) {
+    refuse("host socket");
+  }
 }
 
 export type AppStackHealthLabel =
