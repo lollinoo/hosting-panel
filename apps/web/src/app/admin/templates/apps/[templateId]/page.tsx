@@ -34,10 +34,11 @@ export default async function AdminAppTemplatePage({ params }: { params: Promise
     return <LoadError m={m} />;
   }
   const template = r.data;
+  const categories: Record<string, string> = t.category;
 
   return (
     <div className="space-y-6">
-      <Link href="/admin/templates/apps" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+      <Link href="/admin/templates" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft aria-hidden className="h-4 w-4" />
         {t.back}
       </Link>
@@ -45,6 +46,7 @@ export default async function AdminAppTemplatePage({ params }: { params: Promise
         <div className="flex flex-wrap items-center gap-2">
           <h1 className="text-2xl font-bold tracking-tight">{template.name}</h1>
           <Badge variant={APP_TEMPLATE_STATE_BADGE[template.state]}>{t.state[template.state]}</Badge>
+          <Badge variant="outline">{Object.hasOwn(categories, template.category) ? categories[template.category] : template.category}</Badge>
         </div>
         <p className="font-mono text-sm text-muted-foreground mt-1">{template.slug}</p>
         {template.description && <p className="text-sm text-muted-foreground mt-1">{template.description}</p>}

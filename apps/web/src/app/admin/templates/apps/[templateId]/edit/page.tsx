@@ -48,7 +48,7 @@ export default async function EditAppTemplatePage({
   return (
     <div className="space-y-6">
       <div className="space-y-1">
-        <Link href="/admin/templates/apps" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:underline">
+        <Link href="/admin/templates" className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:underline">
           <ArrowLeft aria-hidden className="h-4 w-4" />
           {t.back}
         </Link>

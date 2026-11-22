@@ -503,7 +503,7 @@ describe("application template editor pages", () => {
     const out = await render(NewAppTemplatePage());
     expect(paths()).toEqual(["v1/me"]);
     expect(out).toMatch(new RegExp(`<h1[^>]*>${t.create}</h1>`));
-    expect(out).toContain('href="/admin/templates/apps"');
+    expect(out).toContain('href="/admin/templates"');
     expect(out).toContain(t.back);
     expect(out).toContain('id="app-template-slug"');
     expect(out).toContain("# HCP-STACK/v1");
@@ -516,7 +516,7 @@ describe("application template editor pages", () => {
     expect(out).toMatch(/<h1[^>]*>Notes<\/h1>/);
     expect(out).toContain(format(t.versionLabel, { n: 2 }));
     expect(out).toContain(">notes<");
-    expect(out).toContain('href="/admin/templates/apps"');
+    expect(out).toContain('href="/admin/templates"');
     expect(out).toContain(t.back);
     expect(out).toContain("# notes v2");
     expect(out).toContain(t.editor.makeDefault);

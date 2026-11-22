@@ -258,6 +258,15 @@ describe("admin application template BFF routes", () => {
     expect(fetchUpstream.mock.calls[0]![1].body).toEqual({ source: SOURCE });
   });
 
+  it("a details PATCH (name, null description, category) is forwarded unchanged", async () => {
+    fetchUpstream.mockResolvedValue({ status: 200, ok: true, data: { data: {} } });
+    const body = { name: "Notes", description: null, category: "content" };
+    const res = await (templateRoute.PATCH as unknown as Handler)(req("PATCH", { body }), ctxOf({ templateId: T }));
+    expect(res.status).toBe(200);
+    expect(fetchUpstream.mock.calls[0]![0]).toBe(`v1/admin/app-templates/${T}`);
+    expect(fetchUpstream.mock.calls[0]![1].body).toEqual(body);
+  });
+
   it("a source of exactly 65536 bytes is forwarded and 65537 is refused", async () => {
     fetchUpstream.mockResolvedValue({ status: 200, ok: true, data: { data: {} } });
     const handler = validateRoute.POST as unknown as Handler;

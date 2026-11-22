@@ -3,25 +3,35 @@
 import { useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import type { AdminAppTemplateDetailDto, AdminAppTemplateUsageDto } from "@hosting-panel/contracts";
+import { APP_TEMPLATE_LIMITS, type AdminAppTemplateDetailDto, type AdminAppTemplateUsageDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { format } from "@/i18n";
+import { Textarea } from "@/components/ui/textarea";
+import { format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { keyedSend } from "@/lib/keyed-send";
 import { appTemplateRefusalText } from "@/components/admin/app-template-text";
+
+const SELECT_CLASS = "flex h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm";
 
 /** A built-in template is part of the product and an archived one is already gone from the catalog. */
 export function canArchiveAppTemplate(t: Pick<AdminAppTemplateDetailDto, "archivedAt" | "builtIn">): boolean {
   return t.archivedAt === null && !t.builtIn;
 }
 
-/** One application template: whether customers are offered it, its versions (make default, new from), its installations and archiving. */
+/** The known categories in catalog order; a stored unknown one comes first, shown raw, so saving keeps it. */
+export function appTemplateCategoryOptions(m: Messages, current: string): { value: string; label: string }[] {
+  const known = Object.entries(m.admin.appTemplates.category).map(([value, label]) => ({ value, label }));
+  return known.some((o) => o.value === current) ? known : [{ value: current, label: current }, ...known];
+}
+
+/** One application template: whether customers are offered it, its name, description and category, its content, its versions (make default, new from), its installations and archiving. */
 export function AppTemplateDetail({ template, usage, csrfToken }: {
   template: AdminAppTemplateDetailDto;
   usage: AdminAppTemplateUsageDto | null;
@@ -36,13 +46,17 @@ export function AppTemplateDetail({ template, usage, csrfToken }: {
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [archiving, setArchiving] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(template.name);
+  const [description, setDescription] = useState(template.description ?? "");
+  const [category, setCategory] = useState(template.category);
   const archived = template.archivedAt !== null;
   const url = `/api/admin/app-templates/${encodeURIComponent(template.id)}`;
   const date = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
 
   /** One change at a time; the page is read again afterwards so it always shows the server's truth. */
   async function run(action: string, method: string, target: string, body: unknown, done: string) {
-    if (busyRef.current) return;
+    if (busyRef.current) return false;
     busyRef.current = true;
     setBusy(action);
     setNotice(null);
@@ -51,10 +65,24 @@ export function AppTemplateDetail({ template, usage, csrfToken }: {
     setBusy(null);
     if (!sent.ok) {
       setNotice({ ok: false, text: appTemplateRefusalText(m, sent.code, sent.reason) });
-      return;
+      return false;
     }
     setNotice({ ok: true, text: done });
     router.refresh();
+    return true;
+  }
+
+  async function saveDetails() {
+    // The server accepts no control character: pasted line breaks and tabs become one space.
+    const oneLine = (text: string) => text.replace(/\p{Cc}+/gu, " ").trim();
+    const body = { name: oneLine(name), description: oneLine(description) || null, category };
+    if (await run("details", "PATCH", url, body, t.detail.saved)) setEditing(false);
+  }
+
+  function closeDetails() {
+    if (busyRef.current) return;
+    setEditing(false);
+    setNotice(null);
   }
 
   async function archive() {
@@ -76,6 +104,12 @@ export function AppTemplateDetail({ template, usage, csrfToken }: {
 
       <Card>
         <CardContent className="space-y-4 pt-6">
+          {archived && (
+            <Alert role="note">
+              <AlertDescription>{m.admin.templates.detail.archivedNotice}</AlertDescription>
+            </Alert>
+          )}
+          {template.builtIn && !archived && <p className="text-sm text-muted-foreground">{m.admin.templates.detail.builtInNotice}</p>}
           <div className="flex items-start gap-2 text-sm">
             <input
               id="app-template-enabled"
@@ -92,11 +126,24 @@ export function AppTemplateDetail({ template, usage, csrfToken }: {
               <p id="app-template-enabled-hint" className="text-muted-foreground">{t.detail.enabledHint}</p>
             </div>
           </div>
-          {canArchiveAppTemplate(template) && (
-            <Button type="button" variant="destructive" disabled={busy !== null} onClick={() => setArchiving(true)}>
-              {t.detail.archive}
-            </Button>
-          )}
+          <div className="flex flex-wrap gap-2">
+            {!archived && (
+              <>
+                <Button type="button" variant="outline" disabled={busy !== null} onClick={() => { setName(template.name); setDescription(template.description ?? ""); setCategory(template.category); setNotice(null); setEditing(true); }}>
+                  {t.detail.editDetails}
+                </Button>
+                <Button asChild variant="outline">
+                  <Link href={`/admin/templates/apps/${encodeURIComponent(template.id)}/edit`}>{t.detail.editContent}</Link>
+                </Button>
+              </>
+            )}
+            {canArchiveAppTemplate(template) && (
+              <Button type="button" variant="destructive" disabled={busy !== null} onClick={() => setArchiving(true)}>
+                {t.detail.archive}
+              </Button>
+            )}
+          </div>
+          {!archived && <p className="text-sm text-muted-foreground">{t.detail.editContentHint}</p>}
         </CardContent>
       </Card>
 
@@ -184,6 +231,42 @@ export function AppTemplateDetail({ template, usage, csrfToken }: {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={editing} onOpenChange={(open) => { if (!open) closeDetails(); }}>
+        <DialogContent aria-describedby="app-template-details-hint">
+          <DialogHeader>
+            <DialogTitle>{t.detail.editDetails}</DialogTitle>
+            <p id="app-template-details-hint" className="text-sm text-muted-foreground">{t.detail.detailsHint}</p>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="app-template-name">{t.col.name}</Label>
+              <Input id="app-template-name" value={name} maxLength={APP_TEMPLATE_LIMITS.stackName} onChange={(e) => setName(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="app-template-description">{m.admin.templates.detail.description}</Label>
+              <Textarea id="app-template-description" rows={3} value={description} maxLength={APP_TEMPLATE_LIMITS.stackDescription} onChange={(e) => setDescription(e.target.value)} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="app-template-category">{t.col.category}</Label>
+              <select id="app-template-category" value={category} className={SELECT_CLASS} onChange={(e) => setCategory(e.target.value)}>
+                {appTemplateCategoryOptions(m, template.category).map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {notice && !notice.ok && (
+            <Alert variant="destructive" role="alert">
+              <AlertDescription>{notice.text}</AlertDescription>
+            </Alert>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" disabled={busy !== null} onClick={closeDetails}>{m.common.cancel}</Button>
+            <Button type="button" disabled={busy !== null || name.trim() === ""} onClick={() => void saveDetails()}>{m.admin.templates.detail.save}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={archiving} onOpenChange={(open) => { if (!open && !busyRef.current) setArchiving(false); }}>
         <DialogContent>
