@@ -138,6 +138,16 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
 5. The automatic rollback of a failed update stays ungated: migration `0025` is additive.
+6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
+   knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
+   with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
+   written in it. Stacks of the first format do not block, and neither does a template of the extended format that no
+   stack uses (the built-in WordPress template is such a row on every panel). See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and (exists (select 1 from app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1'))"
+   ```
+   To go back without forcing, delete those stacks only (step 2); `--allow-feature-loss` works as in step 3, and the
+   older release then fails to read those stacks until the panel is upgraded again.
 
 ## 5. Restore the panel on a new server
 

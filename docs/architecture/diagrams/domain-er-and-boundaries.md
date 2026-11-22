@@ -642,7 +642,7 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stack_domains`, `domains` | `TRIGGER trg_app_stack_domains_hostname_claim` e `trg_domains_app_stack_hostname_claim` (errore `uq_panel_hostname_claim`), più `UNIQUE (hostname)` su `app_stack_domains` (`0025`) | **Invariante Host Collision esteso**: un hostname appartiene a un solo sito, a un solo stack o al pannello. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_name_live (organization_id, lower(name)) WHERE deleted_at IS NULL` (`0025`) | Due stack vivi della stessa organizzazione non hanno lo stesso nome; il nome di uno stack cancellato torna libero. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_org_idempotency (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL` (`0025`) | Una stessa `Idempotency-Key` crea al più uno stack per organizzazione. |
-| `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`. |
+| `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`; il cancello `app-format-v2` (`ADR-0036`) conta, tra quelle, gli stack su una versione di modello con `spec_version >= 2` o con una revisione il cui piano non ha `schemaVersion` 1. |
 
 ---
 

@@ -91,7 +91,7 @@ Funzione pura in `packages/policy-engine`: Compose in ingresso, bozza v2 più un
 
 - v1: stessa specifica, stesso hash, stesso piano; i test esistenti non cambiano.
 - Una versione di modello salva la versione del proprio formato (`spec_version` 1 o 2).
-- Nuovo gate di downgrade `app-format-v2`: `hp-update` rifiuta (codice 8) una release che non conosce il v2 finché esiste uno stack non cancellato installato da una versione v2. Il gate `app-stacks` resta com'è.
+- Nuovo gate di downgrade `app-format-v2`: `hp-update` rifiuta (codice 8) una release che non conosce il v2 finché esiste uno stack non cancellato installato da una versione v2, o che conserva una revisione scritta nel v2 (una destinazione di rollback che la release precedente non saprebbe leggere). Il gate guarda gli stack, non i modelli: la release 0.9.0 mostra un modello v2 con cifre a zero all'amministratore e lo lascia fuori dal catalogo del cliente, e ogni pannello ha la riga del modello WordPress integrato; un gate sui modelli rifiuterebbe ogni downgrade. Il gate `app-stacks` resta com'è.
 
 ## 3. Alternative scartate
 
