@@ -293,10 +293,12 @@ async function main() {
     });
     if (!ready) return;
 
-    await step("snapshot-before", async () => {
+    // Without the snapshot the run could not prove it left the other containers alone: it creates nothing.
+    const snapped = await step("snapshot-before", async () => {
       before = await containersWithNetworks();
       info(`${String(before.size)} container(s) exist before the run; none is touched`);
     });
+    if (!snapped) return;
 
     tmpDir = await mkdtemp(path.join(os.tmpdir(), `${runPrefix}_`));
     const up = await step("backends-up", async () => {
@@ -534,23 +536,24 @@ async function main() {
     });
   } finally {
     await cleanup();
-    total += 2;
-    const after = await containersWithNetworks().catch(() => null);
-    const moved = [];
+    // No snapshot means the run stopped before it created anything: there is nothing to compare.
     if (before !== null) {
-      if (after === null) moved.push("listing failed");
-      for (const [id, was] of before) {
-        const now = after?.get(id);
+      total += 1;
+      const after = await containersWithNetworks().catch(() => null);
+      const moved = after === null ? ["listing failed"] : [];
+      for (const [id, was] of after === null ? [] : before) {
+        const now = after.get(id);
         if (now === undefined) moved.push(`${was.name} is gone`);
         else if (now.nets !== was.nets) moved.push(`${was.name}: ${was.nets} -> ${now.nets}`);
       }
+      if (moved.length === 0) {
+        passed += 1;
+        console.log("PASS foreign-containers-untouched");
+      } else {
+        console.log(`FAIL foreign-containers-untouched: ${moved.join("; ")}`);
+      }
     }
-    if (before !== null && moved.length === 0) {
-      passed += 1;
-      console.log("PASS foreign-containers-untouched");
-    } else {
-      console.log(`FAIL foreign-containers-untouched: ${before === null ? "no snapshot" : moved.join("; ")}`);
-    }
+    total += 1;
     const left = [];
     for (const args of [["ps", "-aq", ...OURS_FILTER], ["network", "ls", "-q", ...OURS_FILTER], ["volume", "ls", "-q", ...OURS_FILTER]]) {
       if ((await docker(args).catch(() => "x")).trim() !== "") left.push(args[0]);
