@@ -9516,15 +9516,19 @@ components:
         applicationTemplatesAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (the server administrator can write, import and publish application templates); false otherwise
         applicationStacksAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a customer can install an application from a published template); false otherwise
         stackPublicPortsAvailable:
           type: boolean
           default: false
+          description: True once an application can publish a TCP or UDP port; false until that capability ships
         gitBuildsAvailable:
           type: boolean
           default: false
+          description: True once an application can be built from a Git repository; false until that capability ships
 
     OrganizationCapabilitiesDto:
       type: object
@@ -9585,15 +9589,19 @@ components:
         applicationTemplatesAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (the server administrator can write, import and publish application templates); false otherwise
         applicationStacksAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a customer can install an application from a published template); false otherwise
         stackPublicPortsAvailable:
           type: boolean
           default: false
+          description: True once an application can publish a TCP or UDP port; false until that capability ships
         gitBuildsAvailable:
           type: boolean
           default: false
+          description: True once an application can be built from a Git repository; false until that capability ships
 
     DevPersonaDto:
       type: object

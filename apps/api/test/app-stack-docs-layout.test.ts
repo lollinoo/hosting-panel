@@ -62,10 +62,12 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     }
     expect(readme).not.toContain("HCP-SPEC-005");
     const table = between(readme, "## 2. Stato di Implementazione", "## 3. Mappa del Monorepo").split("\n").filter((l) => l.startsWith("|"));
-    for (const flag of ["applicationTemplatesAvailable", "applicationStacksAvailable", "stackPublicPortsAvailable", "gitBuildsAvailable"]) {
+    // The catalog and the stacks are on for linux-systemd (ADR-0036 §2.10); public ports and Git builds ship nowhere.
+    const flags = { applicationTemplatesAvailable: true, applicationStacksAvailable: true, stackPublicPortsAvailable: false, gitBuildsAvailable: false };
+    for (const [flag, on] of Object.entries(flags)) {
       const rows = table.filter((l) => l.includes(flag));
       expect(rows, flag).toHaveLength(1);
-      expect(rows[0], flag).toContain(`\`${flag}: false\``);
+      expect(rows[0], flag).toContain(`\`${flag}: ${on}\``);
     }
     const harness = read("HARNESS.md");
     const runbook = read("docs/runbooks/application-stacks.md");

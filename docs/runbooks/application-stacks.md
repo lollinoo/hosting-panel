@@ -14,12 +14,13 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## Scope and limits (read first)
 
-- **The four capability flags are `false` on every server in this release** (`applicationTemplatesAvailable`,
-  `applicationStacksAvailable`, `stackPublicPortsAvailable`, `gitBuildsAvailable`). They are fixed in code
-  (`apps/api/src/app-stacks/app-feature-gate.ts`); no environment variable or option turns them on. While they are
-  `false`, every admin template route and every stack route answers `NOT_SUPPORTED` (reason
-  `STACK_UNSUPPORTED_FEATURE`): nobody can create, start, stop or delete a stack from the panel. The procedures below
-  apply once the owner turns the flags on.
+- **Two of the four capability flags are on.** `applicationTemplatesAvailable` and `applicationStacksAvailable` are
+  `true` on a server (runtime backend `linux-systemd`) and `false` on the other backends; `stackPublicPortsAvailable`
+  and `gitBuildsAvailable` are `false` everywhere (`ADR-0036` §2.10). They follow the runtime backend in code
+  (`packages/contracts/src/resources.ts`, `apps/api/src/app-stacks/app-feature-gate.ts`); no environment variable or
+  option changes them. Where a flag is `false`, the routes behind it answer `NOT_SUPPORTED` (reason
+  `STACK_UNSUPPORTED_FEATURE`). Release `0.9.0` has all four `false`: there nobody can create, start, stop or delete
+  a stack from the panel, and the procedures below do not apply.
 - **First release scope:** images only (no build, no Git), Dedicated allocations only, HTTP ingress only, Let's Encrypt
   (ACME) certificates only for stack domains, no public TCP/UDP port, no stack backup.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
