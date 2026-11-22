@@ -66,8 +66,7 @@ import { I18nProvider } from "@/i18n/provider";
 import AppStackPage from "@/app/apps/[stackId]/page";
 import { AppTemplateDetail } from "@/components/admin/app-template-detail";
 import { AppTemplateEditor, type AppEditorTarget } from "@/components/admin/app-template-editor";
-import { AppTemplateList } from "@/components/admin/app-template-list";
-import { TemplatesTabs } from "@/components/admin/templates-tabs";
+import { TemplateCatalog } from "@/components/admin/template-catalog";
 import { AppCatalog } from "@/components/app-stacks/app-catalog";
 import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
@@ -519,9 +518,8 @@ const SCENARIOS: Scenario[] = [
   { name: "sections · resources", render: (m) => html(createElement(AppStackResources, { cpuMilli: 750, memoryBytes: DETAIL.memoryBytes, components: DETAIL.components, m }), m) },
   { name: "sections · history", render: (m) => html(createElement(AppStackHistory, { deployments: DEPLOYMENTS, m, locale: localeOf(m) }), m) },
   // ---- admin
-  { name: "admin · template list", render: (m) => html(createElement(AppTemplateList, { templates: TEMPLATES, m }), m) },
-  { name: "admin · template list, empty", render: (m) => html(createElement(AppTemplateList, { templates: [], m }), m) },
-  { name: "admin · tabs", render: (m) => html(createElement(TemplatesTabs, { labels: m.admin.appTemplates.tabs }), m) },
+  { name: "admin · template list", render: (m) => html(createElement(TemplateCatalog, { sites: [], apps: TEMPLATES, m }), m) },
+  { name: "admin · template list, empty", render: (m) => html(createElement(TemplateCatalog, { sites: [], apps: [], m }), m) },
   { name: "admin · template detail", ids: ["app-template-enabled"], render: (m) => adminDetail(m, tdetail(TEMPLATES[0]!), USAGE) },
   { name: "admin · built-in template detail", ids: ["app-template-enabled"], render: (m) => adminDetail(m, tdetail(TEMPLATES[1]!), { ...USAGE, stacks: [], truncated: false }) },
   { name: "admin · archived template detail", ids: ["app-template-enabled"], render: (m) => adminDetail(m, tdetail(TEMPLATES[3]!), null) },
@@ -577,7 +575,7 @@ describe("accessibility rules on every component, in Italian and English", () =>
     const rendered = SCENARIOS.map((s) => s.name).join("|");
     for (const part of [
       "unavailable", "application list", "catalog", "wizard · configure", "wizard · domains", "wizard · review", "wizard steps", "actions", "delete", "secrets",
-      "logs", "domains", "progress", "sections · components", "sections · history", "admin · template list", "admin · tabs", "admin · template detail", "admin · editor",
+      "logs", "domains", "progress", "sections · components", "sections · history", "admin · template list", "admin · template detail", "admin · editor",
     ])
       expect(rendered, part).toContain(part);
   });
@@ -859,7 +857,7 @@ describe("words, not colours", () => {
         expect(h, `${status}/${certificateStatus}`).toContain(`>${m.apps.domains.status[status]}<`);
         expect(h, `${status}/${certificateStatus}`).toContain(`>${m.apps.domains.certificate[certificateStatus]}<`);
       }
-    const list = html(createElement(AppTemplateList, { templates: TEMPLATES, m }), m);
+    const list = html(createElement(TemplateCatalog, { sites: [], apps: TEMPLATES, m }), m);
     for (const state of ["published", "draft", "archived"] as const) expect(list).toContain(`>${m.admin.appTemplates.state[state]}<`);
     const secrets = withState(AppStackSecrets, secretsProps, m);
     expect(secrets).toContain(`>${m.apps.secrets.set}<`);
@@ -938,26 +936,6 @@ describe("dates", () => {
 });
 
 describe("admin pages", () => {
-  it.each(LOCALES)("%s · the templates nav is a labelled nav and the current page is aria-current=page, never a tablist", (_l, m) => {
-    const t = m.admin.appTemplates.tabs;
-    for (const [pathname, current, other] of [
-      ["/admin/templates", t.sites, t.apps],
-      ["/admin/templates/apps", t.apps, t.sites],
-      ["/admin/templates/apps/atpl_x/edit", t.apps, t.sites],
-      ["/admin/templates/appsx", t.sites, t.apps],
-    ] as const) {
-      loc.pathname = pathname;
-      const h = html(createElement(TemplatesTabs, { labels: t }), m);
-      expect(tagsOf(h).find((x) => x.name === "nav")?.attrs["aria-label"]).toBe(t.label);
-      const links = [...h.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/g)];
-      expect(links).toHaveLength(2);
-      const on = links.filter((l) => /aria-current="page"/.test(l[1]!));
-      expect(on.map((l) => strip(l[2]!)), pathname).toEqual([current]);
-      expect(links.find((l) => strip(l[2]!) === other)![1], pathname).not.toMatch(/aria-current/);
-      expect(tagsOf(h).some((x) => x.attrs.role === "tablist" || x.attrs.role === "tab")).toBe(false);
-    }
-  });
-
   it.each(LOCALES)("%s · the enable switch is a labelled role=switch with a hint", (_l, m) => {
     const h = adminDetail(m, tdetail(TEMPLATES[0]!), USAGE);
     const sw = controls(h).find((c) => c.attrs.id === "app-template-enabled")!;
@@ -1002,7 +980,7 @@ describe("gates", () => {
     for (const reason of ["off", "support"] as const) {
       const h = html(createElement(AppsUnavailable, { m, reason }), m);
       expect(withRole(h, "status").join(" ")).toContain(m.apps.unavailable[reason]);
-      expect(tagsOf(h).filter((t) => t.name === "a").map((t) => t.attrs.href)).toEqual(["/sites"]);
+      expect(tagsOf(h).filter((t) => t.name === "a").map((t) => t.attrs.href)).toEqual(["/apps"]);
       expect(inner(h, "a")).toEqual([m.apps.unavailable.back]);
     }
     expect(m.apps.unavailable.off).not.toBe(m.apps.unavailable.support);

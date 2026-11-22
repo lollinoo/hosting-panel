@@ -38,7 +38,7 @@ import AdminAppTemplatesPage from "@/app/admin/templates/apps/page";
 import AdminAppTemplatePage from "@/app/admin/templates/apps/[templateId]/page";
 import EditAppTemplatePage from "@/app/admin/templates/apps/[templateId]/edit/page";
 import NewAppTemplatePage from "@/app/admin/templates/apps/new/page";
-import AdminTemplatesLayout from "@/app/admin/templates/layout";
+import AdminTemplatesPage from "@/app/admin/templates/page";
 import AppsNotFound from "@/app/apps/not-found";
 import AppsPage from "@/app/apps/page";
 import NewAppPage from "@/app/apps/new/page";
@@ -125,8 +125,6 @@ interface Page {
   first: string;
 }
 const customerPages: Page[] = [
-  { name: "/apps", run: () => AppsPage(), first: `v1/organizations/${ORG_A}/app-stacks` },
-  { name: "/apps/new", run: () => NewAppPage(), first: `v1/organizations/${ORG_A}/app-templates` },
   {
     name: "/apps/new/[templateId]",
     run: () => AppWizardPage({ params: Promise.resolve({ templateId: "atpl_notes" }) }),
@@ -156,7 +154,7 @@ describe("every application page × {flag off, support visit, flag on}", () => {
       expect(h).toContain(en.apps.unavailable.off);
       expect(h).not.toContain(en.apps.unavailable.support);
       expect(h).toContain('role="status"');
-      expect(h).toContain('href="/sites"');
+      expect(h).toContain('href="/apps"');
       expect(appReads()).toEqual([]);
       expect(nonMe()).toEqual([]);
     });
@@ -218,6 +216,99 @@ describe("every application page × {flag off, support visit, flag on}", () => {
       expect(appReads()).toEqual([]);
       expect(nonMe()).toEqual([]);
     });
+  });
+});
+
+const FLAG_OFF = [
+  ["flag absent", { applicationStacksAvailable: undefined }],
+  ["flag false", { applicationStacksAvailable: false }],
+  ["flag a truthy string", { applicationStacksAvailable: "true" }],
+  ["flag 1", { applicationStacksAvailable: 1 }],
+  ["no capabilities at all", {}],
+] as const;
+const SITES = `v1/organizations/${ORG_A}/sites`;
+const ADDRESSES = `v1/organizations/${ORG_A}/managed-sites`;
+const underA = (p: string) => p === `v1/organizations/${ORG_A}` || p.startsWith(`v1/organizations/${ORG_A}/`);
+const adminVisits = ["admin", "customer"] as const;
+
+describe.each([
+  { name: "/apps", run: () => AppsPage() },
+  { name: "/apps/new", run: () => NewAppPage() },
+])("$name: the guards run before any read", ({ run }) => {
+  it("customer, /v1/me fails → the load error, nothing but /v1/me is read", async () => {
+    fetchUpstream.mockImplementation(async () => fail(500, "INTERNAL_ERROR"));
+    expect(html(await run())).toContain(en.shell.loadErrorTitle);
+    expect(nonMe()).toEqual([]);
+  });
+
+  it("an administrator outside a support visit is sent back to the admin sites before any read", async () => {
+    session.current = sessionOf({ isServerAdmin: true, activeConsole: "admin" });
+    upstream(meOf({ memberships: [{ organizationId: ORG_B }] }));
+    await expect(run()).rejects.toThrow("REDIRECT /admin/sites?support=ended");
+    expect(nonMe()).toEqual([]);
+  });
+
+  it("no session → login, nothing is read", async () => {
+    session.current = null;
+    await expect(run()).rejects.toThrow("REDIRECT /login");
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("flag on but no membership → load error and nothing read", async () => {
+    upstream(meOf({ memberships: [] }));
+    expect(html(await run())).toContain(en.shell.loadErrorTitle);
+    expect(nonMe()).toEqual([]);
+  });
+});
+
+describe("/apps: the one list is never gated; stacks are read only with the flag on outside a visit", () => {
+  it.each(FLAG_OFF)("customer, %s → the list without a notice, only the member's site reads", async (_label, caps) => {
+    upstream(meOf({ platformCapabilities: caps }), { [SITES]: ok([]) });
+    const h = html(await AppsPage());
+    expect(h).not.toContain(en.apps.unavailable.title);
+    expect(h).toContain(en.apps.list.title);
+    expect(appReads()).toEqual([]);
+    expect(nonMe().sort()).toEqual([ADDRESSES, SITES]);
+  });
+
+  it.each(adminVisits)("a support visit (flag ON, console cookie «%s») → the visited organisation's sites only", async (activeConsole) => {
+    session.current = sessionOf({ isServerAdmin: true, activeConsole });
+    upstream(meOf({ memberships: [{ organizationId: ORG_B }], supportAccess: visit }), { [SITES]: ok([]) });
+    const h = html(await AppsPage());
+    expect(h).not.toContain(en.apps.unavailable.title);
+    expect(appReads()).toEqual([]);
+    expect(nonMe().sort()).toEqual([ADDRESSES, SITES]);
+  });
+
+  it("flag on → reads only under the first membership's organisation, never the second", async () => {
+    upstream(meOf(), { [SITES]: ok([]), [`v1/organizations/${ORG_A}/app-stacks`]: ok([]) });
+    await AppsPage();
+    expect(nonMe().sort()).toEqual([`v1/organizations/${ORG_A}/app-stacks`, ADDRESSES, SITES]);
+    expect(paths().join("\n")).not.toContain(ORG_B);
+  });
+});
+
+describe("/apps/new: one chooser, WordPress only with the flag off or in a visit", () => {
+  it.each(FLAG_OFF)("customer, %s → the WordPress form, no application read, only the member's organisation", async (_label, caps) => {
+    upstream(meOf({ platformCapabilities: caps }));
+    await expect(NewAppPage()).rejects.toThrow("REDIRECT /sites/new");
+    expect(appReads()).toEqual([]);
+    for (const p of nonMe()) expect(underA(p), p).toBe(true);
+  });
+
+  it.each(adminVisits)("a support visit (flag ON, console cookie «%s») → the WordPress form before any read", async (activeConsole) => {
+    session.current = sessionOf({ isServerAdmin: true, activeConsole });
+    upstream(meOf({ memberships: [{ organizationId: ORG_B }], supportAccess: visit }));
+    await expect(NewAppPage()).rejects.toThrow("REDIRECT /sites/new");
+    expect(nonMe()).toEqual([]);
+  });
+
+  it("flag on → reads only under the first membership's organisation, never the second", async () => {
+    upstream(meOf(), { [`v1/organizations/${ORG_A}/app-templates`]: ok({ templates: [], categories: [] }) });
+    await NewAppPage().catch(() => undefined); // one choice ends in a redirect; the paths are what is asserted
+    expect(appReads()).toEqual([`v1/organizations/${ORG_A}/app-templates`]);
+    for (const p of nonMe()) expect(underA(p), p).toBe(true);
+    expect(paths().join("\n")).not.toContain(ORG_B);
   });
 });
 
@@ -409,6 +500,9 @@ describe("the admin layout keeps customers out before any application-template r
 describe("admin application pages when the API answers 422 NOT_SUPPORTED", () => {
   const T = en.admin.appTemplates;
   const off = fail(422, "NOT_SUPPORTED");
+  const SITE_TEMPLATES = ok({
+    templates: [{ id: "stpl_wordpress", module: "wordpress", name: "WordPress", builtIn: true, enabled: true, archivedAt: null, defaultVersionNumber: 1, siteCount: 2 }],
+  });
   const adminSession = () => {
     session.current = sessionOf({ isServerAdmin: true, activeConsole: "admin" });
   };
@@ -429,10 +523,12 @@ describe("admin application pages when the API answers 422 NOT_SUPPORTED", () =>
     });
   });
 
-  it("the list shows the notice and offers no create link", async () => {
-    const h = html(await AdminAppTemplatesPage());
-    expect(h).toContain(T.notAvailable);
-    expect(h).toContain('role="status"');
+  it("the one list shows the WordPress templates only, no notice, and a plain «new» link", async () => {
+    upstream(meOf({ memberships: [] }), { "v1/admin/site-templates": SITE_TEMPLATES, "v1/admin/app-templates": off });
+    const h = html(await AdminTemplatesPage());
+    expect(h).toContain('href="/admin/templates/stpl_wordpress"');
+    expect(h).toContain('href="/admin/templates/new"');
+    expect(h).not.toContain(T.notAvailable);
     expect(h).not.toContain(T.loadError);
     expect(controls(h)).toEqual({ create: false, edit: false, switchRole: false, textarea: false, form: false });
   });
@@ -457,23 +553,25 @@ describe("admin application pages when the API answers 422 NOT_SUPPORTED", () =>
     await expect(EditAppTemplatePage({ params: Promise.resolve({ templateId: "atpl_zz" }) })).rejects.toThrow("NEXT_NOT_FOUND");
   });
 
-  it("an API failure other than 422 is the load error, not the notice", async () => {
-    upstream(meOf({ memberships: [] }), { "v1/admin/app-templates": fail(500, "INTERNAL_ERROR") });
-    const h = html(await AdminAppTemplatesPage());
-    expect(h).toContain(T.loadError);
+  it("an API failure other than 422 is the load error, not the notice, and the WordPress templates stay", async () => {
+    upstream(meOf({ memberships: [] }), { "v1/admin/site-templates": SITE_TEMPLATES, "v1/admin/app-templates": fail(500, "INTERNAL_ERROR") });
+    const h = html(await AdminTemplatesPage());
+    expect(h).toMatch(new RegExp(`role="alert"[^]*${T.loadError}`));
     expect(h).not.toContain(T.notAvailable);
+    expect(h).toContain('href="/admin/templates/stpl_wordpress"');
   });
 
   it("without a session every admin application page goes to login before any read", async () => {
     session.current = null;
     for (const run of [
-      () => AdminAppTemplatesPage(),
+      () => AdminTemplatesPage(),
       () => AdminAppTemplatePage({ params: Promise.resolve({ templateId: "atpl_x" }) }),
       () => EditAppTemplatePage({ params: Promise.resolve({ templateId: "atpl_x" }) }),
       () => NewAppTemplatePage(),
     ]) {
       await expect(run()).rejects.toThrow("REDIRECT /login");
     }
+    expect(() => AdminAppTemplatesPage()).toThrow("REDIRECT /admin/templates");
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 
@@ -482,21 +580,22 @@ describe("admin application pages when the API answers 422 NOT_SUPPORTED", () =>
     expect(paths()).toEqual(["v1/me"]);
   });
 
-  it("the templates layout shows the tabs only while the capability is strictly true", async () => {
-    for (const [value, tabs] of [
+  it("the one list reads the multi-service templates only while the capability is strictly true", async () => {
+    for (const [value, read] of [
       [true, true],
       [false, false],
       [undefined, false],
       ["true", false],
       [1, false],
     ] as const) {
+      fetchUpstream.mockClear();
       upstream(meOf({ memberships: [], platformCapabilities: { applicationTemplatesAvailable: value } }));
-      const h = html(await AdminTemplatesLayout({ children: createElement("p", null, "kid") }));
-      expect(h, String(value)).toContain("<p>kid</p>");
-      expect(h.includes("<nav"), String(value)).toBe(tabs);
+      await AdminTemplatesPage();
+      expect(paths().includes("v1/admin/app-templates"), String(value)).toBe(read);
     }
-    upstream(meOf());
+    fetchUpstream.mockClear();
     fetchUpstream.mockImplementation(async () => fail(500, "INTERNAL_ERROR"));
-    expect(html(await AdminTemplatesLayout({ children: createElement("p", null, "kid") }))).not.toContain("<nav");
+    await AdminTemplatesPage();
+    expect(paths()).not.toContain("v1/admin/app-templates");
   });
 });

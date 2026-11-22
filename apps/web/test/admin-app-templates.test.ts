@@ -43,15 +43,13 @@ vi.mock("next/navigation", () => ({
   usePathname: () => pathname,
 }));
 
-import AdminTemplatesLayout from "@/app/admin/templates/layout";
 import AdminAppTemplatesPage from "@/app/admin/templates/apps/page";
 import AdminAppTemplatePage from "@/app/admin/templates/apps/[templateId]/page";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
-import { templatesTab } from "@/components/admin/templates-tabs";
-import { AppTemplateList, appTemplateChips } from "@/components/admin/app-template-list";
-import { AppTemplateDetail, canArchiveAppTemplate } from "@/components/admin/app-template-detail";
+import { AppTemplateDetail, appTemplateCategoryOptions, canArchiveAppTemplate } from "@/components/admin/app-template-detail";
 import { appTemplateRefusalText } from "@/components/admin/app-template-text";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter } from "@/components/ui/dialog";
 
 const NOW = "2026-11-21T10:00:00.000Z";
 const locales = [
@@ -132,7 +130,7 @@ const html = (m: Messages, node: ReactElement) =>
 
 // Calls a client component once with stand-in hooks so its handlers can run without a DOM.
 const internals = (React as unknown as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE!;
-function callHooks<P>(C: (p: P) => ReactNode, props: P, m: Messages) {
+function callHooks<P>(C: (p: P) => ReactNode, props: P, m: Messages, init: Record<number, unknown> = {}) {
   let s = 0;
   const sets: Array<[number, unknown]> = [];
   const ctx = { locale: m === en ? "en" : "it", messages: m };
@@ -140,7 +138,7 @@ function callHooks<P>(C: (p: P) => ReactNode, props: P, m: Messages) {
   internals.H = {
     useState: (v: unknown) => {
       const k = s++;
-      return [v, (x: unknown) => void sets.push([k, x])];
+      return [k in init ? init[k] : v, (x: unknown) => void sets.push([k, x])];
     },
     useRef: (v: unknown) => ({ current: v }),
     useEffect: () => {},
@@ -194,155 +192,16 @@ beforeEach(() => {
   route();
 });
 
-describe("templates layout", () => {
-  const child = createElement("p", null, "child page");
-  const anchors = (out: string) => [...out.matchAll(/<a([^>]*)>([^<]*)<\/a>/g)].map((a) => ({ attrs: a[1]!, text: a[2]! }));
-
-  it.each([
-    ["flag off", envelope({ platformCapabilities: { applicationTemplatesAvailable: false } })],
-    ["flag absent", envelope({ platformCapabilities: {} })],
-    ["/v1/me failure", failure(500)],
-  ])("%s: renders exactly its children and no nav", async (_name, me) => {
-    route({ "v1/me": me });
-    const out = renderToStaticMarkup(await AdminTemplatesLayout({ children: child }));
-    expect(out).toBe(renderToStaticMarkup(child));
-    expect(out).not.toContain("<nav");
-    expect(paths()).toEqual(["v1/me"]);
-  });
-
-  it.each(locales)("flag on: a labelled nav with both links, the current one by path (%s)", async (locale, m) => {
-    getRequestLocale.mockResolvedValue(locale);
-    const t = m.admin.appTemplates.tabs;
-    for (const [path, active, href] of [
-      ["/admin/templates/apps/x", t.apps, "/admin/templates/apps"],
-      ["/admin/templates", t.sites, "/admin/templates"],
-    ] as const) {
-      pathname = path;
-      const out = renderToStaticMarkup(await AdminTemplatesLayout({ children: child }));
-      expect(out).toContain(`<nav aria-label="${t.label}"`);
-      expect(out).toContain("child page");
-      const links = anchors(out);
-      expect(links.map((a) => a.text)).toEqual([t.sites, t.apps]);
-      expect(links.map((a) => a.attrs.match(/href="([^"]+)"/)![1])).toEqual(["/admin/templates", "/admin/templates/apps"]);
-      const current = links.filter((a) => a.attrs.includes('aria-current="page"'));
-      expect(current).toHaveLength(1);
-      expect(current[0]!.text).toBe(active);
-      expect(current[0]!.attrs).toContain(`href="${href}"`);
-    }
-  });
-
-  it.each([
-    ["/admin/templates", "sites"],
-    ["/admin/templates/new", "sites"],
-    ["/admin/templates/stpl_wordpress", "sites"],
-    ["/admin/templates/stpl_wordpress/edit", "sites"],
-    ["/admin/templates/appsx", "sites"],
-    ["/admin/templates/apps", "apps"],
-    ["/admin/templates/apps/new", "apps"],
-    ["/admin/templates/apps/atpl_x", "apps"],
-    ["/admin/templates/apps/atpl_x/edit", "apps"],
-  ])("templatesTab(%s) = %s", (path, tab) => {
-    expect(templatesTab(path)).toBe(tab);
-  });
-
-  it("the tab labels differ between Italian and English", () => {
-    for (const key of ["label", "sites", "apps"] as const) expect(en.admin.appTemplates.tabs[key]).not.toBe(itMsgs.admin.appTemplates.tabs[key]);
-  });
-});
-
-describe("appTemplateChips", () => {
-  it("offers only HTTP and storage, never ports or Git", () => {
-    expect(appTemplateChips({ hasIngress: true, hasVolumes: true })).toEqual(["http", "storage"]);
-    expect(appTemplateChips({ hasIngress: true, hasVolumes: false })).toEqual(["http"]);
-    expect(appTemplateChips({ hasIngress: false, hasVolumes: true })).toEqual(["storage"]);
-    expect(appTemplateChips({ hasIngress: false, hasVolumes: false })).toEqual([]);
-  });
-});
-
-describe("AppTemplateList", () => {
-  const rowsOf = (out: string) => out.split("<tr").filter((r) => r.includes("/admin/templates/apps/"));
-
-  it.each(locales)("one row per template: link, category, version, state word, installations, chips (%s)", (_l, m) => {
-    const t = m.admin.appTemplates;
-    const out = html(m, createElement(AppTemplateList, { templates: [BOARD, BUILT_IN, ARCHIVED, DRAFT], m }));
-    for (const col of Object.values(t.col)) expect(out).toContain(`>${col}<`);
-    const rows = rowsOf(out);
-    expect(rows).toHaveLength(4);
-    const row = (id: string) => rows.find((r) => r.includes(`href="/admin/templates/apps/${id}"`))!;
-    for (const tpl of [BOARD, BUILT_IN, ARCHIVED, DRAFT]) expect(row(tpl.id)).toContain(`>${t.state[appTemplateState(tpl)]}<`);
-    expect(row("atpl_board")).toContain(`>${t.category.collaboration}<`);
-    expect(row("atpl_board")).toContain(">v2<");
-    expect(row("atpl_board")).toContain(">3<");
-    expect(row("atpl_board")).toContain(`>${t.chip.http}<`);
-    expect(row("atpl_board")).toContain(`>${t.chip.storage}<`);
-    expect(row("atpl_board")).not.toContain(`>${t.builtIn}<`);
-    expect(row("atpl_http_cache")).toContain(`>${t.builtIn}<`);
-    expect(row("atpl_http_cache")).toContain(">v1<");
-    expect(row("atpl_http_cache")).toContain(">7<");
-    expect(row("atpl_http_cache")).not.toContain(`>${t.chip.storage}<`);
-    expect(row("atpl_draft")).toContain(">mystery<");
-    expect(row("atpl_draft")).toContain(`>${t.noVersion}<`);
-    expect(row("atpl_draft")).not.toContain(`>${t.chip.http}<`);
-    expect(out).not.toMatch(/\bgit\b|\bports?\b|\bporte\b/i);
-  });
-
-  it("sorts by name with archived templates last, and encodes the link", () => {
-    const odd = summary({ id: "atpl_a b", name: "Zed" });
-    const out = html(en, createElement(AppTemplateList, { templates: [ARCHIVED, odd, BOARD, DRAFT, BUILT_IN], m: en }));
-    const order = ["Alpha", "Board", "Http cache", "Zed", "Aardvark"].map((name) => out.indexOf(`>${name}<`));
-    expect(order.every((i) => i >= 0)).toBe(true);
-    expect([...order].sort((a, b) => a - b)).toEqual(order);
-    expect(out).toContain('href="/admin/templates/apps/atpl_a%20b"');
-  });
-
-  it.each(locales)("says there is nothing and draws no table when empty (%s)", (_l, m) => {
-    const out = html(m, createElement(AppTemplateList, { templates: [], m }));
-    expect(out).toContain(m.admin.appTemplates.empty);
-    expect(out).not.toContain("<table");
-  });
-});
-
 describe("list page", () => {
-  it("redirects to /login without a session (list and detail) before any upstream call", async () => {
-    getServerSession.mockResolvedValue(null);
-    await expect(AdminAppTemplatesPage()).rejects.toThrow("REDIRECT:/login");
-    await expect(AdminAppTemplatePage({ params: Promise.resolve({ templateId: "atpl_board" }) })).rejects.toThrow("REDIRECT:/login");
+  it("/admin/templates/apps redirects to the one list without any read", () => {
+    expect(() => AdminAppTemplatesPage()).toThrow("REDIRECT:/admin/templates");
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 
-  it.each(locales)("reads exactly the template list and renders title, subtitle, the create link and the rows (%s)", async (locale, m) => {
-    getRequestLocale.mockResolvedValue(locale);
-    const t = m.admin.appTemplates;
-    const out = html(m, await AdminAppTemplatesPage());
-    expect(fetchUpstream.mock.calls).toEqual([["v1/admin/app-templates", { accessToken: "tok", timeoutMs: 20_000 }]]);
-    expect(out).toContain(t.title);
-    expect(out).toContain(t.subtitle);
-    expect(out).toMatch(new RegExp(`href="/admin/templates/apps/new"[^>]*>${t.create}<`));
-    expect(out).toContain('href="/admin/templates/apps/atpl_board"');
-    expect(out).not.toContain(t.more);
-  });
-
-  it("notes a partial list when the API says there is more", async () => {
-    route({ "v1/admin/app-templates": envelope([BOARD], { nextCursor: "c", hasMore: true }) });
-    expect(html(en, await AdminAppTemplatesPage())).toContain(en.admin.appTemplates.more);
-  });
-
-  it.each(locales)("a 422 NOT_SUPPORTED says the feature is off and offers no create link (%s)", async (locale, m) => {
-    getRequestLocale.mockResolvedValue(locale);
-    route({ "v1/admin/app-templates": failure(422, "NOT_SUPPORTED") });
-    const out = html(m, await AdminAppTemplatesPage());
-    expect(out).toMatch(new RegExp(`role="status"[^]*${m.admin.appTemplates.notAvailable.replace(/[()]/g, "\\$&")}`));
-    expect(out).not.toContain("/admin/templates/apps/new");
-    expect(out).not.toContain("<table");
-    expect(out).not.toContain(m.admin.appTemplates.loadError);
-  });
-
-  it("any other failure says it could not load", async () => {
-    route({ "v1/admin/app-templates": failure(500) });
-    const out = html(en, await AdminAppTemplatesPage());
-    expect(out).toMatch(new RegExp(`role="alert"[^]*${en.admin.appTemplates.loadError}`));
-    expect(out).not.toContain("<table");
-    expect(out).not.toContain(en.admin.appTemplates.notAvailable);
+  it("the detail page redirects to /login without a session before any upstream call", async () => {
+    getServerSession.mockResolvedValue(null);
+    await expect(AdminAppTemplatePage({ params: Promise.resolve({ templateId: "atpl_board" }) })).rejects.toThrow("REDIRECT:/login");
+    expect(fetchUpstream).not.toHaveBeenCalled();
   });
 });
 
@@ -499,7 +358,7 @@ describe("detail page", () => {
     expect(out).toMatch(/class="[^"]*font-mono[^"]*">board</);
     expect(out).toContain(`>${t.state.published}<`);
     expect(out).toContain("A team board");
-    expect(out).toMatch(new RegExp(`href="/admin/templates/apps"[^>]*>[^]*?${t.back}<`));
+    expect(out).toMatch(new RegExp(`href="/admin/templates"[^>]*>[^]*?${t.back}<`));
     expect(out).toContain('id="app-template-enabled"');
     expect(out).toContain(">team-board<");
   });
@@ -535,6 +394,161 @@ describe("detail page", () => {
     const out = html(en, await page());
     expect(out).toContain('id="app-template-enabled"');
     expect(out).toContain(en.admin.appTemplates.detail.usageError);
+  });
+});
+
+describe("editing the details", () => {
+  const mount = (template: AdminAppTemplateDetailDto, m: Messages) =>
+    html(m, createElement(AppTemplateDetail, { template, usage: USAGE, csrfToken: "csrf" }));
+  const props = (template = detail(BOARD)) => ({ template, usage: USAGE, csrfToken: "csrf" });
+  const button = (tree: unknown, text: string) => els(tree).find((e) => e.type === Button && textOf(e) === text)!;
+
+  it.each(locales)("the category options are the known ones in catalog order; an unknown stored one comes first, raw (%s)", (_l, m) => {
+    const known = Object.entries(m.admin.appTemplates.category).map(([value, label]) => ({ value, label }));
+    expect(known).toHaveLength(8);
+    expect(appTemplateCategoryOptions(m, "content")).toEqual(known);
+    expect(appTemplateCategoryOptions(m, "mystery")).toEqual([{ value: "mystery", label: "mystery" }, ...known]);
+  });
+
+  it.each(locales)("a custom template offers both entries and says that saving content makes a new version (%s)", (_l, m) => {
+    const t = m.admin.appTemplates.detail;
+    const out = mount(detail(BOARD), m);
+    expect(out).toMatch(new RegExp(`<button[^>]*>${t.editDetails}</button>`));
+    expect(out).toMatch(new RegExp(`<a[^>]*href="/admin/templates/apps/atpl_board/edit"[^>]*>${t.editContent}</a>`));
+    expect(out).toContain(t.editContentHint);
+    expect(out).toContain(`>${t.archive}<`);
+    expect(out).not.toContain(m.admin.templates.detail.builtInNotice);
+    expect(out).not.toContain('role="note"');
+  });
+
+  it.each(locales)("a built-in template has its note and both entries, but no archive (%s)", (_l, m) => {
+    const t = m.admin.appTemplates.detail;
+    const out = mount(detail(BUILT_IN), m);
+    expect(out).toContain(m.admin.templates.detail.builtInNotice);
+    expect(out).toContain(`>${t.editDetails}<`);
+    expect(out).toContain('href="/admin/templates/apps/atpl_http_cache/edit"');
+    expect(out).not.toContain(`>${t.archive}<`);
+  });
+
+  it.each(locales)("an archived template shows its notice and offers neither entry (%s)", (_l, m) => {
+    const t = m.admin.appTemplates.detail;
+    const out = mount(detail(ARCHIVED), m);
+    expect(out).toMatch(new RegExp(`role="note"[^]*?${m.admin.templates.detail.archivedNotice}`));
+    expect(out).not.toContain(t.editDetails);
+    expect(out).not.toContain(t.editContent);
+    expect(out).not.toContain('href="/admin/templates/apps/atpl_old/edit"');
+  });
+
+  it("the button opens the dialog with bounded fields and the 8 categories", () => {
+    const t = en.admin.appTemplates.detail;
+    const { tree, sets } = callHooks(AppTemplateDetail, props(), en);
+    (button(tree, t.editDetails).props.onClick as () => void)();
+    expect(sets).toContainEqual([3, true]);
+    expect(sets).toEqual(expect.arrayContaining([[4, "Board"], [5, "A team board"], [6, "collaboration"]]));
+    const all = els(tree);
+    expect(all.some((e) => e.props.id === "app-template-details-hint" && textOf(e) === t.detailsHint)).toBe(true);
+    expect(all.find((e) => e.props.id === "app-template-name")!.props.maxLength).toBe(80);
+    expect(all.find((e) => e.props.id === "app-template-description")!.props.maxLength).toBe(500);
+    const select = all.find((e) => e.props.id === "app-template-category")!;
+    expect(select.type).toBe("select");
+    expect(select.props.value).toBe("collaboration");
+    expect(els(select.props.children).filter((e) => e.type === "option")).toHaveLength(8);
+  });
+
+  it("save PATCHes name, description and category, then refreshes, says so and closes", async () => {
+    keyedSend.mockResolvedValue({ ok: true, data: {} });
+    const { tree, sets } = callHooks(AppTemplateDetail, props(), en);
+    await (button(tree, en.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "details", "PATCH", "/api/admin/app-templates/atpl_board", {
+      name: "Board",
+      description: "A team board",
+      category: "collaboration",
+    });
+    expect(sets).toContainEqual([1, { ok: true, text: en.admin.appTemplates.detail.saved }]);
+    expect(sets).toContainEqual([3, false]);
+  });
+
+  it("a template without a description sends null; a name of spaces cannot be saved", async () => {
+    keyedSend.mockResolvedValue({ ok: true, data: {} });
+    const { tree } = callHooks(AppTemplateDetail, props(detail(BUILT_IN)), en);
+    await (button(tree, en.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(keyedSend).toHaveBeenCalledTimes(1));
+    expect(keyedSend.mock.calls[0]![5]).toEqual({ name: "Http cache", description: null, category: "web" });
+    const blank = callHooks(AppTemplateDetail, props(detail({ ...BOARD, name: "   " })), en);
+    expect(button(blank.tree, en.admin.templates.detail.save).props.disabled).toBe(true);
+  });
+
+  it.each(locales)("a refusal keeps the dialog open with the reason's sentence and refreshes nothing (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "template_archived" });
+    const { tree, sets } = callHooks(AppTemplateDetail, props(), m);
+    await (button(tree, m.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(sets).toContainEqual([1, { ok: false, text: m.admin.appTemplates.reasons.template_archived }]));
+    expect(sets).not.toContainEqual([3, false]);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  const detailsDialog = (tree: unknown) =>
+    els(tree).find((e) => e.type === DialogContent && els(e.props.children).some((c) => c.props.id === "app-template-name"))!;
+
+  it.each([
+    ["template_archived, en", en, { ok: false, code: "RESOURCE_LOCKED", reason: "template_archived" }, en.admin.appTemplates.reasons.template_archived],
+    ["template_archived, it", itMsgs, { ok: false, code: "RESOURCE_LOCKED", reason: "template_archived" }, itMsgs.admin.appTemplates.reasons.template_archived],
+    ["network failure, en", en, { ok: false, code: "" }, errorMessage(en, "")],
+  ] as const)("a refused save (%s) shows its alert inside the dialog, before the footer, and keeps it open", async (_l, m, refusal, text) => {
+    keyedSend.mockResolvedValue(refusal);
+    const { tree, sets } = callHooks(AppTemplateDetail, props(), m);
+    await (button(tree, m.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(sets).toContainEqual([1, { ok: false, text }]));
+    expect(sets).not.toContainEqual([3, false]);
+    const open = callHooks(AppTemplateDetail, props(), m, { 1: { ok: false, text }, 3: true });
+    const inside = els(detailsDialog(open.tree).props.children);
+    const alert = inside.findIndex((e) => e.props.role === "alert" && textOf(e) === text);
+    expect(alert).toBeGreaterThanOrEqual(0);
+    expect(alert).toBeLessThan(inside.findIndex((e) => e.type === DialogFooter));
+  });
+
+  it("no alert in the dialog without a refusal; closing or reopening clears an old one", () => {
+    const t = en.admin.appTemplates.detail;
+    const ok = callHooks(AppTemplateDetail, props(), en, { 1: { ok: true, text: t.saved }, 3: true });
+    expect(els(detailsDialog(ok.tree).props.children).some((e) => e.props.role === "alert")).toBe(false);
+    const refused = { 1: { ok: false, text: "No" }, 3: true };
+    const reopen = callHooks(AppTemplateDetail, props(), en, refused);
+    (button(reopen.tree, t.editDetails).props.onClick as () => void)();
+    expect(reopen.sets).toContainEqual([1, null]);
+    const cancel = callHooks(AppTemplateDetail, props(), en, refused);
+    (button(cancel.tree, en.common.cancel).props.onClick as () => void)();
+    expect(cancel.sets).toEqual(expect.arrayContaining([[3, false], [1, null]]));
+    const outside = callHooks(AppTemplateDetail, props(), en, refused);
+    (els(outside.tree).find((e) => e.type === Dialog && e.props.open === true)!.props.onOpenChange as (o: boolean) => void)(false);
+    expect(outside.sets).toEqual(expect.arrayContaining([[3, false], [1, null]]));
+  });
+
+  it.each([
+    ["line1\r\nline2\tend", "line1 line2 end"],
+    ["\r\n\n\t", null],
+    ["soft\u000bbreak\u000cpage\u0085next", "soft break page next"],
+  ])("a description %j is sent as %j", async (description, sent) => {
+    keyedSend.mockResolvedValue({ ok: true, data: {} });
+    const { tree } = callHooks(AppTemplateDetail, props(), en, { 5: description });
+    await (button(tree, en.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    expect(keyedSend.mock.calls[0]![5]).toEqual({ name: "Board", description: sent, category: "collaboration" });
+  });
+
+  it("a pasted tab or line break in the name is sent as one space", async () => {
+    keyedSend.mockResolvedValue({ ok: true, data: {} });
+    const { tree } = callHooks(AppTemplateDetail, props(), en, { 4: " Board\tTeam\n" });
+    await (button(tree, en.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    expect(keyedSend.mock.calls[0]![5]).toMatchObject({ name: "Board Team" });
+  });
+
+  it.each(locales)("the detail page shows the category in the header, an unknown one raw (%s)", async (locale, m) => {
+    getRequestLocale.mockResolvedValue(locale);
+    const head = async () =>
+      html(m, await AdminAppTemplatePage({ params: Promise.resolve({ templateId: "atpl_board" }) })).split('id="app-template-enabled"')[0]!;
+    expect(await head()).toContain(`>${m.admin.appTemplates.category.collaboration}<`);
+    route({ "v1/admin/app-templates/atpl_board": envelope(detail({ ...BOARD, category: "mystery" })) });
+    expect(await head()).toContain(">mystery<");
   });
 });
 

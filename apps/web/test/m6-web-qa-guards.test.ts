@@ -24,7 +24,7 @@ const customerRoutes = files(path.join(src, "app/api/bff/orgs/[orgId]/app-stacks
 const routeFiles = [...adminRoutes, ...customerRoutes];
 const customerFiles = [...files(path.join(src, "app/apps")), ...files(path.join(src, "components/app-stacks"))];
 const adminFiles = [
-  ...files(path.join(src, "components/admin")).filter((f) => /\/(app-template-[^/]*|templates-tabs\.tsx)$/.test(rel(f))),
+  ...files(path.join(src, "components/admin")).filter((f) => /\/(app-template-[^/]*|template-catalog\.tsx)$/.test(rel(f))),
   ...files(path.join(src, "app/admin/templates/apps")),
 ];
 const allNew = [...routeFiles, ...customerFiles, ...adminFiles];
@@ -61,7 +61,7 @@ describe("M6 web guards: the scans really see the new files", () => {
     expect(files(path.join(src, "components/app-stacks")).length).toBeGreaterThanOrEqual(14);
     expect(adminFiles.map(rel)).toEqual(
       expect.arrayContaining([
-        "components/admin/templates-tabs.tsx",
+        "components/admin/template-catalog.tsx",
         "components/admin/app-template-editor.tsx",
         "app/admin/templates/apps/page.tsx",
       ]),
