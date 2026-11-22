@@ -467,7 +467,7 @@ Le contromisure valgono anche per i modelli scritti dall'amministratore: l'ammin
 
 ## 7. Verifica
 
-Ogni file di test si esegue da solo (`corepack pnpm exec vitest run <file> --maxWorkers=1 --no-file-parallelism`). L'ultima verifica completa registrata (build, lint, typecheck e test, dal hook pre-push su una copia pulita) è sul commit `96ec4c8`: 456 file passati, 12 767 test passati, 46 saltati. Le riparazioni successive sono state provate file per file dai loro autori; la verifica completa dell'albero finale la esegue il capo, e il suo esito è nella descrizione della PR #37.
+Ogni file di test si esegue da solo (`corepack pnpm exec vitest run <file> --maxWorkers=1 --no-file-parallelism`). L'ultima verifica completa registrata (build, lint, typecheck e test, dal hook pre-push su una copia pulita) è sul commit `ac35ac4`: 461 file passati, 12 933 test passati, 46 saltati (la precedente, su `96ec4c8`: 456 file, 12 767 test). Le due riparazioni del terzo giro (`2430024`, `8183a7d`) hanno superato l'esecuzione del capo dei test dell'esecutore e degli stack (128 file, 3 083 test) e i tre script su Docker reale; `release:build` e `release:smoke` sono passati su `39ea336`. La verifica della punta del ramo avviene al push, e il suo esito è nella descrizione della PR #37.
 
 - **Contratti**: `packages/contracts/test/app-template-limits.test.ts`, `packages/contracts/test/app-template-issues.test.ts`, `packages/contracts/test/app-template-text.test.ts`, `packages/contracts/test/app-template-images.test.ts`, `packages/contracts/test/app-template-canonical.test.ts`, `packages/contracts/test/app-template-spec.test.ts`, `packages/contracts/test/app-template-parameters.test.ts`, `packages/contracts/test/app-stack-plan.test.ts` (con il fixture `app-stack-notes-demo`), `packages/contracts/test/app-stack-status.test.ts`, `packages/contracts/test/app-stack-operations.test.ts`, `packages/contracts/test/app-api-dto.test.ts`, `packages/contracts/test/app-stack-ipc.test.ts`, `packages/contracts/test/app-template-built-in.test.ts`, `packages/contracts/test/app-templates-schemas.qa.test.ts`.
 - **Motore delle regole**: `packages/policy-engine/test/app-template-keys.test.ts`, `packages/policy-engine/test/app-template-graph.test.ts`, `packages/policy-engine/test/app-template-validation.test.ts`, `packages/policy-engine/test/app-template-security.test.ts` (A4, A5, A6, A7, A12, A13), `packages/policy-engine/test/app-template-compile.test.ts`, `packages/policy-engine/test/app-template-encoding-edges.test.ts`, `packages/policy-engine/test/app-template-built-in.test.ts`, `packages/policy-engine/test/app-template-pipeline.qa.test.ts`.
@@ -492,7 +492,7 @@ Ogni file di test si esegue da solo (`corepack pnpm exec vitest run <file> --max
 | M7 gate, ADR, script, documenti | `1b6ac74`, `5adc18b`, `31e6138`, `ec73b06` |
 | Revisione di sicurezza, riparazioni | `43c8541`, `5d6aaee`, `fcfab26`, `2fae079`, `f9306a1`, `60efa54` |
 | Secondo giro, riparazioni | `6d7ec4a` (mascheramento lineare dei log), `ac35ac4` (aggiornamento delle sole route) |
-| Terzo giro, riparazioni | `fix16-refresh-recovery`, `fix16-log-frames`: fatte e provate dai loro test, non rilette da un quarto giro; il commit è nella PR #37 |
+| Terzo giro, riparazioni | `8183a7d` (`fix16-refresh-recovery`), `2430024` (`fix16-log-frames`): fatte e provate dai loro test, non rilette da un quarto giro |
 
 ## 8. Come costruito: voci aperte
 

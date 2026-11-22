@@ -25,12 +25,15 @@ It does not say the feature is ready: the owner gates below are open.
   read limit cut came back as an unmasked middle piece. Both are repaired (`fix16-refresh-recovery`,
   `fix16-log-frames`) and covered by their engineers' failing-first tests, named in rows `A8` and
   `B3`. The review loop ends at round 3: no fourth round re-read these two repairs.
-- **Final verify pending.** The last full verify recorded is on `96ec4c8` (build, lint and typecheck
-  0; 456 test files passed, 12 767 tests passed, 46 skipped). The repairs after it (`560cc6e` to
-  `ac35ac4`, then the two `fix16` repairs) ran file by file in their engineers' reports and the lead's
-  runs. The full verify of the final tree was pending when this report was written; its result is in
-  the pull request description (#37). `release:build` and `release:smoke` have not been run in this
-  cycle.
+- **Full verify of the code: passed on `ac35ac4`.** The last full verify recorded here (repository
+  pre-push hook in a clean checkout: build, lint and typecheck 0) is on `ac35ac4`: 461 test files
+  passed, 12 933 tests passed, 46 skipped; it contains every test file this report marks "(added after
+  `96ec4c8`)". The commits after it are the two `fix16` repairs (`2430024`, `8183a7d`), which
+  passed the lead's run of the executor and stack tests (128 files, 3 083 tests) and the three
+  real-Docker scripts, and the documents; the verify of the tip of the branch runs when it is pushed
+  and its result is in the pull request description (#37). `release:build` (archive
+  `hosting-panel-0.8.0-linux-x64.tar.gz`) exited 0 and `release:smoke` printed `smoke: PASS` on
+  `39ea336`, in a clean checkout.
 
 ## Verdicts
 
@@ -51,7 +54,7 @@ in the Notes cell of the row.
 | Item | Value |
 |---|---|
 | Branch | `feat/apps-application-stacks-and-template-catalog` (issue #36, draft PR #37), started at `b70882f` = `main` `88fc80e` + an empty start commit |
-| Commit of the test runs | `96ec4c8`: the last full verify (clean detached checkout, repository pre-push hook) |
+| Commit of the test runs | `96ec4c8` and `ac35ac4`: the full verifies (clean detached checkout, repository pre-push hook); a row below cites the first of them that contained its files |
 | Commit of the real-Docker runs | `ac35ac4` (the lead's run, 07:38–07:41, the code-complete tree before the `fix16` repairs); earlier runs on the trees committed as `8b8efd9` (engine script, 05:00), `31e6138` (the two seed scripts, 06:00 and 06:10) and `f9306a1` (all three, 07:05) |
 | Host | cloud-dev VM, Linux 6.8.0-151-generic, 4 CPU, 7.8 GB RAM, with a live hosting-panel install running beside the tests (its four containers were checked untouched after every Docker run) |
 | Docker Engine | 29.10.0 (API 1.57) |
@@ -73,7 +76,9 @@ in the Notes cell of the row.
 | 03:40–03:59 | working tree before `1219728..5adc18b` | 0 | 0 | 0 | 420 files: 419 passed, 1 failed (`support-access-tenancy`: path-parameter values missing for the new routes; the test map was extended and the file then passed 6/6) |
 | 04:01–04:43 | `5adc18b`, clean checkout, pre-push hook | 0 | 0 | 0 | 420 files passed, 11 491 passed, 46 skipped |
 | 05:47–06:28 | `96ec4c8`, clean checkout, pre-push hook | 0 | 0 | 0 | 456 files passed, 12 767 passed, 46 skipped |
-| pending | final tree, clean checkout, pre-push hook | | | | pending when this report was written; the result is in the pull request description (#37) |
+| 07:38–08:16 | `ac35ac4`, clean checkout, pre-push hook | 0 | 0 | 0 | 461 files passed, 12 933 passed, 46 skipped |
+| 08:02 | working tree with the `fix16` repairs (committed as `2430024`, `8183a7d`): executor tests, every application-stack API test, the two route sweeps, the site pins | — | 0 | 0 (executor, api) | 128 files, 3 083 passed, 45 skipped |
+| after this report | tip of the branch, clean checkout, pre-push hook | | | | the result is in the pull request description (#37) |
 
 ### Real Docker Engine acceptance scripts
 
@@ -88,7 +93,7 @@ marker is `swarmtest_<12 hex>`; the stack ids are `stk_swarmtest_<12 hex>`.
 | Worker with storage, first run | `node infra/linux/accept-app-stack-worker-storage.mjs` | `RESULT 20/20 passed, 1 skipped (not counted in n/m) in 47.0s`; the gate saw 311 requests and denied 0 |
 | All three, after the round-1 repairs (07:05) | the same three commands, one after the other | engine `RESULT 25/25 passed, 1 skipped`; http-cache `RESULT 20/20 passed, 1 skipped`; worker-storage `RESULT 20/20 passed, 1 skipped`; no object with the run marker left; the four live containers running |
 | All three, the lead, 07:38–07:41 on `ac35ac4` | the same three commands, one after the other | engine `RESULT 25/25 passed, 1 skipped (not counted in n/m) in 71.5s`; http-cache `RESULT 20/20 passed, 1 skipped (not counted in n/m) in 39.1s`; worker-storage `RESULT 20/20 passed, 1 skipped (not counted in n/m) in 48.0s`; exit 0 each; the same four live containers before and after; 0 containers, networks or volumes with the run marker or the `hp_app_` prefix left |
-| A tree with the `fix16` repairs | the same three commands | not run at the time of writing |
+| All three, the lead, 08:03–08:05 on the tree with the `fix16` repairs (`2430024`, `8183a7d`) | the same three commands, one after the other | engine `RESULT 25/25 passed, 1 skipped (not counted in n/m) in 70.5s`; http-cache `RESULT 20/20 passed, 1 skipped (not counted in n/m) in 40.4s`; worker-storage `RESULT 20/20 passed, 1 skipped (not counted in n/m) in 48.2s`; exit 0 each; the same four live containers running; 0 leftover containers, networks and volumes |
 
 The skipped step is the same in every run: `host-nft-metadata-drop-on-stack-net` needs root to read
 the host nft ruleset (`HP_ACCEPT_ROOT_CASES=1` as root). The first run of the HTTP script pulled both
