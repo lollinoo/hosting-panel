@@ -224,6 +224,7 @@ export {
 } from "./site-types/index.js";
 
 export { SimulatedSiteFiles, makeDir, type SimSeedEntry } from "./simulator-files.js";
+export { SimulatedAppStacks, type AppStackSimFault, type AppStackSimStep } from "./simulator-app-stacks.js";
 export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps } from "./simulator-site-types.js";
 
 export type { TerminalLimits } from "./terminal-sessions.js";

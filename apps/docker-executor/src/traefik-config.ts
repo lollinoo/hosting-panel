@@ -3,6 +3,9 @@ import { chmod, lstat, mkdir, open, readdir, readFile, rename, rm, stat, writeFi
 import { isIPv4 } from "node:net";
 import path from "node:path";
 import {
+  APP_STACK_ID_PATTERN,
+  APP_STACK_KEY_PATTERN,
+  MAX_APP_STACK_DOMAINS,
   VOLUME_SUFFIX_PATTERN,
   isSiteOrigin,
   normalizeSiteDomain,
@@ -507,6 +510,145 @@ export function buildSiteDynamicTraefikYaml(
   return lines.join("\n");
 }
 
+export interface AppStackRouteEntry {
+  readonly componentKey: string;
+  readonly internalPort: number;
+  readonly hosts: readonly SiteHostRoute[];
+}
+
+const APP_STACK_FILE_PATTERN = /^app_([a-z][a-z0-9_]{0,63})\.yml$/;
+
+function invalidAppRoute(): never {
+  throw new ExecutorCodedError("Invalid application route", "VALIDATION_ERROR");
+}
+
+function assertAppStackId(stackId: string): void {
+  if (!APP_STACK_ID_PATTERN.test(stackId)) invalidAppRoute();
+  assertSafeIdentifier(stackId, "stackId");
+}
+
+/** HTTP host routing only: no manual certificate, no redirect, nothing from the template. */
+export function buildAppStackDynamicTraefikYaml(
+  stackId: string,
+  routes: readonly AppStackRouteEntry[],
+  opts: SiteRouteOptions,
+): string {
+  assertAppStackId(stackId);
+  const reserved = new Set(opts.reservedHosts);
+  const activeRoutes = routes
+    .filter((route) => route.hosts.length > 0)
+    .map((route) => {
+      if (
+        !APP_STACK_KEY_PATTERN.test(route.componentKey) ||
+        !Number.isInteger(route.internalPort) ||
+        route.internalPort < 1 ||
+        route.internalPort > 65535
+      ) {
+        invalidAppRoute();
+      }
+      if (route.hosts.some((host) => host.source !== undefined || host.redirectTo !== null)) {
+        hostPolicyDenied("certificate source");
+      }
+      return {
+        componentKey: route.componentKey,
+        internalPort: route.internalPort,
+        hosts: assertSiteHostRoutes(route.hosts, reserved).sort((a, b) => a.hostname.localeCompare(b.hostname)),
+      };
+    })
+    .sort((a, b) => a.componentKey.localeCompare(b.componentKey) || a.internalPort - b.internalPort);
+
+  const pairs = new Set(activeRoutes.map((route) => `${route.componentKey}:${String(route.internalPort)}`));
+  const allHostnames = activeRoutes.flatMap((route) => route.hosts.map((h) => h.hostname));
+  if (
+    pairs.size !== activeRoutes.length ||
+    allHostnames.length > MAX_APP_STACK_DOMAINS ||
+    new Set(allHostnames).size !== allHostnames.length
+  ) {
+    invalidAppRoute();
+  }
+  if (activeRoutes.length === 0) {
+    return "";
+  }
+
+  const lines = [`# Managed by hp-docker-executor for application stack ${stackId} — DO NOT EDIT`];
+  for (const route of activeRoutes) {
+    lines.push(`# @hp-app-route ${JSON.stringify(route)}`);
+  }
+  const routers: string[] = [];
+  const middlewares: string[] = [];
+  const services: string[] = [];
+  for (const route of activeRoutes) {
+    const port = String(route.internalPort);
+    const key = `app_${stackId}_${route.componentKey}_${port}`;
+    let needsHttpsRedirect = false;
+    for (const host of route.hosts) {
+      const i = hostSuffix(host.hostname);
+      const httpsRedirect = opts.acmeEnabled && host.httpsRedirect;
+      needsHttpsRedirect ||= httpsRedirect;
+      const router = (name: string, entryPoint: string) => [
+        `    ${name}:`,
+        "      entryPoints:",
+        `        - "${entryPoint}"`,
+        `      rule: "Host(\`${host.hostname}\`)"`,
+        `      service: "${key}"`,
+      ];
+      routers.push(...router(`${key}_${i}`, "web"));
+      if (httpsRedirect) routers.push("      middlewares:", `        - "${key}_https"`);
+      if (host.tls && opts.acmeEnabled) {
+        const dns01 = host.challenge === "dns-01";
+        routers.push(
+          ...router(`${key}_${i}_tls`, "websecure"),
+          ...(dns01 && !opts.dnsChallenge
+            ? ["      tls: {}"]
+            : ["      tls:", `        certResolver: ${dns01 ? DNS_RESOLVER_NAME : "le"}`]),
+        );
+      }
+    }
+    if (needsHttpsRedirect) {
+      middlewares.push(`    ${key}_https:`, "      redirectScheme:", "        scheme: https", "        permanent: true");
+    }
+    services.push(
+      `    ${key}:`,
+      "      loadBalancer:",
+      "        passHostHeader: true",
+      "        servers:",
+      `          - url: "http://hp_app_${stackId}_${route.componentKey}:${port}"`,
+    );
+  }
+
+  lines.push("http:", "  routers:", ...routers);
+  if (middlewares.length > 0) {
+    lines.push("  middlewares:", ...middlewares);
+  }
+  lines.push("  services:", ...services, "");
+  return lines.join("\n");
+}
+
+/** Lines "# @hp-app-route {json}" only; malformed lines are skipped. */
+export function parsePersistedAppStackRoutesFromYaml(yamlContent: string): AppStackRouteEntry[] {
+  const routes: AppStackRouteEntry[] = [];
+  for (const line of yamlContent.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("# @hp-app-route ")) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(trimmed.slice("# @hp-app-route ".length)) as Partial<AppStackRouteEntry>;
+      if (
+        typeof parsed.componentKey === "string" &&
+        typeof parsed.internalPort === "number" &&
+        Array.isArray(parsed.hosts) &&
+        parsed.hosts.every(isSiteHostRouteShape)
+      ) {
+        routes.push({ componentKey: parsed.componentKey, internalPort: parsed.internalPort, hosts: parsed.hosts });
+      }
+    } catch {
+      // Ignore malformed comment lines
+    }
+  }
+  return routes;
+}
+
 function isSiteHostRouteShape(value: unknown): value is SiteHostRoute {
   const h = value as Partial<SiteHostRoute> | null;
   return (
@@ -777,6 +919,13 @@ export class TraefikIngressFileManager {
           for (const routeHost of entry.hosts) hostnames.add(routeHost.hostname);
         }
       }
+      for (const name of names) {
+        const stackId = APP_STACK_FILE_PATTERN.exec(name)?.[1];
+        if (!stackId) continue;
+        for (const entry of await this.readAppStackRoutesNow(stackId)) {
+          for (const routeHost of entry.hosts) hostnames.add(routeHost.hostname);
+        }
+      }
       return [...hostnames].sort();
     });
   }
@@ -792,6 +941,13 @@ export class TraefikIngressFileManager {
       if (siteMap.size === 0) continue;
       // One bad file must not stop the others: the state is already saved, so no retry would reach them.
       await this.flushSiteDynamicFile(siteId, siteMap).catch(() => undefined);
+    }
+    for (const name of names) {
+      const stackId = APP_STACK_FILE_PATTERN.exec(name)?.[1];
+      if (!stackId) continue;
+      const routes = await this.readAppStackRoutesNow(stackId);
+      if (routes.length === 0) continue;
+      await this.writeAppStackRoutesNow(stackId, routes).catch(() => undefined);
     }
   }
 
@@ -1040,5 +1196,58 @@ export class TraefikIngressFileManager {
     await mkdir(this.dynamicDirPath, { recursive: true, mode: 0o755 });
     const yaml = buildSiteDynamicTraefikYaml(siteId, [...siteMap.values()], this.routeOptions);
     await writeFileIfChanged(filePath, yaml, 0o644);
+  }
+
+  public getAppStackDynamicFilePath(stackId: string): string {
+    assertAppStackId(stackId);
+    return assertContainedPath(this.dynamicDirPath, path.join(this.dynamicDirPath, `app_${stackId}.yml`));
+  }
+
+  /** Validates before touching the file; [] removes it. changed: the bytes differed or the file was removed. */
+  public writeAppStackRoutes(
+    stackId: string,
+    routes: readonly AppStackRouteEntry[],
+  ): Promise<{ readonly changed: boolean; readonly hostnames: string[] }> {
+    return this.inSiteFileLine(() => this.writeAppStackRoutesNow(stackId, routes));
+  }
+
+  private async writeAppStackRoutesNow(
+    stackId: string,
+    routes: readonly AppStackRouteEntry[],
+  ): Promise<{ readonly changed: boolean; readonly hostnames: string[] }> {
+    const filePath = this.getAppStackDynamicFilePath(stackId);
+    await this.loadDnsProviderState();
+    const yaml = buildAppStackDynamicTraefikYaml(stackId, routes, this.routeOptions);
+    if (yaml === "") {
+      return { changed: await this.removeAppStackFile(filePath), hostnames: [] };
+    }
+    const hostnames = routes.flatMap((route) => route.hosts.map((h) => h.hostname)).sort();
+    // An unchanged file is not renamed: every rename reloads Traefik.
+    if ((await readFile(filePath).catch(() => null))?.equals(Buffer.from(yaml))) {
+      return { changed: false, hostnames };
+    }
+    await writeFileAtomically(filePath, yaml, 0o644);
+    return { changed: true, hostnames };
+  }
+
+  /** True when a file existed. */
+  public removeAppStackRoutes(stackId: string): Promise<boolean> {
+    return this.inSiteFileLine(() => this.removeAppStackFile(this.getAppStackDynamicFilePath(stackId)));
+  }
+
+  private async removeAppStackFile(filePath: string): Promise<boolean> {
+    const existed = (await lstat(filePath).catch(() => null)) !== null;
+    await rm(filePath, { force: true });
+    return existed;
+  }
+
+  /** [] when the file is absent. */
+  public readAppStackRoutes(stackId: string): Promise<AppStackRouteEntry[]> {
+    return this.inSiteFileLine(() => this.readAppStackRoutesNow(stackId));
+  }
+
+  private async readAppStackRoutesNow(stackId: string): Promise<AppStackRouteEntry[]> {
+    const filePath = this.getAppStackDynamicFilePath(stackId);
+    return parsePersistedAppStackRoutesFromYaml(await readFile(filePath, "utf8").catch(() => ""));
   }
 }
