@@ -12,7 +12,7 @@ export interface AppBuiltInTemplate {
   readonly description: string;
   /** English twin, for ADR-0035 and the README; not stored. */
   readonly descriptionEn: string;
-  /** HCP-STACK/v1, LF only, final newline. */
+  /** HCP-STACK/v1 or HCP-STACK/v2, LF only, final newline. */
   readonly source: string;
 }
 
@@ -21,6 +21,9 @@ const HTTP_CACHE_DESCRIPTION =
 
 const WORKER_STORAGE_DESCRIPTION =
   "Un lavoro in background che a intervalli regolari aggiorna un contatore in un archivio chiave-valore persistente. I dati sono conservati anche quando lo stack viene cancellato, salvo richiesta esplicita.";
+
+const WORDPRESS_DESCRIPTION =
+  "Un sito WordPress con il suo database. Le password del database sono generate dalla piattaforma: non c'è nulla da inserire. Dopo aver collegato il dominio, apri subito il sito e completa la configurazione iniziale di WordPress (titolo, utente e password dell'amministratore): finché non lo fai, chiunque raggiunga l'indirizzo può farlo al posto tuo. Sito e database sono conservati anche quando l'applicazione viene cancellata, salvo richiesta esplicita.";
 
 const httpCache: AppBuiltInTemplate = Object.freeze({
   templateId: "atpl_http_cache",
@@ -143,4 +146,109 @@ const workerStorage: AppBuiltInTemplate = Object.freeze({
   ].join("\n"),
 });
 
-export const APP_BUILT_IN_TEMPLATES: readonly AppBuiltInTemplate[] = Object.freeze([httpCache, workerStorage]);
+/**
+ * WordPress with its database, in the extended format (ADR-0036 §2.9), written for this repository. Both components run
+ * with the "standard" profile: the official images start as root and drop to their own user. The two database
+ * passwords are generated, reach the components only through the environment and are never shown. This is not the
+ * managed WordPress site of the panel: no automatic install, no backup, no file or database tools.
+ */
+const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
+  templateId: "atpl_wordpress_mariadb",
+  versionId: "atv_wordpress_mariadb_1",
+  slug: "wordpress-mariadb",
+  name: "WordPress in contenitore",
+  category: "content",
+  description: WORDPRESS_DESCRIPTION,
+  descriptionEn:
+    "A WordPress site with its own database. The platform generates the database passwords: there is nothing to type. After you connect the domain, open the site right away and complete the first-time setup of WordPress (title, administrator user and password): until you do, anyone who reaches the address can do it in your place. The site and the database are kept even when the application is deleted, unless deletion is explicitly requested.",
+  source: [
+    "x-hp-stack:",
+    "  schemaVersion: 2",
+    '  name: "WordPress in contenitore"',
+    "  category: content",
+    `  description: "${WORDPRESS_DESCRIPTION}"`,
+    "x-hp-parameters:",
+    "  - key: db_password",
+    '    label: "Password del database"',
+    "    type: secret",
+    "    required: true",
+    "    customer: false",
+    "    generate:",
+    "      kind: password",
+    "      length: 32",
+    "  - key: db_root_password",
+    '    label: "Password di amministrazione del database"',
+    "    type: secret",
+    "    required: true",
+    "    customer: false",
+    "    generate:",
+    "      kind: password",
+    "      length: 32",
+    "services:",
+    "  wordpress:",
+    "    image: wordpress:7.1.4-php8.4-apache@sha256:4bf2c44f19a5eba28de4e5cbe50e1c5dc55ae3f8b894f681f4d7676a7e2512e5",
+    "    x-hp-profile: standard",
+    "    environment:",
+    "      - name: WORDPRESS_DB_HOST",
+    "        value: db",
+    "      - name: WORDPRESS_DB_NAME",
+    "        value: wordpress",
+    "      - name: WORDPRESS_DB_USER",
+    "        value: wordpress",
+    "      - name: WORDPRESS_DB_PASSWORD",
+    "        secret: db_password",
+    "    volumes:",
+    "      - site:/var/www/html",
+    "    expose:",
+    "      - 80",
+    "    depends_on:",
+    "      - db",
+    "    healthcheck:",
+    "      kind: tcp",
+    "      port: 80",
+    "      intervalSeconds: 15",
+    "      timeoutSeconds: 3",
+    "    deploy:",
+    "      resources:",
+    "        limits:",
+    '          cpus: "1.0"',
+    "          memory: 512M",
+    "  db:",
+    "    image: mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
+    "    x-hp-profile: standard",
+    "    environment:",
+    "      - name: MARIADB_DATABASE",
+    "        value: wordpress",
+    "      - name: MARIADB_USER",
+    "        value: wordpress",
+    "      - name: MARIADB_PASSWORD",
+    "        secret: db_password",
+    "      - name: MARIADB_ROOT_PASSWORD",
+    "        secret: db_root_password",
+    "    volumes:",
+    "      - database:/var/lib/mysql",
+    "    expose:",
+    "      - 3306",
+    "    healthcheck:",
+    "      kind: tcp",
+    "      port: 3306",
+    "      intervalSeconds: 15",
+    "      timeoutSeconds: 3",
+    "    deploy:",
+    "      resources:",
+    "        limits:",
+    '          cpus: "1.0"',
+    "          memory: 512M",
+    "volumes:",
+    "  site: {}",
+    "  database: {}",
+    "x-hp-ingress:",
+    "  - service: wordpress",
+    "    port: 80",
+    "    protocol: http",
+    "",
+  ].join("\n"),
+});
+
+/** The two seeds of the first format (ADR-0035), then the WordPress one of the extended format (ADR-0036). */
+export const APP_BUILT_IN_TEMPLATES: readonly AppBuiltInTemplate[] = Object.freeze([httpCache, workerStorage, wordpressMariadb]);

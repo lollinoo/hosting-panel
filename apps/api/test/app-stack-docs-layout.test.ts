@@ -12,7 +12,13 @@ const between = (text: string, from: string, to?: string) => {
   return text.slice(start, end < 0 ? undefined : end);
 };
 
-const digests = [...new Set(APP_BUILT_IN_TEMPLATES.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0])))];
+const digestsOf = (templates: readonly (typeof APP_BUILT_IN_TEMPLATES)[number][]) => [
+  ...new Set(templates.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]))),
+];
+// The seeds of the first format are recorded in ADR-0035, the one of the extended format in ADR-0036.
+const isExtended = (t: (typeof APP_BUILT_IN_TEMPLATES)[number]) => t.source.startsWith("x-hp-stack:\n  schemaVersion: 2\n");
+const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t)));
+const extendedDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter(isExtended));
 const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
@@ -28,6 +34,17 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
     for (const s of ["app-stacks", "0025_app_stacks.sql", "APP_IMAGE_ALLOWLIST", "HCP-STACK/v1", "D12", ...digests]) expect(adr, s).toContain(s);
     expect(digests.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("ADR-0036 records the extended format and the images of its built-in template", () => {
+    const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0036-.*\.md$/.test(f));
+    expect(adrs).toHaveLength(1);
+    const file = `docs/architecture/adr/${adrs[0]!}`;
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    expect(extendedDigests).toHaveLength(2);
+    for (const s of ["HCP-STACK/v2", "ADR-0035", "atpl_wordpress_mariadb", ...extendedDigests]) expect(adr, s).toContain(s);
+    expect(extendedDigests.filter((d) => digests.includes(d))).toEqual([]);
   });
 
   it("README, HARNESS, runbook, ER diagram and the brain files name the feature", () => {
