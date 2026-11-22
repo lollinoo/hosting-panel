@@ -222,17 +222,17 @@ describe("every application page × {flag off, support visit, flag on}", () => {
 });
 
 describe("the organisation of a page never comes from the URL", () => {
-  it("a hostile stack id stays one encoded path segment under the member's organisation", async () => {
+  it("a hostile stack id that is not one path segment is notFound() with no application read", async () => {
     const evil = `${STACK}/../../${ORG_B}/app-stacks/stk_b1`;
     upstream(meOf());
     await expect(AppStackPage({ params: Promise.resolve({ stackId: evil }) })).rejects.toThrow("NEXT_NOT_FOUND");
-    expect(nonMe()).toEqual([`v1/organizations/${ORG_A}/app-stacks/${encodeURIComponent(evil)}`]);
+    expect(nonMe()).toEqual([]);
   });
 
   it("a hostile template id likewise", async () => {
     const evil = `../${ORG_B}/app-templates/atpl_x`;
     await expect(AppWizardPage({ params: Promise.resolve({ templateId: evil }) })).rejects.toThrow("NEXT_NOT_FOUND");
-    expect(nonMe()).toEqual([`v1/organizations/${ORG_A}/app-templates/${encodeURIComponent(evil)}`]);
+    expect(nonMe()).toEqual([]);
   });
 
   it("the wizard element carries the member's organisation, not another membership", async () => {
@@ -477,9 +477,9 @@ describe("admin application pages when the API answers 422 NOT_SUPPORTED", () =>
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 
-  it("the «new template» page reads nothing from the API", async () => {
+  it("the «new template» page reads only the capability from the API", async () => {
     await NewAppTemplatePage();
-    expect(fetchUpstream).not.toHaveBeenCalled();
+    expect(paths()).toEqual(["v1/me"]);
   });
 
   it("the templates layout shows the tabs only while the capability is strictly true", async () => {

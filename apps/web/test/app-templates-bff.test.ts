@@ -324,10 +324,26 @@ describe("application template and stack server reads", () => {
     }
   });
 
-  it("ids are encoded; notFound and the flag-off code stay apart; the list reads give null on failure", async () => {
+  it("an id that is not one path segment is never put in a path: not found (null for the list reads), nothing is read", async () => {
+    fetchUpstream.mockResolvedValue({ ok: true, status: 200, data: { data: [] } });
+    const notFound = { ok: false, outcome: "notFound" };
+    for (const bad of ["..", ".", "a/b", "a%2Fb", "", "x".repeat(129)]) {
+      expect(await serverApi.fetchServerAdminAppTemplate(bad), bad).toEqual(notFound);
+      expect(await serverApi.fetchServerAdminAppTemplateVersion(bad, "atv_notes_2"), bad).toEqual(notFound);
+      expect(await serverApi.fetchServerAdminAppTemplateVersion(T, bad), bad).toEqual(notFound);
+      expect(await serverApi.fetchServerAdminAppTemplateUsage(bad), bad).toEqual(notFound);
+      expect(await serverApi.fetchServerOrgAppTemplate(ORG, bad), bad).toEqual(notFound);
+      expect(await serverApi.fetchServerOrgAppStack(ORG, bad), bad).toEqual(notFound);
+      expect(await serverApi.fetchServerOrgAppStackDeployments(ORG, bad), bad).toBeNull();
+      expect(await serverApi.fetchServerOrgAppStackDomains(ORG, bad), bad).toBeNull();
+    }
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("notFound and the flag-off code stay apart; the list reads give null on failure", async () => {
     fetchUpstream.mockResolvedValue({ ok: false, status: 404, error: { error: { code: "NOT_FOUND" } } });
-    expect(await serverApi.fetchServerOrgAppStack(ORG, "a/b")).toMatchObject({ ok: false, outcome: "notFound" });
-    expect(fetchUpstream.mock.calls[0]![0]).toBe(`v1/organizations/${ORG}/app-stacks/a%2Fb`);
+    expect(await serverApi.fetchServerOrgAppStack(ORG, "stk_gone")).toMatchObject({ ok: false, outcome: "notFound" });
+    expect(fetchUpstream.mock.calls[0]![0]).toBe(`v1/organizations/${ORG}/app-stacks/stk_gone`);
     fetchUpstream.mockResolvedValue({ ok: false, status: 422, error: { error: { code: "NOT_SUPPORTED" } } });
     expect(await serverApi.fetchServerAdminAppTemplates()).toEqual({ ok: false, outcome: "error", status: 422, code: "NOT_SUPPORTED" });
     expect(await serverApi.fetchServerOrgAppStackDeployments(ORG, "stk_a1")).toBeNull();

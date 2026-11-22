@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { MAX_APP_STACK_DOMAINS, type AppStackDetailDto, type AppStackDomainDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -41,6 +41,10 @@ export function AppStackDomains({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
+  // router.refresh() keeps client state: take the fresh server rows.
+  useEffect(() => {
+    if (initial) setRows(initial);
+  }, [initial]);
   const base = `/api/bff/orgs/${orgId}/app-stacks/${stackId}/domains`;
   const confirming = rows.find((d) => d.id === removing);
   const date = new Intl.DateTimeFormat(locale, { dateStyle: "medium" });

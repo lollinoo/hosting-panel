@@ -54,9 +54,10 @@ const locales = [
 
 const internals = (React as unknown as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE!;
 type Effect = () => void | (() => void);
-/** Calls a component (or hook) once with stand-in hooks; `state` overrides the initial value of a useState slot. */
-function callHooks<P, R>(C: (p: P) => R, props: P, m: Messages = en, state: Record<number, unknown> = {}) {
+/** Calls a component (or hook) once with stand-in hooks; `state` overrides the initial value of a useState slot, `refs` keeps useRef slots across calls. */
+function callHooks<P, R>(C: (p: P) => R, props: P, m: Messages = en, state: Record<number, unknown> = {}, refs: Array<{ current: unknown }> = []) {
   let s = 0;
+  let r = 0;
   const sets: Array<[number, unknown]> = [];
   const effects: Effect[] = [];
   const ctx = { locale: m === en ? "en" : "it", messages: m };
@@ -66,7 +67,7 @@ function callHooks<P, R>(C: (p: P) => R, props: P, m: Messages = en, state: Reco
       const k = s++;
       return [k in state ? state[k] : v, (x: unknown) => void sets.push([k, x])];
     },
-    useRef: (v: unknown) => ({ current: v }),
+    useRef: (v: unknown) => (refs[r++] ??= { current: v }),
     useEffect: (f: Effect) => void effects.push(f),
     useContext: () => ctx,
   };
@@ -196,7 +197,7 @@ describe("AppStackActions requests", () => {
       router.refresh.mockClear();
       const { out, sets } = callHooks(AppStackActions, actionProps(status));
       await click(button(out, label));
-      expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", action, "POST", `${BASE}/${action}`, {});
+      expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", `${action}:${status}`, "POST", `${BASE}/${action}`, {});
       expect(sets).toContainEqual([1, en.apps.actions.accepted]);
       expect(router.refresh).toHaveBeenCalledTimes(1);
     }
@@ -223,6 +224,46 @@ describe("AppStackActions requests", () => {
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
+  it.each(locales)("installing a draft whose version left the catalog says to remove the draft and install again (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "STACK_TEMPLATE_UNPUBLISHED" });
+    const { out, sets } = callHooks(AppStackActions, actionProps("draft"), m);
+    await click(button(out, m.apps.actions.install));
+    expect(sets).toContainEqual([2, m.apps.reasons.draftUnpublished]);
+    expect(m.apps.reasons.draftUnpublished).not.toBe(m.apps.reasons.STACK_TEMPLATE_UNPUBLISHED);
+  });
+
+  it("a kept key serves only a retry from the same status: stop (reply lost) → start → stop sends a new key", async () => {
+    let lost = true;
+    const used: string[] = [];
+    keyedSend.mockImplementation(async (keys: Record<string, string>, _csrf: string, name: string) => {
+      used.push((keys[name] ??= `key-${used.length}`));
+      if (lost) return { ok: false, code: "" };
+      delete keys[name];
+      return accepted;
+    });
+    const refs: Array<{ current: unknown }> = [];
+    let shown: AppStackStatus | null = null;
+    // Each render with a new status runs the effects, as React does for a changed dependency.
+    const render = (status: AppStackStatus, state: Record<number, unknown> = {}) => {
+      const r = callHooks(AppStackActions, actionProps(status), en, state, refs);
+      if (status !== shown) for (const f of r.effects) f();
+      shown = status;
+      return r.out;
+    };
+    const stop = async () => {
+      const dialog = els(render("running", { 3: true })).find((e) => e.type === Dialog && e.props.open)!;
+      await click(els(dialog).find((e) => e.type === Button && textOf(e) === en.apps.actions.stopConfirm));
+    };
+    await stop();
+    await stop(); // a true retry
+    expect(used[1]).toBe(used[0]);
+    lost = false;
+    await click(button(render("stopped"), en.apps.actions.start));
+    await stop();
+    expect(new Set(used).size).toBe(3);
+    expect(used[3]).not.toBe(used[0]);
+  });
+
   it("a 2xx without an operation id is not reported as accepted", async () => {
     keyedSend.mockResolvedValue({ ok: true, data: { data: {} } });
     const { out, sets } = callHooks(AppStackActions, actionProps("running"));
@@ -246,7 +287,7 @@ describe("AppStackActions requests", () => {
     const confirm = els(dialog).find((e) => e.type === Button && textOf(e) === m.apps.actions.stopConfirm)!;
     expect(confirm.props.variant).toBe("destructive");
     await click(confirm);
-    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "stop", "POST", `${BASE}/stop`, {});
+    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "stop:running", "POST", `${BASE}/stop`, {});
     expect(open.sets).toContainEqual([3, false]);
   });
 
@@ -312,7 +353,7 @@ describe("upgrade and rollback plan dialog", () => {
       const confirm = button(out, confirmText)!;
       expect(confirm.props.disabled).toBe(false);
       await click(confirm);
-      expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", mode, "POST", `${BASE}/${mode}`, { ...target, planHash: DIFF.planHash });
+      expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", `${mode}:running`, "POST", `${BASE}/${mode}`, { ...target, planHash: DIFF.planHash });
       expect(router.refresh).toHaveBeenCalledTimes(1);
       expect(parentSets).toContainEqual([1, en.apps.actions.accepted]);
       expect(parentSets).toContainEqual([4, null]);
@@ -375,7 +416,7 @@ describe("upgrade and rollback plan dialog", () => {
 });
 
 describe("AppStackDelete", () => {
-  const props = (hasData = true) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData });
+  const props = (hasData = true, status: AppStackStatus = "running") => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData, status });
   const submit = async (tree: unknown) => {
     const form = els(tree).find((e) => e.type === "form")!;
     await (form.props.onSubmit as (e: { preventDefault(): void }) => Promise<void>)({ preventDefault() {} });
@@ -393,6 +434,14 @@ describe("AppStackDelete", () => {
     expect(open.props.variant).toBe("destructive");
     void click(open);
     expect(sets).toContainEqual([0, true]);
+  });
+
+  it("the delete button is enabled exactly when appStackEnqueueTarget allows a delete", () => {
+    for (const status of APP_STACK_STATUSES) {
+      const open = button(callHooks(AppStackDelete, props(true, status)).out, en.apps.delete.open)!;
+      expect(open.props.disabled, status).toBe(appStackEnqueueTarget("stack.delete", status) === null);
+    }
+    expect(button(callHooks(AppStackDelete, props(true, "deleting")).out, en.apps.delete.open)!.props.disabled).toBe(true);
   });
 
   it.each(locales)("asks the typed name and a separate, unticked data checkbox with its keep note (%s)", (_l, m) => {

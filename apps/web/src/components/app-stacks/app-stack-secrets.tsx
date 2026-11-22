@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import type { AppStackDetailDto } from "@hosting-panel/contracts";
+import { SetAppStackSecretInputSchema, type AppStackDetailDto } from "@hosting-panel/contracts";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -115,6 +115,7 @@ export function AppStackSecrets({
                   type="password"
                   autoComplete="new-password"
                   spellCheck={false}
+                  maxLength={SetAppStackSecretInputSchema.shape.value.maxLength ?? undefined}
                   readOnly={busy}
                   aria-describedby="app-secret-value-note"
                   aria-invalid={fieldError !== null || undefined}

@@ -469,6 +469,7 @@ describe("application template editor pages", () => {
   const failed = (status: number, code?: string) => ({ ok: false, status, data: null, error: code ? { error: { code } } : null });
   const route = (over: Record<string, unknown> = {}) => {
     const table: Record<string, unknown> = {
+      "v1/me": envelope({ platformCapabilities: { applicationTemplatesAvailable: true } }),
       "v1/admin/app-templates/atpl_notes": envelope(detail()),
       "v1/admin/app-templates/atpl_notes/versions/atv_notes_2": envelope(version("atv_notes_2", 2)),
       "v1/admin/app-templates/atpl_notes/versions/atv_notes_1": envelope(version("atv_notes_1", 1)),
@@ -498,9 +499,9 @@ describe("application template editor pages", () => {
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 
-  it("new: the create editor seeded with the starter, without any upstream call", async () => {
+  it("new: the create editor seeded with the starter, after the capability read alone", async () => {
     const out = await render(NewAppTemplatePage());
-    expect(fetchUpstream).not.toHaveBeenCalled();
+    expect(paths()).toEqual(["v1/me"]);
     expect(out).toMatch(new RegExp(`<h1[^>]*>${t.create}</h1>`));
     expect(out).toContain('href="/admin/templates/apps"');
     expect(out).toContain(t.back);
@@ -511,7 +512,7 @@ describe("application template editor pages", () => {
 
   it("edit: loads the template and its default version, and seeds that source", async () => {
     const out = await render(editPage());
-    expect(paths()).toEqual(["v1/admin/app-templates/atpl_notes", "v1/admin/app-templates/atpl_notes/versions/atv_notes_2"]);
+    expect(paths()).toEqual(["v1/me", "v1/admin/app-templates/atpl_notes", "v1/admin/app-templates/atpl_notes/versions/atv_notes_2"]);
     expect(out).toMatch(/<h1[^>]*>Notes<\/h1>/);
     expect(out).toContain(format(t.versionLabel, { n: 2 }));
     expect(out).toContain(">notes<");
@@ -525,7 +526,7 @@ describe("application template editor pages", () => {
 
   it("edit?version=: seeds the source of that version", async () => {
     const out = await render(editPage({ version: "atv_notes_1" }));
-    expect(paths()).toEqual(["v1/admin/app-templates/atpl_notes", "v1/admin/app-templates/atpl_notes/versions/atv_notes_1"]);
+    expect(paths()).toEqual(["v1/me", "v1/admin/app-templates/atpl_notes", "v1/admin/app-templates/atpl_notes/versions/atv_notes_1"]);
     expect(out).toContain("# notes v1");
     expect(out).not.toContain("# notes v2");
   });
@@ -533,7 +534,7 @@ describe("application template editor pages", () => {
   it("edit: without a default version it starts from the newest one", async () => {
     route({ "v1/admin/app-templates/atpl_notes": envelope(detail({ defaultVersionId: null, defaultVersionNumber: null })) });
     await render(editPage({ version: ["x", "y"] }));
-    expect(paths()).toEqual(["v1/admin/app-templates/atpl_notes", "v1/admin/app-templates/atpl_notes/versions/atv_notes_2"]);
+    expect(paths()).toEqual(["v1/me", "v1/admin/app-templates/atpl_notes", "v1/admin/app-templates/atpl_notes/versions/atv_notes_2"]);
   });
 
   it("edit: a stored version that no longer passes shows the warning and its issues above the editor", async () => {
@@ -572,9 +573,26 @@ describe("application template editor pages", () => {
     expect(out).not.toContain('id="app-template-source"');
   });
 
-  it("edit: encodes the ids it sends upstream", async () => {
+  it("edit: an id that is not one path segment is notFound() without a template read", async () => {
     await expect(editPage({}, "a/b")).rejects.toThrow("NOT_FOUND");
-    expect(paths()).toEqual(["v1/admin/app-templates/a%2Fb"]);
+    expect(paths()).toEqual(["v1/me"]);
+  });
+
+  it.each([
+    ["flag off", envelope({ platformCapabilities: { applicationTemplatesAvailable: false } })],
+    ["flag absent", envelope({ platformCapabilities: {} })],
+    ["/v1/me failure", failed(500)],
+  ])("%s: both pages show the notice instead of the editor, after the capability read alone", async (_name, me) => {
+    for (const page of [() => NewAppTemplatePage(), () => editPage()]) {
+      fetchUpstream.mockClear();
+      route({ "v1/me": me });
+      const out = await render(page());
+      expect(paths()).toEqual(["v1/me"]);
+      expect(out).toContain(t.notAvailable);
+      expect(out).toContain('role="status"');
+      expect(out).not.toContain('id="app-template-source"');
+      expect(out).not.toContain("<button");
+    }
   });
 
   it("both pages speak Italian", async () => {

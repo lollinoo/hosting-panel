@@ -2964,6 +2964,8 @@ x-hp-ingress:
       installing: "Installazione in corso…",
       secretFailed: "L'applicazione è stata creata ma un valore riservato non è stato salvato. Riprova o impostalo dalla pagina dell'applicazione.",
       openApp: "Apri l'applicazione",
+      domainInvalid: "Scrivi solo il nome dell'indirizzo, per esempio shop.example.com, senza http:// né percorsi.",
+      domainRepeated: "Questo indirizzo è già nell'elenco.",
     },
     status: {
       draft: "Bozza",
@@ -3194,6 +3196,8 @@ x-hp-ingress:
       already_current: "È già il rilascio in uso.",
       unknown_ingress: "Questo indirizzo non può puntare a quel componente.",
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
+      PARAM_VALUE_NOT_CUSTOMER: "Questa impostazione la decide l'applicazione: non si può cambiare.",
+      draftUnpublished: "Questa versione non si può più installare. Elimina questa bozza e installa di nuovo l'applicazione: una bozza non ha dati, quindi non perdi nulla.",
     },
     codes: {
       RESOURCE_LOCKED: "L'applicazione sta completando un'altra modifica: attendi e riprova.",

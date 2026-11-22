@@ -12,6 +12,7 @@ export default async function AppsPage() {
   const ctx = await getCustomerContext();
   const locale = await getRequestLocale();
   const m = getMessages(locale);
+  if (ctx.loadError) return <LoadError m={m} />;
   const gate = appsGate(ctx);
   if (gate) return <AppsUnavailable m={m} reason={gate} />;
   if (!ctx.orgId) return <LoadError m={m} />;

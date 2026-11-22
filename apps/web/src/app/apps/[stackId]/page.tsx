@@ -30,6 +30,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
   const ctx = await getCustomerContext();
   const locale = await getRequestLocale();
   const m = getMessages(locale);
+  if (ctx.loadError) return <LoadError m={m} />;
   const gate = appsGate(ctx);
   if (gate) return <AppsUnavailable m={m} reason={gate} />;
   if (!ctx.orgId) return <LoadError m={m} />;
@@ -97,7 +98,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         <AppStackHistory deployments={deployments} m={m} locale={locale} />
       </Section>
       <Section id="danger" title={d.section.danger}>
-        <AppStackDelete {...ids} stackName={s.name} hasData={s.volumes.length > 0} />
+        <AppStackDelete {...ids} stackName={s.name} hasData={s.volumes.length > 0} status={s.status} />
       </Section>
     </div>
   );

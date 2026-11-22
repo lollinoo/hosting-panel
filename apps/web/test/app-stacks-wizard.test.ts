@@ -240,6 +240,24 @@ describe("wizardErrorView", () => {
     expect(wizardErrorView(en, "QUOTA_EXCEEDED", [])).toEqual({ error: en.apps.codes.QUOTA_EXCEEDED, fieldErrors: {}, step: null });
     expect(wizardErrorView(en, "", []).error).toBe(en.errors.generic);
   });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("an address held by someone else that names no row goes back to the addresses step with its sentence (%s)", (_l, m) => {
+    expect(wizardErrorView(m, "DOMAIN_CONFLICT", [])).toEqual({ error: m.apps.codes.DOMAIN_CONFLICT, fieldErrors: {}, step: "domains" });
+    expect(wizardErrorView(m, "CERTIFICATE_IN_USE", [{ field: "hostname" }])).toEqual({ error: m.apps.codes.CERTIFICATE_IN_USE, fieldErrors: {}, step: "domains" });
+    expect(wizardErrorView(m, "DOMAIN_CONFLICT", [{ field: "name", reason: "name_taken" }]).step).toBe("configure");
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("a setting only the application decides reads as its own sentence on that field (%s)", (_l, m) => {
+    const view = wizardErrorView(m, "VALIDATION_ERROR", [{ field: "parameters.port", reason: "PARAM_VALUE_NOT_CUSTOMER" }]);
+    expect(view.fieldErrors).toEqual({ "param:port": m.apps.reasons.PARAM_VALUE_NOT_CUSTOMER });
+    expect(view.error).toBe(m.apps.reasons.PARAM_VALUE_NOT_CUSTOMER);
+  });
 });
 
 describe("AppWizard markup", () => {
@@ -267,6 +285,7 @@ describe("AppWizard markup", () => {
     }
     expect(out).toContain(t.secretHint);
     expect(out).not.toContain(t.secretKept);
+    for (const key of ["admin_password", "api_token"]) expect(out).toMatch(new RegExp(`<input[^>]*id="app-param-${key}"[^>]*maxLength="16384"`));
   });
 
   it("configure: a field error is aria-invalid with its text; a private value typed before a step back is said to be kept", () => {
@@ -324,6 +343,23 @@ describe("AppWizard markup", () => {
     const single = html(wizard({ 0: "domains", 4: rows }, {}, { ...ENTRY, ingress: [ENTRY.ingress[0]!] }).tree);
     expect(single).not.toContain("app-domain-0-target");
     expect(html(wizard({ 0: "domains" }, {}, { ...ENTRY, ingress: [] }).tree)).toContain(t.noDomains);
+  });
+
+  it("Next on the addresses step checks each address like the server and names repeats; blank rows are skipped, the step stays", () => {
+    const rows = [
+      { hostname: "https://shop.example.com", target: 0 },
+      { hostname: " ", target: 0 },
+      { hostname: "Shop.example.com", target: 0 },
+      { hostname: "shop.example.com.", target: 1 },
+      { hostname: "shop", target: 0 },
+    ];
+    const { tree, sets } = wizard({ 0: "domains", 4: rows });
+    click(tree, t.next);
+    expect(sets).toEqual([[5, { "domain:0": t.domainInvalid, "domain:3": t.domainRepeated, "domain:4": t.domainInvalid }]]);
+    const ok = wizard({ 0: "domains", 4: [{ hostname: " Shop.Example.com ", target: 0 }, { hostname: "", target: 0 }, { hostname: "bücher.example.test", target: 1 }] });
+    click(ok.tree, t.next);
+    expect(ok.sets).toContainEqual([5, {}]);
+    expect(ok.sets).toContainEqual([0, "review"]);
   });
 
   it("review: values or defaults, «Set» for a typed private value, never the value itself, at any step", () => {
@@ -404,6 +440,16 @@ describe("AppWizard install", () => {
     expect(router.push).not.toHaveBeenCalled();
   });
 
+  it("an address in use with no row named goes back to the addresses step with its sentence", async () => {
+    answer({ [BASE]: [refusal(409, "DOMAIN_CONFLICT")] });
+    const { tree, sets } = wizard({ ...ready, 3: [] }, {}, NO_SECRETS);
+    await click(tree, t.install);
+    expect(sets).toContainEqual([0, "domains"]);
+    expect(sets).toContainEqual([6, en.apps.codes.DOMAIN_CONFLICT]);
+    expect(sets).toContainEqual([7, false]);
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
   it("keeps the create key after a lost reply or a 5xx, renews it after a 4xx", async () => {
     const keys = { current: {} as Record<string, string> };
     answer({ [BASE]: ["network", refusal(503, "UPSTREAM_UNAVAILABLE"), refusal(409, "ALREADY_EXISTS", [{ field: "name", reason: "name_taken" }]), accepted(202)] });
@@ -452,6 +498,13 @@ describe("AppWizard install", () => {
     expect(sets).toContainEqual([6, appStackRefusalText(en, "VALIDATION_ERROR", "STACK_SECRET_MISSING")]);
     expect(router.push).not.toHaveBeenCalled();
   });
+
+  it("a draft whose version is no longer offered says to delete it and install again", async () => {
+    answer({ [`${BASE}/stk_a1/deploy`]: [refusal(400, "VALIDATION_ERROR", [{ field: "templateVersionId", reason: "STACK_TEMPLATE_UNPUBLISHED" }])] });
+    const { tree, sets } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1" });
+    await click(tree, t.retry);
+    expect(sets).toContainEqual([6, en.apps.reasons.draftUnpublished]);
+  });
 });
 
 describe("wizard page", () => {
@@ -476,6 +529,17 @@ describe("wizard page", () => {
     fetchUpstream.mockClear();
     mockData.getCustomerContext.mockResolvedValue({ session: { csrfToken: "csrf" }, orgId: ORG, loadError: false, capabilities: null, support: null });
     expect(html(await page())).toContain(en.apps.unavailable.off);
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("a failed session read is the load error, not the «off» notice; an id that is not one path segment is not found; neither reads", async () => {
+    mockData.getCustomerContext.mockResolvedValue({ session: { csrfToken: "csrf" }, orgId: null, loadError: true, capabilities: null, support: null });
+    const h = html(await page());
+    expect(h).toContain(en.shell.loadErrorTitle);
+    expect(h).not.toContain(en.apps.unavailable.title);
+    mockData.getCustomerContext.mockResolvedValue({ session: { csrfToken: "csrf" }, orgId: ORG, loadError: false, capabilities: { applicationStacksAvailable: true }, support: null });
+    for (const templateId of ["..", ".", "a/b"])
+      await expect(AppWizardPage({ params: Promise.resolve({ templateId }) }), templateId).rejects.toThrow("NEXT_NOT_FOUND");
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 });

@@ -48,6 +48,10 @@ export function AppStackActions({
   const [error, setError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
   const [plan, setPlan] = useState<"upgrade" | "rollback" | null>(null);
+  // A key kept after a lost reply serves only a retry from the status it was sent from: the API replays a known key forever.
+  useEffect(() => {
+    keys.current = {};
+  }, [status]);
   const base = `/api/bff/orgs/${orgId}/app-stacks/${stackId}`;
   const target: PlanTarget | null =
     plan === "upgrade" && upgrade ? { templateVersionId: upgrade.templateVersionId } : plan === "rollback" && rollback ? { revisionId: rollback.revisionId } : null;
@@ -59,14 +63,14 @@ export function AppStackActions({
     setBusy(action);
     setNotice(null);
     setError(null);
-    const sent = await keyedSend(keys.current, csrfToken, action, "POST", `${base}/${action}`, body);
+    const sent = await keyedSend(keys.current, csrfToken, `${action}:${status}`, "POST", `${base}/${action}`, body);
     busyRef.current = false;
     setBusy(null);
     if (sent.ok && typeof (sent.data as { data?: { operationId?: unknown } } | null)?.data?.operationId === "string") {
       setNotice(t.accepted);
       router.refresh();
     } else if (sent.ok) setError(appStackRefusalText(m, ""));
-    else if (sent.reason !== "plan_changed") setError(appStackRefusalText(m, sent.code, sent.reason)); // the plan dialog plans again
+    else if (sent.reason !== "plan_changed") setError(appStackRefusalText(m, sent.code, sent.reason, status)); // the plan dialog plans again
     return sent;
   }
 

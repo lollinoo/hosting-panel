@@ -5,7 +5,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   APP_TEMPLATE_LIMITS,
+  AppStackDomainEntrySchema,
   MAX_APP_STACK_DOMAINS,
+  SetAppStackSecretInputSchema,
   type AppTemplateParameter,
   type AppTemplateParameterEntry,
   type CustomerAppTemplateDto,
@@ -56,6 +58,8 @@ const fieldOf = (field: string | undefined): [string, WizardStep] | null => {
   const domain = field?.match(/^domains\.(\d+)\.hostname$/);
   return domain ? [`domain:${domain[1]}`, "domains"] : null;
 };
+/** Refusals about an address that may name no row: they belong to the addresses step. */
+const ADDRESS_CODES = new Set(["DOMAIN_CONFLICT", "CERTIFICATE_IN_USE"]);
 
 /** Error envelope → {error, fieldErrors, step}: the first located field decides the step. */
 export function wizardErrorView(
@@ -71,6 +75,7 @@ export function wizardErrorView(
     fieldErrors[at[0]] = appStackRefusalText(m, code, d.reason);
     step ??= at[1];
   }
+  if (step === null && ADDRESS_CODES.has(code)) step = "domains";
   return { error: appStackRefusalText(m, code, details[0]?.reason), fieldErrors, step };
 }
 
@@ -137,6 +142,18 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       if (!name.trim()) errors.name = t.required;
       for (const k of missingSecretKeys(params, new Set(typedSecrets))) errors[`param:${k}`] = t.required;
     }
+    if (step === "domains") {
+      // The same hostname rules the server applies, so a refusal never lands on a step without the field.
+      const seen = new Set<string>();
+      domains.forEach((r, i) => {
+        const raw = r.hostname.trim().toLowerCase();
+        if (!raw) return;
+        const parsed = AppStackDomainEntrySchema.shape.hostname.safeParse(raw);
+        if (!parsed.success) errors[`domain:${i}`] = t.domainInvalid;
+        else if (seen.has(parsed.data)) errors[`domain:${i}`] = t.domainRepeated;
+        else seen.add(parsed.data);
+      });
+    }
     setFieldErrors(errors);
     if (Object.keys(errors).length > 0) return;
     // Rows and the sent list keep the same indexes, so a refusal on domains.<i> points at row i.
@@ -186,7 +203,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     }
     const r = await post(keys.current, csrfToken, "deploy", `${at}/deploy`, {});
     if (!r.ok) {
-      setError(appStackRefusalText(m, r.data?.error?.code ?? "", r.data?.error?.details?.[0]?.reason));
+      setError(appStackRefusalText(m, r.data?.error?.code ?? "", r.data?.error?.details?.[0]?.reason, "draft"));
       setBusy(false);
       return;
     }
@@ -205,7 +222,16 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
     let note: string;
     if (p.type === "secret") {
       note = typedSecrets.includes(p.key) ? `${t.secretHint} ${t.secretKept}` : t.secretHint;
-      control = <Input {...common} type="password" autoComplete="new-password" spellCheck={false} onChange={(e) => typeSecret(p.key, e.target.value)} />;
+      control = (
+        <Input
+          {...common}
+          type="password"
+          autoComplete="new-password"
+          spellCheck={false}
+          maxLength={SetAppStackSecretInputSchema.shape.value.maxLength ?? undefined}
+          onChange={(e) => typeSecret(p.key, e.target.value)}
+        />
+      );
     } else {
       note = format(t.defaultValue, { value: String(p.default) });
       control =

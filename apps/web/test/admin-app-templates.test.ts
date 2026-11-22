@@ -504,9 +504,9 @@ describe("detail page", () => {
     expect(out).toContain(">team-board<");
   });
 
-  it("encodes the id it sends upstream", async () => {
+  it("an id that is not one path segment is notFound() with no template read", async () => {
     await expect(page("a/b")).rejects.toThrow("NOT_FOUND");
-    expect(paths()).toContain("v1/admin/app-templates/a%2Fb");
+    expect(paths().filter((p) => p.includes("a%2Fb") || p.includes("a/b"))).toEqual([]);
   });
 
   it("renders notFound() for a 404", async () => {

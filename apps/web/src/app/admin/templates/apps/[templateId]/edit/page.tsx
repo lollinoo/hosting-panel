@@ -3,7 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { fetchServerAdminAppTemplate, fetchServerAdminAppTemplateVersion } from "@/lib/server-api";
+import { fetchServerAdminAppTemplate, fetchServerAdminAppTemplateVersion, fetchServerMe } from "@/lib/server-api";
 import { getServerSession } from "@/lib/server-session";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AppIssueList, AppTemplateEditor } from "@/components/admin/app-template-editor";
@@ -23,17 +23,18 @@ export default async function EditAppTemplatePage({
   if (!session) redirect("/login");
   const { templateId } = await params;
   const query = (await searchParams)?.version;
-  const m = await getRequestLocale().then(getMessages);
+  const [m, me] = await Promise.all([getRequestLocale().then(getMessages), fetchServerMe()]);
   const t = m.admin.appTemplates;
+  const off = (
+    <Alert variant="warning" role="status">
+      <AlertDescription>{t.notAvailable}</AlertDescription>
+    </Alert>
+  );
+  if (me?.platformCapabilities.applicationTemplatesAvailable !== true) return off;
 
   const detail = await fetchServerAdminAppTemplate(templateId);
   if (!detail.ok && detail.outcome === "notFound") notFound();
-  if (!detail.ok && detail.code === "NOT_SUPPORTED")
-    return (
-      <Alert variant="warning" role="status">
-        <AlertDescription>{t.notAvailable}</AlertDescription>
-      </Alert>
-    );
+  if (!detail.ok && detail.code === "NOT_SUPPORTED") return off;
   const baseId = detail.ok
     ? typeof query === "string" && query !== ""
       ? query

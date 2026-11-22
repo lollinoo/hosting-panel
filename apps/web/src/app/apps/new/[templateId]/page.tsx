@@ -10,6 +10,7 @@ import { getCustomerContext } from "@/app/sites/data";
 export default async function AppWizardPage({ params }: { params: Promise<{ templateId: string }> }) {
   const ctx = await getCustomerContext();
   const m = getMessages(await getRequestLocale());
+  if (ctx.loadError) return <LoadError m={m} />;
   const gate = appsGate(ctx);
   if (gate) return <AppsUnavailable m={m} reason={gate} />;
   if (!ctx.orgId) return <LoadError m={m} />;

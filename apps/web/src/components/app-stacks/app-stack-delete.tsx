@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { appStackEnqueueTarget, type AppStackStatus } from "@hosting-panel/contracts";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -23,12 +24,14 @@ export function AppStackDelete({
   csrfToken,
   stackName,
   hasData,
+  status,
 }: {
   orgId: string;
   stackId: string;
   csrfToken: string;
   stackName: string;
   hasData: boolean;
+  status?: AppStackStatus;
 }) {
   const m = useMessages();
   const t = m.apps.delete;
@@ -68,7 +71,7 @@ export function AppStackDelete({
 
   return (
     <>
-      <Button type="button" variant="destructive" onClick={show}>
+      <Button type="button" variant="destructive" disabled={!status || appStackEnqueueTarget("stack.delete", status) === null} onClick={show}>
         {t.open}
       </Button>
       <Dialog open={open} onOpenChange={(o) => !o && !busy && setOpen(false)}>

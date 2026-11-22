@@ -75,11 +75,27 @@ describe("application refusal texts", () => {
     expect(appStackRefusalText(itMsgs, "RESOURCE_LOCKED", "stopped")).toBe("Non è possibile ora: l'applicazione è nello stato «Ferma».");
   });
 
-  it.each(locales)("%s: appStackProblemText says why for a STACK_* reason, a generic line otherwise", (_n, m) => {
+  it.each(locales)("%s: appStackProblemText says why for a STACK_* reason or a code with its own sentence, a generic line otherwise", (_n, m) => {
     expect(appStackProblemText(m, null)).toBeNull();
     for (const r of APP_STACK_REASONS) expect(appStackProblemText(m, r), r).toBe((m.apps.reasons as Record<string, string>)[r]);
-    for (const p of ["DOCKER_ENGINE_UNAVAILABLE", "OPERATION_INTERRUPTED", "OPERATION_AMBIGUOUS", "name_taken"])
-      expect(appStackProblemText(m, p), p).toBe(m.apps.history.problemGeneric);
+    for (const c of CODES) expect(appStackProblemText(m, c), c).toBe((m.apps.codes as Record<string, string>)[c]);
+    expect(appStackProblemText(m, "OPERATION_AMBIGUOUS")).not.toBe(m.apps.history.problemGeneric);
+    for (const p of ["OPERATION_INTERRUPTED", "name_taken", "constructor"]) expect(appStackProblemText(m, p), p).toBe(m.apps.history.problemGeneric);
+  });
+
+  it.each(locales)("%s: a setting only the application decides has its own sentence", (_n, m) => {
+    const text = appStackRefusalText(m, "VALIDATION_ERROR", "PARAM_VALUE_NOT_CUSTOMER");
+    expect(text).toBe(m.apps.reasons.PARAM_VALUE_NOT_CUSTOMER);
+    expect(text).not.toBe(errorMessage(m, "VALIDATION_ERROR"));
+    expect(text).not.toBe(m.apps.reasons.STACK_PARAMETER_INVALID);
+  });
+
+  it.each(locales)("%s: a draft whose version is no longer offered says to remove it and install again; any other status keeps the general text", (_n, m) => {
+    expect(appStackRefusalText(m, "VALIDATION_ERROR", "STACK_TEMPLATE_UNPUBLISHED", "draft")).toBe(m.apps.reasons.draftUnpublished);
+    expect(m.apps.reasons.draftUnpublished).not.toBe(m.apps.reasons.STACK_TEMPLATE_UNPUBLISHED);
+    for (const status of ["running", "stopped", "failed"] as const)
+      expect(appStackRefusalText(m, "VALIDATION_ERROR", "STACK_TEMPLATE_UNPUBLISHED", status), status).toBe(m.apps.reasons.STACK_TEMPLATE_UNPUBLISHED);
+    expect(appStackRefusalText(m, "VALIDATION_ERROR", "STACK_SECRET_MISSING", "draft")).toBe(m.apps.reasons.STACK_SECRET_MISSING);
   });
 });
 

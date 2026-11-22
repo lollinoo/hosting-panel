@@ -2936,6 +2936,8 @@ x-hp-ingress:
       installing: "Installing…",
       secretFailed: "The application was created but a private value was not saved. Try again or set it from the application page.",
       openApp: "Open the application",
+      domainInvalid: "Write the address name only, for example shop.example.com, without http:// or a path.",
+      domainRepeated: "This address is already in the list.",
     },
     status: {
       draft: "Draft",
@@ -3166,6 +3168,8 @@ x-hp-ingress:
       already_current: "It is already the release in use.",
       unknown_ingress: "This address cannot point at that component.",
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
+      PARAM_VALUE_NOT_CUSTOMER: "The application decides this setting: it cannot be changed.",
+      draftUnpublished: "This version can no longer be installed. Delete this draft and install the application again: a draft has no data, so nothing is lost.",
     },
     codes: {
       RESOURCE_LOCKED: "The application is finishing another change: wait and try again.",

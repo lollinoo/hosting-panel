@@ -138,6 +138,7 @@ const internals = (React as unknown as Record<string, { H: unknown }>).__CLIENT_
 function callHooks<P>(C: (p: P) => ReactNode, props: P, m: Messages = en, state: Record<number, unknown> = {}) {
   let s = 0;
   const sets: Array<[number, unknown]> = [];
+  const effects: Array<() => unknown> = [];
   const ctx = { locale: m === en ? "en" : "it", messages: m };
   const prev = internals.H;
   internals.H = {
@@ -146,11 +147,11 @@ function callHooks<P>(C: (p: P) => ReactNode, props: P, m: Messages = en, state:
       return [k in state ? state[k] : v, (x: unknown) => void sets.push([k, x])];
     },
     useRef: (v: unknown) => ({ current: v }),
-    useEffect: () => undefined,
+    useEffect: (f: () => unknown) => void effects.push(f),
     useContext: () => ctx,
   };
   try {
-    return { out: C(props), sets };
+    return { out: C(props), sets, effects };
   } finally {
     internals.H = prev;
   }
@@ -204,6 +205,28 @@ describe("detail page", () => {
       expect(await page()).toContain(text);
     }
     expect(reads()).toEqual([]);
+  });
+
+  it("a failed session read is the load error, not the «off» notice, and reads no application", async () => {
+    mockData.getCustomerContext.mockResolvedValue(context({ loadError: true, orgId: null, capabilities: null }));
+    const h = await page();
+    expect(h).toContain(en.shell.loadErrorTitle);
+    expect(h).not.toContain(en.apps.unavailable.title);
+    expect(reads()).toEqual([]);
+  });
+
+  it("an id that is not one path segment is not found and nothing is read", async () => {
+    for (const stackId of ["..", ".", "a/b", "stk_a1%2F.."]) {
+      await expect(AppStackPage({ params: Promise.resolve({ stackId }) }), stackId).rejects.toThrow("NEXT_NOT_FOUND");
+    }
+    expect(reads()).toEqual([]);
+  });
+
+  it("the delete button is offered only while a delete may be queued", async () => {
+    const open = new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${en.apps.delete.open}<`);
+    expect(await page()).not.toMatch(open);
+    answer({ [UP]: ok({ ...DETAIL, status: "deleting" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    expect(await page()).toMatch(open);
   });
 
   it("reads the application, its history and its addresses and renders every section in order", async () => {
@@ -312,6 +335,24 @@ describe("sections", () => {
     expect(html(AppStackHistory({ deployments: null, m: en, locale: "en" }))).toContain(en.apps.detail.sectionError);
     expect(html(AppStackHistory({ deployments: [], m: en, locale: "en" }))).toContain(en.apps.history.empty);
   });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("history: an outcome to be verified never reads as failed; the generic failure line is for a failed entry only (%s)", (locale, m) => {
+    const base = DEPLOYMENTS[1]!;
+    const unknown: AppStackDeploymentDto[] = [
+      { ...base, id: "sdep_3", status: "unknown", problem: "OPERATION_AMBIGUOUS" },
+      { ...base, id: "sdep_4", status: "unknown", problem: "OPERATION_INTERRUPTED" },
+    ];
+    const h = html(AppStackHistory({ deployments: unknown, m, locale }), m);
+    expect(h).toContain(m.apps.history.status.unknown);
+    expect(h).toContain(m.apps.codes.OPERATION_AMBIGUOUS);
+    expect(h).not.toContain(m.apps.history.problemGeneric);
+    expect(h).not.toContain("text-destructive");
+    const failed = html(AppStackHistory({ deployments: [{ ...unknown[1]!, status: "failed" }], m, locale }), m);
+    expect(failed).toMatch(new RegExp(`class="text-destructive">${m.apps.history.problemGeneric}<`));
+  });
 });
 
 describe("private values", () => {
@@ -335,6 +376,7 @@ describe("private values", () => {
     for (const a of [/type="password"/, /autocomplete="new-password"/i, /spellcheck="false"/i, /aria-describedby="app-secret-value-note"/])
       expect(input).toMatch(a);
     expect(input).not.toMatch(/\svalue=/);
+    expect(input).toMatch(/maxLength="16384"/i);
     expect(h).toMatch(/<label[^>]*for="app-secret-value"/);
     expect(h).toContain(format(en.apps.secrets.newValue, { label: "Admin password" }));
     expect(h).toContain(`id="app-secret-value-note"`);
@@ -485,6 +527,16 @@ describe("web addresses", () => {
     expect(sets).toContainEqual([0, [DOMAIN, SECOND]]);
     expect(sets).toContainEqual([1, ""]);
     expect(router.refresh).toHaveBeenCalledOnce();
+  });
+
+  it("a refresh of the page brings fresh rows: statuses are not kept from the first answer", () => {
+    const fresh = { ...SECOND, status: "active", certificateStatus: "active" } as const;
+    const { sets, effects } = callHooks(AppStackDomains, props({ initial: [DOMAIN, fresh] }), en, { 0: [DOMAIN, SECOND] });
+    for (const f of effects) f();
+    expect(sets).toContainEqual([0, [DOMAIN, fresh]]);
+    const failed = callHooks(AppStackDomains, props({ initial: null }), en, { 0: [DOMAIN] });
+    for (const f of failed.effects) f();
+    expect(failed.sets).toEqual([]);
   });
 
   it("an address in use reads as DOMAIN_CONFLICT", async () => {

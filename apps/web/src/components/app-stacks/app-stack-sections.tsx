@@ -110,20 +110,25 @@ export function AppStackHistory({ deployments, m, locale }: { deployments: AppSt
   const when = (iso: string) => <time dateTime={iso}>{date.format(new Date(iso))}</time>;
   return (
     <ul className="divide-y rounded-md border text-sm">
-      {deployments.map((d) => (
-        <li key={d.id} className="space-y-1 p-3">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="font-medium">{t.kind[d.kind.slice("stack.".length) as keyof typeof t.kind]}</span>
-            <span>{t.status[d.status]}</span>
-            {d.revisionNumber !== null && <span className="text-muted-foreground">{format(m.apps.detail.releaseLine, { n: d.revisionNumber })}</span>}
-          </div>
-          <p className="flex flex-wrap gap-x-3 text-muted-foreground">
-            {when(d.startedAt)}
-            {d.endedAt && when(d.endedAt)}
-          </p>
-          {d.problem && <p className="text-destructive">{appStackProblemText(m, d.problem)}</p>}
-        </li>
-      ))}
+      {deployments.map((d) => {
+        // Only a failed entry reads as failed; an outcome to be verified keeps its own words.
+        const problem = appStackProblemText(m, d.problem);
+        const failed = d.status === "failed";
+        return (
+          <li key={d.id} className="space-y-1 p-3">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="font-medium">{t.kind[d.kind.slice("stack.".length) as keyof typeof t.kind]}</span>
+              <span>{t.status[d.status]}</span>
+              {d.revisionNumber !== null && <span className="text-muted-foreground">{format(m.apps.detail.releaseLine, { n: d.revisionNumber })}</span>}
+            </div>
+            <p className="flex flex-wrap gap-x-3 text-muted-foreground">
+              {when(d.startedAt)}
+              {d.endedAt && when(d.endedAt)}
+            </p>
+            {problem && (failed || problem !== t.problemGeneric) && <p className={failed ? "text-destructive" : "text-muted-foreground"}>{problem}</p>}
+          </li>
+        );
+      })}
     </ul>
   );
 }

@@ -209,6 +209,17 @@ describe("gate", () => {
     expect(broken).not.toContain(en.apps.unavailable.title);
   });
 
+  it.each([
+    ["/apps", AppsPage],
+    ["/apps/new", NewAppPage],
+  ])("%s: a failed session read is the load error, not the «off» notice, and reads nothing", async (_path, Page) => {
+    mockData.getCustomerContext.mockResolvedValue(context({ loadError: true, orgId: null, capabilities: null }));
+    const h = await render(Page);
+    expect(h).toContain(en.shell.loadErrorTitle);
+    expect(h).not.toContain(en.apps.unavailable.title);
+    expect(appReads()).toEqual([]);
+  });
+
   it("the notice reads in Italian too", () => {
     const h = html(createElement(AppsUnavailable, { m: itMsgs, reason: "support" }), itMsgs);
     expect(h).toContain(itMsgs.apps.unavailable.title);
