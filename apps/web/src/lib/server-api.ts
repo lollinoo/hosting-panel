@@ -47,6 +47,7 @@ import type {
   AdminAppTemplateDetailDto,
   AdminAppTemplateVersionDto,
   AdminAppTemplateUsageDto,
+  AdminAppStacksDto,
   CustomerAppTemplatesDto,
   CustomerAppTemplateDto,
   AppStackSummaryDto,
@@ -323,6 +324,10 @@ export async function fetchServerAdminAppTemplateVersion(
 export async function fetchServerAdminAppTemplateUsage(templateId: string): Promise<ServerResult<AdminAppTemplateUsageDto>> {
   if (!segments(templateId)) return NOT_ONE_SEGMENT;
   return serverGet<AdminAppTemplateUsageDto>(`v1/admin/app-templates/${enc(templateId)}/usage`);
+}
+
+export async function fetchServerAdminAppStacks(): Promise<ServerResult<AdminAppStacksDto>> {
+  return serverGet<AdminAppStacksDto>("v1/admin/app-stacks");
 }
 
 export async function fetchServerOrgAppTemplates(orgId: string): Promise<ServerResult<CustomerAppTemplatesDto>> {
