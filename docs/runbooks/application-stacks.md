@@ -2,7 +2,8 @@
 
 Operator procedures for application stacks (`ADR-0035`). Design record:
 `docs/architecture/adr/0035-application-stacks.md`. Acceptance evidence and what is still pending:
-`docs/security/hcp-spec-005-acceptance-report.md`.
+`docs/security/hcp-spec-005-acceptance-report.md`. The routing options of a stack's addresses (`ADR-0037`,
+`docs/architecture/adr/0037-application-routing-options.md`) are procedure 10.
 
 `<stackId>` is the id in the address of the application page (`/apps/<stackId>`, it starts with `stk_`);
 `<componentKey>` and `<volumeKey>` are the names the template gives a component and a volume. The database commands
@@ -137,7 +138,17 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    restart, no route change), and their volumes stay on the server. Upgrading again brings the panel's view back.
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
-5. The automatic rollback of a failed update stays ungated: migration `0025` is additive.
+5. The automatic rollback of a failed update stays ungated: migrations `0025` and `0026` are additive.
+6. **Routing options (`ADR-0037`).** The same command also exits with **code 8** when the target release does not
+   list the feature `app-routing-options` and an address redirects, is protected by a password or has a path rule.
+   Compression alone does not count. See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, hostname, redirect_to_domain_id is not null as redirects, access_username is not null as protected, jsonb_array_length(path_routes) as paths from app_stack_domains where redirect_to_domain_id is not null or access_username is not null or path_routes <> '[]'::jsonb"
+   ```
+   To go back without forcing: switch those options off on each address (procedure 10). With `--allow-feature-loss`
+   an older release that still manages the stacks writes the route files without the options at its next route
+   refresh: **a protected address becomes public**, a redirecting address serves the application and the path rules
+   stop. The rows keep the options; after upgrading again they apply at the next route refresh.
 
 ## 5. Restore the panel on a new server
 
@@ -226,3 +237,51 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo docker network ls --filter name=swarmtest_
    sudo docker volume ls --filter name=swarmtest_
    ```
+6. The routing options (`ADR-0037`) have their own check, `infra/linux/accept-app-routing-options.mjs`:
+   ```bash
+   node infra/linux/accept-app-routing-options.mjs
+   ```
+   It deploys no stack. It writes a route file with the production writer, starts a throw-away proxy from
+   `traefik:v3.7` on `127.0.0.1:16880` and `127.0.0.1:16843` and two small web containers, and asks the proxy what a
+   visitor would get (redirect, password, compression, path rules): once as a server without Let's Encrypt, once
+   with it. Unlike the scripts above it uses the `docker` command line behind a name check, not a gate socket. It
+   creates only objects named `hp_swarmtest_rt_<hex>…` or `hp_app_stk_swarmtest_<hex>_…`, puts no label on them (a
+   live panel never adopts them) and removes them at the end, also on Ctrl-C. It needs `traefik:v3.7` and the web
+   image of the built-in «HTTP + cache» template already on the machine (`SKIP … nothing was created` otherwise) and
+   both ports free. In the second pass the certificate authority is a closed local port on purpose, so no
+   certificate request leaves the machine: the `INFO` line counts the proxy's error lines about it, and they are
+   expected. A `FAIL` of `foreign-containers-untouched` names a container that was on the machine before the run
+   and whose networks changed, or that is gone: look at it before anything else.
+
+## 10. Routing options of an address
+
+Each web address of a stack has four options (`ADR-0037`): a redirect to another address of the same stack, password
+protection (the browser asks a user name and a password), compression, and up to four path rules that send a
+sub-path such as `/api` to another component and port of the same stack. A customer owner or a hosting administrator
+of the organisation (`app.update`) changes them on the application page, **Opzioni** next to the address. The server
+administrator's console has no such action, and nobody writes proxy configuration.
+
+1. **When a change applies.** Saving stores the options and asks for a route refresh of that stack at once; the
+   panel's periodic check of the applications (every minute by default) asks again when the first try could not.
+   The refresh is a short action on the stack that rewrites `app_<stackId>.yml`: the proxy reads the file again by
+   itself and no container is restarted. An option change does not wait the five minutes of a health-only change.
+   No refresh is queued while the stack is stopped, has an action in progress or has a newer version waiting to be
+   deployed, nor for ten minutes after a failed action: the options apply once that is over.
+2. **See the options of a stack** (read-only; the query leaves the verifier column out on purpose):
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, hostname, redirect_to_domain_id, compression, access_username, path_routes from app_stack_domains where stack_id = '<stackId>' order by hostname"
+   ```
+3. **The password.** The panel keeps only a verifier of it (it starts with `$apr1$`), in the database row and in the
+   route file; nobody can read the password back. A forgotten password is replaced from **Opzioni** with a new one of
+   at least 12 characters. Never paste `app_<stackId>.yml` or the column `access_password_hash` into a ticket: a
+   verifier can be attacked offline. The application never receives the user name or the password.
+4. **The password travels in clear over HTTP** until the address has a usable certificate, and always on a server
+   without Let's Encrypt; the options dialog says so on such an address. Once the certificate is usable, HTTP only
+   sends the visitor to HTTPS and asks nothing.
+5. **A redirect** is permanent and keeps path and query. The redirecting address is published only while its
+   destination is. Removing the destination clears the redirect, and the address serves the application again. A
+   redirecting address has no password and no path rule of its own: set them on the destination.
+6. **A path rule whose target is not ready** (its component is not healthy, or a newer template version no longer
+   has that port) is not published: requests under that path reach the address's main component until the target
+   reads healthy again. The dialog marks a target that left the template as «Non più disponibile».
+7. **Downgrade:** procedure 4, step 6. **The real-Docker check:** procedure 9, step 6.
