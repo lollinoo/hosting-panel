@@ -5090,7 +5090,7 @@ paths:
       operationId: adminCreateAppTemplate
       summary: Create an application template with its first version, as a draft (server administrator only; audited as admin.app_template.create)
       description: >-
-        The source is an `HCP-STACK/v1` document; its `x-hp-stack` header gives the name, the description and the
+        The source is an `HCP-STACK/v1` or `HCP-STACK/v2` document; its `x-hp-stack` header gives the name, the description and the
         category, which PATCH may change later. A source with problems is refused with `VALIDATION_ERROR`
         ("The template is not valid.") and up to 20 `details` (`field` is the path in the document or `source`,
         `reason` the problem's reason, `message` its line and column). The audit row never carries the source.
@@ -12716,8 +12716,8 @@ components:
           maxLength: 300
           description: Fixed English text; never echoes a value
 
-    AppTemplateParameter:
-      description: A typed parameter of a template, by `type`. A `secret` parameter has no default and is set by the customer, write-only.
+    AppTemplateValueParameter:
+      description: A typed parameter with a default, by `type`
       oneOf:
         - type: object
           required: [key, label, type, options, default, customer]
@@ -12766,6 +12766,14 @@ components:
             type: { type: string, enum: [size] }
             default: { type: string, pattern: "^[1-9][0-9]{0,4}[KMG]$" }
             customer: { type: boolean }
+
+    AppTemplateParameter:
+      description: >-
+        A parameter the customer may set, by `type`. A `secret` parameter has no default and is set by the customer,
+        write-only. A secret the platform generates (`HCP-STACK/v2`) is never listed here, whether or not the customer
+        may replace it.
+      oneOf:
+        - $ref: "#/components/schemas/AppTemplateValueParameter"
         - type: object
           required: [key, label, type, required, customer]
           properties:
@@ -12774,6 +12782,39 @@ components:
             type: { type: string, enum: [secret] }
             required: { type: boolean }
             customer: { type: boolean, enum: [true] }
+
+    AppSecretGenerate:
+      type: object
+      additionalProperties: false
+      required: [kind, length]
+      description: >-
+        How the platform makes a secret nobody types (`HCP-STACK/v2`). `length` counts characters, except for `base64`
+        where it counts the random bytes before encoding; the bounds are 16 to 128 for `password` and `hex`, 16 to 96
+        for `base64` and 8 to 32 for `user`. The value is made at installation and never returned.
+      properties:
+        kind: { type: string, enum: [password, hex, base64, user] }
+        length: { type: integer, minimum: 8, maximum: 128 }
+
+    AdminAppTemplateParameter:
+      description: >-
+        A parameter as the template declares it, by `type` (server administrator only). A `secret` parameter of an
+        `HCP-STACK/v1` template has no `generate` and is set by the customer. In `HCP-STACK/v2` it always has
+        `generate`: `null` when the customer sets it (`customer` is then `true`), otherwise how the platform makes it at
+        installation; a generated secret is always `required`, and `customer` says whether the customer may replace it.
+      oneOf:
+        - $ref: "#/components/schemas/AppTemplateValueParameter"
+        - type: object
+          required: [key, label, type, required, customer]
+          properties:
+            key: { $ref: "#/components/schemas/AppTemplateParameterKey" }
+            label: { type: string, minLength: 1, maxLength: 80 }
+            type: { type: string, enum: [secret] }
+            required: { type: boolean }
+            customer: { type: boolean }
+            generate:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/AppSecretGenerate"
 
     AppStackHealthcheck:
       description: A closed tcp or http check on the component's own address; `timeoutSeconds` never exceeds `intervalSeconds`
@@ -12846,6 +12887,43 @@ components:
             properties:
               envName: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
               parameterKey: { $ref: "#/components/schemas/AppTemplateParameterKey" }
+        profile:
+          type: string
+          enum: [strict, standard]
+          description: >-
+            The closed container body the component runs with; present only for an `HCP-STACK/v2` template (a v1
+            component always runs as `strict`). What a name allows is fixed by the platform: no template names a
+            capability, a user or a mount option.
+        secretEnvironment:
+          type: array
+          maxItems: 64
+          description: >-
+            The variables whose value holds a secret, present only for an `HCP-STACK/v2` template; sorted by unique
+            name. Each value is told as its pieces, in order: the template's own text, or the key of the secret
+            parameter that fills that place. Never a secret value.
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, pieces]
+            properties:
+              name: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
+              pieces:
+                type: array
+                minItems: 1
+                maxItems: 9
+                description: At most 4 of the pieces name a secret parameter, and two pieces of text never follow each other
+                items:
+                  oneOf:
+                    - type: object
+                      additionalProperties: false
+                      required: [literal]
+                      properties:
+                        literal: { type: string, minLength: 1, maxLength: 4096 }
+                    - type: object
+                      additionalProperties: false
+                      required: [parameterKey]
+                      properties:
+                        parameterKey: { $ref: "#/components/schemas/AppTemplateParameterKey" }
         resources:
           type: object
           required: [cpuMilli, memoryBytes]
@@ -12908,7 +12986,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes
 
     ImportComposeInput:
       type: object
@@ -12940,7 +13018,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes; its header gives the name, description and category
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes; its header gives the name, description and category
 
     AddAppTemplateVersionInput:
       type: object
@@ -12950,7 +13028,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes
         makeDefault:
           type: boolean
           default: false
@@ -12999,7 +13077,7 @@ components:
           type: array
           description: Every parameter the source declares; empty when not valid
           items:
-            $ref: "#/components/schemas/AppTemplateParameter"
+            $ref: "#/components/schemas/AdminAppTemplateParameter"
         preview:
           nullable: true
           description: "`null` when the source is not valid"
@@ -13166,7 +13244,7 @@ components:
           format: date-time
         source:
           type: string
-          description: The `HCP-STACK/v1` document, as saved
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, as saved
         valid:
           type: boolean
           description: Whether the stored source passes today's checks
@@ -13177,7 +13255,7 @@ components:
         parameters:
           type: array
           items:
-            $ref: "#/components/schemas/AppTemplateParameter"
+            $ref: "#/components/schemas/AdminAppTemplateParameter"
         preview:
           nullable: true
           allOf:
