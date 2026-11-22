@@ -317,3 +317,20 @@ Source: the owner's feedback after the demo and the lead rulings L22–L31 of ru
 - **L29 Unchanged rules.** No new npm dependency or environment variable; WordPress behaviour, API contracts (apart from the additive reads of L27 and L31), database and executor untouched; nothing copied from other panels; customer pages never read an organisation id from the address.
 - **L30 Documents.** README, HARNESS, runbooks, `ADR-0035` (approved, §2.16), the acceptance report and `.agents/brain` use the new names where they tell an operator where to click; README still does not contain the spec's id.
 - **L31 A WordPress row shows its web address.** A second additive read-only route, `GET /v1/organizations/:orgId/managed-sites` (`site.read`, the same sites the customer can already read, at most 200, with the primary domain), feeds the address column of `/apps`.
+
+## Routing Options for Application Addresses (2026-11-22)
+
+Source: the owner's directive of 2026-11-22 (take the routing features of a self-hosted PaaS, staying on Traefik route files) and the agent's calls R1–R12, waiting for the owner (`ADR-0037`, `PROPOSTO`; issue #53, PR #54).
+
+- **R1 Per address, by the customer.** Four options on each web address of an application, changed with `app.update` through `PATCH …/app-stacks/:stackId/domains/:domainId`; the request replaces all options of the address. Nothing reaches outside the application's own addresses and ingress targets.
+- **R2 Redirect.** To another address of the same application, permanent, path and query kept; never to itself or to an address that redirects; `https` when the target's certificate is usable, else `http`; a redirecting address carries no protection and no path rule; a removed target sets the column back to `NULL`.
+- **R3 Password protection.** HTTP Basic, one user name and password per address, password at least 12 characters. The API stores only an `$apr1$` verifier computed with `node:crypto` (bcrypt would need a dependency, SHA-1 has no salt). The verifier lives in the database row, the signed route request and the route file; never in a DTO, audit row, outbox row, operation or log. The application never receives the credentials (`removeHeader`).
+- **R4 Compression.** Per address, default `false` in the database and the API, pre-checked by the web form for new addresses.
+- **R5 Path rules.** Up to four per address: `{ pathPrefix, componentKey, port, stripPrefix }`, target among the plan's ingress pairs; they inherit certificate, HTTPS redirect, protection and compression from the address.
+- **R6 Byte identity.** New wire fields are omitted when unset: the route request, the `# @hp-app-route` line, the route file and the routes hash of an address without options do not change. Site schemas, site code, `site_*.yml` and `hp-panel.yml` are untouched.
+- **R7 The executor re-checks** every value against strict patterns, the redirect target and every path target, and refuses the whole publication on one bad value.
+- **R8 Data.** Additive migration `0026_app_routing_options.sql` on `app_stack_domains`.
+- **R9 Downgrade gate** `app-routing-options`: in use when an address redirects, is protected or has a path rule (not for compression alone).
+- **R10 Web.** «Opzioni» on each address row, in the customer's words; path rules under an advanced section.
+- **R11 Out of scope.** Public TCP/UDP ports, other proxies, IP allowlists, custom headers, uploaded or wildcard certificates for applications, the same options for WordPress sites.
+- **R12 Rejected.** Proxy labels or configuration written by a customer or a template; options in the template; one database row per path rule; bcrypt.
