@@ -148,6 +148,15 @@ export {
 } from "./server.js";
 
 export {
+  APP_STACK_COMPONENT_TIMEOUT_MS,
+  APP_STACK_CREATE_TIMEOUT_MS,
+  APP_STACK_LOGS_TIMEOUT_MS,
+  APP_STACK_PREPARE_TIMEOUT_MS,
+  APP_STACK_PULL_TIMEOUT_MS,
+  APP_STACK_REMOVE_TIMEOUT_MS,
+  APP_STACK_ROUTES_TIMEOUT_MS,
+  APP_STACK_STATUS_TIMEOUT_MS,
+  APP_STACK_STOP_TIMEOUT_MS,
   BACKUPS_TEST_TIMEOUT_MS,
   BACKUPS_TIMEOUT_MS,
   ExecutorIpcClientError,
@@ -225,6 +234,51 @@ export {
 
 export { SimulatedSiteFiles, makeDir, type SimSeedEntry } from "./simulator-files.js";
 export { SimulatedAppStacks, type AppStackSimFault, type AppStackSimStep } from "./simulator-app-stacks.js";
+export {
+  APP_STACK_COMPONENT_ROLE,
+  APP_STACK_HTTP_PROBE_BODY_MAX_BYTES,
+  APP_STACK_LABELS,
+  APP_STACK_LOG_CONFIG,
+  APP_STACK_LOG_MASK,
+  APP_STACK_LOG_MASK_MIN_LENGTH,
+  APP_STACK_PULL_ENGINE_TIMEOUT_MS,
+  APP_STACK_RESTART_POLICY,
+  APP_STACK_STOP_TIMEOUT_SECONDS,
+  APP_STACK_TMPFS,
+  AppStackEngine,
+  AppStackExecutorError,
+  appStackComponentLabels,
+  appStackContainerName,
+  appStackEdgeNetworkName,
+  appStackImageDigestMatches,
+  appStackInternalNetworkName,
+  appStackNetworkLabels,
+  appStackRouteFileName,
+  appStackSecretDirKey,
+  appStackVolumeLabels,
+  appStackVolumeName,
+  assertAppStackPayloadHardening,
+  assertAppStackSecretContents,
+  assertExecutableAppStackPlan,
+  buildAppStackContainerCreatePayload,
+  decodeAppStackHealthLabel,
+  encodeAppStackHealthLabel,
+  isOwnAppStackResource,
+  maskAppStackLogLines,
+  probeAppStackHealth,
+  purgeAppStackComponentSecrets,
+  purgeAppStackSecrets,
+  readAppStackComponentSecretValues,
+  writeAppStackComponentSecrets,
+  type AppStackContainerCreatePayload,
+  type AppStackDockerRequest,
+  type AppStackEngineDeps,
+  type AppStackHealthLabel,
+  type AppStackHealthProbe,
+  type AppStackPlanCheckOptions,
+  type AppStackProbeTarget,
+  type AppStackRouteStore,
+} from "./app-stacks/index.js";
 export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps } from "./simulator-site-types.js";
 
 export type { TerminalLimits } from "./terminal-sessions.js";
