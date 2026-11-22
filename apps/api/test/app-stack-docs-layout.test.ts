@@ -19,7 +19,12 @@ const digestsOf = (templates: readonly (typeof APP_BUILT_IN_TEMPLATES)[number][]
 const isExtended = (t: (typeof APP_BUILT_IN_TEMPLATES)[number]) => t.source.startsWith("x-hp-stack:\n  schemaVersion: 2\n");
 const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t)));
 const extendedDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter(isExtended));
-const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
+const scripts = [
+  "accept-app-stack-engine.mjs",
+  "accept-app-stack-http-cache.mjs",
+  "accept-app-stack-worker-storage.mjs",
+  "accept-app-stack-wordpress.mjs",
+];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
   it("ADR-0035 is approved and cites existing paths", () => {
@@ -45,6 +50,9 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     expect(extendedDigests).toHaveLength(2);
     for (const s of ["HCP-STACK/v2", "ADR-0035", "atpl_wordpress_mariadb", ...extendedDigests]) expect(adr, s).toContain(s);
     expect(extendedDigests.filter((d) => digests.includes(d))).toEqual([]);
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    expect([...paths], file).toContain("infra/linux/accept-app-stack-wordpress.mjs");
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
   });
 
   it("README, HARNESS, runbook, ER diagram and the brain files name the feature", () => {
@@ -115,6 +123,13 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
         "container-hardening", "worker-writes-storage", "network-shape", "idempotent-reapply", "data-survives-upgrade-and-rollback",
         "pull-failure-consistent", "network-failure-consistent", "health-timeout-consistent", "recovery-reads-only",
         "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
+      ],
+      "accept-app-stack-wordpress.mjs": [
+        "gate-self-test", "preflight", "snapshot-before", "plan-compiles-from-seed", "refused-before-docker",
+        "deploy-creates-exact-set", "container-standard-profile", "secrets-reach-only-their-component", "network-shape",
+        "no-control-plane-reach", "route-published-after-health", "wordpress-installs", "logs-mask-environment-secrets",
+        "data-survives-stop-and-start", "idempotent-reapply", "upgrade-keeps-data", "recovery-reads-only",
+        "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
       ]
     };
     const harness = read("HARNESS.md");
@@ -131,6 +146,8 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       expect(script, file).not.toMatch(/["']-p["']|["']--publish["']/);
       const anyHost = script.split("\n").filter((l) => l.includes("0.0.0.0"));
       if (name.includes("worker-storage")) expect(anyHost, file).toEqual([]);
+      // A script that carries secrets has its gate refuse them anywhere but the environment of an own container.
+      if (name.includes("wordpress")) for (const s of ['deny("secret in the address")', 'deny("secret outside Env")']) expect(script, `${file} ${s}`).toContain(s);
       for (const line of anyHost) expect(line, file).toContain("HostIp");
       expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000), file).toEqual([]);
       // The gate forwards only what it recognises: its judge ends in a denial.

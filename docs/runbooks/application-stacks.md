@@ -212,20 +212,22 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. The real-Docker checks are `infra/linux/accept-app-stack-engine.mjs` (the stack engine),
    `infra/linux/accept-app-stack-http-cache.mjs` and `infra/linux/accept-app-stack-worker-storage.mjs` (the two built-in
-   templates). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
-   next to a test run (memory):
+   templates of the first format) and `infra/linux/accept-app-stack-wordpress.mjs` (the built-in WordPress and MariaDB
+   template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
+   the images are local). They import the built packages: build first (`corepack pnpm run build`), then run one at a
+   time, never next to a test run (memory):
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
    ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
-   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the two template scripts: their
+   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
    throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`),
    never prune, and clean up at the end, also on Ctrl-C.
 3. Each step prints one line: `PASS <step>`, `FAIL <step>: <reason>` or `SKIP <step>: <why>`. A step that needs root is
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
-   for the HTTP-cache script), it prints `SKIP … nothing was created` and exits 1. Without a build the HTTP-cache
+   for the template scripts), it prints `SKIP … nothing was created` and exits 1. Without a build a template
    script prints `FAIL preflight: run corepack pnpm run build first`.
 4. The last line is `RESULT <n>/<m> passed`, followed by `, <k> skipped (not counted in n/m)` when steps were skipped,
    and the time. The exit code is 0 only when every counted step passed.
