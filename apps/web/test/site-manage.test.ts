@@ -97,7 +97,7 @@ describe("site management UI", () => {
         createElement(I18nProvider, { locale: m === en ? "en" : "it", messages: m, children: createElement(Dialog, { open: true }, createElement(DeleteSiteForm, { siteName: "Hotel", onConfirm: async () => null, onCancel: () => {} })) }),
       );
       expect(html).toContain("<strong>Hotel</strong>");
-      expect(html).toMatch(/<button[^>]*disabled[^>]*>[^<]*(Delete site|Elimina il sito)/);
+      expect(html).toMatch(/<button[^>]*disabled[^>]*>[^<]*(Delete application|Elimina l(&#x27;|')applicazione)/);
     }
   });
 
