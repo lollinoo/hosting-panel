@@ -190,6 +190,17 @@ describe("assertExecutableAppStackPlan", () => {
     });
   });
 
+  it("refuses a component whose hp_app_<stackId>_<key> name would not fit one DNS label", () => {
+    const named = (idLength: number) =>
+      rehash({ ...plan, stackId: `stk_${"a".repeat(idLength - 4)}`, components: [web, { ...worker, key: "k".repeat(27) }] });
+    expect(refusal(check(named(40)))).toEqual({
+      reason: "STACK_PLAN_INVALID",
+      code: "VALIDATION_ERROR",
+      message: "The application plan is invalid at components.1.key",
+    });
+    expect(check(named(28))().components[1]?.key).toBe("k".repeat(27));
+  });
+
   it.each([
     ["no digest", "registry.test/acme/web"],
     ["a latest tag", "registry.test/acme/web:latest"],

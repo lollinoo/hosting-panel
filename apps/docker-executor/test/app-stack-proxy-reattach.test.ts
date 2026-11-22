@@ -98,6 +98,20 @@ describe("ingress proxy re-attach to application edge networks (M4, L17)", () =>
     expect(proxyConnects()).toEqual([...SITE_EDGES, APP_EDGE].sort());
   });
 
+  it("connects every other app_edge network when the first connect answers 500", async () => {
+    const { adapter, mockDaemon, proxy } = await setup(true);
+    const others = ["hp_appedge_blog", "hp_appedge_wiki"];
+    for (const name of others) {
+      mockDaemon.createdNetworks.push({ Name: name, Labels: { "io.hostingpanel.network_role": "app_edge" } });
+    }
+    mockDaemon.brokenNetworks.connect.add(APP_EDGE);
+    await expect(adapter.ensureIngressProxy()).resolves.toMatchObject({ status: "running" });
+    expect(proxy()?.running).toBe(true);
+    const attached = Object.keys(proxy()?.networks ?? {});
+    expect(attached).toEqual(expect.arrayContaining([...SITE_EDGES, ...others]));
+    expect(attached).not.toContain(APP_EDGE);
+  });
+
   it("with no app_edge network connects exactly the site edge networks", async () => {
     const { adapter, proxyConnects } = await setup(false);
     await adapter.ensureIngressProxy();

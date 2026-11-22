@@ -267,13 +267,13 @@ const CEILINGS: ReadonlyArray<readonly [name: string, limit: number, build: (n: 
     "components.1.key",
   ],
   [
-    "stack id length",
-    64,
+    "stack id length (hp_app_<stackId>_worker fits 63)",
+    49,
     (n) =>
       edit((p) => {
         p.stackId = `s${"a".repeat(n - 1)}`;
       }),
-    "stackId",
+    "components.1.key",
   ],
   [
     "organisation id length",

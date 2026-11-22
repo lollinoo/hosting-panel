@@ -1,6 +1,7 @@
 import {
   APP_IMAGE_ALLOWLIST,
   ApprovedStackPlanSchema,
+  appStackEngineNameProblem,
   appStackPlanImageProblems,
   type AppImageAllowlistEntry,
   type AppStackSecretFileContent,
@@ -24,6 +25,10 @@ export function assertExecutableAppStackPlan(input: unknown, options: AppStackPl
     );
   }
   const plan = parsed.data;
+  const unnamed = plan.components.findIndex((c) => appStackEngineNameProblem(plan.stackId, c.key) !== null);
+  if (unnamed !== -1) {
+    throw new AppStackExecutorError("STACK_PLAN_INVALID", `The application plan is invalid at components.${unnamed}.key`);
+  }
   const [refused] = appStackPlanImageProblems(plan, options.allowlist ?? APP_IMAGE_ALLOWLIST);
   if (refused !== undefined) {
     throw new AppStackExecutorError(

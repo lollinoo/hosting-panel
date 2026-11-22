@@ -3776,10 +3776,19 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
       );
     }
     const networks = JSON.parse(res.body.toString("utf8")) as Array<{ readonly Name: string }>;
+    let appEdgeError: unknown;
     for (const network of networks) {
-      const connected = await this.connectContainerToNetwork(network.Name, containerRef, aliases, {
-        skipMissingNetwork: true,
-      });
+      let connected: boolean;
+      try {
+        connected = await this.connectContainerToNetwork(network.Name, containerRef, aliases, {
+          skipMissingNetwork: true,
+        });
+      } catch (err) {
+        // A failing stack network never keeps the proxy off the others; the caller logs the first error.
+        if (role !== "app_edge") throw err;
+        appEdgeError ??= err;
+        continue;
+      }
       if (!connected) {
         // Removed between the list and the connect (site deleted): skip it, keep the rest.
         console.warn(
@@ -3792,6 +3801,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
         );
       }
     }
+    if (appEdgeError !== undefined) throw appEdgeError;
   }
 
   private async connectContainerToNetwork(
