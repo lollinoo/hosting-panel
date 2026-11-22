@@ -134,3 +134,22 @@ export const AdminAppTemplateUsageDtoSchema = z.object({
   truncated: z.boolean(), // more than ADMIN_APP_TEMPLATE_USAGE_MAX non-deleted stacks exist
 });
 export type AdminAppTemplateUsageDto = z.infer<typeof AdminAppTemplateUsageDtoSchema>;
+export const ADMIN_APP_STACKS_MAX = 200;
+/** The administrator's «Applicazioni» list: every customer's live application stacks, read-only. No secret, no parameter value, no plan. */
+export const AdminAppStacksDtoSchema = z.object({
+  // non-deleted stacks of every organization; ORDER BY organization name, stack name, id; ≤ ADMIN_APP_STACKS_MAX
+  stacks: z.array(
+    z.object({
+      id: AppEntityIdSchema,
+      name: z.string(),
+      organizationName: z.string(),
+      templateId: AppEntityIdSchema,
+      templateName: z.string(),
+      versionNumber: z.number().int().positive(),
+      status: AppStackStatusSchema,
+      primaryHostname: z.string().nullable(), // first active domain by hostname, else first domain, else null
+    }),
+  ),
+  truncated: z.boolean(), // more than ADMIN_APP_STACKS_MAX live stacks exist
+});
+export type AdminAppStacksDto = z.infer<typeof AdminAppStacksDtoSchema>;

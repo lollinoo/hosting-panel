@@ -2146,6 +2146,35 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/managed-sites:
+    get:
+      tags: [Managed Sites]
+      operationId: listManagedSites
+      summary: List the organization's managed sites with their primary web address (site.read)
+      description: >-
+        Read-only. At most 200 sites, ordered by name then id; `primaryDomain` is null for a site without one.
+        A member sees only the sites it may read, as on `GET /v1/organizations/{orgId}/sites`.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+      responses:
+        "200":
+          description: Managed sites
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    maxItems: 200
+                    items:
+                      $ref: "#/components/schemas/ManagedSiteDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
     post:
       tags: [Managed Sites]
       operationId: createManagedSite
@@ -5365,6 +5394,34 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Application templates are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/app-stacks:
+    get:
+      tags: [App Stacks]
+      operationId: adminListAppStacks
+      summary: List every customer's applications installed from application templates (server administrator only, read-only)
+      description: >-
+        Deleted applications are left out; at most 200, by customer name then application name (`truncated` says
+        more exist). Never carries a secret, a setting value or a plan. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+      responses:
+        "200":
+          description: The applications
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AdminAppStacksDto"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-templates:
@@ -13042,6 +13099,41 @@ components:
                 minimum: 1
               status:
                 $ref: "#/components/schemas/AppStackStatus"
+        truncated:
+          type: boolean
+          description: More than 200 applications exist
+
+    AdminAppStacksDto:
+      type: object
+      required: [stacks, truncated]
+      properties:
+        stacks:
+          type: array
+          maxItems: 200
+          description: By customer name, then application name
+          items:
+            type: object
+            required: [id, name, organizationName, templateId, templateName, versionNumber, status, primaryHostname]
+            properties:
+              id:
+                $ref: "#/components/schemas/AppEntityId"
+              name:
+                type: string
+              organizationName:
+                type: string
+              templateId:
+                $ref: "#/components/schemas/AppEntityId"
+              templateName:
+                type: string
+              versionNumber:
+                type: integer
+                minimum: 1
+              status:
+                $ref: "#/components/schemas/AppStackStatus"
+              primaryHostname:
+                type: string
+                nullable: true
+                description: The first active web address by hostname, else the first one
         truncated:
           type: boolean
           description: More than 200 applications exist

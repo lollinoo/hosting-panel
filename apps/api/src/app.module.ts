@@ -27,6 +27,7 @@ import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminSiteTemplatesController } from "./controllers/admin-site-templates.controller.js";
 import { AdminAppTemplatesController } from "./controllers/admin-app-templates.controller.js";
+import { AdminAppStacksController } from "./controllers/admin-app-stacks.controller.js";
 import { AppTemplatesController } from "./controllers/app-templates.controller.js";
 import { AppStacksController } from "./controllers/app-stacks.controller.js";
 import { AppStackDomainsController } from "./controllers/app-stack-domains.controller.js";
@@ -170,6 +171,7 @@ export class AppModule {
         AdminHostController,
         AdminUpdatesController,
         AdminAppTemplatesController,
+        AdminAppStacksController,
         AppTemplatesController,
         AppStacksController,
         AppStackDomainsController,

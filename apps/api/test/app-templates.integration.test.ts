@@ -471,6 +471,7 @@ describe("application templates while the capability flags are off", () => {
       [h.adminToken, "GET", `${BASE}/${id}/versions/atv_000000000000000000000000`],
       [h.adminToken, "POST", `${BASE}/${id}/archive`, {}],
       [h.adminToken, "GET", `${BASE}/${id}/usage`],
+      [h.adminToken, "GET", "/v1/admin/app-stacks"],
       [h.a.token, "GET", catalogue],
       [h.a.token, "GET", `${catalogue}/${id}`],
     ];

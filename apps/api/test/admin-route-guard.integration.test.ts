@@ -275,6 +275,7 @@ describe("every administrator route refuses a customer before it does anything",
       ["GET", "/v1/admin/app-templates/:templateId/versions/:versionId"],
       ["POST", "/v1/admin/app-templates/:templateId/archive"],
       ["GET", "/v1/admin/app-templates/:templateId/usage"],
+      ["GET", "/v1/admin/app-stacks"],
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }

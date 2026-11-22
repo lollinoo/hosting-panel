@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import {
   AddAppTemplateVersionInputSchema,
+  AdminAppStacksDtoSchema,
   AdminAppTemplateDetailDtoSchema,
   AdminAppTemplateListQuerySchema,
   AdminAppTemplateSummaryDtoSchema,
@@ -86,6 +87,25 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     {
       templateId: "atpl_demo",
       stacks: [{ id: "ast_demo", name: "My notes", organizationId: "org_1", organizationName: "Acme", versionNumber: 1, status: "running" }],
+      truncated: false,
+    },
+  ],
+  [
+    "admin stacks",
+    AdminAppStacksDtoSchema,
+    {
+      stacks: [
+        {
+          id: "ast_demo",
+          name: "My notes",
+          organizationName: "Acme",
+          templateId: "atpl_demo",
+          templateName: "Notes",
+          versionNumber: 1,
+          status: "running",
+          primaryHostname: null,
+        },
+      ],
       truncated: false,
     },
   ],

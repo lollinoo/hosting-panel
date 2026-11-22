@@ -1,10 +1,12 @@
 import { Inject, Injectable } from "@nestjs/common";
 import {
+  ADMIN_APP_STACKS_MAX,
   ADMIN_APP_TEMPLATE_USAGE_MAX,
   APP_TEMPLATE_SPEC_VERSION,
   AppTemplateSpecSchema,
   appTemplateState,
   type AddAppTemplateVersionInput,
+  type AdminAppStacksDto,
   type AdminAppTemplateDetailDto,
   type AdminAppTemplateListQuery,
   type AdminAppTemplateSummaryDto,
@@ -25,8 +27,10 @@ import {
   AppTemplateRepositoryError,
   addAppTemplateVersion,
   and,
+  appStackDomains,
   appStacks,
   appTemplateVersions,
+  appTemplates,
   archiveAppTemplate,
   asc,
   countAppStacksByTemplateVersion,
@@ -325,7 +329,7 @@ export class AppTemplatesService {
     return this.get(templateId);
   }
 
-  /** The only route that names other organisations' stacks. */
+  /** One of the two admin reads that name other organisations' stacks (with adminStacks). */
   public async usage(templateId: string): Promise<AdminAppTemplateUsageDto> {
     const db = this.dbClient.db;
     if (!(await getAppTemplate(db, templateId))) throw appNotFound();
@@ -345,6 +349,42 @@ export class AppTemplatesService {
       .orderBy(asc(organizations.name), asc(appStacks.name), asc(appStacks.id))
       .limit(ADMIN_APP_TEMPLATE_USAGE_MAX + 1);
     return { templateId, stacks: rows.slice(0, ADMIN_APP_TEMPLATE_USAGE_MAX), truncated: rows.length > ADMIN_APP_TEMPLATE_USAGE_MAX };
+  }
+
+  /** Every organization's live stacks for the administrator's list; same joins and order as usage(), without the template filter. */
+  public async adminStacks(): Promise<AdminAppStacksDto> {
+    const db = this.dbClient.db;
+    const rows = await db
+      .select({
+        id: appStacks.id,
+        name: appStacks.name,
+        organizationName: organizations.name,
+        templateId: appStacks.templateId,
+        templateName: appTemplates.name,
+        versionNumber: appTemplateVersions.versionNumber,
+        status: appStacks.status,
+      })
+      .from(appStacks)
+      .innerJoin(organizations, eq(organizations.id, appStacks.organizationId))
+      .innerJoin(appTemplates, eq(appTemplates.id, appStacks.templateId))
+      .innerJoin(appTemplateVersions, eq(appTemplateVersions.id, appStacks.templateVersionId))
+      .where(isNull(appStacks.deletedAt))
+      .orderBy(asc(organizations.name), asc(appStacks.name), asc(appStacks.id))
+      .limit(ADMIN_APP_STACKS_MAX + 1);
+    const kept = rows.slice(0, ADMIN_APP_STACKS_MAX);
+    const domains =
+      kept.length === 0
+        ? []
+        : await db
+            .select({ stackId: appStackDomains.stackId, hostname: appStackDomains.hostname, status: appStackDomains.status })
+            .from(appStackDomains)
+            .where(inArray(appStackDomains.stackId, kept.map((r) => r.id)));
+    // Same rule as the customer list (app-stack-dto.ts appStackSummaryDto).
+    const primary = (id: string) => {
+      const own = domains.filter((d) => d.stackId === id).sort((a, b) => byText(a.hostname, b.hostname));
+      return (own.find((d) => d.status === "active") ?? own[0])?.hostname ?? null;
+    };
+    return { stacks: kept.map((r) => ({ ...r, primaryHostname: primary(r.id) })), truncated: rows.length > ADMIN_APP_STACKS_MAX };
   }
 
   public async listForCustomer(): Promise<CustomerAppTemplatesDto> {

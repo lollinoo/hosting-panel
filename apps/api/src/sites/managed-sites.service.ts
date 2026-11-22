@@ -365,6 +365,31 @@ export class ManagedSitesService {
     };
   }
 
+  public async list(organizationId: string): Promise<ManagedSiteDto[]> {
+    const db = this.dbClient.db;
+    const rows = await db
+      .select({ site: sites, primaryDomain: domains.hostname })
+      .from(sites)
+      .leftJoin(domains, and(eq(domains.siteId, sites.id), eq(domains.isPrimary, true)))
+      .where(and(eq(sites.organizationId, organizationId), inArray(sites.siteType, [...SITE_TYPE_KEYS])))
+      .orderBy(asc(sites.name), asc(sites.id))
+      .limit(200);
+    const stopped = await stoppedSiteIds(db, rows.map(({ site }) => site.id));
+    return rows.map(({ site, primaryDomain }) => ({
+      id: site.id,
+      organizationId: site.organizationId,
+      hostAllocationId: site.hostAllocationId,
+      name: site.name,
+      slug: site.slug,
+      status: shownSiteStatus(site.status, stopped.has(site.id)),
+      phpVersion: site.phpVersion,
+      siteType: siteTypeKeyOf(site.siteType),
+      primaryDomain: primaryDomain ?? null,
+      createdAt: site.createdAt.toISOString(),
+      updatedAt: site.updatedAt.toISOString(),
+    }));
+  }
+
   public async act(
     siteId: string,
     organizationId: string,
