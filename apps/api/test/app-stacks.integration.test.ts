@@ -15,6 +15,8 @@ import {
   operationSteps,
   outboxEvents,
   resourceQuotas,
+  rolePermissions,
+  roles,
 } from "@hosting-panel/database";
 import type { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -226,6 +228,83 @@ describe("application stacks HTTP API (H5)", () => {
     expect(kinds).toEqual(["stack.delete", "stack.start"]);
     expect(await audits("app.stack.start", stopped)).toHaveLength(1);
     expect(await audits("app.stack.delete", stopped)).toHaveLength(1);
+  });
+
+  it("S5-L1: a create or a deploy retried with its key is replayed after its version stopped being the default", async () => {
+    const addDefault = async (templateId: string, source: string) => {
+      const res = await h.call(h.adminToken, "POST", `/v1/admin/app-templates/${templateId}/versions`, { source, makeDefault: true });
+      expect(res.status, res.raw).toBe(201);
+    };
+    const site = await h.publish(WEB_SOURCE);
+    const body = { templateVersionId: site.versionId, name: "replayed-after-change", deploy: true };
+    const createKey = randomUUID();
+    const created = await create(h.a, body, createKey);
+    expect(created.status, created.raw).toBe(202);
+    const app = await h.publish();
+    const stackId = await draft("deploy-replayed", app.versionId);
+    expect((await setSecret(stackId, "value-1")).status).toBe(200);
+    const deployKey = randomUUID();
+    const deployed = await act(h.a, stackId, "deploy", {}, deployKey);
+    expect(deployed.status, deployed.raw).toBe(202);
+
+    await addDefault(site.templateId, WEB_SOURCE.replace("memory: 64M", "memory: 96M"));
+    await addDefault(app.templateId, NOTES_DEMO_SOURCE.replace("memory: 256M", "memory: 128M"));
+    // A rotated secret changes the plan, so the preflight of the retried deploy would want a new revision.
+    expect((await setSecret(stackId, "value-2")).status).toBe(200);
+    const before = await h.counts();
+    const createdAgain = await create(h.a, body, createKey);
+    expect(createdAgain.status, createdAgain.raw).toBe(202);
+    expect(createdAgain.body).toEqual(created.body);
+    const deployedAgain = await act(h.a, stackId, "deploy", {}, deployKey);
+    expect(deployedAgain.status, deployedAgain.raw).toBe(202);
+    expect(deployedAgain.body).toEqual(deployed.body);
+    expect(await h.counts()).toEqual(before);
+    expectRefusal(await create(h.a, { ...body, name: "other" }, createKey), 409, "IDEMPOTENCY_CONFLICT");
+    expectRefusal(await act(h.a, stackId, "deploy", { parameters: [{ key: "worker_count", value: 3 }] }, deployKey), 409, "IDEMPOTENCY_CONFLICT");
+  });
+
+  it("S5-M1: the 11th secret value of a stack within an hour is 429 RATE_LIMITED and stores nothing", async () => {
+    const stackId = await draft();
+    for (let i = 1; i <= 10; i += 1) expect((await setSecret(stackId, `value-${String(i)}`)).status).toBe(200);
+    const before = await h.counts();
+    const res = await setSecret(stackId, "value-11");
+    expectRefusal(res, 429, "RATE_LIMITED");
+    expect(res.body.error.retryable).toBe(true);
+    expect(res.raw).not.toContain("app_secret");
+    expect(await h.counts()).toEqual(before);
+    expect((await setSecret(await draft(), "value-1")).status).toBe(200);
+  });
+
+  it("S5-L2: a deploy that changes settings also needs app.update; without settings app.control is enough", async () => {
+    await h.dbClient.db.insert(roles).values({ id: "role_app_operator", name: "app_operator" as never, description: "Operate only", isPreset: false });
+    await h.dbClient.db.insert(rolePermissions).values([
+      { roleId: "role_app_operator", permissionKey: "app.read" },
+      { roleId: "role_app_operator", permissionKey: "app.control" },
+    ]);
+    const operator = await h.addMember(h.a.orgId, "role_app_operator" as "role_customer_collaborator");
+    const stackId = await draft();
+    expect((await setSecret(stackId, "value-1")).status).toBe(200);
+    const before = await h.counts();
+    expectRefusal(await act(operator, stackId, "deploy", { parameters: [{ key: "worker_count", value: 3 }] }), 403, "PERMISSION_DENIED");
+    expect({ ...(await h.counts()), audit_events: 0 }).toEqual({ ...before, audit_events: 0 });
+    const denied = await h.dbClient.db
+      .select()
+      .from(auditEvents)
+      .where(and(eq(auditEvents.actorId, operator.userId), eq(auditEvents.targetType, "app_stack")));
+    expect(denied.map((row) => [row.action, row.targetId, (row.details as Json).outcome])).toEqual([["app.update", stackId, "denied"]]);
+    const res = await act(operator, stackId, "deploy");
+    expect(res.status, res.raw).toBe(202);
+  });
+
+  it("#17: a malformed deploy body is answered only after app.control allowed the caller", async () => {
+    await h.dbClient.db.insert(roles).values({ id: "role_app_controller", name: "app_controller" as never, description: "Control only", isPreset: false });
+    await h.dbClient.db.insert(rolePermissions).values({ roleId: "role_app_controller", permissionKey: "app.control" });
+    const controller = await h.addMember(h.a.orgId, "role_app_controller" as "role_customer_collaborator");
+    const stackId = await draft();
+    const before = await h.counts();
+    expectRefusal(await act(controller, stackId, "deploy", "{not json"), 400, "VALIDATION_ERROR");
+    expectRefusal(await h.call(h.b.token, "POST", `${base(h.a)}/${stackId}/deploy`, "{not json", idem()), 404, "NOT_FOUND");
+    expect(await h.counts()).toEqual(before);
   });
 
   const STACK_ROUTES: readonly (readonly [string, string, unknown?])[] = [

@@ -422,6 +422,19 @@ export class AppStackObserverService {
     if (last?.status === "failed" && last.completedAt && now.getTime() - last.completedAt.getTime() < APP_STACK_ROUTE_REFRESH_BACKOFF_MS) {
       return false;
     }
+    // A deploy would start (or recreate) a component someone stopped: the routes wait until the application runs again.
+    const [stopped] = await db
+      .select({ componentKey: appStackComponents.componentKey })
+      .from(appStackComponents)
+      .where(
+        and(
+          eq(appStackComponents.stackId, stack.stackId),
+          eq(appStackComponents.organizationId, stack.organizationId),
+          inArray(appStackComponents.health, ["stopped", "missing"]),
+        ),
+      )
+      .limit(1);
+    if (stopped) return false;
     const plan = await this.#appliedPlan(stack);
     if (plan === null) return false;
     const { entries } = appStackRoutePlan({

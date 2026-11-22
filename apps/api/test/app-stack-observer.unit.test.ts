@@ -59,6 +59,7 @@ describe("AppStackObserverService (PGlite)", () => {
   let calls: { method: string; stackId?: string }[];
   let failing: Set<string>;
   let onStatusRead: () => void;
+  let cache: "running" | "stopped" | "missing";
   let report: CertificateStatusReport;
   let reportFails: boolean;
   let answers: Map<string, { a: string[]; aaaa: string[] }>;
@@ -72,7 +73,8 @@ describe("AppStackObserverService (PGlite)", () => {
       observedAt: NOW.toISOString(),
       components: [
         { ...base, componentKey: "app", state: "running", health: "healthy", exitCode: null },
-        { ...base, componentKey: "cache", state: "exited", health: "stopped", exitCode: 1 },
+        ...(cache === "running" ? [{ ...base, componentKey: "cache", state: "running", health: "healthy", exitCode: null } as const] : []),
+        ...(cache === "stopped" ? [{ ...base, componentKey: "cache", state: "exited", health: "stopped", exitCode: 1 } as const] : []),
       ],
       networks: { internal: true, edge: true },
       volumes: ["data"],
@@ -259,6 +261,7 @@ describe("AppStackObserverService (PGlite)", () => {
     calls = [];
     failing = new Set();
     onStatusRead = () => undefined;
+    cache = "stopped";
     report = { acmeEnabled: true, trusted: true, readable: true, certificates: [], failures: [] };
     reportFails = false;
     answers = new Map();
@@ -519,6 +522,10 @@ describe("AppStackObserverService (PGlite)", () => {
   });
 
   describe("route refresh", () => {
+    beforeEach(() => {
+      cache = "running";
+    });
+
     it("a new address on a running stack queues exactly one system deploy of the applied revision, and the next pass none", async () => {
       const stack = await seedStack({ status: "running", domains: [{ hostname: "new.example.com" }] });
 
@@ -613,6 +620,24 @@ describe("AppStackObserverService (PGlite)", () => {
 
       expect(await db().select().from(operations).where(eq(operations.kind, "stack.deploy"))).toEqual([]);
       expect(triggerAsync).not.toHaveBeenCalled();
+    });
+
+    it("never starts a component someone stopped: no deploy while one reads stopped or missing, exactly one once it runs again", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "hand-stop.example.com" }] });
+
+      cache = "stopped";
+      for (const now of [NOW, at(11), at(120)]) await observer().reconcileOnce(now);
+      cache = "missing";
+      await observer().reconcileOnce(at(121));
+      expect(await deploys(stack.id)).toEqual([]);
+      expect(triggerAsync).not.toHaveBeenCalled();
+
+      cache = "running";
+      await observer().reconcileOnce(at(122));
+      await observer().reconcileOnce(at(123));
+      expect(await deploys(stack.id)).toHaveLength(1);
+      expect(triggerAsync).toHaveBeenCalledTimes(1);
+      expect(mutatingCalls()).toEqual([]);
     });
   });
 });

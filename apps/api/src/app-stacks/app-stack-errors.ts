@@ -96,6 +96,11 @@ function mapSecretError(err: AppStackSecretError): ControlPlaneError {
       const message = "Set every required secret before the application is deployed.";
       return appRefusal("VALIDATION_ERROR", message, { message, reason: "STACK_SECRET_MISSING" });
     }
+    case "RATE_LIMITED":
+      return new ControlPlaneError("RATE_LIMITED", "Too many secret values were set on this application in the last hour. Try again later.", {
+        retryable: true,
+        retryAfterMs: err.retryAfterMs,
+      });
   }
 }
 

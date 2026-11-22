@@ -37,6 +37,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStacks,
   appTemplates,
   appTemplateVersions,
   countAppStacksByOrganization,
@@ -169,6 +170,29 @@ export class AppStacksService {
     const { organizationId } = ctx;
     const db = this.dbClient.db;
     const requestHash = canonicalRequestHash({ route: APP_AUDIT_ACTIONS.stackCreate, organizationId, stackId: null, body: input });
+    // A retry goes straight to the repository's replay or conflict (it reads only the key and the hash): the preflight
+    // may now refuse what it accepted then.
+    const [prior] = await db
+      .select({ stackId: appStacks.id, hostAllocationId: appStacks.hostAllocationId })
+      .from(appStacks)
+      .where(and(eq(appStacks.organizationId, organizationId), eq(appStacks.idempotencyKey, ctx.idempotencyKey)))
+      .limit(1);
+    if (prior) {
+      return this.#write((tx) =>
+        createAppStackTransactional(tx, {
+          ...prior,
+          organizationId,
+          templateVersionId: input.templateVersionId,
+          name: input.name,
+          createdBy: ctx.userId,
+          idempotencyKey: ctx.idempotencyKey,
+          requestHash,
+          deploy: null,
+          parameters: [],
+          componentKeys: [],
+        }),
+      );
+    }
     const allocation = await findAppStackAllocation(db, organizationId);
     if (!allocation) {
       const message = "Applications need a dedicated server. Ask your administrator.";
@@ -364,6 +388,7 @@ export class AppStacksService {
 
   /** "Make it match the current inputs": a new revision only when the plan or the given parameters changed. */
   public async deploy(ctx: AppStackRequestContext, stack: AppStackRow, input: DeployAppStackInput): Promise<AppStackWriteResult> {
+    if (await this.#keyUsed(ctx)) return this.#enqueue(ctx, stack, "stack.deploy", input, null);
     const candidate = await this.#deployCandidate(stack, input.parameters);
     if (candidate.newRevision) await this.#assertDomainTargets(stack, candidate.plan);
     return this.#enqueue(ctx, stack, "stack.deploy", input, candidate.newRevision ? candidate.revision : null);

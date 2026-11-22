@@ -114,6 +114,16 @@ describe("mapAppStackError", () => {
     const missing = mapped(new AppStackSecretError("SECRET_MISSING", "Secret 'app_secret' version 2 is missing."));
     expect(missing).toMatchObject({ status: 400, code: "VALIDATION_ERROR", details: [{ reason: "STACK_SECRET_MISSING" }] });
     expect(JSON.stringify(missing)).not.toContain("app_secret");
+    const limited = mapAppStackError(new AppStackSecretError("RATE_LIMITED", "Secret 'app_secret' x", 90_000)) as ControlPlaneError;
+    expect(mapped(limited)).toEqual({
+      status: 429,
+      code: "RATE_LIMITED",
+      message: "Too many secret values were set on this application in the last hour. Try again later.",
+      details: [],
+      retryable: true,
+    });
+    expect(limited.retryAfterMs).toBe(90_000);
+    expect(JSON.stringify(limited)).not.toContain("app_secret");
   });
 
   it("rewrites the plain lock and idempotency errors of the repository without echoing them", () => {

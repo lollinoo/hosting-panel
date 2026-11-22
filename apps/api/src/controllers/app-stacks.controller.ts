@@ -31,6 +31,7 @@ import { AppStacksService, type AppStackRequestContext } from "../app-stacks/app
 import { appRefusal } from "../app-templates/app-template-errors.js";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
 import { parsePaginationQuery, requireIdempotencyKey, resolveRequestId, type PaginationParams } from "../common/control-plane.error.js";
+import { peekBody } from "../common/deferred-body-error.js";
 import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 
 type RawQuery = Record<string, unknown> | undefined;
@@ -94,7 +95,10 @@ export class AppStacksController {
     return { data: await this.stacks.plan(stack, PlanAppStackInputSchema.parse(raw ?? {})) };
   }
 
-  /** Builds a new revision only when the plan or the given settings changed (a rotated secret changes the plan). */
+  /**
+   * Builds a new revision only when the plan or the given settings changed (a rotated secret changes the plan). Settings
+   * in the body also need `app.update` (spec §8).
+   */
   @Post(":stackId/deploy")
   @HttpCode(HttpStatus.ACCEPTED)
   public deploy(
@@ -103,7 +107,9 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.control", (ctx, stack) =>
+    const body = peekBody(raw);
+    const settings = typeof body === "object" && body !== null && "parameters" in body;
+    return this.#queue(req, orgId, stackId, settings ? ["app.control", "app.update"] : "app.control", (ctx, stack) =>
       this.stacks.deploy(ctx, stack, DeployAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -235,7 +241,7 @@ export class AppStacksController {
     req: FastifyRequest,
     orgId: string,
     stackId: string,
-    permission: PermissionKey,
+    permission: PermissionKey | readonly PermissionKey[],
     run: (ctx: AppStackRequestContext, stack: AppStackRow) => Promise<AppStackWriteResult>,
   ): Promise<AppStackAcceptedEnvelope> {
     const auth = await this.#guard(req, orgId, permission, stackId);
@@ -248,14 +254,21 @@ export class AppStacksController {
     return this.stacks.require(orgId, stackId);
   }
 
-  async #guard(req: FastifyRequest, orgId: string, permission: PermissionKey, stackId: string | null): Promise<AuthenticatedRequestContext> {
+  async #guard(
+    req: FastifyRequest,
+    orgId: string,
+    permission: PermissionKey | readonly PermissionKey[],
+    stackId: string | null,
+  ): Promise<AuthenticatedRequestContext> {
     const auth = await this.authz.authenticateRequest(req);
-    await this.authz.requireOrgPermission(auth, req, {
-      organizationId: orgId,
-      permission,
-      targetType: "app_stack",
-      ...(stackId === null ? {} : { targetId: stackId }),
-    });
+    for (const key of [permission].flat()) {
+      await this.authz.requireOrgPermission(auth, req, {
+        organizationId: orgId,
+        permission: key,
+        targetType: "app_stack",
+        ...(stackId === null ? {} : { targetId: stackId }),
+      });
+    }
     requireAppFeature(this.gate, "applicationStacksAvailable");
     return auth;
   }
