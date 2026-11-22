@@ -2,7 +2,7 @@
  * Report of the Compose importer: one note for everything it kept with a remark, changed, dropped or refused.
  * A message is fixed English text plus names the importer has checked and paths: it never echoes a value of the file.
  */
-import { formatTemplatePath, type TemplatePath } from "@hosting-panel/contracts";
+import { COMPOSE_IMPORT_REPORT_MAX, formatTemplatePath, type ComposeImportLevel, type TemplatePath } from "@hosting-panel/contracts";
 
 /** One code per rule. A code always comes with the same level, written next to it. */
 export const COMPOSE_IMPORT_CODES = Object.freeze([
@@ -88,7 +88,7 @@ export const COMPOSE_IMPORT_CODES = Object.freeze([
 ] as const);
 export type ComposeImportCode = (typeof COMPOSE_IMPORT_CODES)[number];
 
-export type ComposeImportLevel = "info" | "changed" | "dropped" | "refused";
+export type { ComposeImportLevel };
 
 export interface ComposeImportNote {
   level: ComposeImportLevel;
@@ -97,8 +97,8 @@ export interface ComposeImportNote {
   message: string;
 }
 
-/** A report never holds more notes than this; the last one then says how many are not shown. */
-export const COMPOSE_IMPORT_REPORT_MAX = 200;
+/** A report never holds more notes than this (the bound of the DTO); the last one then says how many are not shown. */
+export { COMPOSE_IMPORT_REPORT_MAX };
 
 const PATH_MAX = 512;
 
