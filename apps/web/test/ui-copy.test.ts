@@ -11,14 +11,16 @@ const dirs = [
   "app/reset-password",
   "app/account",
   "app/sites",
+  "app/apps",
   "components/auth",
   "components/account",
   "components/customer",
   "components/shared",
+  "components/app-stacks",
 ].map((d) => path.join(src, d));
 // Sections only a server administrator sees, each with the pages it belongs to.
 const adminOnly: Record<string, string> = { admin: "every page under /admin (app/admin)" };
-const sections = ["common", "login", "account", "shell", "site", "notFound", "errors"] as const;
+const sections = ["common", "login", "account", "shell", "site", "apps", "notFound", "errors"] as const;
 
 function files(dir: string): string[] {
   if (!fs.existsSync(dir)) return [];

@@ -1066,7 +1066,7 @@ describe("8. the customer's side did not change", () => {
   it("the shipped vocabulary test reads every customer section whole, so it reads any key M5d could have added there", () => {
     const t = read("apps/web/test/ui-copy.test.ts");
     expect(t).toContain('const adminOnly: Record<string, string> = { admin: "every page under /admin (app/admin)" };');
-    expect(t).toContain('const sections = ["common", "login", "account", "shell", "site", "notFound", "errors"] as const;');
+    expect(t).toContain('const sections = ["common", "login", "account", "shell", "site", "apps", "notFound", "errors"] as const;');
     expect(t).toContain("JSON.stringify(en[s]), JSON.stringify(itMsgs[s])");
     expect(t).toMatch(/const jargon = \/\\b\(container\|docker\|image\|volume\|network\|service/);
     expect(t).toContain("revision");

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { Check, ChevronDown, CircleUser, LogOut, Plus, UserCog } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,12 +59,15 @@ export function CustomerTopBar({
   sites,
   userName,
   csrfToken,
+  appsAvailable = false,
 }: {
   sites: SiteLink[];
   userName: string;
   csrfToken: string;
+  appsAvailable?: boolean;
 }) {
   const m = useMessages();
+  const pathname = usePathname();
   const [leaving, setLeaving] = useState(false);
 
   async function logout() {
@@ -89,6 +92,13 @@ export function CustomerTopBar({
           </span>
           <span className="sr-only sm:not-sr-only">{m.shell.productName}</span>
         </Link>
+        {appsAvailable && (
+          <Button asChild variant="ghost" size="sm">
+            <Link href="/apps" aria-current={pathname.startsWith("/apps") ? "page" : undefined}>
+              {m.apps.nav}
+            </Link>
+          </Button>
+        )}
         <SiteSwitcher sites={sites} />
         <div className="ml-auto flex items-center gap-4">
           <LanguageSwitch csrfToken={csrfToken} />
