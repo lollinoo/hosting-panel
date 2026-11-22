@@ -17,6 +17,7 @@ import {
   resolveAppTemplateValidationOptions,
 } from "./app-templates/app-template-validation-options.js";
 import { AppTemplatesService } from "./app-templates/app-templates.service.js";
+import { ComposeImportService } from "./app-templates/compose-import.service.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
@@ -247,6 +248,7 @@ export class AppModule {
         FirewallService,
         UpdatesService,
         AppTemplatesService,
+        ComposeImportService,
         AppStacksService,
         AppStackDomainsService,
         AppStackRuntime,
