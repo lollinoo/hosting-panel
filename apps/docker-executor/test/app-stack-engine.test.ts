@@ -694,12 +694,17 @@ describe("publishAppStackRoutes and unpublishAppStackRoutes (5.13, 5.14)", () =>
   it.each([
     ["a route outside the plan ingress", [{ ...ROUTES[0]!, componentKey: "worker" }], "STACK_PLAN_INVALID", "The route is not an ingress of the plan"],
     ["a manual certificate", [{ ...ROUTES[0]!, hosts: [{ ...HOST, source: "manual" as const }] }], "STACK_UNSUPPORTED_FEATURE", undefined],
-    ["a redirect", [{ ...ROUTES[0]!, hosts: [{ ...HOST, redirectTo: "https://x.example.org" }] }], "STACK_UNSUPPORTED_FEATURE", undefined],
+    [
+      "a path rule outside the plan ingress",
+      [{ ...ROUTES[0]!, hosts: [{ ...HOST, paths: [{ pathPrefix: "/api", componentKey: "worker", internalPort: 9000, stripPrefix: false }] }] }],
+      "STACK_PLAN_INVALID",
+      "A path of the route is not an ingress of the plan",
+    ],
   ])("refuses %s with no request", async (_name, routes, reason, message) => {
     const h = await setup();
     await expect(h.engine.publishAppStackRoutes({ plan, routes })).rejects.toMatchObject({
       reason,
-      message: message ?? "Only automatic certificates and plain host routes are supported for applications",
+      message: message ?? "Only automatic certificates are supported for applications",
     });
     expect(h.fake.log).toEqual([]);
     expect(h.routes.write).not.toHaveBeenCalled();
@@ -711,6 +716,42 @@ describe("publishAppStackRoutes and unpublishAppStackRoutes (5.13, 5.14)", () =>
     await expect(h.engine.publishAppStackRoutes({ plan, routes: ROUTES })).rejects.toMatchObject({ reason: "STACK_COMPONENT_NOT_READY" });
     expect(h.proxy.ensure).not.toHaveBeenCalled();
     expect(h.routes.write).not.toHaveBeenCalled();
+  });
+
+  it("a path rule waits for its own target, and the options reach the route file as sent (ADR-0037)", async () => {
+    const h = await setup();
+    const [web, worker] = plan.components;
+    const two = appStackTestPlan({
+      components: [web!, { ...worker!, expose: [9000], healthcheck: { ...web!.healthcheck!, port: 9000 } }],
+      ingress: [{ componentKey: "web", port: 8080 }, { componentKey: "worker", port: 9000 }],
+    });
+    const routes: AppStackRouteWire[] = [
+      {
+        componentKey: "web",
+        internalPort: 8080,
+        hosts: [
+          {
+            ...HOST,
+            compress: true,
+            protection: { username: "team", passwordHash: "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/" },
+            paths: [{ pathPrefix: "/jobs", componentKey: "worker", internalPort: 9000, stripPrefix: true }],
+          },
+          { hostname: "www.example.org", tls: true, httpsRedirect: true, redirectTo: "https://shop.example.org" },
+        ],
+      },
+    ];
+    await prepared(h, two);
+    await h.engine.startAppStackComponent({ plan: two, componentKey: "web", secretFileContents: [] });
+    h.fake.log.length = 0;
+    await expect(h.engine.publishAppStackRoutes({ plan: two, routes })).rejects.toMatchObject({
+      reason: "STACK_COMPONENT_NOT_READY",
+      message: "Component worker is not ready to receive traffic",
+    });
+    expect(h.proxy.ensure).not.toHaveBeenCalled();
+    expect(h.routes.write).not.toHaveBeenCalled();
+    await h.engine.startAppStackComponent({ plan: two, componentKey: "worker", secretFileContents: SECRETS });
+    await expect(h.engine.publishAppStackRoutes({ plan: two, routes })).resolves.toMatchObject({ routeCount: 1, changed: true });
+    expect(h.routes.write).toHaveBeenCalledWith(ID, routes);
   });
 
   it("attaches the proxy before writing; a second publish writes nothing new", async () => {
