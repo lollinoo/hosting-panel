@@ -2710,7 +2710,7 @@ export const it = {
       },
     },
     appTemplates: {
-      tabs: { label: "Tipo di modello", sites: "WordPress", apps: "Applicazione multi-servizio" },
+      tabs: { label: "Tipo di modello", sites: "WordPress", apps: "Applicazione multi-servizio", importCompose: "Importa da Compose" },
       title: "Modelli applicazione",
       subtitle: "Applicazioni multi-servizio che i clienti possono installare sul proprio server dedicato.",
       create: "Nuovo modello multi-servizio",
@@ -2740,6 +2740,7 @@ export const it = {
         productivity: "Produttività",
         web: "Siti web",
         jobs: "Attività periodiche",
+        apps: "Altre applicazioni",
       },
       stackStatus: {
         draft: "Bozza",
@@ -2783,8 +2784,8 @@ export const it = {
         editContentHint: "Si apre la versione predefinita. Salvando crei una nuova versione: quelle esistenti e le applicazioni già installate non cambiano.",
       },
       editor: {
-        source: "Sorgente HCP-STACK/v1",
-        sourceHint: "YAML ristretto: niente alias, tag o documenti multipli; massimo 64 KiB.",
+        source: "Sorgente del modello",
+        sourceHint: "Formato HCP-STACK/v1 o HCP-STACK/v2, in YAML ristretto: niente alias, tag o documenti multipli; massimo 64 KiB.",
         syntaxOk: "Sintassi corretta.",
         syntaxError: "Riga {line}, colonna {column}: {message}",
         validate: "Valida",
@@ -2802,8 +2803,9 @@ export const it = {
         customerYes: "Sì",
         customerNo: "No",
         secretNoDefault: "(segreto, nessun valore)",
+        secretGenerated: "(segreto generato dalla piattaforma: {kind}, lunghezza {length})",
         preview: "Anteprima del piano",
-        previewHint: "Piano sanitizzato: i segreti compaiono solo come nome del file, mai come valore.",
+        previewHint: "Piano sanitizzato: di un segreto compare solo il nome del file o della variabile che lo riceve, mai il valore.",
         makeDefault: "Rendi predefinita",
         save: "Salva nuova versione",
         saveCreate: "Crea modello",
@@ -2836,6 +2838,33 @@ x-hp-ingress:
     port: 8080
     protocol: http
 `,
+      },
+      importer: {
+        title: "Importa da Compose",
+        subtitle:
+          "Incolla un file Docker Compose: la piattaforma ne ricava la bozza di un modello, che controlli e correggi prima di crearlo. Finché non crei il modello non viene salvato nulla.",
+        compose: "File Compose",
+        composeHint:
+          "Un solo documento YAML, massimo 64 KiB. Le password che l'importatore riconosce non finiscono nella bozza: diventano valori generati dalla piattaforma. Controlla comunque che nella bozza non resti nessun segreto.",
+        tooLarge: "Il file supera 64 KiB.",
+        name: "Nome del modello",
+        nameHint: "Facoltativo. Se lo lasci vuoto vale il nome scritto nel file, se c'è.",
+        category: "Categoria",
+        categoryFromFile: "Dal file",
+        run: "Importa",
+        running: "Importazione…",
+        runningHint: "Il server chiede ai registri la versione esatta di ogni immagine: può volerci fino a un minuto.",
+        lookupFailed:
+          "In questo momento il server non riesce a chiedere ai registri le immagini del file. Non è stato salvato nulla: riprova tra qualche minuto.",
+        noAnswer: "Il server non ha risposto in tempo. Non è stato salvato nulla: riprova.",
+        refused: "Il file non può essere importato così com'è:",
+        refusedHint: "Correggi il file qui sopra e importalo di nuovo.",
+        draftReady: "La bozza è pronta. Leggi cosa è cambiato rispetto al file, poi scegli lo slug e crea il modello.",
+        draftInvalid: "La bozza non supera ancora i controlli: correggi il sorgente qui sotto.",
+        report: "Cosa è cambiato rispetto al file",
+        level: { refused: "Rifiutato ({n})", dropped: "Tolto ({n})", changed: "Modificato ({n})", info: "Note ({n})" },
+        again: "Importa un altro file",
+        draft: "Bozza del modello",
       },
       reasons: {
         STACK_TEMPLATE_INVALID: "Il sorgente non è valido.",
@@ -2945,6 +2974,7 @@ x-hp-ingress:
       productivity: "Produttività",
       web: "Siti web",
       jobs: "Attività periodiche",
+      apps: "Altre applicazioni",
     },
     wizard: {
       stepsLabel: "Passaggi dell'installazione",
