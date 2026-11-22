@@ -267,12 +267,6 @@ async function revisionOf(db: DatabaseExecutor, stackId: string, revisionId: str
   return row ?? null;
 }
 
-async function operationOf(db: DatabaseExecutor, operationId: string | undefined): Promise<OperationRow | null> {
-  if (operationId === undefined) return null;
-  const [row] = await db.select().from(operations).where(eq(operations.id, operationId));
-  return row ?? null;
-}
-
 async function enqueueDeployment(
   tx: DatabaseExecutor,
   input: StackScope & {
@@ -323,17 +317,22 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
       if (existing.requestHash !== input.requestHash) {
         throw codedError(`Idempotency key '${input.idempotencyKey}' was already used for a different request`, "IDEMPOTENCY_CONFLICT");
       }
-      const [deployment] = await tx
-        .select()
-        .from(appStackDeployments)
-        .where(eq(appStackDeployments.stackId, existing.id))
-        .orderBy(asc(appStackDeployments.startedAt), asc(appStackDeployments.id))
-        .limit(1);
+      const [own] = await tx
+        .select({ operation: operations, deployment: appStackDeployments })
+        .from(operations)
+        .innerJoin(appStackDeployments, eq(appStackDeployments.operationId, operations.id))
+        .where(
+          and(
+            eq(operations.organizationId, input.organizationId),
+            eq(operations.idempotencyKey, input.idempotencyKey),
+            eq(appStackDeployments.stackId, existing.id),
+          ),
+        );
       return {
         stack: existing,
-        revision: await revisionOf(tx, existing.id, existing.desiredRevisionId),
-        deployment: deployment ?? null,
-        operation: await operationOf(tx, deployment?.operationId),
+        revision: await revisionOf(tx, existing.id, own?.deployment.revisionId ?? null),
+        deployment: own?.deployment ?? null,
+        operation: own?.operation ?? null,
         idempotentReplay: true,
       };
     }

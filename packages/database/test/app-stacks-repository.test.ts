@@ -17,6 +17,7 @@ import {
   createAppTemplate,
   createAppStackTransactional,
   createDatabaseClient,
+  enqueueAppStackOperationTransactional,
   eq,
   hostAllocations,
   hosts,
@@ -314,6 +315,25 @@ describe("@hosting-panel/database — app stacks repository (create)", () => {
     const draft = input({ deployed: false });
     await createAppStackTransactional(db(), draft);
     expect(await createAppStackTransactional(db(), draft)).toMatchObject({ idempotentReplay: true, revision: null, operation: null });
+  });
+
+  it("replays a create with its own operation only: a draft's later deploy is not the create's", async () => {
+    const draft = input({ deployed: false });
+    await createAppStackTransactional(db(), draft);
+    const deploy = await enqueueAppStackOperationTransactional(db(), {
+      organizationId: orgA,
+      stackId: draft.stackId,
+      kind: "stack.deploy",
+      requestedByUserId: null,
+      idempotencyKey: `${draft.idempotencyKey}-deploy`,
+      requestHash: hex(`${draft.idempotencyKey} deploy`),
+      revision: revisionFor(draft),
+      destroyData: false,
+    });
+    expect(deploy.operation).not.toBeNull();
+    const replay = await createAppStackTransactional(db(), draft);
+    expect(replay).toMatchObject({ idempotentReplay: true, revision: null, deployment: null, operation: null });
+    expect(replay.stack.id).toBe(draft.stackId);
   });
 
   it("refuses the same key with another request hash", async () => {
