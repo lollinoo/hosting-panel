@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { AppStackDomainDtoSchema } from "../src/app-templates/stack-dto.js";
+import { findForbiddenPublicDtoKeys } from "../src/resources.js";
 import {
   APP_ROUTE_PASSWORD_HASH_PATTERN,
   APP_ROUTE_PASSWORD_MAX,
@@ -115,5 +117,18 @@ describe("application routing options (ADR-0037)", () => {
     expect(ok(UpdateAppStackDomainInputSchema, { ...redirect, protection: { username: "team" } })).toBe(false);
     expect(ok(UpdateAppStackDomainInputSchema, { ...redirect, pathRoutes: [RULE] })).toBe(false);
     expect(ok(UpdateAppStackDomainInputSchema, { ...INPUT, redirectToDomainId: "not an id" })).toBe(false);
+  });
+
+  it("the DTO of an address shows the user name and never a password or a verifier", () => {
+    const dto = {
+      id: "sdom_0123456789abcdef01234567", hostname: "shop.example.org", componentKey: "web", port: 8080, status: "active",
+      certificateStatus: "active", certificateProblem: null, certificateExpiresAt: null, checkedAt: null, redirectToDomainId: null,
+      compression: true, protection: { username: "team" }, pathRoutes: [RULE],
+    };
+    expect(AppStackDomainDtoSchema.parse(dto)).toEqual(dto);
+    expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);
+    // zod drops what the schema does not name: a verifier handed to the DTO schema by mistake does not come out.
+    const leaked = AppStackDomainDtoSchema.parse({ ...dto, protection: { username: "team", passwordHash: VERIFIER } });
+    expect(JSON.stringify(leaked)).not.toContain("apr1");
   });
 });

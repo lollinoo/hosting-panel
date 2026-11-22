@@ -151,6 +151,16 @@ export function appStackDomainDto(row: AppStackDomainRow): AppStackDomainDto {
     certificateProblem: row.certProblem,
     certificateExpiresAt: iso(row.certExpiresAt),
     checkedAt: iso(row.dnsCheckedAt),
+    redirectToDomainId: row.redirectToDomainId,
+    compression: row.compression,
+    // The user name only: the verifier of the password stays in the row.
+    protection: row.accessUsername === null ? null : { username: row.accessUsername },
+    pathRoutes: row.pathRoutes.map((path) => ({
+      pathPrefix: path.pathPrefix,
+      componentKey: path.componentKey,
+      port: path.port,
+      stripPrefix: path.stripPrefix,
+    })),
   };
 }
 

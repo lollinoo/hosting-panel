@@ -489,8 +489,9 @@ export class AppStackRuntime {
       await (entries.length > 0 ? port.publishAppStackRoutes({ plan, routes: entries }) : port.unpublishAppStackRoutes(ctx.ref));
     }
     // An address goes live (and gets its certificate) only once its route is written.
+    const written = new Set(entries.flatMap((e) => e.hosts.map((h) => h.hostname)));
     for (const row of domains) {
-      if (row.status === "pending" && ready.has(row.componentKey)) {
+      if (row.status === "pending" && written.has(row.hostname)) {
         await updateAppStackDomainState(this.#deps.db, { domainId: row.id, set: { status: "active" } });
       }
     }

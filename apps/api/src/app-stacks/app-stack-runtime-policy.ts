@@ -5,6 +5,7 @@ import {
   effectiveComponentHealth,
   type AppStackComponentHealth,
   type AppStackComponentObservation,
+  type AppStackHostRoute,
   type AppStackOperationKind,
   type AppStackStatus,
   type AppStackStatusIpcResult,
@@ -205,7 +206,7 @@ export function appStackRestartSet(next: Pick<ApprovedStackPlan, "components">, 
 export interface AppStackRouteEntry {
   readonly componentKey: string;
   readonly internalPort: number;
-  readonly hosts: SiteHostRoute[];
+  readonly hosts: AppStackHostRoute[];
 }
 
 const toDomainPolicyRow = (row: AppStackDomainRow): DomainRow => ({
@@ -220,6 +221,10 @@ const toDomainPolicyRow = (row: AppStackDomainRow): DomainRow => ({
 /**
  * R13. Rows on a (componentKey, internalPort) outside plan.ingress are left out and counted in `orphaned`; `include`
  * filters the ingress targets. Entries sorted by (componentKey, internalPort), empty ones dropped.
+ *
+ * ADR-0037. An address that redirects sits in the entry of its destination and is published with it, so the redirect
+ * needs only the destination to be ready; a path rule is published while its own target is ready. An option that is
+ * not set adds no key: the entries of addresses without options are what they were before the options existed.
  */
 export function appStackRoutePlan(input: {
   readonly plan: Pick<ApprovedStackPlan, "ingress">;
@@ -228,34 +233,71 @@ export function appStackRoutePlan(input: {
   readonly now: Date;
   readonly acmeEnabled: boolean;
 }): { readonly entries: AppStackRouteEntry[]; readonly orphaned: number } {
-  const groups = new Map<string, { componentKey: string; internalPort: number; rows: DomainRow[] }>();
-  let orphaned = 0;
-  for (const row of input.domains) {
-    if (!input.plan.ingress.some((r) => r.componentKey === row.componentKey && r.port === row.internalPort)) {
-      orphaned += 1;
-      continue;
-    }
-    if (!input.include.has(row.componentKey)) continue;
-    const id = `${row.componentKey}:${String(row.internalPort)}`;
-    const group = groups.get(id) ?? { componentKey: row.componentKey, internalPort: row.internalPort, rows: [] };
-    group.rows.push(toDomainPolicyRow(row));
+  const isIngress = (componentKey: string, port: number): boolean =>
+    input.plan.ingress.some((r) => r.componentKey === componentKey && r.port === port);
+  const receives = (componentKey: string, port: number): boolean => input.include.has(componentKey) && isIngress(componentKey, port);
+  const routed = input.domains.filter((row) => isIngress(row.componentKey, row.internalPort));
+  const byId = new Map(routed.map((row) => [row.id, row]));
+  const hostOf = (row: AppStackDomainRow): SiteHostRoute =>
+    buildSiteHostRoutes([toDomainPolicyRow(row)], input.now, { acmeEnabled: input.acmeEnabled })[0]!;
+
+  const groups = new Map<string, AppStackRouteEntry>();
+  for (const row of routed) {
+    const serving = row.redirectToDomainId === null ? row : byId.get(row.redirectToDomainId);
+    // A destination that is not routed, not ready, or that redirects itself takes the addresses pointing at it out.
+    if (serving === undefined || (serving !== row && serving.redirectToDomainId !== null)) continue;
+    if (!receives(serving.componentKey, serving.internalPort)) continue;
+    const id = `${serving.componentKey}:${String(serving.internalPort)}`;
+    const group = groups.get(id) ?? { componentKey: serving.componentKey, internalPort: serving.internalPort, hosts: [] };
+    group.hosts.push(
+      serving === row
+        ? { ...hostOf(row), ...contentOptions(row, receives) }
+        : { ...hostOf(row), redirectTo: `${hostOf(serving).httpsRedirect ? "https" : "http"}://${serving.hostname}` },
+    );
     groups.set(id, group);
   }
-  const entries = [...groups.values()]
-    .map((g) => ({
-      componentKey: g.componentKey,
-      internalPort: g.internalPort,
-      hosts: buildSiteHostRoutes(g.rows, input.now, { acmeEnabled: input.acmeEnabled }),
-    }))
-    .filter((e) => e.hosts.length > 0)
-    .sort((a, b) =>
-      a.componentKey === b.componentKey ? a.internalPort - b.internalPort : a.componentKey < b.componentKey ? -1 : 1,
-    );
-  return { entries, orphaned };
+  const entries = [...groups.values()].sort((a, b) =>
+    a.componentKey === b.componentKey ? a.internalPort - b.internalPort : a.componentKey < b.componentKey ? -1 : 1,
+  );
+  return { entries, orphaned: input.domains.length - routed.length };
 }
 
+/** What an address that serves content asks for beyond its host, in the key order of the route request. */
+function contentOptions(
+  row: AppStackDomainRow,
+  receives: (componentKey: string, port: number) => boolean,
+): Pick<AppStackHostRoute, "compress" | "protection" | "paths"> {
+  const paths = row.pathRoutes
+    .filter((path) => receives(path.componentKey, path.port))
+    .map((path) => ({ pathPrefix: path.pathPrefix, componentKey: path.componentKey, internalPort: path.port, stripPrefix: path.stripPrefix }))
+    .sort((a, b) => (a.pathPrefix < b.pathPrefix ? -1 : 1));
+  return {
+    ...(row.compression ? { compress: true as const } : {}),
+    ...(row.accessUsername !== null && row.accessPasswordHash !== null
+      ? { protection: { username: row.accessUsername, passwordHash: row.accessPasswordHash } }
+      : {}),
+    ...(paths.length > 0 ? { paths } : {}),
+  };
+}
+
+/**
+ * The hosts are hashed as a site's are (a redirect included); the options of an entry follow as one more element only
+ * when one of its hosts has any, so the hash of addresses without options is the one already stored.
+ */
 export function appStackRoutesHash(entries: readonly AppStackRouteEntry[]): string {
-  const canonical = entries.map((e) => [e.componentKey, e.internalPort, routePlanHash(e.hosts, null)]);
+  const canonical = entries.map((e) => {
+    const options = [...e.hosts]
+      .sort((a, b) => a.hostname.localeCompare(b.hostname))
+      .filter((h) => h.compress !== undefined || h.protection !== undefined || h.paths !== undefined)
+      .map((h) => [
+        h.hostname,
+        h.compress === true ? 1 : 0,
+        h.protection ? [h.protection.username, h.protection.passwordHash] : null,
+        h.paths ? h.paths.map((path) => [path.pathPrefix, path.componentKey, path.internalPort, path.stripPrefix]) : null,
+      ]);
+    const hosts = [e.componentKey, e.internalPort, routePlanHash(e.hosts, null)];
+    return options.length > 0 ? [...hosts, options] : hosts;
+  });
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 

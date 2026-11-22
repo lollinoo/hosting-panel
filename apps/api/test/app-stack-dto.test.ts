@@ -5,6 +5,7 @@ import {
   AppStackDetailDtoSchema,
   AppStackDomainDtoSchema,
   AppStackSummaryDtoSchema,
+  findForbiddenPublicDtoKeys,
   type AppImageAllowlistEntry,
   type AppStackComponentHealth,
   type ApprovedStackPlan,
@@ -104,6 +105,11 @@ const domain = (id: string, hostname: string, status: AppStackDomainRow["status"
   certAttempts: 0,
   certExpiresAt: null,
   certTrusted: true,
+  redirectToDomainId: null,
+  compression: false,
+  accessUsername: null,
+  accessPasswordHash: null,
+  pathRoutes: [],
   createdAt: NOW,
   updatedAt: NOW,
 });
@@ -266,8 +272,30 @@ describe("row mappers", () => {
       certificateProblem: "not_pointing",
       certificateExpiresAt: expires.toISOString(),
       checkedAt: NOW.toISOString(),
+      redirectToDomainId: null,
+      compression: false,
+      protection: null,
+      pathRoutes: [],
     });
     expect(AppStackDomainDtoSchema.strict().parse(dto)).toEqual(dto);
+  });
+
+  it("maps the routing options of a domain row: the user name, never the verifier of the password", () => {
+    const verifier = "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/";
+    const pathRoutes = [{ pathPrefix: "/api", componentKey: "api", port: 3000, stripPrefix: true }];
+    const dto = appStackDomainDto({
+      ...domain("sdom_1", "app.example.test", "active"),
+      compression: true,
+      accessUsername: "team",
+      accessPasswordHash: verifier,
+      pathRoutes,
+    });
+    expect(dto).toMatchObject({ redirectToDomainId: null, compression: true, protection: { username: "team" }, pathRoutes });
+    expect(JSON.stringify(dto)).not.toContain("apr1");
+    expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);
+    expect(AppStackDomainDtoSchema.strict().parse(dto)).toEqual(dto);
+    const redirecting = appStackDomainDto({ ...domain("sdom_2", "old.example.test", "active"), redirectToDomainId: "sdom_1" });
+    expect(redirecting).toMatchObject({ redirectToDomainId: "sdom_1", protection: null, pathRoutes: [] });
   });
 
   it("maps a deployment row with its operation kind and revision number", () => {

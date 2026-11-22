@@ -155,7 +155,8 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     AppStackDomainDtoSchema,
     {
       id: "asd_1", hostname: "notes.example.com", componentKey: "app", port: 8080, status: "active", certificateStatus: "active",
-      certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT,
+      certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT, redirectToDomainId: null, compression: true,
+      protection: { username: "team" }, pathRoutes: [{ pathPrefix: "/api", componentKey: "api", port: 3000, stripPrefix: true }],
     },
   ],
   [

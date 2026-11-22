@@ -81,6 +81,18 @@ function mapDomainError(err: AppStackDomainError): ControlPlaneError {
       const message = "This web address cannot point at that part of the application.";
       return appRefusal("VALIDATION_ERROR", message, { field: "componentKey", message, reason: "unknown_ingress" });
     }
+    case "REDIRECT_TARGET": {
+      const message = "Choose another web address of this application.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "redirectToDomainId", message, reason: "redirect_target" });
+    }
+    case "REDIRECT_CHAIN": {
+      const message = "A web address that redirects cannot be the destination of another one.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "redirectToDomainId", message, reason: "redirect_chain" });
+    }
+    case "PASSWORD_REQUIRED": {
+      const message = "Choose a password for this web address.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "protection.password", message, reason: "password_required" });
+    }
   }
 }
 

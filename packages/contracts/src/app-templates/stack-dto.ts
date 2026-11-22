@@ -9,6 +9,7 @@ import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
 import { APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
+import { AppStackDomainRoutingDtoShape } from "./stack-routing.js";
 import {
   APP_STACK_RETENTION_POLICIES,
   APP_STACK_VOLUME_STATUSES,
@@ -209,6 +210,7 @@ export const AppStackDomainDtoSchema = z.object({
   certificateProblem: z.string().nullable(),
   certificateExpiresAt: IsoDateTimeSchema.nullable(),
   checkedAt: IsoDateTimeSchema.nullable(), // dns_checked_at
+  ...AppStackDomainRoutingDtoShape, // ADR-0037
 });
 export type AppStackDomainDto = z.infer<typeof AppStackDomainDtoSchema>;
 export const APP_STACK_DIFF_CHANGES = ["added", "updated", "removed", "unchanged"] as const;

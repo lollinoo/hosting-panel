@@ -6258,6 +6258,58 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}:
+    patch:
+      tags: [App Stacks]
+      operationId: updateAppStackDomain
+      summary: Set the routing options of a web address of an application (app.update; audited as app.stack.domain.update)
+      description: >-
+        Replaces the four options of the address together (ADR-0037): the redirect to another address of the same
+        application, the password protection, compression and the paths. An option sent empty is cleared. The password
+        is write-only: send `protection.username` alone to keep the one already set (`VALIDATION_ERROR`,
+        `details[0].reason: password_required` when none is set). A redirect goes to another address of this
+        application that does not redirect itself and that no address redirects to (`redirect_target`,
+        `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
+        point of the application (`unknown_ingress`, `details[0].field: pathRoutes.<n>.componentKey`). The audit row
+        holds the user name and whether a password was sent, never the password. No Idempotency-Key. Returns 422
+        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
+        false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAppStackDomainInput"
+      responses:
+        "200":
+          description: The web addresses of the application
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: The application is being deleted (`RESOURCE_LOCKED`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
     delete:
       tags: [App Stacks]
       operationId: removeAppStackDomain
@@ -13380,6 +13432,61 @@ components:
     AddAppStackDomainInput:
       $ref: "#/components/schemas/AppStackDomainEntry"
 
+    AppStackDomainPathRoute:
+      type: object
+      additionalProperties: false
+      required: [pathPrefix, componentKey, port, stripPrefix]
+      properties:
+        pathPrefix:
+          type: string
+          maxLength: 64
+          pattern: "^(?:/[A-Za-z0-9][A-Za-z0-9._~-]{0,31}){1,4}$"
+          description: One to four segments, no trailing slash. The rule takes this path and everything below it
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        stripPrefix:
+          type: boolean
+          description: Whether the path is taken off the request before it reaches the application
+
+    UpdateAppStackDomainInput:
+      type: object
+      additionalProperties: false
+      required: [redirectToDomainId, compression, protection, pathRoutes]
+      description: The four routing options of a web address (ADR-0037), always sent together
+      properties:
+        redirectToDomainId:
+          nullable: true
+          description: Another web address of the same application; visitors are sent there, path and query kept
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        compression:
+          type: boolean
+        protection:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [username]
+          properties:
+            username:
+              type: string
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+            password:
+              type: string
+              writeOnly: true
+              minLength: 12
+              maxLength: 128
+              description: Printable ASCII characters. Leave it out to keep the password already set
+        pathRoutes:
+          type: array
+          maxItems: 4
+          description: Each path once
+          items:
+            $ref: "#/components/schemas/AppStackDomainPathRoute"
+
     AppStackAcceptedDto:
       type: object
       required: [stackId, operationId, deploymentId, status]
@@ -13626,7 +13733,7 @@ components:
 
     AppStackDomainDto:
       type: object
-      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt]
+      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -13654,6 +13761,25 @@ components:
           format: date-time
           nullable: true
           description: When the DNS was last checked
+        redirectToDomainId:
+          nullable: true
+          description: The web address of the same application this one sends its visitors to
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        compression:
+          type: boolean
+        protection:
+          type: object
+          nullable: true
+          required: [username]
+          description: Set when the address asks for a user name and a password. The password is never returned
+          properties:
+            username:
+              type: string
+        pathRoutes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppStackDomainPathRoute"
 
     AppStackPlanDiffDto:
       type: object

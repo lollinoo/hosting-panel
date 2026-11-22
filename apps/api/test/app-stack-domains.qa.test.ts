@@ -21,6 +21,7 @@ import {
   memberships,
   operations,
   organizations,
+  outboxEvents,
   platformInstallations,
   resourceQuotas,
   tlsCertificates,
@@ -433,6 +434,141 @@ describe("B3: application web addresses touch only the application's own route f
       expect(next.refreshes).toBe(0);
       expect(next.publishes).toBe(0);
       expect((await stackRow()).status).toBe("running");
+    });
+  });
+
+  describe("routing options rewrite only the application's file (ADR-0037)", () => {
+    const MAIN = "main.example.test";
+    const OLD = "old.example.test";
+    const PASSWORD = "Routing-Canary-Pass-0001";
+    const OFF = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] };
+    const FILES = { pathPrefix: "/files", componentKey: "web", port: 8080, stripPrefix: true };
+    const OPTION_WORDS = ["basicAuth", "compress", "redirectRegex", "stripPrefix", "PathPrefix", "apr1"];
+    let plain: string;
+    let plainHash: string | null;
+
+    async function setOptions(hostname: string, body: Json): Promise<void> {
+      const res = await owner("PATCH", `${base()}/${(await rowOf(hostname)).id}`, body);
+      expect(res.status, res.raw).toBe(200);
+      expect(res.raw).not.toContain(PASSWORD);
+      expect(res.raw).not.toContain("apr1");
+    }
+    /** One change of the options: only the application's file moved, with one refresh, and the next pass is idle. */
+    async function expectOneRewrite(act: () => Promise<unknown>, minutes: number): Promise<string> {
+      const r = await change(act, minutes);
+      expect(r.filesAfter.get(appFileName())).not.toBe(r.filesBefore.get(appFileName()));
+      expect([...r.filesAfter.keys()]).toEqual([...r.filesBefore.keys()]);
+      expectSiteAndPanelUntouched(r);
+      expect(r.refreshes).toBe(1);
+      expect(r.publishes).toBe(1);
+      expectOnlyApplicationRequests(r.methods);
+      const next = await change(async () => undefined, minutes + 1);
+      expect(next.refreshes).toBe(0);
+      expect(next.publishes).toBe(0);
+      expect(next.filesAfter).toEqual(next.filesBefore);
+      return r.filesAfter.get(appFileName())!;
+    }
+    /** The password and its verifier are in no audit row, operation or outbox row. */
+    async function expectNoPasswordKept(...verifiers: string[]): Promise<void> {
+      const db = dbClient.db;
+      const kept = JSON.stringify([await db.select().from(auditEvents), await db.select().from(operations), await db.select().from(outboxEvents)]);
+      for (const word of [PASSWORD, "apr1", ...verifiers]) expect(kept).not.toContain(word);
+    }
+
+    it("two addresses without options give a file with none of the options in it", async () => {
+      lookup.set(MAIN, [HOST_IPV4]);
+      lookup.set(OLD, [HOST_IPV4]);
+      await change(async () => expect((await addHost(MAIN)).status).toBe(201), 130);
+      const r = await change(async () => expect((await addHost(OLD)).status).toBe(201), 131);
+      plain = r.filesAfter.get(appFileName())!;
+      plainHash = (await stackRow()).appliedRoutesHash;
+      expect(plain).toContain(MAIN);
+      expect(plain).toContain(OLD);
+      for (const word of OPTION_WORDS) expect(plain).not.toContain(word);
+      expect(plainHash).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("a password, compression and a path reach the file in one rewrite, with the verifier of the row and never the password", async () => {
+      const text = await expectOneRewrite(
+        () => setOptions(MAIN, { redirectToDomainId: null, compression: true, protection: { username: "guest", password: PASSWORD }, pathRoutes: [FILES] }),
+        132,
+      );
+      const verifier = (await rowOf(MAIN)).accessPasswordHash!;
+      expect(text).toContain(`- "guest:${verifier}"`);
+      expect(text).toContain("basicAuth:");
+      expect(text).toContain("compress: {}");
+      expect(text).toContain("Host(`main.example.test`) && (Path(`/files`) || PathPrefix(`/files/`))");
+      expect(text).toContain("stripPrefix:");
+      expect(text).not.toContain("redirectRegex");
+      expect(text).not.toContain(PASSWORD);
+      expect((await stackRow()).appliedRoutesHash).not.toBe(plainHash);
+      await expectNoPasswordKept(verifier);
+    });
+
+    it("the same options sent again, with the user name alone, move nothing", async () => {
+      const verifier = (await rowOf(MAIN)).accessPasswordHash!;
+      const r = await change(() => setOptions(MAIN, { redirectToDomainId: null, compression: true, protection: { username: "guest" }, pathRoutes: [FILES] }), 134);
+      expect((await rowOf(MAIN)).accessPasswordHash).toBe(verifier);
+      expect(r.refreshes).toBe(0);
+      expect(r.publishes).toBe(0);
+      expect(r.filesAfter).toEqual(r.filesBefore);
+    });
+
+    it("a new password rewrites the file with the new verifier and without the old one", async () => {
+      const old = (await rowOf(MAIN)).accessPasswordHash!;
+      const text = await expectOneRewrite(
+        () => setOptions(MAIN, { redirectToDomainId: null, compression: true, protection: { username: "guest", password: `${PASSWORD}-b` }, pathRoutes: [FILES] }),
+        135,
+      );
+      const verifier = (await rowOf(MAIN)).accessPasswordHash!;
+      expect(verifier).not.toBe(old);
+      expect(text).toContain(`- "guest:${verifier}"`);
+      expect(text).not.toContain(old);
+      await expectNoPasswordKept(old, verifier);
+    });
+
+    it("a redirect sends the old address to the main one, keeps it live, and gives it no other option", async () => {
+      const mainId = (await rowOf(MAIN)).id;
+      const before = (await files()).get(appFileName())!;
+      const text = await expectOneRewrite(() => setOptions(OLD, { ...OFF, compression: true, redirectToDomainId: mainId }), 137);
+      // No certificate yet on this host (ACME off), so the destination is reached over plain HTTP.
+      expect(text).toContain("redirectRegex:");
+      expect(text).toContain('replacement: "http://main.example.test${1}"');
+      expect(text).toContain("permanent: true");
+      // One protected host and one compressed host, as before: the redirecting address added neither.
+      const count = (t: string, word: string) => t.split(word).length - 1;
+      for (const word of ["_auth\"", "_compress\"", "basicAuth:"]) expect(count(text, word), word).toBe(count(before, word));
+      expect((await rowOf(OLD)).status).toBe("active");
+      expect((await rowOf(OLD)).compression).toBe(true);
+    });
+
+    it("with every option cleared the file and its hash are the plain ones again, byte for byte", async () => {
+      await expectOneRewrite(() => setOptions(OLD, OFF), 139);
+      const text = await expectOneRewrite(() => setOptions(MAIN, OFF), 141);
+      expect(text).toBe(plain);
+      expect((await stackRow()).appliedRoutesHash).toBe(plainHash);
+    });
+
+    it("removing the destination of a redirect takes the redirect away: the other address serves content again, compressed as it was set", async () => {
+      const mainId = (await rowOf(MAIN)).id;
+      await expectOneRewrite(() => setOptions(OLD, { ...OFF, compression: true, redirectToDomainId: mainId }), 143);
+      const text = await expectOneRewrite(async () => expect((await owner("DELETE", `${base()}/${mainId}`)).status).toBe(200), 145);
+      expect((await rowOf(OLD)).redirectToDomainId).toBeNull();
+      expect(text).toContain(OLD);
+      expect(text).not.toContain(MAIN);
+      expect(text).not.toContain("redirectRegex");
+      expect(text).toContain("compress: {}");
+    });
+
+    it("removing the last address unpublishes the file, as without options", async () => {
+      const id = (await rowOf(OLD)).id;
+      const r = await change(async () => expect((await owner("DELETE", `${base()}/${id}`)).status).toBe(200), 147);
+      expect(r.filesAfter.has(appFileName())).toBe(false);
+      expectSiteAndPanelUntouched(r);
+      expect(r.refreshes).toBe(1);
+      expect((await stackRow()).appliedRoutesHash).toBeNull();
+      expect((await change(async () => undefined, 148)).refreshes).toBe(0);
+      await expectNoPasswordKept();
     });
   });
 
