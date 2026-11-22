@@ -33,6 +33,7 @@ import {
   appStackRestartSet,
   appStackRoutePlan,
   appStackRoutesHash,
+  appStackRoutesHealthOnly,
   appStackSettleTarget,
 } from "../src/app-stacks/app-stack-runtime-policy.js";
 import { ControlPlaneError } from "../src/common/control-plane.error.js";
@@ -314,6 +315,27 @@ describe("routes", () => {
     expect(hash([domain("www.example.com", "web", 8080), ...rows.slice(1)])).not.toBe(hash(rows));
     expect(appStackRoutesHash([])).toBe(appStackRoutesHash([]));
     expect(appStackRoutesHash([])).not.toBe(hash(rows));
+  });
+
+  it("appStackRoutesHealthOnly: true only when the published routes are today's addresses of some targets", () => {
+    const www = domain("www.example.com", "web", 8080);
+    const admin = domain("admin.example.com", "admin", 9000);
+    const app = domain("app.example.com", "web", 8080);
+    const routed = (domains: AppStackDomainRow[], include: ReadonlySet<string> = all) =>
+      appStackRoutesHash(appStackRoutePlan({ plan: p, domains, include, now: NOW, acmeEnabled: true }).entries);
+    const healthOnly = (domains: AppStackDomainRow[], appliedRoutesHash: string | null) =>
+      appStackRoutesHealthOnly({ plan: p, domains, now: NOW, acmeEnabled: true, appliedRoutesHash });
+
+    // A target left out or back.
+    expect(healthOnly([www, admin, app], routed([www, admin, app]))).toBe(true);
+    expect(healthOnly([www, admin, app], routed([www, admin, app], new Set(["admin"])))).toBe(true);
+    expect(healthOnly([www, admin], null)).toBe(true);
+    // An address added, removed, moved, or its certificate state changed.
+    expect(healthOnly([www, admin, app], routed([www]))).toBe(false);
+    expect(healthOnly([www], routed([www, app]))).toBe(false);
+    expect(healthOnly([], routed([admin]))).toBe(false);
+    expect(healthOnly([www, admin], routed([domain("www.example.com", "admin", 9000)]))).toBe(false);
+    expect(healthOnly([domain("www.example.com", "web", 8080, { certStatus: "requested" })], routed([www]))).toBe(false);
   });
 });
 

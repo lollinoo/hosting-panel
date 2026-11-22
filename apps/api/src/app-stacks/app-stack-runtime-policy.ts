@@ -28,6 +28,10 @@ export const APP_STACK_OBSERVE_BATCH = 20;
 export const APP_STACK_OBSERVE_PASS_BUDGET_MS = 45_000;
 /** Observer: no system route refresh while the stack's last operation failed less than this long ago. */
 export const APP_STACK_ROUTE_REFRESH_BACKOFF_MS = 10 * 60_000;
+/** Observer: at most one route refresh per stack this often while only the health of its targets changes. */
+export const APP_STACK_ROUTE_REFRESH_INTERVAL_MS = 5 * 60_000;
+/** Idempotency key prefix of the observer's route refresh, a stack.deploy that only changes routes (spec §3.9). */
+export const APP_STACK_ROUTES_KEY_PREFIX = "sys_routes_";
 /** Customer log reads. */
 export const APP_STACK_LOG_TAIL_DEFAULT = 200;
 export const APP_STACK_LOG_TAIL_MAX = 500;
@@ -51,6 +55,8 @@ export const APP_STACK_STEP_RUNNING_TEXT = "In progress";
 export const APP_STACK_STEP_FAILED_TEXT = "Could not finish this step";
 export const APP_STACK_STEP_SKIPPED_TEXT = "Skipped";
 export const APP_STACK_NO_ADDRESS_TEXT = "No web address to publish";
+/** Steps a route refresh does not run. */
+export const APP_STACK_STEP_NOT_NEEDED_TEXT = "Not needed to update the web addresses";
 /** Start step done text when the readiness budget ran out before every component was started. */
 export const APP_STACK_START_INCOMPLETE_TEXT = "Some components were not started in time";
 /** Operation errorMessage while the outcome is in doubt (thrown as OPERATION_AMBIGUOUS). */
@@ -251,6 +257,25 @@ export function appStackRoutePlan(input: {
 export function appStackRoutesHash(entries: readonly AppStackRouteEntry[]): string {
   const canonical = entries.map((e) => [e.componentKey, e.internalPort, routePlanHash(e.hosts, null)]);
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/**
+ * True when the published routes are the current addresses of some set of ingress targets: since they were written only
+ * the health of the targets changed, not the addresses (none added, removed, moved or with another certificate state).
+ */
+export function appStackRoutesHealthOnly(input: {
+  readonly plan: Pick<ApprovedStackPlan, "ingress">;
+  readonly domains: readonly AppStackDomainRow[];
+  readonly now: Date;
+  readonly acmeEnabled: boolean;
+  readonly appliedRoutesHash: string | null;
+}): boolean {
+  const targets = [...new Set(input.plan.ingress.map((r) => r.componentKey))];
+  for (let mask = 0; mask < 2 ** targets.length; mask += 1) {
+    const { entries } = appStackRoutePlan({ ...input, include: new Set(targets.filter((_, i) => (mask >> i) & 1)) });
+    if ((entries.length > 0 ? appStackRoutesHash(entries) : null) === input.appliedRoutesHash) return true;
+  }
+  return false;
 }
 
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */

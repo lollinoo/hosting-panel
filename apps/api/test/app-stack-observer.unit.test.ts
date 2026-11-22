@@ -26,6 +26,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { AppStackObserverService } from "../src/app-stacks/app-stack-observer.service.js";
 import {
   APP_STACK_OBSERVE_BATCH,
+  APP_STACK_ROUTE_REFRESH_INTERVAL_MS,
   appStackDisplayStatus,
   appStackRoutePlan,
   appStackRoutesHash,
@@ -60,6 +61,7 @@ describe("AppStackObserverService (PGlite)", () => {
   let failing: Set<string>;
   let onStatusRead: () => void;
   let cache: "running" | "stopped" | "missing";
+  let appHealth: "healthy" | "unhealthy";
   let report: CertificateStatusReport;
   let reportFails: boolean;
   let answers: Map<string, { a: string[]; aaaa: string[] }>;
@@ -72,7 +74,7 @@ describe("AppStackObserverService (PGlite)", () => {
       stackId,
       observedAt: NOW.toISOString(),
       components: [
-        { ...base, componentKey: "app", state: "running", health: "healthy", exitCode: null },
+        { ...base, componentKey: "app", state: "running", health: appHealth, exitCode: null },
         ...(cache === "running" ? [{ ...base, componentKey: "cache", state: "running", health: "healthy", exitCode: null } as const] : []),
         ...(cache === "stopped" ? [{ ...base, componentKey: "cache", state: "exited", health: "stopped", exitCode: 1 } as const] : []),
       ],
@@ -262,6 +264,7 @@ describe("AppStackObserverService (PGlite)", () => {
     failing = new Set();
     onStatusRead = () => undefined;
     cache = "stopped";
+    appHealth = "healthy";
     report = { acmeEnabled: true, trusted: true, readable: true, certificates: [], failures: [] };
     reportFails = false;
     answers = new Map();
@@ -622,21 +625,80 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(triggerAsync).not.toHaveBeenCalled();
     });
 
-    it("never starts a component someone stopped: no deploy while one reads stopped or missing, exactly one once it runs again", async () => {
-      const stack = await seedStack({ status: "running", domains: [{ hostname: "hand-stop.example.com" }] });
+    const routesOf = async (stackId: string, hostnames: readonly string[]) => {
+      const [stack] = await db().select().from(appStacks).where(eq(appStacks.id, stackId));
+      const plan = (await db().select().from(appStackRevisions).where(eq(appStackRevisions.id, stack!.appliedRevisionId!)))[0]!.plan as ApprovedStackPlan;
+      const rows = (await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stackId))).filter((r) => hostnames.includes(r.hostname));
+      const { entries } = appStackRoutePlan({ plan, domains: rows, include: new Set(["app"]), now: NOW, acmeEnabled: true });
+      return entries.length > 0 ? appStackRoutesHash(entries) : null;
+    };
+    /** What the routes-only deploy leaves behind once it published `hostnames`. */
+    const settleRefresh = async (stackId: string, hostnames: readonly string[]) => {
+      const appliedRoutesHash = await routesOf(stackId, hostnames);
+      await db().update(operations).set({ status: "succeeded", completedAt: NOW }).where(eq(operations.resourceId, stackId));
+      await db().update(appStacks).set({ status: "running", appliedRoutesHash }).where(eq(appStacks.id, stackId));
+    };
+    const allDeploys = (stackId: string) =>
+      db().select().from(operations).where(and(eq(operations.resourceId, stackId), eq(operations.kind, "stack.deploy")));
 
-      cache = "stopped";
-      for (const now of [NOW, at(11), at(120)]) await observer().reconcileOnce(now);
-      cache = "missing";
-      await observer().reconcileOnce(at(121));
+    it("a stopped or missing accessory holds nothing: a removed address is withdrawn on the next pass, with reads only", async () => {
+      for (const state of ["stopped", "missing"] as const) {
+        cache = state;
+        const stack = await seedStack({ status: "running", domains: [{ hostname: `keep-${state}.example.com` }, { hostname: `gone-${state}.example.com` }] });
+        await db().update(appStacks).set({ appliedRoutesHash: await routesOf(stack.id, [`keep-${state}.example.com`, `gone-${state}.example.com`]) }).where(eq(appStacks.id, stack.id));
+        await db().delete(appStackDomains).where(eq(appStackDomains.hostname, `gone-${state}.example.com`));
+
+        await observer().reconcileOnce(NOW);
+
+        expect(await deploys(stack.id)).toHaveLength(1);
+        expect((await health(stack.id)).find((h) => h.componentKey === "cache")!.health).toBe(state);
+      }
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("an address added while its target reads unhealthy queues nothing; the pass after it reads healthy queues the refresh", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "later.example.com" }] });
+
+      appHealth = "unhealthy";
+      await observer().reconcileOnce(NOW);
       expect(await deploys(stack.id)).toEqual([]);
-      expect(triggerAsync).not.toHaveBeenCalled();
 
-      cache = "running";
-      await observer().reconcileOnce(at(122));
-      await observer().reconcileOnce(at(123));
+      appHealth = "healthy";
+      await observer().reconcileOnce(at(1));
       expect(await deploys(stack.id)).toHaveLength(1);
-      expect(triggerAsync).toHaveBeenCalledTimes(1);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("a flapping target queues at most one refresh per five minutes; a removed or added address is never delayed", async () => {
+      const obs = observer();
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "a.example.com" }, { hostname: "b.example.com" }] });
+      await db().update(appStacks).set({ appliedRoutesHash: await routesOf(stack.id, ["a.example.com"]) }).where(eq(appStacks.id, stack.id));
+
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      await settleRefresh(stack.id, ["a.example.com", "b.example.com"]);
+      for (const minute of [1, 2, 3, 4]) {
+        appHealth = minute % 2 === 1 ? "unhealthy" : "healthy";
+        await obs.reconcileOnce(at(minute));
+      }
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+
+      await db().delete(appStackDomains).where(eq(appStackDomains.hostname, "b.example.com"));
+      await obs.reconcileOnce(at(4.5));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      await settleRefresh(stack.id, ["a.example.com"]);
+      await db()
+        .insert(appStackDomains)
+        .values({ id: `sdom_obs_c_${stack.id}`, stackId: stack.id, organizationId: ORG, componentKey: "app", internalPort: 8080, hostname: "c.example.com", dnsNextCheckAt: at(60) });
+      await obs.reconcileOnce(at(5));
+      expect(await allDeploys(stack.id)).toHaveLength(3);
+      await settleRefresh(stack.id, ["a.example.com", "c.example.com"]);
+
+      appHealth = "unhealthy";
+      await obs.reconcileOnce(at(5 + APP_STACK_ROUTE_REFRESH_INTERVAL_MS / 60_000 - 0.5));
+      expect(await allDeploys(stack.id)).toHaveLength(3);
+      await obs.reconcileOnce(at(5 + APP_STACK_ROUTE_REFRESH_INTERVAL_MS / 60_000));
+      expect(await allDeploys(stack.id)).toHaveLength(4);
       expect(mutatingCalls()).toEqual([]);
     });
   });

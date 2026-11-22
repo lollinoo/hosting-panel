@@ -12,6 +12,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackRevisions,
   appStacks,
   appStackSecrets,
   appStackVolumes,
@@ -43,8 +44,10 @@ import {
   APP_STACK_FAILURE,
   APP_STACK_HEALTH_BUDGET_MS,
   APP_STACK_NO_ADDRESS_TEXT,
+  APP_STACK_ROUTES_KEY_PREFIX,
   APP_STACK_STEP_DONE_TEXT,
   APP_STACK_STEP_FAILED_TEXT,
+  APP_STACK_STEP_NOT_NEEDED_TEXT,
   APP_STACK_STEP_SKIPPED_TEXT,
   APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
@@ -683,6 +686,115 @@ describe("AppStackRuntime (RT3)", () => {
 
       expect((await stackOf(stackId)).status).toBe("deleting");
       expect(await deploymentOf(del)).toMatchObject({ status: "unknown", problem: "OPERATION_AMBIGUOUS" });
+    });
+  });
+
+  describe("route refresh (the observer's system stack.deploy, trigger routes)", () => {
+    const NOT_NEEDED = ["reserve", "pull", "prepare", "create", "start", "health"] as const;
+    const refreshSteps = (publish: [string, string] = ["succeeded", APP_STACK_STEP_DONE_TEXT.publish]) => ({
+      ...done("stack.deploy"),
+      ...Object.fromEntries(NOT_NEEDED.map((k) => [k, ["skipped", APP_STACK_STEP_NOT_NEEDED_TEXT]])),
+      publish,
+    });
+    const refresh = (stackId: string) => {
+      n += 1;
+      return enqueueAppStackOperationTransactional(db(), {
+        organizationId: ORG,
+        stackId,
+        kind: "stack.deploy",
+        requestedByUserId: null,
+        idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}${hex(String(n)).slice(0, 32)}`,
+        requestHash: hex(`routes ${String(n)}`),
+        revision: null,
+        destroyData: false,
+      });
+    };
+    const addHost = (stackId: string, hostname: string) =>
+      addAppStackDomainsTransactional(db(), { organizationId: ORG, stackId, entries: [{ hostname, componentKey: "web", internalPort: 8080 }] });
+    const routedHosts = (stackId: string) => fake.stack(stackId).routes.flatMap((r) => r.hosts.map((h) => h.hostname)).sort();
+    const revisionsOf = async (stackId: string) => (await db().select().from(appStackRevisions).where(eq(appStackRevisions.stackId, stackId))).length;
+    const domainStatus = async (hostname: string) =>
+      (await db().select().from(appStackDomains).where(eq(appStackDomains.hostname, hostname)))[0]!.status;
+
+    it("a stopped accessory and a removed address: one status read and one publish, nothing started, the address withdrawn", async () => {
+      const { stackId, rev, write } = await create([CACHE, WEB]);
+      const keep = `keep${String(n)}.example.test`;
+      const gone = `gone${String(n)}.example.test`;
+      await addHost(stackId, keep);
+      await addHost(stackId, gone);
+      expect(await run(write)).toBeUndefined();
+      expect(routedHosts(stackId)).toEqual([gone, keep]);
+      fake.stack(stackId).components.get("cache")!.state = "exited";
+      await db().delete(appStackDomains).where(eq(appStackDomains.hostname, gone));
+      fake.calls.length = 0;
+      const op = await refresh(stackId);
+
+      expect(await run(op)).toBeUndefined();
+
+      expect(trace()).toEqual(["getAppStackStatus", "publishAppStackRoutes"]);
+      expect(routedHosts(stackId)).toEqual([keep]);
+      const stack = await stackOf(stackId);
+      expect(stack).toMatchObject({ status: "degraded", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+      expect(stack.appliedRoutesHash).toBe(appStackRoutesHash(fake.stack(stackId).routes));
+      expect(await revisionsOf(stackId)).toBe(1);
+      expect(await stepsOf(op)).toEqual(refreshSteps());
+      expect(await deploymentOf(op)).toMatchObject({ status: "succeeded", problem: null });
+      expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "healthy" });
+    });
+
+    it("the last address removed: exactly a status read and an unpublish, no routes hash", async () => {
+      const { stackId } = await running();
+      await db().delete(appStackDomains).where(eq(appStackDomains.stackId, stackId));
+      const op = await refresh(stackId);
+
+      expect(await run(op)).toBeUndefined();
+
+      expect(trace()).toEqual(["getAppStackStatus", "unpublishAppStackRoutes"]);
+      expect(fake.stack(stackId).routes).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: null });
+      expect(await stepsOf(op)).toEqual(refreshSteps());
+    });
+
+    it("an address added while its target is unhealthy stays pending; a later refresh publishes it once the target reads healthy", async () => {
+      const { stackId } = await running();
+      const added = `added${String(n)}.example.test`;
+      await addHost(stackId, added);
+      fake.setHealth("web", "unhealthy");
+      const first = await refresh(stackId);
+
+      expect(await run(first)).toBeUndefined();
+
+      expect(trace()).toEqual(["getAppStackStatus", "unpublishAppStackRoutes"]);
+      expect(fake.stack(stackId).routes).toEqual([]);
+      expect(await domainStatus(added)).toBe("pending");
+      // A refresh judges no component: the stack stays one the observer refreshes.
+      expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRoutesHash: null });
+
+      fake.setHealth("web", "healthy");
+      fake.calls.length = 0;
+      const second = await refresh(stackId);
+      expect(await run(second)).toBeUndefined();
+
+      expect(trace()).toEqual(["getAppStackStatus", "publishAppStackRoutes"]);
+      expect(routedHosts(stackId)).toHaveLength(2);
+      expect(routedHosts(stackId)).toContain(added);
+      expect(await domainStatus(added)).toBe("active");
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRoutesHash: appStackRoutesHash(fake.stack(stackId).routes) });
+    });
+
+    it("a publish that fails for sure: degraded, the routes hash and the file unchanged", async () => {
+      const { stackId } = await running();
+      const before = await stackOf(stackId);
+      await addHost(stackId, `more${String(n)}.example.test`);
+      fake.failNext("publishAppStackRoutes", "definite");
+      const op = await refresh(stackId);
+
+      expectFailure(await run(op), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toEqual(["getAppStackStatus", "publishAppStackRoutes"]);
+      expect(routedHosts(stackId)).toHaveLength(1);
+      expect(await stackOf(stackId)).toMatchObject({ status: "degraded", appliedRoutesHash: before.appliedRoutesHash, appliedRevisionId: before.appliedRevisionId });
+      expect(await stepsOf(op)).toEqual({ ...refreshSteps(["failed", APP_STACK_STEP_FAILED_TEXT]), settle: ["skipped", APP_STACK_STEP_SKIPPED_TEXT] });
     });
   });
 

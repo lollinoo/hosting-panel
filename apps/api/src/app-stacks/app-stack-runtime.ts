@@ -42,9 +42,11 @@ import {
   APP_STACK_HEALTH_BUDGET_MS,
   APP_STACK_HEALTH_POLL_MS,
   APP_STACK_NO_ADDRESS_TEXT,
+  APP_STACK_ROUTES_KEY_PREFIX,
   APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_STEP_DONE_TEXT,
   APP_STACK_STEP_LEASE_MS,
+  APP_STACK_STEP_NOT_NEEDED_TEXT,
   APP_STACK_STEP_RUNNING_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
   appStackAggregate,
@@ -68,6 +70,8 @@ import { parkAppStackOperationUnknown, settleAppStackOperation, type AppStackSet
 
 type OperationRow = typeof operations.$inferSelect;
 type HealthRows = { componentKey: string; health: AppStackComponentHealth }[];
+type DomainRows = Awaited<ReturnType<typeof listAppStackDomains>>;
+const ROUTES_NOT_NEEDED: readonly AppStackStepKey[] = ["reserve", "pull", "prepare", "create", "start", "health"];
 
 export const APP_STACK_RUNTIME_CLOCK = Symbol.for("hosting-panel.api.appStackRuntimeClock");
 export interface AppStackRuntimeClock {
@@ -168,6 +172,8 @@ export class AppStackRuntime {
     };
     switch (op.kind) {
       case "stack.deploy":
+        if (op.requestedByUserId === null && op.idempotencyKey?.startsWith(APP_STACK_ROUTES_KEY_PREFIX)) return this.#routes(ctx);
+        return this.#rollout(ctx, null);
       case "stack.upgrade":
       case "stack.rollback":
         return this.#rollout(ctx, null);
@@ -391,26 +397,7 @@ export class AppStackRuntime {
       const routesHash = await this.#step(
         ctx,
         "publish",
-        async () => {
-          if (!addressed) return null;
-          const ready = new Set(
-            plan.ingress.map((r) => r.componentKey).filter((key) => appStackComponentReady(appStackObservedComponent(final, key))),
-          );
-          const acmeEnabled = await this.#acmeEnabled();
-          const { entries } = appStackRoutePlan({ plan, domains, include: ready, now: this.#now(), acmeEnabled });
-          const hash = entries.length > 0 ? appStackRoutesHash(entries) : null;
-          if (hash !== stack.appliedRoutesHash) {
-            await this.#renew(ctx);
-            await (entries.length > 0 ? port.publishAppStackRoutes({ plan, routes: entries }) : port.unpublishAppStackRoutes(ctx.ref));
-          }
-          // An address goes live (and gets its certificate) only once its route is written.
-          for (const row of domains) {
-            if (row.status === "pending" && ready.has(row.componentKey)) {
-              await updateAppStackDomainState(db, { domainId: row.id, set: { status: "active" } });
-            }
-          }
-          return hash;
-        },
+        async () => (addressed ? this.#publishReady(ctx, stack, plan, final, domains) : null),
         addressed ? undefined : APP_STACK_NO_ADDRESS_TEXT,
       );
 
@@ -481,6 +468,69 @@ export class AppStackRuntime {
       );
       return settle({ stackStatus: "failed" }, health);
     });
+  }
+
+  /** Routes of the addresses whose ingress target is ready in `observed`, written when they changed; returns their hash. */
+  async #publishReady(
+    ctx: StackContext,
+    stack: AppStackRow,
+    plan: ApprovedStackPlan,
+    observed: ObservedAppStack,
+    domains: DomainRows,
+  ): Promise<string | null> {
+    const port = ctx.port!;
+    const ready = new Set(plan.ingress.map((r) => r.componentKey).filter((key) => appStackComponentReady(appStackObservedComponent(observed, key))));
+    const acmeEnabled = await this.#acmeEnabled();
+    const { entries } = appStackRoutePlan({ plan, domains, include: ready, now: this.#now(), acmeEnabled });
+    const hash = entries.length > 0 ? appStackRoutesHash(entries) : null;
+    if (hash !== stack.appliedRoutesHash) {
+      await this.#renew(ctx);
+      await (entries.length > 0 ? port.publishAppStackRoutes({ plan, routes: entries }) : port.unpublishAppStackRoutes(ctx.ref));
+    }
+    // An address goes live (and gets its certificate) only once its route is written.
+    for (const row of domains) {
+      if (row.status === "pending" && ready.has(row.componentKey)) {
+        await updateAppStackDomainState(this.#deps.db, { domainId: row.id, set: { status: "active" } });
+      }
+    }
+    return hash;
+  }
+
+  /**
+   * The observer's route refresh (spec §3.9): one status read, then the current addresses of the healthy ingress targets.
+   * Nothing is pulled, created, started or restarted; the revisions stay as they are.
+   */
+  async #routes(ctx: StackContext): Promise<void> {
+    const { db } = this.#deps;
+    const body = async () => {
+      const { stack, plan } = await this.#step(ctx, "validate", async () => {
+        const stack = await this.#begin(ctx, false);
+        const plan = await this.#planOf(ctx, stack.appliedRevisionId);
+        if (!plan) throw new AppStackStepRefusal("STACK_TEMPLATE_INVALID");
+        if (!ctx.port) throw new AppStackStepRefusal("STACK_UNSUPPORTED_FEATURE");
+        return { stack, plan };
+      });
+      for (const key of ROUTES_NOT_NEEDED) await updateOperationStepTransactional(db, ctx.op.id, key, "skipped", APP_STACK_STEP_NOT_NEEDED_TEXT);
+      const domains = await listAppStackDomains(db, ctx.ref);
+      const routesHash = await this.#step(ctx, "publish", async () => {
+        const observed = await this.#poll(ctx, plan, "final");
+        if (!observed) throw new AppStackStepRefusal("DOCKER_ENGINE_UNAVAILABLE");
+        return this.#publishReady(ctx, stack, plan, observed, domains);
+      });
+      ctx.current = "settle";
+      const status = appStackAggregate({ plan, health: healthMap(ctx.lastHealth!), domainCount: domains.length, routesPublished: true });
+      // A route change judges no component: the stack stays one the observer refreshes.
+      await settleAppStackOperation(db, ctx.op, ctx.deploymentId, {
+        outcome: "succeeded",
+        problem: null,
+        stackStatus: status === "running" ? "running" : "degraded",
+        appliedRoutesHash: routesHash,
+      });
+    };
+    // The previous route file stays in place on a definite failure.
+    await this.#guard(ctx, body, (problem) =>
+      settleAppStackOperation(db, ctx.op, ctx.deploymentId, { outcome: "failed", problem, stackStatus: "degraded", failedStep: ctx.current }),
+    );
   }
 
   async #stop(ctx: StackContext): Promise<void> {
