@@ -201,7 +201,7 @@ describe("pages and layouts for a flagged cookie", () => {
 
   it("an unflagged customer is not sent to the change-password page", async () => {
     getServerSession.mockResolvedValue(session(false));
-    await expect(HomePage()).rejects.toThrow("/sites");
+    await expect(HomePage()).rejects.toThrow("/apps");
   });
 });
 

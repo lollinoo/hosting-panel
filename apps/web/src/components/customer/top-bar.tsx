@@ -14,15 +14,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LanguageSwitch } from "@/components/shared/language-switch";
+import { appHref, type AppLink } from "@/components/app-stacks/app-stack-view";
 import { useMessages } from "@/i18n/provider";
 
-type SiteLink = { id: string; name: string };
-
-function SiteSwitcher({ sites }: { sites: SiteLink[] }) {
+function AppSwitcher({ apps }: { apps: readonly AppLink[] }) {
   const m = useMessages();
-  const { siteId } = useParams<{ siteId?: string }>();
-  const current = sites.find((s) => s.id === siteId);
-  if (sites.length === 0) return null;
+  const { siteId, stackId } = useParams<{ siteId?: string; stackId?: string }>();
+  const current = apps.find((a) => a.id === (a.kind === "site" ? siteId : stackId));
+  if (apps.length === 0) return null;
   const label = current?.name ?? m.shell.yourSites;
   return (
     <DropdownMenu>
@@ -35,17 +34,18 @@ function SiteSwitcher({ sites }: { sites: SiteLink[] }) {
       <DropdownMenuContent align="start" className="w-64">
         <DropdownMenuLabel>{m.shell.yourSites}</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {sites.map((s) => (
-          <DropdownMenuItem key={s.id} asChild>
-            <Link href={`/sites/${s.id}`} aria-current={s.id === siteId ? "page" : undefined}>
-              <span className="flex-1 truncate">{s.name}</span>
-              {s.id === siteId && <Check aria-hidden className="h-4 w-4" />}
+        {apps.map((a) => (
+          <DropdownMenuItem key={`${a.kind}:${a.id}`} asChild>
+            <Link href={appHref(a.kind, a.id)} aria-current={a === current ? "page" : undefined}>
+              <span className="flex-1 truncate">{a.name}</span>
+              {a.label && <span className="text-xs text-muted-foreground">{a.label}</span>}
+              {a === current && <Check aria-hidden className="h-4 w-4" />}
             </Link>
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild>
-          <Link href="/sites/new">
+          <Link href="/apps/new">
             <Plus aria-hidden className="h-4 w-4" />
             {m.shell.newSite}
           </Link>
@@ -55,17 +55,7 @@ function SiteSwitcher({ sites }: { sites: SiteLink[] }) {
   );
 }
 
-export function CustomerTopBar({
-  sites,
-  userName,
-  csrfToken,
-  appsAvailable = false,
-}: {
-  sites: SiteLink[];
-  userName: string;
-  csrfToken: string;
-  appsAvailable?: boolean;
-}) {
+export function CustomerTopBar({ apps = [], userName, csrfToken }: { apps?: readonly AppLink[]; userName: string; csrfToken: string }) {
   const m = useMessages();
   const pathname = usePathname();
   const [leaving, setLeaving] = useState(false);
@@ -83,7 +73,7 @@ export function CustomerTopBar({
   return (
     <header className="sticky top-0 z-40 border-b bg-card/95 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-5xl items-center gap-4 px-6">
-        <Link href="/sites" className="flex items-center gap-2 font-semibold tracking-tight">
+        <Link href="/apps" className="flex items-center gap-2 font-semibold tracking-tight">
           <span
             aria-hidden
             className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-xs font-bold text-primary-foreground"
@@ -92,14 +82,12 @@ export function CustomerTopBar({
           </span>
           <span className="sr-only sm:not-sr-only">{m.shell.productName}</span>
         </Link>
-        {appsAvailable && (
-          <Button asChild variant="ghost" size="sm">
-            <Link href="/apps" aria-current={pathname.startsWith("/apps") ? "page" : undefined}>
-              {m.apps.nav}
-            </Link>
-          </Button>
-        )}
-        <SiteSwitcher sites={sites} />
+        <Button asChild variant="ghost" size="sm">
+          <Link href="/apps" aria-current={pathname.startsWith("/apps") || pathname.startsWith("/sites") ? "page" : undefined}>
+            {m.apps.nav}
+          </Link>
+        </Button>
+        <AppSwitcher apps={apps} />
         <div className="ml-auto flex items-center gap-4">
           <LanguageSwitch csrfToken={csrfToken} />
           <DropdownMenu>

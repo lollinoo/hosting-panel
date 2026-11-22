@@ -138,29 +138,38 @@ beforeEach(() => {
 
 describe("navigation entry", () => {
   const appsLink = (h: string) => h.match(/<a[^>]*href="\/apps"[^>]*>([^<]*)<\/a>/);
+  const STACKS = `v1/organizations/${ORG}/app-stacks`;
 
-  it("the apps layout shows «Applications» only with the flag on and outside a support visit", async () => {
+  it("the apps layout always shows «Applications», marked on /apps; only the flag on outside a visit reads the stacks", async () => {
+    answer({ [STACKS]: ok([STACK]) });
     const on = html(await AppsLayout({ children: createElement("p", null, "child") }));
     expect(appsLink(on)?.[1]).toBe(en.apps.nav);
     expect(appsLink(on)?.[0]).toContain('aria-current="page"');
     expect(on).toContain("<p>child</p>");
+    expect(appReads()).toEqual([STACKS]);
 
     for (const over of [{ capabilities: {} }, { capabilities: null }, { capabilities: { applicationStacksAvailable: "true" } }, { support: visit }]) {
+      fetchUpstream.mockClear();
       mockData.getCustomerContext.mockResolvedValue(context(over));
-      expect(appsLink(html(await AppsLayout({ children: null }))), JSON.stringify(over)).toBeNull();
+      const h = html(await AppsLayout({ children: null }));
+      expect(appsLink(h)?.[1], JSON.stringify(over)).toBe(en.apps.nav);
+      expect(appsLink(h)?.[0], JSON.stringify(over)).toContain('aria-current="page"');
+      expect(appReads(), JSON.stringify(over)).toEqual([]);
     }
   });
 
-  it("the sites layout passes the same flag; without it the top bar is unchanged", async () => {
-    nav.pathname = "/sites";
+  it("the sites layout marks the same entry on a site page; with the flag off it still shows it and reads nothing", async () => {
+    nav.pathname = "/sites/s1";
+    answer({ [STACKS]: ok([STACK]) });
     const on = html(await SitesLayout({ children: null }));
     expect(appsLink(on)?.[1]).toBe(en.apps.nav);
-    expect(appsLink(on)?.[0]).not.toContain("aria-current");
+    expect(appsLink(on)?.[0]).toContain('aria-current="page"');
 
+    fetchUpstream.mockClear();
     mockData.getCustomerContext.mockResolvedValue(context({ capabilities: {} }));
     const off = html(await SitesLayout({ children: null }));
-    expect(off).not.toContain('href="/apps"');
-    expect(off).not.toContain(en.apps.nav);
+    expect(appsLink(off)?.[1]).toBe(en.apps.nav);
+    expect(off).toMatch(/<a[^>]*href="\/apps"[^>]*><span[^>]*>HP<\/span>/);
     expect(fetchUpstream).not.toHaveBeenCalled();
   });
 });
@@ -173,39 +182,56 @@ describe("gate", () => {
     expect(appsGate({ capabilities: ON as never, support: null })).toBeNull();
   });
 
-  it.each([
-    ["/apps", AppsPage],
-    ["/apps/new", NewAppPage],
-  ])("%s with the flag off or in a support visit shows the notice and reads no application", async (_path, Page) => {
-    for (const [over, reason] of [
-      [{ capabilities: {} }, "off"],
-      [{ capabilities: null }, "off"],
-      [{ support: visit }, "support"],
-    ] as const) {
+  it("/apps with the flag off or in a support visit shows the list without a notice and reads no application", async () => {
+    for (const over of [{ capabilities: {} }, { capabilities: null }, { support: visit }]) {
       mockData.getCustomerContext.mockResolvedValue(context(over));
-      const h = await render(Page);
-      expect(h).toContain(en.apps.unavailable.title);
-      expect(h).toContain(en.apps.unavailable[reason]);
-      expect(h).toContain('role="status"');
-      expect(h).toContain('href="/sites"');
+      const h = await render(AppsPage);
+      expect(h).not.toContain(en.apps.unavailable.title);
+      expect(h).toMatch(new RegExp(`<h1[^>]*>${en.apps.list.title}</h1>`));
+      expect(h).toContain('href="/apps/new"');
     }
     expect(appReads()).toEqual([]);
   });
 
-  it.each([
-    ["/apps", AppsPage],
-    ["/apps/new", NewAppPage],
-  ])("%s: no organisation → load error; 422 NOT_SUPPORTED → notice; 500 → load error", async (_path, Page) => {
+  it("/apps/new with the flag off or in a support visit goes to the WordPress form and reads no application", async () => {
+    for (const over of [{ capabilities: {} }, { capabilities: null }, { support: visit }]) {
+      mockData.getCustomerContext.mockResolvedValue(context(over));
+      await expect(NewAppPage()).rejects.toThrow("REDIRECT /sites/new");
+    }
+    expect(appReads()).toEqual([]);
+  });
+
+  it("/apps: no organisation → load error; 422 NOT_SUPPORTED → the list without a notice; 500 → the partial warning", async () => {
     mockData.getCustomerContext.mockResolvedValue(context({ orgId: null }));
-    expect(await render(Page)).toContain(en.shell.loadErrorTitle);
+    expect(await render(AppsPage)).toContain(en.shell.loadErrorTitle);
     expect(appReads()).toEqual([]);
 
     mockData.getCustomerContext.mockResolvedValue(context());
     fetchUpstream.mockResolvedValue(fail(422, "NOT_SUPPORTED"));
-    expect(await render(Page)).toContain(en.apps.unavailable.off);
+    const off = await render(AppsPage);
+    expect(off).toContain(en.apps.list.title);
+    expect(off).not.toContain(en.apps.unavailable.off);
+    expect(off).not.toContain(en.apps.list.partial);
     fetchUpstream.mockResolvedValue(fail(500, "INTERNAL_ERROR"));
-    const broken = await render(Page);
-    expect(broken).toContain(en.shell.loadErrorTitle);
+    const broken = await render(AppsPage);
+    expect(broken).toContain(en.apps.list.partial);
+    expect(broken).not.toContain(en.shell.loadErrorTitle);
+    expect(broken).not.toContain(en.apps.unavailable.title);
+  });
+
+  it("/apps/new: no organisation → load error; 422 NOT_SUPPORTED → the WordPress form; 500 → the partial warning and WordPress", async () => {
+    mockData.getCustomerContext.mockResolvedValue(context({ orgId: null }));
+    expect(await render(NewAppPage)).toContain(en.shell.loadErrorTitle);
+    expect(appReads()).toEqual([]);
+
+    mockData.getCustomerContext.mockResolvedValue(context());
+    fetchUpstream.mockResolvedValue(fail(422, "NOT_SUPPORTED"));
+    await expect(NewAppPage()).rejects.toThrow("REDIRECT /sites/new");
+    fetchUpstream.mockResolvedValue(fail(500, "INTERNAL_ERROR"));
+    const broken = await render(NewAppPage);
+    expect(broken).toContain(en.apps.list.partial);
+    expect([...broken.matchAll(/<a[^>]*href="([^"]*)"/g)].map((a) => a[1])).toEqual(["/sites/new"]);
+    expect(broken).not.toContain(en.shell.loadErrorTitle);
     expect(broken).not.toContain(en.apps.unavailable.title);
   });
 
@@ -255,7 +281,7 @@ describe("/apps — my applications", () => {
   it("an empty list says so and still offers a new application", async () => {
     answer({ [`v1/organizations/${ORG}/app-stacks`]: ok([]) });
     const h = await render(AppsPage);
-    expect(h).toContain(en.apps.list.empty);
+    expect(h).toContain(`${en.apps.list.empty} ${en.shell.emptyBody}`);
     expect(h).toContain('href="/apps/new"');
     expect(h).not.toContain("<table");
   });
@@ -264,13 +290,16 @@ describe("/apps — my applications", () => {
 describe("/apps/new — the catalog", () => {
   const CATALOG = { templates: [NOTES, WORKER], categories: ["content", "odd-kind"] };
 
-  it("shows the steps, the filter and one card per entry with resources, data, web and isolation", async () => {
+  it("shows WordPress first, then the filter and one card per entry with resources, data, web and isolation; no step strip", async () => {
     answer({ [`v1/organizations/${ORG}/app-templates`]: ok(CATALOG) });
     const h = await render(NewAppPage);
     expect(fetchUpstream).toHaveBeenCalledWith(`v1/organizations/${ORG}/app-templates`, expect.anything());
-    expect(h).toContain(`aria-label="${en.apps.wizard.stepsLabel}"`);
-    expect(h).toMatch(new RegExp(`<li[^>]*aria-current="step"[^>]*>${en.apps.wizard.step.choose}`));
-    expect(h).toContain(en.apps.catalog.title);
+    expect(h).not.toContain(en.apps.wizard.stepsLabel);
+    expect(h).toMatch(new RegExp(`<h1[^>]*>${en.apps.catalog.title}</h1>`));
+    const wordpress = h.match(/<a[^>]*href="\/sites\/new"[^>]*>([^<]*)<\/a>/)!;
+    expect(wordpress[1]).toBe(en.apps.catalog.choose);
+    expect(wordpress[0]).toContain('aria-label="Choose WordPress"');
+    expect(h.indexOf('href="/sites/new"')).toBeLessThan(h.indexOf('href="/apps/new/atpl_notes"'));
     expect(h).toContain(`role="group" aria-label="${en.apps.catalog.filterLabel}"`);
     expect(h).toMatch(new RegExp(`aria-pressed="true"[^>]*>${en.apps.catalog.all}<`));
     expect(h).toMatch(new RegExp(`aria-pressed="false"[^>]*>${en.apps.category.content}<`));
@@ -294,11 +323,13 @@ describe("/apps/new — the catalog", () => {
     expect(h).toContain('href="/apps/new/atpl_worker"');
   });
 
-  it("an empty catalog says so", async () => {
+  it("an empty catalog with WordPress the only choice goes to the WordPress form", async () => {
     answer({ [`v1/organizations/${ORG}/app-templates`]: ok({ templates: [], categories: [] }) });
-    const h = await render(NewAppPage);
-    expect(h).toContain(en.apps.catalog.empty);
-    expect(h).toContain(en.apps.wizard.step.choose);
+    await expect(NewAppPage()).rejects.toThrow("REDIRECT /sites/new");
+  });
+
+  it("the catalog alone still says when it is empty", () => {
+    expect(html(callHooks(AppCatalog, { entries: [], categories: [] }).tree)).toContain(en.apps.catalog.empty);
   });
 
   it("filterCatalog keeps one category, or all of them on null", () => {

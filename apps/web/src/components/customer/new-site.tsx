@@ -68,6 +68,7 @@ export function NewSite({
   siteTypes,
   limit,
   noSiteTypes = false,
+  initialTypeId,
 }: {
   orgId: string;
   csrfToken: string;
@@ -75,6 +76,8 @@ export function NewSite({
   limit: SiteLimit | null;
   /** The list was read and is empty (not: could not be read), so there is nothing to create. */
   noSiteTypes?: boolean;
+  /** The type the chooser picked; one not offered falls back to the first, as a reloaded list does. */
+  initialTypeId?: string | null;
 }) {
   const m = useMessages();
   const router = useRouter();
@@ -83,7 +86,7 @@ export function NewSite({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [typeId, setTypeId] = useState<string | null>(siteTypes[0]?.id ?? null);
+  const [typeId, setTypeId] = useState<string | null>(initialTypeId ?? siteTypes[0]?.id ?? null);
   // A choice that is no longer offered (the list was reloaded) falls back to the first one, as the chooser shows.
   const selected = siteTypes.find((type) => type.id === typeId) ?? siteTypes[0] ?? null;
 

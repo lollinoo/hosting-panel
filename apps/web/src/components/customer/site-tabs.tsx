@@ -1,10 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useMessages } from "@/i18n/provider";
-import { LAST_SITE_COOKIE } from "@/app/sites/landing";
 import { cn } from "@/lib/utils";
 import type { WebSiteType } from "@/site-types";
 
@@ -26,11 +24,6 @@ export const SITE_TABS: {
 export function SiteTabs({ siteId, typeTabs = [] }: { siteId: string; typeTabs?: WebSiteType["tabs"] }) {
   const m = useMessages();
   const pathname = usePathname();
-
-  // Server layouts cannot set cookies, so the last-visited site is remembered here.
-  useEffect(() => {
-    document.cookie = `${LAST_SITE_COOKIE}=${encodeURIComponent(siteId)}; path=/; max-age=31536000; samesite=lax`;
-  }, [siteId]);
 
   const tabs = [
     SITE_TABS[0]!,

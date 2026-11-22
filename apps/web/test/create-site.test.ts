@@ -29,7 +29,6 @@ vi.mock("next/navigation", () => ({
 
 import { POST as createSite } from "@/app/api/bff/orgs/[orgId]/managed-sites/route";
 import { POST as siteAction } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/actions/route";
-import { EmptySites } from "@/components/customer/empty-sites";
 import { NewSite, createErrorView, isLimitFull } from "@/components/customer/new-site";
 import { SiteForm, buildParameterValues } from "@/components/customer/site-form";
 import NewSitePage from "@/app/sites/new/page";
@@ -70,12 +69,6 @@ describe("managed-sites BFF", () => {
 });
 
 describe("create-site UI", () => {
-  it("empty state links to /sites/new", () => {
-    for (const m of [en, itMsgs]) {
-      expect(renderToStaticMarkup(createElement(EmptySites, { m }))).toContain('href="/sites/new"');
-    }
-  });
-
   it("new customer copy has no infrastructure vocabulary", () => {
     const banned = /\b(container|image|docker|volume|network|revision|service|template|mariadb|job|organization|organizzazione|servizio)\b/i;
     for (const m of [en, itMsgs]) {
@@ -155,7 +148,7 @@ describe("NewSite and the site limit", () => {
       expect(out).toContain("<form");
       expect(out).not.toContain(format(m.site.create.limitReached, { max: 5 }));
     }
-    expect(page(itMsgs, "it", { used: 2, max: 5 })).toContain("2 di 5 siti");
+    expect(page(itMsgs, "it", { used: 2, max: 5 })).toContain("2 di 5 applicazioni WordPress");
   });
 
   it("at the limit it explains why and shows no form", () => {
@@ -615,9 +608,9 @@ describe("new site page", () => {
     expect(fetchServerCustomerSiteTypes).not.toHaveBeenCalled();
   });
 
-  it("without an organisation it goes back to /sites before reading anything", async () => {
+  it("without an organisation it goes back to /apps before reading anything", async () => {
     getCustomerContext.mockResolvedValue({ session: { csrfToken: "csrf" }, orgId: null });
-    await expect(NewSitePage()).rejects.toThrow("REDIRECT:/sites");
+    await expect(NewSitePage()).rejects.toThrow("REDIRECT:/apps");
     expect(fetchServerOrg).not.toHaveBeenCalled();
     expect(fetchServerCustomerSiteTypes).not.toHaveBeenCalled();
   });

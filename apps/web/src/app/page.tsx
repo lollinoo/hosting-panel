@@ -5,5 +5,5 @@ export default async function HomePage() {
   const session = await getServerSession();
   if (!session) redirect("/login");
   if (session.user.mustChangePassword) redirect("/account/change-password");
-  redirect(session.activeConsole === "admin" ? "/admin/hosts" : "/sites");
+  redirect(session.activeConsole === "admin" ? "/admin/hosts" : "/apps");
 }

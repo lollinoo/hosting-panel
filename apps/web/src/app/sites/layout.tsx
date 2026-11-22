@@ -1,27 +1,10 @@
-import { CustomerTopBar } from "@/components/customer/top-bar";
-import { SupportBanner } from "@/components/customer/support-banner";
-import { LoadError } from "@/components/shared/load-error";
-import { getMessages } from "@/i18n";
-import { getRequestLocale } from "@/i18n/server";
-import { getCustomerContext, getSites } from "./data";
+import { getCustomerContext } from "@/app/sites/data";
+import { CustomerLayout } from "@/app/sites/customer-layout";
 
 export const dynamic = "force-dynamic";
 
 export default async function SitesLayout({ children }: { children: React.ReactNode }) {
-  const { session, orgId, loadError, capabilities, support } = await getCustomerContext();
-  const sites = loadError ? null : await getSites(orgId);
-  return (
-    <div className="flex min-h-screen flex-col bg-muted/30">
-      <CustomerTopBar
-        sites={(sites ?? []).map((s) => ({ id: s.id, name: s.name }))}
-        userName={session.user.name}
-        csrfToken={session.csrfToken}
-        appsAvailable={capabilities?.applicationStacksAvailable === true && support === null}
-      />
-      {support && <SupportBanner support={support} csrfToken={session.csrfToken} />}
-      <main className="mx-auto w-full max-w-5xl flex-1 px-6 py-8">
-        {sites ? children : <LoadError m={getMessages(await getRequestLocale())} />}
-      </main>
-    </div>
-  );
+  await getCustomerContext(); // the login, password and support guards run before anything renders (cached: CustomerLayout reuses it)
+  // Called, not rendered as <CustomerLayout>: the awaited layout is then plain markup, with no async component left inside.
+  return CustomerLayout({ children });
 }

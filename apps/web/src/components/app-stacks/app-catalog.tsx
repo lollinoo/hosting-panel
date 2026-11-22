@@ -9,7 +9,6 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { format, type Messages } from "@/i18n";
 import { useMessages } from "@/i18n/provider";
 import { formatCpu, formatMemory } from "./app-stack-view";
-import { WizardSteps } from "./wizard-steps";
 
 export function filterCatalog(entries: readonly CustomerAppTemplateSummaryDto[], category: string | null): CustomerAppTemplateSummaryDto[] {
   return entries.filter((e) => category === null || e.category === category);
@@ -40,8 +39,6 @@ export function AppCatalog({ entries, categories }: { entries: CustomerAppTempla
 
   return (
     <div className="space-y-6">
-      <WizardSteps current="choose" />
-      <h1 className="text-2xl font-bold tracking-tight">{t.title}</h1>
       {entries.length === 0 ? (
         <p className="text-sm text-muted-foreground">{t.empty}</p>
       ) : (

@@ -1,5 +1,12 @@
-import { APP_STACK_REASONS, APP_STACK_STATUSES, type AppStackComponentHealth, type AppStackStatus } from "@hosting-panel/contracts";
-import { errorMessage, format, type Messages } from "@/i18n";
+import {
+  APP_STACK_REASONS,
+  APP_STACK_STATUSES,
+  type AppStackComponentHealth,
+  type AppStackStatus,
+  type AppStackSummaryDto,
+  type SiteSummaryDto,
+} from "@hosting-panel/contracts";
+import { errorMessage, format, type Locale, type Messages } from "@/i18n";
 
 export type Tone = "success" | "warning" | "destructive" | "secondary" | "outline";
 
@@ -60,3 +67,36 @@ export function formatMemory(memoryBytes: string): string {
   const [unit, label] = bytes >= GIB ? [GIB, "GiB"] : [MIB, "MiB"];
   return `${Number((bytes * 10n + unit / 2n) / unit) / 10} ${label}`;
 }
+
+export type AppKind = "site" | "stack";
+export type AppEntry =
+  | { kind: "site"; id: string; name: string; site: SiteSummaryDto }
+  | { kind: "stack"; id: string; name: string; stack: AppStackSummaryDto };
+/** What the top bar's switcher needs (serialisable: passed from a server layout to a client component). */
+export type AppLink = { kind: AppKind; id: string; name: string; label: string | null };
+
+/** The detail page of one application of either kind. */
+export const appHref = (kind: AppKind, id: string): string => `${kind === "site" ? "/sites" : "/apps"}/${encodeURIComponent(id)}`;
+
+/** Both kinds in one order: by name in the reader's language, then sites before stacks, then by id. */
+export function appEntries(sites: readonly SiteSummaryDto[], stacks: readonly AppStackSummaryDto[], locale: Locale): AppEntry[] {
+  const entries: AppEntry[] = [
+    ...sites.map((site) => ({ kind: "site" as const, id: site.id, name: site.name, site })),
+    ...stacks.map((stack) => ({ kind: "stack" as const, id: stack.id, name: stack.name, stack })),
+  ];
+  return entries.sort(
+    (a, b) =>
+      a.name.localeCompare(b.name, locale, { sensitivity: "base" }) ||
+      (a.kind === b.kind ? 0 : a.kind === "site" ? -1 : 1) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+}
+
+/** The kind a list names: «WordPress» for a WordPress site, the catalog entry's name for a stack, null for a site of no known type. */
+export function appKindLabel(m: Messages, e: AppEntry): string | null {
+  if (e.kind === "stack") return e.stack.templateName;
+  return e.site.siteType === "wordpress" ? m.apps.list.wordpress : null;
+}
+
+export const appLinks = (m: Messages, entries: readonly AppEntry[]): AppLink[] =>
+  entries.map((e) => ({ kind: e.kind, id: e.id, name: e.name, label: appKindLabel(m, e) }));

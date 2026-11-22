@@ -3,7 +3,7 @@ import { useMessages } from "@/i18n/provider";
 export const WIZARD_STEPS = ["choose", "configure", "domains", "review", "install"] as const;
 export type WizardStep = (typeof WIZARD_STEPS)[number];
 
-/** Uses the messages context: render it inside a client component (AppCatalog, AppWizard). */
+/** Uses the messages context: render it inside a client component (AppWizard). */
 export function WizardSteps({ current }: { current: WizardStep }) {
   const m = useMessages();
   const at = WIZARD_STEPS.indexOf(current);

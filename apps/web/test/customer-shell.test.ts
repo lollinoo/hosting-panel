@@ -1,12 +1,25 @@
-import { describe, expect, it } from "vitest";
-import { SITE_STATUSES, type SiteSummaryDto } from "@hosting-panel/contracts";
+import fs from "node:fs";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { SITE_STATUSES } from "@hosting-panel/contracts";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 import { toSiteStatusView } from "@/components/customer/status-pill";
 import { SITE_TABS } from "@/components/customer/site-tabs";
-import { pickLandingSite } from "@/app/sites/landing";
 
-const site = (id: string) => ({ id, name: id }) as SiteSummaryDto;
+const fetchUpstream = vi.fn();
+const getServerSession = vi.fn();
+vi.mock("@/lib/upstream", () => ({ fetchUpstream: (...a: unknown[]) => fetchUpstream(...a) }));
+vi.mock("@/lib/server-session", () => ({ getServerSession: () => getServerSession() }));
+vi.mock("next/navigation", () => ({
+  redirect: (to: string) => {
+    throw new Error(`REDIRECT ${to}`);
+  },
+  usePathname: () => "/",
+}));
+
+import HomePage from "@/app/page";
+import SitesPage from "@/app/sites/page";
 
 describe("customer shell", () => {
   it("toSiteStatusView maps every SiteStatus to a known label key", () => {
@@ -35,10 +48,16 @@ describe("customer shell", () => {
     expect(SITE_TABS[0]?.href("s1")).toBe("/sites/s1");
   });
 
-  it("pickLandingSite returns last-used site if present, else first, else null", () => {
-    expect(pickLandingSite([site("a"), site("b")], "b")).toBe("b");
-    expect(pickLandingSite([site("a"), site("b")], "gone")).toBe("a");
-    expect(pickLandingSite([site("a")], undefined)).toBe("a");
-    expect(pickLandingSite([], "b")).toBeNull();
+  it("/sites and a customer's landing go to the one list of applications", async () => {
+    expect(() => SitesPage()).toThrow("REDIRECT /apps");
+    getServerSession.mockResolvedValue({ activeConsole: "customer", user: { mustChangePassword: false } });
+    await expect(HomePage()).rejects.toThrow("REDIRECT /apps");
+    expect(fetchUpstream).not.toHaveBeenCalled();
+  });
+
+  it("deleting a site returns to the list of applications", () => {
+    const code = fs.readFileSync(path.resolve(__dirname, "../src/components/customer/site-actions.tsx"), "utf-8");
+    expect(code).toContain('router.push("/apps")');
+    expect(code).not.toContain('"/sites"');
   });
 });

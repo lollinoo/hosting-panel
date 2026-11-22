@@ -10,7 +10,7 @@ export function AppsUnavailable({ m, reason }: { m: Messages; reason: "off" | "s
         <AlertTitle>{m.apps.unavailable.title}</AlertTitle>
         <AlertDescription>{m.apps.unavailable[reason]}</AlertDescription>
       </Alert>
-      <Link href="/sites" className="text-sm font-medium text-primary hover:underline">
+      <Link href="/apps" className="text-sm font-medium text-primary hover:underline">
         {m.apps.unavailable.back}
       </Link>
     </div>
