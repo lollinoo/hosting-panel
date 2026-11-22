@@ -74,7 +74,7 @@ Durable log of settled architectural and product boundary decisions aligned via 
 - **ADR-010**: Concrete Process Topology & IPC (`Split Agents` + Signed UDS IPC) — **To transition from `OPEN` to `APPROVATO — Fase 2` during `HCP-SPEC-003` implementation**
 - **ADR-011**: Filesystem & Volume Disk Quota Enforcement for `Shared` Hosting — **Remains `OPEN — prima di Shared`**
 - **ADR-012**: Threat Model Constraint on Untrusted Workloads in Shared Hosting — **VINCOLO**
-- **ADR-0035**: Application Stacks & Template Catalog (`docs/architecture/adr/0035-application-stacks.md`) — **`PROPOSTO`** (owner gate W0, BLOCKED.md #1)
+- **ADR-0035**: Application Stacks & Template Catalog (`docs/architecture/adr/0035-application-stacks.md`) — **`APPROVATO`** (owner, 2026-11-22)
 
 ---
 
@@ -256,9 +256,9 @@ Source: `docs/architecture/adr/0034-per-customer-site-limit.md`, `docs/architect
 
 ## Application Stacks & Template Catalog Decisions (2026-11-22)
 
-Source: HCP-SPEC-005 (application stacks, 2026-11-22) and the lead decisions L0–L21 of run swarm-1122-002730. Every item is proposed, assumed by this run — not an owner decision (BLOCKED.md #1); ADR-0035 stays PROPOSTO.
+Source: HCP-SPEC-005 (application stacks, 2026-11-22) and the lead decisions L0–L21 of run swarm-1122-002730. Every item was proposed and assumed by this run; the owner approved ADR-0035 and D1–D12 on 2026-11-22 (BLOCKED.md #1); the lead decisions L0–L21 are not owner decisions.
 
-1. **Owner decisions D1–D12 of the spec (§24), each proposed, assumed by this run (`ADR-0035` §2.15)**:
+1. **Owner decisions D1–D12 of the spec (§24), each proposed, assumed by this run, approved by the owner on 2026-11-22 (`ADR-0035` §2.15)**:
    - D1 `app_templates` separate from `site_templates`: proposed, assumed by this run — ten `app_*` tables in migration `0025_app_stacks.sql`.
    - D2 only the server administrator edits templates: proposed, assumed by this run — `/v1/admin/app-templates` behind `requireServerAdmin`.
    - D3 at most 8 components per stack: proposed, assumed by this run — `APP_TEMPLATE_LIMITS.services = 8`, re-checked by the executor.
@@ -302,3 +302,18 @@ Decisions taken during the build (lead rulings on review findings; recorded in `
 27. **Restore and delete**: the fresh-server guard of the panel restore counts live stacks; a delete turns `pending` and `missing` volume rows into `removed` and writes the retention both ways; boot repair moves an orphaned `stopping` stack to `unknown`.
 28. **No image-allowlist seam in the runtime**: API tests use the three allowlisted repositories or the built-in templates; only the M3 engine script injects its own allowlist through the executor's test seam.
 29. **Acceptance verdicts** use the HCP-SPEC-004 grammar (no partial verdict): what only the owner can prove is an "Owner part" of a `PASS` row, or `PENDING (owner: …)` when nothing of the row can run here (`B6`).
+
+## Cycle 2 — one name, «Applicazioni» (2026-11-22)
+
+Source: the owner's feedback after the demo and the lead rulings L22–L31 of run swarm-1122-002730 (`ADR-0035` §2.16).
+
+- **L22 Name.** IT «Applicazioni» / «applicazione», EN «Applications» / «application»; a WordPress site is an application of kind WordPress; the kind shown in lists is the site type's name for a site and the template's name for a stack.
+- **L23 Texts.** Every text that names the customer's managed thing as a class says «applicazione/application»; «sito/site» stays only where it means the public website itself; i18n key paths do not change, only values.
+- **L24 Web routes.** `/apps` is the one list, `/apps/new` the one chooser, `/apps/new/[templateId]` the stack wizard; `/sites/new` is the WordPress form reached from the chooser; `/sites` and the customer landing `/` go to `/apps`; detail addresses and the API routes do not change.
+- **L25 Flags off and support visits.** With `applicationStacksAvailable` not true, or during a support visit, the list and the chooser show WordPress only, with no notice and no dead end; the four capability flags stay `false` in code.
+- **L26 Limits and data stay separate.** `maxSites` and the application-stack limit remain two limits; no table, DTO field or API route is renamed.
+- **L27 Administrator.** «Siti» becomes «Applicazioni» (`/admin/sites` unchanged): WordPress applications as before and, with `applicationStacksAvailable` true, every stack read-only through the additive read `GET /v1/admin/app-stacks`; «Modelli» is one list of both template kinds with one «Nuovo modello».
+- **L28 Editing an application template.** Name, description and category are edited on the template page (the existing PATCH); «Modifica contenuto» opens the editor on the default version; saving creates a new version, versions stay immutable.
+- **L29 Unchanged rules.** No new npm dependency or environment variable; WordPress behaviour, API contracts (apart from the additive reads of L27 and L31), database and executor untouched; nothing copied from other panels; customer pages never read an organisation id from the address.
+- **L30 Documents.** README, HARNESS, runbooks, `ADR-0035` (approved, §2.16), the acceptance report and `.agents/brain` use the new names where they tell an operator where to click; README still does not contain the spec's id.
+- **L31 A WordPress row shows its web address.** A second additive read-only route, `GET /v1/organizations/:orgId/managed-sites` (`site.read`, the same sites the customer can already read, at most 200, with the primary domain), feeds the address column of `/apps`.

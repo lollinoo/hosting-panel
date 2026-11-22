@@ -13,9 +13,9 @@ It does not say the feature is ready: the owner gates below are open.
   `stackPublicPortsAvailable` and `gitBuildsAvailable` are `false` on every backend. Turning the
   first two on for `linux-systemd`, the live acceptance on the owner's VMs, the reboot test (`B6`) and
   the merge are the owner's (BLOCKED.md #2).
-- **Gate W0 open.** Decisions D1–D12 and `ADR-0035` stay `PROPOSTO` (BLOCKED.md #1); the image
-  allowlist and the three seed digests wait for the owner (BLOCKED.md #4); one branch and one draft PR
-  (#37) instead of a series of small PRs (BLOCKED.md #3).
+- **Gate W0.** The owner approved decisions D1–D12 and `ADR-0035` on 2026-11-22 (BLOCKED.md #1) and
+  kept one branch and one PR (#37, BLOCKED.md #3); the image allowlist and the three seed digests still
+  wait for the owner (BLOCKED.md #4).
 - **Security review: 0 critical, 0 high and 0 medium open; two mediums repaired after the last round
   and not re-reviewed.** The independent review found no critical and no high defect; the one high of
   the code reviews (organisation ids, S5-H1) is repaired. The third and last review round closed both
@@ -154,8 +154,8 @@ its engineer's report.
 - **A real update** between two releases with `hp-update` (`A20`).
 - **Turning the feature on:** `applicationTemplatesAvailable` and `applicationStacksAvailable` on
   `linux-systemd`, then a live acceptance with a real customer organisation (BLOCKED.md #2).
-- **Approvals:** D1–D12 and `ADR-0035` (BLOCKED.md #1), the PR shape (BLOCKED.md #3), the image
-  allowlist and the three digests above (BLOCKED.md #4).
+- **Approvals:** the image allowlist and the three digests above (BLOCKED.md #4). D1–D12, `ADR-0035`
+  and the PR shape were approved on 2026-11-22.
 
 ## Known limits behind a PASS
 

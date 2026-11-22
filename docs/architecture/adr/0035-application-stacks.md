@@ -1,6 +1,6 @@
 # ADR 0035 — Stack Applicativi e Catalogo dei Modelli di Applicazione
 
-- **Stato:** `PROPOSTO` — in attesa dell'approvazione del proprietario (gate W0, BLOCKED.md #1); costruito dallo sciame swarm-1122-002730 con le proposte della specifica
+- **Stato:** `APPROVATO` — decisioni D1–D12 approvate dal proprietario il 2026-11-22; costruito dallo sciame swarm-1122-002730
 - **Data:** 2026-11-22
 - **Riferimento:** HCP-SPEC-005 (stack applicativi, catalogo dei modelli, deploy dichiarativi, 2026-11-22; da non confondere con la vecchia sigla HCP-SPEC-005 di `docs/architecture/adr/0014-zero-sock-traefik-file-provider-ingress.md`), `ADR-0033` (modelli di sito), `ADR-0034` (limite per cliente), `ADR-0014` (Traefik a file), `ADR-0015` (segreti); issue #36, PR in bozza #37
 - **Migrazioni:** `0025` (additiva; file `packages/database/migrations/0025_app_stacks.sql`)
@@ -29,7 +29,7 @@ Le applicazioni hanno tabelle proprie con prefisso `app_` (D1, §2.15). Non esis
 
 Si riusano le primitive che già esistono, senza cambiarne la semantica: il parser di ADR-0033 (`packages/contracts/src/site-templates/yaml-subset.ts`), lo scanner dell'interpolazione (`packages/policy-engine/src/site-template-interpolation.ts`), l'autorizzazione, la cifratura AES-256-GCM, l'outbox, l'esecutore e la sua IPC firmata, il proxy Traefik a file e l'audit. I piccoli helper privati del validatore dei siti sono copiati nei file nuovi con un test che ne controlla la deriva, non estratti (decisione del capo L1): così il codice dei modelli di sito non cambia di una riga.
 
-Nel menu dell'amministratore la voce «Modelli» ottiene due schede, Siti e Applicazioni, visibili solo con `applicationTemplatesAvailable` vero; il cliente ha la voce «Applicazioni», visibile solo con `applicationStacksAvailable` vero.
+Nei dati e nelle API le due famiglie restano separate; nelle console sono una sola cosa, le **applicazioni** (§2.16): l'amministratore ha un solo elenco «Modelli» con i due tipi e una sola voce «Applicazioni»; il cliente ha un solo elenco `/apps` e una sola pagina di creazione `/apps/new`, dove gli stack compaiono solo con `applicationStacksAvailable` vero.
 
 ### 2.2 Il modello delle risorse (migrazione `0025`)
 
@@ -284,24 +284,53 @@ Perché è sicuro: i due componenti girano come `999:1000` (la riga dell'allowli
 
 **Ripristino su un server nuovo.** `infra/linux/hp-restore-panel.sql` ha istruzioni additive dopo la chiusura generica delle operazioni: le distribuzioni in corso diventano `failed` (`OPERATION_INTERRUPTED`), i componenti `missing`, i volumi `missing` (i dati non sono in nessun backup), i domini tornano `pending` senza certificato, gli stack `failed` (o `delete_failed` se erano in cancellazione). Le bozze restano `draft`. Segreti, parametri, revisioni e versioni non si toccano (i trigger di immutabilità farebbero fallire l'intero ripristino). Lo stack si ridistribuisce a mano dal pannello. Se dopo il ripristino lo stack si cancella, i volumi `missing` diventano `removed` e i segreti dello stack si cancellano (rilievo S5-M4). La guardia «server nuovo» di `infra/linux/restore-panel.sh` conta anche gli stack non cancellati, non solo i siti; la sua query usa `query_to_xml` e quindi PostgreSQL con libxml (il PostgreSQL 18 installato ha `--with-libxml`; la query è stata provata su PGlite).
 
-### 2.15 Decisioni D1–D12: proposte, assunte da questa esecuzione
+### 2.15 Decisioni D1–D12: approvate dal proprietario
 
-Le dodici decisioni del §24 della specifica sono **proposte**: questa esecuzione le assume per costruire, ma non le approva. Ognuna è «proposta; assunta dall'esecuzione; da approvare» (gate W0, BLOCKED.md #1).
+Le dodici decisioni del §24 della specifica, proposte e assunte da questa esecuzione per costruire, sono state **approvate dal proprietario il 2026-11-22** dopo la dimostrazione (gate W0, BLOCKED.md #1, chiuso per D1–D12 e per questo ADR).
 
 | D | Proposta della specifica | Come l'esecuzione l'ha assunta | Stato |
 |---|---|---|---|
-| D1 | `app_templates` separati da `site_templates` | dieci tabelle `app_*` nella migrazione `0025` | proposta; assunta dall'esecuzione; da approvare |
-| D2 | solo l'amministratore modifica i modelli | route `/v1/admin/app-templates` con `requireServerAdmin` | proposta; assunta dall'esecuzione; da approvare |
-| D3 | al più 8 componenti per stack | `APP_TEMPLATE_LIMITS.services = 8`, ricontrollato dall'esecutore | proposta; assunta dall'esecuzione; da approvare |
-| D4 | immagini approvate e fissate a digest | digest obbligatorio e allowlist di codice di tre righe (§2.5) | proposta; assunta dall'esecuzione; da approvare |
-| D5 | parametri `secret` sempre come file | `X_FILE` e file in sola lettura; nessun segreto nell'ambiente | proposta; assunta dall'esecuzione; da approvare |
-| D6 | backup degli stack non supportato | `NOT_SUPPORTED`; nessun flag | proposta; assunta dall'esecuzione; da approvare |
-| D7 | porte TCP/UDP dietro un gate | `stackPublicPortsAvailable = false`; `x-hp-ports` rifiutato | proposta; assunta dall'esecuzione; da approvare |
-| D8 | build Git dietro un gate | `gitBuildsAvailable = false`; `build` rifiutato | proposta; assunta dall'esecuzione; da approvare |
-| D9 | la rollback non inverte i database | i volumi non si toccano; avviso nell'anteprima del cambio | proposta; assunta dall'esecuzione; da approvare |
-| D10 | indipendente da Shared Hosting | solo Dedicated, `SHARED_MODE_GATED` invariato | proposta; assunta dall'esecuzione; da approvare |
-| D11 | import di Egg solo in futuro, solo metadati | nessun importatore | proposta; assunta dall'esecuzione; da approvare |
-| D12 | catalogo iniziale originale e revisionato per le licenze | due modelli scritti da zero, licenze in §2.5 | proposta; assunta dall'esecuzione; da approvare |
+| D1 | `app_templates` separati da `site_templates` | dieci tabelle `app_*` nella migrazione `0025` | approvata dal proprietario (2026-11-22) |
+| D2 | solo l'amministratore modifica i modelli | route `/v1/admin/app-templates` con `requireServerAdmin` | approvata dal proprietario (2026-11-22) |
+| D3 | al più 8 componenti per stack | `APP_TEMPLATE_LIMITS.services = 8`, ricontrollato dall'esecutore | approvata dal proprietario (2026-11-22) |
+| D4 | immagini approvate e fissate a digest | digest obbligatorio e allowlist di codice di tre righe (§2.5) | approvata dal proprietario (2026-11-22); l'allowlist e i digest restano da confermare (§8.1, BLOCKED.md #4) |
+| D5 | parametri `secret` sempre come file | `X_FILE` e file in sola lettura; nessun segreto nell'ambiente | approvata dal proprietario (2026-11-22) |
+| D6 | backup degli stack non supportato | `NOT_SUPPORTED`; nessun flag | approvata dal proprietario (2026-11-22) |
+| D7 | porte TCP/UDP dietro un gate | `stackPublicPortsAvailable = false`; `x-hp-ports` rifiutato | approvata dal proprietario (2026-11-22) |
+| D8 | build Git dietro un gate | `gitBuildsAvailable = false`; `build` rifiutato | approvata dal proprietario (2026-11-22) |
+| D9 | la rollback non inverte i database | i volumi non si toccano; avviso nell'anteprima del cambio | approvata dal proprietario (2026-11-22) |
+| D10 | indipendente da Shared Hosting | solo Dedicated, `SHARED_MODE_GATED` invariato | approvata dal proprietario (2026-11-22) |
+| D11 | import di Egg solo in futuro, solo metadati | nessun importatore | approvata dal proprietario (2026-11-22) |
+| D12 | catalogo iniziale originale e revisionato per le licenze | due modelli scritti da zero, licenze in §2.5 | approvata dal proprietario (2026-11-22) |
+
+### 2.16 Secondo ciclo: un solo nome, «Applicazioni» (decisioni L22–L28 e L31, 2026-11-22)
+
+Dopo la dimostrazione il proprietario ha chiesto di non separare più sito e applicazione nelle console: anche WordPress è
+un'applicazione. Le decisioni L22–L28 sono state prese con lui; L31 è una scelta di chi ha costruito il ciclo, da confermare:
+
+- **L22 Nome.** «Applicazioni» / «Applications». Un sito WordPress è un'applicazione di tipo WordPress; negli elenchi il tipo è il
+  nome del tipo di sito per un sito e il nome del modello per uno stack.
+- **L23 Testi.** Cambiano i testi che nominano la cosa gestita come categoria (menu, titoli, colonne, pulsanti «nuovo», elenchi
+  vuoti, limiti, conferme); «sito» resta dove indica il sito web pubblico o una sezione che contiene solo siti WordPress. Le
+  chiavi dei testi non cambiano.
+- **L24 Indirizzi web.** `/apps` è l'unico elenco del cliente, `/apps/new` l'unica pagina di scelta; `/sites` porta a `/apps`;
+  `/sites/<id>/…`, `/apps/<id>` e `/apps/new/<modello>` restano dove sono. Le route dell'API non cambiano.
+- **L25 Flag spenti e visite di supporto.** Con `applicationStacksAvailable` spento, o in una visita di supporto, l'elenco e la
+  scelta mostrano solo WordPress, senza avvisi; i quattro flag restano `false`.
+- **L26 Limiti e dati.** `max_sites` e il limite degli stack restano due limiti distinti; nessuna tabella, DTO o route rinominata.
+- **L27 Amministratore.** La voce «Siti» diventa «Applicazioni» (`/admin/sites`): le applicazioni WordPress come prima e, con il
+  flag acceso, gli stack di tutti i clienti in sola lettura, letti dalla route nuova `GET /v1/admin/app-stacks`
+  (amministratore del server, al più 200, nessun segreto né valore di parametro). «Modelli» è un solo elenco dei due tipi con un
+  solo «Nuovo modello»; `/admin/templates/apps` porta a `/admin/templates`.
+- **L28 Modificare un modello multi-servizio.** Nome, descrizione e categoria si cambiano dalla pagina del modello (la `PATCH`
+  esistente); valgono quelli della riga, non quelli dell'intestazione `x-hp-stack` di una versione nuova. «Modifica contenuto»
+  apre l'editor sulla versione predefinita; salvare crea una versione nuova, le versioni restano immutabili.
+- **L31 Indirizzo di un sito WordPress.** Una riga WordPress dell'elenco mostra il suo indirizzo web grazie a una seconda route
+  nuova di sola lettura, `GET /v1/organizations/:orgId/managed-sites` (permesso `site.read`, gli stessi siti che il cliente può
+  già leggere, al più 200, con il dominio principale).
+
+Codice: `apps/web/src/components/admin/template-catalog.tsx`, `apps/web/src/components/admin/app-template-detail.tsx`,
+`apps/api/src/controllers/admin-app-stacks.controller.ts`, `apps/api/src/controllers/managed-sites.controller.ts`.
 
 ## 3. Alternative scartate
 
@@ -429,8 +458,8 @@ La tabella unisce le divergenze dei sette documenti di architettura dello sciame
 | DW6 | §15 catalogo con «icone originali/licenziate» | nessuna icona nelle schede del catalogo in questo rilascio | clean-room e licenze: nulla da licenziare |
 | DW7 | §15 etichette dell'amministratore «porte pubbliche, Git build» | solo le etichette «HTTP» e «Storage» | quelle capacità non esistono in questo rilascio; un'etichetta le pubblicizzerebbe |
 | DW8 | §15 segreti con «Sostituisci» | in più, nessun interruttore mostra/nascondi sul valore che si digita | più rigido e più semplice |
-| DW9 | §15 navigazione «Modelli sito / Modelli applicazione» | i due collegamenti compaiono solo con `applicationTemplatesAvailable` vero; con il flag spento `/admin/templates` è esattamente la pagina di oggi | flag spenti in produzione (L19); i test delle pagine esistenti non cambiano |
-| DW10 | §8 l'amministratore che agisce per un cliente | nessuna pagina `/apps` durante una visita di supporto (solo un avviso) | `app.*` non è fra i permessi dell'accesso di supporto (L13) |
+| DW9 | §15 navigazione «Modelli sito / Modelli applicazione» | sostituita nel secondo ciclo (§2.16): un solo elenco «Modelli» con una colonna «Tipo»; con il flag spento mostra solo i modelli WordPress, senza avvisi | richiesta del proprietario dopo la dimostrazione (L27) |
+| DW10 | §8 l'amministratore che agisce per un cliente | durante una visita di supporto `/apps` mostra solo le applicazioni WordPress e la creazione offre solo WordPress; `/apps/<id>` e `/apps/new/<modello>` mostrano l'avviso | `app.*` non è fra i permessi dell'accesso di supporto (L13) |
 | DW12 | etichette dei passi | i nomi dei passi mostrati al cliente vengono dai cataloghi del web per chiave di passo; l'etichetta inglese dell'API non si mostra | IT/EN (§15) |
 | CB1 | (nessuna regola sugli id esterni) | gli id creati dalla modifica rispettano `APP_STACK_ID_PATTERN`; quelli dell'organizzazione e dell'allocazione `APP_FOREIGN_ID_PATTERN` (`^[a-z][a-z0-9_-]{0,127}$`) | le organizzazioni reali sono `org_<uuid>` con i trattini (rilievo alto S5-H1) |
 | CB2 | §6.3 chiavi | la chiave di un servizio ha al più 27 caratteri (`APP_STACK_COMPONENT_KEY_MAX`); l'esecutore ricontrolla i nomi di al più 63 caratteri | `hp_app_<stackId>_<chiave>` deve essere un'etichetta DNS |
@@ -498,7 +527,7 @@ Ogni file di test si esegue da solo (`corepack pnpm exec vitest run <file> --max
 
 ### 8.1 Da approvare dal proprietario
 
-- **Gate W0**: le decisioni D1–D12 (§2.15) e questo ADR; l'allowlist e i digest delle tre immagini (§2.5, BLOCKED.md #4); la forma della PR, un solo ramo e una sola PR in bozza con commit atomici per voce del backlog (BLOCKED.md #3).
+- **Gate W0**: l'allowlist e i digest delle tre immagini (§2.5, BLOCKED.md #4); le decisioni D1–D12 e questo ADR sono approvati (2026-11-22), e il proprietario ha confermato un solo ramo e una sola PR (#37, BLOCKED.md #3).
 - **Gate W6**: accendere `applicationTemplatesAvailable` e `applicationStacksAvailable` su `linux-systemd`; l'accettazione sulle VM del proprietario con un'organizzazione reale; la prova del riavvio (B6); il passo `host-nft-metadata-drop-on-stack-net` eseguito da root (`HP_ACCEPT_ROOT_CASES=1`) e il blocco del metadata su una VM cloud (A11); l'emissione ACME su un hostname reale di uno stack (A14, B3); un `hp-update` fra due release reali (A20); il merge.
 
 ### 8.2 Seguiti registrati

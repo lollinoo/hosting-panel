@@ -16,13 +16,13 @@ const digests = [...new Set(APP_BUILT_IN_TEMPLATES.flatMap((t) => [...t.source.m
 const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
-  it("ADR-0035 is proposed and cites existing paths", () => {
+  it("ADR-0035 is approved and cites existing paths", () => {
     const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0035-.*\.md$/.test(f));
     expect(adrs).toHaveLength(1);
     const file = `docs/architecture/adr/${adrs[0]!}`;
     const adr = read(file);
     for (const h of ["Stato", "Data", "Riferimento", "Migrazioni"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
-    expect(adr).toMatch(/^- \*\*Stato:\*\* `PROPOSTO`/m);
+    expect(adr).toMatch(/^- \*\*Stato:\*\* `APPROVATO`/m);
     const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
     expect(paths.size, file).toBeGreaterThanOrEqual(15);
     for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);

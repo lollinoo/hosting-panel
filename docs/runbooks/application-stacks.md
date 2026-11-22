@@ -24,7 +24,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   (ACME) certificates only for stack domains, no public TCP/UDP port, no stack backup.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
   `app.create`, `app.update`, `app.control`, `app.delete`). The server administrator's console has the template catalog
-  (**Modelli applicazione**) and no stack actions; collaborators and support access have no stack permission.
+  (**Modelli**, kind «Applicazione multi-servizio») and a read-only list of every stack in **Applicazioni**; it has no
+  stack actions; collaborators and support access have no stack permission.
 - **Never run `docker rm`, `docker volume rm`, `docker network rm` or any `prune` on a stack's objects by hand**, except
   where a step below says so. The panel owns them; removing one by hand leaves the panel's view wrong.
 - **Stack data is in no backup.** The site and panel backups (S3 or local) do not include stacks or their volumes.
@@ -40,7 +41,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 1. In the panel: the application page (`/apps/<stackId>`) shows the status, each component's health with the time of
    the last check, the domains, the history of every action with its reason, and each component's log (the last 1 to
    500 lines, secret values masked). A health observation older than 5 minutes reads as `unknown`.
-2. The server administrator finds the stacks of a template in **Modelli applicazione** › the template › its usage list
+2. The server administrator sees every live stack in **Applicazioni** (customer, template and version, status, web
+   address; at most 200, read-only) and the stacks of one template in **Modelli** › the template › its usage list
    (organisation, name, version, status). All live stacks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where deleted_at is null order by organization_id, name"
@@ -164,7 +166,7 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    addresses whose target component is stopped and publishes them again once it reads healthy; the refresh only reads
    the stack's state and changes routes, it never starts anything. While only health changes, a stack gets at most one
    refresh every five minutes; a removed address is withdrawn on the next pass.
-2. **Nobody installs it again.** In **Modelli applicazione**, disable the template (archive it if it is not built-in).
+2. **Nobody installs it again.** In **Modelli**, open the template and switch off **Offerto ai clienti** (archive it if it is not built-in).
    Installed stacks keep running; a deploy or upgrade that needs a new revision of that template is refused
    (`STACK_TEMPLATE_UNPUBLISHED`).
 3. **Logs.** The application page shows the last 1 to 500 lines per component with secret values masked. For more:
