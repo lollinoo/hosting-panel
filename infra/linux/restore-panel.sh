@@ -23,7 +23,7 @@ the copy and asks y/N; --yes answers yes (without a terminal and without --yes t
 Exit codes: 0 panel restored, 1 a step failed (the message says what to do; running again is safe),
 2 refused: bad arguments (a --local-repo folder that is a relative path, has a symlink, belongs
 to root, is writable by everybody or is not a restic repository), not root, no backup.key, sites
-already on this server, a copy made by a newer panel, or the question not answered y.
+or applications already on this server, a copy made by a newer panel, or the question not answered y.
 EOF
 }
 
@@ -145,11 +145,14 @@ unset db_url
 # The marker means an earlier run of this script already dropped this server's panel database.
 if [[ ! -e "${MARKER}" ]]; then
   # As the panel's user too: after a complete restore this database was built from the copy.
-  sites="$(PGPASSWORD="${db_pw}" "${PG_BIN}/psql" -X -tAc 'SELECT count(*) FROM public.sites' -h 127.0.0.1 -U hosting_panel -d hosting_panel)" ||
+  # A server older than application stacks has no app_stacks table: query_to_xml reads it only where it exists.
+  counts="$(PGPASSWORD="${db_pw}" "${PG_BIN}/psql" -X -tAc "SELECT (SELECT count(*) FROM public.sites), CASE WHEN to_regclass('public.app_stacks') IS NULL THEN 0 ELSE (xpath('/row/n/text()', query_to_xml('SELECT count(*) AS n FROM public.app_stacks WHERE deleted_at IS NULL', false, true, '')))[1]::text::bigint END" -h 127.0.0.1 -U hosting_panel -d hosting_panel)" ||
     die 1 "Cannot read the panel database. Check that PostgreSQL is running (systemctl status postgresql), that the password in DATABASE_URL of ${ETC}/api.env is the one of the database user hosting_panel and that install.sh ran to the end, then run this again. ${SAFE}"
   # A crafted copy can make count(*) answer any text: never print it.
-  [[ "${sites}" =~ ^[0-9]+$ ]] || die 1 "The panel database gave an unexpected answer to the site count. ${SAFE}"
+  [[ "${counts}" =~ ^([0-9]+)\|([0-9]+)$ ]] || die 1 "The panel database gave an unexpected answer to the site count. ${SAFE}"
+  sites="${BASH_REMATCH[1]}" stacks="${BASH_REMATCH[2]}"
   [[ "${sites}" == "0" ]] || die 2 "This panel already has ${sites} site(s): bringing back a copy would erase them. Run this only on a freshly installed server."
+  [[ "${stacks}" == "0" ]] || die 2 "This panel already has ${stacks} application(s): bringing back a copy would erase them. Run this only on a freshly installed server."
 fi
 if ((!has_local)); then
   [[ -n "${ak}" ]] || read -rp "S3 access key ID: " ak || true
