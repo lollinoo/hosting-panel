@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   BUILT_IN_VERSION_BY_MODULE,
   PHP_VERSION_PARAMETER_KEY,
@@ -156,7 +156,7 @@ function slugify(name: string): string {
 
 @Injectable()
 export class ManagedSitesService {
-  readonly #logReads = new LogReadGate();
+  readonly #logReads: LogReadGate;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -164,7 +164,10 @@ export class ManagedSitesService {
     private readonly config: ControlPlaneRuntimeConfig,
     @Inject(DOCKER_EXECUTOR_TOKEN)
     private readonly executor: DockerExecutorPort,
-  ) {}
+    @Optional() @Inject(LogReadGate) logReads?: LogReadGate,
+  ) {
+    this.#logReads = logReads ?? new LogReadGate();
+  }
 
   public async create(input: {
     organizationId: string;

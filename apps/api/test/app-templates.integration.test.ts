@@ -1,5 +1,6 @@
 import { APP_TEMPLATE_SPEC_VERSION, toAppStackPreview } from "@hosting-panel/contracts";
 import {
+  addAppTemplateVersion,
   appStacks,
   appTemplates,
   auditEvents,
@@ -240,6 +241,24 @@ describe("application template catalogue", () => {
     expect((await patch(templateId, {})).status).toBe(400);
   });
 
+  it("checks the default as locked when concurrent changes publish it", async () => {
+    const created = (await create()).body.data as Json;
+    const templateId = created.id as string;
+    const { version: bad } = await addAppTemplateVersion(h.dbClient.db as HostingPanelDatabase, {
+      templateId,
+      version: { source: NOTES_DEMO_SOURCE.replace('cpus: "1.0"', 'cpus: "16.001"'), specVersion: APP_TEMPLATE_SPEC_VERSION, compiledSchema: {}, specHash: "0".repeat(64) },
+      createdBy: null,
+    });
+    const results = await sentTogether(h, [() => patch(templateId, { enabled: true }), () => patch(templateId, { defaultVersionId: bad.id })]);
+    expect(results.map((res) => res.status).sort(), results.map((res) => res.raw).join("\n")).toEqual([200, 400]);
+    expect(results.find((res) => res.status === 400)!.body.error.message).toBe("This version does not pass the current checks.");
+    const detail = (await h.call(h.adminToken, "GET", `${BASE}/${templateId}`)).body.data as Json;
+    expect(detail.enabled && detail.defaultVersionId === bad.id).toBe(false);
+    for (const row of await auditRows(h, "admin.app_template.publish")) {
+      expect(row.details).toMatchObject({ defaultVersionId: created.defaultVersionId, versionNumber: 1 });
+    }
+  });
+
   it("archives idempotently, refuses changes afterwards and refuses a built-in template", async () => {
     const templateId = (await create()).body.data.id as string;
     const archived = await h.call(h.adminToken, "POST", `${BASE}/${templateId}/archive`, {});
@@ -409,6 +428,14 @@ describe("application templates under a stricter image allowlist", () => {
     expect(shown.status).toBe(200);
     expect(shown.body.data).toMatchObject({ valid: false, parameters: [], preview: null, source: NOTES_DEMO_SOURCE });
     expect(shown.body.data.issues[0].code).toBe("IMAGE_NOT_ALLOWLISTED");
+  });
+
+  it("refuses enabling an archived template as archived before checking its default", async () => {
+    const { template } = await storedTemplate(h, "old-notes");
+    expect((await h.call(h.adminToken, "POST", `${BASE}/${template.id}/archive`, {})).status).toBe(200);
+    const res = await h.call(h.adminToken, "PATCH", `${BASE}/${template.id}`, { enabled: true });
+    expect(res.status, res.raw).toBe(409);
+    expect(res.body.error.details[0].reason).toBe("template_archived");
   });
 
   it("leaves a published template whose source no longer validates out of the customer catalogue", async () => {

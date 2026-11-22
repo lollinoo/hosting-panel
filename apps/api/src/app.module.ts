@@ -8,6 +8,9 @@ import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
+import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
+import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
+import { AppStacksService } from "./app-stacks/app-stacks.service.js";
 import {
   APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
   resolveAppTemplateValidationOptions,
@@ -24,6 +27,7 @@ import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminSiteTemplatesController } from "./controllers/admin-site-templates.controller.js";
 import { AdminAppTemplatesController } from "./controllers/admin-app-templates.controller.js";
 import { AppTemplatesController } from "./controllers/app-templates.controller.js";
+import { AppStacksController } from "./controllers/app-stacks.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -73,6 +77,7 @@ import { SiteBackupsService } from "./backups/site-backups.service.js";
 import { SiteRestoreService } from "./backups/site-restore.service.js";
 import { SiteTemplatesService } from "./site-templates/site-templates.service.js";
 import { ManagedSitesService } from "./sites/managed-sites.service.js";
+import { LogReadGate } from "./sites/log-read-gate.js";
 import { SiteDomainsApplier } from "./sites/site-domains-applier.js";
 import { SiteFilesApplier } from "./sites/site-files-applier.js";
 import { SiteDatabasesService } from "./sites/site-databases.service.js";
@@ -164,6 +169,7 @@ export class AppModule {
         AdminUpdatesController,
         AdminAppTemplatesController,
         AppTemplatesController,
+        AppStacksController,
       ],
       providers: [
         {
@@ -236,6 +242,11 @@ export class AppModule {
         FirewallService,
         UpdatesService,
         AppTemplatesService,
+        AppStacksService,
+        AppStackRuntime,
+        AppStackObserverService,
+        // One per app: site and stack log reads share the panel-wide caps (ADR 0026 limit 27).
+        { provide: LogReadGate, useValue: new LogReadGate() },
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,
@@ -258,6 +269,9 @@ export class AppModule {
         SiteRestoreService,
         SiteWordpressService,
         BackupSchedulerService,
+        AppStackRuntime,
+        AppStackObserverService,
+        LogReadGate,
       ],
     };
   }

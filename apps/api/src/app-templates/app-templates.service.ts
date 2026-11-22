@@ -264,22 +264,6 @@ export class AppTemplatesService {
   }
 
   public async update(templateId: string, input: UpdateAppTemplateInput, actor: AppTemplateActor): Promise<AdminAppTemplateDetailDto> {
-    const db = this.dbClient.db;
-    const template = await getAppTemplate(db, templateId);
-    if (!template) throw appNotFound();
-    const enabledAfter = input.enabled ?? template.enabled;
-    const publishes =
-      (input.enabled === true && !template.enabled) ||
-      (input.defaultVersionId !== undefined && input.defaultVersionId !== template.defaultVersionId && enabledAfter);
-    let target: AppTemplateVersionRow | null = null;
-    if (publishes) {
-      // A stricter release never lets an old version out: the stored source is checked again before anything is written.
-      const versionId = input.defaultVersionId ?? template.defaultVersionId;
-      target = versionId === null ? null : await getAppTemplateVersion(db, { templateId, versionId });
-      if (!target) throw mapAppTemplateError(new AppTemplateRepositoryError("INVALID_DEFAULT", "unknown default version"));
-      const checked = validateAppTemplateSource(target.source, this.validation);
-      if (!checked.ok) throw adminTemplateInvalid(checked.errors, "This version does not pass the current checks.");
-    }
     await guardedApp(mapAppTemplateError, () =>
       this.dbClient.db.transaction(async (tx) => {
         const updated = await updateAppTemplate(tx as unknown as HostingPanelDatabase, {
@@ -290,15 +274,21 @@ export class AppTemplatesService {
           enabled: input.enabled,
           defaultVersionId: input.defaultVersionId,
         });
-        const isPublish = (change: { readonly field: string; readonly to: unknown }): boolean =>
-          (change.field === "enabled" && change.to === true) || (change.field === "defaultVersionId" && enabledAfter);
+        const isPublish = (change: { readonly field: string }): boolean =>
+          updated.template.enabled && (change.field === "enabled" || change.field === "defaultVersionId");
         const others = updated.changes.filter((change) => !isPublish(change));
         if (updated.changes.some(isPublish)) {
+          // A stricter release never lets an old version out: the default of the locked row is checked again, a refusal rolls back.
+          const versionId = updated.template.defaultVersionId;
+          const target = versionId === null ? null : await getAppTemplateVersion(tx, { templateId, versionId });
+          if (!target) throw new AppTemplateRepositoryError("INVALID_DEFAULT", "unknown default version");
+          const checked = validateAppTemplateSource(target.source, this.validation);
+          if (!checked.ok) throw adminTemplateInvalid(checked.errors, "This version does not pass the current checks.");
           await actor.audit(tx, {
             action: "admin.app_template.publish",
             targetType: TARGET_TYPE,
             targetId: templateId,
-            details: { defaultVersionId: updated.template.defaultVersionId, versionNumber: target?.versionNumber ?? null },
+            details: { defaultVersionId: target.id, versionNumber: target.versionNumber },
           });
         }
         if (others.length > 0) {
