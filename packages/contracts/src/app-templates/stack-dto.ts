@@ -7,7 +7,7 @@ import { AppTemplateParameterEntriesSchema, AppTemplateParameterValueSchema } fr
 import { AppStackPlanIngressSchema } from "./plan.js";
 import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
-import { APP_STACK_LOG_TAIL_MAX } from "./stack-ipc.js";
+import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
 import { APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
 import {
   APP_STACK_RETENTION_POLICIES,
@@ -18,7 +18,7 @@ import {
 } from "./stack-status.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
-const noControl = (s: string): boolean => !/\p{Cc}/u.test(s);
+const noControl = (s: string): boolean => !/[\p{Cc}\p{Cs}]/u.test(s);
 const HashSchema = z.string().regex(APP_STACK_HASH_PATTERN);
 const OperationIdSchema = z.string().min(1).max(128); // op_<32 hex>[-tN]
 const MemoryBytesText = z.string().regex(/^[0-9]{1,20}$/); // decimal bytes, textual like the plan
@@ -97,11 +97,7 @@ export type DeleteAppStackInput = z.infer<typeof DeleteAppStackInputSchema>;
 export const SetAppStackSecretInputSchema = z
   .object({
     parameterKey: AppTemplateParameterKeySchema,
-    value: z
-      .string()
-      .min(1)
-      .max(16_384)
-      .refine((v) => !v.includes("\u0000"), "Secret value contains a NUL character"),
+    value: AppStackSecretFileContentSchema.shape.content, // the executor's rule
   })
   .strict();
 export type SetAppStackSecretInput = z.infer<typeof SetAppStackSecretInputSchema>;

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { z } from "zod";
 import * as appTemplates from "../src/app-templates/index.js";
 import { APP_STACK_REASONS } from "../src/app-templates/issues.js";
+import { APP_STACK_PLAN_MAX_BYTES } from "../src/app-templates/limits.js";
 import type { ApprovedStackPlan } from "../src/app-templates/plan.js";
 import {
   APP_STACK_EXECUTOR_REASON_CODES,
@@ -228,7 +229,9 @@ describe("application stack IPC wire", () => {
   it("bounds the secret content and never echoes it in an issue", () => {
     const sentinel = "SENTINEL-SECRET-CONTENT";
     expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, content: "x".repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS) }).success).toBe(true);
-    for (const content of ["", sentinel + "x".repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS), `${sentinel}\u0000tail`]) {
+    expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, content: "a\tb\r\nc\u007f\u0085\u{1f511}" }).success).toBe(true);
+    const controls = ["\u0000", "\u0001", "\u000b", "\u000c", "\u001f", "\ud800"].map((c) => `${sentinel}${c}tail`);
+    for (const content of ["", sentinel + "x".repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS), ...controls, `\udc00${sentinel}`]) {
       const result = AppStackComponentIpcRequestSchema.safeParse({ ...component, secretFileContents: [{ ...SECRET, content }] });
       expect(result.success).toBe(false);
       expect(issuesText(result)).not.toContain(sentinel);
@@ -237,6 +240,32 @@ describe("application stack IPC wire", () => {
       expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, version }).success).toBe(false);
     }
     expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, parameterKey: "hp_secret" }).success).toBe(false);
+  });
+
+  it("the largest start request the schema allows stays under the executor's 1 MiB body cap", () => {
+    const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
+    const sized = (extra: number): ApprovedStackPlan => {
+      const plan = structuredClone(PLAN);
+      const app = plan.components.find((c) => c.key === "app")!;
+      const environment = Array.from({ length: 63 }, (_, i) => ({ name: `E${String(i).padStart(3, "0")}`, value: "a".repeat(4_096) }));
+      Object.assign(app, { secretFiles: [], environment: [...environment, { name: "Z", value: "b".repeat(extra) }] });
+      return plan;
+    };
+    const plan = sized(APP_STACK_PLAN_MAX_BYTES - bytes(sized(0)));
+    expect(bytes(plan)).toBe(APP_STACK_PLAN_MAX_BYTES);
+    let worst = "a";
+    for (let unit = 0; unit <= 0xffff; unit += 1) {
+      const char = String.fromCharCode(unit);
+      if (bytes(char) > bytes(worst) && AppStackSecretFileContentSchema.safeParse({ ...SECRET, content: char }).success) worst = char;
+    }
+    const secretFileContents = Array.from({ length: 8 }, (_, i) => ({
+      parameterKey: `s${String(i)}${"x".repeat(30)}`,
+      version: 2_147_483_647,
+      content: worst.repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS),
+    }));
+    const request = { plan, componentKey: `a${"b".repeat(31)}`, secretFileContents };
+    expect(AppStackComponentIpcRequestSchema.safeParse(request).success).toBe(true);
+    expect(bytes(request)).toBeLessThan(1_048_576); // = MAX_IPC_BODY_BYTES, docker-executor server.ts
   });
 
   it("refuses a duplicate parameterKey and more than eight secret entries", () => {

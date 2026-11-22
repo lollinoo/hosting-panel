@@ -40,6 +40,7 @@ import {
   SetAppStackSecretInputSchema,
   UpgradeAppStackInputSchema,
 } from "../src/app-templates/stack-dto.js";
+import { AppStackSecretFileContentSchema } from "../src/app-templates/stack-ipc.js";
 import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys } from "../src/resources.js";
 
 const fixture = (name: string): unknown =>
@@ -262,6 +263,31 @@ describe("app API input schemas", () => {
     const refused = SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value: "Zq9ab\u0000cd" });
     expect(refused.success).toBe(false);
     expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
+  });
+
+  it("a secret value refuses C0 controls but tab and line breaks, and unpaired surrogates, with the executor's rule", () => {
+    const parse = (value: string) => SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value });
+    for (let unit = 0; unit < 0x20; unit += 1) {
+      expect(parse(`Zq9${String.fromCharCode(unit)}`).success, String(unit)).toBe([0x09, 0x0a, 0x0d].includes(unit));
+    }
+    for (const value of ["Zq9\ud800", "\udfffZq9", "Zq9\udc00\ud800"]) {
+      const refused = parse(value);
+      expect(refused.success).toBe(false);
+      expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
+    }
+    expect(parse("line 1\r\nline 2\u007f\u0085 \u{1f511}").success).toBe(true);
+    expect(SetAppStackSecretInputSchema.shape.value).toBe(AppStackSecretFileContentSchema.shape.content);
+  });
+
+  it("template and stack names and descriptions refuse an unpaired surrogate, not a paired one", () => {
+    for (const text of ["a\ud800", "\udc00a", "a\udc00\ud800b"]) {
+      expect(UpdateAppTemplateInputSchema.safeParse({ name: text }).success, text).toBe(false);
+      expect(UpdateAppTemplateInputSchema.safeParse({ description: text }).success, text).toBe(false);
+      expect(CreateAppStackInputSchema.safeParse({ templateVersionId: "atv_demo_1", name: text, deploy: false }).success, text).toBe(false);
+    }
+    const paired = "Notes \u{1f4dd}";
+    expect(UpdateAppTemplateInputSchema.safeParse({ name: paired, description: paired }).success).toBe(true);
+    expect(CreateAppStackInputSchema.safeParse({ templateVersionId: "atv_demo_1", name: paired, deploy: false }).success).toBe(true);
   });
 });
 

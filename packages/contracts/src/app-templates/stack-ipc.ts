@@ -47,6 +47,9 @@ export const APP_STACK_EXECUTOR_REASON_CODES: Readonly<Record<AppStackExecutorRe
   STACK_UNSUPPORTED_FEATURE: "VALIDATION_ERROR", // route host with source "manual" or a redirectTo
 });
 
+/** C0 controls but tab and line breaks, and unpaired surrogates: 6 bytes each in JSON, so the start body stays < 1 MiB. */
+// eslint-disable-next-line no-control-regex
+const SECRET_FORBIDDEN_CHARACTER = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\p{Cs}]/u;
 export const AppStackSecretFileContentSchema = z
   .object({
     parameterKey: AppTemplateParameterKeySchema,
@@ -55,7 +58,7 @@ export const AppStackSecretFileContentSchema = z
       .string()
       .min(1)
       .max(APP_STACK_SECRET_CONTENT_MAX_CHARS)
-      .refine((v) => !v.includes("\u0000"), "Secret content contains a NUL character"),
+      .refine((v) => !SECRET_FORBIDDEN_CHARACTER.test(v), "Secret contains a control character or an unpaired surrogate"),
   })
   .strict();
 export type AppStackSecretFileContent = z.infer<typeof AppStackSecretFileContentSchema>;

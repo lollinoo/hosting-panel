@@ -7,7 +7,7 @@ import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_TEMPLATE_STATES, AppStackStatusSchema } from "./stack-status.js";
 
 const IsoDateTimeSchema = z.string().datetime({ offset: true });
-const noControl = (s: string): boolean => !/\p{Cc}/u.test(s);
+const noControl = (s: string): boolean => !/[\p{Cc}\p{Cs}]/u.test(s);
 
 /** = the 0025 CHECK on app_templates.slug: 2..48 chars. */
 export const APP_TEMPLATE_SLUG_PATTERN = /^[a-z][a-z0-9-]{1,47}$/;
