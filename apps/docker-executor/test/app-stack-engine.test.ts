@@ -11,8 +11,10 @@ import {
   appStackNetworkLabels,
   appStackVolumeLabels,
   buildAppStackContainerCreatePayload,
+  writeAppStackComponentSecrets,
   type AppStackHealthProbe,
 } from "../src/app-stacks/index.js";
+import { LOG_READ_MAX_BYTES } from "../src/docker-logs.js";
 import type { AppStackRouteEntry } from "../src/traefik-config.js";
 import { createAppStackFakeEngine } from "./support/app-stack-fake-engine.js";
 import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
@@ -963,15 +965,87 @@ describe("getAppStackComponentLogs (5.17)", () => {
     expect((await read(h))[0]?.text).toBe(`${"x".repeat(1_990)}[REDACTED]`);
   });
 
-  it("masks the parts of a value split by Docker's frames and by the 2 MiB read limit", async () => {
+  it("joins a line Docker split into frames and drops the line the 2 MiB read limit cut", async () => {
     const h = await setup();
     await deployed(h);
     logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET.slice(0, 7)}` }, { stream: "stdout", payload: `${AT} ${SECRET.slice(7)} done\n` });
-    expect((await read(h)).map((line) => line.text)).toEqual(["key=[REDACTED]", "[REDACTED] done"]);
+    expect(await read(h)).toEqual([{ at: AT, stream: "stdout", text: "key=[REDACTED] done" }]);
     // The read keeps the first 2 MiB: the second frame's payload starts at byte 8 + filler + 8 and is cut 8 characters into the value.
     const filler = 2 * 1024 * 1024 - 8 - 8 - "key=".length - 8;
     logs(h).splice(0, 2, { stream: "stdout", payload: "x".repeat(filler - 1) + "\n" }, { stream: "stderr", payload: `key=${SECRET}\n` });
-    expect((await read(h)).at(-1)).toEqual({ at: null, stream: "stderr", text: "key=[REDACTED]" });
+    expect(await read(h)).toEqual([{ at: null, stream: "stdout", text: "x".repeat(2_000) }]);
+  });
+
+  describe("a value Docker split into 16 KiB frames", () => {
+    const ASCII = "Kx9vQ2mT7pLw4rZs8nBd3hFj6yGc1aVe5uXo0iNk";
+    const WIDE = "秘密钥匙安全口令保护数据";
+    const frame = (stream: 1 | 2, payload: Buffer | string) => {
+      const header = Buffer.alloc(8);
+      header[0] = stream;
+      header.writeUInt32BE(Buffer.byteLength(payload), 4);
+      return Buffer.concat([header, Buffer.from(payload)]);
+    };
+    /** A frame of 16 KiB of message ending with the value's first `split` bytes, then its continuation frame. */
+    const splitLine = (value: string, split: number, lead = 16_384 - split) => {
+      const bytes = Buffer.from(value);
+      return [
+        frame(1, Buffer.concat([Buffer.from(`${AT} `), Buffer.alloc(lead, "m"), bytes.subarray(0, split)])),
+        frame(1, Buffer.concat([Buffer.from(`${AT} `), bytes.subarray(split), Buffer.from(" end\n")])),
+      ] as const;
+    };
+    /** Filler before `frames` so the read limit cuts them `cut` bytes in. */
+    const cutAt = (frames: readonly Buffer[], cut: number) =>
+      Buffer.concat([frame(1, `${".".repeat(LOG_READ_MAX_BYTES - cut - 9)}\n`), ...frames]);
+    const serve = (h: Harness, body: Buffer) =>
+      h.request.mockImplementation(async (method, endpointPath, payload, options) =>
+        endpointPath.includes("/logs?")
+          ? { statusCode: 200, body: body.subarray(0, options?.maxBodyBytes) }
+          : h.fake.request(method, endpointPath, payload, options),
+      );
+    /** Every six consecutive characters of the value that a line shows. */
+    const leaks = (lines: readonly ServiceLogLine[], value: string) =>
+      Array.from({ length: value.length - 5 }, (_, i) => value.slice(i, i + 6)).filter((piece) => lines.some((line) => line.text.includes(piece)));
+
+    async function stack() {
+      const h = await setup();
+      await deployed(h);
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { ascii: ASCII, wide: WIDE });
+      return h;
+    }
+
+    it("drops the continuation the read limit cut instead of returning a middle piece of the value", async () => {
+      const h = await stack();
+      const frames = splitLine(ASCII, 15);
+      serve(h, cutAt(frames, frames[0].length + 8 + `${AT} `.length + 18));
+      const lines = await read(h);
+      expect(leaks(lines, ASCII)).toEqual([]);
+      expect(lines).toEqual([{ at: null, stream: "stdout", text: ".".repeat(2_000) }]);
+    });
+
+    it("masks a value of three-byte characters split inside a character", async () => {
+      const h = await stack();
+      serve(h, Buffer.concat(splitLine(WIDE, 3 * 5 + 1, 4)));
+      expect(await read(h)).toEqual([{ at: AT, stream: "stdout", text: "mmmm[REDACTED] end" }]);
+    });
+
+    it("never returns six consecutive characters of the value over 300 seeded layouts", { timeout: 60_000 }, async () => {
+      const h = await stack();
+      let seed = 20_261_122;
+      const random = (n: number) => {
+        seed = (seed * 48_271) % 2_147_483_647;
+        return Math.floor((seed / 2_147_483_647) * n);
+      };
+      for (let run = 0; run < 300; run++) {
+        const value = run % 2 === 0 ? ASCII : WIDE;
+        const size = Buffer.byteLength(value);
+        const frames = splitLine(value, 1 + random(size - 1));
+        const length = frames[0].length + frames[1].length;
+        const cut = 16_384 - 64 + random(length - 16_384 + 64 + 32);
+        const body = cut > length ? Buffer.concat([frame(2, "plain\n"), ...frames]) : cutAt(frames, cut);
+        serve(h, body);
+        expect(leaks(await read(h), value), `run ${String(run)}, cut ${String(cut)}`).toEqual([]);
+      }
+    });
   });
 
   it.each([

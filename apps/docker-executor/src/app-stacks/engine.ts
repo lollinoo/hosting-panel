@@ -1,4 +1,3 @@
-import { StringDecoder } from "node:string_decoder";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   APP_STACK_HASH_PATTERN,
@@ -158,21 +157,47 @@ function json<T>(res: EngineResponse): T {
   }
 }
 
-/** demuxDockerLogStream (docker-logs.ts), masking each line before its 2 000-character cut so no cut splits a value. */
+interface LogEntry {
+  readonly at: string | null;
+  readonly stream: ServiceLogLine["stream"];
+  readonly parts: Buffer[];
+}
+
+/** The byte length of the "<timestamp> " a line part starts with, and the timestamp; [0, null] without one. */
+function logStamp(part: Buffer): [number, string | null] {
+  const [prefix = "", stamp = ""] = LOG_TIMESTAMP.exec(part.toString("latin1", 0, 64)) ?? [];
+  return stamp !== "" && !Number.isNaN(Date.parse(stamp)) ? [prefix.length, stamp] : [0, null];
+}
+
+/** demuxDockerLogStream (docker-logs.ts), but the frames Docker split a line into are joined as bytes (each part without
+ *  its own timestamp) and the whole line is masked before its 2 000-character cut; when the read limit cut the stream,
+ *  the lines still waiting for their end are dropped, so no piece of a value comes back (S5-M1). */
 function maskedLogLines(body: Buffer, values: readonly string[]): ServiceLogLine[] {
-  const lines: ServiceLogLine[] = [];
+  const entries: LogEntry[] = [];
+  const open = new Map<ServiceLogLine["stream"], LogEntry>();
   for (let offset = 0; offset + 8 <= body.length; ) {
     const stream = body[offset] === 2 ? "stderr" : "stdout";
     const end = Math.min(body.length, offset + 8 + body.readUInt32BE(offset + 4));
-    for (const raw of new StringDecoder("utf8").write(body.subarray(offset + 8, end)).split("\n")) {
-      const line = raw.replace(/\r$/, "");
-      if (line === "") continue;
-      const [prefix = "", stamp = ""] = LOG_TIMESTAMP.exec(line) ?? [];
-      const timed = stamp !== "" && !Number.isNaN(Date.parse(stamp));
-      lines.push({ at: timed ? stamp : null, stream, text: timed ? line.slice(prefix.length) : line });
-    }
+    const payload = body.subarray(offset + 8, end);
     offset = end;
+    for (let start = 0; start < payload.length; ) {
+      const newline = payload.indexOf(10, start);
+      const stop = newline === -1 ? payload.length : newline;
+      const part = payload.subarray(start, stop);
+      const [skip, at] = logStamp(part);
+      let entry = open.get(stream);
+      if (entry === undefined) entries.push((entry = { at, stream, parts: [] }));
+      entry.parts.push(part.subarray(skip));
+      if (newline === -1) open.set(stream, entry);
+      else open.delete(stream);
+      start = stop + 1;
+    }
   }
+  const cut = new Set(body.length >= LOG_READ_MAX_BYTES ? open.values() : []);
+  const lines = entries.flatMap((entry): ServiceLogLine[] => {
+    const text = Buffer.concat(entry.parts).toString("utf8").replace(/\r$/, "");
+    return cut.has(entry) || (text === "" && entry.at === null) ? [] : [{ at: entry.at, stream: entry.stream, text }];
+  });
   return maskAppStackLogLines(lines, values).map((line) => ({ ...line, text: line.text.slice(0, LOG_LINE_MAX_CHARS) }));
 }
 

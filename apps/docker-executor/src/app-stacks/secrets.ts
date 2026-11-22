@@ -109,9 +109,9 @@ function buildAutomaton(needles: readonly string[]): Automaton {
 }
 
 /** Every match of each value (and of each line of a multi-line value) of length >= 6 becomes "[REDACTED]", and so
- *  does a line end of >= 6 characters that starts a value or a line start that ends one (a value cut by a split frame
- *  or by the read limit); overlapping matches are merged first, so no part of either value stays visible. Pure; one
- *  pass over each line in each direction, whatever the values. */
+ *  does a line end of >= 6 characters that starts a value or a line start that ends one (a value whose other part is
+ *  in a frame the read did not return); overlapping matches are merged first, so no part of either value stays
+ *  visible. Pure; one pass over each line in each direction, whatever the values. */
 export function maskAppStackLogLines(lines: readonly ServiceLogLine[], values: readonly string[]): ServiceLogLine[] {
   const min = APP_STACK_LOG_MASK_MIN_LENGTH;
   const needles = [...new Set(values.flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter((needle) => needle.length >= min);
