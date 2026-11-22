@@ -21,6 +21,7 @@ const plan = appStackTestPlan();
 const [web, worker] = plan.components as [ApprovedStackPlan["components"][number], ApprovedStackPlan["components"][number]];
 const ID = plan.stackId;
 const NET = `hp_appnet_${ID}`;
+const EDGE = `hp_appedge_${ID}`;
 
 const hardened = {
   Privileged: false,
@@ -159,11 +160,28 @@ describe("buildAppStackContainerCreatePayload", () => {
 
 describe("assertAppStackPayloadHardening", () => {
   const body = buildAppStackContainerCreatePayload(plan, "worker", ctx);
-  const mutate = (host: Record<string, unknown>, top: Record<string, unknown> = {}) =>
-    ({ ...body, ...top, HostConfig: { ...body.HostConfig, ...host } }) as unknown as AppStackContainerCreatePayload;
+  const webBody = buildAppStackContainerCreatePayload(plan, "web", ctx);
+  const withPlan = { ...ctx, plan };
+  const mutate = (host: Record<string, unknown>, top: Record<string, unknown> = {}, base = body) =>
+    ({ ...base, ...top, HostConfig: { ...base.HostConfig, ...host } }) as unknown as AppStackContainerCreatePayload;
+  const endpoints = (config: Record<string, unknown>, base = body) => mutate({}, { NetworkingConfig: { EndpointsConfig: config } }, base);
 
-  it("accepts the built bodies", () => {
-    for (const key of ["web", "worker"]) expect(() => assertAppStackPayloadHardening(buildAppStackContainerCreatePayload(plan, key, ctx), ctx)).not.toThrow();
+  it("accepts the built bodies, with and without the plan", () => {
+    for (const key of ["web", "worker"]) {
+      const built = buildAppStackContainerCreatePayload(plan, key, ctx);
+      expect(() => assertAppStackPayloadHardening(built, ctx)).not.toThrow();
+      expect(() => assertAppStackPayloadHardening(built, withPlan)).not.toThrow();
+    }
+  });
+
+  it.each([
+    ["root as the user", mutate({}, { User: "0" })],
+    ["no user", mutate({}, { User: undefined })],
+    ["the edge network on a component without ingress", endpoints({ [NET]: { Aliases: ["worker"] }, [EDGE]: { Aliases: [`hp_app_${ID}_worker`] } })],
+    ["an ingress component without its edge network", endpoints({ [NET]: { Aliases: ["web"] } }, webBody)],
+    ["a component outside the plan", mutate({}, { Labels: { ...body.Labels, "io.hostingpanel.app_component": "ghost" } })],
+  ])("with the plan refuses %s", (_name, mutated) => {
+    expect(() => assertAppStackPayloadHardening(mutated, withPlan)).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
   });
 
   it.each([
@@ -208,6 +226,13 @@ describe("assertAppStackPayloadHardening", () => {
     ["no CPU limit", mutate({ NanoCpus: 0 })],
     ["CPU above the plan ceiling", mutate({ NanoCpus: 32_000_000_000 })],
     ["a CPU value that is not whole millicores", mutate({ NanoCpus: 250_000_001 })],
+    ["an extra network", endpoints({ [NET]: { Aliases: ["worker"] }, hp_ingress_net: { Aliases: ["worker"] } })],
+    ["another stack's network endpoint", endpoints({ [NET]: { Aliases: ["worker"] }, hp_appnet_stk_other: { Aliases: ["worker"] } })],
+    ["a fixed endpoint address", endpoints({ [NET]: { Aliases: ["worker"], IPAMConfig: { IPv4Address: "10.1.0.9" } } })],
+    ["another alias", endpoints({ [NET]: { Aliases: ["web"] } })],
+    ["no private network endpoint", endpoints({})],
+    ["the bare key on the edge network", endpoints({ [NET]: { Aliases: ["web"] }, [EDGE]: { Aliases: ["web"] } }, webBody)],
+    ["the site job role", mutate({}, { Labels: { ...body.Labels, "io.hostingpanel.role": "site_job" } })],
   ])("refuses %s", (_name, mutated) => {
     expect(() => assertAppStackPayloadHardening(mutated, ctx)).toThrow(expect.objectContaining({ code: "HOST_POLICY_DENIED" }));
   });

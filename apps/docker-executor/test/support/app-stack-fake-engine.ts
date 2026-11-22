@@ -42,6 +42,8 @@ export interface FakeContainer {
   networks: Map<string, string>;
   /** volume names */
   mounts: string[];
+  /** Raw frame payloads of GET /logs, newest last ("<timestamp> <text>\n"; no "\n" = a frame Docker split). */
+  logs: Array<{ stream: "stdout" | "stderr"; payload: string }>;
 }
 
 export interface AppStackFakeEngine {
@@ -57,6 +59,8 @@ export interface AppStackFakeEngine {
   readonly volumes: Map<string, FakeVolume>;
   /** By container name. */
   readonly containers: Map<string, FakeContainer>;
+  /** GET /info. */
+  readonly info: { NCPU: number };
   /** The next request whose "METHOD path" matches answers this status without effect. */
   failNext(match: RegExp, status: number, body?: string): void;
   /** The next matching request waits until released. */
@@ -86,6 +90,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
   const networks = new Map<string, FakeNetwork>();
   const volumes = new Map<string, FakeVolume>();
   const containers = new Map<string, FakeContainer>();
+  const info = { NCPU: 16 };
   const fails: Array<{ match: RegExp; status: number; body?: string }> = [];
   const holds: Array<{ match: RegExp; released: Promise<void> }> = [];
   let counter = 0;
@@ -103,6 +108,8 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     const parts = url.pathname.split("/").slice(1).map(decodeURIComponent);
     const [kind, ref = "", action] = parts;
     const input = (body ?? {}) as Record<string, unknown>;
+
+    if (kind === "info" && method === "GET") return reply(200, info);
 
     if (kind === "images") {
       if (method === "GET" && action === "json") {
@@ -220,6 +227,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
           index: counter,
           networks: new Map(),
           mounts: (host.Mounts ?? []).map((m) => m.Source),
+          logs: [],
         };
         containers.set(name, container);
         for (const n of joined) connect(findNetwork(n) as FakeNetwork, container);
@@ -238,6 +246,20 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
             Networks: Object.fromEntries([...container.networks].map(([n, ip]) => [n, { IPAddress: ip }])),
           },
         });
+      }
+      if (method === "GET" && action === "logs") {
+        const tail = Number(url.searchParams.get("tail") ?? container.logs.length);
+        return {
+          statusCode: 200,
+          body: Buffer.concat(
+            container.logs.slice(-tail).flatMap(({ stream, payload }) => {
+              const header = Buffer.alloc(8);
+              header[0] = stream === "stderr" ? 2 : 1;
+              header.writeUInt32BE(Buffer.byteLength(payload), 4);
+              return [header, Buffer.from(payload)];
+            }),
+          ),
+        };
       }
       const run = () => {
         container.State = { ...container.State, Status: "running", Running: true, Restarting: false, StartedAt: new Date().toISOString() };
@@ -266,7 +288,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     return reply(404, { message: "Unhandled fake route" });
   }
 
-  const request: AppStackDockerRequest = async (method, endpointPath, body) => {
+  const request: AppStackDockerRequest = async (method, endpointPath, body, options) => {
     const line = `${method} ${endpointPath}`;
     log.push(line);
     if (body !== undefined) bodies.set(line, [...(bodies.get(line) ?? []), body]);
@@ -277,7 +299,8 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
       const [fail] = fails.splice(failed, 1);
       return reply(fail?.status ?? 500, fail?.body ?? { message: "fake failure" });
     }
-    return route(method, new URL(endpointPath, "http://docker"), body);
+    const res = route(method, new URL(endpointPath, "http://docker"), body);
+    return options?.maxBodyBytes === undefined ? res : { ...res, body: res.body.subarray(0, options.maxBodyBytes) };
   };
 
   return {
@@ -289,6 +312,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
     networks,
     volumes,
     containers,
+    info,
     failNext(match, status, body) {
       fails.push({ match, status, ...(body === undefined ? {} : { body }) });
     },

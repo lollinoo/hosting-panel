@@ -168,6 +168,14 @@ describe("maskAppStackLogLines", () => {
     expect(maskAppStackLogLines([line("a abcdefghijk b defghijk")], ["abcdefgh", "defghijk"])).toEqual([line("a [REDACTED] b [REDACTED]")]);
   });
 
+  it("masks a line end that starts a value and a line start that ends one, from six characters", () => {
+    const value = "Sup3rS3cretValue-0123456789abcdef";
+    expect(
+      maskAppStackLogLines([line(`url=redis://default:${value.slice(0, 18)}`), line(`${value.slice(18)}@cache`), line("ok Sup3r"), line("23456789 seen")], [value]),
+    ).toEqual([line("url=redis://default:[REDACTED]"), line("[REDACTED]@cache"), line("ok Sup3r"), line("23456789 seen")]);
+    expect(maskAppStackLogLines([line(`${value.slice(-6)} and ${value.slice(0, 6)}`)], [value])).toEqual([line("[REDACTED] and [REDACTED]")]);
+  });
+
   it("returns the lines unchanged without values", () => {
     expect(maskAppStackLogLines([line("plain text")], [])).toEqual([line("plain text")]);
   });

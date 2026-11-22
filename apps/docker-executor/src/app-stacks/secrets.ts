@@ -58,16 +58,32 @@ export async function readAppStackComponentSecretValues(
   }
 }
 
-/** Every match of each value (and of each line of a multi-line value) of length >= 6 becomes "[REDACTED]";
- *  overlapping matches are merged first, so no part of either value stays visible. Pure. */
+/** Every match of each value (and of each line of a multi-line value) of length >= 6 becomes "[REDACTED]", and so
+ *  does a line end of >= 6 characters that starts a value or a line start that ends one (a value cut by a split frame
+ *  or by the read limit); overlapping matches are merged first, so no part of either value stays visible. Pure. */
 export function maskAppStackLogLines(lines: readonly ServiceLogLine[], values: readonly string[]): ServiceLogLine[] {
-  const needles = [...new Set(values.flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter(
-    (needle) => needle.length >= APP_STACK_LOG_MASK_MIN_LENGTH,
-  );
+  const min = APP_STACK_LOG_MASK_MIN_LENGTH;
+  const needles = [...new Set(values.flatMap((value) => [value, ...value.split(/\r?\n/)]))].filter((needle) => needle.length >= min);
   return lines.map((line) => {
+    const source = line.text;
+    const lead = source.slice(0, min);
     const matches: [number, number][] = [];
     for (const needle of needles) {
-      for (let at = line.text.indexOf(needle); at !== -1; at = line.text.indexOf(needle, at + 1)) matches.push([at, at + needle.length]);
+      for (let at = source.indexOf(needle); at !== -1; at = source.indexOf(needle, at + 1)) matches.push([at, at + needle.length]);
+      const head = needle.slice(0, min);
+      for (let at = source.indexOf(head, Math.max(0, source.length - needle.length)); at !== -1; at = source.indexOf(head, at + 1)) {
+        if (needle.startsWith(source.slice(at))) {
+          matches.push([at, source.length]);
+          break;
+        }
+      }
+      if (lead.length < min) continue;
+      for (let at = needle.indexOf(lead, Math.max(0, needle.length - source.length)); at !== -1; at = needle.indexOf(lead, at + 1)) {
+        if (source.startsWith(needle.slice(at))) {
+          matches.push([0, needle.length - at]);
+          break;
+        }
+      }
     }
     const merged: [number, number][] = [];
     for (const [start, end] of matches.sort((a, b) => a[0] - b[0])) {

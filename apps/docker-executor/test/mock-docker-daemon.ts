@@ -173,6 +173,12 @@ export async function startMockDockerDaemon(options?: {
         return;
       }
 
+      if (method === "GET" && routePath === "/info") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ NCPU: 16 }));
+        return;
+      }
+
       if (method === "POST" && routePath === "/images/create" && options?.pullBody !== undefined) {
         const fromImage = parsedUrl.searchParams.get("fromImage");
         if (fromImage && !/"error"\s*:/.test(options.pullBody)) {

@@ -264,7 +264,7 @@ function judge(method, rawUrl, bodyText) {
   if (leakedWindows(`${p}?${query}\n${bodyText}`, SECRET) > 0) return deny("secret in request");
   const body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
   let m;
-  if (method === "GET" && (p === "/_ping" || p === "/version")) return fwd();
+  if (method === "GET" && (p === "/_ping" || p === "/version" || p === "/info")) return fwd();
   if (method === "GET" && (m = p.match(/^\/images\/(.+)\/json$/))) return IMAGES.has(m[1]) ? fwd() : deny("image");
   if (method === "POST" && p === "/images/create") {
     const from = u.searchParams.get("fromImage") ?? "";
@@ -576,6 +576,8 @@ async function main() {
       ];
       const allowed = cases.filter(([method, url, body]) => judge(method, url, body).kind !== "deny");
       assert(allowed.length === 0, "judge() denies every foreign or unsafe request", allowed.map(([method, url]) => `${method} ${url}`).join(" | "));
+      const wider = [["POST", "/v1.45/info"], ["GET", "/v1.45/info/x"]].filter(([method, url]) => judge(method, url, "").kind !== "deny");
+      assert(wider.length === 0, "judge() allows GET /info and nothing wider", wider.map(([method, url]) => `${method} ${url}`).join(" | "));
       // Through the socket: read-only requests only, harmless even if the gate let them through.
       const denied = await viaGate("GET", `/v1.45/containers/hp_selftest_${hex}/json`);
       assert(denied.status === 403 && gateDenied.length === 1, "the socket answers 403 for a foreign name and records the denial", `${denied.status} ${gateDenied.length}`);

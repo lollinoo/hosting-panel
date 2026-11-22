@@ -11,6 +11,7 @@ import {
 } from "@hosting-panel/contracts";
 import { ExecutorCodedError } from "../traefik-config.js";
 import {
+  APP_STACK_COMPONENT_ROLE,
   APP_STACK_LABELS,
   appStackComponentLabels,
   appStackContainerName,
@@ -140,20 +141,19 @@ const MOUNT_KEYS = new Set(["Type", "Source", "Target", "ReadOnly"]);
 const onlyKeys = (value: object, allowed: ReadonlySet<string>) => Object.keys(value).every((key) => allowed.has(key));
 const inRange = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 
-/** Run on every body before POST /containers/create: refuses a body that lost any hardening property. */
+/** Run on every body before POST /containers/create: refuses a body that lost any hardening property.
+ *  With the plan, the User and the edge network must also be the plan component's. */
 export function assertAppStackPayloadHardening(
   payload: AppStackContainerCreatePayload,
-  ctx: { readonly secretsRootDir: string },
+  ctx: { readonly secretsRootDir: string; readonly plan?: ApprovedStackPlan },
 ): void {
   const refuse = (rule: string): never => {
     throw new ExecutorCodedError(`The application container body breaks the ${rule} rule`, "HOST_POLICY_DENIED");
   };
   const host = payload.HostConfig;
   const stackId = payload.Labels[APP_STACK_LABELS.stackId] ?? "";
-  const secretDir = path.join(
-    path.resolve(ctx.secretsRootDir),
-    appStackSecretDirKey(stackId, payload.Labels[APP_STACK_LABELS.component] ?? ""),
-  );
+  const key = payload.Labels[APP_STACK_LABELS.component] ?? "";
+  const secretDir = path.join(path.resolve(ctx.secretsRootDir), appStackSecretDirKey(stackId, key));
   const volumePrefix = `hp_appvol_${stackId}_`;
   const hostPath = (source: string) => source.includes("docker.sock") || source.includes("/var/run");
 
@@ -171,7 +171,11 @@ export function assertAppStackPayloadHardening(
     label.startIndex,
     label.health,
   ]);
-  if (!onlyKeys(payload.Labels, labelKeys)) refuse("Labels");
+  if (!onlyKeys(payload.Labels, labelKeys) || payload.Labels[label.role] !== APP_STACK_COMPONENT_ROLE) refuse("Labels");
+  const { plan } = ctx;
+  const component = plan?.stackId === stackId ? plan.components.find((c) => c.key === key) : undefined;
+  if (plan !== undefined && component === undefined) refuse("Labels");
+  if (component !== undefined && (payload.User ?? null) !== component.runAsUser) refuse("User");
   if (host.Privileged !== false) refuse("Privileged");
   if (!isDeepStrictEqual(host.CapDrop, ["ALL"])) refuse("CapDrop");
   if (!isDeepStrictEqual(host.SecurityOpt, ["no-new-privileges:true"])) refuse("SecurityOpt");
@@ -183,6 +187,15 @@ export function assertAppStackPayloadHardening(
   if (!inRange(host.Memory, memoryBytesMin, memoryBytesMax) || host.MemorySwap !== host.Memory) refuse("Memory");
   if (!inRange(host.NanoCpus / 1_000_000, cpuMilliMin, cpuMilliMax)) refuse("NanoCpus");
   if (host.NetworkMode !== appStackInternalNetworkName(stackId)) refuse("NetworkMode");
+  // Only the stack's own networks, each with only its alias (no fixed address); the edge one for an ingress component.
+  const edge = appStackEdgeNetworkName(stackId);
+  const onEdge =
+    plan === undefined ? Object.hasOwn(payload.NetworkingConfig.EndpointsConfig, edge) : plan.ingress.some((r) => r.componentKey === key);
+  const endpoints = {
+    [host.NetworkMode]: { Aliases: [key] },
+    ...(onEdge ? { [edge]: { Aliases: [appStackContainerName(stackId, key)] } } : {}),
+  };
+  if (!isDeepStrictEqual(payload.NetworkingConfig, { EndpointsConfig: endpoints })) refuse("NetworkingConfig");
   for (const bind of host.Binds) {
     const k = SECRET_BIND_PATTERN.exec(bind)?.[1];
     if (k === undefined || bind !== `${path.join(secretDir, k)}:${appStackSecretFilePath(k)}:ro` || hostPath(bind)) refuse("Binds");

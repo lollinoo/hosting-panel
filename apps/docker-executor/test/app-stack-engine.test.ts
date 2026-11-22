@@ -485,6 +485,25 @@ describe("createAppStackComponents (5.10)", () => {
     ]);
   });
 
+  it("refuses a plan asking for more processors than the server has before any change", async () => {
+    const h = await setup();
+    await deployed(h);
+    const oldWorker = idOf(h, WORKER);
+    h.fake.info.NCPU = 1;
+    const cpus = (cpuMilli: number) =>
+      rehash({ ...plan, components: plan.components.map((c) => (c.key === "worker" ? { ...c, resources: { ...c.resources, cpuMilli } } : c)) });
+    await expect(h.engine.createAppStackComponents({ plan: cpus(1_001) })).rejects.toMatchObject({
+      reason: "STACK_PLAN_INVALID",
+      message: "The application needs more processors than this server has",
+    });
+    expect(h.fake.log[0]).toBe("GET /info");
+    expect(mutations(h.fake.log)).toEqual([]);
+    expect(idOf(h, WORKER)).toBe(oldWorker);
+    await expect(h.engine.createAppStackComponents({ plan: cpus(1_000) })).resolves.toMatchObject({
+      components: [{ componentKey: "web", outcome: "unchanged" }, { componentKey: "worker", outcome: "replaced" }],
+    });
+  });
+
   it.each([
     [409, "STACK_NAMESPACE_CONFLICT"],
     [404, "STACK_COMPONENT_NOT_READY"],
@@ -921,15 +940,48 @@ describe("getAppStackStatus (5.16)", () => {
 });
 
 describe("getAppStackComponentLogs (5.17)", () => {
+  const AT = "2026-11-22T03:00:00.000000000Z";
+  const logs = (h: Harness) => h.fake.containers.get(WORKER)?.logs ?? [];
+  const read = (h: Harness, tail = 50) => h.engine.getAppStackComponentLogs({ ...REF, componentKey: "worker", tail });
+
   it("returns the masked tail of an own component", async () => {
     const h = await setup();
     await deployed(h);
-    h.logLines.push({ at: null, stream: "stdout", text: `key=${SECRET} ok` }, { at: null, stream: "stderr", text: "plain" });
-    await expect(h.engine.getAppStackComponentLogs({ ...REF, componentKey: "worker", tail: 50 })).resolves.toEqual([
-      { at: null, stream: "stdout", text: "key=[REDACTED] ok" },
+    logs(h).push({ stream: "stdout", payload: "dropped\n" }, { stream: "stdout", payload: `${AT} key=${SECRET} ok\r\n` }, { stream: "stderr", payload: "plain\n" });
+    await expect(read(h, 2)).resolves.toEqual([
+      { at: AT, stream: "stdout", text: "key=[REDACTED] ok" },
       { at: null, stream: "stderr", text: "plain" },
     ]);
-    expect(h.readLogs).toHaveBeenCalledWith(idOf(h, WORKER), 50);
+    expect(h.fake.log).toEqual([`GET /containers/${enc(WORKER)}/json`, `GET /containers/${idOf(h, WORKER)}/logs?stdout=1&stderr=1&timestamps=1&tail=2`]);
+    expect(h.readLogs).not.toHaveBeenCalled();
+  });
+
+  it("masks a value that crosses the 2 000-character cut of its line", async () => {
+    const h = await setup();
+    await deployed(h);
+    logs(h).push({ stream: "stdout", payload: `${AT} ${"x".repeat(1_990)}${SECRET}@cache\n` });
+    expect((await read(h))[0]?.text).toBe(`${"x".repeat(1_990)}[REDACTED]`);
+  });
+
+  it("masks the parts of a value split by Docker's frames and by the 2 MiB read limit", async () => {
+    const h = await setup();
+    await deployed(h);
+    logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET.slice(0, 7)}` }, { stream: "stdout", payload: `${AT} ${SECRET.slice(7)} done\n` });
+    expect((await read(h)).map((line) => line.text)).toEqual(["key=[REDACTED]", "[REDACTED] done"]);
+    // The read keeps the first 2 MiB: the second frame's payload starts at byte 8 + filler + 8 and is cut 8 characters into the value.
+    const filler = 2 * 1024 * 1024 - 8 - 8 - "key=".length - 8;
+    logs(h).splice(0, 2, { stream: "stdout", payload: "x".repeat(filler - 1) + "\n" }, { stream: "stderr", payload: `key=${SECRET}\n` });
+    expect((await read(h)).at(-1)).toEqual({ at: null, stream: "stderr", text: "key=[REDACTED]" });
+  });
+
+  it.each([
+    [404, { code: "NOT_FOUND", message: "Component not found" }],
+    [500, { code: "DOCKER_ENGINE_UNAVAILABLE", message: "Failed to read service logs (HTTP 500)" }],
+  ])("a log read answered %s is refused", async (status, error) => {
+    const h = await setup();
+    await deployed(h);
+    h.fake.failNext(/\/logs\?/, status);
+    await expect(read(h)).rejects.toMatchObject(error);
   });
 
   it("an absent component is NOT_FOUND and a foreign one a conflict", async () => {

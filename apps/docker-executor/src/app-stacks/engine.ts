@@ -1,8 +1,10 @@
+import { StringDecoder } from "node:string_decoder";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   APP_STACK_HASH_PATTERN,
   APP_STACK_ID_PATTERN,
   APP_STACK_KEY_PATTERN,
+  APP_STACK_LOG_TAIL_MAX,
   APP_STACK_NETWORK_ROLES,
   type AppImageAllowlistEntry,
   type AppStackComponentActionIpcResult,
@@ -29,6 +31,7 @@ import {
 } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import type { ServiceLogLine, StackExecutorPort } from "@hosting-panel/executor-contracts";
+import { LOG_READ_MAX_BYTES } from "../docker-logs.js";
 import { ExecutorCodedError, type AppStackRouteEntry } from "../traefik-config.js";
 import {
   assertAppStackPayloadHardening,
@@ -78,6 +81,7 @@ export interface AppStackEngineDeps {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
   readonly routes: AppStackRouteStore;
   readonly proxy: { readonly containerName: string; ensure(): Promise<void> };
+  /** Not called: the stack path reads the raw stream to mask each line before it is cut (S5-M1). */
   readonly readLogs: (containerRef: string, tail: number) => Promise<ServiceLogLine[]>;
   readonly probe?: AppStackHealthProbe;
   readonly now?: () => Date;
@@ -88,6 +92,8 @@ export const APP_STACK_PULL_ENGINE_TIMEOUT_MS = 240_000;
 const REMOVAL_POLL_MS = 100;
 const REMOVAL_WAIT_MS = 5_000;
 const STOPPED_STATES = new Set(["created", "exited", "dead"]);
+const LOG_LINE_MAX_CHARS = 2_000;
+const LOG_TIMESTAMP = /^(\d{4}-\d{2}-\d{2}T\S+) ?/;
 
 type Labels = Readonly<Record<string, string>>;
 type EngineResponse = Awaited<ReturnType<AppStackDockerRequest>>;
@@ -142,12 +148,32 @@ const conflict = () =>
 const engineError = (verb: string, statusCode: number) =>
   new ExecutorCodedError(`Failed to ${verb} (HTTP ${String(statusCode)})`, "DOCKER_ENGINE_UNAVAILABLE");
 
+const malformed = () => new ExecutorCodedError("The container engine answered with malformed data", "DOCKER_ENGINE_UNAVAILABLE");
+
 function json<T>(res: EngineResponse): T {
   try {
     return JSON.parse(res.body.toString("utf8")) as T;
   } catch {
-    throw new ExecutorCodedError("The container engine answered with malformed data", "DOCKER_ENGINE_UNAVAILABLE");
+    throw malformed();
   }
+}
+
+/** demuxDockerLogStream (docker-logs.ts), masking each line before its 2 000-character cut so no cut splits a value. */
+function maskedLogLines(body: Buffer, values: readonly string[]): ServiceLogLine[] {
+  const lines: ServiceLogLine[] = [];
+  for (let offset = 0; offset + 8 <= body.length; ) {
+    const stream = body[offset] === 2 ? "stderr" : "stdout";
+    const end = Math.min(body.length, offset + 8 + body.readUInt32BE(offset + 4));
+    for (const raw of new StringDecoder("utf8").write(body.subarray(offset + 8, end)).split("\n")) {
+      const line = raw.replace(/\r$/, "");
+      if (line === "") continue;
+      const [prefix = "", stamp = ""] = LOG_TIMESTAMP.exec(line) ?? [];
+      const timed = stamp !== "" && !Number.isNaN(Date.parse(stamp));
+      lines.push({ at: timed ? stamp : null, stream, text: timed ? line.slice(prefix.length) : line });
+    }
+    offset = end;
+  }
+  return maskAppStackLogLines(lines, values).map((line) => ({ ...line, text: line.text.slice(0, LOG_LINE_MAX_CHARS) }));
 }
 
 const networkName = (stackId: string, role: AppStackNetworkRole) =>
@@ -256,6 +282,12 @@ export class AppStackEngine implements StackExecutorPort {
   public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
     return this.locked(req.plan.stackId, async () => {
       const plan = this.check(req.plan);
+      // The Engine refuses a CPU limit above its processor count only at create, after a replaced container is gone.
+      const { NCPU } = await this.list<{ NCPU?: unknown }>("/info", "read the server information");
+      if (typeof NCPU !== "number") throw malformed();
+      if (plan.components.some((c) => c.resources.cpuMilli > NCPU * 1000)) {
+        refuse("STACK_PLAN_INVALID", "The application needs more processors than this server has");
+      }
       for (const role of rolesOf(plan)) {
         const view = await this.get<NetworkView>(`/networks/${enc(networkName(plan.stackId, role))}`, "inspect a stack network");
         if (view === null || !isOwnNetwork(view, plan, role)) refuse("STACK_COMPONENT_NOT_READY", "The stack network is not prepared");
@@ -273,7 +305,7 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const listed = await this.listContainers(plan);
       // Every body and every derived name is checked before the first removal or create.
-      const ctx = { secretsRootDir: this.deps.secretsRootDir };
+      const ctx = { secretsRootDir: this.deps.secretsRootDir, plan };
       const bodies = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
         const existing = listed.find((c) => c.key === key);
@@ -465,11 +497,16 @@ export class AppStackEngine implements StackExecutorPort {
     );
     if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
     if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
-    const lines = await this.deps.readLogs(target.Id, req.tail);
-    return maskAppStackLogLines(
-      lines,
-      await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey),
+    const tail = Math.min(APP_STACK_LOG_TAIL_MAX, Math.max(1, Math.trunc(req.tail) || 1));
+    const res = await this.deps.request(
+      "GET",
+      `/containers/${enc(target.Id)}/logs?stdout=1&stderr=1&timestamps=1&tail=${String(tail)}`,
+      undefined,
+      { maxBodyBytes: LOG_READ_MAX_BYTES },
     );
+    if (res.statusCode === 404) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+    if (res.statusCode !== 200) throw engineError("read service logs", res.statusCode);
+    return maskedLogLines(res.body, await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey));
   }
 
   private async locked<T>(stackId: string, fn: () => Promise<T>): Promise<T> {
