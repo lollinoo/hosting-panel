@@ -143,6 +143,12 @@ function insert(table: string, over: Record<string, string> = {}): string {
   return `INSERT INTO ${table} (${Object.keys(row).join(", ")}) VALUES (${Object.values(row).join(", ")})`;
 }
 
+// What a later migration adds to these tables; its own test checks it (0026: app-routing-options-database.test.ts).
+const LATER_COLUMNS: Record<string, string[]> = {
+  app_stack_domains: ["access_password_hash", "access_username", "compression", "path_routes", "redirect_to_domain_id"],
+};
+const LATER_CONSTRAINTS = ["app_stack_domains.uq_app_stack_domains_stack_id", "app_stack_domains.fk_app_stack_domains_redirect"];
+
 const long = (n: number) => `'${"x".repeat(n)}'`;
 const named = (name: string) => new RegExp(`"${name}"`);
 
@@ -284,21 +290,24 @@ describe("0025 app_stacks migration", () => {
       for (const table of [...tables, organizations]) {
         const config = getTableConfig(table);
         const present = colsAfter.filter((c) => c.table_name === config.name).map((c) => c.column_name);
-        expect(config.columns.map((c) => c.name).sort(), config.name).toEqual(present.sort());
+        const declared = config.columns.map((c) => c.name).filter((name) => !(LATER_COLUMNS[config.name] ?? []).includes(name));
+        expect(declared.sort(), config.name).toEqual(present.sort());
       }
       expect(tables.map((t) => getTableConfig(t).name).sort()).toEqual(NEW_TABLES);
     });
 
     it("names in schema.ts every unique, primary key and composite foreign key the migration creates", () => {
       const present = new Set(consAfter.map(qualified));
-      const declared = tables.flatMap((table) => {
-        const config = getTableConfig(table);
-        return [
-          ...config.uniqueConstraints.map((u) => u.getName()),
-          ...config.primaryKeys.map((p) => p.getName()),
-          ...config.foreignKeys.map((f) => f.getName()).filter((name) => name.startsWith("fk_")),
-        ].map((name) => `${config.name}.${name}`);
-      });
+      const declared = tables
+        .flatMap((table) => {
+          const config = getTableConfig(table);
+          return [
+            ...config.uniqueConstraints.map((u) => u.getName()),
+            ...config.primaryKeys.map((p) => p.getName()),
+            ...config.foreignKeys.map((f) => f.getName()).filter((name) => name.startsWith("fk_")),
+          ].map((name) => `${config.name}.${name}`);
+        })
+        .filter((name) => !LATER_CONSTRAINTS.includes(name));
       expect(declared.length).toBe(24);
       expect(declared.filter((name) => !present.has(name))).toEqual([]);
     });

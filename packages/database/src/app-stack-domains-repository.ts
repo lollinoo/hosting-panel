@@ -1,17 +1,27 @@
-// Web addresses of a stack (ACME only): add, remove, DNS/certificate state. Hostname uniqueness across sites, stacks and
-// the panel host comes from the 0025 triggers.
+// Web addresses of a stack (ACME only): add, remove, DNS/certificate state, routing options (0026, ADR-0037). Hostname
+// uniqueness across sites, stacks and the panel host comes from the 0025 triggers.
 // Lock order of every stack writer: organizations row FOR NO KEY UPDATE → app_templates row FOR SHARE → app_stacks row
 // FOR UPDATE → resource_quotas row FOR UPDATE → tls_publish_state → hostname advisory lock (0025 triggers).
 
 import { randomUUID } from "node:crypto";
-import { MAX_APP_STACK_DOMAINS, type CertStatus, type DomainStatus } from "@hosting-panel/contracts";
+import { MAX_APP_STACK_DOMAINS, type AppStackDomainPathRoute, type CertStatus, type DomainStatus } from "@hosting-panel/contracts";
 import { and, asc, eq, getTableColumns, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { appStackDomains, appStacks, domains, hosts } from "./schema.js";
 import { assertNoManualCapture } from "./tls-coverage.js";
 
 export type AppStackDomainRow = typeof appStackDomains.$inferSelect;
-export type AppStackDomainErrorCode = "NOT_FOUND" | "DOMAIN_CONFLICT" | "DOMAIN_LIMIT" | "VALIDATION_ERROR";
+export type AppStackDomainErrorCode =
+  | "NOT_FOUND"
+  | "DOMAIN_CONFLICT"
+  | "DOMAIN_LIMIT"
+  | "VALIDATION_ERROR"
+  /** The redirect target is this address or not an address of the stack. */
+  | "REDIRECT_TARGET"
+  /** The target redirects itself, or another address already redirects to this one. */
+  | "REDIRECT_CHAIN"
+  /** Protection asked while keeping a password that was never set. */
+  | "PASSWORD_REQUIRED";
 
 export class AppStackDomainError extends Error {
   constructor(
@@ -132,6 +142,67 @@ export function removeAppStackDomainTransactional(
       )
       .returning({ id: appStackDomains.id });
     return removed.length > 0;
+  });
+}
+
+/** Every option of one address. A redirecting address takes no protection and no path rule (the contract refuses it). */
+export interface AppStackDomainRouting {
+  readonly redirectToDomainId: string | null;
+  readonly compression: boolean;
+  /** `passwordHash` left out keeps the verifier already stored. */
+  readonly protection: { readonly username: string; readonly passwordHash?: string } | null;
+  readonly pathRoutes: readonly AppStackDomainPathRoute[];
+}
+
+/**
+ * Replaces the routing options of one address. The stack row is FOR UPDATE, so the redirect rules are checked against
+ * every address of the stack as committed: the target is another address of the same stack, it does not redirect, and
+ * no address redirects to the one that starts redirecting. The caller has checked the path targets against the plan.
+ */
+export function updateAppStackDomainRoutingTransactional(
+  db: HostingPanelDatabase,
+  input: { readonly organizationId: string; readonly stackId: string; readonly domainId: string; readonly routing: AppStackDomainRouting },
+): Promise<{ readonly before: AppStackDomainRow; readonly after: AppStackDomainRow }> {
+  return db.transaction(async (tx) => {
+    if (!(await lockLiveStack(tx, input.organizationId, input.stackId))) {
+      throw new AppStackDomainError("NOT_FOUND", "The application was not found.");
+    }
+    const rows = await listAppStackDomains(tx, { organizationId: input.organizationId, stackId: input.stackId });
+    const before = rows.find((row) => row.id === input.domainId);
+    if (!before) throw new AppStackDomainError("NOT_FOUND", "The web address was not found.");
+    const { redirectToDomainId, compression, protection, pathRoutes } = input.routing;
+    if (redirectToDomainId !== null) {
+      const target = rows.find((row) => row.id === redirectToDomainId);
+      if (!target || target.id === before.id) {
+        throw new AppStackDomainError("REDIRECT_TARGET", "Choose another web address of this application.");
+      }
+      if (target.redirectToDomainId !== null || rows.some((row) => row.redirectToDomainId === before.id)) {
+        throw new AppStackDomainError("REDIRECT_CHAIN", "A web address that redirects cannot be the destination of another one.");
+      }
+    }
+    const accessPasswordHash = protection === null ? null : (protection.passwordHash ?? before.accessPasswordHash);
+    if (protection !== null && accessPasswordHash === null) {
+      throw new AppStackDomainError("PASSWORD_REQUIRED", "Choose a password for this web address.");
+    }
+    const [after] = await tx
+      .update(appStackDomains)
+      .set({
+        redirectToDomainId,
+        compression,
+        accessUsername: protection?.username ?? null,
+        accessPasswordHash,
+        pathRoutes: pathRoutes.map((rule) => ({
+          pathPrefix: rule.pathPrefix,
+          componentKey: rule.componentKey,
+          port: rule.port,
+          stripPrefix: rule.stripPrefix,
+        })),
+        updatedAt: new Date(),
+      })
+      .where(and(eq(appStackDomains.id, before.id), eq(appStackDomains.stackId, input.stackId)))
+      .returning();
+    if (!after) throw new AppStackDomainError("NOT_FOUND", "The web address was not found.");
+    return { before, after };
   });
 }
 
