@@ -2,7 +2,7 @@ import { z } from "zod";
 import { AppTemplateIssueSchema } from "./issues.js";
 import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_CATEGORY_PATTERN, APP_TEMPLATE_LIMITS } from "./limits.js";
 import { AppStackPreviewSchema } from "./plan.js";
-import { AppTemplateParameterSchema } from "./spec.js";
+import { AppTemplateAnyParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_TEMPLATE_STATES, AppStackStatusSchema } from "./stack-status.js";
 
@@ -60,7 +60,7 @@ export type AdminAppTemplateListQuery = z.infer<typeof AdminAppTemplateListQuery
 export const AppTemplateValidationDtoSchema = z.object({
   valid: z.boolean(),
   issues: z.array(AppTemplateIssueSchema), // [] when valid; sorted, ≤ 50
-  parameters: z.array(AppTemplateParameterSchema), // all of spec.parameters (customer:false and secret too); [] when invalid
+  parameters: z.array(AppTemplateAnyParameterSchema), // all of spec.parameters (customer:false and secret too); [] when invalid
   preview: AppStackPreviewSchema.nullable(), // null when invalid
 });
 export type AppTemplateValidationDto = z.infer<typeof AppTemplateValidationDtoSchema>;
@@ -113,7 +113,7 @@ export const AdminAppTemplateVersionDtoSchema = z.object({
   source: z.string(),
   valid: z.boolean(),
   issues: z.array(AppTemplateIssueSchema),
-  parameters: z.array(AppTemplateParameterSchema),
+  parameters: z.array(AppTemplateAnyParameterSchema),
   preview: AppStackPreviewSchema.nullable(),
 });
 export type AdminAppTemplateVersionDto = z.infer<typeof AdminAppTemplateVersionDtoSchema>;

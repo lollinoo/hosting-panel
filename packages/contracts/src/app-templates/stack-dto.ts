@@ -45,7 +45,7 @@ export const CustomerAppTemplatesDtoSchema = z.object({
 });
 export type CustomerAppTemplatesDto = z.infer<typeof CustomerAppTemplatesDtoSchema>;
 export const CustomerAppTemplateDtoSchema = CustomerAppTemplateSummaryDtoSchema.extend({
-  parameters: z.array(AppTemplateParameterSchema), // customer:true only (secret too), source order
+  parameters: z.array(AppTemplateParameterSchema), // appTemplateInstallParameters: customer:true, never a generated secret; source order
   ingress: z.array(AppStackPlanIngressSchema), // {componentKey: service, port}, sorted
   components: z.array(z.object({ key: AppStackKeySchema, cpuMilli: z.number().int(), memoryBytes: MemoryBytesText })), // by key
 });
@@ -222,7 +222,7 @@ export const AppStackPlanDiffDtoSchema = z.object({
   newRevision: z.boolean(), // false: deploy would redeploy the desired revision as is
   components: z.array(z.object({ key: AppStackKeySchema, change: Change, restart: z.boolean() })),
   volumes: z.array(z.object({ key: AppStackKeySchema, change: Change })), // "removed" = no longer mounted, data kept
-  parameters: z.array(z.object({ key: AppTemplateParameterKeySchema, change: Change })), // names only, secrets included
+  parameters: z.array(z.object({ key: AppTemplateParameterKeySchema, change: Change })), // names only, secrets included (not the ones the customer never sees)
   ingress: z.array(z.object({ componentKey: AppStackKeySchema, port: z.number().int(), change: Change })),
   downtime: z.boolean(),
   dataRisk: z.boolean(),

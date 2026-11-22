@@ -139,6 +139,25 @@ export function appTemplateSecretGenerate(parameter: AppTemplateParameter): AppS
   return parameter.type === "secret" && "generate" in parameter ? parameter.generate : null;
 }
 
+/** A parameter of either format, as the administrator's pages receive it. */
+export const AppTemplateAnyParameterSchema = z.union([AppTemplateParameterSchema, AppTemplateParameterV2Schema]);
+
+/** What the install form asks and the customer may set afterwards, in the version 1 shape: the customer's parameters
+ *  without the secrets the platform generates (nobody types those, even when the customer may replace them later). */
+export function appTemplateInstallParameters(parameters: readonly AppTemplateParameter[]): AppTemplateParameterV1[] {
+  return parameters.flatMap((parameter): AppTemplateParameterV1[] => {
+    if (!parameter.customer) return [];
+    if (parameter.type !== "secret") return [parameter];
+    if (appTemplateSecretGenerate(parameter) !== null) return [];
+    return [{ key: parameter.key, label: parameter.label, type: "secret", required: parameter.required, customer: true }];
+  });
+}
+
+/** The secrets the customer never sees or sets: generated ones with `customer: false` (v2 only). */
+export function appTemplateHiddenSecretKeys(parameters: readonly AppTemplateParameter[]): Set<string> {
+  return new Set(parameters.filter((parameter) => parameter.type === "secret" && !parameter.customer).map((parameter) => parameter.key));
+}
+
 export const AppTemplateImageSchema = z
   .object({
     /** "[registry/]repository" exactly as written. */

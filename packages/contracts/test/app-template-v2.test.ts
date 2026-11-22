@@ -37,14 +37,20 @@ import {
   toAppStackPreview,
 } from "../src/app-templates/plan.js";
 import {
+  type AppTemplateParameterV2,
   type AppTemplateSpecV2,
+  AppTemplateAnyParameterSchema,
   AppTemplateParameterSchema,
   AppTemplateParameterV2Schema,
   AppTemplateSpecSchema,
   appSecretGenerateProblem,
+  appTemplateHiddenSecretKeys,
+  appTemplateInstallParameters,
   appTemplateSecretGenerate,
   appTemplateServiceProfile,
 } from "../src/app-templates/spec.js";
+import { AdminAppTemplateVersionDtoSchema, AppTemplateValidationDtoSchema } from "../src/app-templates/admin-dto.js";
+import { CustomerAppTemplateDtoSchema } from "../src/app-templates/stack-dto.js";
 import {
   AppStackCreateIpcRequestSchema,
   AppStackImageResolveIpcRequestSchema,
@@ -556,5 +562,90 @@ describe("Executor requests of the second format", () => {
     expect(AppStackImageResolveIpcRequestSchema.safeParse({ image: "wordpress", registryAuth: "x" }).success).toBe(false);
     expect(AppStackImageResolveIpcResultSchema.safeParse({ image: "wordpress:7.1.4", digest: DIGEST_A }).success).toBe(true);
     expect(AppStackImageResolveIpcResultSchema.safeParse({ image: "wordpress:7.1.4", digest: "sha256:abc" }).success).toBe(false);
+  });
+});
+
+describe("What each side sees of the parameters of the second format", () => {
+  const PARAMETERS: AppTemplateParameterV2[] = [
+    { key: "title", label: "Title", type: "string", default: "Demo", customer: true },
+    { key: "replicas", label: "Replicas", type: "integer", min: 1, max: 4, default: 2, customer: false },
+    { key: "db_password", label: "Database password", type: "secret", required: true, customer: false, generate: { kind: "password", length: 32 } },
+    { key: "admin_password", label: "Administrator password", type: "secret", required: true, customer: true, generate: { kind: "hex", length: 24 } },
+    { key: "api_key", label: "API key", type: "secret", required: false, customer: true, generate: null },
+  ];
+
+  it("the install form: the customer's parameters, without a generated secret, in the shape of the first format", () => {
+    const asked = appTemplateInstallParameters(PARAMETERS);
+    expect(asked).toEqual([
+      { key: "title", label: "Title", type: "string", default: "Demo", customer: true },
+      { key: "api_key", label: "API key", type: "secret", required: false, customer: true },
+    ]);
+    for (const parameter of asked) expect(AppTemplateParameterSchema.safeParse(parameter).success).toBe(true);
+    expect(JSON.stringify(asked)).not.toContain("generate");
+    expect(appTemplateInstallParameters([])).toEqual([]);
+  });
+
+  it("the install form of a template of the first format is its customer parameters, unchanged", () => {
+    const v1 = AppTemplateSpecSchema.parse(SPEC_V1);
+    expect(appTemplateInstallParameters(v1.parameters)).toEqual(v1.parameters.filter((parameter) => parameter.customer));
+    expect(appTemplateInstallParameters(v1.parameters).map((parameter) => parameter.key)).toEqual(["worker_count", "app_secret"]);
+  });
+
+  it("the hidden secrets are the ones the customer may not set, and only secrets", () => {
+    expect([...appTemplateHiddenSecretKeys(PARAMETERS)]).toEqual(["db_password"]);
+    expect([...appTemplateHiddenSecretKeys(SPEC_V2.parameters)]).toEqual(["app_secret"]);
+    expect(appTemplateHiddenSecretKeys(AppTemplateSpecSchema.parse(SPEC_V1).parameters).size).toBe(0);
+  });
+
+  it("a parameter of either format is accepted by the administrator's pages, and nothing else", () => {
+    for (const parameter of [...PARAMETERS, ...AppTemplateSpecSchema.parse(SPEC_V1).parameters]) {
+      expect(AppTemplateAnyParameterSchema.safeParse(parameter).success, parameter.key).toBe(true);
+    }
+    for (const bad of [
+      { key: "db_password", label: "D", type: "secret", required: true, customer: false },
+      { key: "db_password", label: "D", type: "secret", required: true, customer: false, generate: { kind: "uuid", length: 32 } },
+      { key: "db_password", label: "D", type: "secret", required: true, customer: true, generate: null, value: "x" },
+      { key: "n", label: "N", type: "string", default: "x", customer: true, generate: null },
+    ]) {
+      expect(AppTemplateAnyParameterSchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("the administrator's answers carry the generation rule; the customer's catalogue cannot", () => {
+    const preview = toAppStackPreview(PLAN_V2);
+    const validation = AppTemplateValidationDtoSchema.parse({ valid: true, issues: [], parameters: PARAMETERS, preview });
+    expect(validation.parameters[2]).toEqual(PARAMETERS[2]);
+    const version = AdminAppTemplateVersionDtoSchema.parse({
+      id: "atv_demo_2",
+      templateId: "atpl_demo",
+      versionNumber: 2,
+      specHash: "a".repeat(64),
+      createdAt: "2026-11-22T10:00:00.000Z",
+      source: "x-hp-stack: {}\n",
+      valid: true,
+      issues: [],
+      parameters: PARAMETERS,
+      preview,
+    });
+    expect(version.parameters).toEqual(PARAMETERS);
+
+    const customer = {
+      id: "atpl_demo",
+      name: "Notes",
+      description: "Notes app",
+      category: "productivity",
+      versionId: "atv_demo_2",
+      versionNumber: 2,
+      componentCount: 2,
+      cpuMilli: 1500,
+      memoryBytes: "805306368",
+      volumeCount: 1,
+      hasIngress: true,
+      ingress: [{ componentKey: "app", port: 8080 }],
+      components: [{ key: "app", cpuMilli: 1000, memoryBytes: "536870912" }],
+    };
+    expect(CustomerAppTemplateDtoSchema.safeParse({ ...customer, parameters: appTemplateInstallParameters(PARAMETERS) }).success).toBe(true);
+    expect(CustomerAppTemplateDtoSchema.safeParse({ ...customer, parameters: [PARAMETERS[2]] }).success).toBe(false);
+    expect(CustomerAppTemplateDtoSchema.safeParse({ ...customer, parameters: [PARAMETERS[4]] }).success).toBe(false);
   });
 });
