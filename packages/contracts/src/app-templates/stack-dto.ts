@@ -95,7 +95,14 @@ export const DeleteAppStackInputSchema = z.object({ confirmName: z.string().max(
 export type DeleteAppStackInput = z.infer<typeof DeleteAppStackInputSchema>;
 /** Write-only. `value` is never echoed, logged, hashed into a request hash or stored outside app_stack_secrets. */
 export const SetAppStackSecretInputSchema = z
-  .object({ parameterKey: AppTemplateParameterKeySchema, value: z.string().min(1).max(16_384) })
+  .object({
+    parameterKey: AppTemplateParameterKeySchema,
+    value: z
+      .string()
+      .min(1)
+      .max(16_384)
+      .refine((v) => !v.includes("\u0000"), "Secret value contains a NUL character"),
+  })
   .strict();
 export type SetAppStackSecretInput = z.infer<typeof SetAppStackSecretInputSchema>;
 export const AddAppStackDomainInputSchema = AppStackDomainEntrySchema;

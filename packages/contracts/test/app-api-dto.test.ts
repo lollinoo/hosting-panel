@@ -257,6 +257,12 @@ describe("app API input schemas", () => {
     expect(refused.error?.message).not.toContain("Zq9");
     expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
   });
+
+  it("a secret value with a NUL character is refused, as the executor would", () => {
+    const refused = SetAppStackSecretInputSchema.safeParse({ parameterKey: "app_secret", value: "Zq9ab\u0000cd" });
+    expect(refused.success).toBe(false);
+    expect(JSON.stringify(refused.error?.issues)).not.toContain("Zq9");
+  });
 });
 
 describe("contracts dist guard rules for the two DTO files", () => {

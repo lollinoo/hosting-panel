@@ -41,6 +41,27 @@ describe("ApprovedStackPlanSchema: the fixture", () => {
   });
 });
 
+describe("ApprovedStackPlanSchema: ids", () => {
+  it("accepts foreign organisation and allocation ids in UUID form", () => {
+    const plan = variant((p) => {
+      p.organizationId = "org_3984baf6-928d-40dd-b388-bfac50b5e54f";
+      p.hostAllocationId = "alloc_3984baf6-928d-40dd-b388-bfac50b5e54f";
+    });
+    expect(pathsOf(plan)).toEqual([]);
+    expect(pathsOf(variant((p) => void (p.organizationId = `o${"a".repeat(127)}`)))).toEqual([]);
+  });
+
+  it.each([
+    ["a stack id with a hyphen", (p: Mutable<ApprovedStackPlan>) => void (p.stackId = "stk_3984baf6-928d"), ["stackId"]],
+    ["a 65-character stack id", (p: Mutable<ApprovedStackPlan>) => void (p.stackId = `s${"a".repeat(64)}`), ["stackId"]],
+    ["a revision id with a hyphen", (p: Mutable<ApprovedStackPlan>) => void (p.revisionId = "srev_a-b"), ["revisionId"]],
+    ["a 129-character organisation id", (p: Mutable<ApprovedStackPlan>) => void (p.organizationId = `o${"a".repeat(128)}`), ["organizationId"]],
+    ["an upper-case allocation id", (p: Mutable<ApprovedStackPlan>) => void (p.hostAllocationId = "Alloc_1"), ["hostAllocationId"]],
+  ])("refuses %s", (_, change, paths) => {
+    expect(pathsOf(variant(change))).toEqual(paths);
+  });
+});
+
 describe("ApprovedStackPlanSchema: refine rules", () => {
   const cases: Array<[string, (plan: Mutable<ApprovedStackPlan>, cache: AppStackPlanComponent, app: AppStackPlanComponent) => void, string[]]> = [
     ["plan over 262 144 bytes", (_, cache) => void (cache.environment = envEntries(64, "a".repeat(4_096))), [""]],

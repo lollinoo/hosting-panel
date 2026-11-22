@@ -4,6 +4,7 @@
  * Pure, synchronous and never throws; a message never echoes a value.
  */
 import {
+  APP_FOREIGN_ID_PATTERN,
   APP_IMAGE_ALLOWLIST,
   APP_STACK_ID_PATTERN,
   APP_STACK_PLAN_MAX_BYTES,
@@ -182,10 +183,11 @@ function finishPlan(ids: AppStackPlanIds, planHash: string, { components, volume
 
 /** The preview's plan: ids of the longest allowed length, so a preview that fits means an install with defaults fits. */
 const PREVIEW_ID = "x".repeat(64);
+const PREVIEW_FOREIGN_ID = "x".repeat(128);
 const PREVIEW_IDS: AppStackPlanIds = {
   stackId: PREVIEW_ID,
-  organizationId: PREVIEW_ID,
-  hostAllocationId: PREVIEW_ID,
+  organizationId: PREVIEW_FOREIGN_ID,
+  hostAllocationId: PREVIEW_FOREIGN_ID,
   templateVersionId: PREVIEW_ID,
   revisionId: PREVIEW_ID,
 };
@@ -200,8 +202,9 @@ export function compileAppStackPlan(input: AppStackCompileInput, options: AppTem
     const validation = validateAppTemplateSource(input.source, options);
     if (!validation.ok) return { ok: false, issues: validation.errors };
     const { stackId, organizationId, hostAllocationId, templateVersionId, revisionId } = input.ids;
-    const ids = [stackId, organizationId, hostAllocationId, templateVersionId, revisionId];
-    if (!ids.every((id) => APP_STACK_ID_PATTERN.test(id)) || ![...input.secretVersions.values()].every(isVersion)) return internal();
+    const ids = [stackId, templateVersionId, revisionId].every((id) => APP_STACK_ID_PATTERN.test(id)) &&
+      [organizationId, hostAllocationId].every((id) => APP_FOREIGN_ID_PATTERN.test(id));
+    if (!ids || ![...input.secretVersions.values()].every(isVersion)) return internal();
 
     const resolution = resolveAppTemplateParameters(validation.spec, input.parameters);
     if (!resolution.ok) return resolution;

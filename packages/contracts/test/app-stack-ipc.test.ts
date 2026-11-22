@@ -209,6 +209,22 @@ describe("application stack IPC wire", () => {
     }
   });
 
+  it("every request accepts a UUID-form organisation and allocation id and refuses a foreign-form stack id", () => {
+    const organizationId = "org_3984baf6-928d-40dd-b388-bfac50b5e54f";
+    const foreignPlan = { ...PLAN, organizationId, hostAllocationId: "alloc_3984baf6-928d-40dd-b388-bfac50b5e54f" };
+    const requests = INSTANCES.filter(([name]) => name.endsWith("request"));
+    expect(requests).toHaveLength(8);
+    for (const [name, schema, value] of requests) {
+      const request = value as Record<string, unknown>;
+      const foreign = "plan" in request ? { ...request, plan: foreignPlan } : { ...request, organizationId };
+      expect(schema.safeParse(foreign).success, name).toBe(true);
+    }
+    for (const stackId of ["stk_3984baf6-928d", `s${"a".repeat(64)}`]) {
+      expect(AppStackRefIpcRequestSchema.safeParse({ stackId, organizationId }).success).toBe(false);
+    }
+    expect(AppStackRefIpcRequestSchema.safeParse({ ...REF, organizationId: `o${"a".repeat(128)}` }).success).toBe(false);
+  });
+
   it("bounds the secret content and never echoes it in an issue", () => {
     const sentinel = "SENTINEL-SECRET-CONTENT";
     expect(AppStackSecretFileContentSchema.safeParse({ ...SECRET, content: "x".repeat(APP_STACK_SECRET_CONTENT_MAX_CHARS) }).success).toBe(true);

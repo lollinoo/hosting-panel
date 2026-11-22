@@ -58,8 +58,10 @@ export const APP_STACK_KEY_PATTERN = /^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 export const APP_STACK_ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]{0,63}$/;
 export const APP_TEMPLATE_CATEGORY_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 export const APP_TEMPLATE_OPTION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
-/** Every id carried by a plan. */
+/** Every id this feature mints (stack, template, version, revision, deployment, domain, secret). */
 export const APP_STACK_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+/** Ids of entities this feature does not mint (organisation `org_<uuid>`, host allocation). */
+export const APP_FOREIGN_ID_PATTERN = /^[a-z][a-z0-9_-]{0,127}$/;
 export const APP_STACK_HASH_PATTERN = /^[a-f0-9]{64}$/;
 export const APP_STACK_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 /** Plus: no "//", no "." or ".." segment (appStackHealthPathProblem). */

@@ -176,6 +176,14 @@ describe("compileAppStackPlan on the notes-demo fixture", () => {
     expect(verifyAppStackPlanHash(result.plan)).toBe(true);
   });
 
+  it("compiles for a UUID-form organisation and allocation with the same planHash", () => {
+    const uuid = "3984baf6-928d-40dd-b388-bfac50b5e54f";
+    const ids = { ...IDS, organizationId: `org_${uuid}`, hostAllocationId: `alloc_${uuid}` };
+    const plan = planOf({ ids });
+    expect(plan).toEqual({ ...(PLAN as ApprovedStackPlan), ...ids });
+    expect(plan.planHash).toBe("6247134963c40efc9f135593adc6f42c5aa59391ec8889dada24d538726d0f33");
+  });
+
   it("parses with ApprovedStackPlanSchema and passes the image check only with the fixture allowlist", () => {
     const plan = planOf();
     expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
@@ -359,7 +367,11 @@ describe("limits and ids", () => {
   it.each([
     ["an upper-case stack id", { ids: { ...IDS, stackId: "STK_1" } }],
     ["an empty revision id", { ids: { ...IDS, revisionId: "" } }],
-    ["a 65-character organization id", { ids: { ...IDS, organizationId: `o${"a".repeat(64)}` } }],
+    ["a stack id with a hyphen", { ids: { ...IDS, stackId: "stk_3984baf6-928d" } }],
+    ["a 65-character stack id", { ids: { ...IDS, stackId: `s${"a".repeat(64)}` } }],
+    ["a revision id with a hyphen", { ids: { ...IDS, revisionId: "astr_a-b" } }],
+    ["a 129-character organization id", { ids: { ...IDS, organizationId: `o${"a".repeat(128)}` } }],
+    ["an allocation id with a dot", { ids: { ...IDS, hostAllocationId: "alloc.1" } }],
     ["a secret version 0", { secretVersions: new Map([["app_secret", 0]]) }],
     ["a fractional secret version", { secretVersions: new Map([["app_secret", 1.5]]) }],
     ["a secret version over 2^31-1", { secretVersions: new Map([["app_secret", 2_147_483_648]]) }],
@@ -436,6 +448,19 @@ describe("previewAppTemplateSource (A1)", () => {
     const result = previewAppTemplateSource(source, options);
     expect(result.ok ? [] : summary(result.errors)).toEqual(tooLarge);
     expect(summary(issuesOf({ source }))).toEqual(tooLarge);
+  });
+
+  it("measures the preview with ids of the longest allowed length, foreign ids included", () => {
+    const longest = { stackId: "s".repeat(64), organizationId: "o".repeat(128), hostAllocationId: "h".repeat(128), templateVersionId: "t".repeat(64), revisionId: "r".repeat(64) };
+    const padded = (n: number) =>
+      edit(bigSource("a".repeat(125)), `value: "${"${p}".repeat(16)}"`, `value: "${"a".repeat(n)}"`);
+    const bytes = JSON.stringify(planOf({ source: padded(1), ids: longest })).length;
+    const source = padded(262_144 + 2 - bytes);
+    const tooLarge = [{ path: "", code: "PLAN_TOO_LARGE", reason: "STACK_TEMPLATE_INVALID" }];
+    expect(summary(issuesOf({ source, ids: longest }))).toEqual(tooLarge);
+    expect(planOf({ source, ids: { ...longest, organizationId: "o".repeat(64), hostAllocationId: "h".repeat(64) } }).components).toHaveLength(2);
+    const result = previewAppTemplateSource(source, options);
+    expect(result.ok ? [] : summary(result.errors)).toEqual(tooLarge);
   });
 
   it("reports SPEC_INTERNAL for a body the plan schema refuses", () => {

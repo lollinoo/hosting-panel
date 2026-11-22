@@ -39,7 +39,7 @@ export const ALLOWED_APP_STACK_TRANSITIONS: Readonly<Record<AppStackStatus, read
   degraded: Object.freeze(["stopping", "starting", "updating", "deleting"] as const),
   failed: Object.freeze(["starting", "stopping", "updating", "deleting"] as const),
   unknown: Object.freeze(["running", "degraded", "stopped", "failed", "starting", "stopping", "updating", "deleting"] as const),
-  stopping: Object.freeze(["stopped", "running", "degraded", "unknown", "deleting"] as const),
+  stopping: Object.freeze(["stopped", "running", "degraded", "failed", "unknown", "deleting"] as const),
   stopped: Object.freeze(["starting", "updating", "deleting"] as const),
   starting: Object.freeze(["running", "degraded", "failed", "unknown", "deleting"] as const),
   updating: Object.freeze(["running", "degraded", "failed", "unknown", "deleting"] as const),

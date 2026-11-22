@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  APP_FOREIGN_ID_PATTERN,
   APP_ID_PREFIXES,
   APP_STACK_ID_PATTERN,
   APP_STACK_OPERATION_KINDS,
   APP_STACK_STEP_KEYS,
   APP_STACK_STEP_LABELS,
   APP_STACK_STEPS_BY_KIND,
+  AppForeignIdSchema,
   AppStackOperationPayloadSchema,
   OPERATION_KINDS,
   OPERATION_RESOURCE_TYPES,
@@ -67,6 +69,19 @@ describe("application stack operations", () => {
     expect(guards(payload)).toEqual([[], [], []]);
     expect(AppStackOperationPayloadSchema.parse(payload)).toEqual(business);
     expect(AppStackOperationPayloadSchema.safeParse({ ...business, stackId: "Stk-1" }).success).toBe(false);
+    const foreign = { ...payload, organizationId: "org_3984baf6-928d-40dd-b388-bfac50b5e54f" };
+    expect(AppStackOperationPayloadSchema.parse(foreign)).toEqual(business);
+  });
+
+  it("foreign ids: hyphenated UUID forms up to 128 characters, minted ids keep the stack id pattern", () => {
+    for (const id of ["org_3984baf6-928d-40dd-b388-bfac50b5e54f", "usr_3984baf6-928d-40dd-b388-bfac50b5e54f", "alloc_0123", `o${"a".repeat(127)}`]) {
+      expect(id).toMatch(APP_FOREIGN_ID_PATTERN);
+      expect(AppForeignIdSchema.safeParse(id).success, id).toBe(true);
+    }
+    for (const id of ["", "Org_1", "1org", "-org", "org.1", "org 1", `o${"a".repeat(128)}`]) {
+      expect(AppForeignIdSchema.safeParse(id).success, id).toBe(false);
+    }
+    expect("stk_3984baf6-928d").not.toMatch(APP_STACK_ID_PATTERN);
   });
 
   it("secret metadata passes the secret guards", () => {

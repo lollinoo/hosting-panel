@@ -15,6 +15,7 @@ import {
   AppStackVolumeMountSchema,
   AppTemplateParameterKeySchema,
 } from "./limits.js";
+import { AppForeignIdSchema } from "./stack-ids.js";
 import {
   AppStackHealthcheckSchema,
   appStackArgvExecutableProblem,
@@ -162,8 +163,8 @@ export const ApprovedStackPlanSchema = z
   .object({
     schemaVersion: z.literal(APP_STACK_PLAN_SCHEMA_VERSION),
     stackId: AppStackIdSchema,
-    organizationId: AppStackIdSchema,
-    hostAllocationId: AppStackIdSchema,
+    organizationId: AppForeignIdSchema,
+    hostAllocationId: AppForeignIdSchema,
     templateVersionId: AppStackIdSchema,
     /** = app_stack_revisions.id of the row that stores this plan. */
     revisionId: AppStackIdSchema,

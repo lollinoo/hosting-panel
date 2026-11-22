@@ -4,7 +4,7 @@ import { SiteHostRouteSchema } from "../ipc-schemas.js";
 import { APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
 import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_LIMITS, AppStackKeySchema, AppStackPortSchema, AppTemplateParameterKeySchema } from "./limits.js";
 import { ApprovedStackPlanSchema } from "./plan.js";
-import { AppEntityIdSchema } from "./stack-ids.js";
+import { AppEntityIdSchema, AppForeignIdSchema } from "./stack-ids.js";
 import { MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
 
 /** Chars of one secret file (= setAppStackSecretTransactional bound). */
@@ -84,7 +84,7 @@ export const AppStackComponentIpcRequestSchema = z
   .strict();
 export type AppStackComponentIpcRequest = z.infer<typeof AppStackComponentIpcRequestSchema>;
 /** stop, unpublish, status. */
-export const AppStackRefIpcRequestSchema = z.object({ stackId: AppEntityIdSchema, organizationId: AppEntityIdSchema }).strict();
+export const AppStackRefIpcRequestSchema = z.object({ stackId: AppEntityIdSchema, organizationId: AppForeignIdSchema }).strict();
 export type AppStackRefIpcRequest = z.infer<typeof AppStackRefIpcRequestSchema>;
 export const AppStackRemoveIpcRequestSchema = AppStackRefIpcRequestSchema.extend({ removeVolumes: z.boolean() }).strict();
 export type AppStackRemoveIpcRequest = z.infer<typeof AppStackRemoveIpcRequestSchema>;
