@@ -41,6 +41,10 @@ const orgA = "org_sr_a";
 const orgB = "org_sr_b";
 const ALLOC: Record<string, string> = { [orgA]: "alloc_sr_a", [orgB]: "alloc_sr_b" };
 const hex = (seed: string) => createHash("sha256").update(seed).digest("hex");
+const PARAMETERS = [
+  { parameterKey: "title", value: "Hello" },
+  { parameterKey: "port", value: 8080 },
+];
 
 interface PlanOptions {
   readonly components?: readonly string[];
@@ -72,10 +76,7 @@ function revisionFor(stack: { stackId: string; organizationId: string; templateV
     volumeKeys,
     cpuMilli: 250 * componentKeys.length,
     memoryBytes: 134217728 * componentKeys.length,
-    parameters: [
-      { parameterKey: "title", value: "Hello" },
-      { parameterKey: "port", value: 8080 },
-    ],
+    parameters: PARAMETERS,
   };
 }
 
@@ -100,27 +101,26 @@ describe("@hosting-panel/database — app stacks repository (create)", () => {
     return { templateId: created.template.id, versionId: created.version.id };
   }
 
-  function input(over: Partial<CreateAppStackInput> & { deployed?: boolean } = {}): CreateAppStackInput {
+  type InputOptions = Partial<Pick<CreateAppStackInput, "stackId" | "organizationId" | "templateVersionId" | "name">> & { deployed?: boolean };
+  function input(over: InputOptions = {}): CreateAppStackInput {
     counter += 1;
-    const stackId = over.stackId ?? newAppEntityId("stk");
-    const organizationId = over.organizationId ?? orgA;
-    const templateVersionId = over.templateVersionId ?? versionId;
-    return {
+    const { deployed = true, ...rest } = over;
+    const stackId = rest.stackId ?? newAppEntityId("stk");
+    const organizationId = rest.organizationId ?? orgA;
+    const templateVersionId = rest.templateVersionId ?? versionId;
+    const common = {
       stackId,
       organizationId,
       hostAllocationId: ALLOC[organizationId]!,
       templateVersionId,
-      name: `Stack ${String(counter)}`,
-      parameters: [
-        { parameterKey: "title", value: "Hello" },
-        { parameterKey: "port", value: 8080 },
-      ],
+      name: rest.name ?? `Stack ${String(counter)}`,
       createdBy: null,
       idempotencyKey: `key-${String(counter)}`,
       requestHash: hex(`request ${String(counter)}`),
-      deploy: over.deployed === false ? null : revisionFor({ stackId, organizationId, templateVersionId }),
-      ...over,
     };
+    return deployed
+      ? { ...common, deploy: revisionFor({ stackId, organizationId, templateVersionId }) }
+      : { ...common, deploy: null, parameters: PARAMETERS, componentKeys: ["web", "cache"] };
   }
 
   const rowsOf = async (stackId: string) => ({
@@ -169,7 +169,7 @@ describe("@hosting-panel/database — app stacks repository (create)", () => {
     await client.close();
   });
 
-  it("creates a draft: stack and parameters only, no revision, operation or deployment", async () => {
+  it("creates a draft: stack, parameters and one component row per key, no revision, volume, operation or deployment", async () => {
     const values = input({ deployed: false });
     const result = await createAppStackTransactional(db(), values);
     expect(result).toMatchObject({ revision: null, deployment: null, operation: null, idempotentReplay: false });
@@ -187,9 +187,31 @@ describe("@hosting-panel/database — app stacks repository (create)", () => {
       ["title", "Hello"],
     ]);
     expect(rows.revisions).toEqual([]);
-    expect(rows.components).toEqual([]);
+    expect(rows.components.map((c) => [c.componentKey, c.health, c.appliedRevisionId]).sort()).toEqual([
+      ["cache", "unknown", null],
+      ["web", "unknown", null],
+    ]);
+    expect(rows.volumes).toEqual([]);
     expect(rows.deployments).toEqual([]);
     expect(rows.operations).toEqual([]);
+  });
+
+  it("refuses a draft whose component keys are missing, too many, repeated or malformed", async () => {
+    const nine = Array.from({ length: 9 }, (_, i) => `part-${String(i)}`);
+    for (const componentKeys of [[], nine, ["web", "web"], ["Web"], ["web-"]]) {
+      const values = { ...input({ deployed: false }), deploy: null, parameters: PARAMETERS, componentKeys };
+      await expect(createAppStackTransactional(db(), values)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect((await rowsOf(values.stackId)).stacks).toEqual([]);
+    }
+  });
+
+  it("stores the revision's parameters at create with deploy: one source for both copies", async () => {
+    const values = input();
+    const deploy = { ...values.deploy!, parameters: [{ parameterKey: "title", value: "From the revision" }] };
+    const result = await createAppStackTransactional(db(), { ...values, deploy });
+    expect(result.revision?.parameters).toEqual([{ key: "title", value: "From the revision" }]);
+    const rows = await rowsOf(values.stackId);
+    expect(rows.parameters.map((p) => [p.parameterKey, p.publicValue])).toEqual([["title", "From the revision"]]);
   });
 
   it("creates with deploy: every row in one transaction, the operation locked on the stack with the deploy steps", async () => {
@@ -370,10 +392,12 @@ describe("@hosting-panel/database — app stacks repository (create)", () => {
     const withPassword = { ...revision, plan: { ...revision.plan, components: [{ key: "web", password: "hunter2" }, { key: "cache" }] } };
     await expect(createAppStackTransactional(db(), { ...values, deploy: withPassword })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     const pem = "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
-    await expect(
-      createAppStackTransactional(db(), { ...values, parameters: [{ parameterKey: "title", value: pem }] }),
-    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    const withPem = { ...revision, parameters: [{ parameterKey: "title", value: pem }] };
+    await expect(createAppStackTransactional(db(), { ...values, deploy: withPem })).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     expect((await rowsOf(values.stackId)).stacks).toEqual([]);
+    const draft = { ...input({ deployed: false }), deploy: null, parameters: [{ parameterKey: "title", value: pem }], componentKeys: ["web"] };
+    await expect(createAppStackTransactional(db(), draft)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect((await rowsOf(draft.stackId)).stacks).toEqual([]);
     expect(await db().select().from(appStacks).where(and(eq(appStacks.organizationId, orgA), eq(appStacks.idempotencyKey, values.idempotencyKey)))).toEqual([]);
   });
 });

@@ -5,9 +5,11 @@
 import { randomUUID } from "node:crypto";
 import {
   APP_STACK_BUSY_STATUSES,
+  APP_STACK_KEY_PATTERN,
   APP_STACK_RESOURCE_TYPE,
   APP_STACK_REVISION_KINDS,
   APP_STACK_TERMINAL_DEPLOYMENT_STATUSES,
+  APP_TEMPLATE_LIMITS,
   appStackEnqueueTarget,
   appStackLockKey,
   appStackOperationSteps,
@@ -99,19 +101,30 @@ export interface AppStackWriteResult {
   readonly idempotentReplay: boolean;
 }
 
-export interface CreateAppStackInput {
+interface CreateAppStackCommon {
   readonly stackId: string;
   readonly organizationId: string;
   readonly hostAllocationId: string;
   readonly templateVersionId: string;
   readonly name: string;
-  readonly parameters: readonly AppStackParameterValue[];
   readonly createdBy: string | null;
   readonly idempotencyKey: string;
   readonly requestHash: string;
-  /** null → stays `draft` (secrets must be set before the first deploy). */
-  readonly deploy: NewAppStackRevision | null;
 }
+export type CreateAppStackInput = CreateAppStackCommon &
+  (
+    | {
+        /** Revision 1, deployed at once; its parameters are the stored set. */
+        readonly deploy: NewAppStackRevision;
+      }
+    | {
+        /** Stays `draft` (secrets must be set before the first deploy). */
+        readonly deploy: null;
+        readonly parameters: readonly AppStackParameterValue[];
+        /** The template's service keys (1..8, distinct, APP_STACK_KEY_PATTERN): one component row each, so domains can attach. */
+        readonly componentKeys: readonly string[];
+      }
+  );
 
 export interface EnqueueAppStackOperationInput {
   readonly organizationId: string;
@@ -122,9 +135,7 @@ export interface EnqueueAppStackOperationInput {
   readonly requestHash: string;
   /** upgrade/rollback: required; deploy: optional (null = redeploy the desired revision); start/stop/restart/delete: null. */
   readonly revision: NewAppStackRevision | null;
-  /** With a revision: the public parameters it was compiled from (the stored set is replaced from `revision.parameters`). */
-  readonly parameters: readonly AppStackParameterValue[] | null;
-  /** delete only: true sets retention_policy = 'destroy' on every volume of the stack. */
+  /** stack.delete: sets retention_policy of every volume of the stack (true → 'destroy', false → 'retain'); ignored otherwise. */
   readonly destroyData: boolean;
 }
 
@@ -334,7 +345,19 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
       throw new AppStackRepositoryError("TEMPLATE_UNPUBLISHED", "This application is not available for installation.");
     }
     const scope = { organizationId: input.organizationId, stackId: input.stackId };
-    if (input.deploy) assertRevision(input.deploy, { ...scope, hostAllocationId: input.hostAllocationId, templateVersionId: input.templateVersionId });
+    if (input.deploy) {
+      assertRevision(input.deploy, { ...scope, hostAllocationId: input.hostAllocationId, templateVersionId: input.templateVersionId });
+    } else {
+      const keys = input.componentKeys;
+      if (
+        keys.length < 1 ||
+        keys.length > APP_TEMPLATE_LIMITS.services ||
+        new Set(keys).size !== keys.length ||
+        !keys.every((k) => APP_STACK_KEY_PATTERN.test(k))
+      ) {
+        throw codedError("The component keys are invalid.", "VALIDATION_ERROR");
+      }
+    }
 
     const now = new Date();
     let stack: AppStackRow;
@@ -362,8 +385,12 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
       }
       throw err;
     }
-    await insertParameters(tx, scope, input.parameters);
-    if (!input.deploy) return { stack, revision: null, deployment: null, operation: null, idempotentReplay: false };
+    if (!input.deploy) {
+      await insertParameters(tx, scope, input.parameters);
+      await tx.insert(appStackComponents).values(input.componentKeys.map((componentKey) => ({ ...scope, componentKey })));
+      return { stack, revision: null, deployment: null, operation: null, idempotentReplay: false };
+    }
+    await insertParameters(tx, scope, input.deploy.parameters);
 
     const revision = await insertRevision(tx, scope, input.deploy, 1);
     await syncComponentsAndVolumes(tx, scope, input.deploy);
@@ -421,6 +448,13 @@ export async function enqueueAppStackOperationTransactional(
       };
     }
 
+    const revisionKind = (APP_STACK_REVISION_KINDS as readonly AppStackOperationKind[]).includes(input.kind);
+    const next = revisionKind ? input.revision : null;
+    // Header lock order: the template row before the stack row.
+    const published =
+      next && input.kind !== "stack.rollback"
+        ? await getPublishedAppTemplateVersion(tx, { templateVersionId: next.templateVersionId, lock: true })
+        : null;
     const [stack] = await tx
       .select()
       .from(appStacks)
@@ -437,8 +471,6 @@ export async function enqueueAppStackOperationTransactional(
     if (target === null) {
       throw new AppStackRepositoryError("INVALID_TRANSITION", `This action is not available while the application is ${stack.status}.`, stack.status);
     }
-    const revisionKind = (APP_STACK_REVISION_KINDS as readonly AppStackOperationKind[]).includes(input.kind);
-    const next = revisionKind ? input.revision : null;
     if (revisionKind && next === null && (input.kind !== "stack.deploy" || stack.desiredRevisionId === null)) {
       throw new AppStackRepositoryError("NO_REVISION", "There is no version of this application to install.");
     }
@@ -451,12 +483,10 @@ export async function enqueueAppStackOperationTransactional(
         if (!(await getAppTemplateVersion(tx, { templateId: stack.templateId, versionId: next.templateVersionId }))) {
           throw new AppStackRepositoryError("TEMPLATE_MISMATCH", "That version belongs to another application.");
         }
-      } else {
-        const published = await getPublishedAppTemplateVersion(tx, { templateVersionId: next.templateVersionId, lock: true });
-        if (!published) throw new AppStackRepositoryError("TEMPLATE_UNPUBLISHED", "This version is not available.");
-        if (published.template.id !== stack.templateId) {
-          throw new AppStackRepositoryError("TEMPLATE_MISMATCH", "That version belongs to another application.");
-        }
+      } else if (!published) {
+        throw new AppStackRepositoryError("TEMPLATE_UNPUBLISHED", "This version is not available.");
+      } else if (published.template.id !== stack.templateId) {
+        throw new AppStackRepositoryError("TEMPLATE_MISMATCH", "That version belongs to another application.");
       }
       assertRevision(next, { ...scope, hostAllocationId: stack.hostAllocationId, templateVersionId: next.templateVersionId });
       const ingress = planList(next.plan, "ingress");
@@ -485,8 +515,11 @@ export async function enqueueAppStackOperationTransactional(
         next: totals(revision),
       });
     }
-    if (input.destroyData) {
-      await tx.update(appStackVolumes).set({ retentionPolicy: "destroy", updatedAt: now }).where(eq(appStackVolumes.stackId, stack.id));
+    if (input.kind === "stack.delete") {
+      await tx
+        .update(appStackVolumes)
+        .set({ retentionPolicy: input.destroyData ? "destroy" : "retain", updatedAt: now })
+        .where(eq(appStackVolumes.stackId, stack.id));
     }
     const revisionId = revision?.id ?? stack.desiredRevisionId;
     const { deployment, operation } = await enqueueDeployment(tx, {
@@ -557,7 +590,7 @@ export async function transitionAppStackTransactional(
 /**
  * Deployment progress/outcome plus the stack status in one call. `ended_at` is set on a terminal deployment status.
  * appliedRevisionId: sets app_stacks.applied_revision_id and applied_revision_id of every component row.
- * stackStatus "deleted" finalises: quota released, domain rows deleted, volumes retain→retained / destroy→removed,
+ * stackStatus "deleted" finalises: quota released, domain rows deleted, volumes retain→retained / destroy or pending→removed,
  * component rows deleted, status + deleted_at set, then secret versions purged when no volume is `retained`.
  */
 export async function updateAppStackDeploymentTransactional(
@@ -602,7 +635,10 @@ export async function updateAppStackDeploymentTransactional(
     await db.delete(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
     await db
       .update(appStackVolumes)
-      .set({ status: sql`CASE WHEN ${appStackVolumes.retentionPolicy} = 'destroy' THEN 'removed' ELSE 'retained' END`, updatedAt: now })
+      .set({
+        status: sql`CASE WHEN ${appStackVolumes.retentionPolicy} = 'destroy' OR ${appStackVolumes.status} = 'pending' THEN 'removed' ELSE 'retained' END`,
+        updatedAt: now,
+      })
       .where(eq(appStackVolumes.stackId, stack.id));
     await db.delete(appStackComponents).where(eq(appStackComponents.stackId, stack.id));
   }
@@ -668,9 +704,9 @@ export async function setAppStackVolumeStatusTransactional(
 }
 
 /**
- * Boot repair: a busy stack with no active operation on its lock key → `failed` (`deleting` → `delete_failed`); a
- * queued/running deployment whose operation is no longer active → `failed`, problem OPERATION_INTERRUPTED.
- * Returns the number of stacks repaired.
+ * Boot repair: a busy stack with no active operation on its lock key → `failed` (`deleting` → `delete_failed`,
+ * `stopping` → `unknown`: only moves the transition table allows); a queued/running deployment whose operation is no
+ * longer active → `failed`, problem OPERATION_INTERRUPTED. Returns the number of stacks repaired.
  */
 export async function repairOrphanedAppStackStatusesTransactional(db: HostingPanelDatabase): Promise<number> {
   const active = [...ACTIVE_OPERATION_LOCK_STATUSES];
@@ -687,7 +723,10 @@ export async function repairOrphanedAppStackStatusesTransactional(db: HostingPan
       );
     const repaired = await tx
       .update(appStacks)
-      .set({ status: sql`CASE WHEN ${appStacks.status} = 'deleting' THEN 'delete_failed' ELSE 'failed' END`, updatedAt: now })
+      .set({
+        status: sql`CASE ${appStacks.status} WHEN 'deleting' THEN 'delete_failed' WHEN 'stopping' THEN 'unknown' ELSE 'failed' END`,
+        updatedAt: now,
+      })
       .where(
         and(
           inArray(appStacks.status, [...APP_STACK_BUSY_STATUSES]),

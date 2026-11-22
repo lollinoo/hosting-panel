@@ -2,7 +2,7 @@
 // leaves this module, except the just-in-time hand-off to the executor. Lock order: stack row FOR NO KEY UPDATE.
 
 import { randomUUID } from "node:crypto";
-import { APP_ID_PREFIXES, APP_TEMPLATE_PARAMETER_KEY_PATTERN } from "@hosting-panel/contracts";
+import { APP_ID_PREFIXES, APP_STACK_SECRET_CONTENT_MAX_CHARS, APP_TEMPLATE_PARAMETER_KEY_PATTERN } from "@hosting-panel/contracts";
 import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
 import { appStacks, appStackSecrets } from "./schema.js";
@@ -27,7 +27,6 @@ export class AppStackSecretError extends Error {
   }
 }
 
-const VALUE_MAX_CHARS = 16_384;
 /** The 0025 CHECK caps ciphertext_base64 at 32768 chars, i.e. 24576 plaintext bytes. */
 const VALUE_MAX_UTF8_BYTES = 24_576;
 const newId = (prefix: string) => `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
@@ -62,7 +61,7 @@ export async function setAppStackSecretTransactional(
   if (
     !APP_TEMPLATE_PARAMETER_KEY_PATTERN.test(input.parameterKey) ||
     input.value.length < 1 ||
-    input.value.length > VALUE_MAX_CHARS ||
+    input.value.length > APP_STACK_SECRET_CONTENT_MAX_CHARS ||
     Buffer.byteLength(input.value, "utf8") > VALUE_MAX_UTF8_BYTES
   ) {
     throw new AppStackSecretError("VALIDATION_ERROR", "The secret parameter key or value length is invalid.");

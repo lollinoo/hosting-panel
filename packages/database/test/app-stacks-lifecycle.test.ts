@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import {
+  APP_STACK_BUSY_STATUSES,
   APP_STACK_ENQUEUE_TRANSITIONS,
   APP_STACK_STEPS_BY_KIND,
+  canTransitionAppStack,
   type AppStackOperationKind,
   type AppStackStatus,
 } from "@hosting-panel/contracts";
@@ -147,18 +149,22 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     counter += 1;
     const stackId = newAppEntityId("stk");
     const templateVersionId = options.templateVersionId ?? versionId;
-    return createAppStackTransactional(db(), {
+    const common = {
       stackId,
       organizationId: org,
       hostAllocationId: ALLOC[org]!,
       templateVersionId,
       name: options.name ?? `Stack ${String(counter)}`,
-      parameters: PARAMETERS,
       createdBy: null,
       idempotencyKey: `lc-create-${String(counter)}`,
       requestHash: hex(`create ${String(counter)}`),
-      deploy: options.draft ? null : revisionFor({ id: stackId, organizationId: org, templateVersionId }, options),
-    });
+    };
+    return createAppStackTransactional(
+      db(),
+      options.draft
+        ? { ...common, deploy: null, parameters: PARAMETERS, componentKeys: options.components ?? ["web", "cache"] }
+        : { ...common, deploy: revisionFor({ id: stackId, organizationId: org, templateVersionId }, options) },
+    );
   }
 
   /** Settles every operation of the stack and stores `status`, as a finished worker would. */
@@ -185,7 +191,6 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
       idempotencyKey: `lc-${String(counter)}`,
       requestHash: hex(`enqueue ${String(counter)}`),
       revision,
-      parameters: revision?.parameters ?? null,
       destroyData: false,
       ...rest,
     });
@@ -276,6 +281,17 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
       expect(await keysOf(stack.id)).toMatchObject({ revisions: 1, deployments: 1 });
       expect((await stackOf(stack.id)).status).toBe(status);
     }
+  });
+
+  it("attaches a web address to a draft, and the first deploy keeps it", async () => {
+    const { stack } = await create(orgA, { draft: true });
+    const [added] = await domain(stack, "draft.example", "web", 8080);
+    expect(added).toMatchObject({ hostname: "draft.example", componentKey: "web", internalPort: 8080 });
+    const deployed = await enqueue(stack, "stack.deploy");
+    expect(deployed.stack).toMatchObject({ status: "queued", desiredRevisionId: deployed.revision!.id });
+    expect(await keysOf(stack.id)).toEqual({ components: ["cache", "web"], volumes: ["data"], revisions: 1, deployments: 1 });
+    const domains = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
+    expect(domains.map((d) => [d.hostname, d.componentKey, d.internalPort])).toEqual([["draft.example", "web", 8080]]);
   });
 
   it("refuses to deploy a draft without a revision", async () => {
@@ -389,6 +405,38 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     ]);
   });
 
+  it("writes the retention policy from destroyData on every delete, and ignores it for every other kind", async () => {
+    const created = await create(orgA, { volumes: ["data", "logs"] });
+    let stack = await ready(created.stack.id);
+    const policies = async () => (await listAppStackVolumes(db(), { organizationId: orgA, stackId: stack.id })).map((v) => v.retentionPolicy);
+    await enqueue(stack, "stack.restart", { destroyData: true });
+    expect(await policies()).toEqual(["retain", "retain"]);
+    stack = await ready(stack.id);
+    await setAppStackVolumeStatusTransactional(db(), { organizationId: orgA, stackId: stack.id, volumeKeys: ["data", "logs"], status: "present" });
+
+    const destroying = await enqueue(stack, "stack.delete", { destroyData: true });
+    expect(await policies()).toEqual(["destroy", "destroy"]);
+    const scope = { organizationId: orgA, stackId: stack.id };
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: destroying.deployment!.id,
+      deploymentStatus: "failed",
+      problem: "STACK_VOLUME_IN_USE",
+      stackStatus: "delete_failed",
+    });
+    stack = await ready(stack.id, "delete_failed");
+    const retry = await enqueue(stack, "stack.delete");
+    expect(await policies()).toEqual(["retain", "retain"]);
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: retry.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: "deleted",
+    });
+    expect((await listAppStackVolumes(db(), { ...scope, includeDeleted: true })).map((v) => v.status)).toEqual(["retained", "retained"]);
+  });
+
   it("moves the stack status only through allowed transitions", async () => {
     const { stack } = await create();
     expect((await transitionAppStackTransactional(db(), { organizationId: orgA, stackId: stack.id, to: "deploying" })).status).toBe("deploying");
@@ -434,6 +482,7 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     await organization("org_sl_final", true);
     const created = await create("org_sl_final", { name: "Final" });
     let stack = await ready(created.stack.id);
+    await setAppStackVolumeStatusTransactional(db(), { organizationId: "org_sl_final", stackId: stack.id, volumeKeys: ["data"], status: "present" });
     await domain(stack, "final.example", "web", 8080);
     await setAppStackSecretTransactional(db(), {
       organizationId: "org_sl_final",
@@ -488,6 +537,56 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect(await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, destroyed.id))).toEqual([]);
   });
 
+  it("finalises a delete of volumes never created as removed, so they keep no secret alive", async () => {
+    const created = await create(orgA, { volumes: ["data", "logs"] });
+    const stack = await ready(created.stack.id);
+    await setAppStackVolumeStatusTransactional(db(), { organizationId: orgA, stackId: stack.id, volumeKeys: ["logs"], status: "present" });
+    await setAppStackSecretTransactional(db(), {
+      organizationId: orgA,
+      stackId: stack.id,
+      parameterKey: "app_secret",
+      value: "s3cr3t-value",
+      masterKey: "e".repeat(64),
+    });
+    const deletion = await enqueue(stack, "stack.delete");
+    const scope = { organizationId: orgA, stackId: stack.id };
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: deletion.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: "deleted",
+    });
+    const volumes = await listAppStackVolumes(db(), { ...scope, includeDeleted: true });
+    expect(volumes.map((v) => [v.volumeKey, v.status])).toEqual([
+      ["data", "removed"],
+      ["logs", "retained"],
+    ]);
+    expect(await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, stack.id))).toHaveLength(1);
+
+    const pendingOnly = await ready((await create()).stack.id);
+    await setAppStackSecretTransactional(db(), {
+      organizationId: orgA,
+      stackId: pendingOnly.id,
+      parameterKey: "app_secret",
+      value: "s3cr3t-value",
+      masterKey: "e".repeat(64),
+    });
+    const gone = await enqueue(pendingOnly, "stack.delete");
+    await updateAppStackDeploymentTransactional(db(), {
+      organizationId: orgA,
+      stackId: pendingOnly.id,
+      deploymentId: gone.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: "deleted",
+    });
+    expect((await listAppStackVolumes(db(), { organizationId: orgA, stackId: pendingOnly.id, includeDeleted: true })).map((v) => v.status)).toEqual([
+      "removed",
+    ]);
+    expect(await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, pendingOnly.id))).toEqual([]);
+  });
+
   it("records component health and volume status, ignoring unknown keys", async () => {
     const { stack } = await create();
     const observedAt = new Date("2026-11-22T10:00:00.000Z");
@@ -526,6 +625,16 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     expect(interrupted?.endedAt).toBeInstanceOf(Date);
     expect((await getAppStackDeployment(db(), { organizationId: orgA, deploymentId: locked.deployment!.id }))?.status).toBe("queued");
     expect(await repairOrphanedAppStackStatusesTransactional(db())).toBe(0);
+  });
+
+  it("boot repair writes only transitions the table allows: stopping becomes unknown", async () => {
+    await repairOrphanedAppStackStatusesTransactional(db());
+    const orphans: [AppStackStatus, string][] = [];
+    for (const status of APP_STACK_BUSY_STATUSES) orphans.push([status, (await ready((await create()).stack.id, status)).id]);
+    expect(await repairOrphanedAppStackStatusesTransactional(db())).toBe(APP_STACK_BUSY_STATUSES.length);
+    const repaired = await Promise.all(orphans.map(async ([from, id]) => [from, (await stackOf(id)).status] as const));
+    expect(repaired.filter(([from, to]) => !canTransitionAppStack(from, to))).toEqual([]);
+    expect(repaired).toContainEqual(["stopping", "unknown"]);
   });
 
   it("pages stacks and deployments by keyset, newest first", async () => {
