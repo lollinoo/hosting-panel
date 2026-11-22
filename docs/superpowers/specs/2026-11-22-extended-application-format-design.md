@@ -123,7 +123,7 @@ environment:
   secret reference is an environment secret; its name may look like a secret; its literal parts are still checked by
   `envValueProblem` piece by piece, and the worst-case length rule counts a secret reference as zero.
 - A value entry without a secret reference keeps every v1 rule (`ENV_NAME_SECRET_LIKE`, `ENV_VALUE_SECRET_LIKE`).
-- A secret used in an environment value may be at most 4 096 characters (API rule when it is set); the executor
+- A secret used in an environment value may be at most 4 096 UTF-8 bytes (API rule when it is set); the executor
   refuses an expanded value over 32 768 UTF-8 bytes.
 
 ## 5. Spec and plan (contracts)
@@ -157,7 +157,10 @@ environment:
   allowlist row the plan's `runAsUser` must equal the row's.
 - `buildAppStackContainerCreatePayload(plan, key, ctx)` builds the body of the component's profile;
   `assertAppStackPayloadHardening` checks it against the closed body of that profile (exact `CapAdd` list for
-  `standard`, none for `strict`) and that every `Env` name is one of the plan's.
+  `standard`, none for `strict`). With the plan it also checks `Env`: the plan's plain entries, equal and in the
+  same order, then one entry for each environment secret under the name the plan gives it. A secret's value is not
+  read by the check; the literal text around it is the plan's. A body with the keys of `standard` is accepted only
+  together with the plan that declares that profile.
 - **create** (`createAppStackComponents`) takes `{ plan, secretContents? }`. `secretContents` (same entry shape and
   limits as `secretFileContents`) is sent only when the plan has a `secretEnvironment` entry; the wire format of a v1
   create is unchanged. The executor refuses a missing, duplicated or foreign entry before it removes anything, expands
@@ -183,8 +186,9 @@ note:   { level: "info" | "changed" | "dropped" | "refused"; path: string; code:
 `listComposeImages(compose)` returns the image references the API must resolve first. The API route
 `POST /v1/admin/app-templates/import-compose` (administrator, `applicationTemplatesAvailable`) lists the images, asks
 the executor for the digests of those without one, runs the importer and returns `{ source, report, validation }`
-where `validation` is the strict validator's verdict on the draft. Nothing is stored: the administrator reviews the
-draft in the existing editor and saves it through the existing routes, which validate again.
+where `validation` is the strict validator's verdict on the draft; `source` and `validation` are `null` when the
+importer refuses the file. Nothing is stored and nothing is audited: the administrator reviews the draft in the
+existing editor and saves it through the existing routes, which validate again.
 
 Reading: the in-house YAML subset (`parseTemplateYaml`); a file outside the subset (anchors, block scalars, …) is
 refused with the positioned error. Rules:
@@ -210,6 +214,31 @@ refused with the positioned error. Rules:
 Every imported service gets `x-hp-profile: standard`. The header's name and category come from the input, else from
 the `# name:` / `# category:` comment lines of the file, else «Applicazione importata» / `apps`.
 
+As built (the tests in `packages/policy-engine/test` pin each point):
+
+- **What counts as a secret.** A variable whose name ends in a secret word; the password inside an address
+  (`scheme://user:password@host`); a value the file also writes under a secret name. A weak literal (for example
+  `wordpress`) is replaced only under a secret name or at the password position of an address.
+- **Shared values.** Two variables with the same secret share one generated parameter. A distinctive secret found
+  inside another value is cut out and replaced by the reference; the rest of the value stays.
+- **A setting under a secret-looking name** (a switch, a number or a path, for example
+  `MARIADB_RANDOM_ROOT_PASSWORD: "yes"`) is dropped with a note: a template cannot carry a plain value under such a
+  name, and a generated secret would mean something else.
+- **External credentials** written in the file become random generated values: the administrator replaces the
+  parameter in the draft with one the customer fills in.
+- **A command that carries a secret** is refused: a template is published as it is written.
+- **Health checks.** An http check keeps the path of the address the command asks; an address with a query string,
+  a fragment or a path a template does not accept gives a tcp check. Timings outside the bounds are moved to the
+  bound with a note.
+- **Bounds.** More than 64 different secrets written in the clear give no draft; a report has at most 200 notes; a
+  key the importer does not know refuses the file.
+- **Route.** Server administrator first, then the capability, then the body (at most 64 KiB of UTF-8). The digests
+  are looked up in parallel. An image its registry refuses stays unresolved and the report names it
+  (`IMAGE_UNRESOLVED`); any other lookup failure fails the whole request with `DOCKER_ENGINE_UNAVAILABLE`,
+  retryable, and a fixed text.
+- **Known limits.** A secret the importer recognises by none of the three ways stays in the draft; a health-check
+  path is not searched for secrets; anonymous lookups count toward the registry's rate limits.
+
 ## 8. API and web
 
 - Creating a stack generates the secrets of §4.3 in the same transaction. Upgrade does the same for new generated
@@ -217,7 +246,9 @@ the `# name:` / `# category:` comment lines of the file, else «Applicazione imp
   §4.4. The runtime sends `secretContents` on create when the plan needs it and every referenced secret on start.
 - A stored template version records the spec version of its source (1 or 2).
 - Web, administrator: «Importa da Compose» in «Modelli» (paste, import, read the report, continue in the editor);
-  the preview shows each component's profile and its environment secrets by name.
+  the preview shows each component's profile and its environment secrets by name. The report is grouped by level,
+  most serious first; the draft is saved only from the editor; the web route waits at most 60 s for the answer;
+  «Importa un altro file» discards the unsaved edits of the draft.
 - Web, customer: the install form never asks for a generated secret; a `customer: true` generated secret can be
   replaced later from the application page, a `customer: false` one is not shown.
 
@@ -237,7 +268,8 @@ with the managed WordPress site.
 - Executor: payload tests per profile, create with secrets, simulator parity.
 - API: install with generated secrets end to end on the simulator, import route, sweep tests, OpenAPI.
 - Real Docker: `infra/linux/accept-app-stack-wordpress.mjs` (WordPress answers through the stack path, restart keeps
-  data, the hardening of the `standard` body is read back from the Engine).
+  data, the hardening of the `standard` body is read back from the Engine). With `--imported` the same steps run on
+  the draft the importer makes from the WordPress and MariaDB Compose fixture.
 - The repository's verify command.
 
 ## 11. Left to the builder

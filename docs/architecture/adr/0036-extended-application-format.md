@@ -103,7 +103,7 @@ Funzione pura in `packages/policy-engine`: Compose in ingresso, bozza v2 più un
 
 ## 4. Limiti noti
 
-1. Lo strato scrivibile di un container `standard` non ha un limite di spazio proprio (i volumi e i log sì).
+1. Lo strato scrivibile di un container `standard` non ha un limite di spazio proprio. I log sì (10 MiB per tre file); i volumi no, come già deciso in `ADR-0035` §2.11.
 2. I segreti d'ambiente sono leggibili da root sull'host con `docker inspect` (§2.5).
 3. L'importatore non legge ancore, scalari a blocchi e chiavi di fusione; un controllo di salute `exec` diventa una sonda TCP.
 4. Nessuna variabile «URL dello stack» dentro un modello: WordPress prende l'indirizzo dalla richiesta.
@@ -137,4 +137,101 @@ Docker Engine 29.10.0, immagini `wordpress:7.1.4-php8.4-apache@sha256:4bf2c44f19
 
 ## 8. Come costruito
 
-Da completare alla fine del lavoro (commit, esito della verifica, voci aperte, seguiti registrati).
+Questa sezione registra ciò che il codice fa dove il testo dei §2–§4 e del progetto era generico o è stato precisato durante il lavoro. Dove non dice altro, vale il testo sopra. Sono tutte scelte dell'agente, come quelle del §2.
+
+### 8.1 Formato, piano ed esecutore
+
+- **Limiti dei segreti d'ambiente** (`APP_STACK_SECRET_ENV_LIMITS` in `packages/contracts/src/app-templates/limits.ts`): un segreto usato in una variabile d'ambiente è lungo al massimo 4 096 **byte** UTF-8 (non caratteri); un valore ha al massimo 4 riferimenti a segreti e 9 pezzi; il valore espanso è lungo al massimo 32 768 byte.
+- **Forma canonica dei pezzi.** In `secretEnvironment` due testi letterali vicini sono un pezzo solo e ogni voce ha almeno un riferimento a un segreto: lo schema del piano rifiuta le altre forme, così lo stesso valore ha un solo hash.
+- **Una versione per segreto.** In un piano v2 ogni chiave di segreto ha una sola versione, fra file e ambiente: una sola voce di contenuto serve i due usi.
+- **Segreto facoltativo non impostato.** La variabile d'ambiente è omessa, come il file nel v1; non diventa una stringa vuota.
+- **Anteprima.** `profile` e `secretEnvironment` sono chiavi facoltative dell'anteprima, presenti solo per un corpo v2: l'anteprima di un piano v1 non cambia di un byte.
+- **Tipi per versione.** I contratti esportano i tipi dei due formati con il suffisso `V1` e `V2` (`AppTemplateSpecV1`, `AppTemplateSpecV2`, `ApprovedStackPlanV1`, `ApprovedStackPlanV2` e quelli di parametro, servizio e componente).
+- **Il v2 contiene il v1.** Una sorgente v1 in cui si scrive `schemaVersion: 2` è una sorgente v2 valida; i suoi servizi hanno il profilo `strict`.
+- **Dal tag al digest** (§2.7): è la route IPC di sola lettura `GET /v1/app-stacks/image-digest?image=…` dell'esecutore. La ricerca nel motore ha un tempo massimo di 30 s, la chiamata del client di 40 s. Per un'immagine che il registro non conosce il motore non risponde `200` (misurato: `403`) e l'esecutore rifiuta con `STACK_IMAGE_PULL_FAILED`.
+- **Controllo del corpo** (`assertAppStackPayloadHardening` in `apps/docker-executor/src/app-stacks/container-payload.ts`): `Env` deve contenere le voci in chiaro del piano, uguali e nello stesso ordine, poi una voce per ogni segreto d'ambiente con il nome scritto nel piano. Il valore di un segreto è opaco per il controllo; il testo letterale intorno è quello del piano ed è controllato, anche per `docker.sock`. Un corpo con le chiavi del profilo `standard` è accettato solo insieme al piano che dichiara quel profilo.
+
+### 8.2 API
+
+- **Che cosa vede il cliente.** Il catalogo del cliente riceve i parametri nella forma del v1, senza i segreti generati: il modulo d'installazione non chiede mai un valore generato. Il dettaglio di un'applicazione non elenca i segreti con `customer: false`; un segreto generato con `customer: true` compare come impostato.
+- **Che cosa vede l'amministratore.** Le route dei modelli restituiscono i parametri di tutte e due le forme. Nel contratto OpenAPI (`docs/api/openapi.yaml`) sono schemi distinti: `AppTemplateParameter` per il cliente, `AdminAppTemplateParameter` e `AppSecretGenerate` per l'amministratore.
+- **Quando si genera.** Alla creazione dello stack (anche in bozza) e a un upgrade che introduce un parametro generato nuovo, dentro la stessa transazione dell'operazione; mai a una ripetizione idempotente. L'anteprima di un upgrade non scrive nulla. L'audit registra solo i nomi dei parametri generati (`generatedParameterKeys`).
+- **Route dei segreti.** Per un segreto con `customer: false` la route risponde come per una chiave sconosciuta. Un valore più lungo di 4 096 byte per un segreto usato nell'ambiente è rifiutato.
+- **Consegna.** `secretContents` parte con la chiamata `create` solo se il piano ha segreti d'ambiente; avvio e riavvio inviano solo i segreti del componente.
+
+### 8.3 Modello WordPress
+
+Categoria `content`. Slug `wordpress-mariadb`. I due componenti hanno un controllo di salute `tcp` (porta 80 e porta 3306) e il limite di 1 CPU e 512 MiB ciascuno. Il nome del database e quello dell'utente sono valori fissi (`wordpress`); le due password sono generate, lunghe 32 caratteri, con `customer: false`. Il modello non installa WordPress: dopo aver collegato il dominio, chi apre il sito per primo completa la prima configurazione (§8.8).
+
+### 8.4 Importatore
+
+Le regole complete sono nel progetto, §7, e nei test di `packages/policy-engine/test`. Quelle decise durante il lavoro:
+
+- **Riconoscere un segreto.** Per nome (la variabile finisce con una parola da segreto), per posto (la password dentro un indirizzo) o per testo (un valore che il file scrive anche sotto un nome da segreto). Un valore debole (per esempio `wordpress`) è sostituito solo sotto un nome da segreto o al posto della password di un indirizzo, non dovunque compaia.
+- **Valori condivisi.** Due variabili con lo stesso segreto diventano un solo parametro generato; un segreto riconoscibile scritto dentro un altro valore è tagliato via e sostituito dal riferimento, e il resto del valore resta.
+- **Impostazione sotto un nome da segreto.** Un interruttore, un numero o un percorso sotto un nome che sembra un segreto (per esempio `MARIADB_RANDOM_ROOT_PASSWORD: "yes"`) è **tolto** con una riga del rapporto: un modello non può portare un valore in chiaro sotto quel nome e un segreto generato avrebbe un altro significato.
+- **Credenziali esterne.** Una chiave di un servizio esterno scritta nel file diventa un valore generato a caso: l'amministratore deve sostituire il parametro nella bozza con uno che il cliente compila.
+- **Comandi.** Un comando che porta un segreto è rifiutato: un modello è pubblicato com'è scritto.
+- **Controlli di salute.** Un controllo `CMD` che chiede un indirizzo HTTP locale diventa un controllo `http` sullo stesso percorso; se l'indirizzo ha una query, un frammento o un percorso che un modello non accetta, o se il comando è un altro, diventa un controllo `tcp`. I tempi fuori dai limiti sono portati al limite, con una riga del rapporto.
+- **Limiti.** Più di 64 segreti diversi scritti in chiaro: nessuna bozza. Un rapporto ha al massimo 200 righe. Una chiave che l'importatore non conosce rifiuta il file.
+
+### 8.5 Route d'importazione e pagine web
+
+- **Risposta.** `{ source, report, validation }`; `source` e `validation` sono `null` quando l'importatore rifiuta il file. La route non salva e non registra nulla nell'audit, come la route di validazione.
+- **Ordine dei controlli.** Amministratore del server, poi `applicationTemplatesAvailable`, poi il corpo (al massimo 64 KiB in UTF-8).
+- **Ricerca dei digest.** In parallelo, al massimo otto immagini. Se il registro rifiuta un'immagine, quella resta senza digest e il rapporto la nomina (`IMAGE_UNRESOLVED`). Ogni altro errore (motore spento, tempo scaduto) fa fallire tutta la richiesta con `DOCKER_ENGINE_UNAVAILABLE`, ripetibile, e un testo fisso: ciò che dice l'esecutore non arriva al chiamante.
+- **Pagine.** **Amministrazione › Modelli › Importa da Compose**: file, nome e categoria; poi il rapporto, raggruppato per gravità, e la bozza nell'editor esistente, già validata. La bozza si salva solo da lì. La route del pannello web aspetta la risposta al massimo 60 s. La categoria predefinita di una bozza importata è `apps` («Altre applicazioni»).
+
+### 8.6 Flag
+
+I flag seguono il backend di esecuzione nel codice: `appFeaturesFor` in `packages/contracts/src/resources.ts` dà i quattro valori, `createPlatformCapabilities` li usa quando nessuno gliene passa altri, e `resolveAppFeatureGate` in `apps/api/src/app-stacks/app-feature-gate.ts` li registra nell'API. Nessuna variabile d'ambiente e nessuna opzione di avvio li cambia; solo un test può passarne altri. Su `local-simulator` restano tutti `false`: una prova locale del catalogo passa ancora i flag al proprio avvio di prova. Il flag è letto solo dalle route: accenderlo non avvia nessun lavoro in background, e un server senza stack non fa nessuna chiamata a Docker per gli stack.
+
+### 8.7 Prove su Docker reale
+
+Lo script `infra/linux/accept-app-stack-wordpress.mjs` è stato eseguito il 2026-11-22 su Docker Engine 29.10.0, da un utente non root, su una macchina che ospita anche un pannello in funzione. Parte dal piano: lo compila con il motore di policy, lo passa all'adattatore dell'esecutore e raggiunge Docker solo attraverso il proprio socket filtrato. Non passa dall'API né dalle pagine web, e il proxy è una copia a perdere su `127.0.0.1`, in HTTP.
+
+| Esecuzione | Esito | Tempo | Richieste a Docker (rifiutate) |
+| :--- | :--- | :--- | :--- |
+| Modello integrato | 21/21, 1 passo saltato | 40,5 s | 312 (0) |
+| `--imported`: la bozza importata dal file Compose dei test dell'importatore | 22/22, 2 passi saltati | 48,8 s | 372 (0) |
+| `--imported` con `HP_ACCEPT_REGISTRY_CASES=1` | 23/23, 1 passo saltato | 52,7 s | 399 (0) |
+
+- **Che cosa provano.** Un piano con una chiave vietata è rifiutato prima di qualunque richiesta a Docker. Il corpo dei container è quello del profilo `standard`; ogni segreto arriva solo al suo componente; un container non raggiunge il pannello. La route è pubblicata dopo il controllo di salute e WordPress si installa davvero dalla sua pagina di prima configurazione. I dati restano dopo arresto, avvio e upgrade; il lettore dei log nasconde i segreti d'ambiente; la rimozione conserva i volumi, la distruzione dei dati li toglie e alla fine non resta nulla.
+- **Bozza importata.** L'importazione toglie 4 voci del file, ne cambia 5 e scrive 7 note. La bozza ha tre valori generati (anche l'account del database) e supera gli stessi controlli del modello integrato. Il file nomina le versioni fissate dal modello integrato e l'importazione riceve i digest registrati con esse, così non si scarica nulla di nuovo. Con `HP_ACCEPT_REGISTRY_CASES=1` lo script chiede anche i due tag al registro pubblico attraverso il prodotto: una lettura per tag, nessun'altra richiesta, e gli stessi due digest.
+- **Passo saltato.** `host-nft-metadata-drop-on-stack-net` chiede root: resta fra le voci del gate W6 (§8.9).
+- **Incidente con il pannello in funzione.** In un'esecuzione precedente del modello integrato l'esecutore del pannello installato sulla stessa macchina ha collegato il proprio proxy alla rete edge della prova: lo collega a ogni rete con l'etichetta di ruolo `app_edge`, chiunque l'abbia creata. I passi di rimozione sono falliti (18/21) e la rete è rimasta. Il proxy del pannello non è stato riavviato e ha continuato a rispondere; è stato staccato a mano dalla rete della prova, poi la rete è stata rimossa. Ora il filtro dello script scrive in Docker un altro valore di quell'etichetta per la rete edge della prova e lo traduce nei due sensi, e due controlli nuovi lo provano. Nelle tre esecuzioni della tabella nessun container del pannello è stato collegato a una rete della prova. I due script più vecchi che creano una rete edge non hanno ancora questa protezione (#52).
+
+### 8.8 Limiti noti aggiunti al §4
+
+7. Un segreto scritto in chiaro che l'importatore non riconosce né per nome, né per posto, né per testo resta nella bozza: l'amministratore deve rileggerla (§2.8).
+8. Il controllo di salute non è cercato per segreti; un percorso con un segreto resterebbe nella bozza.
+9. La ricerca anonima dei digest conta nei limiti di frequenza del registro; un tempo scaduto fa fallire tutta l'importazione.
+10. «Importa un altro file» scarta le modifiche non salvate della bozza.
+11. I parametri di una bozza importata hanno come etichetta il nome della variabile, e una categoria scritta nell'intestazione del file che il pannello non conosce è mostrata com'è.
+12. I segreti generati alla creazione contano, dopo, nel limite orario dei segreti che il cliente può cambiare.
+13. Un segreto di tipo file lungo fino a 24 576 byte, impostato sotto una versione precedente e poi usato più volte in un valore d'ambiente dopo un upgrade, può superare i 32 768 byte: la creazione è rifiutata con `STACK_PLAN_INVALID` prima che qualcosa sia rimosso.
+14. WordPress resta aperto alla prima configurazione finché qualcuno non la completa: chi apre il dominio per primo sceglie l'utente amministratore.
+
+### 8.9 Da approvare dal proprietario
+
+- Questo ADR (`PROPOSTO`) e le scelte E1–E14 di `.agents/brain/decisions.md`.
+- Il commit che accende i due flag (§2.10): è separato dagli altri e si può togliere dalla PR.
+- Le voci del gate W6 di `ADR-0035` §8.1 ancora aperte: l'accettazione sulle VM del proprietario con un'organizzazione reale, la prova del riavvio, il passo `host-nft-metadata-drop-on-stack-net` eseguito da root, l'emissione ACME su un hostname reale di uno stack, un `hp-update` fra due release reali, il merge.
+
+### 8.10 Seguiti registrati
+
+Ogni seguito è una issue del repository; nessuno fa parte di questa PR.
+
+| Issue | Che cosa | Limite |
+| :--- | :--- | :--- |
+| #44 | L'importatore legge ancore, chiavi di fusione e scalari a blocchi | §4, 3 |
+| #45 | Controlli di salute con un comando dentro il componente | §4, 3 |
+| #46 | L'indirizzo pubblico dell'applicazione dentro un modello | §4, 4 |
+| #47 | Limite di spazio per lo strato scrivibile del profilo `standard` | §4, 1 |
+| #48 | Immagini da registri che chiedono un accesso | §4, 5 |
+| #49 | Aiuti alla revisione di una bozza importata: eccezione per un'impostazione sotto un nome da segreto, credenziali esterne, etichette e categorie | §4, 6 e 11 |
+| #50 | I segreti generati non devono contare nel limite orario del cliente | §4, 12 |
+| #51 | Chiudere la finestra della prima configurazione di un WordPress appena installato | §4, 14 |
+| #52 | Gli script di accettazione più vecchi nascondono la rete edge della prova a un pannello in funzione | §8.7 |
+
+Restano limiti scritti, senza issue: il 2 (è la scelta del §2.5) e i limiti 7, 8, 9, 10 e 13. Una capability in più per il profilo `standard` (per esempio `KILL`) si valuta solo quando un'immagine la chiede: oggi nessuna delle due immagini misurate ne ha bisogno.
