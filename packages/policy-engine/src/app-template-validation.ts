@@ -7,6 +7,7 @@
  */
 import {
   APP_IMAGE_ALLOWLIST,
+  APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
   APP_TEMPLATE_CATEGORY_PATTERN,
@@ -366,8 +367,8 @@ interface ServiceResult {
 function validateService(ctx: Context, key: string, raw: unknown): ServiceResult | null {
   const { issues } = ctx;
   const path: TemplatePath = ["services", key];
-  if (!APP_STACK_KEY_PATTERN.test(key)) {
-    issues.add("SERVICE_NAME_INVALID", path, "A service name uses lower-case letters, digits and '-' (at most 32, no '_').", "key");
+  if (!APP_STACK_KEY_PATTERN.test(key) || key.length > APP_STACK_COMPONENT_KEY_MAX) {
+    issues.add("SERVICE_NAME_INVALID", path, `A service name uses lower-case letters, digits and '-' (at most ${APP_STACK_COMPONENT_KEY_MAX}, no '_').`, "key");
   }
   if (!isMapping(raw)) {
     issues.mismatch(path, "a mapping");

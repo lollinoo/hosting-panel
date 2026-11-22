@@ -55,6 +55,8 @@ export const APP_STACK_SECRET_DIR = "/run/secrets";
 export const APP_TEMPLATE_PARAMETER_KEY_PATTERN = /^[a-z][a-z0-9_]{0,31}$/;
 /** Service (component) and volume keys: no "_", DNS-label safe. */
 export const APP_STACK_KEY_PATTERN = /^[a-z](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
+/** Service (component) keys: "hp_app_" (7) + minted stack id "stk_" + 24 hex (28) + "_" (1) + 27 = 63, one DNS label. */
+export const APP_STACK_COMPONENT_KEY_MAX = 27;
 export const APP_STACK_ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]{0,63}$/;
 export const APP_TEMPLATE_CATEGORY_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 export const APP_TEMPLATE_OPTION_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;

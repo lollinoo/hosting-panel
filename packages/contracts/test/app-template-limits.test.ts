@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  APP_STACK_COMPONENT_KEY_MAX,
   APP_TEMPLATE_LIMITS,
   AppStackResourcesSchema,
   AppTemplateParameterKeySchema,
@@ -28,6 +29,12 @@ describe("APP_TEMPLATE_LIMITS", () => {
     expect(l.healthIntervalDefault).toBeLessThanOrEqual(l.healthIntervalMax);
     expect(l.healthTimeoutDefault).toBeGreaterThanOrEqual(l.healthTimeoutMin);
     expect(l.healthTimeoutDefault).toBeLessThanOrEqual(Math.min(l.healthTimeoutMax, l.healthIntervalDefault));
+  });
+});
+
+describe("APP_STACK_COMPONENT_KEY_MAX", () => {
+  it("keeps hp_app_<minted stack id>_<key> within one 63-character DNS label", () => {
+    expect(`hp_app_stk_${"0".repeat(24)}_${"a".repeat(APP_STACK_COMPONENT_KEY_MAX)}`).toHaveLength(63);
   });
 });
 

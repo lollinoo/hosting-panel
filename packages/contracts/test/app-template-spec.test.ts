@@ -97,6 +97,15 @@ describe("AppTemplateSpecSchema: cross-field rules", () => {
   });
 });
 
+describe("AppTemplateSpecSchema: service key length", () => {
+  const withService = (key: string) => variant((s, app, cache) => s.services.push({ ...structuredClone(cache), key }));
+
+  it("accepts a 27-character service key and refuses a 28-character one at its key", () => {
+    expect(pathsOf(withService(`z${"a".repeat(26)}`))).toEqual([]);
+    expect(pathsOf(withService(`z${"a".repeat(27)}`))).toEqual(["services.2.key"]);
+  });
+});
+
 describe("AppTemplateParameterSchema", () => {
   const ok = (parameter: Record<string, unknown>) => AppTemplateParameterSchema.safeParse(parameter).success;
   const base = { key: "p", label: "P", customer: true };

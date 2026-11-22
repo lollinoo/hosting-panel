@@ -2,6 +2,7 @@ import { z } from "zod";
 import { findForbiddenPublicDtoKeys, findPlaintextSecretKeys, findUnsafeDockerInputFields } from "../resources.js";
 import { APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
 import {
+  APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_HASH_PATTERN,
   APP_STACK_ID_PATTERN,
   APP_STACK_PLAN_MAX_BYTES,
@@ -43,7 +44,7 @@ export const AppStackPlanSecretFileSchema = z
 
 export const AppStackPlanComponentSchema = z
   .object({
-    key: AppStackKeySchema,
+    key: AppStackKeySchema.max(APP_STACK_COMPONENT_KEY_MAX),
     image: z.string().regex(APP_STACK_PLAN_IMAGE_PATTERN),
     runAsUser: z.string().regex(APP_STACK_RUN_AS_USER_PATTERN).nullable(),
     /** Docker Cmd; null = the image CMD; Entrypoint is never set. */
@@ -62,6 +63,11 @@ export type AppStackPlanComponent = z.infer<typeof AppStackPlanComponentSchema>;
 
 export const AppStackPlanVolumeSchema = z.object({ key: AppStackKeySchema }).strict();
 export const AppStackPlanIngressSchema = z.object({ componentKey: AppStackKeySchema, port: AppStackPortSchema }).strict();
+
+/** hp_app_<stackId>_<componentKey> is the proxy's backend host name: one DNS label, at most 63 characters. */
+export function appStackEngineNameProblem(stackId: string, componentKey: string): "too_long" | null {
+  return `hp_app_${stackId}_${componentKey}`.length > 63 ? "too_long" : null;
+}
 
 type Path = (string | number)[];
 type PlanShape = {

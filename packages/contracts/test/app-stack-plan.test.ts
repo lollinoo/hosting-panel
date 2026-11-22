@@ -6,6 +6,7 @@ import {
   ApprovedStackPlanSchema,
   AppStackPreviewSchema,
   appStackComponentHashInput,
+  appStackEngineNameProblem,
   appStackPlanHashInput,
   sumAppStackPlanResources,
   toAppStackPreview,
@@ -59,6 +60,28 @@ describe("ApprovedStackPlanSchema: ids", () => {
     ["an upper-case allocation id", (p: Mutable<ApprovedStackPlan>) => void (p.hostAllocationId = "Alloc_1"), ["hostAllocationId"]],
   ])("refuses %s", (_, change, paths) => {
     expect(pathsOf(variant(change))).toEqual(paths);
+  });
+});
+
+describe("Engine name hp_app_<stackId>_<key> within one 63-character DNS label", () => {
+  const MINTED = `stk_${"0".repeat(24)}`;
+  const named = (stackId: string, appKey = "app") =>
+    variant((p, _, app) => {
+      p.stackId = stackId;
+      app.key = appKey;
+      (p.ingress[0] as { componentKey: string }).componentKey = appKey;
+    });
+
+  it("accepts a 27-character key and refuses a 28-character one with a minted stack id", () => {
+    expect(pathsOf(named(MINTED, "a".repeat(27)))).toEqual([]);
+    expect(pathsOf(named(MINTED, "a".repeat(28)))).toEqual(["components.1.key"]);
+  });
+
+  it("appStackEngineNameProblem refuses a name over 63 characters, a longer stack id with a shorter key included", () => {
+    expect(appStackEngineNameProblem(MINTED, "a".repeat(27))).toBeNull();
+    expect(appStackEngineNameProblem(MINTED, "a".repeat(28))).toBe("too_long");
+    expect(appStackEngineNameProblem(`s${"a".repeat(49)}`, "cache")).toBeNull();
+    expect(appStackEngineNameProblem(`s${"a".repeat(50)}`, "cache")).toBe("too_long");
   });
 });
 

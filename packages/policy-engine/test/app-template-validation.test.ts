@@ -129,6 +129,16 @@ describe("issue list", () => {
   });
 });
 
+describe("service key length", () => {
+  const renamed = (key: string) => SOURCE.replace("  cache:\n", `  ${key}:\n`).replace("      - cache\n", `      - ${key}\n`);
+
+  it("accepts a 27-character service key and refuses a 28-character one at services.<key>", () => {
+    expect(validateAppTemplateSource(renamed(`c${"a".repeat(26)}`), options).ok).toBe(true);
+    const key = `c${"a".repeat(27)}`;
+    expect(errorsOf(renamed(key)).map((issue) => [issue.path, issue.code])).toEqual([[`services.${key}`, "SERVICE_NAME_INVALID"]]);
+  });
+});
+
 describe("explicit YAML null is not an absent key", () => {
   it.each([
     ["intervalSeconds: 15", "intervalSeconds: ~", "services.app.healthcheck.intervalSeconds"],

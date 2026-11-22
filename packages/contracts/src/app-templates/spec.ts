@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { SITE_TEMPLATE_SIZE_PATTERN } from "../site-templates/spec.js";
 import {
+  APP_STACK_COMPONENT_KEY_MAX,
   APP_STACK_DIGEST_PATTERN,
   APP_TEMPLATE_CATEGORY_PATTERN,
   APP_TEMPLATE_LIMITS,
@@ -94,7 +95,7 @@ export const AppTemplateEnvEntrySchema = z.union([AppTemplateEnvValueEntrySchema
 
 export const AppTemplateServiceSchema = z
   .object({
-    key: AppStackKeySchema,
+    key: AppStackKeySchema.max(APP_STACK_COMPONENT_KEY_MAX),
     image: AppTemplateImageSchema,
     /** Raw: an item may be a whole "${key}" placeholder. */
     command: z.array(z.string().min(1).max(APP_TEMPLATE_LIMITS.argvItemLength)).min(1).max(APP_TEMPLATE_LIMITS.argvItems).nullable(),
