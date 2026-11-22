@@ -647,6 +647,25 @@ describe("release workflow and docs", () => {
     }
   });
 
+  it("application-stack engine acceptance script is registered and machine-safe", () => {
+    const file = "infra/linux/accept-app-stack-engine.mjs";
+    const script = read(file);
+    for (const s of ["DockerEngineSocketAdapter", "hp_swarmtest_", "@sha256:", "appImageAllowlist", "pullMissingImages: false",
+      "/dev/shm/", "HP_ACCEPT_ROOT_CASES", "snapshot-before", "gate-clean", "nothing-left"]) expect(script, s).toContain(s);
+    for (const step of ["refuse-unpinned-image-before-docker", "refuse-over-ceiling-before-docker", "refuse-tampered-plan-before-docker",
+      "apply-stack-a", "container-hardening", "secrets-only-as-files", "dns-between-components", "host-probe-reaches-internal-bridge",
+      "idempotent-reapply", "status-reads-only", "no-cross-stack-reachability", "logs-masked", "network-shape-covered-by-metadata-drop",
+      "internal-component-has-no-default-route", "no-docker-socket-in-components", "refuse-foreign-namespace",
+      "remove-keeps-volumes", "reapply-reuses-volume-data", "remove-with-volumes", "foreign-untouched"]) expect(script, step).toContain(`"${step}"`);
+    expect(script).not.toMatch(/shell:\s*true|(?<![.\w])exec\(|execSync|spawnSync/);
+    expect(script).not.toMatch(/["'`]hp_(?:ingress_proxy|ingress_net|mariadb|phpmyadmin)["'`]/);
+    expect(script).not.toMatch(/["'](?:prune|system)["']/);
+    expect(script).not.toMatch(/PortBindings\s*:|["']-p["']|["']--publish["']|0\.0\.0\.0|:latest\b|publishAppStackRoutes/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000)).toEqual([]);
+    expect(script).toMatch(/skipped \(not counted in n\/m\)/);
+    expect(read("HARNESS.md")).toContain("accept-app-stack-engine.mjs");
+  });
+
   it("m3b restore and download docs are consistent", () => {
     const bootstrap = read("infra/linux/bootstrap-dedicated.sh");
     expect(bootstrap).toContain(

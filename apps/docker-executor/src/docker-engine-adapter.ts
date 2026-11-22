@@ -1692,6 +1692,17 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     // A new proxy starts on hp_ingress_net only, and a site edge network may have been detached
     // while the proxy kept running: reattach every one on each ensure (idempotent, CP-01).
     await this.reconnectProxyToSiteEdgeNetworks();
+    // Application stacks (ADR-0035): best effort, a stack network must never fail the site ingress.
+    await this.reconnectToRoleNetworks("app_edge", this.ingressProxyContainerName).catch((err: unknown) => {
+      console.warn(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "app_edge_reconnect_failed",
+          code: (err as { code?: unknown } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
 
     return {
       component: "ingress_proxy",
@@ -3749,7 +3760,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
   }
 
   private async reconnectToRoleNetworks(
-    role: "site_edge" | "site_internal",
+    role: "site_edge" | "site_internal" | "app_edge",
     containerRef: string,
     aliases?: readonly string[],
   ): Promise<void> {

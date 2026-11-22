@@ -173,6 +173,7 @@ function judge(method, rawUrl, bodyText) {
   if (method === "GET" && /^\/images\/traefik:v3\.7\/json$/.test(p)) return { kind: "forward" };
   // The site edge/internal network lists: the proxies must never be attached to the live site networks.
   if (method === "GET" && p === "/networks" && /site_(edge|internal)/.test(query)) return { kind: "fake", status: 200, json: [] };
+  if (method === "GET" && p === "/networks" && /app_edge/.test(query)) return { kind: "fake", status: 200, json: [] };
   let m;
   if (method === "GET" && (m = p.match(/^\/networks\/([^/]+)$/)) && own(m[1])) return { kind: "forward" };
   if (method === "POST" && p === "/networks/create") {
