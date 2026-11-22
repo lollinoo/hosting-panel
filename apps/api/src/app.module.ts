@@ -3,8 +3,16 @@ import { APP_FILTER } from "@nestjs/core";
 import type { DatabaseClient } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { Phase1DisabledDockerExecutor } from "@hosting-panel/executor-contracts";
+import type { AppFeatureFlags } from "@hosting-panel/contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
+import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
+import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
+import {
+  APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
+  resolveAppTemplateValidationOptions,
+} from "./app-templates/app-template-validation-options.js";
+import { AppTemplatesService } from "./app-templates/app-templates.service.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
@@ -14,6 +22,8 @@ import { ApiExceptionFilter } from "./common/api-exception.filter.js";
 import { AccountController } from "./controllers/account.controller.js";
 import { AdminSitesController } from "./controllers/admin-sites.controller.js";
 import { AdminSiteTemplatesController } from "./controllers/admin-site-templates.controller.js";
+import { AdminAppTemplatesController } from "./controllers/admin-app-templates.controller.js";
+import { AppTemplatesController } from "./controllers/app-templates.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -101,6 +111,10 @@ export interface AppModuleOptions {
   readonly dnsLookup?: DnsLookup;
   /** Test seam of the certificate validator (clock, trust anchors); production registers `{}`. */
   readonly tlsValidatorOptions?: TlsValidatorOptions;
+  /** Tests only: HCP-SPEC-005 feature switches; production registers every flag false. */
+  readonly appFeatures?: Partial<AppFeatureFlags>;
+  /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production registers `{}` (the code allowlist). */
+  readonly appTemplateValidation?: AppTemplateValidationOptions;
 }
 
 @Module({})
@@ -148,6 +162,8 @@ export class AppModule {
         AdminFirewallController,
         AdminHostController,
         AdminUpdatesController,
+        AdminAppTemplatesController,
+        AppTemplatesController,
       ],
       providers: [
         {
@@ -173,6 +189,14 @@ export class AppModule {
         {
           provide: TLS_VALIDATOR_OPTIONS,
           useValue: options.tlsValidatorOptions ?? {},
+        },
+        {
+          provide: APP_FEATURE_GATE_TOKEN,
+          useValue: resolveAppFeatureGate(options.appFeatures),
+        },
+        {
+          provide: APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
+          useValue: resolveAppTemplateValidationOptions(options.appTemplateValidation),
         },
         OidcService,
         AuthzContextService,
@@ -211,6 +235,7 @@ export class AppModule {
         AdminTerminalService,
         FirewallService,
         UpdatesService,
+        AppTemplatesService,
         {
           provide: APP_FILTER,
           useClass: ApiExceptionFilter,

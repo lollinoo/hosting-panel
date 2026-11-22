@@ -88,4 +88,23 @@ describe("controller routes and docs/api/openapi.yaml agree", () => {
       expect(routes.has(route), route).toBe(true);
     }
   });
+
+  it("documents the application template and stack routes", () => {
+    for (const route of [
+      "GET /v1/admin/app-templates",
+      "POST /v1/admin/app-templates/validate",
+      "POST /v1/admin/app-templates",
+      "GET /v1/admin/app-templates/{templateId}",
+      "PATCH /v1/admin/app-templates/{templateId}",
+      "POST /v1/admin/app-templates/{templateId}/versions",
+      "GET /v1/admin/app-templates/{templateId}/versions/{versionId}",
+      "POST /v1/admin/app-templates/{templateId}/archive",
+      "GET /v1/admin/app-templates/{templateId}/usage",
+      "GET /v1/organizations/{orgId}/app-templates",
+      "GET /v1/organizations/{orgId}/app-templates/{templateId}",
+    ]) {
+      expect(operations.has(route), route).toBe(true);
+      expect(routes.has(route), route).toBe(true);
+    }
+  });
 });

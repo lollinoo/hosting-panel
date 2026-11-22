@@ -132,6 +132,19 @@ describe("enqueueHostJob", () => {
     expect(operationId).toMatch(/^op_/);
   });
 
+  it("an active stack operation blocks the panel update like site work", async () => {
+    await enqueueOperationTransactional(dbClient.db, {
+      organizationId: DEMO_IDS.organizations.acme,
+      kind: "stack.deploy",
+      resourceType: "stack",
+      resourceId: "stk_sentinel",
+      requestedByUserId: actorId,
+      steps: [{ key: "run", label: "Run" }],
+    });
+    const err = await refusal(enqueueHostJob(dbClient.db, input("panel_update")));
+    expect([err.code, err.details?.[0]?.reason]).toEqual(["RESOURCE_LOCKED", "site_work_running"]);
+  });
+
   it("the same idempotency key gives back the same operation and no second request row", async () => {
     const key = randomUUID();
     const first = await enqueueHostJob(dbClient.db, input("os_refresh", key));
@@ -163,13 +176,14 @@ describe("enqueueHostJob", () => {
 });
 
 describe("SITE_WORK_KINDS", () => {
-  it("R206 A3: holds every heavy operation of every site type, and the same set as before", () => {
+  it("R206 A3: holds every heavy operation of every site type and every stack operation", () => {
     for (const kind of Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds)) {
       expect(SITE_WORK_KINDS).toContain(kind);
     }
     expect([...SITE_WORK_KINDS].sort()).toEqual([
       "panel.backups.create", "site.backups.create", "site.backups.download", "site.backups.prune",
       "site.backups.restore", "site.wordpress.import", "site.wordpress.update",
+      "stack.delete", "stack.deploy", "stack.restart", "stack.rollback", "stack.start", "stack.stop", "stack.upgrade",
     ]);
   });
 });

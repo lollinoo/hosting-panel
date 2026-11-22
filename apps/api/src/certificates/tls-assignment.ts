@@ -17,6 +17,7 @@ import {
   gte,
   hosts,
   inArray,
+  listAppStackHostnames,
   lockTlsPublishState,
   not,
   operations,
@@ -215,12 +216,16 @@ export async function checkAssignment(tx: DatabaseExecutor, input: AssignmentInp
 
   // Cross-tenant (D7): no name of an assigned version may match a panel host of another organization or the panel.
   const panelHosts = await tx.select({ hostname: hosts.hostname }).from(hosts);
+  // Application web addresses (ADR-0035): ACME-only, never assignable, but no manual certificate may cover them.
+  const stackHosts = await listAppStackHostnames(tx);
   const assignedVersions = [...new Set(changed.flatMap((c) => (c.versionId === null ? [] : [c.versionId])))];
   for (const versionId of assignedVersions) {
     const names = versionById.get(versionId)!.sanDns;
-    const foreign = [...allDomains.filter((d) => d.organizationId !== organizationId), ...panelHosts].some((h) =>
-      names.some((name) => traefikNameMatches(h.hostname, name)),
-    );
+    const foreign = [
+      ...allDomains.filter((d) => d.organizationId !== organizationId),
+      ...stackHosts.filter((h) => h.organizationId !== organizationId),
+      ...panelHosts,
+    ].some((h) => names.some((name) => traefikNameMatches(h.hostname, name)));
     if (foreign) throw new ControlPlaneError("DOMAIN_CONFLICT", FOREIGN_COVERAGE_MESSAGE);
   }
 
@@ -260,7 +265,11 @@ export async function checkAssignment(tx: DatabaseExecutor, input: AssignmentInp
   const plan = planManualCertificates({
     entries,
     acme,
-    guardHosts: [...acmeAfterActive, ...panelHosts.map((h) => lc(h.hostname))],
+    guardHosts: [
+      ...acmeAfterActive,
+      ...stackHosts.filter((h) => h.status === "active").map((h) => lc(h.hostname)),
+      ...panelHosts.map((h) => lc(h.hostname)),
+    ],
   });
 
   const evictAcmeHosts = [

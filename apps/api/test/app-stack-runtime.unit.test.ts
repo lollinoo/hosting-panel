@@ -1,0 +1,663 @@
+import { createHash, randomBytes } from "node:crypto";
+import {
+  APP_STACK_STEPS_BY_KIND,
+  ApprovedStackPlanSchema,
+  type AppStackOperationKind,
+  type AppStackPlanComponent,
+  type AppStackRouteWire,
+  type ApprovedStackPlan,
+} from "@hosting-panel/contracts";
+import {
+  addAppStackDomainsTransactional,
+  appStackComponents,
+  appStackDeployments,
+  appStackDomains,
+  appStacks,
+  appStackSecrets,
+  appStackVolumes,
+  createAppStackTransactional,
+  createAppTemplate,
+  createDatabaseClient,
+  enqueueAppStackOperationTransactional,
+  eq,
+  hostAllocations,
+  hosts,
+  newAppEntityId,
+  operations,
+  operationSteps,
+  organizations,
+  platformInstallations,
+  setAppStackSecretTransactional,
+  sql,
+  transitionOperation,
+  updateAppTemplate,
+  type AppStackWriteResult,
+  type DatabaseClient,
+  type NewAppStackRevision,
+} from "@hosting-panel/database";
+import { Phase1DisabledDockerExecutor, type DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import { computeAppStackComponentHash, computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { AppStackRuntime } from "../src/app-stacks/app-stack-runtime.js";
+import {
+  APP_STACK_FAILURE,
+  APP_STACK_HEALTH_BUDGET_MS,
+  APP_STACK_NO_ADDRESS_TEXT,
+  APP_STACK_STEP_DONE_TEXT,
+  APP_STACK_STEP_FAILED_TEXT,
+  APP_STACK_STEP_SKIPPED_TEXT,
+  APP_STACK_UNCERTAIN_TEXT,
+  appStackRoutesHash,
+} from "../src/app-stacks/app-stack-runtime-policy.js";
+import { ControlPlaneError } from "../src/common/control-plane.error.js";
+import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
+import { FakeStackExecutor } from "./support/fake-stack-executor.js";
+
+// RT3: AppStackRuntime called directly (no worker) on PGlite with the scripted fake executor and a fake clock whose
+// sleep advances time, so a 10-minute readiness budget elapses in microseconds.
+
+const ORG = "org_rt3";
+const ALLOC = "alloc_rt3";
+const NGINX = `nginxinc/nginx-unprivileged@sha256:${"a".repeat(64)}`;
+const MEMCACHED = `memcached@sha256:${"b".repeat(64)}`;
+const START = Date.UTC(2026, 10, 22, 12);
+const hex = (seed: string) => createHash("sha256").update(seed).digest("hex");
+type Json = Record<string, unknown>;
+
+function component(key: string, patch: Partial<AppStackPlanComponent> = {}): AppStackPlanComponent {
+  return {
+    key,
+    image: NGINX,
+    runAsUser: null,
+    argv: null,
+    environment: [],
+    secretFiles: [],
+    resources: { cpuMilli: 250, memoryBytes: "134217728" },
+    expose: [8080],
+    dependsOn: [],
+    volumes: [],
+    healthcheck: { kind: "tcp", port: 8080, intervalSeconds: 10, timeoutSeconds: 3 },
+    ...patch,
+  };
+}
+const CACHE = component("cache", {
+  image: MEMCACHED,
+  expose: [11211],
+  healthcheck: { kind: "tcp", port: 11211, intervalSeconds: 10, timeoutSeconds: 3 },
+});
+const WEB = component("web", { dependsOn: ["cache"], volumes: [{ volumeKey: "data", containerPath: "/app/data", readOnly: false }] });
+const INGRESS = [{ componentKey: "web", port: 8080 }];
+
+describe("AppStackRuntime (RT3)", () => {
+  let dbClient: DatabaseClient;
+  let versionId = "";
+  let n = 0;
+  let fake: ReturnType<typeof FakeStackExecutor.create>;
+  let clock: { now(): number; sleep(ms: number): Promise<void>; elapsed(): number };
+  const config: ControlPlaneRuntimeConfig = {
+    oidcIssuer: "https://issuer.local",
+    oidcAudience: "hosting-panel-api",
+    enableDevOidc: true,
+    runtimeBackend: "local-simulator",
+    secretsMasterKey: randomBytes(32),
+    jwtSigningKeyPem: null,
+    autoProcessOutbox: false,
+  };
+  const db = () => dbClient.db;
+  const runtime = (executor: DockerExecutorPort = fake, cfg: ControlPlaneRuntimeConfig = config) =>
+    new AppStackRuntime(dbClient, executor, cfg, clock);
+
+  function revision(stackId: string, components: AppStackPlanComponent[], ingress = INGRESS): NewAppStackRevision {
+    const revisionId = newAppEntityId("srev");
+    const volumes = [...new Set(components.flatMap((c) => c.volumes.map((v) => v.volumeKey)))].sort().map((key) => ({ key }));
+    const base = { schemaVersion: 1 as const, stackId, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: versionId, revisionId, components, volumes, ingress };
+    const plan: ApprovedStackPlan = { ...base, planHash: computeAppStackPlanHash(base) };
+    expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
+    return {
+      revisionId,
+      templateVersionId: versionId,
+      plan,
+      planHash: plan.planHash,
+      componentKeys: components.map((c) => c.key),
+      volumeKeys: volumes.map((v) => v.key),
+      cpuMilli: 250 * components.length,
+      memoryBytes: 134217728 * components.length,
+      parameters: [],
+    };
+  }
+
+  async function create(components: AppStackPlanComponent[], ingress = INGRESS) {
+    n += 1;
+    const stackId = newAppEntityId("stk");
+    const rev = revision(stackId, components, ingress);
+    const write = await createAppStackTransactional(db(), {
+      stackId,
+      organizationId: ORG,
+      hostAllocationId: ALLOC,
+      templateVersionId: versionId,
+      name: `Stack ${String(n)}`,
+      parameters: [],
+      createdBy: null,
+      idempotencyKey: `rt3-${String(n)}`,
+      requestHash: hex(`create ${String(n)}`),
+      deploy: rev,
+    });
+    return { stackId, rev, write };
+  }
+
+  function enqueue(stackId: string, kind: AppStackOperationKind, rev: NewAppStackRevision | null = null, destroyData = false) {
+    n += 1;
+    return enqueueAppStackOperationTransactional(db(), {
+      organizationId: ORG,
+      stackId,
+      kind,
+      requestedByUserId: null,
+      idempotencyKey: `rt3-${String(n)}`,
+      requestHash: hex(`enqueue ${String(n)}`),
+      revision: rev,
+      parameters: rev?.parameters ?? null,
+      destroyData,
+    });
+  }
+
+  /** What the worker does around apply: processing first, then the handler; returns what it threw. */
+  async function run(write: AppStackWriteResult, rt = runtime()): Promise<unknown> {
+    const op = write.operation!;
+    await transitionOperation(db(), op.id, "processing");
+    try {
+      await rt.apply(op, { operationId: op.id, stackId: write.stack.id, deploymentId: write.deployment!.id, revisionId: write.deployment!.revisionId });
+      return undefined;
+    } catch (err) {
+      return err;
+    }
+  }
+
+  const trace = () => fake.calls.map((c) => (c.componentKey ? `${c.method}:${c.componentKey}` : c.method));
+  const stackOf = async (id: string) => (await db().select().from(appStacks).where(eq(appStacks.id, id)))[0]!;
+  const opOf = async (id: string) => (await db().select().from(operations).where(eq(operations.id, id)))[0]!;
+  const deploymentOf = async (write: AppStackWriteResult) =>
+    (await db().select().from(appStackDeployments).where(eq(appStackDeployments.id, write.deployment!.id)))[0]!;
+  const stepsOf = async (write: AppStackWriteResult) =>
+    Object.fromEntries(
+      (await db().select().from(operationSteps).where(eq(operationSteps.operationId, write.operation!.id))).map((s) => [s.key, [s.status, s.message]]),
+    );
+  const healthOf = async (stackId: string) =>
+    Object.fromEntries(
+      (await db().select().from(appStackComponents).where(eq(appStackComponents.stackId, stackId))).map((c) => [c.componentKey, c.health]),
+    );
+  const volumesOf = async (stackId: string) =>
+    Object.fromEntries((await db().select().from(appStackVolumes).where(eq(appStackVolumes.stackId, stackId))).map((v) => [v.volumeKey, v.status]));
+  const addDomain = (stackId: string, componentKey = "web") =>
+    addAppStackDomainsTransactional(db(), {
+      organizationId: ORG,
+      stackId,
+      entries: [{ hostname: `app${String(n)}.example.test`, componentKey, internalPort: 8080 }],
+    });
+  const done = (kind: AppStackOperationKind) => Object.fromEntries(APP_STACK_STEPS_BY_KIND[kind].map((k) => [k, ["succeeded", APP_STACK_STEP_DONE_TEXT[k]]]));
+  const expectFailure = (err: unknown, problem: keyof typeof APP_STACK_FAILURE) => {
+    expect(err).toBeInstanceOf(ControlPlaneError);
+    expect((err as ControlPlaneError).code).toBe(APP_STACK_FAILURE[problem].code);
+    expect((err as ControlPlaneError).message).toBe(APP_STACK_FAILURE[problem].text);
+  };
+
+  /** A first deploy brought to running (with a web address on `web`), the fake's trace cleared afterwards. */
+  async function running(components = [CACHE, WEB], domain = true) {
+    const created = await create(components);
+    if (domain) await addDomain(created.stackId);
+    expect(await run(created.write)).toBeUndefined();
+    expect((await stackOf(created.stackId)).status).toBe("running");
+    fake.calls.length = 0;
+    return created;
+  }
+
+  beforeAll(async () => {
+    dbClient = createDatabaseClient({ mode: "pglite" });
+    await dbClient.migrate();
+    await db().insert(platformInstallations).values({ id: "pin_rt3", name: "Platform" });
+    await db().insert(hosts).values({
+      id: "hst_rt3",
+      platformInstallationId: "pin_rt3",
+      name: "rt3-host",
+      hostname: "panel.rt3.example",
+      ipv4Address: "10.0.0.63",
+      totalCpuMilli: 4000,
+      totalMemoryBytes: "4000000000",
+      totalStorageBytes: "100000000000",
+    });
+    await db().insert(organizations).values({ id: ORG, platformInstallationId: "pin_rt3", name: ORG, slug: "org-rt3" });
+    await db().insert(hostAllocations).values({ id: ALLOC, hostId: "hst_rt3", organizationId: ORG, status: "active" });
+    const template = await createAppTemplate(db(), {
+      slug: "rt3-demo",
+      name: "rt3-demo",
+      description: null,
+      category: "web",
+      createdBy: null,
+      firstVersion: { source: "source rt3", specVersion: 1, compiledSchema: {}, specHash: hex("rt3") },
+    });
+    await updateAppTemplate(db(), { templateId: template.template.id, enabled: true });
+    versionId = template.version.id;
+  }, 120_000);
+
+  afterAll(async () => {
+    await dbClient.close();
+  });
+
+  beforeEach(() => {
+    fake = FakeStackExecutor.create();
+    let t = START;
+    clock = { now: () => t, sleep: async (ms) => {
+      t += ms;
+    }, elapsed: () => t - START };
+  });
+
+  describe("stack.deploy", () => {
+    it("(1) A14: two components in dependency order, readiness polled, routes published once after health", async () => {
+      const { stackId, rev, write } = await create([CACHE, WEB]);
+      await addDomain(stackId);
+      fake.holdUnhealthy("cache", 2);
+
+      expect(await run(write)).toBeUndefined();
+
+      expect(trace()).toEqual([
+        "pullAppStackImage",
+        "pullAppStackImage",
+        "prepareAppStack",
+        "createAppStackComponents",
+        "startAppStackComponent:cache",
+        "getAppStackStatus",
+        "getAppStackStatus",
+        "getAppStackStatus",
+        "startAppStackComponent:web",
+        "getAppStackStatus",
+        "getAppStackStatus",
+        "publishAppStackRoutes",
+      ]);
+      expect(fake.calls.slice(0, 2).map((c) => (c.request as { image: string }).image)).toEqual([MEMCACHED, NGINX]);
+      expect(clock.elapsed()).toBe(10_000);
+      const routes: AppStackRouteWire[] = [
+        { componentKey: "web", internalPort: 8080, hosts: [{ hostname: `app${String(n)}.example.test`, tls: false, httpsRedirect: false, redirectTo: null }] },
+      ];
+      expect(fake.stack(stackId).routes).toEqual(routes);
+
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("running");
+      expect(stack.appliedRevisionId).toBe(rev.revisionId);
+      expect(stack.appliedRoutesHash).toBe(appStackRoutesHash(routes));
+      expect(await deploymentOf(write)).toMatchObject({ status: "succeeded", problem: null });
+      expect((await deploymentOf(write)).endedAt).not.toBeNull();
+      expect((await opOf(write.operation!.id)).status).toBe("succeeded");
+      expect(await stepsOf(write)).toEqual(done("stack.deploy"));
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+      expect(await volumesOf(stackId)).toEqual({ data: "present" });
+      const [domain] = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stackId));
+      expect(domain!.status).toBe("active");
+    });
+
+    it("(2) no web address: the publish step says so and no route call is made", async () => {
+      const { stackId, write } = await create([CACHE, WEB]);
+      expect(await run(write)).toBeUndefined();
+      expect(trace()).not.toContain("publishAppStackRoutes");
+      expect(trace()).not.toContain("unpublishAppStackRoutes");
+      expect((await stepsOf(write))["publish"]).toEqual(["succeeded", APP_STACK_NO_ADDRESS_TEXT]);
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("running");
+      expect(stack.appliedRoutesHash).toBeNull();
+    });
+
+    it("(3) A15: a dependency that never becomes healthy keeps its dependents stopped; the budget ends the deploy", async () => {
+      const { stackId, rev, write } = await create([CACHE, WEB]);
+      await addDomain(stackId);
+      fake.holdUnhealthy("cache");
+
+      expectFailure(await run(write), "STACK_HEALTH_TIMEOUT");
+
+      expect(trace()).not.toContain("startAppStackComponent:web");
+      expect(trace()).not.toContain("publishAppStackRoutes");
+      expect(trace()).not.toContain("removeAppStackComponents");
+      expect(clock.elapsed()).toBeGreaterThanOrEqual(APP_STACK_HEALTH_BUDGET_MS);
+      expect(clock.elapsed()).toBeLessThan(APP_STACK_HEALTH_BUDGET_MS + 10_000);
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("failed");
+      expect(stack.appliedRevisionId).toBe(rev.revisionId);
+      expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: "STACK_HEALTH_TIMEOUT" });
+      expect(await opOf(write.operation!.id)).toMatchObject({
+        status: "failed",
+        errorCode: "DOCKER_ENGINE_UNAVAILABLE",
+        errorMessage: APP_STACK_FAILURE.STACK_HEALTH_TIMEOUT.text,
+      });
+      const steps = await stepsOf(write);
+      expect(steps["start"]![0]).toBe("succeeded");
+      expect(steps["health"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      expect(steps["publish"]).toEqual(["skipped", APP_STACK_STEP_SKIPPED_TEXT]);
+      expect(steps["settle"]).toEqual(["skipped", APP_STACK_STEP_SKIPPED_TEXT]);
+      expect(await healthOf(stackId)).toEqual({ cache: "unhealthy", web: "stopped" });
+      // First deploy: everything is kept so the logs stay readable.
+      expect([...fake.stack(stackId).components.keys()]).toEqual(["cache", "web"]);
+      expect(fake.stack(stackId).volumes.has("data")).toBe(true);
+    });
+
+    it("(4) an unhealthy accessory: degraded, the operation succeeds, the healthy ingress target is published", async () => {
+      const { stackId, write } = await create([CACHE, component("web")]);
+      await addDomain(stackId);
+      fake.setHealth("cache", "unhealthy");
+
+      expect(await run(write)).toBeUndefined();
+
+      expect(trace().filter((c) => c === "publishAppStackRoutes")).toHaveLength(1);
+      expect(fake.stack(stackId).routes.map((r) => r.componentKey)).toEqual(["web"]);
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("degraded");
+      expect(stack.appliedRoutesHash).not.toBeNull();
+      expect(await deploymentOf(write)).toMatchObject({ status: "succeeded", problem: "STACK_HEALTH_TIMEOUT" });
+      expect((await opOf(write.operation!.id)).status).toBe("succeeded");
+      expect(await healthOf(stackId)).toEqual({ cache: "unhealthy", web: "healthy" });
+    });
+
+    it("(5) an image the executor refuses: nothing after the pull, HOST_POLICY_DENIED", async () => {
+      const { stackId, write } = await create([CACHE, WEB]);
+      fake.failNext("pullAppStackImage", "definite", "STACK_IMAGE_NOT_ALLOWED");
+
+      expectFailure(await run(write), "STACK_IMAGE_NOT_ALLOWED");
+
+      expect(trace()).toEqual(["pullAppStackImage"]);
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect((await stackOf(stackId)).appliedRevisionId).toBeNull();
+      expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: "STACK_IMAGE_NOT_ALLOWED" });
+      expect((await opOf(write.operation!.id)).errorCode).toBe("HOST_POLICY_DENIED");
+      const steps = await stepsOf(write);
+      expect(steps["reserve"]![0]).toBe("succeeded");
+      expect(steps["pull"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      expect(steps["prepare"]![0]).toBe("skipped");
+    });
+
+    it("(6) a missing secret fails at validate with zero executor calls", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([web]);
+
+      expectFailure(await run(write), "STACK_SECRET_MISSING");
+
+      expect(fake.calls).toEqual([]);
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+      expect((await stepsOf(write))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+    });
+
+    it("(7) runtime disabled or a Phase 1 executor: NOT_SUPPORTED, zero executor calls", async () => {
+      const disabled = await create([CACHE, WEB]);
+      expectFailure(await run(disabled.write, runtime(fake, { ...config, runtimeBackend: "disabled" })), "STACK_UNSUPPORTED_FEATURE");
+      expect(fake.calls).toEqual([]);
+      expect((await stackOf(disabled.stackId)).status).toBe("failed");
+
+      const phase1 = await create([CACHE, WEB]);
+      expectFailure(await run(phase1.write, runtime(new Phase1DisabledDockerExecutor())), "STACK_UNSUPPORTED_FEATURE");
+      expect(await deploymentOf(phase1.write)).toMatchObject({ status: "failed", problem: "STACK_UNSUPPORTED_FEATURE" });
+      expect((await opOf(phase1.write.operation!.id)).errorCode).toBe("NOT_SUPPORTED");
+    });
+
+    it("(8) an ambiguous create parks the deployment and the stack unknown and throws OPERATION_AMBIGUOUS", async () => {
+      const { stackId, write } = await create([CACHE, WEB]);
+      fake.failNext("createAppStackComponents", "ambiguous");
+
+      const err = await run(write);
+
+      expect(err).toBeInstanceOf(ControlPlaneError);
+      expect((err as ControlPlaneError).code).toBe("OPERATION_AMBIGUOUS");
+      expect((err as ControlPlaneError).message).toBe(APP_STACK_UNCERTAIN_TEXT);
+      expect(trace().at(-1)).toBe("createAppStackComponents");
+      expect((await stackOf(stackId)).status).toBe("unknown");
+      expect(await deploymentOf(write)).toMatchObject({ status: "unknown", problem: "OPERATION_AMBIGUOUS" });
+      // Not settled here: the worker parks the operation unknown with its lock.
+      expect((await opOf(write.operation!.id)).status).toBe("processing");
+    });
+
+    it("(9) B5: a network failure at prepare is a pre-flight failure", async () => {
+      const { stackId, write } = await create([CACHE, WEB]);
+      fake.failNext("prepareAppStack", "definite");
+
+      expectFailure(await run(write), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toEqual(["pullAppStackImage", "pullAppStackImage", "prepareAppStack"]);
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect((await stackOf(stackId)).appliedRevisionId).toBeNull();
+      expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
+      expect((await stepsOf(write))["prepare"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      expect((await stepsOf(write))["create"]![0]).toBe("skipped");
+    });
+
+    it("(12) a definite route publication failure: degraded, revision applied, routes hash unchanged", async () => {
+      const { stackId, rev, write } = await create([CACHE, WEB]);
+      await addDomain(stackId);
+      fake.failNext("publishAppStackRoutes", "definite");
+
+      expectFailure(await run(write), "DOCKER_ENGINE_UNAVAILABLE");
+
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("degraded");
+      expect(stack.appliedRevisionId).toBe(rev.revisionId);
+      expect(stack.appliedRoutesHash).toBeNull();
+      expect((await stepsOf(write))["publish"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+    });
+  });
+
+  describe("stack.upgrade and stack.rollback", () => {
+    const WORKER = component("worker", { dependsOn: ["web"] });
+    const WEB_V2 = { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] };
+
+    it("(10) only the changed component is replaced, its dependents restarted, volumes untouched", async () => {
+      const { stackId } = await running([CACHE, WEB, WORKER]);
+      const volumesBefore = [...fake.stack(stackId).volumes];
+      const v2 = revision(stackId, [CACHE, WEB_V2, WORKER]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+
+      expect(await run(upgrade)).toBeUndefined();
+
+      const create = fake.calls.find((c) => c.method === "createAppStackComponents");
+      expect(create).toBeDefined();
+      expect(trace().filter((c) => /^(start|restart)AppStackComponent/.test(c))).toEqual([
+        "startAppStackComponent:cache",
+        "startAppStackComponent:web",
+        "restartAppStackComponent:worker",
+      ]);
+      expect(trace()).not.toContain("removeAppStack");
+      expect(trace()).not.toContain("removeAppStackComponents");
+      expect([...fake.stack(stackId).volumes]).toEqual(volumesBefore);
+      expect(fake.stack(stackId).components.get("web")!.componentHash).toBe(computeAppStackComponentHash(v2.plan as ApprovedStackPlan, "web"));
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("running");
+      expect(stack.appliedRevisionId).toBe(v2.revisionId);
+      expect(stack.desiredRevisionId).toBe(v2.revisionId);
+      expect(await volumesOf(stackId)).toEqual({ data: "present" });
+    });
+
+    it("(11) a failure after create removes only the replaced component; the previous revision stays applied", async () => {
+      const webFirst = component("web");
+      const { stackId, rev } = await running([webFirst, CACHE]);
+      const v2 = revision(stackId, [{ ...webFirst, environment: [{ name: "CACHE_HOST", value: "cache" }] }, CACHE]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("startAppStackComponent", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      const removal = fake.calls.filter((c) => c.method === "removeAppStackComponents");
+      expect(removal.map((c) => (c.request as { componentKeys: string[] }).componentKeys)).toEqual([["web"]]);
+      expect([...fake.stack(stackId).components.keys()]).toEqual(["cache"]);
+      expect(fake.stack(stackId).volumes.size).toBe(0);
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("failed");
+      expect(stack.appliedRevisionId).toBe(rev.revisionId);
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "missing" });
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", problem: "DOCKER_ENGINE_UNAVAILABLE" });
+    });
+
+    it("a pre-flight failure of an upgrade touches no component and the stack keeps its observed status", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("pullAppStackImage", "definite", "STACK_IMAGE_PULL_FAILED");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(trace()).toEqual(["pullAppStackImage", "getAppStackStatus"]);
+      const stack = await stackOf(stackId);
+      expect(stack.status).toBe("running");
+      expect(stack.appliedRevisionId).toBe(rev.revisionId);
+      expect(stack.desiredRevisionId).toBe(v2.revisionId);
+    });
+
+    it("a rollback runs the deploy path and re-applies the older plan", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      expect(await run(await enqueue(stackId, "stack.upgrade", v2))).toBeUndefined();
+      fake.calls.length = 0;
+      const back = revision(stackId, rev.plan.components as AppStackPlanComponent[]);
+      const rollback = await enqueue(stackId, "stack.rollback", back);
+
+      expect(await run(rollback)).toBeUndefined();
+
+      expect(trace().filter((c) => /^(start|restart)AppStackComponent/.test(c))).toEqual(["startAppStackComponent:cache", "startAppStackComponent:web"]);
+      expect(fake.stack(stackId).components.get("web")!.componentHash).toBe(computeAppStackComponentHash(rev.plan as ApprovedStackPlan, "web"));
+      expect(await stepsOf(rollback)).toEqual(done("stack.rollback"));
+      expect((await stackOf(stackId)).appliedRevisionId).toBe(back.revisionId);
+    });
+  });
+
+  describe("start, restart, stop, delete (13)", () => {
+    it("stop withdraws the routes then stops; start brings it back and republishes", async () => {
+      const { stackId } = await running();
+      const routesHash = (await stackOf(stackId)).appliedRoutesHash;
+      const stop = await enqueue(stackId, "stack.stop");
+
+      expect(await run(stop)).toBeUndefined();
+
+      expect(trace()).toEqual(["unpublishAppStackRoutes", "stopAppStack"]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect((await stackOf(stackId)).appliedRoutesHash).toBeNull();
+      expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+      expect(await stepsOf(stop)).toEqual(done("stack.stop"));
+      expect(fake.stack(stackId).routes).toEqual([]);
+
+      fake.calls.length = 0;
+      const start = await enqueue(stackId, "stack.start");
+      expect(await run(start)).toBeUndefined();
+      expect(trace()).toEqual([
+        "startAppStackComponent:cache",
+        "getAppStackStatus",
+        "startAppStackComponent:web",
+        "getAppStackStatus",
+        "getAppStackStatus",
+        "publishAppStackRoutes",
+      ]);
+      expect((await stackOf(stackId)).status).toBe("running");
+      expect((await stackOf(stackId)).appliedRoutesHash).toBe(routesHash);
+      expect(await stepsOf(start)).toEqual(done("stack.start"));
+    });
+
+    it("restart restarts every component and keeps the published routes", async () => {
+      const { stackId, rev } = await running();
+      const restart = await enqueue(stackId, "stack.restart");
+
+      expect(await run(restart)).toBeUndefined();
+
+      expect(trace().filter((c) => /^(start|restart)AppStackComponent/.test(c))).toEqual(["restartAppStackComponent:cache", "restartAppStackComponent:web"]);
+      expect(trace()).not.toContain("publishAppStackRoutes");
+      expect((await stackOf(stackId)).status).toBe("running");
+      expect((await stackOf(stackId)).appliedRevisionId).toBe(rev.revisionId);
+    });
+
+    it("a start that fails for sure leaves the stack failed", async () => {
+      const { stackId } = await running();
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      fake.failNext("startAppStackComponent", "definite");
+
+      expectFailure(await run(await enqueue(stackId, "stack.start")), "DOCKER_ENGINE_UNAVAILABLE");
+      expect((await stackOf(stackId)).status).toBe("failed");
+    });
+
+    it("a stop that fails after the routes are withdrawn settles degraded with no routes hash", async () => {
+      const { stackId } = await running();
+      fake.failNext("stopAppStack", "definite");
+      const stop = await enqueue(stackId, "stack.stop");
+
+      expectFailure(await run(stop), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect((await stackOf(stackId)).status).toBe("degraded");
+      expect((await stackOf(stackId)).appliedRoutesHash).toBeNull();
+      expect((await stepsOf(stop))["stop"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+    });
+
+    it("delete without data keeps the volumes; with destroyData it asks the executor to remove them", async () => {
+      const kept = await running();
+      const del = await enqueue(kept.stackId, "stack.delete");
+      expect(await run(del)).toBeUndefined();
+      expect(trace()).toEqual(["unpublishAppStackRoutes", "stopAppStack", "removeAppStack"]);
+      expect((fake.calls.at(-1)!.request as { removeVolumes: boolean }).removeVolumes).toBe(false);
+      const stack = await stackOf(kept.stackId);
+      expect(stack.status).toBe("deleted");
+      expect(stack.deletedAt).not.toBeNull();
+      expect(await volumesOf(kept.stackId)).toEqual({ data: "retained" });
+      expect(await stepsOf(del)).toEqual(done("stack.delete"));
+
+      fake.calls.length = 0;
+      const gone = await running();
+      expect(await run(await enqueue(gone.stackId, "stack.delete", null, true))).toBeUndefined();
+      expect((fake.calls.at(-1)!.request as { removeVolumes: boolean }).removeVolumes).toBe(true);
+      expect((await stackOf(gone.stackId)).status).toBe("deleted");
+      expect(await volumesOf(gone.stackId)).toEqual({ data: "removed" });
+      expect(fake.stack(gone.stackId).volumes.size).toBe(0);
+    });
+
+    it("a volume still in use on a data-destroying delete: delete_failed, STACK_VOLUME_IN_USE", async () => {
+      const { stackId } = await running();
+      fake.volumesInUse.add("data");
+      const del = await enqueue(stackId, "stack.delete", null, true);
+
+      expectFailure(await run(del), "STACK_VOLUME_IN_USE");
+
+      expect((await stackOf(stackId)).status).toBe("delete_failed");
+      expect((await stackOf(stackId)).deletedAt).toBeNull();
+      expect(await deploymentOf(del)).toMatchObject({ status: "failed", problem: "STACK_VOLUME_IN_USE" });
+      expect((await opOf(del.operation!.id)).errorCode).toBe("RESOURCE_LOCKED");
+    });
+
+    it("an ambiguous delete keeps the stack deleting", async () => {
+      const { stackId } = await running();
+      fake.failNext("removeAppStack", "ambiguous");
+      const del = await enqueue(stackId, "stack.delete");
+
+      expect(((await run(del)) as ControlPlaneError).code).toBe("OPERATION_AMBIGUOUS");
+
+      expect((await stackOf(stackId)).status).toBe("deleting");
+      expect(await deploymentOf(del)).toMatchObject({ status: "unknown", problem: "OPERATION_AMBIGUOUS" });
+    });
+  });
+
+  it("(14) the secret reaches only the start call, at the version the plan pins", async () => {
+    const sentinel = `SENTINEL-${randomBytes(8).toString("hex")}`;
+    const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+    const { stackId, write } = await create([CACHE, web]);
+    const secret = (value: string) =>
+      setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value, masterKey: config.secretsMasterKey });
+    await secret(`${sentinel}-v1`);
+    await secret(`${sentinel}-v2`);
+
+    const err = await run(write);
+
+    expect(err).toBeUndefined();
+    const carriers = fake.calls.filter((c) => JSON.stringify(c.request).includes(sentinel));
+    expect(carriers.map((c) => `${c.method}:${c.componentKey ?? ""}`)).toEqual(["startAppStackComponent:web"]);
+    expect((carriers[0]!.request as Json)["secretFileContents"]).toEqual([{ parameterKey: "app_secret", version: 1, content: `${sentinel}-v1` }]);
+    const cacheStart = fake.calls.find((c) => c.componentKey === "cache")!;
+    expect((cacheStart.request as Json)["secretFileContents"]).toEqual([]);
+
+    const rowsOf = (result: unknown): Json[] => (Array.isArray(result) ? result : ((result as { rows?: Json[] }).rows ?? [])) as Json[];
+    const tables = rowsOf(
+      await db().execute(sql`select table_name from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'`),
+    ).map((r) => String(r["table_name"]));
+    for (const table of tables) {
+      const dump = JSON.stringify(rowsOf(await db().execute(sql.raw(`select row_to_json(t)::text as j from "${table}" t`))));
+      expect(dump.includes(sentinel), table).toBe(false);
+    }
+    expect((await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, stackId))).length).toBe(2);
+  });
+});

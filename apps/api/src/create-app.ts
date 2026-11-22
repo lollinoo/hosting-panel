@@ -11,6 +11,7 @@ import {
 import {
   LEGACY_SITE_TYPE,
   findForbiddenPublicDtoKeys,
+  type AppFeatureFlags,
   type IpcSigningKey,
   type RuntimeBackend,
 } from "@hosting-panel/contracts";
@@ -37,6 +38,7 @@ import {
   InMemoryHostSimulatorAdapter,
   SignedHostAgentIpcClient,
 } from "@hosting-panel/host-agent";
+import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import type { DnsLookup } from "./sites/dns-check.js";
 import type { TlsValidatorOptions } from "./certificates/tls-certificate-validator.js";
 import { DomainReconcilerService } from "./sites/domain-reconciler.service.js";
@@ -228,6 +230,10 @@ export interface CreateControlPlaneAppOptions {
   readonly dnsLookup?: DnsLookup;
   /** Tests only: the certificate validator's clock and trust anchors. No environment variable widens them. */
   readonly tlsValidatorOptions?: TlsValidatorOptions;
+  /** Tests only: HCP-SPEC-005 feature switches; production passes nothing, so every flag is false. No environment variable sets them. */
+  readonly appFeatures?: Partial<AppFeatureFlags>;
+  /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production passes nothing. No environment variable sets it. */
+  readonly appTemplateValidation?: AppTemplateValidationOptions;
   readonly secretsMasterKey?: string | Buffer | Uint8Array;
   readonly breakglassSigningKey?: string | Buffer | Uint8Array;
   readonly jwtSigningKeyPem?: string;
@@ -528,6 +534,8 @@ export async function createControlPlaneApp(
       hostAgent,
       ...(options?.dnsLookup ? { dnsLookup: options.dnsLookup } : {}),
       ...(options?.tlsValidatorOptions ? { tlsValidatorOptions: options.tlsValidatorOptions } : {}),
+      ...(options?.appFeatures ? { appFeatures: options.appFeatures } : {}),
+      ...(options?.appTemplateValidation ? { appTemplateValidation: options.appTemplateValidation } : {}),
     }),
     fastifyAdapter,
     { logger: false, bodyParser: false },

@@ -4,10 +4,12 @@ import {
   CreateAdministratorInputSchema,
   CreateCustomerAccountInputSchema,
   PLATFORM_OPS_ORG_ID,
+  UpdateOrganizationAppStackLimitInputSchema,
   UpdateOrganizationSiteLimitInputSchema,
   type AdminUserDto,
   type CreateAdministratorResultDto,
   type ErrorCode,
+  type OrganizationAppStackLimitDto,
   type OrganizationSiteLimitDto,
 } from "@hosting-panel/contracts";
 import {
@@ -18,6 +20,7 @@ import {
   membershipRoles,
   memberships,
   organizations,
+  updateOrganizationAppStackLimitTransactional,
   updateOrganizationSiteLimitTransactional,
   users,
   type DatabaseClient,
@@ -172,6 +175,40 @@ export class AdminUsersController {
       return result;
     });
     return { data: { organizationId: orgId, maxSites: changed.maxSites, usedSites: changed.usedSites } };
+  }
+
+  @Patch("organizations/:orgId/app-stack-limit")
+  public async updateAppStackLimit(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Body() raw: unknown,
+  ): Promise<{ data: OrganizationAppStackLimitDto }> {
+    const auth = await requireServerAdmin(this.authz, req, orgId, "organization");
+    const { maxAppStacks } = UpdateOrganizationAppStackLimitInputSchema.parse(raw ?? {});
+    if (orgId === PLATFORM_OPS_ORG_ID) throw new ControlPlaneError("NOT_FOUND", "Customer not found.");
+    const changed = await this.dbClient.db.transaction(async (tx) => {
+      const result = await updateOrganizationAppStackLimitTransactional(tx as unknown as HostingPanelDatabase, {
+        organizationId: orgId,
+        maxAppStacks,
+      });
+      if (!result) throw new ControlPlaneError("NOT_FOUND", "Customer not found.");
+      await this.authz.recordAudit(
+        auth,
+        req,
+        {
+          organizationId: orgId,
+          action: "admin.customer.app_stack_limit",
+          targetType: "organization",
+          targetId: orgId,
+          details: { from: result.previousMaxAppStacks, to: result.maxAppStacks },
+        },
+        tx,
+      );
+      return result;
+    });
+    return {
+      data: { organizationId: orgId, maxAppStacks: changed.maxAppStacks, usedAppStacks: changed.usedAppStacks },
+    };
   }
 
   @Post("administrators")

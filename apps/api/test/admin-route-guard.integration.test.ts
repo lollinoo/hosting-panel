@@ -263,6 +263,19 @@ describe("every administrator route refuses a customer before it does anything",
     ]) {
       expect(guarded()).toContainEqual({ method, path });
     }
+    for (const [method, path] of [
+      ["GET", "/v1/admin/app-templates"],
+      ["POST", "/v1/admin/app-templates/validate"],
+      ["POST", "/v1/admin/app-templates"],
+      ["GET", "/v1/admin/app-templates/:templateId"],
+      ["PATCH", "/v1/admin/app-templates/:templateId"],
+      ["POST", "/v1/admin/app-templates/:templateId/versions"],
+      ["GET", "/v1/admin/app-templates/:templateId/versions/:versionId"],
+      ["POST", "/v1/admin/app-templates/:templateId/archive"],
+      ["GET", "/v1/admin/app-templates/:templateId/usage"],
+    ]) {
+      expect(guarded()).toContainEqual({ method, path });
+    }
   });
 
   it("a member and an owner get 403 PERMISSION_DENIED and exactly one denied audit row naming them, and nothing changes", async () => {

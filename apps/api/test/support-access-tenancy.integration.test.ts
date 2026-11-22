@@ -205,6 +205,9 @@ describe("support access tenancy over every organization route", () => {
       name: "db_a",
       database: "db_a",
       slot: "1",
+      templateId: `atpl_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      stackId: `stk_${randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      componentKey: "app",
     };
   });
 

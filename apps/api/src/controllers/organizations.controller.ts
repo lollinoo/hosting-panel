@@ -7,6 +7,7 @@ import {
   HttpCode,
   HttpStatus,
   Inject,
+  Optional,
   Param,
   Post,
   Query,
@@ -17,6 +18,7 @@ import {
   filterAuthorizedResources,
 } from "@hosting-panel/authz";
 import {
+  APP_FEATURES_OFF,
   findSiteType,
   siteTypeKeyOf,
   CreateInvitationInputSchema,
@@ -98,6 +100,7 @@ import {
 } from "@hosting-panel/hosting-domain";
 import { validateDeclarativeServiceInput } from "@hosting-panel/policy-engine";
 import type { FastifyRequest } from "fastify";
+import { APP_FEATURE_GATE_TOKEN, type AppFeatureGate } from "../app-stacks/app-feature-gate.js";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import {
   ControlPlaneError,
@@ -303,6 +306,7 @@ export class OrganizationsController {
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(AuthzContextService) private readonly authzService: AuthzContextService,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
+    @Optional() @Inject(APP_FEATURE_GATE_TOKEN) private readonly appFeatures: AppFeatureGate = APP_FEATURES_OFF,
   ) {}
 
   /** Managed sites change only through managed-sites routes (image, PHP version, site lock). */
@@ -341,6 +345,7 @@ export class OrganizationsController {
       manualTlsCertificatesAvailable: isManualTlsAvailable(this.config.runtimeBackend),
       localBackupTargetsAvailable: isLocalBackupTargetsAvailable(this.config.runtimeBackend),
       encryptedBackupExportAvailable: isEncryptedBackupExportAvailable(this.config.runtimeBackend),
+      ...this.appFeatures,
     };
   }
 

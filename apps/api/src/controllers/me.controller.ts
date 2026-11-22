@@ -1,5 +1,6 @@
-import { Controller, Get, Inject, Query, Req } from "@nestjs/common";
+import { Controller, Get, Inject, Optional, Query, Req } from "@nestjs/common";
 import {
+  APP_FEATURES_OFF,
   createPlatformCapabilities,
   type MeDto,
   type OrganizationSummaryDto,
@@ -10,6 +11,7 @@ import { eq, users, type DatabaseClient } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import type { FastifyRequest } from "fastify";
+import { APP_FEATURE_GATE_TOKEN, type AppFeatureGate } from "../app-stacks/app-feature-gate.js";
 import { AuthzContextService } from "../auth/authz-context.service.js";
 import { currentSupportAccess } from "../auth/support-access.service.js";
 import {
@@ -33,6 +35,7 @@ export class MeController {
     @Inject(DOCKER_EXECUTOR_TOKEN) private readonly dockerExecutor: DockerExecutorPort,
     @Inject(HOST_AGENT_TOKEN) private readonly hostAgent: HostAgentPort,
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
+    @Optional() @Inject(APP_FEATURE_GATE_TOKEN) private readonly appFeatures: AppFeatureGate = APP_FEATURES_OFF,
   ) {}
 
   @Get()
@@ -69,6 +72,7 @@ export class MeController {
           runtimeBackend: this.config.runtimeBackend,
           dockerExecutorRuntimeAvailable: this.dockerExecutor.isRuntimeAvailable,
           hostAgentRuntimeAvailable: this.hostAgent.isRuntimeAvailable,
+          appFeatures: this.appFeatures,
         }),
         ...(supportAccess ? { supportAccess } : {}),
       },
