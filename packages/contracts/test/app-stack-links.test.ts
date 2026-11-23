@@ -158,6 +158,7 @@ describe("private links between a database and an application (ADR-0039)", () =>
 
     it("accepts a link and a list", () => {
       expect(AppStackLinkDtoSchema.safeParse(link).success).toBe(true);
+      expect(AppStackLinkDtoSchema.safeParse({ ...link, connection: null }).success).toBe(true);
       expect(AppStackLinksDtoSchema.safeParse(list).success).toBe(true);
       expect(AppStackLinksDtoSchema.safeParse({ ...list, role: "application", connection: null, limit: 4 }).success).toBe(true);
     });

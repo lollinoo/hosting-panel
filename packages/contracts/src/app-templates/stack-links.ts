@@ -95,7 +95,8 @@ export const AppStackLinkDtoSchema = z.object({
   databaseKind: z.string(),
   applicationStackId: AppEntityIdSchema,
   applicationName: z.string(),
-  connection: AppStackLinkConnectionDtoSchema,
+  /** null: the database is no longer something to link to (its version has more than one component or port). */
+  connection: AppStackLinkConnectionDtoSchema.nullable(),
 });
 export type AppStackLinkDto = z.infer<typeof AppStackLinkDtoSchema>;
 
