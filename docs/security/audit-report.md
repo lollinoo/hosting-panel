@@ -394,6 +394,11 @@ administrator page that lists them and did not look further).
 - Done after the merge: the root version is `0.6.0` (DL2), in a commit of its own, and the README's
   install and update examples name it. Every run in this report was made on `0.5.0`, before that
   commit. The tag `v0.6.0` starts `.github/workflows/release.yml`, which had never run before.
+  Later note: `release.yml` was removed when the devflow workflow was installed (#22), and pushing
+  a tag no longer starts a release. `.github/workflows/devflow-release.yml` now runs after every
+  merge on `main`: it bumps the version, creates the draft release `v<version>`, runs the tests on
+  that commit, attaches the archive and only then publishes the release. A merge that changes
+  only documents, tests or the workflow tooling makes no release.
 
 ## Runs of the lead
 
