@@ -188,7 +188,19 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## 7. Turn the feature off again
 
-1. In this release the flags are already `false`: nothing is offered, and nothing needs turning off.
+1. **There is no runtime switch.** On a server (runtime backend `linux-systemd`) this release turns
+   `applicationTemplatesAvailable` and `applicationStacksAvailable` on in code (`appFeaturesFor`,
+   `packages/contracts/src/resources.ts`); no environment variable, option or setting turns them off. What an operator
+   can do instead:
+   - **Stop new installations.** In **Modelli**, switch off **Offerto ai clienti** on each application template and
+     archive the ones that are not built-in (procedure 6, step 2). The catalog then offers nothing to install;
+     installed stacks keep running.
+   - **Go back to an earlier release**, where both flags are `false` on every backend:
+     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases before this one, from `0.9.0`,
+     list `app-stacks` but not `app-format-v2` in `RELEASE.json`, so the gate exits with **code 8** while a stack that
+     is not deleted uses the extended format (procedure 4, step 6); stacks of the first format do not block. An older
+     release does not list `app-stacks` and refuses while any stack that is not deleted exists (procedure 4, step 1).
+   - **Change the code:** a release whose `appFeaturesFor` gives `false` for `linux-systemd`.
 2. If a release with the flags on is followed by one with them off (or by a downgrade), do this first: disable or
    archive the templates so nobody installs one, and ask the customers to stop or delete their stacks. Once the flags
    are off, nobody can do it from the panel (every stack route answers `NOT_SUPPORTED`).
