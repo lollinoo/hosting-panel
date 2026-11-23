@@ -624,6 +624,33 @@ describe("notifications (ADR-0040)", () => {
       expect(await dbClient.db.select().from(notificationChannels)).toEqual([]);
     });
 
+    it("refuses a collaborator of the account on the four routes: the two keys are the owner's", async () => {
+      await start();
+      const mario = await createCustomer("Hotel Mario", "mario@hotel.example.test");
+      const userId = `usr_${randomUUID()}`;
+      const membershipId = `mem_${randomUUID()}`;
+      await dbClient.db.insert(users).values({ id: userId, email: "luca@hotel.example.test", name: "Luca", passwordHash: await hashPassword(PW) });
+      await dbClient.db.insert(memberships).values({ id: membershipId, organizationId: mario.orgId, userId });
+      await dbClient.db.insert(membershipRoles).values({ id: `mrl_${randomUUID()}`, membershipId, roleId: "role_customer_collaborator" });
+      const luca = await login("luca@hotel.example.test", PW);
+      expect(luca).toEqual(expect.any(String));
+      const routes: Array<[string, string, unknown]> = [
+        ["GET", "", undefined],
+        ["PUT", "/channels/webhook", { enabled: true, groups: CUSTOMER_GROUPS, url: CUSTOMER_HOOK }],
+        ["DELETE", "/channels/webhook", undefined],
+        ["POST", "/channels/webhook/test", undefined],
+      ];
+      for (const [method, tail, body] of routes) {
+        const res = await call(method, `${mario.base}${tail}`, luca, body);
+        expect([method, res.status, res.body.error?.code]).toEqual([method, 403, "PERMISSION_DENIED"]);
+      }
+      expect(await dbClient.db.select().from(notificationChannels)).toEqual([]);
+      expect(await deliveries()).toEqual([]);
+      expect(outbound.calls).toEqual([]);
+      // The owner of the same account is let in.
+      expect((await call("GET", mario.base, mario.token)).status).toBe(200);
+    });
+
     it("never gives back the address of a webhook, its key or a bot token: a page shows the host and the chat", async () => {
       await start();
       const first = await call("GET", ADMIN_BASE, adminToken);
