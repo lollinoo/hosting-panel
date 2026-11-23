@@ -401,6 +401,21 @@ describe("files written to take long", () => {
     }
   });
 
+  it("reads an address in a time linear in its length, whatever it piles up before a host", () => {
+    // No host follows any of these '@', and no '@' these '://': a reader that starts again at each one reads the value once per piece.
+    const piles = (count: number): string =>
+      web("environment:", ...["@h:x", "@[", "@${", "://"].map((unit, index) => `  P${index}: 'x://u:p${unit.repeat(count)}'`));
+    const all = piles(4_800);
+    const eighth = piles(600);
+    const { result, ms } = timed(all);
+    expectWellFormed(result);
+    expect(ms).toBeLessThan(BOUND_MS);
+    // How the time grows, not how long it takes: the fastest of three runs leaves out the pauses of a busy machine.
+    const fastest = (compose: string): number => Math.min(...Array.from({ length: 3 }, () => timed(compose).ms));
+    const small = Math.max(fastest(eighth), 2);
+    expect(fastest(all)).toBeLessThan(24 * small);
+  });
+
   it("gives keys to thousands of variables whose names make the same key without trying every key made before", () => {
     // Twelve letters, each 'a' or 'A': up to 4 096 names, one key 'aaaaaaaaaaaa'.
     const variables = (count: number): string =>
