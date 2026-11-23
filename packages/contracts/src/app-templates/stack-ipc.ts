@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { TerminalSessionIdSchema } from "../admin-terminal.js";
 import type { ErrorCode } from "../errors.js";
 import { SiteHostRouteSchema } from "../ipc-schemas.js";
 import { APP_STACK_PLAN_IMAGE_PATTERN } from "./images.js";
@@ -108,6 +109,12 @@ export const AppStackLogsIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
   tail: z.number().int().min(1).max(APP_STACK_LOG_TAIL_MAX),
 }).strict();
 export type AppStackLogsIpcRequest = z.infer<typeof AppStackLogsIpcRequestSchema>;
+/** Opens a terminal in one component (ADR-0041): no container name, no user and no command; the executor derives and checks them. */
+export const AppStackTerminalOpenIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
+  sessionId: TerminalSessionIdSchema,
+  componentKey: AppStackKeySchema,
+}).strict();
+export type AppStackTerminalOpenIpcRequest = z.infer<typeof AppStackTerminalOpenIpcRequestSchema>;
 export const AppStackRouteWireSchema = z
   .object({
     componentKey: AppStackKeySchema,

@@ -6,6 +6,8 @@ import { DNS_PROVIDERS, refineDnsCredentials } from "./dns-provider.js";
 import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
 import { FIREWALL_MAX_BLOCKS_PER_FAMILY, FIREWALL_PORT_NAMES } from "./admin-firewall.js";
 import { TERMINAL_INPUT_MAX_BYTES, TerminalSessionIdSchema, type TerminalEndReason } from "./admin-terminal.js";
+import { AppStackKeySchema } from "./app-templates/limits.js";
+import { AppEntityIdSchema, AppForeignIdSchema } from "./app-templates/stack-ids.js";
 import {
   MYSQL_NATIVE_PASSWORD_HASH_PATTERN,
   SITE_DATABASE_CUSTOM_NAME_PATTERN,
@@ -445,7 +447,19 @@ export const TerminalSessionRecordWireSchema = z.object({
   openedAt: z.string().datetime({ offset: true }),
   ended: TerminalEndedWireSchema.nullable(),
 }).strict();
-export const TerminalSessionsEnvelopeSchema = z.object({ data: z.array(TerminalSessionRecordWireSchema).max(256) });
+/** A session in a component of an application (ADR-0041): the request it was opened with, never a site. */
+export const AppStackTerminalSessionRecordWireSchema = z.object({
+  sessionId: TerminalSessionIdSchema,
+  stackId: AppEntityIdSchema,
+  organizationId: AppForeignIdSchema,
+  componentKey: AppStackKeySchema,
+  containerName: z.string().min(1).max(128),
+  openedAt: z.string().datetime({ offset: true }),
+  ended: TerminalEndedWireSchema.nullable(),
+}).strict();
+export const TerminalSessionsEnvelopeSchema = z.object({
+  data: z.array(z.union([TerminalSessionRecordWireSchema, AppStackTerminalSessionRecordWireSchema])).max(256),
+});
 export const PanelContainerRestartIpcRequestSchema = z.object({ component: z.enum(PANEL_CONTAINERS) }).strict();
 export const PanelContainerRestartWireSchema = z.object({ startedAt: z.string().datetime({ offset: true }).nullable() }).strict();
 export const EmptyDataEnvelopeSchema = z.object({ data: z.null() });
