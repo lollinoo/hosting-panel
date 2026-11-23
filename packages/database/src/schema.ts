@@ -18,6 +18,7 @@ import { sql } from "drizzle-orm";
 import type {
   AppStackComponentHealth,
   AppStackDeploymentStatus,
+  AppStackLinkState,
   AppStackRetentionPolicy,
   AppStackStatus,
   AppStackVolumeStatus,
@@ -564,6 +565,27 @@ export const appStackDomains = pgTable(
     }),
     index("idx_app_stack_domains_stack").on(t.stackId),
     index("idx_app_stack_domains_dns_due").on(t.dnsNextCheckAt),
+  ],
+);
+
+/** A database's only component attached to the private network of another application of the same customer (ADR-0039). */
+export const appStackLinks = pgTable(
+  "app_stack_links",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").notNull(),
+    consumerStackId: text("consumer_stack_id").notNull(),
+    providerStackId: text("provider_stack_id").notNull(),
+    state: text("state").$type<AppStackLinkState>().notNull().default("pending"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique("uq_app_stack_links_pair").on(t.consumerStackId, t.providerStackId),
+    stackOrg("fk_app_stack_links_consumer_org", { stackId: t.consumerStackId, organizationId: t.organizationId }),
+    stackOrg("fk_app_stack_links_provider_org", { stackId: t.providerStackId, organizationId: t.organizationId }),
+    index("idx_app_stack_links_provider").on(t.providerStackId),
   ],
 );
 

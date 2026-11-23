@@ -20,6 +20,7 @@ import {
   appStackSecrets,
   appStackVolumes,
   AppStackRepositoryError,
+  createAppStackLinkTransactional,
   createAppStackTransactional,
   createAppTemplate,
   createDatabaseClient,
@@ -33,11 +34,13 @@ import {
   hosts,
   listAppStackComponents,
   listAppStackDeployments,
+  listAppStackLinksOfProvider,
   listAppStackParameters,
   listAppStackRevisions,
   listAppStacks,
   listAppStacksByStatus,
   listAppStackVolumes,
+  markAppStackLinkRemoving,
   newAppEntityId,
   operations,
   operationSteps,
@@ -403,6 +406,63 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
       ["data", "destroy"],
       ["logs", "destroy"],
     ]);
+  });
+
+  it("a database that applications still use is not deleted, whatever the state of the link (ADR-0039)", async () => {
+    const database = await ready((await create()).stack.id);
+    const app = await ready((await create()).stack.id);
+    const link = await createAppStackLinkTransactional(db(), {
+      organizationId: orgA,
+      consumerStackId: app.id,
+      providerStackId: database.id,
+      createdBy: null,
+    });
+    const operationsBefore = (await db().select().from(operations).where(eq(operations.resourceId, database.id))).length;
+    for (const prepare of [
+      async () => undefined,
+      async () => void (await db().execute(`update app_stack_links set state = 'active' where id = '${link.id}'`)),
+      async () => void (await markAppStackLinkRemoving(db(), { organizationId: orgA, stackId: app.id, linkId: link.id })),
+    ]) {
+      await prepare();
+      const err = await enqueue(database, "stack.delete").then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(AppStackRepositoryError);
+      expect((err as AppStackRepositoryError).code).toBe("DATABASE_IN_USE");
+    }
+    expect((await stackOf(database.id)).status).toBe("running");
+    expect((await db().select().from(operations).where(eq(operations.resourceId, database.id))).length).toBe(operationsBefore);
+    // Every other change of the database is still taken.
+    expect((await enqueue(database, "stack.restart")).stack.status).not.toBe("running");
+  });
+
+  it("deleting an application takes its own links with it and leaves the links of the others (ADR-0039)", async () => {
+    const database = await ready((await create()).stack.id);
+    const [leaving, staying] = [await ready((await create()).stack.id), await ready((await create()).stack.id)];
+    for (const app of [leaving, staying]) {
+      await createAppStackLinkTransactional(db(), { organizationId: orgA, consumerStackId: app.id, providerStackId: database.id, createdBy: null });
+    }
+    // A change that is not a delete touches no link.
+    await enqueue(leaving, "stack.stop");
+    expect(await listAppStackLinksOfProvider(db(), database.id)).toHaveLength(2);
+    const result = await enqueue(await ready(leaving.id, "stopped"), "stack.delete");
+    expect(result.stack.status).toBe("deleting");
+    expect((await listAppStackLinksOfProvider(db(), database.id)).map((row) => row.consumerStackId)).toEqual([staying.id]);
+    // The database can go once the last application has.
+    await enqueue(await ready(staying.id), "stack.delete");
+    expect((await enqueue(database, "stack.delete")).stack.status).toBe("deleting");
+  });
+
+  it("a link of an application that is already deleted does not hold its database back, and goes with it (ADR-0039)", async () => {
+    const database = await ready((await create()).stack.id);
+    const app = await ready((await create()).stack.id);
+    await createAppStackLinkTransactional(db(), { organizationId: orgA, consumerStackId: app.id, providerStackId: database.id, createdBy: null });
+    // What a previous release does when it deletes the application: the row is marked, the link is left.
+    await db().update(appStacks).set({ status: "deleted", deletedAt: new Date() }).where(eq(appStacks.id, app.id));
+    expect(await listAppStackLinksOfProvider(db(), database.id)).toHaveLength(1);
+    expect((await enqueue(database, "stack.delete")).stack.status).toBe("deleting");
+    expect(await listAppStackLinksOfProvider(db(), database.id)).toEqual([]);
   });
 
   it("writes the retention policy from destroyData on every delete, and ignores it for every other kind", async () => {

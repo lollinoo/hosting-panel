@@ -34,6 +34,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackLinks,
   appStackParameters,
   appStackRevisions,
   appStacks,
@@ -57,7 +58,8 @@ export type AppStackRepositoryErrorCode =
   | "TEMPLATE_MISMATCH"
   | "INVALID_TRANSITION"
   | "NO_REVISION"
-  | "COMPONENT_IN_USE";
+  | "COMPONENT_IN_USE"
+  | "DATABASE_IN_USE";
 
 export class AppStackRepositoryError extends Error {
   constructor(
@@ -515,6 +517,19 @@ export async function enqueueAppStackOperationTransactional(
       });
     }
     if (input.kind === "stack.delete") {
+      // ADR-0039, under the stack row lock a link insert takes too: a database goes only once no application uses it;
+      // an application takes its own links with it (the executor detaches the databases before it removes the network).
+      // A link whose application is already deleted (a previous release deleted it during a rollback) holds nothing back.
+      const [used] = await tx
+        .select({ id: appStackLinks.id })
+        .from(appStackLinks)
+        .innerJoin(appStacks, eq(appStacks.id, appStackLinks.consumerStackId))
+        .where(and(eq(appStackLinks.providerStackId, stack.id), isNull(appStacks.deletedAt)))
+        .limit(1);
+      if (used) {
+        throw new AppStackRepositoryError("DATABASE_IN_USE", "Applications still use this database. Disconnect them first.");
+      }
+      await tx.delete(appStackLinks).where(or(eq(appStackLinks.consumerStackId, stack.id), eq(appStackLinks.providerStackId, stack.id)));
       await tx
         .update(appStackVolumes)
         .set({ retentionPolicy: input.destroyData ? "destroy" : "retain", updatedAt: now })

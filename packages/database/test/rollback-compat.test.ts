@@ -479,3 +479,94 @@ describe("0025 app stacks", () => {
     expect(await rows(pg, "SELECT hostname FROM domains ORDER BY hostname")).toEqual([{ hostname: "old.example" }]);
   });
 });
+
+describe("0028 app stack links", () => {
+  // ADR-0039: after 0028 the previous release keeps running on the migrated schema; it never names app_stack_links.
+  const M0028 = "0028_app_stack_links.sql";
+  const HASH = "a".repeat(64);
+  let pg: PGlite;
+  const SEED_BEFORE = `
+    INSERT INTO platform_installations (id, name) VALUES ('pi','pi');
+    INSERT INTO hosts (id, platform_installation_id, name, hostname, ipv4_address, total_cpu_milli, total_memory_bytes, total_storage_bytes)
+      VALUES ('h','pi','h','h.example','192.0.2.1',1000,'1','1');
+    INSERT INTO organizations (id, platform_installation_id, name, slug) VALUES ('o','pi','o','o');
+    INSERT INTO host_allocations (id, host_id, organization_id) VALUES ('a','h','o');
+    INSERT INTO app_templates (id, slug, name, category) VALUES ('atpl_a','alpha','Alpha','database');
+    INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
+      VALUES ('atv_a1','atpl_a',1,'x',1,'{}','${HASH}');
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_app','o','a','atpl_a','atv_a1','Application','running'),('stk_db','o','a','atpl_a','atv_a1','Database','running');`;
+  // A link written by the new release before the rollback.
+  const LINK_ROW = `
+    INSERT INTO app_stack_links (id, organization_id, consumer_stack_id, provider_stack_id, state)
+      VALUES ('slnk_a','o','stk_app','stk_db','active');`;
+  // What the previous release does to applications: none of it names the new table.
+  const OLD_RELEASE_WRITES = `
+    UPDATE app_stacks SET status = 'stopped', updated_at = NOW() WHERE id = 'stk_app';
+    UPDATE app_stacks SET name = 'Renamed' WHERE id = 'stk_db';
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_rb','o','a','atpl_a','atv_a1','Rollback','draft');
+    UPDATE app_stacks SET status = 'deleted', deleted_at = NOW() WHERE id = 'stk_rb';
+    INSERT INTO operations (id, organization_id, kind, resource_type, resource_id) VALUES ('op_rb','o','stack.stop','app_stack','stk_app');
+    UPDATE operations SET status = 'succeeded' WHERE id = 'op_rb';
+    DELETE FROM operations WHERE id = 'op_rb';`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0028);
+    await pg.exec(SEED_BEFORE);
+    await pg.exec(read(M0028));
+    await pg.exec(LINK_ROW);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("adds one table and changes no column of a table that was there", async () => {
+    const fresh = new PGlite();
+    try {
+      await migrateTo(fresh, M0028);
+      const columns = "SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' ORDER BY 1, 2";
+      const before = await rows<{ table_name: string }>(fresh, columns);
+      await fresh.exec(read(M0028));
+      const after = await rows<{ table_name: string }>(fresh, columns);
+      expect(after.filter((c) => c.table_name !== "app_stack_links")).toEqual(before);
+      expect([...new Set(after.map((c) => c.table_name))].filter((t) => !before.some((c) => c.table_name === t))).toEqual(["app_stack_links"]);
+      const triggers = "SELECT count(*)::int AS n FROM information_schema.triggers WHERE trigger_schema = 'public'";
+      await fresh.exec(read(M0028));
+      const fullyBefore = new PGlite();
+      try {
+        await migrateTo(fullyBefore, M0028);
+        expect(await rows(fresh, triggers)).toEqual(await rows(fullyBefore, triggers));
+      } finally {
+        await fullyBefore.close();
+      }
+    } finally {
+      await fresh.close();
+    }
+  }, 120_000);
+
+  it("runs the previous release's writes on applications and operations while a link exists", async () => {
+    await pg.exec(OLD_RELEASE_WRITES);
+    expect(await rows(pg, "SELECT id, status FROM app_stacks ORDER BY id")).toEqual([
+      { id: "stk_app", status: "stopped" },
+      { id: "stk_db", status: "running" },
+      { id: "stk_rb", status: "deleted" },
+    ]);
+    expect(await rows(pg, "SELECT id, state FROM app_stack_links")).toEqual([{ id: "slnk_a", state: "active" }]);
+  });
+
+  it("lets the previous release mark a linked application as deleted: the row stays, the link stays with it", async () => {
+    await pg.exec("UPDATE app_stacks SET status = 'deleted', deleted_at = NOW() WHERE id = 'stk_app'");
+    expect(await rows(pg, "SELECT consumer_stack_id FROM app_stack_links")).toEqual([{ consumer_stack_id: "stk_app" }]);
+    await pg.exec("UPDATE app_stacks SET status = 'stopped', deleted_at = NULL WHERE id = 'stk_app'");
+  });
+
+  it("runs 0028 again on a database with a link without harm", async () => {
+    await pg.exec(read(M0028));
+    expect(await rows(pg, "SELECT id, organization_id, consumer_stack_id, provider_stack_id, state FROM app_stack_links")).toEqual([
+      { id: "slnk_a", organization_id: "o", consumer_stack_id: "stk_app", provider_stack_id: "stk_db", state: "active" },
+    ]);
+  });
+});
