@@ -396,22 +396,31 @@ describe("files written to take long", () => {
     const early = timed(crowded("A", distinct, ""));
     expectWellFormed(early.result);
     expect(refusals(early.result)).toEqual(["refused SECRETS_TOO_MANY "]);
-    expect(early.ms).toBeLessThan(2_000);
+    expect(early.ms).toBeLessThan(BOUND_MS);
     // Under a name that looks like a secret's and beside a generated secret, the addresses are read only by the conversion, last to first.
     const late = timed(crowded("DB_PASSWORD", "${SERVICE_PASSWORD_X}", distinct));
     expectWellFormed(late.result);
     expect(refusals(late.result)).toEqual(["refused SECRET_REFERENCES_TOO_MANY services.web.environment.DB_PASSWORD", "refused SECRETS_TOO_MANY "]);
-    expect(late.ms).toBeLessThan(2_000);
+    expect(late.ms).toBeLessThan(BOUND_MS);
   });
 
   it("gives keys to thousands of variables whose names make the same key without trying every key made before", () => {
-    // Twelve letters, each 'a' or 'A': 4 096 names, one key 'aaaaaaaaaaaa'.
-    const names = Array.from({ length: 4096 }, (_unused, mask) => Array.from({ length: 12 }, (_other, at) => ((mask >> at) & 1 ? "A" : "a")).join(""));
-    const { result, ms } = timed(web("environment:", `  A: '${names.map((name) => `$${name}`).join("")}'`));
+    // Twelve letters, each 'a' or 'A': up to 4 096 names, one key 'aaaaaaaaaaaa'.
+    const variables = (count: number): string =>
+      web("environment:", `  A: '${Array.from({ length: count }, (_unused, mask) => `$${Array.from({ length: 12 }, (_other, at) => ((mask >> at) & 1 ? "A" : "a")).join("")}`).join("")}'`);
+    const all = variables(4096);
+    const eighth = variables(512);
+    const { result } = timed(all);
     expectWellFormed(result);
     // The value could exceed 4 096 characters: it is dropped, and no parameter is used.
     expect(specOf(result).parameters).toEqual([]);
-    expect(ms).toBeLessThan(1_000);
+    timed(eighth);
+    // How the time grows, not how long it takes: the fastest of three runs leaves out the pauses of a busy machine.
+    const fastest = (compose: string): number => Math.min(...Array.from({ length: 3 }, () => timed(compose).ms));
+    const small = Math.max(fastest(eighth), 2);
+    const large = fastest(all);
+    // Eight times the names: about 8 times the time when each key is found at once, about 64 when each tries every key made before.
+    expect(large).toBeLessThan(24 * small);
   });
 
   it("answers a file of the largest size made of one value", () => {
