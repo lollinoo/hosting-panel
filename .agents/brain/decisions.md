@@ -333,5 +333,5 @@ Source: the owner's directive of 2026-11-22 (take the backups of a self-hosted P
 - **K9 Data.** Additive migration `0027_app_stack_backups.sql`: `app_stack_backups` and `app_stack_backup_copies`. A target with application copies cannot be deleted; `hp-restore-panel` closes unfinished backups and restores as interrupted.
 - **K10 Downgrade gate** `app-stack-backups`: in use when a row of `app_stack_backups` exists. No new capability flag.
 - **K11 API and web.** `GET` and `POST …/app-stacks/:stackId/backups`, `POST …/backups/:backupId/restore` with `{ confirmName }`; a «Backup» section on the application page replaces the fixed "not available" line.
-- **K12 Out of scope.** Scheduled application backups, restore into a new application or after a panel restore, download, backups without a stop, a destination per application.
+- **K12 Out of scope.** Scheduled application backups, restore into a new application or after a panel restore, download, backups without a stop, a destination per application. Issues, in that order: #59, #60, #61, #58, #62.
 - **Rejected.** `docker pause` instead of a stop; a local staging copy; dump commands declared in the template; restarting inside the backup operation; running as the sites' user `33:33`.

@@ -311,6 +311,6 @@ approval.
    application and of the job from the executor and settles the action; it never sends a copy or a restore twice. A
    job the executor no longer knows (it restarted) is closed as interrupted.
 10. **Limits.** No scheduled backup, no restore into another application, no download of a backup, no backup without
-    stopping, no destination per application (`ADR-0038` K12). Not tried on real Docker: extended attributes, file
-    capabilities, device files, an S3 destination. A copy is taken with the application stopped, so a database inside
-    it is saved as its files on disk.
+    stopping, no destination per application (`ADR-0038` K12). Not tried on real Docker: hard links, extended
+    attributes, file capabilities, device files, an S3 destination, two destinations at once. A copy is taken with the
+    application stopped, so a database inside it is saved as its files on disk.

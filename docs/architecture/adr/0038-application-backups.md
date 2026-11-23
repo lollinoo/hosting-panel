@@ -114,7 +114,7 @@ L'applicazione di un altro cliente risponde `404`. La pagina dell'applicazione h
 
 ### K12 — Fuori ambito
 
-Backup programmati delle applicazioni, ripristino in un'applicazione nuova o dopo il ripristino del pannello, download di un backup, backup senza fermare l'applicazione, scelta della destinazione per applicazione. Ognuno ha una issue propria.
+Backup programmati delle applicazioni, ripristino in un'applicazione nuova o dopo il ripristino del pannello, download di un backup, backup senza fermare l'applicazione, scelta della destinazione per applicazione. Ognuno ha una issue propria: backup programmati #59, ripristino in un'applicazione nuova o dopo il ripristino del pannello #60, download #61, backup senza fermare l'applicazione #58, destinazione per applicazione #62.
 
 ### Alternative scartate
 
@@ -160,13 +160,13 @@ Scostamenti dalla proposta scritta prima del codice:
 
 Non provato:
 
-- **Su Docker reale:** attributi estesi, capacità dei file, file di dispositivo, una destinazione S3 (per S3 è provata solo la costruzione dei container e dell'indirizzo del repository).
-- **Il ripristino dei dati dopo `hp-restore-panel`** (K12).
-- **`infra/linux/accept-m3-panel.mjs`** non è stato rieseguito con le righe nuove di `infra/linux/hp-restore-panel.sql`; quelle righe sono provate su PGlite.
+- **Su Docker reale** (#63): collegamenti fisici (hard link), attributi estesi, capacità dei file, file di dispositivo, una destinazione S3 (per S3 è provata solo la costruzione dei container e dell'indirizzo del repository), due destinazioni insieme e il backup parziale (provati solo dalle prove dell'operazione, senza Docker).
+- **Il ripristino dei dati dopo `hp-restore-panel`** (K12, #60).
+- **`infra/linux/accept-m3-panel.mjs`** non è stato rieseguito con le righe nuove di `infra/linux/hp-restore-panel.sql`; quelle righe sono provate su PGlite (#63).
 - **Le pagine viste da una persona** su un pannello installato.
 
 Punti aperti:
 
-- Un server senza destinazioni utilizzabili non fa il giro notturno: i backup di un'applicazione cancellata restano finché una destinazione torna utilizzabile.
-- Se la chiusura di un'azione fallita fallisce a sua volta, l'applicazione può restare nello stato `stopping`; che cosa la riporta a uno stato leggibile non è provato.
+- Un server senza destinazioni utilizzabili non fa il giro notturno: i backup di un'applicazione cancellata restano finché una destinazione torna utilizzabile (#64).
+- Se la chiusura di un'azione fallita fallisce a sua volta, l'applicazione può restare nello stato `stopping`; che cosa la riporta a uno stato leggibile non è provato (#65).
 - Un'applicazione viva tiene i suoi backup riusciti più recenti senza limite di età: il controllo del downgrade (K10) vale finché l'applicazione esiste.
