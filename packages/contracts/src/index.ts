@@ -32,3 +32,4 @@ export * from "./app-templates/stack-status.js";
 export * from "./app-templates/stack-operations.js";
 export * from "./app-templates/admin-dto.js";
 export * from "./app-templates/stack-dto.js";
+export * from "./app-templates/stack-tasks.js";

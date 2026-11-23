@@ -67,6 +67,7 @@ export const OPERATION_KINDS = [
   "stack.upgrade",
   "stack.rollback",
   "stack.delete",
+  "stack.task",
 ] as const;
 
 export const OperationKindSchema = z.enum(OPERATION_KINDS);

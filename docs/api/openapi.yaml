@@ -15350,6 +15350,7 @@ components:
             - stack.upgrade
             - stack.rollback
             - stack.delete
+            - stack.task
         status:
           type: string
           enum:

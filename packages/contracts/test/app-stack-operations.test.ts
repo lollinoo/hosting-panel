@@ -27,7 +27,7 @@ const guards = (value: unknown): string[][] => [
 describe("application stack operations", () => {
   it("the stack kinds and resource type are operation kinds and resource types", () => {
     for (const kind of APP_STACK_OPERATION_KINDS) expect(OPERATION_KINDS).toContain(kind);
-    expect(OPERATION_KINDS.slice(-7)).toEqual(APP_STACK_OPERATION_KINDS);
+    expect(OPERATION_KINDS.slice(-8)).toEqual([...APP_STACK_OPERATION_KINDS, "stack.task"]);
     expect(OPERATION_RESOURCE_TYPES).toContain("stack");
   });
 
@@ -92,6 +92,6 @@ describe("application stack operations", () => {
     for (const prefix of Object.values(APP_ID_PREFIXES)) {
       expect(`${prefix}_0123456789abcdef01234567`).toMatch(APP_STACK_ID_PATTERN);
     }
-    expect(Object.values(APP_ID_PREFIXES)).toEqual(["atpl", "atv", "stk", "srev", "sdep", "sdom", "ssec"]);
+    expect(Object.values(APP_ID_PREFIXES)).toEqual(["atpl", "atv", "stk", "srev", "sdep", "sdom", "ssec", "srun"]);
   });
 });
