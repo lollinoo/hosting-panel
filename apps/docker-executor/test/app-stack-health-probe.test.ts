@@ -15,7 +15,10 @@ afterEach(async () => {
 
 async function listen(server: net.Server): Promise<number> {
   servers.push(server);
-  server.on("connection", (socket: net.Socket) => sockets.push(socket));
+  server.on("connection", (socket: net.Socket) => {
+    sockets.push(socket);
+    socket.on("error", () => undefined);
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return (server.address() as AddressInfo).port;
 }
