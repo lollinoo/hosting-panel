@@ -894,7 +894,10 @@ async function adapterRig(options: { panelHostname?: string } = {}): Promise<Ada
   const defaultCert = issueCert({ dns: ["default.test"] });
   const tls: TlsServer = createTlsServer(
     { SNICallback: (name, cb) => cb(null, contexts.get(name) ?? createSecureContext({ cert: defaultCert.pem, key: defaultCert.keyPem })) },
-    (socket) => socket.end(),
+    (socket) => {
+      socket.on("error", () => undefined);
+      socket.end();
+    },
   );
   await new Promise<void>((r) => tls.listen(0, "127.0.0.1", r));
   cleanup.push(() => new Promise((r) => tls.close(() => r())));

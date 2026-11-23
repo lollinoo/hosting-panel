@@ -600,7 +600,7 @@ const mustRefuseString = (value: string): boolean =>
   value.includes("${") ||
   /docker\.sock/i.test(value) ||
   /169\.254\.|fd00:ec2::|metadata\.google\.internal/i.test(value) ||
-  /:\/\/[^/\s:@]+:[^/\s@]+@/.test(value);
+  /:\/\/[^/\s:@]*:[^/\s@]+@/.test(value);
 
 const STABLE_CODES = new Set([
   "PARAM_VALUE_INVALID_TYPE",
