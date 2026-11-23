@@ -11,6 +11,7 @@ import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
+import { AdminAppStacksService } from "./app-stacks/admin-app-stacks.service.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
 import {
   APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
@@ -248,6 +249,7 @@ export class AppModule {
         UpdatesService,
         AppTemplatesService,
         AppStacksService,
+        AdminAppStacksService,
         AppStackDomainsService,
         AppStackRuntime,
         AppStackObserverService,

@@ -70,6 +70,8 @@ export interface AppStackHarness {
   readonly app: ControlPlaneAppHandle;
   readonly dbClient: DatabaseClient;
   readonly adminToken: string;
+  /** The server administrator: their user id and the secret of their authenticator, to make a six-digit code. */
+  readonly admin: { readonly userId: string; readonly totpSecret: string };
   /** Two owners, each with an active Dedicated allocation. */
   readonly a: HarnessCustomer;
   readonly b: HarnessCustomer;
@@ -92,6 +94,10 @@ export interface AppStackHarness {
 export async function startAppStackHarness(options?: {
   readonly appFeatures?: Partial<AppFeatureFlags>;
   readonly allowlist?: readonly AppImageAllowlistEntry[];
+  /** The simulator to run on, e.g. one with short terminal waits; a plain one when left out. */
+  readonly dockerExecutor?: InMemoryDockerSimulatorAdapter;
+  /** null starts no terminal pass, so a test runs it by hand; left out, the app keeps its own interval. */
+  readonly terminalSweepIntervalMs?: number | null;
 }): Promise<AppStackHarness> {
   const dbClient = createDatabaseClient({ mode: "pglite" });
   await dbClient.migrate();
@@ -104,10 +110,11 @@ export async function startAppStackHarness(options?: {
     databaseClient: dbClient,
     secretsMasterKey: KEY,
     runtimeBackend: "local-simulator",
-    dockerExecutor: new InMemoryDockerSimulatorAdapter(),
+    dockerExecutor: options?.dockerExecutor ?? new InMemoryDockerSimulatorAdapter(),
     autoProcessOutbox: false,
     outboxPollIntervalMs: null,
     driftReconcileIntervalMs: null,
+    ...(options?.terminalSweepIntervalMs !== undefined ? { terminalSweepIntervalMs: options.terminalSweepIntervalMs } : {}),
     recoverUnknownOnStart: false,
     appFeatures: options?.appFeatures ?? { applicationTemplatesAvailable: true, applicationStacksAvailable: true },
     appTemplateValidation: { allowlist: options?.allowlist ?? APP_TEST_ALLOWLIST },
@@ -188,6 +195,7 @@ export async function startAppStackHarness(options?: {
     app,
     dbClient,
     adminToken,
+    admin: { userId: admin.userId, totpSecret: admin.totpSecretBase32 },
     a,
     b,
     call,
