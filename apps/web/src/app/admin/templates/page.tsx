@@ -47,6 +47,9 @@ export default async function AdminTemplatesPage() {
               <DropdownMenuItem asChild>
                 <Link href="/admin/templates/apps/new">{a.tabs.apps}</Link>
               </DropdownMenuItem>
+              <DropdownMenuItem asChild>
+                <Link href="/admin/templates/apps/new/image">{a.tabs.image}</Link>
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
