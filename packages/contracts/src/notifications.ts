@@ -160,8 +160,8 @@ export type NotificationDeliveryStatus = (typeof NOTIFICATION_DELIVERY_STATUSES)
 export const NOTIFICATION_PROBLEMS = [
   "mail_not_configured", // the mail relay is not set up or not applied
   "mail_refused", // the relay did not take the message
-  "address_not_allowed", // the name does not resolve, or resolves to an address the panel never calls
-  "unreachable", // no connection, a TLS failure or no answer in time
+  "address_not_allowed", // not https to a DNS name, or the name resolves to an address the panel never calls
+  "unreachable", // the name does not resolve, no connection, a TLS failure or no answer in time
   "redirect", // the other side answered with a redirect, which is not followed
   "rejected", // the other side answered 4xx
   "server_error", // the other side answered 5xx
