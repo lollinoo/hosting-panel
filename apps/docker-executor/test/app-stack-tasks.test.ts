@@ -208,6 +208,28 @@ describe("runAppStackTask on the Docker Engine", () => {
     expect(seen).toEqual([["failed", 3], ["failed", 255], ["failed", null], ["failed", null]]);
   });
 
+  it("does not return the engine's own message when it could not start the program: it names the program", async () => {
+    const engine = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "php": executable file not found in $PATH: unknown\r\n';
+    const plans: MockExecPlan[] = [
+      { frames: [[1, engine]], exitCode: 127 },
+      { frames: [[2, engine]], exitCode: 126 },
+      // A program that ran and ended with 127 by itself keeps what it printed; so does the engine's text with another code.
+      { frames: [[1, "my own error\n"]], exitCode: 127 },
+      { frames: [[1, engine]], exitCode: 1 },
+    ];
+    const { adapter } = await setup({ command: () => plans.shift() });
+    const results = [];
+    for (let n = 1; n <= 4; n += 1) results.push(await adapter.runAppStackTask(request(n)));
+    expect(results.map((r) => [r.outcome, r.exitCode, r.output === "" ? "" : r.output.slice(0, 12)])).toEqual([
+      ["failed", 127, ""],
+      ["failed", 126, ""],
+      ["failed", 127, "my own error"],
+      ["failed", 1, "OCI runtime "],
+    ]);
+    expect(JSON.stringify(results.slice(0, 2))).not.toContain("php");
+    for (const result of results) expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+  });
+
   it("masks the secrets of the component in what the command printed", async () => {
     const { adapter, secretsRootDir } = await setup({
       command: () => ({ frames: [[1, `key=${CANARY}\n`], [2, `again ${CANARY} here\n`], [1, "clean\n"]] }),

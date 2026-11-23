@@ -28,6 +28,11 @@ export const APP_STACK_TASK_OUTPUT_TAIL_BYTES = 65_536;
 export const APP_STACK_TASK_RUNS_REMEMBERED = 200;
 export const APP_STACK_TASK_CLEANUP_RETRIES = 6;
 export const APP_STACK_TASK_CLEANUP_RETRY_MS = 5_000;
+/**
+ * How the engine's own message begins when it could not start the program of a run (it is not in the image, or it is
+ * not executable; exit code 127 or 126). The message names the program, so it is never returned as what the run printed.
+ */
+export const APP_STACK_TASK_ENGINE_ERROR_PREFIX = "OCI runtime exec failed";
 
 /**
  * Kills, in one container, every process whose environment carries the mark of a run ($1 = the run id; empty = any
@@ -414,7 +419,11 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     startedAt: Date,
     tail: TaskOutputTail,
   ): Promise<AppStackTaskRunIpcResult> {
-    const { lines, cut } = tail.lines();
+    const kept = tail.lines();
+    // The program never ran: what is there is the engine's message, not something the task printed. The exit code tells.
+    const engineError =
+      (exitCode === 126 || exitCode === 127) && !kept.cut && kept.lines[0]?.startsWith(APP_STACK_TASK_ENGINE_ERROR_PREFIX) === true;
+    const { lines, cut } = engineError ? { lines: [], cut: false } : kept;
     const values = await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey);
     const masked = maskAppStackLogLines(
       lines.map((text) => ({ at: null, stream: "stdout" as const, text })),
