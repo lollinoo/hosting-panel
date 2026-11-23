@@ -80,7 +80,7 @@ describe("the built-in applications end to end (Q-SEED-E2E)", () => {
     throw new Error("the operation never settled");
   }
 
-  it("a freshly booted app offers the customer nothing, and the two built-in templates are there disabled", async () => {
+  it("a freshly booted app offers the customer nothing, and the built-in templates are there disabled", async () => {
     const empty = await catalogue();
     expect(empty.status, empty.raw).toBe(200);
     expect(empty.body.data).toEqual({ templates: [], categories: [] });

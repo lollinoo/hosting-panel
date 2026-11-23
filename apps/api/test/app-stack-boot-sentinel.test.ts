@@ -144,12 +144,18 @@ async function expectBuiltInsOnly(db: DatabaseClient["db"]): Promise<void> {
   const templates = await db.select().from(appTemplates).orderBy(appTemplates.id);
   expect(templates.map((t) => [t.id, t.slug, t.builtIn, t.defaultVersionId])).toEqual([
     ["atpl_http_cache", "http-cache", true, "atv_http_cache_1"],
+    ["atpl_mariadb", "mariadb", true, "atv_mariadb_1"],
+    ["atpl_postgresql", "postgresql", true, "atv_postgresql_1"],
+    ["atpl_valkey", "valkey", true, "atv_valkey_1"],
     ["atpl_worker_storage", "worker-storage", true, "atv_worker_storage_1"],
   ]);
   const versions = await db.select().from(appTemplateVersions).orderBy(appTemplateVersions.id);
   const source = (slug: string) => APP_BUILT_IN_TEMPLATES.find((t) => t.slug === slug)!.source;
   expect(versions.map((v) => [v.id, v.templateId, v.versionNumber, v.source])).toEqual([
     ["atv_http_cache_1", "atpl_http_cache", 1, source("http-cache")],
+    ["atv_mariadb_1", "atpl_mariadb", 1, source("mariadb")],
+    ["atv_postgresql_1", "atpl_postgresql", 1, source("postgresql")],
+    ["atv_valkey_1", "atpl_valkey", 1, source("valkey")],
     ["atv_worker_storage_1", "atpl_worker_storage", 1, source("worker-storage")],
   ]);
 }
@@ -173,11 +179,11 @@ describe("HCP-SPEC-005 §20 boot sentinel: an API boot without application stack
       expect(b.sim.jobs).toEqual([]);
     });
 
-    it("seeds exactly the two built-in templates, disabled, each with its first version as the default", async () => {
+    it("seeds exactly the five built-in templates, disabled, each with its first version as the default", async () => {
       const db = b.app.dbClient.db;
       await expectBuiltInsOnly(db);
       const templates = await db.select().from(appTemplates);
-      expect(templates.map((t) => t.enabled)).toEqual([false, false]);
+      expect(templates.map((t) => t.enabled)).toEqual([false, false, false, false, false]);
     });
 
     it("leaves every application stack table empty", async () => {
@@ -214,8 +220,8 @@ describe("HCP-SPEC-005 §20 boot sentinel: an API boot without application stack
       await ensureBuiltInAppTemplates(db, builtInAppTemplateItems());
       await ensureBuiltInAppTemplates(db, builtInAppTemplateItems());
       const after = [await db.select().from(appTemplates).orderBy(appTemplates.id), await db.select().from(appTemplateVersions).orderBy(appTemplateVersions.id)];
-      expect(after[0]).toHaveLength(2);
-      expect(after[1]).toHaveLength(2);
+      expect(after[0]).toHaveLength(5);
+      expect(after[1]).toHaveLength(5);
       expect(after).toEqual(before);
     });
 
@@ -249,7 +255,7 @@ describe("HCP-SPEC-005 §20 boot sentinel: an API boot without application stack
       expect(await rowCounts(b.app.dbClient.db)).toEqual(Object.fromEntries(Object.keys(STACK_TABLES).map((name) => [name, 0])));
     });
 
-    it("lists the two built-ins to the admin as disabled drafts and offers the customer an empty catalogue", async () => {
+    it("lists the five built-ins to the admin as disabled drafts and offers the customer an empty catalogue", async () => {
       const me = await b.call(b.adminToken, "GET", "/v1/me");
       for (const flag of FLAGS) expect(me.body["data"].platformCapabilities[flag], flag).toBe(true);
 
@@ -258,6 +264,9 @@ describe("HCP-SPEC-005 §20 boot sentinel: an API boot without application stack
       const rows = (admin.body["data"] as Json[]).map((t) => [t.id, t.builtIn, t.enabled]).sort();
       expect(rows).toEqual([
         ["atpl_http_cache", true, false],
+        ["atpl_mariadb", true, false],
+        ["atpl_postgresql", true, false],
+        ["atpl_valkey", true, false],
         ["atpl_worker_storage", true, false],
       ]);
 

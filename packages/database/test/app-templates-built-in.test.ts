@@ -14,11 +14,14 @@ import {
 } from "../src/index.js";
 
 describe("@hosting-panel/database - built-in app templates", () => {
-  it("validates and hashes both seeds", () => {
+  it("validates and hashes the five seeds", () => {
     const items = builtInAppTemplateItems();
     expect(items.map((i) => [i.templateId, i.versionId, i.slug, i.category])).toEqual([
       ["atpl_http_cache", "atv_http_cache_1", "http-cache", "web"],
       ["atpl_worker_storage", "atv_worker_storage_1", "worker-storage", "jobs"],
+      ["atpl_mariadb", "atv_mariadb_1", "mariadb", "database"],
+      ["atpl_postgresql", "atv_postgresql_1", "postgresql", "database"],
+      ["atpl_valkey", "atv_valkey_1", "valkey", "database"],
     ]);
     items.forEach((item, index) => {
       const t = APP_BUILT_IN_TEMPLATES[index]!;
@@ -46,7 +49,7 @@ describe("@hosting-panel/database - built-in app templates", () => {
       await client.close();
     });
 
-    it("seeds two disabled built-in templates with one version each, twice without change, keeping an admin rename", async () => {
+    it("seeds five disabled built-in templates with one version each, twice without change, keeping an admin rename", async () => {
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
       await updateAppTemplate(db(), { templateId: "atpl_http_cache", name: "Il mio sito" });
       await ensureBuiltInAppTemplates(db(), builtInAppTemplateItems());
@@ -54,6 +57,9 @@ describe("@hosting-panel/database - built-in app templates", () => {
       const templates = await db().select().from(appTemplates).orderBy(appTemplates.id);
       expect(templates.map((t) => [t.id, t.builtIn, t.enabled, t.defaultVersionId])).toEqual([
         ["atpl_http_cache", true, false, "atv_http_cache_1"],
+        ["atpl_mariadb", true, false, "atv_mariadb_1"],
+        ["atpl_postgresql", true, false, "atv_postgresql_1"],
+        ["atpl_valkey", true, false, "atv_valkey_1"],
         ["atpl_worker_storage", true, false, "atv_worker_storage_1"],
       ]);
       expect(await getAppTemplate(db(), "atpl_http_cache")).toMatchObject({ name: "Il mio sito" });
