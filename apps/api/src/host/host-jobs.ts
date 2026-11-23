@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   APP_STACK_OPERATION_KINDS,
+  APP_STACK_TASK_KIND,
   HOST_JOB_KIND,
   HOST_JOB_LOCK_KEY,
   PLATFORM_OPS_ORG_ID,
@@ -45,7 +46,13 @@ export const HOST_SERVICE_JOB = {
   host_agent: "restart_hp_host_agent",
 } as const satisfies Record<HostService, HostJob>;
 export const SITE_WORK_BLOCKED_JOBS: readonly HostJob[] = ["restart_hp_docker_executor", "panel_update", "os_upgrade"];
-export const SITE_WORK_KINDS = [...BACKUP_OPERATION_KINDS, ...Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds), ...APP_STACK_OPERATION_KINDS];
+// A task of an application counts too (ADR-0042): a restart of the executor would leave its outcome unknown.
+export const SITE_WORK_KINDS = [
+  ...BACKUP_OPERATION_KINDS,
+  ...Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds),
+  ...APP_STACK_OPERATION_KINDS,
+  APP_STACK_TASK_KIND,
+];
 export const HOST_JOB_END_ACTION: Record<HostJob, string> = {
   restart_hp_api: "admin.host_service.restart.end",
   restart_hp_web: "admin.host_service.restart.end",

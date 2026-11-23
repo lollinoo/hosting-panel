@@ -11,6 +11,9 @@ import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
+import { AppStackTaskRuntime } from "./app-stacks/app-stack-task-runtime.js";
+import { AppStackTaskSchedulerService } from "./app-stacks/app-stack-task-scheduler.service.js";
+import { AppStackTasksService } from "./app-stacks/app-stack-tasks.service.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
 import {
   APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
@@ -31,6 +34,7 @@ import { AdminAppStacksController } from "./controllers/admin-app-stacks.control
 import { AppTemplatesController } from "./controllers/app-templates.controller.js";
 import { AppStacksController } from "./controllers/app-stacks.controller.js";
 import { AppStackDomainsController } from "./controllers/app-stack-domains.controller.js";
+import { AppStackTasksController } from "./controllers/app-stack-tasks.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -175,6 +179,7 @@ export class AppModule {
         AppTemplatesController,
         AppStacksController,
         AppStackDomainsController,
+        AppStackTasksController,
       ],
       providers: [
         {
@@ -251,6 +256,9 @@ export class AppModule {
         AppStackDomainsService,
         AppStackRuntime,
         AppStackObserverService,
+        AppStackTasksService,
+        AppStackTaskRuntime,
+        AppStackTaskSchedulerService,
         // One per app: site and stack log reads share the panel-wide caps (ADR 0026 limit 27).
         { provide: LogReadGate, useValue: new LogReadGate() },
         {
@@ -277,6 +285,8 @@ export class AppModule {
         BackupSchedulerService,
         AppStackRuntime,
         AppStackObserverService,
+        AppStackTaskRuntime,
+        AppStackTaskSchedulerService,
         LogReadGate,
       ],
     };
