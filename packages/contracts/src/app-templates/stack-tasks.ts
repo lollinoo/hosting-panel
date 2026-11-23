@@ -63,7 +63,7 @@ export type AppStackTaskTrigger = (typeof APP_STACK_TASK_TRIGGERS)[number];
 
 // ---- what a run printed ----
 
-const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length; // browser-safe, no Buffer
+const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length; // works in a browser too
 /** Every control character but the tab, and an unpaired surrogate. A line break is one: it never reaches a line. */
 const OUTPUT_LINE_UNSAFE = /[^\P{Cc}\t]|\p{Cs}/gu;
 const OUTPUT_UNSAFE = /[^\P{Cc}\t\n]|\p{Cs}/u;
