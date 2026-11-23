@@ -274,7 +274,7 @@ Dettagli e limiti: [ADR 0024](docs/architecture/adr/0024-wordpress-import.md).
 
 ### Applicazioni multi-servizio (stack)
 
-Una famiglia di risorse nuova, accanto ai siti WordPress e separata da loro nei dati e nelle API (`ADR-0035`). Nelle due console sono tutte **Applicazioni**: un sito WordPress è un'applicazione di tipo WordPress, uno stack è un'applicazione del suo modello; il cliente le trova in un solo elenco (`/apps`) e ne crea una nuova da una sola pagina (`/apps/new`), l'amministratore le vede in **Amministrazione › Applicazioni** (gli stack in sola lettura) e ne gestisce i modelli, dei due tipi, in **Amministrazione › Modelli**. Un **modello di applicazione** è scritto e pubblicato dall'amministratore del server nel formato `HCP-STACK/v1` (da uno a otto componenti, volumi con nome, ingresso HTTP); uno **stack** è l'installazione di un modello pubblicato sull'allocazione Dedicated di un cliente, con i suoi componenti, i suoi volumi dei dati e i suoi domini.
+Una famiglia di risorse nuova, accanto ai siti WordPress e separata da loro nei dati e nelle API (`ADR-0035`). Nelle due console sono tutte **Applicazioni**: un sito WordPress è un'applicazione di tipo WordPress, uno stack è un'applicazione del suo modello; il cliente le trova in un solo elenco (`/apps`) e ne crea una nuova da una sola pagina (`/apps/new`), l'amministratore le vede in **Amministrazione › Applicazioni** (di uno stack apre la pagina, con i log e il terminale dei componenti, senza poterlo avviare, fermare o cambiare) e ne gestisce i modelli, dei due tipi, in **Amministrazione › Modelli**. Un **modello di applicazione** è scritto e pubblicato dall'amministratore del server nel formato `HCP-STACK/v1` (da uno a otto componenti, volumi con nome, ingresso HTTP); uno **stack** è l'installazione di un modello pubblicato sull'allocazione Dedicated di un cliente, con i suoi componenti, i suoi volumi dei dati e i suoi domini.
 
 - **Stato.** I flag `applicationTemplatesAvailable` e `applicationStacksAvailable` valgono `false` su ogni backend: nulla di tutto questo è offerto, né all'amministratore né ai clienti, finché il proprietario non li accende.
 - **Il primo rilascio.** Solo immagini già pronte (nessuna build), solo Dedicated, solo ingresso HTTP, TLS solo Let's Encrypt per i domini degli stack; nessun backup degli stack, nessuna porta TCP/UDP pubblica.
@@ -463,6 +463,17 @@ Un riavvio del pannello parte circa 2 secondi dopo la richiesta e dura al massim
 
 Dettagli e limiti: [ADR 0027](docs/architecture/adr/0027-restart-and-terminal.md).
 
+#### Log e terminale di un'applicazione
+
+Dove le applicazioni multi-servizio sono attive (oggi il flag `applicationStacksAvailable` vale `false` ovunque), **Apri** sulla riga di un'applicazione in **Amministrazione › Applicazioni** porta alla sua pagina: cliente, modello, stato, indirizzo e componenti. Da lì l'amministratore del server ha gli stessi due strumenti che ha per i siti, senza una visita di assistenza.
+
+- **Registri**: le ultime righe (da 1 a 500) stampate da un componente, quelle che vede il cliente, con i valori riservati dell'applicazione nascosti. Ogni lettura è nel **Registro attività** (`admin.app_stack.logs.read`).
+- **Terminale**: una shell di solo testo dentro il container del componente, **come l'utente con cui gira il componente** e con ciò che il componente può raggiungere, niente di più: nessun privilegio aggiunto, file system di base in sola lettura, solo i suoi volumi e le sue reti. Il pannello non apre mai una shell sul server. Le regole sono quelle del terminale di un sito: un codice nuovo a ogni apertura, una sessione per componente e quattro sul server (siti e applicazioni insieme), fine dopo 30 minuti o 60 secondi senza letture, niente di digitato o stampato registrato.
+- Dal terminale si leggono i file dei valori riservati dell'applicazione e si possono cambiare i suoi dati: il Registro attività dice che una sessione c'è stata, non che cosa ha fatto.
+- Il cliente non ha un terminale, e nessuna sua pagina cambia.
+
+Dettagli e limiti: [ADR 0041](docs/architecture/adr/0041-application-terminal-and-logs.md). Procedure per l'operatore: [runbook](docs/runbooks/application-stacks.md), procedure 10 e 11.
+
 #### Firewall
 
 **Amministrazione › Firewall** gestisce il firewall `nftables` del server (tabella `inet hp_dedicated_filter`).
@@ -534,5 +545,6 @@ corepack pnpm run test
 - [Piano di Sicurezza e Protocollo di Outage (`AC-F1-08`)](docs/security/phase-1-test-and-outage-plan.md): Matrice delle minacce e specifica del test di outage `CP-01`.
 - [Report di audit](docs/security/audit-report.md): ogni finding dell'audit di M6 con il suo stato, aperto o chiuso.
 - [ADR 0035 — Stack applicativi](docs/architecture/adr/0035-application-stacks.md): modello delle risorse, confini di fiducia, minacce, compatibilità e downgrade, catalogo iniziale (stato `APPROVATO`).
-- [Procedure operative: stack applicativi](docs/runbooks/application-stacks.md): stato reale, `unknown`, cancellazione con o senza dati, downgrade, ripristino su un nuovo server, incidenti (in inglese).
+- [Procedure operative: stack applicativi](docs/runbooks/application-stacks.md): stato reale, `unknown`, cancellazione con o senza dati, downgrade, ripristino su un nuovo server, incidenti, log e terminale per l'amministratore (in inglese).
+- [ADR 0041 — Terminale e log di un'applicazione per l'amministratore del server](docs/architecture/adr/0041-application-terminal-and-logs.md): chi, dove gira la shell e con quali poteri, limiti in comune con i siti, che cosa resta dopo una sessione (stato `PROPOSTO`).
 - [Report di collaudo degli stack applicativi](docs/security/hcp-spec-005-acceptance-report.md): esito di ogni prova `A1..A20` e `B1..B6`, con i punti in attesa del titolare.

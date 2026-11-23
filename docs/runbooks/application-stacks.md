@@ -24,8 +24,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   (ACME) certificates only for stack domains, no public TCP/UDP port, no stack backup.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
   `app.create`, `app.update`, `app.control`, `app.delete`). The server administrator's console has the template catalog
-  (**Modelli**, kind «Applicazione multi-servizio») and a read-only list of every stack in **Applicazioni**; it has no
-  stack actions; collaborators and support access have no stack permission.
+  (**Modelli**, kind «Applicazione multi-servizio») and the list of every stack in **Applicazioni**. A row opens the
+  stack's page, where the administrator reads a component's logs and opens a terminal in it (procedures 10 and 11,
+  `ADR-0041`). The administrator cannot start, stop, change or delete a customer's stack from that page; collaborators
+  and support access have no stack permission.
 - **Never run `docker rm`, `docker volume rm`, `docker network rm` or any `prune` on a stack's objects by hand**, except
   where a step below says so. The panel owns them; removing one by hand leaves the panel's view wrong.
 - **Stack data is in no backup.** The site and panel backups (S3 or local) do not include stacks or their volumes.
@@ -169,7 +171,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 2. **Nobody installs it again.** In **Modelli**, open the template and switch off **Offerto ai clienti** (archive it if it is not built-in).
    Installed stacks keep running; a deploy or upgrade that needs a new revision of that template is refused
    (`STACK_TEMPLATE_UNPUBLISHED`).
-3. **Logs.** The application page shows the last 1 to 500 lines per component with secret values masked. For more:
+3. **Logs.** The application page shows the last 1 to 500 lines per component with secret values masked. A server
+   administrator reads the same masked lines without the customer (procedure 10). For more:
    `sudo docker logs --tail 500 hp_app_<stackId>_<componentKey>`; that output is **not** masked and may hold a secret
    value: never paste it into a ticket.
 4. What the panel never does for a stack: the drift reconciler never restarts or recreates a stack container; a stack
@@ -202,7 +205,10 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. The real-Docker checks are `infra/linux/accept-app-stack-engine.mjs` (the stack engine),
    `infra/linux/accept-app-stack-http-cache.mjs` and `infra/linux/accept-app-stack-worker-storage.mjs` (the two built-in
-   templates). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
+   templates) and `infra/linux/accept-app-terminal.mjs` (the terminal in a component, `ADR-0041`; its own prefix is
+   `hp_swarmtest_term_<hex>`, it creates no proxy and no edge network, and it needs the image of the «Lavoro periodico
+   con archivio» template on the machine: its `preflight` step fails and names the image when it is missing). They
+   import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
    next to a test run (memory):
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
@@ -226,3 +232,76 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    sudo docker network ls --filter name=swarmtest_
    sudo docker volume ls --filter name=swarmtest_
    ```
+
+## 10. Administrator: the page and the logs of a customer's application
+
+Only a server administrator, and only where `applicationStacksAvailable` is `true` (`ADR-0041`). No support visit is
+needed, and a support visit gives none of this.
+
+1. **Amministrazione › Applicazioni**, then **Apri** on the application's row. The page (`/admin/apps/<stackId>`)
+   shows the customer, the template and its version, the status the customer sees, the web address («Nessun indirizzo
+   web» when the application has none) and every component with its last observed health. It shows no parameter, no
+   secret and no plan.
+2. **Registri** on that page: choose a component and read its last lines, 1 to 500. They are the lines the customer
+   sees on their own page, with the application's secret values masked.
+3. **Every read is recorded.** The audit action is `admin.app_stack.logs.read`, on the application, with the customer's
+   organisation, the component and the number of lines asked; it never holds a line that was read:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select timestamp, actor_id, organization_id, target_id, details from audit_events where action = 'admin.app_stack.logs.read' order by timestamp desc limit 20"
+   ```
+4. What the answers mean: `403` the caller is not a server administrator (also recorded); `422` applications are off
+   on this server; `404` the application is unknown or deleted, or it has no component of that name; `503` the
+   executor is not running.
+
+## 11. Administrator: a terminal in a component
+
+A text shell (`/bin/sh`) inside the container of one component, for a server administrator (`ADR-0041`). It is the
+terminal of the sites (`ADR-0027`) with a different place and a different user.
+
+1. **Open it.** On the application's page (procedure 10), **Terminale** on the component's row. The account needs
+   two-step authentication, and every open asks for a **new** six-digit code: a code already used, also for signing
+   in, is refused until the next one. Wrong codes count like the ones of a sign-in: the fifth locks the account for 15
+   minutes.
+2. **What the shell is.** It runs as the user the component runs as, in the component's own container: no capability,
+   a read-only base file system, the component's memory and process limits, only the component's volumes and networks.
+   The panel never opens a shell on the host and never starts a helper container for this. The tools are the ones in
+   the image, often very few; full-screen programs (editors, pagers, `top`) do not work. **Ctrl-C** stops a command,
+   **Ctrl-D** ends the shell, **Chiudi** ends the session.
+3. **What it can reach.** The secret files of the application in `/run/secrets` are readable from the shell and are
+   **not** masked: never paste what a session prints into a ticket. The shell can change the application's data in
+   its volumes; the panel records that a session took place, never what it did.
+4. **Limits, shared with the sites.** Four sessions on the server, counting sites and applications together; one per
+   component (two components of one application may each have one). A session ends by itself 60 seconds after the
+   page stops reading (tab closed or asleep) or 30 minutes after it was opened.
+5. **When an open is refused**, no code is spent unless the code itself was wrong:
+
+   | The page says | Reason | What to do |
+   | :--- | :--- | :--- |
+   | the component is not running | `container_down` | The application was never installed or is stopped: its customer starts it (**Avvia**), then try again. |
+   | the application is being changed | `site_changing` | An operation holds the application (install, start, stop, upgrade, delete). Wait for it. |
+   | a session is already open in this component | `site_busy` | Close that session, or wait 60 seconds after its page was closed. |
+   | the server has no free session | `server_full` | Four sessions are open on sites and applications. Close one. |
+   | the server cannot run applications now | `503` | The executor is stopped, or older than the API: `systemctl status hp-docker-executor`. |
+
+6. **How a session ends.** `closed` (the administrator), `shell_exited` (Ctrl-D or `exit`; also an image with no
+   `/bin/sh`, where the session ends at once), `idle`, `time_limit`, `container_gone` (the application was stopped,
+   restarted, upgraded, rolled back or deleted while the session was open: open a new one with a new code),
+   `executor_gone` (the executor stopped or was restarted), `not_started` (the executor refused the open). At every
+   end where the container is still there, the executor kills what the session started, also what was left in the
+   background with `&`, `nohup` or `setsid`; it never touches the component's own processes.
+7. **What is recorded.** `admin.terminal.open` and one `admin.terminal.close` per session, on the application, with the
+   component, the container's name, the duration and the reason; `admin.terminal.denied` for every refused code.
+   Nothing typed and nothing printed is stored or logged anywhere. The sessions and their audit rows:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, user_id, stack_id, component_key, opened_at, closed_at, close_reason from admin_terminal_sessions where stack_id is not null order by opened_at desc limit 20"
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select timestamp, action, actor_id, target_id, details from audit_events where target_type = 'app_stack' and action like 'admin.terminal.%' order by timestamp desc limit 20"
+   ```
+8. **After the executor was restarted.** Nothing to do. The open sessions end as `executor_gone`, and at its start the
+   executor kills what a session left in every running component that still has a command open, without restarting
+   any component. If that pass fails, the executor logs one line with `"event":"terminal_reap_failed"` and a code
+   (`journalctl -u hp-docker-executor`); it tries again at its next start.
+9. **Known limits.** A process that deliberately leaves the session and removes the session's mark from its own
+   environment survives the end of the session; a background program can also survive when the executor dies within
+   one second after a shell ended by itself. Either stays inside the component's limits, and nobody is connected to
+   it: the customer's **Riavvia** on the application ends it. After a downgrade to the previous release, a shell left
+   in a component is not cleaned by the old executor (it cleans sites only): **Riavvia** ends it as well.

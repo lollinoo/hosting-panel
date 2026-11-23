@@ -610,6 +610,32 @@ Note di lettura:
 - `app_stack_volumes` non perde mai un volume da sola: `retention_policy = 'destroy'` lo scrive solo una cancellazione che chiede di eliminare i dati; altrimenti il volume resta `retained` dopo la cancellazione dello stack.
 - `organizations.max_app_stacks` non ha chiavi esterne: il limite si controlla sotto il blocco di riga dell'organizzazione, sugli stack non cancellati, e gli stack non contano mai fra i siti.
 
+### 2.4 Estensione ADR-0041: sessioni di terminale nei componenti
+
+La migrazione `0030_app_terminal_sessions.sql` (`ADR-0041`) è additiva e non crea tabelle: nella tabella `admin_terminal_sessions` (`0016`, `ADR-0027`) `site_id` diventa facoltativa e si aggiungono due colonne nulle. La tabella non ha chiavi esterne, di proposito: una riga resta anche quando il sito, l'applicazione, l'utente o l'organizzazione non ci sono più.
+
+```mermaid
+erDiagram
+    admin_terminal_sessions {
+        text id PK "term_<id>"
+        text user_id "chi ha aperto; nessuna chiave esterna"
+        text site_id "sessione in un sito; NULL per un componente"
+        text stack_id "sessione in un componente; NULL per un sito"
+        text component_key "il componente; NULL per un sito"
+        text organization_id "il cliente del sito o dell'applicazione"
+        text container_name "il nome che il pannello ricava, mai un id di Docker"
+        timestamptz opened_at "DEFAULT NOW()"
+        timestamptz closed_at "NULL finche e aperta"
+        text close_reason "closed, shell_exited, idle, time_limit, container_gone, executor_gone, not_started"
+    }
+```
+
+Note di lettura:
+
+- Una sessione appartiene a un sito oppure a un componente di un'applicazione, mai a entrambi e mai a nessuno (`admin_terminal_sessions_target_check`).
+- I due limiti si contano sulle righe aperte, sotto un blocco della tabella: quattro sul server, siti e applicazioni insieme, e una per sito o per coppia applicazione e componente.
+- La riga non tiene niente di ciò che è stato digitato o stampato.
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -643,6 +669,7 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_name_live (organization_id, lower(name)) WHERE deleted_at IS NULL` (`0025`) | Due stack vivi della stessa organizzazione non hanno lo stesso nome; il nome di uno stack cancellato torna libero. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_org_idempotency (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL` (`0025`) | Una stessa `Idempotency-Key` crea al più uno stack per organizzazione. |
 | `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`. |
+| `admin_terminal_sessions` | `CHECK admin_terminal_sessions_target_check` (`0030`) | Una sessione di terminale ha esattamente un bersaglio: un sito (`site_id`), oppure un componente di un'applicazione (`stack_id` e `component_key`). Le righe e le scritture della release precedente mettono sempre `site_id` e lo rispettano. |
 
 ---
 
@@ -664,3 +691,6 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I due modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0030 (`0030_app_terminal_sessions.sql`, `ADR-0041`, additiva)**:
+  - `admin_terminal_sessions.site_id` diventa facoltativa; due colonne nulle, `stack_id` e `component_key`; il vincolo `admin_terminal_sessions_target_check`.
+  - Nessuna tabella nuova, nessun backfill e nessun cancello del downgrade: la release precedente, dopo un rollback automatico, continua a scrivere righe con `site_id` e chiude come `executor_gone` una riga di applicazione rimasta aperta.
