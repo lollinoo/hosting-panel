@@ -251,7 +251,9 @@ export function convertComposeEnvironment(
 
     // The password of an address: text of its own is replaced by a secret, a secret parameter already is one.
     let whole = false;
+    let unclear = false;
     for (const span of urlPasswordsIn(parts.map((part) => ("literal" in part ? part.literal : null))).reverse()) {
+      unclear ||= span.unclear;
       const part = parts[span.first];
       if (part === undefined || span.first !== span.last || ("parameter" in part && !part.parameter.secret)) {
         whole = true;
@@ -327,11 +329,13 @@ export function convertComposeEnvironment(
       else out.push({ name, secret: only.parameter.key });
       continue;
     }
+    // The importer settles on one reading of such an address and does not guess silently.
+    const check = unclear ? " An address of the value can be read in more than one way (it holds another '@'): check by hand that it keeps its host and holds no part of the password." : "";
     for (const key of extracted) {
       report.changed(
         "SECRET_EXTRACTED",
         entry.path,
-        `A part of the value of ${name} is a secret (the password of an address, or a secret the file also writes elsewhere): that part is replaced by the generated secret parameter '${key}', and the rest of the value is kept.`,
+        `A part of the value of ${name} is a secret (the password of an address, or a secret the file also writes elsewhere): that part is replaced by the generated secret parameter '${key}', and the rest of the value is kept.${check}`,
       );
     }
     out.push({ name, value });

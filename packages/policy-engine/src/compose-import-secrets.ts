@@ -44,15 +44,20 @@ export function isPlainSetting(name: string, value: string): boolean {
 }
 
 /**
- * `scheme://user:password@`, the user possibly empty: a form the rule of a template lets through, and the importer does
- * not. Read as an address is read: the user ends at the first ':' and the password at the last '@' before the first '/'
- * or blank, so an '@' written unencoded in either stays inside it.
+ * `scheme://user:password@host`, the user possibly empty: a form the rule of a template lets through, and the importer
+ * does not. The user ends at its first ':'; the password at the first '@' followed by a host, that is by text without
+ * '@' up to a '/', '?', '#', ',' (a list of hosts or of addresses), a blank or the end. So an unencoded '@', '?' or '#'
+ * stays in the password, and a later '@' of a query or of a list never takes the host into it.
  */
-const URL_PASSWORD = /:\/\/[^/\s:]*:([^/\s]+)@/g;
+const URL_PASSWORD = /:\/\/([^/\s:]*):([^/\s]+?)@(?=([^@/?#,\s]*)(?:[/?#,\s]|$))/g;
+/** What follows a host up to the path or a blank: another '@' there means the address can be read in more than one way. */
+const BEFORE_PATH = /[^/\s]*/y;
 
 export interface TextSpan {
   readonly start: number;
   readonly end: number;
+  /** The user, or what follows the host before the path, holds another '@': the password could end elsewhere. */
+  readonly unclear: boolean;
 }
 
 /** Where a text carries the password of a URL. */
@@ -60,7 +65,9 @@ export function urlPasswordSpans(text: string): TextSpan[] {
   const spans: TextSpan[] = [];
   for (const match of text.matchAll(URL_PASSWORD)) {
     const end = match.index + match[0].length - 1;
-    spans.push({ start: end - (match[1]?.length ?? 0), end });
+    BEFORE_PATH.lastIndex = end + 1 + (match[3]?.length ?? 0);
+    const rest = BEFORE_PATH.exec(text)?.[0] ?? "";
+    spans.push({ start: end - (match[2]?.length ?? 0), end, unclear: (match[1] ?? "").includes("@") || rest.includes("@") });
   }
   return spans;
 }
@@ -73,7 +80,9 @@ const STAND_IN = "\u0000";
  * `first` and `last` are indexes in `literals` (null marks a variable), `from` and `to` offsets in the first piece when
  * the span lies inside one literal piece.
  */
-export function urlPasswordsIn(literals: readonly (string | null)[]): { readonly first: number; readonly last: number; readonly from: number; readonly to: number }[] {
+export function urlPasswordsIn(
+  literals: readonly (string | null)[],
+): { readonly first: number; readonly last: number; readonly from: number; readonly to: number; readonly unclear: boolean }[] {
   const starts: number[] = [];
   let text = "";
   for (const literal of literals) {
@@ -87,7 +96,7 @@ export function urlPasswordsIn(literals: readonly (string | null)[]): { readonly
   };
   return urlPasswordSpans(text).map((span) => {
     const first = pieceAt(span.start);
-    return { first, last: pieceAt(span.end - 1), from: span.start - (starts[first] ?? 0), to: span.end - (starts[first] ?? 0) };
+    return { first, last: pieceAt(span.end - 1), from: span.start - (starts[first] ?? 0), to: span.end - (starts[first] ?? 0), unclear: span.unclear };
   });
 }
 

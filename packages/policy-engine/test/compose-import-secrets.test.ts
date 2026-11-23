@@ -154,6 +154,57 @@ describe("a secret in the password of an address", () => {
     ]);
   });
 
+  /** What the note of an extracted secret adds when an address of the value can be read in more than one way. */
+  const CHECK_BY_HAND = "check by hand that it keeps its host and holds no part of the password";
+  const extractedNotes = (result: ComposeImportResult): string[] => messagesOf(result, "SECRET_EXTRACTED");
+
+  it.each([
+    ["a query with an '@'", `postgres://app:${MARKER}@db:5432?notify=ops@example.com`, "postgres://app:${postgres_password}@db:5432?notify=ops@example.com"],
+    ["a list with an '@'", `postgres://app:${MARKER}@db:5432,admin@example.com`, "postgres://app:${postgres_password}@db:5432,admin@example.com"],
+  ])("keeps the host of an address with no path and %s, and asks for a check by hand", (_title, address, kept) => {
+    const result = run(
+      file(
+        "services:",
+        ...serviceLines("db", "environment:", `  POSTGRES_PASSWORD: "${MARKER}"`),
+        ...serviceLines("web", "environment:", `  DATABASE_URL: "${address}"`),
+      ),
+    );
+    expect(keysOf(result)).toEqual(["postgres_password"]);
+    expect(environmentOf(result)).toEqual([{ name: "DATABASE_URL", value: kept }]);
+    expect(extractedNotes(result)).toHaveLength(1);
+    expect(extractedNotes(result)[0]).toContain(CHECK_BY_HAND);
+    expectNoMarker(result);
+  });
+
+  it("reads a '?', a '#' or an '@' inside a password, and a list of addresses one host at a time, without a note", () => {
+    const result = run(
+      web(
+        "environment:",
+        `  DATABASE_URL: "postgres://app:p?a#ss@${MARKER}@db/app"`,
+        `  REPLICA_URL: "postgres://app:${MARKER}-2@db1:5432,db2:5432/app"`,
+        `  BROKER_URL: "amqp://u:${MARKER}-3@h0,amqp://u:${MARKER}-4@h1"`,
+      ),
+    );
+    expect(environmentOf(result)).toEqual([
+      { name: "DATABASE_URL", value: "postgres://app:${database_password}@db/app" },
+      { name: "REPLICA_URL", value: "postgres://app:${replica_password}@db1:5432,db2:5432/app" },
+      { name: "BROKER_URL", value: "amqp://u:${broker_password}@h0,amqp://u:${broker_password_2}@h1" },
+    ]);
+    expect(extractedNotes(result).filter((message) => message.includes(CHECK_BY_HAND))).toEqual([]);
+    expectNoMarker(result);
+  });
+
+  it.each([
+    ["a password with an '@' before a '?'", "postgres://app:p@ss?word@db/app", "postgres://app:${database_password}@ss?word@db/app"],
+    ["a user with an '@' and no password", "postgres://app@db:5432?notify=ops@example.com", "postgres://app@db:${database_password}@example.com"],
+  ])("asks for a check by hand of an address it cannot read one way only: %s", (_title, address, kept) => {
+    const result = run(web("environment:", `  DATABASE_URL: "${address}"`));
+    expect(environmentOf(result)).toEqual([{ name: "DATABASE_URL", value: kept }]);
+    expect(extractedNotes(result)).toEqual([
+      "A part of the value of DATABASE_URL is a secret (the password of an address, or a secret the file also writes elsewhere): that part is replaced by the generated secret parameter 'database_password', and the rest of the value is kept. An address of the value can be read in more than one way (it holds another '@'): check by hand that it keeps its host and holds no part of the password.",
+    ]);
+  });
+
   it("gives two addresses with the same password one secret, and another password another", () => {
     const result = run(
       web("environment:", `  PRIMARY_URL: postgres://app:${MARKER}@db1/app`, `  REPLICA_URL: postgres://app:${MARKER}@db2/app`, `  OTHER_URL: postgres://app:${MARKER}-b@db3/app`),
