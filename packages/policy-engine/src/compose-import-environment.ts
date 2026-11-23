@@ -146,9 +146,17 @@ export function claimLiteralSecrets(registry: ParameterRegistry, census: Variabl
   for (const { entry, literal } of literals) {
     if (isSecretEntry(entry)) registry.forLiteralSecret(entry.name, literal);
   }
-  // Also in a value that names a variable elsewhere: the password is text of its own when it lies inside one literal piece.
+  // In every value, also one replaced whole: the same password written elsewhere is still the same secret. In a value that
+  // names a variable, the password is text of its own when it lies inside one literal piece.
   for (const entry of entries) {
-    if (!entry.scan.ok || isSecretEntry(entry)) continue;
+    if (!entry.scan.ok) {
+      // The '$' form cannot be read: the text as written, where a password without '$' is what the container receives.
+      for (const span of urlPasswordSpans(entry.written)) {
+        const password = entry.written.slice(span.start, span.end);
+        if (!password.includes("$")) registry.forLiteralSecret(urlPasswordName(entry.name), password);
+      }
+      continue;
+    }
     const pieces = entry.scan.pieces.map((piece) => ("literal" in piece ? piece.literal : null));
     for (const span of urlPasswordsIn(pieces)) {
       const piece = pieces[span.first];

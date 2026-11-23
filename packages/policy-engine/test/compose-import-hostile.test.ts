@@ -392,16 +392,13 @@ describe("files written to take long", () => {
       const room = 65_536 - Buffer.byteLength(web("environment:", `  ${name}: '${before}${after}'`));
       return web("environment:", `  ${name}: '${before}${"://:zz@".repeat(Math.floor(room / 7))}${after}'`);
     };
-    // The scan before conversion reads the addresses first to last.
-    const early = timed(crowded("A", distinct, ""));
-    expectWellFormed(early.result);
-    expect(refusals(early.result)).toEqual(["refused SECRETS_TOO_MANY "]);
-    expect(early.ms).toBeLessThan(BOUND_MS);
-    // Under a name that looks like a secret's and beside a generated secret, the addresses are read only by the conversion, last to first.
-    const late = timed(crowded("DB_PASSWORD", "${SERVICE_PASSWORD_X}", distinct));
-    expectWellFormed(late.result);
-    expect(refusals(late.result)).toEqual(["refused SECRET_REFERENCES_TOO_MANY services.web.environment.DB_PASSWORD", "refused SECRETS_TOO_MANY "]);
-    expect(late.ms).toBeLessThan(BOUND_MS);
+    // The scan before conversion reads the addresses first to last, also under a name that looks like a secret's.
+    for (const compose of [crowded("A", distinct, ""), crowded("DB_PASSWORD", `\${SERVICE_PASSWORD_X}${distinct}`, "")]) {
+      const { result, ms } = timed(compose);
+      expectWellFormed(result);
+      expect(refusals(result)).toEqual(["refused SECRETS_TOO_MANY "]);
+      expect(ms).toBeLessThan(BOUND_MS);
+    }
   });
 
   it("gives keys to thousands of variables whose names make the same key without trying every key made before", () => {

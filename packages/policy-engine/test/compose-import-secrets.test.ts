@@ -285,6 +285,16 @@ describe("one secret written in more than one place", () => {
     }
   });
 
+  it.each([
+    ["under a name that looks like a secret's", `  AUTH_TOKEN_URL: "https://svc:${MARKER}@auth/\${REALM}"`, "AUTH_TOKEN_URL", "auth_token_password"],
+    ["whose '$' form cannot be read", `  DATABASE_URL: "postgres://app:${MARKER}@\${DB_HOST:+db}/app"`, "DATABASE_URL", "database_password"],
+  ])("is known from an address in a value replaced whole, %s", (_title, line, name, key) => {
+    const result = run(file("services:", ...serviceLines("worker", "environment:", `  JAVA_OPTS: "-Ddb.pw=${MARKER}"`), ...serviceLines("app", "environment:", line)));
+    expect(environmentOf(result, "worker")).toEqual([{ name: "JAVA_OPTS", value: `-Ddb.pw=\${${key}}` }]);
+    expect(environmentOf(result, "app")).toEqual([{ name, secretParameter: name.toLowerCase() }]);
+    expectNoMarker(result);
+  });
+
   it("is not looked for everywhere when its text is an ordinary word: the name of the database stays", () => {
     const result = run(
       file(
