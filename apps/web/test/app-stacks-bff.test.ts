@@ -18,6 +18,8 @@ import * as planRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/plan
 import * as secretsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/secrets/route";
 import * as domainsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route";
 import * as domainRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route";
+import * as linksRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/links/route";
+import * as linkRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/links/[linkId]/route";
 import * as logsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route";
 
 type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
@@ -29,6 +31,7 @@ const HASH = "a".repeat(64);
 const SECRET = "S3cr3t-planted";
 const NOW = "2026-11-22T10:00:00.000Z";
 const domain = { hostname: "notes.example.com", componentKey: "web", port: 8080 };
+const link = { databaseStackId: "stk_db1" };
 const create = {
   templateVersionId: "atv_notes_2",
   name: "Notes",
@@ -204,6 +207,30 @@ const cases: Case[] = [
     badBodies: [{ x: 1 }, [], null],
   },
   {
+    name: "link add",
+    handler: linksRoute.POST as unknown as Handler,
+    method: "POST",
+    params: { orgId: ORG, stackId: STACK },
+    path: `${BASE}/${STACK}/links`,
+    body: link,
+    idempotency: false,
+    status: 201,
+    timeoutMs: 8_000,
+    badBodies: [{}, { databaseStackId: "" }, { databaseStackId: "Stk-DB" }, { databaseStackId: 7 }, { ...link, extra: 1 }, { ...link, alias: "db" }, [link]],
+  },
+  {
+    name: "link remove",
+    handler: linkRoute.DELETE as unknown as Handler,
+    method: "DELETE",
+    params: { orgId: ORG, stackId: STACK, linkId: "slnk_1" },
+    path: `${BASE}/${STACK}/links/slnk_1`,
+    idempotency: false,
+    status: 200,
+    timeoutMs: 8_000,
+    okBodies: [{}],
+    badBodies: [{ x: 1 }, [], null],
+  },
+  {
     name: "component logs",
     handler: logsRoute.GET as unknown as Handler,
     method: "GET",
@@ -349,7 +376,7 @@ describe("application stack BFF routes", () => {
     });
   }
 
-  it("an empty body is a 400 on plan, secret set and domain add, and forwarded as none on domain remove", async () => {
+  it("an empty body is a 400 on plan, secret set, domain add and link add, and forwarded as none on domain and link remove", async () => {
     for (const c of mutations.filter((m) => !m.idempotency && m.body !== undefined)) {
       expect((await c.handler(req(c.method), ctxOf(c.params))).status, c.name).toBe(400);
     }
@@ -357,7 +384,7 @@ describe("application stack BFF routes", () => {
   });
 
   it("the action route knows only the six queueing actions: anything else is a 404 before the session is read", async () => {
-    for (const name of ["foo", "__proto__", "constructor", "toString", "hasOwnProperty", "plan", "secrets", "domains", "components", "backups", "ports", "DEPLOY"]) {
+    for (const name of ["foo", "__proto__", "constructor", "toString", "hasOwnProperty", "plan", "secrets", "domains", "links", "components", "backups", "ports", "DEPLOY"]) {
       const res = await (actionRoute.POST as unknown as Handler)(
         req("POST", { headers: { "Idempotency-Key": "k" }, body: {} }),
         ctxOf({ orgId: ORG, stackId: STACK, action: name }),
