@@ -248,7 +248,8 @@ export async function finishAppStackTaskRun(db: DatabaseExecutor, input: FinishA
       status: input.status,
       problem: input.problem,
       exitCode: input.exitCode,
-      ...(input.startedAt !== null ? { startedAt: input.startedAt } : {}),
+      // A run that did not start has no start, whatever was written when it was sent.
+      ...(input.status === "not_started" ? { startedAt: null } : input.startedAt !== null ? { startedAt: input.startedAt } : {}),
       endedAt: input.endedAt,
       output: bound.output,
       outputTruncated: input.outputTruncated || bound.truncated,

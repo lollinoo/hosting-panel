@@ -674,6 +674,21 @@ describe("@hosting-panel/database — tasks of applications", () => {
         outputTruncated: false,
       });
       expect(await getAppStackTaskRun(db(), { runId: reported })).toMatchObject({ status: "timed_out", startedAt });
+
+      // Sent, then refused for sure: the start written when it was sent goes, because nothing started.
+      const refused = await queued();
+      await startAppStackTaskRun(db(), { runId: refused, startedAt: at("2026-11-23T11:02:00.000Z") });
+      await finishAppStackTaskRun(db(), {
+        runId: refused,
+        status: "not_started",
+        problem: "unavailable",
+        exitCode: null,
+        startedAt: at("2026-11-23T11:02:01.000Z"),
+        endedAt: at("2026-11-23T11:02:02.000Z"),
+        output: "",
+        outputTruncated: false,
+      });
+      expect(await getAppStackTaskRun(db(), { runId: refused })).toMatchObject({ status: "not_started", startedAt: null });
     });
 
     it("bounds again what a run printed before it writes it", async () => {
