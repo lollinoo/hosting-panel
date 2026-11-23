@@ -430,11 +430,12 @@ export class AppStackRuntime {
       }
       if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare"))) {
         // Pre-flight: create was never called, so no container was touched; the stack keeps the status the plan that
-        // runs shows.
+        // runs shows, and an upgrade or a rollback takes back what its request wrote.
         const { stack } = st;
         const previous = deploy ? st.previous : st.plan;
+        const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreApplied: true } : {};
         const observed = stack && previous ? await this.#status(ctx) : null;
-        if (!stack || !previous || !observed) return settle({ stackStatus: "failed" });
+        if (!stack || !previous || !observed) return settle({ stackStatus: "failed", ...restore });
         const health = appStackHealthRows(previous, observed, "observer");
         const stackStatus: AppStackStatus = appStackAggregate({
           plan: previous,
@@ -442,7 +443,7 @@ export class AppStackRuntime {
           domainCount: (await listAppStackDomains(db, ctx.ref)).length,
           routesPublished: stack.appliedRoutesHash !== null,
         });
-        return settle({ stackStatus }, health);
+        return settle({ stackStatus, ...restore }, health);
       }
       const plan = st.plan!;
       if (!deploy || st.previous === null) {

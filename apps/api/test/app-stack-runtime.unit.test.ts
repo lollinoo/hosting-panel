@@ -521,7 +521,7 @@ describe("AppStackRuntime (RT3)", () => {
       expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "stopped" });
     });
 
-    it("a pre-flight failure of an upgrade touches no component and the stack keeps its observed status", async () => {
+    it("a pre-flight failure of an upgrade touches no component, keeps the observed status and takes its target back", async () => {
       const { stackId, rev } = await running([CACHE, WEB]);
       const v2 = revision(stackId, [CACHE, WEB_V2]);
       const upgrade = await enqueue(stackId, "stack.upgrade", v2);
@@ -533,7 +533,34 @@ describe("AppStackRuntime (RT3)", () => {
       const stack = await stackOf(stackId);
       expect(stack.status).toBe("running");
       expect(stack.appliedRevisionId).toBe(rev.revisionId);
-      expect(stack.desiredRevisionId).toBe(v2.revisionId);
+      expect(stack.desiredRevisionId).toBe(rev.revisionId);
+      // The history keeps what was tried.
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", revisionId: v2.revisionId });
+      expect((await opOf(upgrade.operation!.id)).status).toBe("failed");
+    });
+
+    it("a rollback that fails at prepare goes back to the revision that runs, not to the one it asked for", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      expect(await run(await enqueue(stackId, "stack.upgrade", v2))).toBeUndefined();
+      const rollback = await enqueue(stackId, "stack.rollback", revision(stackId, rev.plan.components as AppStackPlanComponent[]));
+      fake.failNext("prepareAppStack", "definite");
+
+      expectFailure(await run(rollback), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: v2.revisionId, desiredRevisionId: v2.revisionId });
+      expect(fake.stack(stackId).components.get("web")!.componentHash).toBe(computeAppStackComponentHash(v2.plan as ApprovedStackPlan, "web"));
+    });
+
+    it("a failure at create keeps the target: the executor may have replaced a component", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("createAppStackComponents", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
     });
 
     it("a rollback runs the deploy path and re-applies the older plan", async () => {

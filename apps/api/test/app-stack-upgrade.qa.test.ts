@@ -2,10 +2,22 @@
 // identity, only the changed component is replaced, its dependents are restarted, a pre-flight failure touches no
 // container, and a failure after create removes only what the new revision created.
 import { randomUUID } from "node:crypto";
-import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST } from "@hosting-panel/contracts";
-import { appStackRevisions, appStacks, appStackVolumes, asc, eq, operations, resourceQuotas } from "@hosting-panel/database";
+import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST, ApprovedStackPlanSchema } from "@hosting-panel/contracts";
+import {
+  appStackComponents,
+  appStackParameters,
+  appStackRevisions,
+  appStacks,
+  appStackVolumes,
+  asc,
+  eq,
+  operations,
+  recordAppStackComponentHealthTransactional,
+  resourceQuotas,
+} from "@hosting-panel/database";
 import type { AppStackSimFault, AppStackSimStep, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { appStackHealthRows } from "../src/app-stacks/app-stack-runtime-policy.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import { DOCKER_EXECUTOR_TOKEN } from "../src/tokens.js";
 import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness } from "./fixtures/app-stack-harness.js";
@@ -40,6 +52,11 @@ const EXTRA = [
   "",
 ].join("\n");
 const EXTRA_ADDED = BASE.replace("volumes:\n  data: {}", `${EXTRA}volumes:\n  data: {}`);
+/** The worker and its setting are gone: only the storage is left. */
+const WORKER_DROPPED =
+  BASE.slice(0, BASE.indexOf("x-hp-parameters:")) +
+  BASE.slice(BASE.indexOf("services:"), BASE.indexOf("  worker:")) +
+  BASE.slice(BASE.indexOf("volumes:\n  data: {}"));
 const BUDGET_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 
@@ -122,13 +139,13 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
   }
 
   /** A template of its own from `source`, one stack of it deployed and running on revision 1. */
-  async function install(source: string): Promise<{ templateId: string; versionId: string; stackId: string }> {
+  async function install(source: string, parameters: readonly Json[] = []): Promise<{ templateId: string; versionId: string; stackId: string }> {
     const { templateId, versionId } = await h.publish(source);
     const res = await h.call(
       h.a.token,
       "POST",
       `/v1/organizations/${h.a.orgId}/app-stacks`,
-      { templateVersionId: versionId, name: `app-${randomUUID().slice(0, 8)}`, deploy: true },
+      { templateVersionId: versionId, name: `app-${randomUUID().slice(0, 8)}`, deploy: true, parameters },
       { "Idempotency-Key": randomUUID() },
     );
     expect(res.status, res.raw).toBe(202);
@@ -160,6 +177,44 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
   });
   const volumeIdentity = async (stackId: string) =>
     (await volumeRows(stackId)).map((r) => ({ stackId: r.stackId, key: r.volumeKey, status: r.status, retention: r.retentionPolicy, createdAt: r.createdAt.getTime() }));
+
+  /** What the request of an upgrade writes, as the code reads it back. */
+  const targetRows = async (stackId: string) => {
+    const row = await stackRow(stackId);
+    const { db } = h.dbClient;
+    return {
+      stack: { desired: row.desiredRevisionId, applied: row.appliedRevisionId, version: row.templateVersionId, quota: row.resourceQuotaId },
+      parameters: (await db.select().from(appStackParameters).where(eq(appStackParameters.stackId, stackId)).orderBy(asc(appStackParameters.parameterKey))).map(
+        (p) => [p.parameterKey, p.publicValue],
+      ),
+      components: (await db.select().from(appStackComponents).where(eq(appStackComponents.stackId, stackId)).orderBy(asc(appStackComponents.componentKey))).map(
+        (c) => [c.componentKey, c.appliedRevisionId, c.health],
+      ),
+      quota: (await db.select().from(resourceQuotas).where(eq(resourceQuotas.organizationId, h.a.orgId))).map((q) => [q.usedServices, q.usedCpuMilli, q.usedMemoryBytes]),
+    };
+  };
+  /** What the customer reads: the detail and the list entry. */
+  const shown = async (stackId: string) => {
+    const res = await h.call(h.a.token, "GET", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}`);
+    expect(res.status, res.raw).toBe(200);
+    const d = res.body.data as Json;
+    const listed = ((await h.call(h.a.token, "GET", `/v1/organizations/${h.a.orgId}/app-stacks`)).body.data as Json[]).find((s) => s.id === stackId)!;
+    return {
+      status: d.status,
+      templateVersionId: d.templateVersionId,
+      version: d.templateVersionNumber,
+      revision: d.revisionNumber,
+      upgrade: d.upgrade,
+      rollback: d.rollback,
+      parameters: d.parameters,
+      components: d.components.map((c: Json) => c.key),
+      cpuMilli: d.cpuMilli,
+      memoryBytes: d.memoryBytes,
+      listed: { status: listed.status, version: listed.templateVersionNumber, components: listed.componentCount },
+    };
+  };
+  const componentRead = (stackId: string, key: string, read: "logs" | "health") =>
+    h.call(h.a.token, "GET", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/components/${key}/${read}`);
 
   const volumeMounted = (stackId: string, component: string): boolean => {
     const name = snapshot(stackId).volumes.data!.name;
@@ -297,15 +352,23 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
     ];
 
     it.each(FAULTS)("an upgrade that fails at %s (%s) leaves every container, the volume and the applied revision as they were", async (at, fault) => {
-      const { templateId, stackId } = await install(BASE);
+      const { templateId, versionId: v1, stackId } = await install(BASE, [{ key: "worker_interval_seconds", value: 45 }]);
       const [rev1] = await revisions(stackId);
       const v2 = await addVersion(templateId, STORAGE_CHANGED);
       const before = observed(stackId);
       const volumeRowsBefore = await volumeIdentity(stackId);
+      // Everything the request of the upgrade rewrites, and everything the customer reads from it.
+      const rowsBefore = await targetRows(stackId);
+      const shownBefore = await shown(stackId);
+      expect(shownBefore).toMatchObject({ version: 1, revision: 1, upgrade: { versionNumber: 2 }, rollback: null });
+      const upgradeBody = { templateVersionId: v2, parameters: [{ key: "worker_interval_seconds", value: 60 }] };
+      const preview = await plan(stackId, upgradeBody);
+      expect(preview.status, preview.raw).toBe(200);
+      expect(preview.body.data).toMatchObject({ fromRevisionId: rev1!.id, fromVersionNumber: 1, toVersionNumber: 2 });
 
       sim.appStacks.failNextAppStackStep(at, fault);
-      const diff = await plan(stackId, { templateVersionId: v2 });
-      expect((await queue(stackId, "upgrade", { templateVersionId: v2, planHash: diff.body.data.planHash })).status).toBe(202);
+      expect((await queue(stackId, "upgrade", { ...upgradeBody, planHash: preview.body.data.planHash })).status).toBe(202);
+      expect((await targetRows(stackId)).parameters).toEqual([["worker_interval_seconds", 60]]);
       await drain(stackId);
 
       const [, failedUp] = await opsOf(stackId);
@@ -319,14 +382,103 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       expect(row.status).toBe("running");
       expect(await volumeIdentity(stackId)).toEqual(volumeRowsBefore);
       expectBystanderUntouched();
+      // What the request wrote is taken back: target, version, settings, components and quota are those of revision 1, so
+      // the customer sees version 1 with the upgrade on offer again and the same preview of it.
+      expect(await targetRows(stackId)).toEqual(rowsBefore);
+      expect(await shown(stackId)).toEqual(shownBefore);
+      expect((await plan(stackId, upgradeBody)).body.data).toEqual(preview.body.data);
 
-      // The fault was consumed: asking again for the same revision works, and the data is the same.
+      // The fault was consumed: a plain redeploy installs what runs, not the version that failed, and the data is the same.
       const retry = await h.call(h.a.token, "POST", orgPath(stackId, "deploy"), {}, { "Idempotency-Key": randomUUID() });
       expect(retry.status, retry.raw).toBe(202);
       await drain(stackId);
-      expect(await stackRow(stackId)).toMatchObject({ status: "running" });
-      expect((await stackRow(stackId)).appliedRevisionId).toBe((await stackRow(stackId)).desiredRevisionId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev1!.id, desiredRevisionId: rev1!.id, templateVersionId: v1 });
+      expect((await revisions(stackId)).map((r) => r.templateVersionId)).toEqual([v1, v2]);
+      expect(snapshot(stackId).containers).toEqual(before.snap!.containers);
       expect(snapshot(stackId).volumes).toEqual(before.snap!.volumes);
+    });
+
+    it("an upgrade that drops a component and fails at pull: that component keeps its logs and health, and a later crash shows", async () => {
+      const { templateId, stackId } = await install(BASE, [{ key: "worker_interval_seconds", value: 45 }]);
+      const v2 = await addVersion(templateId, WORKER_DROPPED);
+      const rowsBefore = await targetRows(stackId);
+      const shownBefore = await shown(stackId);
+      expect(shownBefore).toMatchObject({ components: ["storage", "worker"], listed: { version: 1, components: 2 } });
+      for (const read of ["logs", "health"] as const) expect((await componentRead(stackId, "worker", read)).status).toBe(200);
+
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      const diff = await plan(stackId, { templateVersionId: v2 });
+      expect(diff.body.data.components.find((c: Json) => c.key === "worker")).toMatchObject({ change: "removed" });
+      expect((await queue(stackId, "upgrade", { templateVersionId: v2, planHash: diff.body.data.planHash })).status).toBe(202);
+      expect((await targetRows(stackId)).components.map((c) => c[0])).toEqual(["storage"]);
+      await drain(stackId);
+
+      expect((await opsOf(stackId))[1]).toMatchObject({ kind: "stack.upgrade", status: "failed" });
+      expect(snapshot(stackId).containers.worker!.state).toBe("running");
+      expect(await targetRows(stackId)).toEqual(rowsBefore);
+      expect(await shown(stackId)).toEqual(shownBefore);
+      for (const read of ["logs", "health"] as const) {
+        const res = await componentRead(stackId, "worker", read);
+        expect(res.status, res.raw).toBe(200);
+      }
+
+      // The storage stops: the page shows the next observation, recorded here for this stack only as the observer's pass
+      // does (a whole pass would also read the bystander).
+      sim.appStacks.crashAppStackComponent(stackId, "storage");
+      const [rev1] = await revisions(stackId);
+      await recordAppStackComponentHealthTransactional(h.dbClient.db, {
+        organizationId: h.a.orgId,
+        stackId,
+        observedAt: new Date(),
+        components: appStackHealthRows(
+          ApprovedStackPlanSchema.parse(rev1!.plan),
+          await sim.appStacks.getAppStackStatus({ stackId, organizationId: h.a.orgId }),
+          "observer",
+        ),
+      });
+      expect((await targetRows(stackId)).components[0]).toEqual(["storage", rev1!.id, "stopped"]);
+      expect(await shown(stackId)).toMatchObject({ status: "failed", version: 1 });
+    });
+
+    it("the failed upgrade stays in the history, its key answers the same operation, and a new request tries it again", async () => {
+      const { templateId, stackId } = await install(BASE);
+      const [rev1] = await revisions(stackId);
+      const v2 = await addVersion(templateId, STORAGE_CHANGED);
+      const key = randomUUID();
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      const diff = await plan(stackId, { templateVersionId: v2 });
+      const body = { templateVersionId: v2, planHash: diff.body.data.planHash };
+      const first = await h.call(h.a.token, "POST", orgPath(stackId, "upgrade"), body, { "Idempotency-Key": key });
+      expect(first.status, first.raw).toBe(202);
+      await drain(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", desiredRevisionId: rev1!.id });
+
+      const replay = await h.call(h.a.token, "POST", orgPath(stackId, "upgrade"), body, { "Idempotency-Key": key });
+      expect(replay.status, replay.raw).toBe(202);
+      expect(replay.body.data.operationId).toBe(first.body.data.operationId);
+      expect(await opsOf(stackId)).toHaveLength(2);
+      const history = await h.call(h.a.token, "GET", orgPath(stackId, "deployments"));
+      expect(history.body.data[0]).toMatchObject({
+        operationId: first.body.data.operationId,
+        kind: "stack.upgrade",
+        revisionNumber: 2,
+        status: "failed",
+        problem: "DOCKER_ENGINE_UNAVAILABLE",
+      });
+
+      // A new request is a new operation and a new revision; once it runs, the way back is to the version that ran before.
+      const again = await upgradeTo(stackId, v2);
+      expect(again.planHash).toBe(diff.body.data.planHash);
+      await drain(stackId);
+      const ops = await opsOf(stackId);
+      expect(ops.map((o) => [o.kind, o.status])).toEqual([
+        ["stack.deploy", "succeeded"],
+        ["stack.upgrade", "failed"],
+        ["stack.upgrade", "succeeded"],
+      ]);
+      const all = await revisions(stackId);
+      expect(all.map((r) => r.revisionNumber)).toEqual([1, 2, 3]);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", appliedRevisionId: all[2]!.id, templateVersionId: v2 });
     });
   });
 

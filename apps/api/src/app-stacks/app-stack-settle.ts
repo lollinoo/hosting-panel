@@ -38,6 +38,8 @@ export interface AppStackSettlement {
   readonly appliedRevisionId?: string;
   /** Absent = unchanged. */
   readonly appliedRoutesHash?: string | null;
+  /** An upgrade or a rollback that changed nothing on the executor: what its request wrote goes back to the applied revision. */
+  readonly restoreApplied?: boolean;
   readonly health?: {
     readonly observedAt: Date;
     readonly components: readonly { componentKey: string; health: AppStackComponentHealth }[];
@@ -101,6 +103,7 @@ export function settleAppStackOperation(
         stackStatus: target === current ? null : target,
         ...(s.appliedRevisionId === undefined ? {} : { appliedRevisionId: s.appliedRevisionId }),
         ...(s.appliedRoutesHash === undefined ? {} : { appliedRoutesHash: s.appliedRoutesHash }),
+        ...(s.restoreApplied === true ? { restoreApplied: true } : {}),
       });
     }
     if (s.health && target !== "deleted") {
