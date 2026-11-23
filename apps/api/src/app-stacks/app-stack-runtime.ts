@@ -36,6 +36,7 @@ import { computeAppStackComponentHash, verifyAppStackPlanHash } from "@hosting-p
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
+import { AppStackBackupRuntime, isAppStackBackupKind } from "./app-stack-backup-runtime.js";
 import { recoverAppStackOperation } from "./app-stack-recovery.js";
 import {
   APP_STACK_FAILURE,
@@ -130,6 +131,7 @@ const healthMap = (rows: HealthRows) => new Map(rows.map((h) => [h.componentKey,
 @Injectable()
 export class AppStackRuntime {
   readonly #deps: AppStackRuntimeDeps;
+  readonly #backups: AppStackBackupRuntime;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) dbClient: DatabaseClient,
@@ -138,10 +140,13 @@ export class AppStackRuntime {
     @Optional() @Inject(APP_STACK_RUNTIME_CLOCK) clock?: AppStackRuntimeClock,
   ) {
     this.#deps = { db: dbClient.db, executor, config, clock: clock ?? SYSTEM_APP_STACK_CLOCK };
+    this.#backups = new AppStackBackupRuntime(this.#deps);
   }
 
-  /** Worker dispatch for every APP_STACK_OPERATION_KINDS kind. Throws to fail. */
+  /** Worker dispatch for every kind of the stack lane. Throws to fail. */
   public async apply(op: OperationRow, payload: Readonly<Record<string, unknown>>): Promise<void> {
+    // Backups have their own payload and no deployment row (ADR-0038).
+    if (isAppStackBackupKind(op.kind)) return this.#backups.apply(op);
     const parsed = AppStackOperationPayloadSchema.safeParse(payload);
     if (!parsed.success || parsed.data.stackId !== op.resourceId) {
       const failure = APP_STACK_FAILURE.STACK_TEMPLATE_INVALID;
@@ -192,6 +197,7 @@ export class AppStackRuntime {
 
   /** Worker recovery for an `unknown` stack operation; read-only. */
   public recover(op: OperationRow): Promise<"pending" | "settled"> {
+    if (isAppStackBackupKind(op.kind)) return this.#backups.recover(op);
     return recoverAppStackOperation(this.#deps, op);
   }
 

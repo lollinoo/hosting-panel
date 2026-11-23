@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { APP_STACK_OPERATION_KINDS, type OperationKind } from "@hosting-panel/contracts";
+import { APP_STACK_BACKUP_OPERATION_KINDS, APP_STACK_OPERATION_KINDS, type OperationKind } from "@hosting-panel/contracts";
 import {
   DEMO_IDS,
   and,
@@ -130,9 +130,11 @@ describe("outbox stack lane (RT5)", () => {
     await worker.processPendingOnce();
 
     const takers = claims.filter((c) => c.operationIds.includes(operation.id));
-    expect(takers.map((c) => c.filter)).toEqual([{ includeKinds: APP_STACK_OPERATION_KINDS }]);
+    expect(takers.map((c) => c.filter)).toEqual([{ includeKinds: [...APP_STACK_OPERATION_KINDS, ...APP_STACK_BACKUP_OPERATION_KINDS] }]);
     const main = claims.find((c) => (c.filter as { excludeKinds?: string[] }).excludeKinds !== undefined);
-    expect((main!.filter as { excludeKinds: string[] }).excludeKinds).toEqual(expect.arrayContaining([...APP_STACK_OPERATION_KINDS]));
+    expect((main!.filter as { excludeKinds: string[] }).excludeKinds).toEqual(
+      expect.arrayContaining([...APP_STACK_OPERATION_KINDS, ...APP_STACK_BACKUP_OPERATION_KINDS]),
+    );
     expect(runtime.apply).toHaveBeenCalledTimes(1);
     expect(runtime.apply.mock.calls[0]![0].id).toBe(operation.id);
     expect(runtime.apply.mock.calls[0]![1]).toMatchObject({ operationId: operation.id, stackId: operation.resourceId });

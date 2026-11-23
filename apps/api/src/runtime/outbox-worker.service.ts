@@ -1,5 +1,6 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
+  APP_STACK_BACKUP_OPERATION_KINDS,
   APP_STACK_OPERATION_KINDS,
   ERROR_CODES,
   HOST_JOB_KIND,
@@ -93,7 +94,8 @@ const FILE_ARCHIVE_OPERATION_KINDS: readonly OperationKind[] = [
 // The import runs in the WordPress lane: its copy step is the update's own.
 const WORDPRESS_LANE_KINDS = [...WORDPRESS_OPERATION_KINDS, WORDPRESS_IMPORT_KIND] as const satisfies readonly OperationKind[];
 const HOST_LANE_KINDS = [HOST_JOB_KIND, PANEL_CONTAINER_APPLY_KIND] as const satisfies readonly OperationKind[];
-const STACK_LANE_KINDS: readonly OperationKind[] = APP_STACK_OPERATION_KINDS;
+// Backups of an application run under its lock, in the same lane (ADR-0038 K6).
+const STACK_LANE_KINDS: readonly OperationKind[] = [...APP_STACK_OPERATION_KINDS, ...APP_STACK_BACKUP_OPERATION_KINDS];
 // host-jobs.ts imports this file for the backup kinds, so a static import back would be an ESM cycle.
 const hostJobs = () => import("../host/host-jobs.js");
 export const BACKUP_OPERATION_KINDS = [
