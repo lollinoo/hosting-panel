@@ -37,7 +37,8 @@
  * Steps: gate-self-test, preflight, snapshot-before, plans-compile-from-seeds, applications-deploy,
  * mariadb-starts-hardened, postgresql-starts-hardened, valkey-starts-hardened, data-survives-restart,
  * unlinked-application-cannot-reach, link-reaches-by-alias, link-idempotent, two-applications-stay-apart,
- * link-follows-a-replaced-database, application-removal-detaches-running-database,
+ * link-follows-a-replaced-database, application-stop-start-keeps-links,
+ * application-removal-detaches-running-database,
  * stopped-database-survives-application-removal, stale-attachment-repaired, refuses-foreign-targets,
  * detach-removes-reachability, remove-everything, host-nft-metadata-drop-on-stack-net (root only:
  * HP_ACCEPT_ROOT_CASES=1 as root), gate-clean, nothing-left.
@@ -942,6 +943,31 @@ async function main() {
       assert((await valkey(worker, aliasOf(V), "GET", "probe")) === "kept", "the first application reaches the new container by the same name, data kept", "another value");
       assert((await valkey(workerB, aliasOf(V), "GET", "probe")) === "kept", "and so does the second", "another value");
       assert((await inspectOf(DB(V))).Config.Cmd.includes("192mb"), "it runs the new version", "old arguments");
+    });
+
+    await step("application-stop-start-keeps-links", async () => {
+      const before = await Promise.all(ports.map(([stackId]) => runOf(DB(stackId))));
+      const attached = await Promise.all(ports.map(([stackId]) => netsOf(DB(stackId))));
+      const stopped = await adapter.stopAppStack({ stackId: A, organizationId: ORG });
+      assert(stopped.components.length === plans.a.components.length && stopped.components.every((c) => c.outcome === "stopped"), "the first application is stopped", JSON.stringify(stopped));
+      for (const name of namesOf(plans.a).containers) assert((await inspectOf(name)).State.Running === false, `${name} is not running`, "running");
+      assert(same(await Promise.all(ports.map(([stackId]) => netsOf(DB(stackId)))), attached), "every database stays attached to the stopped application's network", "changed");
+      assert(same(await Promise.all(ports.map(([stackId]) => runOf(DB(stackId)))), before), "no database is restarted or made again", "changed");
+      assert((await valkey(workerB, aliasOf(V), "GET", "probe")) === "kept", "the other application still reaches the database", "another value");
+      // What the API does before the start of an application: one pass for each database it uses.
+      const mark = gateLog.length;
+      assert(outcomes(await link(V, [A, B])) === "a:already_connected,b:already_connected", "the pass before the start finds Valkey attached", "not attached");
+      for (const stackId of [M, P]) assert(outcomes(await link(stackId, [A])) === "a:already_connected", `the pass before the start finds ${stackId} attached`, "not attached");
+      assert(writesIn(mark).length === 0, "the passes change nothing on the server", writesIn(mark).join(" | "));
+      for (const c of plans.a.components) {
+        if (c.dependsOn.length > 0) await waitHealthy(A, c.dependsOn);
+        const started = await adapter.startAppStackComponent(startReq(plans.a, c.key));
+        assert(started.outcome === "started", `${c.key} starts again`, JSON.stringify(started));
+      }
+      await waitHealthy(A, plans.a.components.map((c) => c.key));
+      for (const [stackId, port] of ports) assert((await reach(worker, aliasOf(stackId), port)) === null, `started again, the application reaches ${stackId} by its name`, String(await reach(worker, aliasOf(stackId), port)));
+      assert((await valkey(worker, aliasOf(V), "GET", "probe")) === "kept", "and reads the same data", "another value");
+      assert(same(await Promise.all(ports.map(([stackId]) => runOf(DB(stackId)))), before), "the databases ran through all of it", "changed");
     });
 
     await step("application-removal-detaches-running-database", async () => {
