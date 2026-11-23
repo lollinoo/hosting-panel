@@ -385,7 +385,7 @@ describe("notification pages", () => {
     answer({ [ADMIN]: ok(settings()) });
     const h = html(en, await AdminNotificationsPage());
     expect(reads()).toEqual([ADMIN]);
-    for (const text of [en.notifications.title, en.notifications.intro.server, "hooks.example.org"]) expect(h).toContain(text);
+    for (const text of [en.notifications.title, en.admin.notifications.intro, "hooks.example.org"]) expect(h).toContain(text);
 
     answer({ [ADMIN]: fail(500, "INTERNAL_ERROR") });
     const broken = html(en, await AdminNotificationsPage());
@@ -397,10 +397,10 @@ describe("notification pages", () => {
     answer({ "v1/me": ok({ memberships: [{ organizationId: ORG }] }), [OF_ORG]: ok(ofCustomer()) });
     const h = html(en, await AccountNotificationsPage());
     expect(reads()).toEqual(["v1/me", OF_ORG]);
-    for (const text of [en.notifications.intro.customer, en.notifications.back, 'href="/account"', en.notifications.email.intro.customer]) {
+    for (const text of [en.notifications.intro, en.notifications.back, 'href="/account"', en.notifications.email.intro.customer]) {
       expect(h, text).toContain(text);
     }
-    expect(h).not.toContain(en.notifications.intro.server);
+    expect(h).not.toContain(en.admin.notifications.intro);
   });
 
   it("a member who is not an owner is told who can set the notifications, not shown an error", async () => {

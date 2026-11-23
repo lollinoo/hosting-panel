@@ -2858,15 +2858,15 @@ x-hp-ingress:
       },
       more: "Elenco parziale: sono mostrati solo i primi 100 modelli multi-servizio.",
     },
+    notifications: {
+      intro:
+        "Il pannello ti scrive quando un avviso della pagina Stato si apre e quando si chiude. Scegli dove ricevere i messaggi e per quali avvisi.",
+    },
   },
   notifications: {
     title: "Notifiche",
-    intro: {
-      server:
-        "Il pannello ti scrive quando un avviso della pagina Stato si apre e quando si chiude. Scegli dove ricevere i messaggi e per quali avvisi.",
-      customer:
-        "Ti scriviamo quando uno dei tuoi siti ha un problema e quando il problema è risolto. Scegli dove ricevere i messaggi e per che cosa.",
-    },
+    intro:
+      "Ti scriviamo quando uno dei tuoi siti ha un problema e quando il problema è risolto. Scegli dove ricevere i messaggi e per che cosa.",
     back: "Torna al tuo account",
     notAllowed: "Solo un proprietario dell'account può impostare le notifiche.",
     mailNotReady: {

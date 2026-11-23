@@ -19,7 +19,7 @@ export default async function AdminNotificationsPage() {
     <div className="max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">{t.title}</h1>
-        <p className="text-sm text-muted-foreground mt-1">{t.intro.server}</p>
+        <p className="text-sm text-muted-foreground mt-1">{m.admin.notifications.intro}</p>
       </div>
       {settings ? (
         <NotificationSettings csrfToken={session.csrfToken} initial={settings} base="/api/admin/notifications" />

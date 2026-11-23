@@ -2831,15 +2831,15 @@ x-hp-ingress:
       },
       more: "Partial list: only the first 100 multi-service templates are shown.",
     },
+    notifications: {
+      intro:
+        "The panel writes to you when an alert of the Health page opens and when it closes. Choose where to receive the messages and for which alerts.",
+    },
   },
   notifications: {
     title: "Notifications",
-    intro: {
-      server:
-        "The panel writes to you when an alert of the Health page opens and when it closes. Choose where to receive the messages and for which alerts.",
-      customer:
-        "We write to you when one of your sites has a problem and when the problem is solved. Choose where to receive the messages and what for.",
-    },
+    intro:
+      "We write to you when one of your sites has a problem and when the problem is solved. Choose where to receive the messages and what for.",
     back: "Back to your account",
     notAllowed: "Only an account owner can set up notifications.",
     mailNotReady: {

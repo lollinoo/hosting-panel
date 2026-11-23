@@ -36,7 +36,7 @@ export default async function AccountNotificationsPage() {
         </Link>
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t.title}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{t.intro.customer}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{t.intro}</p>
         </div>
         {settings?.ok ? (
           <NotificationSettings csrfToken={session.csrfToken} initial={settings.data} base={`/api/bff/orgs/${orgId}/notifications`} />
