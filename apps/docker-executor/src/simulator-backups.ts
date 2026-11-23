@@ -12,6 +12,8 @@ import { ExecutorCodedError } from "./traefik-config.js";
 const MAX_RUNNING_JOBS = 2;
 // Site ids never contain ":", so the panel lane never collides with a site.
 const PANEL_LANE = "panel:db";
+/** The lane of an application, the same string the real runner uses. */
+const stackLane = (stackId: string): string => `stack:${stackId}`;
 const SIM_ARCHIVE_SIZE_BYTES = 1_048_577;
 const SIM_ARCHIVE_TTL_MS = 60 * 60 * 1000;
 const GIB = 1024 ** 3;
@@ -28,7 +30,7 @@ type SimJobSnapshot = NonNullable<BackupJobStatus["snapshot"]>;
 type SimJobArchive = NonNullable<BackupJobStatus["archive"]>;
 
 interface SimBackupJob {
-  readonly action: "start" | "forget" | "restore" | "archive" | "panelStart";
+  readonly action: "start" | "forget" | "restore" | "archive" | "panelStart" | "stackRestore";
   readonly jobId: string;
   readonly siteId: string;
   /** Repository the job is pinned to (see repoKey): snapshots live per (target, site) like the real repositories. */
@@ -131,8 +133,34 @@ function targetKeyOf(target: SimTarget): string {
 
 const snapKey = (targetKey: string, siteId: string): string => `${targetKey}|${siteId}`;
 
+/** What the simulated Docker says about an application before a copy or a restore of its volumes. */
+export type SimulatedAppStackReadiness = "ready" | "running" | "volume_missing" | "foreign";
+
+export interface SimulatedBackupsOptions {
+  /** Absent: every application is at rest with every volume (a test that only cares about the jobs). */
+  readonly appStackReadiness?: (
+    stackId: string,
+    organizationId: string,
+    volumeKeys: readonly string[],
+  ) => SimulatedAppStackReadiness;
+}
+
+/** A copy or a restore of an application the simulator accepted. */
+export interface SimulatedAppStackBackupJob {
+  readonly action: "stackStart" | "stackRestore";
+  readonly jobId: string;
+  readonly stackId: string;
+  readonly organizationId: string;
+  readonly volumeKeys: readonly string[];
+  readonly snapshotId: string | null;
+}
+
 /** In-memory simulator for backup jobs and per-site snapshot repositories. */
 export class SimulatedBackups {
+  private readonly appStackJobLog: SimulatedAppStackBackupJob[] = [];
+
+  public constructor(private readonly options: SimulatedBackupsOptions = {}) {}
+
   private readonly jobs = new Map<string, SimBackupJob>();
   private readonly snapshotsByRepo = new Map<string, string[]>();
   private readonly readyArchives = new Map<string, string>();
@@ -188,6 +216,37 @@ export class SimulatedBackups {
 
       case "forget":
         return this.enqueueJob("forget", req.jobId, req.siteId, {
+          snapshotIdsToForget: req.snapshotIds,
+          target: req.target,
+        }) as BackupsResultByAction[R["action"]];
+
+      case "stackStart":
+      case "stackRestore": {
+        const known = this.jobs.has(req.jobId);
+        // The real runner checks the application before it accepts a new job, never for a request sent twice.
+        if (!known) this.assertAppStackAtRest(req.stackId, req.organizationId, req.volumeKeys);
+        const status =
+          req.action === "stackStart"
+            ? this.enqueueJob("start", req.jobId, stackLane(req.stackId), { target: req.target })
+            : this.enqueueJob("stackRestore", req.jobId, stackLane(req.stackId), {
+                requiredSnapshotId: req.snapshotId,
+                target: req.target,
+              });
+        if (!known) {
+          this.appStackJobLog.push({
+            action: req.action,
+            jobId: req.jobId,
+            stackId: req.stackId,
+            organizationId: req.organizationId,
+            volumeKeys: [...req.volumeKeys],
+            snapshotId: req.action === "stackRestore" ? req.snapshotId : null,
+          });
+        }
+        return status as BackupsResultByAction[R["action"]];
+      }
+
+      case "stackForget":
+        return this.enqueueJob("forget", req.jobId, stackLane(req.stackId), {
           snapshotIdsToForget: req.snapshotIds,
           target: req.target,
         }) as BackupsResultByAction[R["action"]];
@@ -295,6 +354,16 @@ export class SimulatedBackups {
     this.siteStates.set(serviceInstanceId, { ...state });
   }
 
+  /** Lists every accepted copy or restore of an application, in order. */
+  public appStackJobs(): readonly SimulatedAppStackBackupJob[] {
+    return this.appStackJobLog.map((job) => ({ ...job, volumeKeys: [...job.volumeKeys] }));
+  }
+
+  /** Lists the snapshots of an application: in one target's repository when given, else across all targets. */
+  public appStackSnapshots(stackId: string, target?: SimTarget): readonly string[] {
+    return this.snapshots(stackLane(stackId), target);
+  }
+
   /** Lists the job ids of every accepted panelStart, in order. */
   public panelJobIds(): readonly string[] {
     return [...this.panelJobs];
@@ -306,6 +375,20 @@ export class SimulatedBackups {
       return [...(this.snapshotsByRepo.get(snapKey(targetKeyOf(target), siteId)) ?? [])];
     }
     return [...this.snapshotsByRepo.entries()].filter(([k]) => k.endsWith(`|${siteId}`)).flatMap(([, ids]) => ids);
+  }
+
+  /** The refusals of the real runner's check: same codes, nothing read or written. */
+  private assertAppStackAtRest(stackId: string, organizationId: string, volumeKeys: readonly string[]): void {
+    const readiness = this.options.appStackReadiness?.(stackId, organizationId, volumeKeys) ?? "ready";
+    if (readiness === "running") {
+      throw new ExecutorCodedError("The application is running", "RESOURCE_LOCKED");
+    }
+    if (readiness === "volume_missing") {
+      throw new ExecutorCodedError("A volume of the application is missing", "NOT_FOUND");
+    }
+    if (readiness === "foreign") {
+      throw new ExecutorCodedError("A volume with the name of this application is not its own", "HOST_POLICY_DENIED");
+    }
   }
 
   /** Returns the site state of a service instance, {true, true} unless set. */

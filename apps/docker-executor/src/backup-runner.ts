@@ -80,6 +80,14 @@ import {
   writeRestoreNote,
   type RestoreNote,
 } from "./restore-jobs.js";
+import {
+  buildAppStackBackupCopyContainerPayload,
+  buildAppStackForgetContainerPayload,
+  buildAppStackPartialSnapshotDropContainerPayload,
+  buildAppStackRepoContainerPayload,
+  buildAppStackRestoreContainerPayload,
+} from "./app-stack-backup-jobs.js";
+import { APP_STACK_LABELS, appStackVolumeName, isOwnAppStackResource } from "./app-stacks/names.js";
 import { purgeServiceSecrets, writeServiceSecrets } from "./docker-engine-adapter.js";
 import {
   PANEL_DUMP_MAGIC,
@@ -171,6 +179,36 @@ type RestoreBackupRequest = Extract<BackupsIpcRequest, { action: "restore" }>;
 type ArchiveBackupRequest = Extract<BackupsIpcRequest, { action: "archive" }>;
 type PanelStartRequest = Extract<BackupsIpcRequest, { action: "panelStart" }>;
 type SiteStateRequest = Extract<BackupsIpcRequest, { action: "siteState" }>;
+type AppStackBackupRequest = Extract<BackupsIpcRequest, { action: "stackStart" }>;
+type AppStackRestoreRequest = Extract<BackupsIpcRequest, { action: "stackRestore" }>;
+type AppStackForgetRequest = Extract<BackupsIpcRequest, { action: "stackForget" }>;
+
+/** The job lane of an application. A site id never holds a colon, so the lane of a site is never this one. */
+export const appStackBackupLane = (stackId: string): string => `stack:${stackId}`;
+/** Container states in which nothing of an application writes to its volumes. */
+const APP_STACK_REST_STATES: ReadonlySet<string> = new Set(["created", "exited", "dead"]);
+
+interface AppStackJobOutcome {
+  readonly state: "succeeded" | "failed";
+  readonly failure: BackupJobStatus["failure"];
+  readonly snapshot: BackupJobStatus["snapshot"];
+}
+const appStackJobFailed = (failure: BackupFailureClass): AppStackJobOutcome => ({ state: "failed", failure, snapshot: null });
+const APP_STACK_JOB_DONE: AppStackJobOutcome = { state: "succeeded", failure: null, snapshot: null };
+
+interface AppStackJobContext {
+  readonly createdRefs: string[];
+  readonly secretIds: string[];
+}
+
+/** A Docker answer as JSON, or null when it is not JSON. */
+function parseDockerJson(body: Buffer): unknown {
+  try {
+    return JSON.parse(body.toString("utf8")) as unknown;
+  } catch {
+    return null;
+  }
+}
 
 export type PanelFetchProblem = BackupFailureClass | "no_copy" | "refused";
 
@@ -2401,6 +2439,233 @@ export class BackupRunner {
     return { discarded: !expired };
   }
 
+  /**
+   * Refuses a copy or a restore of an application unless every asked volume is its own and none of its containers
+   * runs (ADR-0038 K4). Synchronous, before the job is accepted: a refusal here means nothing was read or written.
+   */
+  private async assertAppStackAtRest(
+    stackId: string,
+    organizationId: string,
+    volumeKeys: readonly string[],
+  ): Promise<void> {
+    const filters = encodeURIComponent(JSON.stringify({ label: [`${APP_STACK_LABELS.stackId}=${stackId}`] }));
+    const listed = await this.callDocker("GET", `/containers/json?all=true&filters=${filters}`);
+    const containers = listed.statusCode === 200 ? parseDockerJson(listed.body) : null;
+    if (!Array.isArray(containers)) {
+      throw new ExecutorCodedError("Docker could not list the containers of the application", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    for (const raw of containers) {
+      const view = (raw ?? {}) as { readonly Labels?: Record<string, string> | null; readonly State?: unknown };
+      if (!isOwnAppStackResource(view.Labels ?? undefined, stackId, organizationId)) {
+        throw new ExecutorCodedError("A container carries the id of this application without being its own", "HOST_POLICY_DENIED");
+      }
+      if (typeof view.State !== "string" || !APP_STACK_REST_STATES.has(view.State)) {
+        throw new ExecutorCodedError("The application is running", "RESOURCE_LOCKED");
+      }
+    }
+    for (const volumeKey of volumeKeys) {
+      const name = appStackVolumeName(stackId, volumeKey);
+      const found = await this.callDocker("GET", `/volumes/${encodeURIComponent(name)}`);
+      if (found.statusCode === 404) {
+        throw new ExecutorCodedError("A volume of the application is missing", "NOT_FOUND");
+      }
+      const view = found.statusCode === 200 ? parseDockerJson(found.body) : null;
+      if (view === null || typeof view !== "object" || Array.isArray(view)) {
+        throw new ExecutorCodedError("Docker could not read a volume of the application", "DOCKER_ENGINE_UNAVAILABLE");
+      }
+      const volume = view as {
+        readonly Name?: unknown;
+        readonly Driver?: unknown;
+        readonly Labels?: Record<string, string> | null;
+        readonly Options?: Record<string, string> | null;
+      };
+      const own =
+        isOwnAppStackResource(volume.Labels ?? undefined, stackId, organizationId) &&
+        volume.Labels?.[APP_STACK_LABELS.volumeKey] === volumeKey &&
+        volume.Name === name &&
+        volume.Driver === "local" &&
+        Object.keys(volume.Options ?? {}).length === 0;
+      if (!own) {
+        throw new ExecutorCodedError("A volume with the name of this application is not its own", "HOST_POLICY_DENIED");
+      }
+    }
+  }
+
+  /** The repository of an application, ready for a job: key, destination, tool, network and the secret files. */
+  private async openAppStackRepository(
+    req: { readonly jobId: string; readonly stackId: string; readonly target: BackupRepositoryTarget },
+    intent: "backup" | "forget" | "restore",
+    ctx: AppStackJobContext,
+  ): Promise<
+    | { readonly ok: true; readonly repo: ResolvedBackupRepository; readonly secrets: SecretMounts }
+    | { readonly ok: false; readonly failure: BackupFailureClass }
+  > {
+    const backupKey = await this.readBackupKey();
+    if (backupKey === null) return { ok: false, failure: "key_file_missing" };
+    const scope: BackupResticRepoKind = { kind: "stack", stackId: req.stackId };
+    let prepared: PreparedRepository;
+    if (intent === "restore" && isLocalBackupTarget(req.target)) {
+      // A restore only reads the repository: the local directory is mounted read-only.
+      const guarded = await guardLocalTarget(this.localGuardDeps(), {
+        targetId: req.target.targetId,
+        scope,
+        intent,
+        requiredExtraBytes: 0,
+      });
+      prepared = guarded.ok
+        ? {
+            ok: true,
+            repo: resolveBackupRepository(req.target, scope, {
+              backupNetworkName: this.deps.backupNetworkName,
+              local: guarded.repo,
+              readOnly: true,
+            }),
+            local: guarded.repo,
+          }
+        : { ok: false, problem: guarded.problem };
+    } else {
+      prepared = await this.prepareRepository(req.target, scope, intent, 0);
+    }
+    if (!prepared.ok) return { ok: false, failure: prepared.problem };
+    if ((await this.tryEnsureImage(RESTIC_IMAGE)) !== "ok") return { ok: false, failure: "tool_unavailable" };
+    await this.ensureNetworkFor(prepared.repo);
+    const secrets = await this.writeResticSecrets(`job_bk_${req.jobId}`, req.target, backupKey, ctx.secretIds);
+    return { ok: true, repo: prepared.repo, secrets };
+  }
+
+  /** Runs one job of an application: whatever happens, containers and secret files go and the lane is released. */
+  private async runAppStackJob(
+    stackId: string,
+    entry: JobRecord,
+    body: (ctx: AppStackJobContext) => Promise<AppStackJobOutcome>,
+  ): Promise<void> {
+    const ctx: AppStackJobContext = { createdRefs: [], secretIds: [] };
+    let outcome = appStackJobFailed("other");
+    try {
+      outcome = await body(ctx);
+    } catch {
+      outcome = appStackJobFailed("other");
+    } finally {
+      await this.cleanupContainersAndSecrets(ctx.createdRefs, null, ctx.secretIds);
+      this.activeSiteIds.delete(appStackBackupLane(stackId));
+      this.activeJobCount = Math.max(0, this.activeJobCount - 1);
+      // Settle only after cleanup and locks are released so status polls never observe pre-release state.
+      this.settleEntry(entry, outcome.state, outcome.failure, outcome.snapshot);
+    }
+  }
+
+  /** One snapshot holding every asked volume of an application, each under `/data/<volumeKey>`. */
+  private runAppStackBackupJob(req: AppStackBackupRequest, entry: JobRecord): Promise<void> {
+    return this.runAppStackJob(req.stackId, entry, async (ctx) => {
+      const opened = await this.openAppStackRepository(req, "backup", ctx);
+      if (!opened.ok) return appStackJobFailed(opened.failure);
+      const { repo } = opened;
+      const base = { jobId: req.jobId, stackId: req.stackId, repo, ...opened.secrets };
+
+      const repoOutcome = await this.runContainer(
+        buildAppStackRepoContainerPayload({ ...base, init: true }),
+        ctx.createdRefs,
+        BACKUP_REPO_STEP_TIMEOUT_MS,
+        { captureStderr: true },
+      );
+      if (repoOutcome.kind === "not_found") return appStackJobFailed("tool_unavailable");
+      const repoProblem = classifyResticExitCode(repoOutcome.exitCode, repoOutcome.stderr, repo.kind);
+      if (repoProblem !== null) return appStackJobFailed(repoProblem);
+
+      const copy = await this.runContainer(
+        buildAppStackBackupCopyContainerPayload({ ...base, volumeKeys: req.volumeKeys }),
+        ctx.createdRefs,
+        BACKUP_UPLOAD_TIMEOUT_MS,
+        { captureStdout: true, captureStderr: true },
+      );
+      if (copy.kind === "not_found") return appStackJobFailed("tool_unavailable");
+      if (copy.exitCode === 0) {
+        const summary = parseResticSummary(copy.stdout);
+        return summary === null ? appStackJobFailed("other") : { state: "succeeded", failure: null, snapshot: summary };
+      }
+      if (copy.exitCode === 3) {
+        const partial = parseResticSummary(copy.stdout);
+        if (partial !== null) {
+          try {
+            await this.runContainer(
+              buildAppStackPartialSnapshotDropContainerPayload({ ...base, snapshotId: partial.snapshotId }),
+              ctx.createdRefs,
+              BACKUP_REPO_STEP_TIMEOUT_MS,
+            );
+          } catch {
+            // Partial snapshot forget is best-effort before reporting files_unreadable.
+          }
+        }
+        return appStackJobFailed("files_unreadable");
+      }
+      return appStackJobFailed(classifyResticExitCode(copy.exitCode, copy.stderr, repo.kind) ?? "other");
+    });
+  }
+
+  /**
+   * Writes the asked volumes back from one snapshot, one container per volume, in the order asked. It stops at the
+   * first volume that fails: the caller leaves the application stopped, since some volumes are already changed.
+   */
+  private runAppStackRestoreJob(req: AppStackRestoreRequest, entry: JobRecord): Promise<void> {
+    return this.runAppStackJob(req.stackId, entry, async (ctx) => {
+      const opened = await this.openAppStackRepository(req, "restore", ctx);
+      if (!opened.ok) return appStackJobFailed(opened.failure);
+      const { repo } = opened;
+      for (const volumeKey of req.volumeKeys) {
+        const outcome = await this.runContainer(
+          buildAppStackRestoreContainerPayload({
+            jobId: req.jobId,
+            stackId: req.stackId,
+            repo,
+            ...opened.secrets,
+            volumeKey,
+            snapshotId: req.snapshotId,
+          }),
+          ctx.createdRefs,
+          BACKUP_RESTORE_FETCH_TIMEOUT_MS,
+          { captureStderr: true },
+        );
+        if (outcome.kind === "not_found") return appStackJobFailed("tool_unavailable");
+        if (outcome.exitCode !== 0) {
+          return appStackJobFailed(classifyResticExitCode(outcome.exitCode, outcome.stderr, repo.kind) ?? "other");
+        }
+      }
+      return APP_STACK_JOB_DONE;
+    });
+  }
+
+  /** Removes the listed snapshots from the repository of an application. */
+  private runAppStackForgetJob(req: AppStackForgetRequest, entry: JobRecord): Promise<void> {
+    return this.runAppStackJob(req.stackId, entry, async (ctx) => {
+      const opened = await this.openAppStackRepository(req, "forget", ctx);
+      if (!opened.ok) return appStackJobFailed(opened.failure);
+      const { repo } = opened;
+      const base = { jobId: req.jobId, stackId: req.stackId, repo, ...opened.secrets };
+
+      const repoOutcome = await this.runContainer(
+        buildAppStackRepoContainerPayload({ ...base, init: false }),
+        ctx.createdRefs,
+        BACKUP_REPO_STEP_TIMEOUT_MS,
+        { captureStderr: true },
+      );
+      if (repoOutcome.kind === "not_found") return appStackJobFailed("tool_unavailable");
+      // A repository that does not exist holds no snapshot: nothing is left to remove.
+      if (repoOutcome.exitCode === 10) return APP_STACK_JOB_DONE;
+      const repoProblem = classifyResticExitCode(repoOutcome.exitCode, repoOutcome.stderr, repo.kind);
+      if (repoProblem !== null) return appStackJobFailed(repoProblem);
+
+      const forget = await this.runContainer(
+        buildAppStackForgetContainerPayload({ ...base, snapshotIds: req.snapshotIds }),
+        ctx.createdRefs,
+        BACKUP_FORGET_TIMEOUT_MS,
+        { captureStderr: true },
+      );
+      if (forget.kind === "not_found") return appStackJobFailed("tool_unavailable");
+      const forgetProblem = classifyResticExitCode(forget.exitCode, forget.stderr, repo.kind);
+      return forgetProblem === null ? APP_STACK_JOB_DONE : appStackJobFailed(forgetProblem);
+    });
+  }
+
   /** Executes a validated backup, restore, settle, or archive IPC request. */
   public async run<R extends BackupsIpcRequest>(
     req: R,
@@ -2427,6 +2692,23 @@ export class BackupRunner {
       case "forget":
         return this.startBackgroundJob(request.siteId, request.jobId, (entry) =>
           this.runForgetJob(request, entry),
+        ) as BackupsResultByAction[R["action"]];
+      case "stackStart":
+      case "stackRestore": {
+        this.evictJobs();
+        // A request sent twice answers with the job it already started, without checking the application again.
+        const known = this.jobs.get(request.jobId);
+        if (known) return cloneJobStatus(known.status) as BackupsResultByAction[R["action"]];
+        await this.assertAppStackAtRest(request.stackId, request.organizationId, request.volumeKeys);
+        return this.startBackgroundJob(appStackBackupLane(request.stackId), request.jobId, (entry) =>
+          request.action === "stackStart"
+            ? this.runAppStackBackupJob(request, entry)
+            : this.runAppStackRestoreJob(request, entry),
+        ) as BackupsResultByAction[R["action"]];
+      }
+      case "stackForget":
+        return this.startBackgroundJob(appStackBackupLane(request.stackId), request.jobId, (entry) =>
+          this.runAppStackForgetJob(request, entry),
         ) as BackupsResultByAction[R["action"]];
       case "panelStart":
         return this.startBackgroundJob(PANEL_LANE, request.jobId, (entry) =>

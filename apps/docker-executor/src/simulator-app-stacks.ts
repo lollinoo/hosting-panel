@@ -149,6 +149,19 @@ export class SimulatedAppStacks implements StackExecutorPort {
     this.logs.set(appStackContainerName(stackId, componentKey), lines.map((line) => ({ ...line })));
   }
 
+  /** What a copy or a restore of this application's volumes would find (ADR-0038 K4). */
+  public backupReadiness(
+    stackId: string,
+    organizationId: string,
+    volumeKeys: readonly string[],
+  ): "ready" | "running" | "volume_missing" | "foreign" {
+    const stack = this.stacks.get(stackId);
+    if (stack === undefined) return "volume_missing";
+    if (stack.organizationId !== organizationId) return "foreign";
+    if ([...stack.containers.values()].some((c) => c.state === "running")) return "running";
+    return volumeKeys.every((key) => stack.volumes.has(key)) ? "ready" : "volume_missing";
+  }
+
   public getAppStackSnapshot(stackId: string): AppStackSimSnapshot | null {
     const stack = this.stacks.get(stackId);
     if (stack === undefined) return null;
