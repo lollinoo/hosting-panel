@@ -8,3 +8,4 @@ export * from "./parameters.js";
 export * from "./plan.js";
 export * from "./stack-ipc.js";
 export * from "./built-in.js";
+export * from "./single-image.js";
