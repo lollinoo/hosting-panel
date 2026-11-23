@@ -21,7 +21,8 @@ export function appStackTextProblem(text: string): AppStackTextProblem | null {
   if (CONTROL_CHARACTER.test(text)) return "control_character";
   if (/docker\.sock/i.test(text)) return "docker_socket";
   if (METADATA_ENDPOINTS.some((pattern) => pattern.test(text))) return "metadata_endpoint";
-  if (/:\/\/[^/\s:@]+:[^/\s@]+@/.test(text)) return "url_credentials";
+  // scheme://user:password@host; the user may be empty (redis://:password@host).
+  if (/:\/\/[^/\s:@]*:[^/\s@]+@/.test(text)) return "url_credentials";
   return null;
 }
 

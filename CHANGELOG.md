@@ -4,6 +4,15 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Hp-web stop is not logged as a failure (2026-11-24)
+*hosting-panel v0.9.2*
+
+**Bug Fixes & Stability**
+- **infra**: Hp-web stop is not logged as a failure
+- **policy-engine**: Refuse URL credentials with an empty user in template values
+
+---
+
 ### Answer 400 on a malformed percent-escape in an IPC path (2026-11-24)
 *hosting-panel v0.9.1*
 
