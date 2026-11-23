@@ -479,3 +479,100 @@ describe("0025 app stacks", () => {
     expect(await rows(pg, "SELECT hostname FROM domains ORDER BY hostname")).toEqual([{ hostname: "old.example" }]);
   });
 });
+
+describe("0029 notifications", () => {
+  // ADR-0040: after 0029 the previous release keeps running on the migrated schema; it never names the three tables.
+  const M0029 = "0029_notifications.sql";
+  const NEW_TABLES = ["notification_channel_alerts", "notification_channels", "notification_deliveries"];
+  let pg: PGlite;
+  const SEED_BEFORE = `
+    INSERT INTO platform_installations (id, name) VALUES ('pi','pi');
+    INSERT INTO hosts (id, platform_installation_id, name, hostname, ipv4_address, total_cpu_milli, total_memory_bytes, total_storage_bytes)
+      VALUES ('h','pi','h','h.example','192.0.2.1',1000,'1','1');
+    INSERT INTO organizations (id, platform_installation_id, name, slug) VALUES ('o','pi','o','o'),('o_gone','pi','gone','gone');
+    INSERT INTO host_allocations (id, host_id, organization_id) VALUES ('a','h','o');
+    INSERT INTO sites (id, organization_id, host_allocation_id, name, slug) VALUES ('s1','o','a','s1','s1');
+    INSERT INTO users (id, email, name) VALUES ('u_admin','admin@example.test','Admin');`;
+  // Channels, what they were told and their messages, written by the new release before the rollback.
+  const CHANNEL_ROWS = `
+    INSERT INTO notification_channels (id, organization_id, kind, groups, recipients, updated_by_user_id)
+      VALUES ('nch_srv',NULL,'email','["server"]','["ops@example.com"]','u_admin');
+    INSERT INTO notification_channels (id, organization_id, kind, groups) VALUES ('nch_org','o_gone','email','["availability"]');
+    INSERT INTO notification_channel_alerts (channel_id, alert_key, kind, severity, event)
+      VALUES ('nch_srv','disk_high','disk_high','critical','{}'),('nch_org','backup_failed:s9','backup_failed','warning','{}');
+    INSERT INTO notification_deliveries (id, channel_id, events, locale, status, next_attempt_at)
+      VALUES ('ndl_srv','nch_srv','[]','it','pending', now()),('ndl_org','nch_org','[]','en','pending', now());`;
+  // What the previous release writes: none of it names a new table.
+  const OLD_RELEASE_WRITES = `
+    UPDATE organizations SET name = 'renamed' WHERE id = 'o';
+    UPDATE sites SET status = 'ready' WHERE id = 's1';
+    UPDATE users SET name = 'Admin 2', locale = 'en' WHERE id = 'u_admin';
+    INSERT INTO operations (id, organization_id, kind, resource_type, resource_id) VALUES ('op_rb','o','site.create','site','s1');
+    UPDATE operations SET status = 'succeeded' WHERE id = 'op_rb';
+    DELETE FROM operations WHERE id = 'op_rb';`;
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0029);
+    await pg.exec(SEED_BEFORE);
+    await pg.exec(read(M0029));
+    await pg.exec(CHANNEL_ROWS);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("adds three tables and changes no column, index or trigger of a table that was there", async () => {
+    const fresh = new PGlite();
+    try {
+      await migrateTo(fresh, M0029);
+      const columns = "SELECT table_name, column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema = 'public' ORDER BY 1, 2";
+      const indexes = "SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = 'public' ORDER BY 1, 2";
+      const triggers = "SELECT event_object_table, trigger_name FROM information_schema.triggers WHERE trigger_schema = 'public' ORDER BY 1, 2";
+      const before = {
+        columns: await rows<{ table_name: string }>(fresh, columns),
+        indexes: await rows<{ tablename: string }>(fresh, indexes),
+        triggers: await rows(fresh, triggers),
+      };
+      await fresh.exec(read(M0029));
+      const after = await rows<{ table_name: string }>(fresh, columns);
+      expect(after.filter((c) => !NEW_TABLES.includes(c.table_name))).toEqual(before.columns);
+      expect([...new Set(after.map((c) => c.table_name))].filter((t) => !before.columns.some((c) => c.table_name === t))).toEqual(NEW_TABLES);
+      expect((await rows<{ tablename: string }>(fresh, indexes)).filter((i) => !NEW_TABLES.includes(i.tablename))).toEqual(before.indexes);
+      expect(await rows(fresh, triggers)).toEqual(before.triggers);
+    } finally {
+      await fresh.close();
+    }
+  }, 120_000);
+
+  it("runs the previous release's writes on organizations, sites, users and operations while channels exist", async () => {
+    await pg.exec(OLD_RELEASE_WRITES);
+    expect(await rows(pg, "SELECT id, organization_id, updated_by_user_id FROM notification_channels ORDER BY id")).toEqual([
+      { id: "nch_org", organization_id: "o_gone", updated_by_user_id: null },
+      { id: "nch_srv", organization_id: null, updated_by_user_id: "u_admin" },
+    ]);
+  });
+
+  it("lets the previous release delete the user who saved a channel: the channel stays, without the name", async () => {
+    await pg.exec("DELETE FROM users WHERE id = 'u_admin'");
+    expect(await rows(pg, "SELECT id, updated_by_user_id FROM notification_channels WHERE id = 'nch_srv'")).toEqual([
+      { id: "nch_srv", updated_by_user_id: null },
+    ]);
+  });
+
+  it("lets the previous release delete an organization that has a channel: its rows go with it, the server's stay", async () => {
+    await pg.exec("DELETE FROM organizations WHERE id = 'o_gone'");
+    expect(await rows(pg, "SELECT id FROM notification_channels")).toEqual([{ id: "nch_srv" }]);
+    expect(await rows(pg, "SELECT channel_id, alert_key FROM notification_channel_alerts")).toEqual([{ channel_id: "nch_srv", alert_key: "disk_high" }]);
+    expect(await rows(pg, "SELECT id FROM notification_deliveries")).toEqual([{ id: "ndl_srv" }]);
+  });
+
+  it("runs 0029 again on a database with channels without harm", async () => {
+    await pg.exec(read(M0029));
+    expect(await rows(pg, "SELECT id, kind, enabled, groups, recipients, locale FROM notification_channels")).toEqual([
+      { id: "nch_srv", kind: "email", enabled: true, groups: ["server"], recipients: ["ops@example.com"], locale: "it" },
+    ]);
+    expect(await rows(pg, "SELECT id, status FROM notification_deliveries")).toEqual([{ id: "ndl_srv", status: "pending" }]);
+  });
+});
