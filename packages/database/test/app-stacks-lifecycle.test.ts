@@ -361,6 +361,145 @@ describe("@hosting-panel/database — app stacks lifecycle", () => {
     ]);
   });
 
+  it("a settle that takes back an upgrade or a rollback leaves the rows its request wrote as they were before it, quota included", async () => {
+    await organization("org_sl_restore", true);
+    const t = await template("sl-restore");
+    const created = await create("org_sl_restore", { templateVersionId: t.versionId, components: ["web", "cache"], volumes: ["data"] });
+    const scope = { organizationId: "org_sl_restore", stackId: created.stack.id };
+    const rev1 = created.revision!;
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: created.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: null,
+      appliedRevisionId: rev1.id,
+    });
+    let stack = await ready(created.stack.id);
+    await recordAppStackComponentHealthTransactional(db(), {
+      ...scope,
+      observedAt: new Date("2026-11-20T10:00:00Z"),
+      components: [
+        { componentKey: "web", health: "healthy" },
+        { componentKey: "cache", health: "unhealthy" },
+      ],
+    });
+    const v2 = await addAppTemplateVersion(db(), {
+      templateId: t.templateId,
+      createdBy: null,
+      version: { source: "source restore v2", specVersion: 1, compiledSchema: {}, specHash: hex("restore v2") },
+    });
+    await updateAppTemplate(db(), { templateId: t.templateId, defaultVersionId: v2.version.id });
+    const rows = async () => {
+      const row = await stackOf(stack.id);
+      return {
+        stack: { desired: row.desiredRevisionId, applied: row.appliedRevisionId, version: row.templateVersionId, quota: row.resourceQuotaId },
+        parameters: (await listAppStackParameters(db(), scope)).map((p) => [p.parameterKey, p.publicValue]),
+        components: (await listAppStackComponents(db(), scope)).map((c) => [c.componentKey, c.appliedRevisionId, c.health, c.healthObservedAt]),
+        quota: await quotaOf("rq_org_sl_restore").then((q) => [q.usedServices, q.usedCpuMilli, q.usedMemoryBytes]),
+      };
+    };
+    const takeBack = (write: AppStackWriteResult) =>
+      updateAppStackDeploymentTransactional(db(), {
+        ...scope,
+        deploymentId: write.deployment!.id,
+        deploymentStatus: "failed",
+        problem: "STACK_IMAGE_PULL_FAILED",
+        stackStatus: "running",
+        restoreApplied: true,
+      });
+    const before = await rows();
+    expect(before.quota).toEqual([2, 500, String(2 * 134217728)]);
+
+    // Upgrade: a smaller plan, other parameters, one component dropped and one added, a new volume.
+    const upgrade = await enqueue(stack, "stack.upgrade", {
+      plan: { templateVersionId: v2.version.id, components: ["web"], volumes: ["data", "logs"], parameters: [{ parameterKey: "title", value: "Second" }] },
+    });
+    expect(await rows()).not.toEqual(before);
+    // The freed share is taken by someone else: the maximum is now what is used.
+    await db().update(resourceQuotas).set({ maxServices: 1, maxCpuMilli: 250, maxMemoryBytes: "134217728" }).where(eq(resourceQuotas.id, "rq_org_sl_restore"));
+    const settled = await takeBack(upgrade);
+    expect(settled).toMatchObject({ status: "running", desiredRevisionId: rev1.id, templateVersionId: t.versionId });
+    const after = await rows();
+    // The dropped component comes back with the revision that runs; its health is the next observation's to write.
+    expect(after).toEqual({
+      ...before,
+      components: before.components.map((c) => (c[0] === "cache" ? ["cache", rev1.id, "unknown", null] : c)),
+    });
+    // History stays: the failed deployment names the revision it tried, and that revision is kept. Volumes are never dropped.
+    expect(await getAppStackDeployment(db(), { organizationId: scope.organizationId, deploymentId: upgrade.deployment!.id })).toMatchObject({
+      status: "failed",
+      revisionId: upgrade.revision!.id,
+    });
+    expect(await keysOf(stack.id)).toMatchObject({ components: ["cache", "web"], volumes: ["data", "logs"], revisions: 2 });
+
+    // Rollback from an applied second revision: taken back to it.
+    await db().update(resourceQuotas).set({ maxServices: 8, maxCpuMilli: 4000, maxMemoryBytes: "4000000000" }).where(eq(resourceQuotas.id, "rq_org_sl_restore"));
+    stack = await ready(stack.id);
+    const second = await enqueue(stack, "stack.upgrade", {
+      plan: { templateVersionId: v2.version.id, components: ["web", "worker"], parameters: [{ parameterKey: "title", value: "Second" }] },
+    });
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: second.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: "running",
+      appliedRevisionId: second.revision!.id,
+    });
+    stack = await ready(stack.id);
+    const applied = await rows();
+    const rollback = await enqueue(stack, "stack.rollback", { plan: { templateVersionId: t.versionId, components: ["web", "cache"] } });
+    expect(await rows()).not.toEqual(applied);
+    await takeBack(rollback);
+    expect(await rows()).toEqual(applied);
+    expect((await stackOf(stack.id)).desiredRevisionId).toBe(second.revision!.id);
+  });
+
+  it("a take-back changes nothing when nothing was applied or when a web address now needs the target", async () => {
+    const t = await template("sl-restore-none");
+    const never = await ready((await create(orgA, { templateVersionId: t.versionId })).stack.id, "failed");
+    const created = await create(orgA, { templateVersionId: t.versionId });
+    const v2 = await addAppTemplateVersion(db(), {
+      templateId: t.templateId,
+      createdBy: null,
+      version: { source: "source none v2", specVersion: 1, compiledSchema: {}, specHash: hex("none v2") },
+    });
+    await updateAppTemplate(db(), { templateId: t.templateId, defaultVersionId: v2.version.id });
+    const settle =(stack: AppStackRow, write: AppStackWriteResult) =>
+      updateAppStackDeploymentTransactional(db(), {
+        organizationId: stack.organizationId,
+        stackId: stack.id,
+        deploymentId: write.deployment!.id,
+        deploymentStatus: "failed",
+        problem: "STACK_IMAGE_PULL_FAILED",
+        stackStatus: "failed",
+        restoreApplied: true,
+      });
+
+    // Never applied: there is no running version to go back to.
+    const upgrade = await enqueue(never, "stack.upgrade", { plan: { templateVersionId: v2.version.id, components: ["web"] } });
+    expect(await settle(never, upgrade)).toMatchObject({ desiredRevisionId: upgrade.revision!.id, templateVersionId: v2.version.id });
+
+    // A web address attached, while the upgrade ran, to a part only the new revision has: the target stays.
+    const scope = { organizationId: orgA, stackId: created.stack.id };
+    await updateAppStackDeploymentTransactional(db(), {
+      ...scope,
+      deploymentId: created.deployment!.id,
+      deploymentStatus: "succeeded",
+      problem: null,
+      stackStatus: null,
+      appliedRevisionId: created.revision!.id,
+    });
+    const live = await ready(created.stack.id);
+    const adding = await enqueue(live, "stack.upgrade", {
+      plan: { templateVersionId: v2.version.id, components: ["web", "cache", "api"], ingress: [{ componentKey: "api", port: 9000 }] },
+    });
+    await domain(live, "api.restore.example", "api", 9000);
+    expect(await settle(live, adding)).toMatchObject({ status: "failed", desiredRevisionId: adding.revision!.id, templateVersionId: v2.version.id });
+    expect((await listAppStackComponents(db(), scope)).map((c) => c.componentKey)).toEqual(["api", "cache", "web"]);
+  });
+
   it("refuses a revision of another template's version", async () => {
     const other = await template("sl-other");
     const stack = await ready((await create()).stack.id);
