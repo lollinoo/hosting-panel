@@ -43,8 +43,12 @@ export function isPlainSetting(name: string, value: string): boolean {
   return AMOUNT.test(value) && !isSecretLastWord(words(name).at(-1));
 }
 
-/** `scheme://user:password@`, the user possibly empty: a form the rule of a template lets through, and the importer does not. */
-const URL_PASSWORD = /:\/\/[^/\s:@]*:([^/\s@]+)@/g;
+/**
+ * `scheme://user:password@`, the user possibly empty: a form the rule of a template lets through, and the importer does
+ * not. Read as an address is read: the user ends at the first ':' and the password at the last '@' before the first '/'
+ * or blank, so an '@' written unencoded in either stays inside it.
+ */
+const URL_PASSWORD = /:\/\/[^/\s:]*:([^/\s]+)@/g;
 
 export interface TextSpan {
   readonly start: number;

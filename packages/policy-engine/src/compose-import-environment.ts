@@ -232,8 +232,19 @@ export function convertComposeEnvironment(
       continue;
     }
 
-    // The password of an address: text of its own is replaced by a secret, a secret parameter already is one.
+    // A secret the file writes elsewhere, met again here. Cut first: an address that repeats such a password shares its
+    // parameter, even where the address would read its password otherwise.
     const extracted = new Set<string>();
+    parts = parts.flatMap((part): Part[] => {
+      if ("parameter" in part) return [part];
+      return registry.cutAtSecrets(part.literal).map((cut) => {
+        if (typeof cut === "string") return { literal: cut };
+        extracted.add(cut.key);
+        return { parameter: cut };
+      });
+    });
+
+    // The password of an address: text of its own is replaced by a secret, a secret parameter already is one.
     let whole = false;
     for (const span of urlPasswordsIn(parts.map((part) => ("literal" in part ? part.literal : null))).reverse()) {
       const part = parts[span.first];
@@ -251,15 +262,6 @@ export function convertComposeEnvironment(
       replaceBySecret(entry);
       continue;
     }
-    // A secret the file writes elsewhere, met again here.
-    parts = parts.flatMap((part): Part[] => {
-      if ("parameter" in part) return [part];
-      return registry.cutAtSecrets(part.literal).map((cut) => {
-        if (typeof cut === "string") return { literal: cut };
-        extracted.add(cut.key);
-        return { parameter: cut };
-      });
-    });
 
     // `value` is the text of the draft; `around` is what the validator reads between two secret references.
     let value = "";

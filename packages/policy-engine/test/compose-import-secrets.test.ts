@@ -114,6 +114,46 @@ describe("a secret in the password of an address", () => {
     expectNoMarker(result);
   });
 
+  it("reads the password up to the last '@' before the host, as an address is read", () => {
+    const result = run(web("environment:", `  REDIS_URL: "redis://:S3cret@${MARKER}@redis:6379/0"`));
+    expect(specOf(result).parameters).toEqual([generated("redis_password", "REDIS_PASSWORD")]);
+    expect(environmentOf(result)).toEqual([{ name: "REDIS_URL", value: "redis://:${redis_password}@redis:6379/0" }]);
+    expectNoMarker(result);
+  });
+
+  it.each([`S3cret@${MARKER}`, `S3cret@Pa55/${MARKER}`])("gives an address the parameter of the password it repeats (%s)", (password) => {
+    const result = run(
+      file(
+        "services:",
+        ...serviceLines("db", "environment:", `  POSTGRES_PASSWORD: "${password}"`),
+        ...serviceLines("app", "depends_on: [db]", "environment:", `  DATABASE_URL: "postgres://app:${password}@db:5432/app"`),
+      ),
+    );
+    expect(keysOf(result)).toEqual(["postgres_password"]);
+    expect(environmentOf(result, "app")).toEqual([{ name: "DATABASE_URL", value: "postgres://app:${postgres_password}@db:5432/app" }]);
+    expectNoMarker(result);
+  });
+
+  it.each([
+    ["a path and a query with an '@'", `postgres://app:${MARKER}@db:5432/app?options=a@b`, "postgres://app:${database_password}@db:5432/app?options=a@b"],
+    ["an IPv6 host", `postgres://app:${MARKER}@[::1]:5432/app`, "postgres://app:${database_password}@[::1]:5432/app"],
+    ["a user with an '@'", `smtp://app@example.invalid:${MARKER}@mail:587`, "smtp://app@example.invalid:${database_password}@mail:587"],
+  ])("takes out the password alone from an address with %s", (_title, address, kept) => {
+    const result = run(web("environment:", `  DATABASE_URL: "${address}"`));
+    expect(specOf(result).parameters).toEqual([generated("database_password", "DATABASE_PASSWORD")]);
+    expect(environmentOf(result)).toEqual([{ name: "DATABASE_URL", value: kept }]);
+    expectNoMarker(result);
+  });
+
+  it("keeps an address with a user and no password, and one whose password is a variable", () => {
+    const result = run(web("environment:", '  REPLICA_URL: "postgres://app@[::1]:5432/app?x=a@b"', '  DATABASE_URL: "postgres://app:${DB_PASSWORD}@db:5432/app"'));
+    expect(specOf(result).parameters).toEqual([generated("db_password", "DB_PASSWORD")]);
+    expect(environmentOf(result)).toEqual([
+      { name: "REPLICA_URL", value: "postgres://app@[::1]:5432/app?x=a@b" },
+      { name: "DATABASE_URL", value: "postgres://app:${db_password}@db:5432/app" },
+    ]);
+  });
+
   it("gives two addresses with the same password one secret, and another password another", () => {
     const result = run(
       web("environment:", `  PRIMARY_URL: postgres://app:${MARKER}@db1/app`, `  REPLICA_URL: postgres://app:${MARKER}@db2/app`, `  OTHER_URL: postgres://app:${MARKER}-b@db3/app`),
