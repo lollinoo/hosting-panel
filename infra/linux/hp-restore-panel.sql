@@ -61,4 +61,11 @@ UPDATE app_stack_domains SET status = 'pending', cert_status = 'none', cert_expi
 UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, updated_at = now() WHERE status = 'deleting';
 UPDATE app_stacks SET status = 'failed', applied_routes_hash = NULL, updated_at = now()
  WHERE deleted_at IS NULL AND status NOT IN ('draft','failed','delete_failed','deleting');
+-- Notifications (ADR-0040): the alerts a channel was told belong to the host the copy was made on. Forgetting them
+-- makes the first passes tell what is open here as new, and tell no alert of the old host as closed. A message that
+-- was still waiting when the copy was made is old news: it is not sent. The channels and their secrets stay.
+DELETE FROM notification_channel_alerts;
+UPDATE notification_deliveries SET status = 'failed', problem = 'expired', next_attempt_at = NULL,
+       finished_at = COALESCE(finished_at, now())
+ WHERE status = 'pending';
 DELETE FROM user_sessions;
