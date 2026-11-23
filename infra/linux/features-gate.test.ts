@@ -12,6 +12,7 @@ const M21 = "0021_manual_tls_certificates.sql";
 const M22 = "0022_backup_targets_and_copies.sql";
 const M24 = "0024_site_templates.sql";
 const M25 = "0025_app_stacks.sql";
+const M27 = "0027_app_stack_backups.sql";
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -44,7 +45,7 @@ exit 0
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       D: d,
-      APPLIED: (opts.applied ?? [M21, M22, M24, M25]).join("\n"),
+      APPLIED: (opts.applied ?? [M21, M22, M24, M25, M27]).join("\n"),
       IN_USE: (opts.inUse ?? []).join(" "),
       FAIL_ON: opts.failOn ?? ""
     }
@@ -55,10 +56,10 @@ exit 0
 
 describe("panel_features_in_use", () => {
   it("prints the in-use features; the password only in PGPASSWORD and ON_ERROR_STOP set", () => {
-    const r = run({ inUse: ["manual-tls", "backup-targets", "site-templates", "app-stacks"] });
+    const r = run({ inUse: ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-stack-backups"] });
     expect(r.code, r.err).toBe(0);
-    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\n");
-    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(5);
+    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-stack-backups\n");
+    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(6);
     for (const c of r.calls.split("\n").filter(Boolean)) {
       expect(c).toMatch(/^-X -qtA -v ON_ERROR_STOP=1 -h 127\.0\.0\.1 -U hosting_panel -d hosting_panel -c /);
     }
@@ -70,6 +71,8 @@ describe("panel_features_in_use", () => {
     expect(run({ inUse: ["backup-targets"] }).out).toBe("backup-targets\n");
     expect(run({ inUse: ["site-templates"] }).out).toBe("site-templates\n");
     expect(run({ inUse: ["app-stacks"] }).out).toBe("app-stacks\n");
+    // the two names share a prefix: each predicate answers for its own name only
+    expect(run({ inUse: ["app-stack-backups"] }).out).toBe("app-stack-backups\n");
     expect(run({ inUse: [] }).out).toBe("");
   });
 
@@ -79,10 +82,12 @@ describe("panel_features_in_use", () => {
     expect(calls).toContain("backup_targets where not legacy_settings and archived_at is null");
     expect(calls).toContain("sites where template_version_id is not null and template_version_id <> 'stv_wordpress_1'");
     expect(calls).toContain("app_stacks where deleted_at is null");
+    // every backup counts, whatever its status and also when its application is gone (ADR-0038 K10)
+    expect(calls).toContain("select 'app-stack-backups' where exists (select 1 from public.app_stack_backups)");
   });
 
   it("a migration that is not recorded means the feature is not asked and not in use", () => {
-    const all = ["manual-tls", "backup-targets", "site-templates", "app-stacks"];
+    const all = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-stack-backups"];
     const r = run({ applied: [], inUse: all });
     expect(r.code, r.err).toBe(0);
     expect(r.out).toBe("");
@@ -96,6 +101,14 @@ describe("panel_features_in_use", () => {
     const only25 = run({ applied: [M25], inUse: all });
     expect(only25.out).toBe("app-stacks\n");
     expect(only25.calls.split("\n").filter(Boolean)).toHaveLength(2);
+    const only27 = run({ applied: [M27], inUse: all });
+    expect(only27.out).toBe("app-stack-backups\n");
+    expect(only27.calls.split("\n").filter(Boolean)).toHaveLength(2);
+    // a panel that never ran 0027 is not asked about a table it does not have
+    const before27 = run({ applied: [M21, M22, M24, M25], inUse: all });
+    expect(before27.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\n");
+    expect(before27.calls).not.toContain("'app-stack-backups'");
+    expect(before27.calls.split("\n").filter(Boolean)).toHaveLength(5);
   });
 
   it("fails closed: a psql error or a URL that is not the local panel database is non-zero", () => {
@@ -104,6 +117,7 @@ describe("panel_features_in_use", () => {
     expect(run({ failOn: "backup_targets" }).code).not.toBe(0);
     expect(run({ failOn: "template_version_id", inUse: ["site-templates"] }).code).not.toBe(0);
     expect(run({ failOn: "app_stacks where", inUse: ["app-stacks"] }).code).not.toBe(0);
+    expect(run({ failOn: "app_stack_backups", inUse: ["app-stack-backups"] }).code).not.toBe(0);
     const bad = run({ url: `postgresql://hosting_panel:${PW}@db.example.com:5432/hosting_panel` });
     expect(bad.code).not.toBe(0);
     expect(bad.calls).toBe("");
@@ -117,7 +131,7 @@ describe("release_features", () => {
   };
   it("reads the features line build-release.mjs writes", () => {
     const json = JSON.stringify({ version: "1.0.0", node: "26.13.1", features: RELEASE_FEATURES.join(" ") }, null, 2);
-    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks");
+    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks app-stack-backups");
   });
   it("is empty when the key is absent or empty", () => {
     expect(parse(`${JSON.stringify({ version: "1.0.0" }, null, 2)}\n`)).toBe("");

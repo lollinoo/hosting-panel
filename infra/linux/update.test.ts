@@ -102,6 +102,30 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
+  it("refuses a downgrade while an application backup exists (exit 8), naming only that feature", () => {
+    const known = "manual-tls backup-targets site-templates app-stacks";
+    const f = gated("echo app-stack-backups", `${known} app-stack-backups`);
+    // the target knows everything but the backups of applications
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["0.1.0 does not know app-stack-backups,", "--allow-feature-loss", "backups of applications", "retention period"]) {
+      expect(r.err).toContain(t);
+    }
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks"]) expect(r.err).not.toContain(t);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+    expect(existsSync(join(f.root, "releases/0.1.0"))).toBe(false);
+  });
+
+  it("a target that knows the backups of applications is not held back by them", () => {
+    const all = "manual-tls backup-targets site-templates app-stacks app-stack-backups";
+    const f = gated("echo app-stack-backups", all);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", all), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(asked(f)).toBe(false);
+  });
+
   it("--allow-feature-loss lets the downgrade through", () => {
     const f = gated("echo manual-tls");
     const r = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], f.env);
