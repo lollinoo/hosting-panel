@@ -26,6 +26,8 @@ import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKE
 
 /** Databases the observer retries in one pass. */
 export const APP_STACK_LINK_RETRY_BATCH = 20;
+/** The observer's pass asks for no further database after this long (a call already started runs to its end). */
+export const APP_STACK_LINK_RETRY_BUDGET_MS = 45_000;
 
 /** What the executor call needs of a plan: the only component's key. */
 export type AppStackLinkComponents = readonly { readonly key: string }[];
@@ -79,10 +81,19 @@ export class AppStackLinksApplier {
     }
   }
 
-  /** The observer's pass: databases with a link still to attach or to detach, the one that waited longest first. Never throws. */
+  /**
+   * The observer's pass: databases with a link still to attach or to detach, the one that waited longest first, within
+   * APP_STACK_LINK_RETRY_BUDGET_MS. A database the server was asked for has its rows touched (settle or unsettle), so it
+   * moves behind every one this pass did not reach, and the next pass begins with those. Never throws.
+   */
   public async retry(): Promise<void> {
     try {
-      for (const due of await listAppStackLinkProvidersDue(this.#db, { limit: APP_STACK_LINK_RETRY_BATCH })) await this.apply(due.stackId);
+      const due = await listAppStackLinkProvidersDue(this.#db, { limit: APP_STACK_LINK_RETRY_BATCH });
+      const passStart = Date.now();
+      for (const { stackId } of due) {
+        if (Date.now() - passStart >= APP_STACK_LINK_RETRY_BUDGET_MS) break;
+        await this.apply(stackId);
+      }
     } catch {
       // Best effort: the next pass asks again.
     }

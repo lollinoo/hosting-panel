@@ -453,6 +453,48 @@ describe("private links between a database and an application (ADR-0039)", () =>
     expect(linked(database.stackId)).toEqual([app.stackId]);
   }, 60_000);
 
+  it("a slow server holds the observer's links for 45 seconds a pass, and the next pass begins with the databases it did not reach", async () => {
+    const databases: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const database = await valkey(true);
+      const app = await application(true);
+      sim.appStacks.failNextAppStackStep("links", "engine_unavailable");
+      expect((await connect(app.stackId, database.stackId)).status).toBe(201);
+      databases.push(database.stackId);
+    }
+    const [first, second, third] = databases as [string, string, string];
+
+    // For these three the server takes 30 seconds, then gives no answer; the clock moves only with it.
+    let clock = Date.now();
+    let asked: string[] = [];
+    const answer = sim.syncAppStackLinks.bind(sim);
+    const slow = vi.spyOn(sim, "syncAppStackLinks").mockImplementation((req) => {
+      if (!databases.includes(req.stackId)) return answer(req);
+      asked.push(req.stackId);
+      clock += 30_000;
+      return Promise.reject(new Error("no answer"));
+    });
+    const time = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const passes: string[][] = [];
+    try {
+      for (let pass = 0; pass < 2; pass += 1) {
+        asked = [];
+        await observer.reconcileOnce();
+        passes.push(asked);
+      }
+    } finally {
+      time.mockRestore();
+      slow.mockRestore();
+    }
+    // A call starts only within the budget, and a database the pass asked goes behind the one it did not reach.
+    expect(passes[0]).toEqual([first, second]);
+    expect(passes[1]).toEqual([third, expect.any(String)]);
+    expect([first, second]).toContain(passes[1]![1]);
+
+    await observer.reconcileOnce();
+    for (const databaseId of databases) expect((await read(databaseId)).body.data.links).toEqual([expect.objectContaining({ state: "active" })]);
+  }, 90_000);
+
   it("a link that cannot be applied never fails the start of a database or of an application", async () => {
     const database = await mariadb(false);
     const app = await application(true);
