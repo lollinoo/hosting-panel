@@ -318,7 +318,10 @@ approval.
    cannot be deleted.
 9. **The backup or the restore reads «Da verificare».** Procedure 2 applies: the panel reads the state of the
    application and of the job from the executor and settles the action; it never sends a copy or a restore twice. A
-   job the executor no longer knows (it restarted) is closed as interrupted.
+   job the executor no longer knows (it restarted) is closed as interrupted. The action also reads so when the panel
+   lost track of a job the executor had accepted (no answer, or the database failed while the job ran): until the
+   job's end is read, the application keeps its lock and nothing can start it, because the job may still be reading
+   or writing its data.
 10. **Limits.** No scheduled backup, no restore into another application, no download of a backup, no backup without
     stopping, no destination per application (`ADR-0038` K12). Not tried on real Docker: hard links, extended
     attributes, file capabilities, device files, an S3 destination, two destinations at once. A copy is taken with the

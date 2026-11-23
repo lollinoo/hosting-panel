@@ -48,7 +48,7 @@ import { SimulatedBackups } from "@hosting-panel/docker-executor";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { enqueueAppStackPrune, listAppStackPruneCandidates } from "../src/app-stacks/app-stack-backup-retention.js";
 import {
   APP_STACK_BACKUP_FAILED_TEXT,
@@ -74,6 +74,22 @@ import { FakeStackExecutor } from "./support/fake-stack-executor.js";
 
 // ADR-0038: the backup kinds through AppStackRuntime (no worker) on PGlite, with the scripted fake for the
 // application and the backup simulator for the jobs. The fake clock's sleep advances time, so polls cost nothing.
+
+/** The next `failures` renewals of an operation's lease throw, as a lost database connection would. */
+const lease = vi.hoisted(() => ({ failures: 0 }));
+vi.mock("@hosting-panel/database", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@hosting-panel/database")>();
+  return {
+    ...actual,
+    renewOperationLease: async (...args: Parameters<typeof actual.renewOperationLease>) => {
+      if (lease.failures > 0) {
+        lease.failures -= 1;
+        throw new Error("connection terminated");
+      }
+      return actual.renewOperationLease(...args);
+    },
+  };
+});
 
 const ORG = "org_bk";
 const ALLOC = "alloc_bk";
@@ -261,6 +277,23 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
   const resumeOf = async (operationId: string) =>
     (await db().select().from(operations).where(eq(operations.idempotencyKey, `resume:${operationId}`)))[0] ?? null;
 
+  /** Throws when the application's lock is free: an action asked now would be queued. */
+  async function expectLocked(stackId: string) {
+    n += 1;
+    await expect(
+      enqueueAppStackOperationTransactional(db(), {
+        organizationId: ORG,
+        stackId,
+        kind: "stack.start",
+        requestedByUserId: null,
+        idempotencyKey: `bk-${String(n)}`,
+        requestHash: hex(`lifecycle ${String(n)}`),
+        revision: null,
+        destroyData: false,
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+  }
+
   /** Runs that operation as the worker would on its next pass. */
   async function resume(operationId: string) {
     const next = await resumeOf(operationId);
@@ -360,6 +393,7 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
     before = null;
     after = null;
     onSleep = null;
+    lease.failures = 0;
     // The fake's own backups belong to an empty simulator: these tests script the jobs.
     Object.assign(fake, {
       backups: async (req: BackupsIpcRequest) => {
@@ -602,6 +636,34 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await resumeOf(op.id)).toMatchObject({ kind: "stack.start", status: "queued" });
     });
 
+    it("a lease renewal that fails while the copy runs parks the backup: nothing starts the application before the copy's end is read", async () => {
+      const { stackId } = await running();
+      const { operation: op, backup } = await request(stackId);
+      before = (req) => {
+        if (req.action !== "stackStart") return;
+        sim.holdJobs();
+        lease.failures = 1;
+      };
+
+      expectParked(await apply(op));
+
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect((await backupOf(backup.id)).status).toBe("running");
+      expect(await resumeOf(op.id)).toBeNull();
+      await expectLocked(stackId);
+
+      before = null;
+      await transitionOperation(db(), op.id, "unknown");
+      expect(await runtime().recover(await opOf(op.id))).toBe("pending");
+      sim.finishHeld();
+      expect(await runtime().recover(await opOf(op.id))).toBe("settled");
+
+      expect(sim.appStackJobs()).toHaveLength(1);
+      expect((await backupOf(backup.id)).status).toBe("succeeded");
+      expect((await opOf(op.id)).status).toBe("succeeded");
+      expect(await resumeOf(op.id)).toMatchObject({ kind: "stack.start", status: "queued" });
+    });
+
     it("where application backups cannot run, the action fails before any request leaves", async () => {
       const { stackId } = await stopped();
       const { operation: op, backup } = await request(stackId);
@@ -759,6 +821,48 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await resumeOf(op.id)).toBeNull();
       expect((await stackOf(stackId)).status).toBe("stopped");
     });
+
+    it.each(["succeeded", "failed"] as const)(
+      "a lease renewal that fails while the restore job writes parks the restore until recovery reads the job's end (job %s)",
+      async (outcome) => {
+        const { stackId, source } = await withBackup();
+        const { operation: op, backup: safety } = await request(stackId, "stack.restore", source.id);
+        before = (req) => {
+          if (req.action !== "stackRestore") return;
+          sim.holdJobs();
+          if (outcome === "failed") sim.failNext("no_space");
+          lease.failures = 1;
+        };
+
+        expectParked(await apply(op));
+
+        // The job may still be writing: the application stays stopped and nothing can start it.
+        expect((await stackOf(stackId)).status).toBe("stopped");
+        expect((await backupOf(source.id)).restoreStatus).toBe("running");
+        expect(await resumeOf(op.id)).toBeNull();
+        await expectLocked(stackId);
+
+        before = null;
+        await transitionOperation(db(), op.id, "unknown");
+        expect(await runtime().recover(await opOf(op.id))).toBe("pending");
+        await expectLocked(stackId);
+        sim.finishHeld();
+        expect(await runtime().recover(await opOf(op.id))).toBe("settled");
+
+        expect(sim.appStackJobs().filter((j) => j.action === "stackRestore")).toHaveLength(1);
+        expect((await backupOf(safety.id)).status).toBe("succeeded");
+        if (outcome === "succeeded") {
+          expect((await opOf(op.id)).status).toBe("succeeded");
+          expect((await backupOf(source.id)).restoreStatus).toBe("succeeded");
+          expect(await resumeOf(op.id)).toMatchObject({ kind: "stack.start", status: "queued" });
+        } else {
+          expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+          expect(await backupOf(source.id)).toMatchObject({ restoreStatus: "failed", restoreProblem: "no_space" });
+          expect(await resumeOf(op.id)).toBeNull();
+          expect((await stackOf(stackId)).status).toBe("stopped");
+        }
+      },
+    );
 
     it("a restore parked before anything was written back is closed as interrupted and the application starts again", async () => {
       const { stackId, source } = await withBackup();

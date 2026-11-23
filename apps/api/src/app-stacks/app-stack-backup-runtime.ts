@@ -593,7 +593,10 @@ export class AppStackBackupRuntime {
     return clean;
   }
 
-  /** Follows a job to its end under a renewed lease; the first read does not wait. */
+  /**
+   * Follows a job to its end under a renewed lease; the first read does not wait. The executor accepted the job: any
+   * failure before its end is read is ambiguous, because settling now would release the application while it may run.
+   */
   async #poll(ctx: Ctx, jobId: string, initial: BackupJobStatus): Promise<BackupJobStatus> {
     const { executor, clock } = this.#deps;
     const began = clock.now();
@@ -602,8 +605,12 @@ export class AppStackBackupRuntime {
     let first = true;
     while (status.state === "running") {
       if (clock.now() - began >= APP_STACK_BACKUP_POLL_DEADLINE_MS) throw ambiguous();
-      await this.#renew(ctx);
-      if (!first) await clock.sleep(APP_STACK_BACKUP_POLL_MS);
+      try {
+        await this.#renew(ctx);
+        if (!first) await clock.sleep(APP_STACK_BACKUP_POLL_MS);
+      } catch {
+        throw ambiguous();
+      }
       first = false;
       try {
         status = await executor.backups({ action: "status", jobId });
