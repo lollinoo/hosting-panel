@@ -109,6 +109,18 @@ const containerView = (state: string, labels: Record<string, string> | null = ow
   State: state,
   Labels: labels === null ? null : { ...labels, "io.hostingpanel.role": "app_component" },
 });
+/** A job container an earlier restore of STACK left behind (its kill or its removal failed). */
+const leftoverJob = (state: string) => ({
+  Id: "b4c0ffee",
+  Names: [`/hp_bk_${OP(70, "-apply")}_rs_data`],
+  State: state,
+  Labels: {
+    "io.hostingpanel.managed": "true",
+    "io.hostingpanel.role": "site_job",
+    "io.hostingpanel.job_id": OP(70, "-apply"),
+    "io.hostingpanel.app_backup_of": STACK,
+  },
+});
 const volumeName = (key: string, stackId = STACK): string => `hp_appvol_${stackId}_${key}`;
 const volumeView = (key: string, over: Record<string, unknown> = {}, stackId = STACK) => ({
   Name: volumeName(key, stackId),
@@ -139,6 +151,9 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
   const docker = {
     containers: [containerView("exited")] as unknown[],
     listStatus: 200,
+    /** Job containers labelled as working for STACK, left by earlier jobs. */
+    jobs: [] as unknown[],
+    jobListStatus: 200,
     volumes: new Map<string, unknown>([
       [volumeName("data"), volumeView("data")],
       [volumeName("db"), volumeView("db")],
@@ -181,6 +196,9 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
       if (docker.listStatus !== 200) return json(docker.listStatus, { message: "boom" });
       // Docker applies the label filter: what a test holds is the list of STACK, another application has no container.
       const filters = JSON.parse(url.searchParams.get("filters") ?? "{}") as { label?: string[] };
+      if (filters.label?.includes(`io.hostingpanel.app_backup_of=${STACK}`) === true) {
+        return docker.jobListStatus === 200 ? json(200, docker.jobs) : json(docker.jobListStatus, { message: "boom" });
+      }
       const asked = filters.label?.includes(`io.hostingpanel.stack_id=${STACK}`) === true;
       return json(200, asked ? docker.containers : []);
     }
@@ -386,6 +404,39 @@ describe("the check before a copy or a restore of an application (ADR-0038 K4)",
       await expect(env.runner.run(copyReq(OP(1)))).resolves.toMatchObject({ state: "running" });
       await expect(settled(env.runner, OP(1))).resolves.toMatchObject({ state: "succeeded" });
     }
+  });
+
+  it.each(["running", "restarting", "paused", "removing"])(
+    "refuses while a job container an earlier job of the application left behind is %s",
+    async (state) => {
+      const env = await setup({ steps: upStep });
+      env.docker.jobs = [leftoverJob("exited"), leftoverJob(state)];
+      for (const req of requestsOf(1)) await expectRefused(env, req, "RESOURCE_LOCKED");
+    },
+  );
+
+  it("lists the job containers of the application by their own label and lets the stopped ones be", async () => {
+    const env = await setup({ steps: upStep });
+    // Stopped leftovers write nothing; the clean-up at the next executor start removes them.
+    env.docker.jobs = [leftoverJob("exited"), leftoverJob("dead"), leftoverJob("created")];
+    await expect(env.runner.run(copyReq(OP(1)))).resolves.toMatchObject({ state: "running" });
+    await expect(settled(env.runner, OP(1))).resolves.toMatchObject({ state: "succeeded" });
+    const lists = env.requests
+      .filter((r) => r.path.startsWith("/containers/json"))
+      .map((r) => new URL(`http://docker${r.path}`).searchParams);
+    expect(lists.map((q) => [q.get("all"), JSON.parse(q.get("filters") ?? "null")])).toEqual([
+      ["true", { label: [`io.hostingpanel.stack_id=${STACK}`] }],
+      ["true", { label: [`io.hostingpanel.app_backup_of=${STACK}`] }],
+    ]);
+  });
+
+  it("refuses when Docker cannot list the job containers of the application", async () => {
+    const env = await setup({ steps: upStep });
+    env.docker.jobListStatus = 500;
+    for (const req of requestsOf(1)) await expectRefused(env, req, "DOCKER_ENGINE_UNAVAILABLE");
+    env.docker.jobListStatus = 200;
+    env.docker.jobs = { not: "a list" } as unknown as unknown[];
+    for (const req of requestsOf(3)) await expectRefused(env, req, "DOCKER_ENGINE_UNAVAILABLE");
   });
 
   it("refuses when a container carries the id of the application without being its own", async () => {
@@ -791,16 +842,17 @@ describe("the job lane of an application", () => {
 
   it("answers a request sent twice with the job it already started, without checking the application again", async () => {
     const { env, release } = await held();
-    expect(env.lists()).toBe(1);
+    // One check: the application's containers, then its job containers.
+    expect(env.lists()).toBe(2);
     // By now the application could be running again: the job that was accepted is not judged a second time.
     env.docker.containers = [containerView("running")];
     await expect(env.runner.run(copyReq(OP(1)))).resolves.toMatchObject({ jobId: OP(1), state: "running" });
-    expect(env.lists()).toBe(1);
+    expect(env.lists()).toBe(2);
     release();
     const done = await settled(env.runner, OP(1));
     expect(done).toMatchObject({ state: "succeeded", snapshot: { snapshotId: SNAPSHOT_ID } });
     await expect(env.runner.run(copyReq(OP(1)))).resolves.toEqual(done);
-    expect(env.lists()).toBe(1);
+    expect(env.lists()).toBe(2);
     expect(env.createdNames()).toEqual([`hp_bk_${OP(1)}_repo`, `hp_bk_${OP(1)}_up`]);
   });
 

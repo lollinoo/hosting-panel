@@ -81,6 +81,7 @@ import {
   type RestoreNote,
 } from "./restore-jobs.js";
 import {
+  APP_STACK_BACKUP_OF_LABEL,
   buildAppStackBackupCopyContainerPayload,
   buildAppStackForgetContainerPayload,
   buildAppStackPartialSnapshotDropContainerPayload,
@@ -2448,21 +2449,28 @@ export class BackupRunner {
     return { discarded: !expired };
   }
 
+  /** Every container carrying the label, stopped ones included. */
+  private async listLabelledContainers(label: string, what: string): Promise<unknown[]> {
+    const filters = encodeURIComponent(JSON.stringify({ label: [label] }));
+    const listed = await this.callDocker("GET", `/containers/json?all=true&filters=${filters}`);
+    const containers = listed.statusCode === 200 ? parseDockerJson(listed.body) : null;
+    if (!Array.isArray(containers)) {
+      throw new ExecutorCodedError(`Docker could not list ${what}`, "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    return containers;
+  }
+
   /**
-   * Refuses a copy or a restore of an application unless every asked volume is its own and none of its containers
-   * runs (ADR-0038 K4). Synchronous, before the job is accepted: a refusal here means nothing was read or written.
+   * Refuses a copy or a restore of an application unless every asked volume is its own and neither one of its
+   * containers nor a job container of an earlier copy or restore of it runs (ADR-0038 K4). Synchronous, before the job
+   * is accepted: a refusal here means nothing was read or written.
    */
   private async assertAppStackAtRest(
     stackId: string,
     organizationId: string,
     volumeKeys: readonly string[],
   ): Promise<void> {
-    const filters = encodeURIComponent(JSON.stringify({ label: [`${APP_STACK_LABELS.stackId}=${stackId}`] }));
-    const listed = await this.callDocker("GET", `/containers/json?all=true&filters=${filters}`);
-    const containers = listed.statusCode === 200 ? parseDockerJson(listed.body) : null;
-    if (!Array.isArray(containers)) {
-      throw new ExecutorCodedError("Docker could not list the containers of the application", "DOCKER_ENGINE_UNAVAILABLE");
-    }
+    const containers = await this.listLabelledContainers(`${APP_STACK_LABELS.stackId}=${stackId}`, "the containers of the application");
     for (const raw of containers) {
       const view = (raw ?? {}) as { readonly Labels?: Record<string, string> | null; readonly State?: unknown };
       if (!isOwnAppStackResource(view.Labels ?? undefined, stackId, organizationId)) {
@@ -2470,6 +2478,15 @@ export class BackupRunner {
       }
       if (typeof view.State !== "string" || !APP_STACK_REST_STATES.has(view.State)) {
         throw new ExecutorCodedError("The application is running", "RESOURCE_LOCKED");
+      }
+    }
+    // A job container can outlive its job when its kill or its removal failed, and go on writing to the volumes. A
+    // stopped one writes nothing and does not block: the clean-up at the next executor start removes it.
+    const jobs = await this.listLabelledContainers(`${APP_STACK_BACKUP_OF_LABEL}=${stackId}`, "the backup jobs of the application");
+    for (const raw of jobs) {
+      const state = ((raw ?? {}) as { readonly State?: unknown }).State;
+      if (typeof state !== "string" || !APP_STACK_REST_STATES.has(state)) {
+        throw new ExecutorCodedError("An earlier backup job of the application is still running", "RESOURCE_LOCKED");
       }
     }
     for (const volumeKey of volumeKeys) {
