@@ -515,7 +515,7 @@ erDiagram
     }
 
     app_templates {
-        text id PK "atpl_<id>; integrati atpl_http_cache e atpl_worker_storage"
+        text id PK "atpl_<id>; cinque integrati (ADR-0035 e ADR-0039)"
         text slug UK "^[a-z][a-z0-9-]{1,47}$"
         text category "^[a-z][a-z0-9-]{0,31}$"
         boolean built_in "DEFAULT false; mai archiviato"
@@ -610,6 +610,34 @@ Note di lettura:
 - `app_stack_volumes` non perde mai un volume da sola: `retention_policy = 'destroy'` lo scrive solo una cancellazione che chiede di eliminare i dati; altrimenti il volume resta `retained` dopo la cancellazione dello stack.
 - `organizations.max_app_stacks` non ha chiavi esterne: il limite si controlla sotto il blocco di riga dell'organizzazione, sugli stack non cancellati, e gli stack non contano mai fra i siti.
 
+### 2.4 Estensione ADR-0039: collegamenti fra un database e un'applicazione
+
+La migrazione `0028_app_stack_links.sql` (`ADR-0039`) è additiva: una tabella nuova, nessuna tabella esistente cambia forma e nessuna riga è riscritta.
+
+```mermaid
+erDiagram
+    app_stacks ||--o{ app_stack_links : "consumer (consumer_stack_id, organization_id) CASCADE"
+    app_stacks ||--o{ app_stack_links : "provider (provider_stack_id, organization_id) CASCADE"
+    users |o--o{ app_stack_links : "created_by (SET NULL)"
+
+    app_stack_links {
+        text id PK "slnk_<id>"
+        text organization_id "la stessa per le due applicazioni"
+        text consumer_stack_id FK "l'applicazione che usa il database"
+        text provider_stack_id FK "il database"
+        text state "pending, active, removing"
+        text created_by FK "NULL se l'utente non esiste più"
+        timestamptz updated_at "l'ultimo passaggio sul server"
+    }
+```
+
+Note di lettura:
+
+- Le due chiavi esterne composte `(…_stack_id, organization_id)` verso `app_stacks` impediscono di registrare un collegamento fra applicazioni di due organizzazioni.
+- Il componente e la porta del database non sono nella riga: si leggono dal suo piano quando il collegamento viene applicato, così un aggiornamento del database non lascia qui un nome vecchio.
+- `active` è l'ultima risposta del server, non una lettura continua di Docker; `removing` resta finché il server conferma lo stacco, poi la riga è cancellata.
+- Quale delle due applicazioni è il database non è un vincolo della tabella: lo decide la categoria `database` del modello, controllata dall'API alla creazione del collegamento.
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -643,6 +671,8 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_name_live (organization_id, lower(name)) WHERE deleted_at IS NULL` (`0025`) | Due stack vivi della stessa organizzazione non hanno lo stesso nome; il nome di uno stack cancellato torna libero. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_org_idempotency (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL` (`0025`) | Una stessa `Idempotency-Key` crea al più uno stack per organizzazione. |
 | `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`. |
+| `app_stack_links` | `FOREIGN KEY fk_app_stack_links_consumer_org (consumer_stack_id, organization_id)` e `fk_app_stack_links_provider_org (provider_stack_id, organization_id) REFERENCES app_stacks(id, organization_id) ON DELETE CASCADE` (`0028`) | **Invariante BOLA dei collegamenti**: un database e l'applicazione che lo usa appartengono alla stessa organizzazione; nessuna riga può unire due clienti. |
+| `app_stack_links` | `UNIQUE uq_app_stack_links_pair (consumer_stack_id, provider_stack_id)`, `CHECK ck_app_stack_links_distinct (consumer_stack_id <> provider_stack_id)` e `CHECK app_stack_links_state_check (state IN ('pending', 'active', 'removing'))` (`0028`) | Una coppia ha al più un collegamento e un'applicazione non si collega a se stessa; il cancello del downgrade `app-stack-links` conta ogni riga, in qualunque stato. |
 
 ---
 
@@ -663,4 +693,7 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Dieci tabelle: `app_templates`, `app_template_versions` (immutabili), `app_stacks`, `app_stack_parameters`, `app_stack_secrets` (immutabili), `app_stack_revisions` (immutabili), `app_stack_components`, `app_stack_volumes`, `app_stack_domains` e `app_stack_deployments`.
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
-  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I due modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I modelli integrati (`atpl_http_cache`, `atpl_worker_storage` e, con `ADR-0039`, `atpl_mariadb`, `atpl_postgresql` e `atpl_valkey`; tutti disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0028 (`0028_app_stack_links.sql`, `ADR-0039`, additiva)**:
+  - Una tabella: `app_stack_links` (un collegamento fra un database e un'applicazione dello stesso cliente, con lo stato `pending`, `active` o `removing`).
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora la tabella nuova.
