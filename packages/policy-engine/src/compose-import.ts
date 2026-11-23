@@ -202,6 +202,14 @@ function buildDraft(report: ImportReport, input: Mapping): string | null {
     census,
     services.map((service) => service.environment),
   );
+  const tooManySecrets = (): null =>
+    report.refused(
+      "SECRETS_TOO_MANY",
+      [],
+      `The file writes more than ${LITERAL_SECRETS_MAX} different secrets in the clear; a template has at most ${LIMITS.secretParameters} secret parameters.`,
+    );
+  // Past the bound the importer no longer follows the secrets it meets, and such a file gives no draft: no service is converted.
+  if (registry.overflowed) return tooManySecrets();
   const given = own(input, "digests");
   const digests: ReadonlyMap<string, unknown> = given instanceof Map ? given : new Map<string, unknown>();
 
@@ -267,11 +275,7 @@ function buildDraft(report: ImportReport, input: Mapping): string | null {
     report.refused("PARAMETERS_TOO_MANY", [], `A template has at most ${LIMITS.parameters} parameters; the variables and secrets of this file need ${parameters.length}.`);
   }
   if (registry.overflowed) {
-    report.refused(
-      "SECRETS_TOO_MANY",
-      [],
-      `The file writes more than ${LITERAL_SECRETS_MAX} different secrets in the clear; a template has at most ${LIMITS.secretParameters} secret parameters.`,
-    );
+    tooManySecrets();
   } else if (secrets > LIMITS.secretParameters) {
     report.refused("SECRETS_TOO_MANY", [], `A template has at most ${LIMITS.secretParameters} secret parameters; this file needs ${secrets}.`);
   }

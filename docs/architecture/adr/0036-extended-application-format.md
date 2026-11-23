@@ -173,7 +173,7 @@ Le regole complete sono nel progetto, §7, e nei test di `packages/policy-engine
 - **Credenziali esterne.** Una chiave di un servizio esterno scritta nel file diventa un valore generato a caso: l'amministratore deve sostituire il parametro nella bozza con uno che il cliente compila.
 - **Comandi.** Un comando che porta un segreto è rifiutato: un modello è pubblicato com'è scritto.
 - **Controlli di salute.** Un controllo `CMD` che chiede un indirizzo HTTP locale diventa un controllo `http` sullo stesso percorso; se l'indirizzo ha una query, un frammento o un percorso che un modello non accetta, o se il comando è un altro, diventa un controllo `tcp`. I tempi fuori dai limiti sono portati al limite, con una riga del rapporto.
-- **Limiti.** Più di 64 segreti diversi scritti in chiaro: nessuna bozza. Un rapporto ha al massimo 200 righe. Una chiave che l'importatore non conosce rifiuta il file.
+- **Limiti.** Più di 64 segreti diversi scritti in chiaro: nessuna bozza; oltre il limite l'importatore non crea un parametro per ogni segreto in più, e se il limite è superato già prima della conversione dei servizi il file è rifiutato lì, senza le righe del rapporto sui servizi. Un rapporto ha al massimo 200 righe. Una chiave che l'importatore non conosce rifiuta il file.
 
 ### 8.5 Route d'importazione e pagine web
 

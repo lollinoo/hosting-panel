@@ -111,6 +111,10 @@ export class ParameterRegistry {
   /** The literal secrets distinctive enough to be recognised anywhere, longest first. */
   private readonly distinctive: { readonly literal: string; readonly key: string }[] = [];
   private full = false;
+  /** Stands for every literal secret met past the bound: such a file is refused, and needs no key for each of them. */
+  private overflow: DraftParameter | undefined;
+  /** The next suffix to try for a stem. A key is never freed, so every suffix below it is taken. */
+  private readonly suffixes = new Map<string, number>();
   private uses = 0;
 
   constructor(
@@ -124,7 +128,9 @@ export class ParameterRegistry {
     if (!/^[a-z]/.test(stem) || stem.startsWith("hp_")) stem = `p_${stem}`;
     stem = stem.slice(0, 32);
     let key = stem;
-    for (let n = 2; this.entries.has(key); n++) key = `${stem.slice(0, 32 - `_${n}`.length)}_${n}`;
+    let n = this.suffixes.get(stem) ?? 2;
+    for (; this.entries.has(key); n++) key = `${stem.slice(0, 32 - `_${n}`.length)}_${n}`;
+    this.suffixes.set(stem, n);
     return key;
   }
 
@@ -241,11 +247,13 @@ export class ParameterRegistry {
    * it. `literal` is the text a container would receive.
    */
   forLiteralSecret(envName: string, literal: string): DraftParameter {
-    const existing = this.literalSecret(literal);
+    const existing = this.literalSecret(literal) ?? this.overflow;
     if (existing !== undefined) return existing;
     const key = this.allocate(envName);
     this.remember(literal, key);
-    return this.add({ key, label: clip(envName, LIMITS.parameterLabel), secret: true, generate: DEFAULT_GENERATE }, []);
+    const parameter = this.add({ key, label: clip(envName, LIMITS.parameterLabel), secret: true, generate: DEFAULT_GENERATE }, []);
+    if (this.full) this.overflow = parameter;
+    return parameter;
   }
 
   /** The same for a value that is not plain text; `written` is the value as the file gives it. */

@@ -370,12 +370,48 @@ describe("files written to take long", () => {
   });
 
   it("takes the password out of hundreds of addresses without reading the file once per address", () => {
-    const lines = Array.from({ length: 60 }, (_unused, index) => `  U${index}_URL: ${Array.from({ length: 15 }, (_other, at) => `amqp://u:pw${index}x${at}Zq@h${at}`).join(",")}`);
-    const { result, ms } = timed(web("environment:", ...lines));
+    // Four addresses per value, the most secrets a value names, and one password per service: a draft with 1 280 addresses.
+    const addresses = (password: string): string => Array.from({ length: 4 }, (_unused, at) => `amqp://u:${password}@h${at}`).join(",");
+    const services = Array.from({ length: 8 }, (_unused, service) =>
+      serviceLines(`s${service}`, "environment:", ...Array.from({ length: 40 }, (_other, index) => `  U${index}_URL: ${addresses(`pw${service}xZq`)}`)),
+    );
+    const { result, ms } = timed(file("services:", ...services.flat()));
     expectWellFormed(result);
-    expect(refusals(result)).toContain("refused SECRETS_TOO_MANY ");
+    const spec = specOf(result);
+    expect(spec.parameters.map((parameter) => parameter.key)).toEqual(["u0_password", ...Array.from({ length: 7 }, (_unused, index) => `u0_password_${index + 2}`)]);
+    expect(spec.services[0]?.environment[39]).toEqual({ name: "U39_URL", value: addresses("${u0_password}") });
+    expect(spec.services[7]?.environment[39]).toEqual({ name: "U39_URL", value: addresses("${u0_password_8}") });
     expect(JSON.stringify(result)).not.toContain("Zq@");
     expect(ms).toBeLessThan(BOUND_MS);
+  });
+
+  it("refuses a file once it writes more secrets than the importer follows, without a parameter for each further address", () => {
+    const distinct = Array.from({ length: 64 }, (_unused, index) => `://:p${index}@`).join("");
+    /** One value: `before`, as many addresses as the file has room for, `after`. Over 9 000 passwords named after one variable. */
+    const crowded = (name: string, before: string, after: string): string => {
+      const room = 65_536 - Buffer.byteLength(web("environment:", `  ${name}: '${before}${after}'`));
+      return web("environment:", `  ${name}: '${before}${"://:zz@".repeat(Math.floor(room / 7))}${after}'`);
+    };
+    // The scan before conversion reads the addresses first to last.
+    const early = timed(crowded("A", distinct, ""));
+    expectWellFormed(early.result);
+    expect(refusals(early.result)).toEqual(["refused SECRETS_TOO_MANY "]);
+    expect(early.ms).toBeLessThan(2_000);
+    // Under a name that looks like a secret's and beside a generated secret, the addresses are read only by the conversion, last to first.
+    const late = timed(crowded("DB_PASSWORD", "${SERVICE_PASSWORD_X}", distinct));
+    expectWellFormed(late.result);
+    expect(refusals(late.result)).toEqual(["refused SECRET_REFERENCES_TOO_MANY services.web.environment.DB_PASSWORD", "refused SECRETS_TOO_MANY "]);
+    expect(late.ms).toBeLessThan(2_000);
+  });
+
+  it("gives keys to thousands of variables whose names make the same key without trying every key made before", () => {
+    // Twelve letters, each 'a' or 'A': 4 096 names, one key 'aaaaaaaaaaaa'.
+    const names = Array.from({ length: 4096 }, (_unused, mask) => Array.from({ length: 12 }, (_other, at) => ((mask >> at) & 1 ? "A" : "a")).join(""));
+    const { result, ms } = timed(web("environment:", `  A: '${names.map((name) => `$${name}`).join("")}'`));
+    expectWellFormed(result);
+    // The value could exceed 4 096 characters: it is dropped, and no parameter is used.
+    expect(specOf(result).parameters).toEqual([]);
+    expect(ms).toBeLessThan(1_000);
   });
 
   it("answers a file of the largest size made of one value", () => {
