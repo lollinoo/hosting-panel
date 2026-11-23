@@ -218,6 +218,22 @@ describe("one secret written in more than one place", () => {
     expectNoMarker(result);
   });
 
+  it("is known from an address that also names a variable before the first service is converted", () => {
+    const worker = serviceLines("worker", "environment:", `  JAVA_OPTS: "-Ddb.pw=${MARKER}"`);
+    const app = (...lines: string[]): string[] => serviceLines("app", ...lines, "environment:", `  DATABASE_URL: "postgres://app:${MARKER}@\${DB_HOST:-db}/app"`);
+    const result = run(file("services:", ...worker, ...app(`command: ["serve", "--opt=${MARKER}"]`)));
+    // The command of the service that writes the address is read before its environment, and carries the secret.
+    expect(notes(result).filter((note) => note.startsWith("refused "))).toEqual(["refused COMMAND_SECRET_REFUSED services.app.command[1]"]);
+    expectNoMarker(result);
+
+    for (const services of [[...worker, ...app()], [...app(), ...worker]]) {
+      const imported = run(file("services:", ...services));
+      expect(environmentOf(imported, "worker")).toEqual([{ name: "JAVA_OPTS", value: "-Ddb.pw=${database_password}" }]);
+      expect(environmentOf(imported, "app")).toEqual([{ name: "DATABASE_URL", value: "postgres://app:${database_password}@${db_host}/app" }]);
+      expectNoMarker(imported);
+    }
+  });
+
   it("is not looked for everywhere when its text is an ordinary word: the name of the database stays", () => {
     const result = run(
       file(
