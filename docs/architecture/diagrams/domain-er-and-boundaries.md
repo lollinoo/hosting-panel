@@ -610,6 +610,67 @@ Note di lettura:
 - `app_stack_volumes` non perde mai un volume da sola: `retention_policy = 'destroy'` lo scrive solo una cancellazione che chiede di eliminare i dati; altrimenti il volume resta `retained` dopo la cancellazione dello stack.
 - `organizations.max_app_stacks` non ha chiavi esterne: il limite si controlla sotto il blocco di riga dell'organizzazione, sugli stack non cancellati, e gli stack non contano mai fra i siti.
 
+### 2.4 Estensione ADR-0040: notifiche
+
+La migrazione `0029_notifications.sql` (`ADR-0040`) è additiva: tre tabelle nuove con i loro indici, nessuna modifica a una tabella esistente. La release precedente non le legge mai.
+
+```mermaid
+erDiagram
+    organizations |o--o{ notification_channels : "organization_id (CASCADE); NULL = ambito server"
+    users |o--o{ notification_channels : "updated_by_user_id (SET NULL)"
+    notification_channels ||--o{ notification_channel_alerts : "cio che il canale sa (CASCADE)"
+    notification_channels ||--o{ notification_deliveries : "messaggi (CASCADE)"
+
+    notification_channels {
+        text id PK "nch_<id>"
+        text organization_id FK "NULL = canale del server; CASCADE"
+        text kind "email, webhook, telegram; uno per tipo e per ambito"
+        boolean enabled "DEFAULT true"
+        jsonb groups "i gruppi di avvisi scelti"
+        jsonb recipients "solo email del server, altrimenti NULL"
+        text display_host "solo webhook: il nome host mostrato"
+        text chat "solo telegram: la chat mostrata"
+        boolean signed "il webhook ha una chiave di firma"
+        text locale "it o en"
+        text config_ciphertext_base64 "busta cifrata; NULL solo per email"
+        timestamptz last_tested_at "ultimo messaggio di prova"
+        text updated_by_user_id FK "SET NULL"
+    }
+
+    notification_channel_alerts {
+        text channel_id PK "FK, CASCADE"
+        text alert_key PK "<tipo>:<soggetto>"
+        text kind "senza CHECK: la lista sta nei contratti"
+        text severity "warning o critical"
+        jsonb event "l'evento com'era all'apertura"
+        timestamptz first_seen_at "primo passaggio che lo ha visto"
+        timestamptz announced_at "NULL = visto una volta, non ancora detto"
+    }
+
+    notification_deliveries {
+        text id PK "ndl_<id>"
+        text channel_id FK "CASCADE"
+        jsonb events "al piu 50 eventi"
+        integer omitted "eventi oltre il limite"
+        boolean test "messaggio di prova"
+        text recipient "solo email: un destinatario per riga"
+        text locale "it o en"
+        text status "pending, sent, failed"
+        integer attempts "tentativi fatti"
+        timestamptz next_attempt_at "solo se pending"
+        text problem "codice stabile; obbligatorio se failed"
+        integer http_status "NULL o 100..599"
+        timestamptz finished_at "NULL solo se pending"
+    }
+```
+
+Note di lettura:
+
+- `notification_channels.organization_id` vuoto è l'ambito del server. Un `UNIQUE (organization_id, kind)` non varrebbe per le righe con `NULL`: l'unicità è data da due indici parziali, uno per ambito.
+- L'indirizzo di un webhook, la sua chiave di firma e il token di un bot stanno solo nella busta cifrata (`config_*`), legata all'ambito e al tipo del canale; `display_host` e `chat` sono ciò che una pagina può mostrare.
+- `notification_channel_alerts` è lo stato del confronto, non uno storico: una riga esiste finché l'avviso è aperto per quel canale. Il ripristino del pannello (`infra/linux/hp-restore-panel.sql`) la svuota.
+- `notification_deliveries` tiene l'esito di ogni messaggio per trenta giorni; il testo non è salvato, si riscrive dagli eventi.
+
 ---
 
 ## 3. Tabella dei Vincoli di Proprietà e Integrità Relazionale
@@ -643,6 +704,11 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_name_live (organization_id, lower(name)) WHERE deleted_at IS NULL` (`0025`) | Due stack vivi della stessa organizzazione non hanno lo stesso nome; il nome di uno stack cancellato torna libero. |
 | `app_stacks` | `UNIQUE INDEX uq_app_stacks_org_idempotency (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL` (`0025`) | Una stessa `Idempotency-Key` crea al più uno stack per organizzazione. |
 | `app_stacks` | `CHECK ck_app_stacks_deleted ((status = 'deleted') = (deleted_at IS NOT NULL))` (`0025`) | Lo stato `deleted` e `deleted_at` vanno sempre insieme: il cancello del downgrade `app-stacks` conta le righe con `deleted_at IS NULL`. |
+| `notification_channels` | `UNIQUE INDEX uq_notification_channels_server_kind (kind) WHERE organization_id IS NULL` e `UNIQUE INDEX uq_notification_channels_org_kind (organization_id, kind) WHERE organization_id IS NOT NULL` (`0029`) | Un canale per tipo nell'ambito del server e uno per tipo per ogni cliente. |
+| `notification_channels` | `CHECK ck_notification_channels_config`, `ck_notification_channels_recipients` e `ck_notification_channels_shown` (`0029`) | Un webhook e un bot hanno sempre la loro busta cifrata intera e la mail non ne ha; indirizzi scritti a mano esistono solo per la mail del server; il nome host mostrato è del solo webhook e la chat del solo bot. |
+| `notification_channels` | `organization_id ... REFERENCES organizations(id) ON DELETE CASCADE` (`0029`) | I canali di un cliente spariscono con il cliente; il cancello del downgrade `notifications` conta ogni riga, accesa o spenta. |
+| `notification_channel_alerts`, `notification_deliveries` | `channel_id ... REFERENCES notification_channels(id) ON DELETE CASCADE` (`0029`) | Rimuovere un canale porta via ciò che sapeva e i suoi messaggi. |
+| `notification_deliveries` | `CHECK ck_notification_deliveries_pending`, `ck_notification_deliveries_sent` e `ck_notification_deliveries_failed` (`0029`) | Un messaggio è in attesa esattamente finché ha un prossimo tentativo e nessuna fine; uno consegnato non ha un motivo di errore e uno non consegnato ne ha sempre uno. |
 
 ---
 
@@ -664,3 +730,7 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
   - Due trigger di unicità degli hostname fra siti, stack e pannello (`uq_panel_hostname_claim`).
   - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove. I due modelli integrati (`atpl_http_cache`, `atpl_worker_storage`, disabilitati) sono garantiti a ogni avvio dell'API da `ensureBuiltInAppTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0029 (`0029_notifications.sql`, `ADR-0040`, additiva)**:
+  - Tre tabelle: `notification_channels` (un canale per tipo e per ambito), `notification_channel_alerts` (ciò che un canale sa già) e `notification_deliveries` (i messaggi con il loro esito).
+  - Due indici unici parziali sui canali e due indici sui messaggi (`idx_notification_deliveries_due`, `idx_notification_deliveries_channel_created`).
+  - Nessuna colonna, indice o trigger cambia su una tabella esistente e non c'è backfill; la release precedente, dopo un rollback automatico, ignora le tabelle nuove.
