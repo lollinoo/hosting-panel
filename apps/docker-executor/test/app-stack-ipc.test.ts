@@ -414,7 +414,10 @@ describe("application stack IPC routes", () => {
     cleanup.push(() => daemon.close());
     const dir = await mkdtemp(path.join(os.tmpdir(), "hp-stk-ipc-"));
     cleanup.push(() => rm(dir, { recursive: true, force: true }));
-    const listener = net.createServer((socket) => socket.end());
+    const listener = net.createServer((socket) => {
+      socket.on("error", () => undefined);
+      socket.end();
+    });
     await new Promise<void>((resolve) => listener.listen(0, "127.0.0.1", () => resolve()));
     cleanup.push(() => new Promise<void>((resolve) => listener.close(() => resolve())));
     const port = (listener.address() as AddressInfo).port;

@@ -139,6 +139,7 @@ async function setup(logs: () => string) {
   await mkdir(secretDir);
   // Fake relay: accepts one message and answers with a fixed queue id.
   const server = net.createServer((sock) => {
+    sock.on("error", () => undefined);
     sock.write("220 hp-mail ESMTP\r\n");
     let inData = false;
     sock.on("data", (d) => {

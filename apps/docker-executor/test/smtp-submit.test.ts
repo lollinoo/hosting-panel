@@ -10,6 +10,7 @@ async function fake(greeting: string | null, onData?: (received: string[]) => vo
   let connections = 0;
   const server = net.createServer((sock) => {
     connections += 1;
+    sock.on("error", () => undefined);
     if (greeting) sock.write(greeting);
     let data = false;
     sock.on("data", (d) => {
@@ -51,7 +52,8 @@ describe("submitLocalMail", () => {
 
   it("waits for CRLF when a reply is split across chunks", async () => {
     const server = net.createServer((sock) => {
-      const send = (parts: string[]) => parts.forEach((p, i) => setTimeout(() => sock.write(p), i * 20));
+      sock.on("error", () => undefined);
+      const send =(parts: string[]) => parts.forEach((p, i) => setTimeout(() => sock.write(p), i * 20));
       send(["220 he", "llo\r\n"]);
       let data = false;
       sock.on("data", (d) => {
