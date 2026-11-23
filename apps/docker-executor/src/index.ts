@@ -235,6 +235,11 @@ export {
 export { SimulatedSiteFiles, makeDir, type SimSeedEntry } from "./simulator-files.js";
 export { SimulatedAppStacks, type AppStackSimFault, type AppStackSimStep } from "./simulator-app-stacks.js";
 export {
+  SimulatedAppStackTasks,
+  type AppStackTaskSimBehaviour,
+  type AppStackTaskSimFault,
+} from "./simulator-app-stack-tasks.js";
+export {
   APP_STACK_COMPONENT_ROLE,
   APP_STACK_HTTP_PROBE_BODY_MAX_BYTES,
   APP_STACK_LABELS,
@@ -244,9 +249,21 @@ export {
   APP_STACK_PULL_ENGINE_TIMEOUT_MS,
   APP_STACK_RESTART_POLICY,
   APP_STACK_STOP_TIMEOUT_SECONDS,
+  APP_STACK_TASK_CLEANUP_RETRIES,
+  APP_STACK_TASK_CLEANUP_RETRY_MS,
+  APP_STACK_TASK_END_SETTLE_MS,
+  APP_STACK_TASK_KILL_SCRIPT,
+  APP_STACK_TASK_KILL_TIMEOUT_MS,
+  APP_STACK_TASK_MARK,
+  APP_STACK_TASK_OUTPUT_TAIL_BYTES,
+  APP_STACK_TASK_READ_TIMEOUT_MS,
+  APP_STACK_TASK_RUN_MARGIN_MS,
+  APP_STACK_TASK_RUN_PATH,
+  APP_STACK_TASK_RUNS_REMEMBERED,
   APP_STACK_TMPFS,
   AppStackEngine,
   AppStackExecutorError,
+  AppStackTaskRunner,
   appStackComponentLabels,
   appStackContainerName,
   appStackEdgeNetworkName,
@@ -255,6 +272,7 @@ export {
   appStackNetworkLabels,
   appStackRouteFileName,
   appStackSecretDirKey,
+  appStackTaskReadPath,
   appStackVolumeLabels,
   appStackVolumeName,
   assertAppStackPayloadHardening,
@@ -268,6 +286,7 @@ export {
   probeAppStackHealth,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
+  reapAppStackTasks,
   readAppStackComponentSecretValues,
   writeAppStackComponentSecrets,
   type AppStackContainerCreatePayload,
@@ -278,6 +297,8 @@ export {
   type AppStackPlanCheckOptions,
   type AppStackProbeTarget,
   type AppStackRouteStore,
+  type AppStackTaskLimits,
+  type AppStackTaskRunnerDeps,
 } from "./app-stacks/index.js";
 export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps } from "./simulator-site-types.js";
 

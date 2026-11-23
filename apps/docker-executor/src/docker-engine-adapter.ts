@@ -67,6 +67,10 @@ import {
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
   type AppStackStopIpcResult,
+  type AppStackTaskReadIpcRequest,
+  type AppStackTaskReadIpcResult,
+  type AppStackTaskRunIpcRequest,
+  type AppStackTaskRunIpcResult,
 } from "@hosting-panel/contracts";
 import {
   createApprovedServiceSpec,
@@ -89,6 +93,7 @@ import {
   type SiteJobResult,
   type SiteRoutesRequest,
   type StackExecutorPort,
+  type StackTaskExecutorPort,
   type TerminalEnded,
   type TerminalOpenRequest,
   type TerminalOpenResult,
@@ -96,6 +101,7 @@ import {
   type TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import { AppStackEngine } from "./app-stacks/engine.js";
+import { AppStackTaskRunner, reapAppStackTasks, type AppStackTaskLimits } from "./app-stacks/tasks.js";
 import {
   DEFAULT_PHPMYADMIN_CONFIG_DIR,
   PHPMYADMIN_CONTAINER_NAME,
@@ -1240,6 +1246,8 @@ export interface DockerEngineSocketAdapterOptions {
   readonly appImageAllowlist?: readonly AppImageAllowlistEntry[];
   /** Shorter terminal limits (tests and the real-Docker script). */
   readonly terminalLimits?: Partial<TerminalLimits>;
+  /** Shorter waits of application tasks (tests and the real-Docker script). */
+  readonly appStackTaskLimits?: AppStackTaskLimits;
   /** Turns a request's site-type key into its definition (default: the executor's registry). */
   readonly resolveSiteType?: (key: SiteTypeKey) => ExecutorSiteType;
 }
@@ -1273,7 +1281,7 @@ interface ManualColdInput {
 const ACME_PLAN_READ_RETRIES = 3;
 const ACME_PLAN_READ_RETRY_MS = 50;
 
-export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecutorPort {
+export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecutorPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly dockerClient: DockerSocketHttpClient;
   private readonly secretsRootDir: string;
@@ -1339,6 +1347,8 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
   private readonly ingressProxyContainerName: string;
   private readonly ingressNetworkName: string;
   private readonly appStackEngine: AppStackEngine;
+  private readonly appStackTasks: AppStackTaskRunner;
+  private readonly appStackTaskLimits: AppStackTaskLimits | undefined;
 
   public constructor(options?: DockerEngineSocketAdapterOptions) {
     this.ingressProxyContainerName = options?.ingressProxyContainerName ?? INGRESS_PROXY_CONTAINER_NAME;
@@ -1492,6 +1502,23 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
       },
       readLogs: (ref, tail) => this.readContainerLogs(ref, tail),
     });
+    this.appStackTaskLimits = options?.appStackTaskLimits;
+    this.appStackTasks = new AppStackTaskRunner({
+      target: this.execTarget,
+      secretsRootDir: this.secretsRootDir,
+      ...(this.appStackTaskLimits ? { limits: this.appStackTaskLimits } : {}),
+      // Nothing of the run is logged: no name, no argument, no output.
+      onCleanupFailed: () => {
+        console.warn(
+          JSON.stringify({
+            component: "hp-docker-executor",
+            event: "app_task_cleanup_failed",
+            code: "INTERNAL_ERROR",
+            timestamp: new Date().toISOString(),
+          }),
+        );
+      },
+    });
   }
 
   public pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
@@ -1540,6 +1567,20 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
 
   public getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
     return this.appStackEngine.getAppStackComponentLogs(req);
+  }
+
+  /** A task of an application, in the existing container of one of its components (ADR-0042). */
+  public runAppStackTask(req: AppStackTaskRunIpcRequest): Promise<AppStackTaskRunIpcResult> {
+    return this.appStackTasks.runAppStackTask(req);
+  }
+
+  public getAppStackTaskRun(req: AppStackTaskReadIpcRequest): Promise<AppStackTaskReadIpcResult> {
+    return this.appStackTasks.getAppStackTaskRun(req);
+  }
+
+  /** At start: ends what the tasks of a previous executor left running in the components of applications. */
+  public async reapAppStackTasks(): Promise<void> {
+    await reapAppStackTasks(this.execTarget, this.appStackTaskLimits);
   }
 
   public async pingEngine(): Promise<boolean> {

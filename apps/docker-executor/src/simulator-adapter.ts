@@ -37,6 +37,8 @@ import {
   type AppStackRefIpcRequest,
   type AppStackRemoveIpcRequest,
   type AppStackRoutesIpcRequest,
+  type AppStackTaskReadIpcRequest,
+  type AppStackTaskRunIpcRequest,
 } from "@hosting-panel/contracts";
 import type {
   AcmeFailure,
@@ -63,6 +65,7 @@ import type {
   SiteJobResult,
   SiteRoutesRequest,
   StackExecutorPort,
+  StackTaskExecutorPort,
   StoredCertificate,
   TerminalEnded,
   TerminalOpenRequest,
@@ -75,6 +78,7 @@ import { SimulatedSiteDatabases } from "./simulator-databases.js";
 import { SimulatedBackups } from "./simulator-backups.js";
 import { SimulatedSiteFiles } from "./simulator-files.js";
 import { SimulatedAppStacks } from "./simulator-app-stacks.js";
+import { SimulatedAppStackTasks } from "./simulator-app-stack-tasks.js";
 import { resolveSimulatorSiteType, type SimulatorSiteType } from "./simulator-site-types.js";
 import { assertValidSiteJobRequest, parseWordpressJobResult } from "./site-jobs.js";
 import { renderPhpIni } from "./site-php.js";
@@ -220,7 +224,7 @@ function simulatedLeafNames(cert: X509Certificate): string[] {
   return traefikCertificateNames({ commonName: cn, dnsNames, ipAddresses });
 }
 
-export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort {
+export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, StackExecutorPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable = true;
   private readonly secretsRootDir: string | null;
   private readonly virtualSecretsRoot: string;
@@ -295,6 +299,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   private readonly resolveSiteType: (key: SiteTypeKey) => SimulatorSiteType;
   private readonly terminalSinks = new Map<string, TerminalShellSink>();
   public readonly appStacks: SimulatedAppStacks;
+  public readonly appStackTasks: SimulatedAppStackTasks;
 
   public constructor(options?: InMemoryDockerSimulatorAdapterOptions) {
     this.secretsRootDir = options?.secretsRootDir ? path.resolve(options.secretsRootDir) : null;
@@ -309,6 +314,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
     this.terminals = new TerminalSessions(options?.terminalLimits);
     this.resolveSiteType = options?.resolveSiteType ?? resolveSimulatorSiteType;
     this.files = new SimulatedSiteFiles(this.resolveSiteType);
+    this.appStackTasks = new SimulatedAppStackTasks({
+      findComponent: (req) => this.appStacks.findAppStackComponent(req),
+      assertEngineAvailable: () => this.assertEngineAvailable(),
+    });
     this.appStacks = new SimulatedAppStacks({
       secretsRootDir: this.secretsRootDir,
       ingress: this.ingressFileManager,
@@ -1358,6 +1367,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest) { return this.appStacks.removeAppStackComponents(req); }
   public getAppStackStatus(req: AppStackRefIpcRequest) { return this.appStacks.getAppStackStatus(req); }
   public getAppStackComponentLogs(req: AppStackLogsIpcRequest) { return this.appStacks.getAppStackComponentLogs(req); }
+  public runAppStackTask(req: AppStackTaskRunIpcRequest) { return this.appStackTasks.runAppStackTask(req); }
+  public getAppStackTaskRun(req: AppStackTaskReadIpcRequest) { return this.appStackTasks.getAppStackTaskRun(req); }
 
   public hasActiveVirtualSecret(serviceInstanceId: string, envName?: string): boolean {
     const set = this.virtualSecretFiles.get(serviceInstanceId);

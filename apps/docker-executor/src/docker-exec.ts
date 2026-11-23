@@ -296,7 +296,8 @@ class DockerFrameDemuxer {
   }
 }
 
-async function inspectExecExitCode(
+/** How an exec ended, waiting a moment while the engine still calls it running. */
+export async function inspectExecExitCode(
   target: DockerExecTarget,
   execId: string,
 ): Promise<{ readonly exitCode: number | null; readonly exitUnknown: boolean }> {

@@ -210,7 +210,11 @@ const rolesOf = (plan: ApprovedStackPlan): AppStackNetworkRole[] =>
 const labelFilter = (stackId: string) => enc(JSON.stringify({ label: [`${APP_STACK_LABELS.stackId}=${stackId}`] }));
 
 /** The component key of an own container (Docker names carry a leading "/"), else null. */
-function ownComponentKey(labels: Labels | null | undefined, name: string | undefined, ids: Ids): string | null {
+export function ownComponentKey(
+  labels: Readonly<Record<string, string>> | null | undefined,
+  name: string | undefined,
+  ids: { readonly stackId: string; readonly organizationId: string },
+): string | null {
   const key = labels?.[APP_STACK_LABELS.component];
   return isOwnAppStackResource(labels ?? undefined, ids.stackId, ids.organizationId) &&
     labels?.[APP_STACK_LABELS.role] === APP_STACK_COMPONENT_ROLE &&

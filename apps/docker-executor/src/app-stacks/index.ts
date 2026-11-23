@@ -5,3 +5,5 @@ export * from "./container-payload.js";
 export * from "./secrets.js";
 export * from "./health-probe.js";
 export * from "./engine.js";
+export * from "./tasks.js";
+export * from "./task-ipc.js";

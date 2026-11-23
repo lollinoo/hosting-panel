@@ -63,6 +63,7 @@ import {
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
 import { AppStackExecutorError } from "./app-stacks/errors.js";
+import { appStackTaskIpcRoute } from "./app-stacks/task-ipc.js";
 import { parseSiteFilesRequest } from "./site-files-helper.js";
 import { ExecutorCodedError, assertSafeIdentifier } from "./traefik-config.js";
 
@@ -698,6 +699,13 @@ export class DockerExecutorIpcServer {
         }
         const ensured = await this.executor.ensureIngressProxy();
         writeJson(res, 200, { data: ensured });
+        return;
+      }
+
+      // Tasks of applications (ADR-0042): an optional port of their own, answered before the application routes.
+      const taskRoute = appStackTaskIpcRoute(method, pathname, parsedUrl, rawBody);
+      if (taskRoute !== null) {
+        writeJson(res, 200, { data: await taskRoute(this.executor) });
         return;
       }
 

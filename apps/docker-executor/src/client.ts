@@ -11,6 +11,8 @@ import {
   AppStackRoutesIpcResultSchema,
   AppStackStatusIpcResultSchema,
   AppStackStopIpcResultSchema,
+  AppStackTaskReadIpcResultSchema,
+  AppStackTaskRunIpcResultSchema,
   type AppStackComponentActionIpcResult,
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
@@ -28,6 +30,10 @@ import {
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
   type AppStackStopIpcResult,
+  type AppStackTaskReadIpcRequest,
+  type AppStackTaskReadIpcResult,
+  type AppStackTaskRunIpcRequest,
+  type AppStackTaskRunIpcResult,
   type ErrorDetail,
   BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
@@ -96,6 +102,7 @@ import type {
   SiteJobResult,
   SiteRoutesRequest,
   StackExecutorPort,
+  StackTaskExecutorPort,
   TerminalEnded,
   TerminalOpenRequest,
   TerminalOpenResult,
@@ -103,6 +110,12 @@ import type {
   TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
+import {
+  APP_STACK_TASK_READ_TIMEOUT_MS,
+  APP_STACK_TASK_RUN_MARGIN_MS,
+  APP_STACK_TASK_RUN_PATH,
+  appStackTaskReadPath,
+} from "./app-stacks/task-ipc.js";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
   type IpcTransportMode,
@@ -252,7 +265,7 @@ export interface SignedDockerExecutorIpcClientOptions {
 
 const handledIpcSockets = new WeakSet<object>();
 
-export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort {
+export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable: boolean;
   private readonly signingKey: IpcSigningKey;
   private readonly transport: IpcTransportMode;
@@ -692,6 +705,21 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     const pathWithQuery = `/v1/app-stacks/${encodeURIComponent(req.stackId)}/components/${encodeURIComponent(req.componentKey)}/logs?${query}`;
     const json = await this.sendSignedJsonRequest("GET", pathWithQuery, undefined, APP_STACK_LOGS_TIMEOUT_MS);
     return z.object({ data: AppStackLogsIpcResultSchema }).parse(json).data;
+  }
+
+  /**
+   * A task of an application (ADR-0042). The answer comes when the command ended, so the wait is the run's own time
+   * limit plus a margin; an answer that does not come is a lost one (`ambiguousOutcome`): ask with getAppStackTaskRun.
+   */
+  public async runAppStackTask(req: AppStackTaskRunIpcRequest): Promise<AppStackTaskRunIpcResult> {
+    const waitMs = req.timeoutSeconds * 1000 + APP_STACK_TASK_RUN_MARGIN_MS;
+    const json = await this.sendSignedJsonRequest("POST", APP_STACK_TASK_RUN_PATH, req, waitMs);
+    return z.object({ data: AppStackTaskRunIpcResultSchema }).parse(json).data;
+  }
+
+  public async getAppStackTaskRun(req: AppStackTaskReadIpcRequest): Promise<AppStackTaskReadIpcResult> {
+    const json = await this.sendSignedJsonRequest("GET", appStackTaskReadPath(req), undefined, APP_STACK_TASK_READ_TIMEOUT_MS);
+    return z.object({ data: AppStackTaskReadIpcResultSchema }).parse(json).data;
   }
 
   private async sendServiceAction(
