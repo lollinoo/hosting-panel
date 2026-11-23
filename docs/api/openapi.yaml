@@ -6167,7 +6167,11 @@ paths:
         Write-only: the value is stored encrypted as a new version and is never returned, logged or audited; the
         answer says only that a value is set, its version and when. Nothing is queued: the next deploy uses it. A key
         that is not a secret of the application is refused (`VALIDATION_ERROR`, `details[0].field: parameterKey`,
-        `details[0].reason: STACK_PARAMETER_INVALID`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        `details[0].reason: STACK_PARAMETER_INVALID`); a secret the template declares `customer: false` is answered
+        exactly like an unknown key, so the answer does not reveal that it exists. A secret the application reads from
+        a component's environment (`HCP-STACK/v2`) holds at most 4096 bytes of UTF-8; a longer value is refused
+        (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`) and nothing is stored. A
+        secret delivered as a file keeps the body's limit. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
         while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
