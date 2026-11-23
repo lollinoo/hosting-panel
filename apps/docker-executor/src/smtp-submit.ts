@@ -14,14 +14,33 @@ export interface SubmitLocalMailOptions {
 
 const unavailable = (why: string) => new ExecutorCodedError(why, "MAIL_RELAY_UNAVAILABLE");
 
+/**
+ * The Subject header value: as it is when printable ASCII, otherwise RFC 2047 encoded words, one per folded
+ * line, never cutting a character in half.
+ */
+export function encodeMailSubject(subject: string): string {
+  if (/^[\x20-\x7e]*$/.test(subject)) return subject;
+  const words: string[] = [];
+  let chunk = "";
+  for (const char of subject) {
+    // 39 bytes are 52 base64 characters, 64 with the marks around them: after "Subject: " the line stays
+    // under the 76 characters a header line holding an encoded word may have.
+    if (Buffer.byteLength(chunk + char, "utf8") > 39) {
+      words.push(chunk);
+      chunk = "";
+    }
+    chunk += char;
+  }
+  if (chunk !== "") words.push(chunk);
+  return words.map((w) => `=?UTF-8?B?${Buffer.from(w, "utf8").toString("base64")}?=`).join("\r\n ");
+}
+
 /** Minimal plain SMTP client for the relay's own bridge address: no TLS, no AUTH. */
 export async function submitLocalMail(opts: SubmitLocalMailOptions): Promise<{ queueId: string }> {
   if (/[\r\n<>]/.test(opts.from) || /[\r\n<>]/.test(opts.to) || /[\r\n]/.test(opts.subject)) {
     throw new ExecutorCodedError("Invalid mail address or subject", "VALIDATION_ERROR");
   }
-  const subject = /^[\x20-\x7e]*$/.test(opts.subject)
-    ? opts.subject
-    : `=?UTF-8?B?${Buffer.from(opts.subject, "utf8").toString("base64")}?=`;
+  const subject = encodeMailSubject(opts.subject);
   const body = opts.text
     .replace(/\r?\n/g, "\r\n")
     .split("\r\n")

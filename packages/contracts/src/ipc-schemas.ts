@@ -4,6 +4,7 @@ import { TLS_FINGERPRINT_PATTERN, TLS_VERSION_ID_PATTERN } from "./tls-certifica
 import { SNI_VIOLATIONS } from "./tls-sni.js";
 import { DNS_PROVIDERS, refineDnsCredentials } from "./dns-provider.js";
 import { HOST_DISK_PATHS, PANEL_CONTAINERS } from "./admin-health.js";
+import { NOTIFICATION_AUDIENCES, NOTIFICATION_MAX_EVENTS, NotificationEventSchema } from "./notifications.js";
 import { FIREWALL_MAX_BLOCKS_PER_FAMILY, FIREWALL_PORT_NAMES } from "./admin-firewall.js";
 import { TERMINAL_INPUT_MAX_BYTES, TerminalSessionIdSchema, type TerminalEndReason } from "./admin-terminal.js";
 import {
@@ -521,23 +522,42 @@ export type MailRelayStatusReport = z.infer<typeof MailRelayStatusReportWireSche
 export const MailTestIpcRequestSchema = z.object({ to: z.string().email(), from: z.string().email() });
 export const MailTestIpcResponseSchema = MailTestResultDtoSchema;
 
-export const PANEL_MAIL_KINDS = ["password_reset"] as const;
-export const PanelMailIpcRequestSchema = z
-  .object({
-    kind: z.enum(PANEL_MAIL_KINDS),
-    to: z.string().email().max(254),
-    from: z.string().email().max(254),
-    locale: z.enum(["it", "en"]),
-    // Printable ASCII only: no space, CR or LF can reach the mail body.
-    link: z
-      .string()
-      .max(512)
-      .regex(/^https:\/\/[\x21-\x7e]+$/)
-      .refine((u) => URL.canParse(u) && new URL(u).protocol === "https:"),
-  })
+export const PANEL_MAIL_KINDS = ["password_reset", "notification"] as const;
+// Printable ASCII only: no space, CR or LF can reach the mail body.
+const PanelMailLinkSchema = z
+  .string()
+  .max(512)
+  .regex(/^https:\/\/[\x21-\x7e]+$/)
+  .refine((u) => URL.canParse(u) && new URL(u).protocol === "https:");
+const panelMailEnvelope = {
+  to: z.string().email().max(254),
+  from: z.string().email().max(254),
+  locale: z.enum(["it", "en"]),
+};
+export const PasswordResetMailIpcRequestSchema = z
+  .object({ kind: z.literal("password_reset"), ...panelMailEnvelope, link: PanelMailLinkSchema })
   .strict();
+/** A notification (ADR-0040) carries events, never text: the executor writes the words from them. */
+export const NotificationMailIpcRequestSchema = z
+  .object({
+    kind: z.literal("notification"),
+    ...panelMailEnvelope,
+    audience: z.enum(NOTIFICATION_AUDIENCES),
+    events: z.array(NotificationEventSchema).max(NOTIFICATION_MAX_EVENTS),
+    omitted: z.number().int().nonnegative().max(1_000_000),
+    test: z.boolean(),
+    link: PanelMailLinkSchema.nullable(),
+  })
+  .strict()
+  .refine((m) => m.test || m.events.length > 0, "A notification holds at least one event.");
+export const PanelMailIpcRequestSchema = z.discriminatedUnion("kind", [
+  PasswordResetMailIpcRequestSchema,
+  NotificationMailIpcRequestSchema,
+]);
 export const PanelMailIpcResponseSchema = z.object({ outcome: z.enum(["queued", "failed"]) });
 export type PanelMailRequest = z.infer<typeof PanelMailIpcRequestSchema>;
+export type PasswordResetMailRequest = z.infer<typeof PasswordResetMailIpcRequestSchema>;
+export type NotificationMailRequest = z.infer<typeof NotificationMailIpcRequestSchema>;
 export type PanelMailResult = z.infer<typeof PanelMailIpcResponseSchema>;
 
 export const SITE_FILES_LIST_MAX = 5_000;

@@ -1135,7 +1135,7 @@ describe("@hosting-panel/contracts — Panel mail IPC", () => {
   };
 
   it("accepts a reset link of 43 url-safe characters", () => {
-    expect(PANEL_MAIL_KINDS).toEqual(["password_reset"]);
+    expect(PANEL_MAIL_KINDS).toEqual(["password_reset", "notification"]);
     expect(PanelMailIpcRequestSchema.parse(valid)).toEqual(valid);
   });
 

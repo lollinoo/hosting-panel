@@ -1,6 +1,6 @@
 import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { submitLocalMail } from "../src/smtp-submit.js";
+import { encodeMailSubject, submitLocalMail } from "../src/smtp-submit.js";
 
 const closers: Array<() => void> = [];
 afterEach(() => closers.splice(0).forEach((c) => c()));
@@ -86,5 +86,37 @@ describe("submitLocalMail", () => {
     await expect(submitLocalMail({ ...base, port: down.port })).rejects.toMatchObject({ code: "MAIL_RELAY_UNAVAILABLE" });
     const silent = await fake(null);
     await expect(submitLocalMail({ ...base, port: silent.port, timeoutMs: 100 })).rejects.toMatchObject({ code: "MAIL_RELAY_UNAVAILABLE" });
+  });
+});
+
+describe("encodeMailSubject", () => {
+  const decode = (header: string) =>
+    header
+      .split("\r\n ")
+      .map((word) => Buffer.from(/^=\?UTF-8\?B\?([A-Za-z0-9+/=]+)\?=$/.exec(word)![1]!, "base64").toString("utf8"))
+      .join("");
+
+  it("leaves a subject of printable ASCII as it is", () => {
+    expect(encodeMailSubject("Reset your panel password")).toBe("Reset your panel password");
+    expect(encodeMailSubject("")).toBe("");
+  });
+
+  it("writes any other subject as encoded words on short lines, whole characters only", () => {
+    for (const subject of [
+      "Pannello di hosting: 2 nuovi avvisi, 1 non più aperto",
+      "Pannello di hosting: 12 nuovi avvisi, 34 non più aperti",
+      "è".repeat(120),
+      "😀".repeat(40),
+      `a${"😀".repeat(30)}`,
+    ]) {
+      const header = encodeMailSubject(subject);
+      expect(decode(header)).toBe(subject);
+      const lines = `Subject: ${header}`.split("\r\n");
+      for (const line of lines) {
+        expect(line.length, subject).toBeLessThanOrEqual(76);
+        expect(line).toMatch(/^[\x20-\x7e]+$/);
+      }
+      for (const line of lines.slice(1)) expect(line.startsWith(" =?UTF-8?B?")).toBe(true);
+    }
   });
 });

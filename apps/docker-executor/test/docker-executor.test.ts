@@ -2112,6 +2112,45 @@ describe("mail relay IPC", () => {
     expect(simulator.panelMails).toHaveLength(2);
   });
 
+  it("a notification mail round-trips into the simulator apart from the resets, and free text is refused", async () => {
+    const simulator = new InMemoryDockerSimulatorAdapter();
+    const { client, raw } = await serve(simulator);
+    await client.applyMailRelay(config);
+    const req = {
+      kind: "notification" as const,
+      to: "owner@example.test",
+      from: "noreply@mail.example.test",
+      locale: "en" as const,
+      audience: "customer" as const,
+      events: [
+        {
+          id: "0".repeat(24),
+          kind: "site_container_down" as const,
+          state: "opened" as const,
+          severity: "critical" as const,
+          site: "Shop",
+          host: null,
+          name: null,
+          component: null,
+          disks: null,
+          percent: null,
+          date: null,
+          operation: null,
+        },
+      ],
+      omitted: 0,
+      test: false,
+      link: "https://panel.example.test/",
+    };
+    expect(await client.sendPanelMail(req)).toEqual({ outcome: "queued" });
+    expect(simulator.notificationMails).toEqual([req]);
+    expect(simulator.panelMails).toEqual([]);
+    for (const bad of [{ ...req, text: "Hello" }, { ...req, events: [] }, { ...req, events: [{ ...req.events[0], site: "Shop\nBcc: x@example.test" }] }]) {
+      expect((await raw("/v1/mail-relay/panel", bad)).status).toBe(400);
+    }
+    expect(simulator.notificationMails).toHaveLength(1);
+  });
+
   it("client uses 300 s for mail apply and 35 s for status and test", async () => {
     const { client } = await serve(new InMemoryDockerSimulatorAdapter());
     const timeouts: Array<number | undefined> = [];

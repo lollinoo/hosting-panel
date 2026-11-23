@@ -11,10 +11,12 @@ import {
   NOTIFICATION_NAME_MAX,
   NOTIFICATION_TEXT_MAX,
   NotificationEventSchema,
+  NotificationMailIpcRequestSchema,
   NotificationSettingsDtoSchema,
   NotificationWebhookBodySchema,
   NotificationWebhookUrlSchema,
   PERMISSION_KEYS,
+  PanelMailIpcRequestSchema,
   PRESET_ROLE_PERMISSIONS,
   SaveCustomerEmailChannelSchema,
   SaveServerEmailChannelSchema,
@@ -389,5 +391,51 @@ describe("notification settings", () => {
     expect(NotificationWebhookBodySchema.safeParse({ ...body, version: 2 }).success).toBe(false);
     expect(NotificationWebhookBodySchema.safeParse({ ...body, organizationId: "org_1" }).success).toBe(false);
     expect(findForbiddenPublicDtoKeys(body)).toEqual([]);
+  });
+});
+
+describe("notification mail request", () => {
+  const mail = {
+    kind: "notification",
+    to: "owner@example.test",
+    from: "noreply@mail.example.test",
+    locale: "it",
+    audience: "customer",
+    events: [eventOf("site_container_down"), eventOf("backup_failed", "closed")],
+    omitted: 0,
+    test: false,
+    link: "https://panel.example.test/",
+  };
+
+  it("carries events, an audience and a link, next to the password reset", () => {
+    expect(PanelMailIpcRequestSchema.parse(mail)).toEqual(mail);
+    expect(NotificationMailIpcRequestSchema.parse({ ...mail, link: null })).toEqual({ ...mail, link: null });
+    expect(PanelMailIpcRequestSchema.safeParse({ ...mail, test: true, events: [] }).success).toBe(true);
+    const reset = { kind: "password_reset", to: mail.to, from: mail.from, locale: "en", link: "https://panel.example.test/reset-password#abc" };
+    expect(PanelMailIpcRequestSchema.parse(reset)).toEqual(reset);
+  });
+
+  it.each([
+    ["a subject", { subject: "Hello" }],
+    ["a text", { text: "Hello" }],
+    ["no event when it is not a test", { events: [] }],
+    ["more events than the limit", { events: Array.from({ length: 51 }, () => eventOf("site_container_down")) }],
+    ["an event with a line break in a name", { events: [{ ...eventOf("site_container_down"), site: "Shop\nBcc: x@example.test" }] }],
+    ["an event with a key of its own", { events: [{ ...eventOf("site_container_down"), message: "free text" }] }],
+    ["an http link", { link: "http://panel.example.test/" }],
+    ["a link with a line break", { link: "https://panel.example.test/\nBcc: x@example.test" }],
+    ["an unknown audience", { audience: "everyone" }],
+    ["an unknown language", { locale: "de" }],
+    ["a recipient with a line break", { to: "owner@example.test\nBcc: x@example.test" }],
+    ["a negative count of events left out", { omitted: -1 }],
+  ])("refuses %s", (_name, patch) => {
+    expect(PanelMailIpcRequestSchema.safeParse({ ...mail, ...patch }).success).toBe(false);
+  });
+
+  it("gives a password reset no events and a notification no free link", () => {
+    const reset = { kind: "password_reset", to: mail.to, from: mail.from, locale: "en", link: "https://panel.example.test/reset-password#abc" };
+    expect(PanelMailIpcRequestSchema.safeParse({ ...reset, events: mail.events }).success).toBe(false);
+    expect(PanelMailIpcRequestSchema.safeParse({ ...reset, link: null }).success).toBe(false);
+    expect(PanelMailIpcRequestSchema.safeParse({ ...mail, kind: "welcome" }).success).toBe(false);
   });
 });
