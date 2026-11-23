@@ -29,6 +29,7 @@ import {
   recordObservedStateReconciliationTransactional,
   serviceInstances,
   siteBackups,
+  sites,
   upsertHostAgentHeartbeat,
   type DatabaseClient,
 } from "@hosting-panel/database";
@@ -40,6 +41,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
+import { AdminHealthService } from "../src/health/admin-health.service.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle, type CreateControlPlaneAppOptions } from "../src/index.js";
 import { skipPasswordChange } from "./fixtures/password-change.js";
 
@@ -673,6 +675,53 @@ describe("admin health and alerts", () => {
     const banner = await call("GET", "/v1/admin/sites", adminToken);
     expect(banner.body.data.certificateAlerts).toEqual([{ kind: "panel_expiring", siteId: null, siteName: null, hostname: SETUP.hostHostname, expiresAt: notAfter, problem: null }]);
     expect(executorCalls).not.toContain("getCertificateStatus");
+  });
+
+  describe("what a look cannot see (ADR-0040 N4)", () => {
+    const observe = () => app.nestApp.get(AdminHealthService).observe();
+
+    it("names the parts nobody reported and the disks nobody read, and nothing once they are read", async () => {
+      await start();
+      let seen = await observe();
+      expect(seen.alerts).toEqual([]);
+      // Before the first pass: the daemons and the containers are unknown, and no disk was read.
+      expect([...seen.unseen].sort()).toEqual([...PANEL_COMPONENTS.slice(3).map((c) => `component_down:${c}`), "disk_high"].sort());
+
+      telemetryWith([{ paths: ["root"], usedBytes: "10", totalBytes: "100" }]);
+      await drift();
+      seen = await observe();
+      expect(seen.alerts).toEqual([]);
+      expect([...seen.unseen]).toEqual([]);
+    });
+
+    it("keeps the containers unseen while the Engine does not answer, and the part that is down is an alert", async () => {
+      await start();
+      sim.setEngineReachable(false);
+      await drift();
+      const seen = await observe();
+      expect(seen.alerts.map((a) => `${a.kind}:${a.subject}`)).toEqual(["component_down:docker_engine"]);
+      expect(seen.unseen.has("component_down:docker_engine")).toBe(false);
+      for (const name of ["ingress_proxy", "shared_database", "phpmyadmin", "sftp", "mail_relay"]) {
+        expect(seen.unseen.has(`component_down:${name}`)).toBe(true);
+      }
+    });
+
+    it("keeps a site unseen while nobody looked at its container, or while it is in maintenance", async () => {
+      await start();
+      const { siteId, serviceId } = await createSite();
+      await drift();
+      const key = `site_container_down:${siteId}`;
+      expect((await observe()).unseen.has(key)).toBe(false);
+
+      await dbClient.db.update(sites).set({ status: "maintenance" }).where(eq(sites.id, siteId));
+      expect((await observe()).unseen.has(key)).toBe(true);
+      await dbClient.db.update(sites).set({ status: "ready" }).where(eq(sites.id, siteId));
+      expect((await observe()).unseen.has(key)).toBe(false);
+
+      // The last look at the container is older than the threshold.
+      await dbClient.db.update(observedStates).set({ observedAt: new Date(Date.now() - 60 * MIN) }).where(eq(observedStates.serviceInstanceId, serviceId));
+      expect((await observe()).unseen.has(key)).toBe(true);
+    });
   });
 
   it("a customer gets 403 and a denied audit row on both routes", async () => {
