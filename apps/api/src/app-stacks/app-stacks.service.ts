@@ -87,6 +87,7 @@ import {
   domainTargetsMissing,
   entriesOf,
   parameterValuesOf,
+  pathTargetsMissing,
   revisionFromPlan,
   sameEntries,
   secretVersionsOf,
@@ -630,6 +631,10 @@ export class AppStacksService {
     const domains = await listAppStackDomains(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id });
     if (domainTargetsMissing(domains, plan.ingress).length > 0) {
       throw refusal("domains", "domain_target_removed", "A web address still points at a part this version removes. Remove the address first.");
+    }
+    // A path rule to a removed part would stop routing unseen, and every later save of its options would be refused.
+    if (pathTargetsMissing(domains, plan.ingress).length > 0) {
+      throw refusal("domains", "path_target_removed", "A path of a web address still points at a part this version removes. Remove the path first.");
     }
   }
 

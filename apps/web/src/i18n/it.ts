@@ -3253,6 +3253,7 @@ x-hp-ingress:
       redirect_chain: "L'indirizzo di destinazione reindirizza a sua volta, oppure un altro indirizzo reindirizza già qui.",
       password_required: "Scegli una password per proteggere questo indirizzo.",
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
+      path_target_removed: "Un percorso di un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima il percorso.",
       PARAM_VALUE_NOT_CUSTOMER: "Questa impostazione la decide l'applicazione: non si può cambiare.",
       draftUnpublished: "Questa versione non si può più installare. Elimina questa bozza e installa di nuovo l'applicazione: una bozza non ha dati, quindi non perdi nulla.",
     },

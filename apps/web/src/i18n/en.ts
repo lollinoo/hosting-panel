@@ -3225,6 +3225,7 @@ x-hp-ingress:
       redirect_chain: "The destination address redirects in turn, or another address already redirects here.",
       password_required: "Choose a password to protect this address.",
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
+      path_target_removed: "A path of a web address points at a component the new version removes: remove the path first.",
       PARAM_VALUE_NOT_CUSTOMER: "The application decides this setting: it cannot be changed.",
       draftUnpublished: "This version can no longer be installed. Delete this draft and install the application again: a draft has no data, so nothing is lost.",
     },

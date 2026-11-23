@@ -289,7 +289,9 @@ administrator's console has no such action, and nobody writes proxy configuratio
 5. **A redirect** is permanent and keeps path and query. The redirecting address is published only while its
    destination is. Removing the destination clears the redirect, and the address serves the application again. A
    redirecting address has no password and no path rule of its own: set them on the destination.
-6. **A path rule whose target is not ready** (its component is not healthy, or a newer template version no longer
-   has that port) is not published: requests under that path reach the address's main component until the target
-   reads healthy again. The dialog marks a target that left the template as «Non più disponibile».
+6. **A path rule whose target is not ready** (its component is not healthy) is not published: requests under that
+   path reach the address's main component until the target reads healthy again. A path must point at an entry
+   point of both the version that runs and the one asked for, and an upgrade or a rollback to a version without that
+   entry point is refused (`path_target_removed`): remove the path first. The dialog marks a target the application
+   no longer offers as «Non più disponibile».
 7. **Downgrade:** procedure 4, step 6. **The real-Docker check:** procedure 9, step 6.
