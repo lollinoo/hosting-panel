@@ -121,8 +121,8 @@ const html = (node: ReactNode, lang: "en" | "it" = "en") =>
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, "&");
 const hrefs = (h: string) => [...h.matchAll(/<a[^>]*href="([^"]*)"[^>]*>/g)].map((m) => m[1]);
-/** Every address on the page except the two fixed chrome ones: the entry/logo (`/apps`) and the account menu. */
-const content = (h: string) => hrefs(h).filter((x) => x !== "/apps" && x !== "/account");
+/** Every address on the page except the fixed chrome ones: the entry/logo (`/apps`) and the two of the account menu. */
+const content = (h: string) => hrefs(h).filter((x) => x !== "/apps" && x !== "/account" && x !== "/account/notifications");
 const entry = (h: string, labels = en) => h.match(/<a[^>]*href="\/apps"[^>]*>([^<]*)<\/a>/)?.[1] === labels.apps.nav;
 const LOGO = /<a[^>]*href="\/apps"[^>]*><span[^>]*>HP<\/span>/;
 const noticeTexts = (m: typeof en | typeof itMsgs) => [m.apps.unavailable.title, m.apps.unavailable.off, m.apps.unavailable.support, m.apps.unavailable.back];
