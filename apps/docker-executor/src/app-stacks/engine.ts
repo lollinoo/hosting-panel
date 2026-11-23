@@ -63,6 +63,7 @@ import {
   assertExecutableAppStackPlan,
 } from "./plan-check.js";
 import {
+  appStackLogMaskValues,
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
@@ -110,7 +111,8 @@ type EngineResponse = Awaited<ReturnType<AppStackDockerRequest>>;
 interface ContainerInspect {
   readonly Id: string;
   readonly Name?: string;
-  readonly Config?: { readonly Labels?: Labels | null };
+  /** Env is read only to mask the logs; no inspect result leaves the executor. */
+  readonly Config?: { readonly Labels?: Labels | null; readonly Env?: readonly string[] | null };
   readonly State?: {
     readonly Status?: string;
     readonly Running?: boolean;
@@ -557,6 +559,12 @@ export class AppStackEngine implements StackExecutorPort {
     );
     if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
     if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
+    // Established before any line is read; the environment secrets come from this container, which outlives the tmpfs.
+    const values = appStackLogMaskValues(
+      req.componentKey,
+      { labels: target.Config?.Labels, env: target.Config?.Env },
+      await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey),
+    );
     const tail = Math.min(APP_STACK_LOG_TAIL_MAX, Math.max(1, Math.trunc(req.tail) || 1));
     const res = await this.deps.request(
       "GET",
@@ -566,7 +574,7 @@ export class AppStackEngine implements StackExecutorPort {
     );
     if (res.statusCode === 404) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
     if (res.statusCode !== 200) throw engineError("read service logs", res.statusCode);
-    return maskedLogLines(res.body, await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey));
+    return maskedLogLines(res.body, values);
   }
 
   private async locked<T>(stackId: string, fn: () => Promise<T>): Promise<T> {

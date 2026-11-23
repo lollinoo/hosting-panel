@@ -17,7 +17,7 @@ import {
   type AppStackContainerCreatePayload,
 } from "../src/app-stacks/index.js";
 import { InMemoryDockerSimulatorAdapter } from "../src/index.js";
-import { createAppStackFakeEngine } from "./support/app-stack-fake-engine.js";
+import { createAppStackFakeEngine, type FakeContainer } from "./support/app-stack-fake-engine.js";
 import {
   TEST_ALLOWLIST,
   V2_CREATE_SECRETS,
@@ -46,6 +46,7 @@ const VALUES = Object.values(V2_SECRET_VALUES);
 const CONTENTS = { db_password: DB_PASSWORD, db_root_password: DB_ROOT_PASSWORD };
 const DB_SECRETS = [v2SecretEntry("db_password"), v2SecretEntry("db_root_password")];
 const WEB_SECRETS = [v2SecretEntry("app_key"), v2SecretEntry("db_password")];
+const SECRET_ENV_LABEL = "io.hostingpanel.app_secret_env";
 
 const plan = appStackTestPlanV2();
 const build = (key: string, from: ApprovedStackPlan = plan, contents: Readonly<Record<string, string>> = CONTENTS) =>
@@ -82,6 +83,29 @@ function withDbPasswordVersion(version: number): ApprovedStackPlanV2 {
       }
     }
   }
+  return rehash(next);
+}
+
+/** The plan with web's BLOG_DB_PASSWORD left out: db_password reaches web only inside its URL. */
+function withEmbeddedOnly(): ApprovedStackPlanV2 {
+  const next = structuredClone(plan);
+  next.components[1]!.secretEnvironment = next.components[1]!.secretEnvironment.filter((entry) => entry.name !== "BLOG_DB_PASSWORD");
+  return rehash(next);
+}
+
+/** The plan where db reads its two secrets only inside one value, with `separator` between them (null: none). */
+function withPair(separator: string | null): ApprovedStackPlanV2 {
+  const next = structuredClone(plan);
+  next.components[0]!.secretEnvironment = [
+    {
+      name: "DB_PAIR",
+      pieces: [
+        { parameterKey: "db_password", version: 1 },
+        ...(separator === null ? [] : [{ literal: separator }]),
+        { parameterKey: "db_root_password", version: 1 },
+      ],
+    },
+  ];
   return rehash(next);
 }
 
@@ -147,6 +171,19 @@ describe("the container body of a version 2 plan", () => {
     expect(body.Env).toEqual([]);
   });
 
+  it("labels the environment secrets with their names and the template text around each reference, and no value", () => {
+    expect(build("db").Labels[SECRET_ENV_LABEL]).toBe('[["DB_PASSWORD",null],["DB_ROOT_PASSWORD",null]]');
+    expect(build("web").Labels[SECRET_ENV_LABEL]).toBe('[["BLOG_DB_PASSWORD",null],["BLOG_DB_URL","sql://blog:",null,"@db:3306/blog"]]');
+    expect(build("db", withPair(null)).Labels[SECRET_ENV_LABEL]).toBe('[["DB_PAIR",null,null]]');
+    expect(SECRET_ENV_LABEL in build("cache").Labels).toBe(false);
+    for (const key of ["web", "worker"]) {
+      expect(SECRET_ENV_LABEL in buildAppStackContainerCreatePayload(appStackTestPlan(), key, { secretsRootDir: ROOT }).Labels).toBe(false);
+    }
+    for (const component of plan.components) {
+      for (const value of VALUES) expect(JSON.stringify(build(component.key).Labels)).not.toContain(value);
+    }
+  });
+
   it("no body of the plan names a host port, a device, the host network or a host path", () => {
     for (const component of plan.components) {
       const text = JSON.stringify(build(component.key));
@@ -201,6 +238,9 @@ describe("the hardening check of a version 2 body", () => {
     expect(thrown(() => harden(build("db"), null))).toMatchObject(rule("HostConfig keys"));
     expect(thrown(() => harden(build("web"), null))).toMatchObject(rule("HostConfig keys"));
     expect(() => harden(build("cache"), null)).not.toThrow();
+    const labelled = structuredClone(build("cache"));
+    (labelled.Labels as Record<string, string>)[SECRET_ENV_LABEL] = '[["DB_PASSWORD",null]]';
+    expect(thrown(() => harden(labelled, null))).toMatchObject(rule("Labels"));
   });
 
   it("refuses a body whose component is not in the plan", () => {
@@ -214,6 +254,7 @@ describe("the hardening check of a version 2 body", () => {
   type Host = Record<string, unknown>;
   /** The body as a tampering caller sees it: writable. */
   type Body = { User?: string; Env: string[] } & Record<string, unknown>;
+  const labelsOf = (body: Body) => body.Labels as Record<string, string>;
   const cases: Array<[string, string, string, (body: Body, host: Host) => void]> = [
     ["one more capability", "db", "CapAdd", (_b, host) => void (host.CapAdd = [...APP_STACK_STANDARD_CAP_ADD, "SYS_ADMIN"])],
     ["another capability", "db", "CapAdd", (_b, host) => void (host.CapAdd = ["NET_ADMIN"])],
@@ -251,6 +292,9 @@ describe("the hardening check of a version 2 body", () => {
     ["the standard process limit on a strict component", "cache", "PidsLimit", (_b, host) => void (host.PidsLimit = 512)],
     ["no /tmp tmpfs on a strict component", "cache", "Tmpfs", (_b, host) => void delete host.Tmpfs],
     ["an environment entry on a component without any", "cache", "Env", (body) => void body.Env.push("EXTRA=1")],
+    ["another secret environment label", "web", "Labels", (body) => void (labelsOf(body)[SECRET_ENV_LABEL] = '[["BLOG_DB_URL",null]]')],
+    ["no secret environment label", "web", "Labels", (body) => void delete labelsOf(body)[SECRET_ENV_LABEL]],
+    ["a secret environment label on a component without any", "cache", "Labels", (body) => void (labelsOf(body)[SECRET_ENV_LABEL] = "[]")],
   ];
   it.each(cases)("refuses %s (%s: %s)", (_name, key, broken, change) => {
     const body = structuredClone(build(key));
@@ -397,11 +441,11 @@ async function created(h: Harness, from: ApprovedStackPlanV2 = plan) {
   await h.engine.createAppStackComponents({ plan: from, secretContents: [...V2_CREATE_SECRETS] });
   h.fake.log.length = 0;
 }
-async function deployed(h: Harness) {
-  await created(h);
-  await h.engine.startAppStackComponent({ plan, componentKey: "db", secretFileContents: DB_SECRETS });
-  await h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: WEB_SECRETS });
-  await h.engine.startAppStackComponent({ plan, componentKey: "cache", secretFileContents: [] });
+async function deployed(h: Harness, from: ApprovedStackPlanV2 = plan) {
+  await created(h, from);
+  await h.engine.startAppStackComponent({ plan: from, componentKey: "db", secretFileContents: DB_SECRETS });
+  await h.engine.startAppStackComponent({ plan: from, componentKey: "web", secretFileContents: WEB_SECRETS });
+  await h.engine.startAppStackComponent({ plan: from, componentKey: "cache", secretFileContents: [] });
   h.fake.log.length = 0;
 }
 const idOf = (h: Harness, name: string) => h.fake.containers.get(name)?.Id ?? "missing";
@@ -591,6 +635,94 @@ describe("AppStackEngine with a version 2 plan", () => {
   });
 });
 
+describe("the log reader of a version 2 component whose secret files are gone", () => {
+  const AT = "2026-11-22T03:00:00.000000000Z";
+  const print = (h: Harness, name: string, text: string) =>
+    h.fake.containers.get(name)?.logs.push({ stream: "stdout", payload: `${AT} ${text}\n` });
+  const texts = async (h: Harness, componentKey: string) =>
+    (await h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 10 })).map((line) => line.text);
+  /** What a host reboot does to the tmpfs: every secret dir is gone while Docker runs the containers again. */
+  async function reboot(h: Harness) {
+    for (const entry of await readdir(h.root)) await rm(path.join(h.root, entry), { recursive: true, force: true });
+    h.fake.log.length = 0;
+  }
+  const unmaskable = { code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component db cannot be masked" };
+
+  it("masks the environment secrets with the values the container holds", async () => {
+    const h = await setup();
+    await deployed(h);
+    await reboot(h);
+    print(h, DB, `login with ${DB_PASSWORD} and ${DB_ROOT_PASSWORD}`);
+    print(h, WEB, `connect sql://blog:${DB_PASSWORD}@db:3306/blog`);
+    await expect(h.engine.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 10 })).resolves.toEqual([
+      { at: AT, stream: "stdout", text: "login with [REDACTED] and [REDACTED]" },
+    ]);
+    expect(await texts(h, "web")).toEqual(["connect sql://blog:[REDACTED]@db:3306/blog"]);
+    // Reading writes nothing and changes nothing.
+    expect(await readdir(h.root)).toEqual([]);
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
+  it("masks a secret the template writes only inside a longer value, alone and in that value", async () => {
+    const h = await setup();
+    await deployed(h, withEmbeddedOnly());
+    await reboot(h);
+    print(h, WEB, `password ${DB_PASSWORD}`);
+    print(h, WEB, `url sql://blog:${DB_PASSWORD}@db:3306/blog`);
+    expect(await texts(h, "web")).toEqual(["password [REDACTED]", "url sql://blog:[REDACTED]@db:3306/blog"]);
+  });
+
+  it("splits a value that holds two secrets on the template text between them", async () => {
+    const h = await setup();
+    await deployed(h, withPair(":"));
+    await reboot(h);
+    print(h, DB, `root ${DB_ROOT_PASSWORD} user ${DB_PASSWORD} pair ${DB_PASSWORD}:${DB_ROOT_PASSWORD}`);
+    expect(await texts(h, "db")).toEqual(["root [REDACTED] user [REDACTED] pair [REDACTED]:[REDACTED]"]);
+  });
+
+  it.each([
+    ["template text that is also inside the secrets", "-"],
+    ["no template text between them", null],
+  ])("masks with the files a value whose secrets are split by %s, and refuses once the files are gone", async (_name, separator) => {
+    const h = await setup();
+    await deployed(h, withPair(separator));
+    print(h, DB, `root ${DB_ROOT_PASSWORD}`);
+    expect(await texts(h, "db")).toEqual(["root [REDACTED]"]);
+    await reboot(h);
+    const err = await failure(texts(h, "db"));
+    expect(err).toMatchObject(unmaskable);
+    expect(h.fake.log.some((line) => line.includes("/logs"))).toBe(false);
+    for (const value of VALUES) expect(shown(err)).not.toContain(value);
+  });
+
+  it.each([
+    ["a variable the label names is not in the environment", (c: FakeContainer) => void (c.Env = c.Env.filter((e) => !e.startsWith("DB_ROOT_PASSWORD=")))],
+    ["a variable the label names is in the environment twice", (c: FakeContainer) => void c.Env.push("DB_PASSWORD=another-value-42")],
+    ["the label is not a list of names and pieces", (c: FakeContainer) => void (c.Labels[SECRET_ENV_LABEL] = "DB_PASSWORD,DB_ROOT_PASSWORD")],
+    ["the label names a variable without a secret", (c: FakeContainer) => void (c.Labels[SECRET_ENV_LABEL] = '[["DB_PASSWORD"]]')],
+    ["a value does not have the template text of the label", (c: FakeContainer) => void (c.Labels[SECRET_ENV_LABEL] = '[["DB_PASSWORD","x",null]]')],
+  ])("fails closed, with no log read, when %s", async (_name, tamper) => {
+    const h = await setup();
+    await deployed(h);
+    await reboot(h);
+    print(h, DB, `login with ${DB_PASSWORD} and ${DB_ROOT_PASSWORD}`);
+    tamper(h.fake.containers.get(DB)!);
+    const err = await failure(texts(h, "db"));
+    expect(err).toMatchObject(unmaskable);
+    expect(h.fake.log.some((line) => line.includes("/logs"))).toBe(false);
+    for (const value of VALUES) expect(shown(err)).not.toContain(value);
+  });
+
+  it("fails closed when the container cannot be inspected", async () => {
+    const h = await setup();
+    await deployed(h);
+    await reboot(h);
+    h.fake.failNext(new RegExp(`^GET /containers/${DB}/json$`), 500);
+    await expect(texts(h, "db")).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+    expect(h.fake.log.some((line) => line.includes("/logs"))).toBe(false);
+  });
+});
+
 describe("resolveAppStackImage", () => {
   const image = "ghcr.io/acme/blog:2.4";
   const digest = `sha256:${"a".repeat(64)}`;
@@ -716,6 +848,33 @@ describe("the simulator with a version 2 plan", () => {
     const status = await sim.getAppStackStatus(REF);
     expect(status.components.map((c) => c.state)).toEqual(["running", "running", "running"]);
     for (const value of VALUES) expect(JSON.stringify(status)).not.toContain(value);
+  });
+
+  it("masks the environment secrets like the engine once the secret files are gone, and refuses where it refuses", async () => {
+    const root = tempDir();
+    const sim = simulator(root);
+    await pulled(sim);
+    const deploy = async (from: ApprovedStackPlanV2) => {
+      await sim.createAppStackComponents({ plan: from, secretContents: [...V2_CREATE_SECRETS] });
+      await sim.startAppStackComponent({ plan: from, componentKey: "db", secretFileContents: DB_SECRETS });
+      await sim.startAppStackComponent({ plan: from, componentKey: "web", secretFileContents: WEB_SECRETS });
+    };
+    const reboot = () => {
+      for (const entry of readdirSync(root)) rmSync(path.join(root, entry), { recursive: true, force: true });
+    };
+    await deploy(plan);
+    reboot();
+    sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: `url sql://blog:${DB_PASSWORD}@db:3306/blog` }]);
+    sim.appStacks.setAppStackComponentLogs(ID, "db", [{ at: null, stream: "stdout", text: `root ${DB_ROOT_PASSWORD}` }]);
+    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "web", tail: 5 }))[0]?.text).toBe("url sql://blog:[REDACTED]@db:3306/blog");
+    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 }))[0]?.text).toBe("root [REDACTED]");
+
+    await deploy(withPair("-"));
+    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 }))[0]?.text).toBe("root [REDACTED]");
+    reboot();
+    const err = await failure(sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 }));
+    expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component db cannot be masked" });
+    for (const value of VALUES) expect(shown(err)).not.toContain(value);
   });
 
   it("checks every body before it removes or replaces anything, like the engine", async () => {

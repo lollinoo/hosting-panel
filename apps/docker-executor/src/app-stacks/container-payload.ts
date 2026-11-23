@@ -1,6 +1,7 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
+  APP_STACK_ENV_NAME_PATTERN,
   APP_STACK_KEY_PATTERN,
   APP_STACK_PIDS_LIMIT,
   APP_STACK_SECRET_ENV_LIMITS,
@@ -220,6 +221,7 @@ export function assertAppStackPayloadHardening(
     label.revisionId,
     label.startIndex,
     label.health,
+    label.secretEnvironment,
   ]);
   if (!onlyKeys(payload.Labels, labelKeys) || payload.Labels[label.role] !== APP_STACK_COMPONENT_ROLE) refuse("Labels");
   const { plan } = ctx;
@@ -286,6 +288,9 @@ export function assertAppStackPayloadHardening(
       refuse("Env");
     }
   }
+  // The log reader masks by this label: exactly the plan component's, and none without the plan.
+  const secretEnvLabel = component === undefined ? null : encodeAppStackSecretEnvLabel(component);
+  if ((payload.Labels[label.secretEnvironment] ?? null) !== secretEnvLabel) refuse("Labels");
   // The plan schema's text rule for environment values and argv.
   const literals = secretEntries.flatMap((entry) => entry.pieces.flatMap((piece) => ("literal" in piece ? [piece.literal] : [])));
   if ([...payload.Env.slice(0, Math.max(0, plainCount)), ...literals, ...(payload.Cmd ?? [])].some((text) => /docker\.sock/i.test(text))) {
@@ -303,6 +308,43 @@ export function encodeAppStackHealthLabel(health: AppStackHealthcheck | null): s
   return health.kind === "tcp"
     ? `tcp:${health.port}:${health.timeoutSeconds}`
     : `http:${health.port}:${health.timeoutSeconds}:${health.path}`;
+}
+
+/** One environment secret as its container label holds it: the name, then each piece (template text, null = a secret). */
+export interface AppStackSecretEnvShape {
+  readonly name: string;
+  readonly pieces: readonly (string | null)[];
+}
+
+/** The label that lets the log reader find a component's environment secrets in its own Config.Env, which outlives the
+ *  secret files: `[["NAME", "text", null, ...], ...]` in plan order. Names and template text only, never a value;
+ *  null for a component without environment secrets (every version 1 one), whose labels stay as they were. */
+export function encodeAppStackSecretEnvLabel(component: AppStackPlanComponent): string | null {
+  const entries = appStackComponentSecretEnvironment(component);
+  if (entries.length === 0) return null;
+  return JSON.stringify(entries.map((entry) => [entry.name, ...entry.pieces.map((piece) => ("literal" in piece ? piece.literal : null))]));
+}
+
+/** null = malformed: not a list of a name and pieces with at least one secret and no two texts side by side. */
+export function decodeAppStackSecretEnvLabel(value: string): AppStackSecretEnvShape[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const entries: AppStackSecretEnvShape[] = [];
+  for (const item of parsed as unknown[]) {
+    if (!Array.isArray(item)) return null;
+    const [name, ...pieces] = item as unknown[];
+    const valid = pieces.every(
+      (piece, i) => piece === null || (typeof piece === "string" && piece !== "" && typeof pieces[i - 1] !== "string"),
+    );
+    if (typeof name !== "string" || !APP_STACK_ENV_NAME_PATTERN.test(name) || !valid || !pieces.includes(null)) return null;
+    entries.push({ name, pieces: pieces as (string | null)[] });
+  }
+  return entries;
 }
 
 /** null = malformed. */

@@ -34,6 +34,7 @@ import {
   appStackContainerName,
   appStackEdgeNetworkName,
   appStackInternalNetworkName,
+  appStackLogMaskValues,
   appStackNetworkLabels,
   appStackVolumeLabels,
   appStackVolumeName,
@@ -399,9 +400,10 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
       if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-      const values = this.options.secretsRootDir !== null
+      const files = this.options.secretsRootDir !== null
         ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
         : (stack?.secrets.get(req.componentKey) ?? []);
+      const values = appStackLogMaskValues(req.componentKey, { labels: container.labels, env: container.payload.Env }, files);
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }

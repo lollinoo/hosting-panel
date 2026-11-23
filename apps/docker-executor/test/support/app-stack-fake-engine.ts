@@ -27,6 +27,8 @@ export interface FakeContainer {
   Name: string;
   Image: string;
   Labels: Labels;
+  /** Config.Env of an inspect: the create body's Env. */
+  Env: string[];
   body: unknown;
   State: {
     Status: string;
@@ -228,6 +230,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
           Name: name,
           Image: String(input.Image),
           Labels: { ...((input.Labels as Labels | undefined) ?? {}) },
+          Env: [...((input.Env as string[] | undefined) ?? [])],
           body,
           State: { Status: "created", Running: false, Restarting: false, ExitCode: 0, OOMKilled: false, StartedAt: "0001-01-01T00:00:00Z" },
           RestartCount: 0,
@@ -246,7 +249,7 @@ export function createAppStackFakeEngine(): AppStackFakeEngine {
         return reply(200, {
           Id: container.Id,
           Name: `/${container.Name}`,
-          Config: { Image: container.Image, Labels: container.Labels },
+          Config: { Image: container.Image, Labels: container.Labels, Env: container.Env },
           State: container.State,
           RestartCount: container.RestartCount,
           NetworkSettings: {
