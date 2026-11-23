@@ -262,6 +262,8 @@ describe("/admin/templates", () => {
     expect(links.map((l) => [l.props.href, textOf(l)])).toEqual([
       ["/admin/templates/new", tabs.sites],
       ["/admin/templates/apps/new", tabs.apps],
+      // ADR-0043: a one-component application template written by a form.
+      ["/admin/templates/apps/new/image", tabs.image],
     ]);
     const out = html(m, tree);
     expect(out).toContain(m.admin.templates.title);
