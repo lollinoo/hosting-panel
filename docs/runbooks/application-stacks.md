@@ -273,8 +273,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    confirmed the attachment. `pending` («In attesa»): recorded, not confirmed. `removing` («Scollegamento in corso»):
    the row goes away once the server has confirmed the detach. The panel brings the server to the rows by itself:
    when a link is created or removed, at every installation, start or restart of the database or of an application
-   linked to it, and about once a minute for whatever still waits (at most 20 databases per pass). There is no button
-   to retry, and none is needed.
+   linked to it, and about once a minute for whatever still waits (at most 20 databases per pass, and no new database
+   after 45 seconds of the pass: the next pass begins with the databases it did not reach). There is no button to
+   retry, and none is needed.
 5. **A link that stays `pending`** is waiting for one of these: the database or the application has never been
    installed (the database has no container, or the application has no private network yet); one of the two is in the
    middle of an operation; the executor did not answer; the installed version of the database has more than one
