@@ -95,7 +95,7 @@ export function bffUpstreamResponse(upstreamRes: UpstreamResponse): NextResponse
 export async function forwardToUpstream(
   req: Request,
   upstreamPath: string,
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   onSuccess?: (session: SessionData, body: unknown, response: NextResponse) => Promise<void>,
   opts?: { timeoutMs?: number; body?: (b: unknown) => boolean }
 ): Promise<NextResponse> {

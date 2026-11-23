@@ -68,6 +68,8 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
   const titles: Record<string, string> = t.title;
   const steps: Record<string, string> = m.apps.steps;
   const status = operation?.status;
+  // The run of a task (ADR-0042) has one step and its own words.
+  const isTask = operation?.kind === "stack.task";
 
   return (
     <Card>
@@ -81,7 +83,7 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
             return (
               <li key={s.id} className="flex items-center gap-2" aria-current={s.status === "running" ? "step" : undefined}>
                 <Icon aria-hidden className={`h-4 w-4 ${s.status === "running" ? "animate-spin" : ""}`} />
-                <span>{Object.hasOwn(steps, s.key) ? steps[s.key] : steps.settle}</span>
+                <span>{isTask ? m.apps.tasks.step : Object.hasOwn(steps, s.key) ? steps[s.key] : steps.settle}</span>
                 <span className="text-muted-foreground">{m.apps.stepStatus[s.status]}</span>
               </li>
             );
@@ -94,7 +96,7 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
         )}
         {(status === "failed" || status === "cancelled") && (
           <Alert variant="destructive" role="alert">
-            <AlertDescription>{t.failed}</AlertDescription>
+            <AlertDescription>{isTask ? t.taskFailed : t.failed}</AlertDescription>
           </Alert>
         )}
         {status === "unknown" && (

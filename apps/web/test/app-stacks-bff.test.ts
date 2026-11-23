@@ -19,6 +19,8 @@ import * as secretsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/s
 import * as domainsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route";
 import * as domainRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route";
 import * as logsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route";
+import * as taskRunsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/tasks/[taskKey]/runs/route";
+import * as taskScheduleRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/tasks/[taskKey]/schedule/route";
 
 type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
 
@@ -44,7 +46,7 @@ const twice = [
 interface Case {
   name: string;
   handler: Handler;
-  method: "GET" | "POST" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "DELETE";
   params: Record<string, string>;
   path: string;
   body?: unknown;
@@ -212,6 +214,52 @@ const cases: Case[] = [
     idempotency: false,
     status: 200,
     timeoutMs: 10_000,
+  },
+  // Tasks (ADR-0042): the run takes an empty body and the schedule one of four choices; neither takes a command.
+  {
+    name: "task runs",
+    handler: taskRunsRoute.GET as unknown as Handler,
+    method: "GET",
+    params: { orgId: ORG, stackId: STACK, taskKey: "save" },
+    path: `${BASE}/${STACK}/tasks/save/runs`,
+    idempotency: false,
+    status: 200,
+    timeoutMs: 10_000,
+  },
+  {
+    name: "task run",
+    handler: taskRunsRoute.POST as unknown as Handler,
+    method: "POST",
+    params: { orgId: ORG, stackId: STACK, taskKey: "save" },
+    path: `${BASE}/${STACK}/tasks/save/runs`,
+    body: {},
+    idempotency: true,
+    status: 202,
+    timeoutMs: 8_000,
+    badBodies: [{ command: ["id"] }, { argv: ["sh", "-c", "id"] }, { taskKey: "other" }, { timeoutSeconds: 600 }, [], null, "go"],
+  },
+  {
+    name: "task schedule",
+    handler: taskScheduleRoute.PUT as unknown as Handler,
+    method: "PUT",
+    params: { orgId: ORG, stackId: STACK, taskKey: "save" },
+    path: `${BASE}/${STACK}/tasks/save/schedule`,
+    body: { frequency: "weekly", weekday: 7, hourUtc: 3 },
+    idempotency: false,
+    status: 200,
+    timeoutMs: 8_000,
+    okBodies: [{ frequency: "never" }, { frequency: "hourly" }, { frequency: "daily", hourUtc: 0 }],
+    badBodies: [
+      { frequency: "daily" },
+      { frequency: "hourly", hourUtc: 3 },
+      { frequency: "daily", hourUtc: 24 },
+      { frequency: "weekly", weekday: 8, hourUtc: 3 },
+      { frequency: "cron", expression: "*/5 * * * *" },
+      { cron: "0 3 * * *" },
+      { frequency: "daily", hourUtc: 3, command: ["id"] },
+      {},
+      [],
+    ],
   },
 ];
 const mutations = cases.filter((c) => c.method !== "GET");

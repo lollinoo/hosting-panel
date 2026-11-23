@@ -54,6 +54,8 @@ import type {
   AppStackDetailDto,
   AppStackDeploymentDto,
   AppStackDomainDto,
+  AppStackTaskDto,
+  AppStackTasksDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -359,4 +361,10 @@ export async function fetchServerOrgAppStackDeployments(orgId: string, stackId: 
 export async function fetchServerOrgAppStackDomains(orgId: string, stackId: string): Promise<AppStackDomainDto[] | null> {
   if (!segments(stackId)) return null;
   return orNull(await serverGet<AppStackDomainDto[]>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/domains`));
+}
+
+/** The tasks of the installed version (ADR-0042); null when the read failed. */
+export async function fetchServerOrgAppStackTasks(orgId: string, stackId: string): Promise<AppStackTaskDto[] | null> {
+  if (!segments(stackId)) return null;
+  return orNull(await serverGet<AppStackTasksDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/tasks`))?.tasks ?? null;
 }
