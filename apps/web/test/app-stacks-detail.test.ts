@@ -426,6 +426,24 @@ describe("private values", () => {
     expect(sets).not.toContainEqual([0, null]);
     expect(router.refresh).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: a value too long for the application is an error on the field that states the limit", async (_n, m) => {
+    const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
+    (byId(out, "app-secret-value")!.props.ref as { current: unknown }).current = { value: "x".repeat(5_000) };
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long" });
+    await submit(out);
+    const text = format(m.apps.reasons.value_too_long, { max: 4096 });
+    expect(text).toContain("4096");
+    expect(text).not.toMatch(/byte|ambiente|environment|variab/i);
+    expect(sets).toContainEqual([2, text]);
+    expect(sets.filter(([k, v]) => k === 3 && v !== null)).toEqual([]);
+    const shown = html(callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD", 2: text }).out);
+    expect(shown).toMatch(/<input[^>]*aria-invalid="true"/);
+    expect(shown).toContain(text);
+  });
 });
 
 describe("logs", () => {

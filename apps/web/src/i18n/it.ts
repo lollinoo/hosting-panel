@@ -3236,6 +3236,7 @@ x-hp-ingress:
       already_current: "È già il rilascio in uso.",
       unknown_ingress: "Questo indirizzo non può puntare a quel componente.",
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
+      value_too_long: "Il valore è troppo lungo: questa applicazione accetta al massimo {max} caratteri, meno se contiene lettere accentate o simboli.",
       PARAM_VALUE_NOT_CUSTOMER: "Questa impostazione la decide l'applicazione: non si può cambiare.",
       draftUnpublished: "Questa versione non si può più installare. Elimina questa bozza e installa di nuovo l'applicazione: una bozza non ha dati, quindi non perdi nulla.",
     },

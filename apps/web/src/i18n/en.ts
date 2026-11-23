@@ -3208,6 +3208,7 @@ x-hp-ingress:
       already_current: "It is already the release in use.",
       unknown_ingress: "This address cannot point at that component.",
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
+      value_too_long: "This value is too long: this application accepts at most {max} characters, fewer if it contains accented letters or symbols.",
       PARAM_VALUE_NOT_CUSTOMER: "The application decides this setting: it cannot be changed.",
       draftUnpublished: "This version can no longer be installed. Delete this draft and install the application again: a draft has no data, so nothing is lost.",
     },
