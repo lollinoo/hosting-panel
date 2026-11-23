@@ -69,6 +69,7 @@ const backup = (over: Partial<AppStackBackupDto> = {}): AppStackBackupDto => ({
   finishedAt: NOW,
   restore: null,
   restorable: true,
+  incompleteData: false,
   ...over,
 });
 const GOOD = backup();
@@ -102,7 +103,7 @@ const FAILED = backup({
   finishedAt: "2026-11-20T09:30:00.000Z",
   restorable: false,
 });
-const list = (...backups: AppStackBackupDto[]): AppStackBackupsDto => ({ backups, unavailableReason: null });
+const list = (...backups: AppStackBackupDto[]): AppStackBackupsDto => ({ backups, unavailableReason: null, goBackTo: null });
 const props = (over: Partial<Parameters<typeof AppStackBackups>[0]> = {}): Parameters<typeof AppStackBackups>[0] => ({
   orgId: "org_a1",
   stackId: "stk_a1",
@@ -244,21 +245,43 @@ describe("backups of an application: the list", () => {
     expect(markup).not.toContain(m.site.backups.problem.database_dump_failed);
   });
 
-  it.each(locales)("%s: a restore from a backup shows on its row: in progress, done, or failed with the reason and what to do", (_n, m) => {
+  it.each(locales)("%s: a restore from a backup shows on its row: in progress, done, or failed with the reason", (_n, m) => {
     const t = m.apps.backups;
+    const note = t.restoreFailedNote.slice(0, t.restoreFailedNote.indexOf("{"));
     const going = run({ backups: list(backup({ restore: { status: "running", problem: null, at: null } })) }, m).markup;
     expect(going).toContain(t.lastRestore.running);
-    expect(going).not.toContain(t.restoreFailedNote);
+    expect(going).not.toContain(note);
     const done = run({ backups: list(backup({ restore: { status: "succeeded", problem: null, at: "2026-11-22T12:00:00.000Z" } })) }, m).markup;
     expect(done).toContain(t.lastRestore.succeeded);
     expect(done).toContain(`>${dateOf(m, "2026-11-22T12:00:00.000Z")}</time>`);
-    expect(done).not.toContain(t.restoreFailedNote);
+    expect(done).not.toContain(note);
+    // The server names no backup to go back to: the restore did not leave the data half written.
     const bad = run({ backups: list(backup({ restore: { status: "failed", problem: "no_space", at: NOW } })) }, m).markup;
     expect(bad).toContain(t.lastRestore.failed);
     expect(bad).toContain(t.problem.no_space);
-    expect(bad).toContain(t.restoreFailedNote);
+    expect(bad).not.toContain(note);
     const gone = run({ backups: list(backup({ restore: { status: "failed", problem: "backup_copy_missing", at: NOW } })) }, m).markup;
     expect(gone).toContain(m.site.backups.problem.backup_copy_missing);
+  });
+
+  it.each(locales)("%s: after a restore left the data half written it names the backup to restore by its date, and marks copies of incomplete data", (_n, m) => {
+    const t = m.apps.backups;
+    const original = backup({ id: "sbak_dddddddddddddddddddddddd", kind: "pre_restore", startedAt: "2026-11-21T09:15:00.000Z" });
+    const broken = backup({ id: "sbak_eeeeeeeeeeeeeeeeeeeeeeee", kind: "pre_restore", startedAt: "2026-11-22T11:00:00.000Z", incompleteData: true });
+    const source = backup({ restore: { status: "failed", problem: "no_space", at: NOW } });
+    const named = format(t.restoreFailedNote, { date: dateOf(m, original.startedAt) });
+    const { markup } = run({ backups: { ...list(broken, source, original), goBackTo: original.id } }, m);
+    expect(count(markup, named)).toBe(1);
+    expect(markup).not.toMatch(/\{\w+\}/);
+    // The mark is on the row of the copy of incomplete data, before the next row.
+    expect(count(markup, t.incompleteNote)).toBe(1);
+    const mark = markup.indexOf(t.incompleteNote);
+    const row = (b: AppStackBackupDto) => markup.search(new RegExp(`<time datetime="${b.startedAt}"`, "i"));
+    expect(row(broken)).toBeGreaterThan(-1);
+    expect(mark).toBeGreaterThan(row(broken));
+    expect(mark).toBeLessThan(row(source));
+    const plain = run({ backups: list(broken, source, original) }, m).markup;
+    expect(plain).not.toContain(t.restoreFailedNote.slice(0, t.restoreFailedNote.indexOf("{")));
   });
 
   it.each(locales)("%s: never an identifier, an address of the panel or where the copies are kept", (_n, m) => {
@@ -286,7 +309,7 @@ describe("backups of an application: when one cannot be asked", () => {
   it.each(locales.flatMap(([n, m]) => APP_STACK_BACKUP_UNAVAILABLE_REASONS.map((r) => [n, r, m] as const)))(
     "%s: %s with nothing kept is one sentence, with no button",
     (_n, reason, m) => {
-      const { out, markup } = run({ backups: { backups: [], unavailableReason: reason } }, m);
+      const { out, markup } = run({ backups: { backups: [], unavailableReason: reason, goBackTo: null } }, m);
       expect(count(markup, m.apps.backups.unavailable[reason])).toBe(1);
       expect(markup).not.toContain("<button");
       expect(markup).not.toContain(m.apps.backups.intro);
@@ -296,7 +319,7 @@ describe("backups of an application: when one cannot be asked", () => {
 
   it.each(locales)("%s: backups kept from before stay in the list, but none can be made or restored, and it says why", (_n, m) => {
     const t = m.apps.backups;
-    const { out, markup } = run({ backups: { backups: [GOOD], unavailableReason: "no_destination" } }, m);
+    const { out, markup } = run({ backups: { backups: [GOOD], unavailableReason: "no_destination", goBackTo: null } }, m);
     expect(count(markup, "<li")).toBe(1);
     const create = buttons(out, t.create)[0]!;
     expect(create.props.disabled).toBe(true);
@@ -329,7 +352,7 @@ describe("backups of an application: when one cannot be asked", () => {
   });
 
   it.each(locales)("%s: the server's reason is said before the status", (_n, m) => {
-    expect(appStackBackupBlock(m, { backups: [GOOD], unavailableReason: "no_data" }, "deploying")).toBe(m.apps.backups.unavailable.no_data);
+    expect(appStackBackupBlock(m, { backups: [GOOD], unavailableReason: "no_data", goBackTo: null }, "deploying")).toBe(m.apps.backups.unavailable.no_data);
     expect(appStackBackupBlock(m, list(GOOD), "deploying")).toBe(format(m.apps.reasons.status, { status: m.apps.status.deploying }));
     expect(appStackBackupBlock(m, list(GOOD), "running")).toBeNull();
     expect(appStackBackupBlock(m, list(), "stopped")).toBeNull();

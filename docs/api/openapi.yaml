@@ -13757,7 +13757,7 @@ components:
 
     AppStackBackupDto:
       type: object
-      required: [id, kind, status, problem, sizeBytes, volumeKeys, copies, startedAt, finishedAt, restore, restorable]
+      required: [id, kind, status, problem, sizeBytes, volumeKeys, copies, startedAt, finishedAt, restore, restorable, incompleteData]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -13826,10 +13826,15 @@ components:
         restorable:
           type: boolean
           description: At least one good copy, of data that still belong to the application
+        incompleteData:
+          type: boolean
+          description: >-
+            A `pre_restore` backup taken while a restore that failed had left the application stopped with its data
+            half written (nothing but backups ran on it since); always `false` for a `manual` backup
 
     AppStackBackupsDto:
       type: object
-      required: [backups, unavailableReason]
+      required: [backups, unavailableReason, goBackTo]
       properties:
         backups:
           type: array
@@ -13841,6 +13846,14 @@ components:
           enum: [not_available, no_destination, no_data]
           nullable: true
           description: Why a new backup cannot be asked for now; `null` when it can
+        goBackTo:
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+          nullable: true
+          description: >-
+            While the last restore of the application left its data half written: the newest good `pre_restore` backup
+            of whole data, the one to restore to go back (the nightly clean-up never removes it meanwhile); `null`
+            otherwise
 
     AppStackDomainDto:
       type: object

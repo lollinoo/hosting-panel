@@ -115,14 +115,16 @@ describe("application backups: DTO and inputs", () => {
     finishedAt: "2026-11-23T10:05:00.000Z",
     restore: { status: "failed", problem: "interrupted", at: "2026-11-23T11:00:00.000Z" },
     restorable: true,
+    incompleteData: false,
   };
 
   it("a backup row names no destination, address, path or key", () => {
     expect(AppStackBackupDtoSchema.parse(dto)).toEqual(dto);
     expect(guards(dto)).toEqual([[], [], []]);
     expect(Object.keys(dto.copies[0] ?? {})).toEqual(["priority", "status", "problem"]);
-    expect(AppStackBackupsDtoSchema.parse({ backups: [dto], unavailableReason: "no_destination" }).backups).toHaveLength(1);
-    expect(AppStackBackupsDtoSchema.safeParse({ backups: [], unavailableReason: "other" }).success).toBe(false);
+    expect(AppStackBackupsDtoSchema.parse({ backups: [dto], unavailableReason: "no_destination", goBackTo: dto.id }).backups).toHaveLength(1);
+    expect(AppStackBackupsDtoSchema.safeParse({ backups: [], unavailableReason: "other", goBackTo: null }).success).toBe(false);
+    expect(AppStackBackupsDtoSchema.safeParse({ backups: [], unavailableReason: null, goBackTo: "../other" }).success).toBe(false);
   });
 
   it("a restore asks for the application's name and nothing else", () => {

@@ -112,11 +112,15 @@ export const AppStackBackupDtoSchema = z.object({
     .nullable(),
   /** At least one good copy, and data that still belongs to the application. */
   restorable: z.boolean(),
+  /** A safety backup taken while a restore that failed had left the data half written. */
+  incompleteData: z.boolean(),
 });
 export type AppStackBackupDto = z.infer<typeof AppStackBackupDtoSchema>;
 
 export const AppStackBackupsDtoSchema = z.object({
   backups: z.array(AppStackBackupDtoSchema), // newest first
   unavailableReason: z.enum(APP_STACK_BACKUP_UNAVAILABLE_REASONS).nullable(),
+  /** While the last restore left the data half written: the safety backup that holds them whole, to restore. */
+  goBackTo: AppEntityIdSchema.nullable(),
 });
 export type AppStackBackupsDto = z.infer<typeof AppStackBackupsDtoSchema>;

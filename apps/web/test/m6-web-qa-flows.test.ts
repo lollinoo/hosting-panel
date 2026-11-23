@@ -455,12 +455,12 @@ describe("application page", () => {
 
   it.each(locales)("B4: a backup is offered only where there is data to save, by a button and never by a link (%s)", async (_l, m) => {
     // web + cache keeps no data: one sentence says so and there is no control
-    const web = await page(webStack({ status: "running" }), m, { backups: [], unavailableReason: "no_data" });
+    const web = await page(webStack({ status: "running" }), m, { backups: [], unavailableReason: "no_data", goBackTo: null });
     expect(web.split(m.apps.backups.unavailable.no_data)).toHaveLength(2);
     expect(web).not.toContain(`>${m.apps.backups.create}<`);
     expect(web).not.toMatch(/<(button|a|input)[^>]*(backup|restore)/i);
     // worker + storage keeps data: the button and the empty list
-    const worker = await page(workerStack({ status: "running" }), m, { backups: [], unavailableReason: null });
+    const worker = await page(workerStack({ status: "running" }), m, { backups: [], unavailableReason: null, goBackTo: null });
     expect(worker.split(`>${m.apps.backups.create}</button>`)).toHaveLength(2);
     expect(worker).toContain(m.apps.backups.none);
     expect(worker).not.toMatch(/<button[^>]*\sdisabled=""[^>]*>[^<]*backup/i);

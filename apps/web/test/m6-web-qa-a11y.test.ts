@@ -265,6 +265,7 @@ const BACKUP: AppStackBackupsDto["backups"][number] = {
   finishedAt: NOW,
   restore: { status: "succeeded", problem: null, at: NOW },
   restorable: true,
+  incompleteData: false,
 };
 // One row per thing the list can say: running, restored, a failed copy with a failed restore, a failed backup.
 const BACKUPS: AppStackBackupsDto = {
@@ -285,6 +286,7 @@ const BACKUPS: AppStackBackupsDto = {
     { ...BACKUP, id: "sbak_2", status: "failed", problem: "timeout", sizeBytes: null, copies: [{ priority: 1, status: "failed", problem: "timeout" }], restore: null, restorable: false },
   ],
   unavailableReason: null,
+  goBackTo: null,
 };
 
 const PARAMS: AppTemplateParameter[] = [
@@ -543,12 +545,21 @@ const SCENARIOS: Scenario[] = [
   { name: "domains · none", ids: ["app-domain-hostname"], render: (m) => withState(AppStackDomains, { ...domainsProps, initial: [] }, m) },
   { name: "domains · unreadable", render: (m) => withState(AppStackDomains, { ...domainsProps, initial: null }, m) },
   { name: "backups", render: (m) => withState(AppStackBackups, backupsProps, m) },
-  { name: "backups · none yet", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { backups: [], unavailableReason: null } }, m) },
+  { name: "backups · none yet", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { backups: [], unavailableReason: null, goBackTo: null } }, m) },
+  {
+    name: "backups · a restore left the data half written",
+    render: (m) =>
+      withState(
+        AppStackBackups,
+        { ...backupsProps, backups: { ...BACKUPS, backups: [{ ...BACKUP, id: "sbak_6", kind: "pre_restore", incompleteData: true }, ...BACKUPS.backups], goBackTo: "sbak_3" } },
+        m,
+      ),
+  },
   { name: "backups · not possible in this status", render: (m) => withState(AppStackBackups, { ...backupsProps, status: "deploying" as const }, m) },
   { name: "backups · kept from before, none can be made", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { ...BACKUPS, unavailableReason: "no_destination" } }, m) },
   ...(["not_available", "no_destination", "no_data"] as const).map((unavailableReason) => ({
     name: `backups · unavailable (${unavailableReason})`,
-    render: (m: Messages) => withState(AppStackBackups, { ...backupsProps, backups: { backups: [], unavailableReason } }, m),
+    render: (m: Messages) => withState(AppStackBackups, { ...backupsProps, backups: { backups: [], unavailableReason, goBackTo: null } }, m),
   })),
   { name: "backups · unreadable", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: null }, m) },
   { name: "backups · create dialog", render: (m) => withState(AppStackBackups, backupsProps, m, { 0: true }) },
@@ -958,7 +969,7 @@ describe("words, not colours", () => {
       ["unknown", m.apps.detail.unknownBody],
       ["draft", m.apps.detail.draftBody],
     ] as const) {
-      fetchUpstream.mockImplementation(async (p: string) => (p === UP ? ok({ ...DETAIL, status, revisionNumber: null }) : ok(p.endsWith("/backups") ? { backups: [], unavailableReason: null } : [])));
+      fetchUpstream.mockImplementation(async (p: string) => (p === UP ? ok({ ...DETAIL, status, revisionNumber: null }) : ok(p.endsWith("/backups") ? { backups: [], unavailableReason: null, goBackTo: null } : [])));
       const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
       expect(withRole(h, "status").join(" "), status).toContain(text);
       expect(withRole(h, "alert"), status).toEqual([]);

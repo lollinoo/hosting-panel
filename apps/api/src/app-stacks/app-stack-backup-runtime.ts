@@ -257,6 +257,7 @@ export class AppStackBackupRuntime {
             operationId: op.id,
             status: restored ? "succeeded" : "failed",
             problem: restored ? null : restoreProblem,
+            mayHaveWritten: sent,
           });
         }
         if (stoppedState) {
@@ -354,7 +355,7 @@ export class AppStackBackupRuntime {
           await settleAppStackBackupAggregate(tx, backup.id);
         }
         if (kind === "stack.restore") {
-          await settleAppStackRestore(tx, { operationId: op.id, status: "failed", problem: failure.problem });
+          await settleAppStackRestore(tx, { operationId: op.id, status: "failed", problem: failure.problem, mayHaveWritten: st.applying });
         }
         // Not stopped for certain: with its addresses possibly withdrawn the application does not serve as before.
         const stack = await getAppStack(tx, scope);

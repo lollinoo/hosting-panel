@@ -135,9 +135,11 @@ const BACKUPS: AppStackBackupsDto = {
       finishedAt: NOW,
       restore: null,
       restorable: true,
+      incompleteData: false,
     },
   ],
   unavailableReason: null,
+  goBackTo: null,
 };
 
 const decode = (s: string) => s.replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&");

@@ -81,6 +81,8 @@ export function AppStackBackups({
   const block = appStackBackupBlock(m, backups, status);
   const base = `/api/bff/orgs/${orgId}/app-stacks/${stackId}/backups`;
   const source = backups.backups.find((b) => b.id === restoring);
+  // A restore left the data half written: the server names the safety backup that holds them whole.
+  const goBack = backups.goBackTo === null ? undefined : backups.backups.find((b) => b.id === backups.goBackTo);
 
   function show(backupId: string | null) {
     setTyped("");
@@ -142,6 +144,11 @@ export function AppStackBackups({
           </p>
         )}
       </div>
+      {goBack && (
+        <Alert variant="warning" role="status">
+          <AlertDescription>{format(t.restoreFailedNote, { date: date.format(new Date(goBack.startedAt)) })}</AlertDescription>
+        </Alert>
+      )}
       {backups.backups.length === 0 ? (
         <p className={muted}>{t.none}</p>
       ) : (
@@ -171,6 +178,7 @@ export function AppStackBackups({
                   )}
                 </div>
                 {b.copies.length > 1 && <p className="text-muted-foreground">{format(t.copies, { good, total: b.copies.length })}</p>}
+                {b.incompleteData && <p className="text-muted-foreground">{t.incompleteNote}</p>}
                 {b.status === "failed" && <p className="text-destructive">{appStackBackupProblemText(m, b.problem)}</p>}
                 {b.status === "partial" && (
                   <p className="text-muted-foreground">
@@ -183,11 +191,7 @@ export function AppStackBackups({
                     {b.restore.at && <> · {when(b.restore.at)}</>}
                   </p>
                 )}
-                {b.restore?.status === "failed" && (
-                  <p className="text-muted-foreground">
-                    {appStackBackupProblemText(m, b.restore.problem)} {t.restoreFailedNote}
-                  </p>
-                )}
+                {b.restore?.status === "failed" && <p className="text-muted-foreground">{appStackBackupProblemText(m, b.restore.problem)}</p>}
               </li>
             );
           })}

@@ -355,7 +355,7 @@ describe("application stacks HTTP API (H5)", () => {
     expectRefusal(await act(h.a, stackId, "backups"), 422, "NOT_SUPPORTED", { reason: "STACK_UNSUPPORTED_FEATURE" });
     const listed = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/backups`);
     expect(listed.status, listed.raw).toBe(200);
-    expect(listed.body.data).toEqual({ backups: [], unavailableReason: "not_available" });
+    expect(listed.body.data).toEqual({ backups: [], unavailableReason: "not_available", goBackTo: null });
     expectRefusal(await act(h.b, stackId, "backups"), 404, "NOT_FOUND");
     expectRefusal(await h.call(h.b.token, "GET", `${base(h.a)}/${stackId}/backups`), 404, "NOT_FOUND");
     expect(await h.counts()).toEqual(before);

@@ -23,6 +23,9 @@ interface Spec {
   readonly age: number;
   /** Copies with a snapshot on a destination (default: one when the backup is good). */
   readonly snapshots?: number;
+  /** Safety backups: copied from half written data; its restore left the data half written. */
+  readonly incompleteData?: boolean;
+  readonly leftIncomplete?: boolean;
 }
 
 function expired(specs: readonly Spec[], live = true): string[] {
@@ -33,6 +36,8 @@ function expired(specs: readonly Spec[], live = true): string[] {
         kind: s.kind ?? "manual",
         status: s.status ?? "succeeded",
         startedAt: new Date(NOW.getTime() - s.age * DAY - n * 1_000),
+        incompleteData: s.incompleteData ?? false,
+        leftIncomplete: s.leftIncomplete ?? false,
       }) as AppStackBackupRow,
   );
   const copies = new Map<string, AppStackBackupCopyRow[]>(
@@ -100,6 +105,29 @@ describe("retention of application backups", () => {
       { id: "f_old", status: "failed", age: DAYS + 4 },
     ];
     expect(expired(rows, false)).toEqual(["f_old", "half_old", "m_old", "p_old"]);
+  });
+
+  it("while the last restore left the data half written, the newest safety backup of whole data stays past the count", () => {
+    const broken = many(APP_STACK_PRE_RESTORE_BACKUPS_KEPT, { kind: "pre_restore", incompleteData: true, leftIncomplete: true }, "p");
+    const older = [
+      { id: "p_whole", kind: "pre_restore", age: 2, leftIncomplete: true },
+      { id: "p_older", kind: "pre_restore", age: 3 },
+    ] as const;
+    expect(expired([...broken, ...older])).toEqual(["p_older"]);
+    // Once a restore leaves the data whole again, the count applies to it like to any other.
+    expect(expired([{ id: "p_back", kind: "pre_restore", age: 0, incompleteData: true }, ...broken, ...older])).toEqual([
+      "p3",
+      "p_older",
+      "p_whole",
+    ]);
+    // A deleted application has nothing to go back to: its backups go with the retention period.
+    expect(expired([...broken, ...older].map((s) => ({ ...s, age: s.age + DAYS + 1 })), false)).toEqual([
+      "p1",
+      "p2",
+      "p3",
+      "p_older",
+      "p_whole",
+    ]);
   });
 
   it("lists a row without a snapshot too: there is nothing to remove from a destination, only the row", () => {

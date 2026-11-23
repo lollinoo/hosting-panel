@@ -196,6 +196,7 @@ export function appStackBackupDto(
     finishedAt: iso(row.finishedAt),
     restore: row.restoreStatus === null ? null : { status: row.restoreStatus, problem: row.restoreProblem, at: iso(row.restoredAt) },
     restorable: good && row.volumeKeys.some((key) => presentVolumeKeys.has(key)),
+    incompleteData: row.incompleteData,
   };
 }
 

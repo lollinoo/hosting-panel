@@ -3042,7 +3042,7 @@ x-hp-ingress:
       failed: "Non riuscito. Il motivo è nello storico qui sotto; i dati sono conservati.",
       backupFailed: "Il backup non è riuscito: il motivo è nell'elenco dei backup. I dati dell'applicazione non sono cambiati.",
       restoreFailed:
-        "Il ripristino non è riuscito: il motivo è nell'elenco dei backup. Se l'applicazione è rimasta ferma, i dati possono essere incompleti: ripristina il backup «Prima di un ripristino» più recente.",
+        "Il ripristino non è riuscito: il motivo è nell'elenco dei backup. Se i dati sono rimasti incompleti, l'elenco dice quale backup ripristinare per tornare a com'erano.",
       longNote: "Con molti dati può durare a lungo. Puoi lasciare questa pagina: l'operazione continua.",
       unknown: "Esito da verificare: il pannello sta controllando lo stato reale, ricarica la pagina tra poco.",
       slow: "Sta richiedendo più del previsto. Ricarica la pagina più tardi.",
@@ -3133,7 +3133,8 @@ x-hp-ingress:
         failed: "Ripristino da questo backup non riuscito",
       },
       restoreFailedNote:
-        "Se l'applicazione è rimasta ferma, i dati possono essere incompleti: ripristina il backup «Prima di un ripristino» più recente per tornare a com'erano.",
+        "I dati dell'applicazione possono essere incompleti: un ripristino non è finito. Per tornare a com'erano prima, ripristina il backup «Prima di un ripristino» del {date}.",
+      incompleteNote: "Questa copia è stata fatta dopo un ripristino non finito: i dati che contiene possono essere incompleti.",
       steps: { copy: "Copia dei dati", restore: "Ripristino dei dati", expire: "Rimozione dei backup scaduti" },
       problem: {
         tool_unavailable:

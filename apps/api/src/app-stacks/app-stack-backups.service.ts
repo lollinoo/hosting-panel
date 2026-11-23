@@ -21,6 +21,7 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import { appRefusal, guardedApp } from "../app-templates/app-template-errors.js";
 import { canonicalRequestHash } from "../common/request-hash.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
+import { appStackBackupToGoBackTo } from "./app-stack-backup-retention.js";
 import { appStackBackupsAvailable } from "./app-stack-backup-runtime.js";
 import { appStackBackupDto } from "./app-stack-dto.js";
 import { mapAppStackError } from "./app-stack-errors.js";
@@ -57,6 +58,7 @@ export class AppStackBackupsService {
     return {
       backups: rows.map((row) => appStackBackupDto(row, copies.get(row.id) ?? [], present)),
       unavailableReason: await this.#unavailableReason(present.size),
+      goBackTo: appStackBackupToGoBackTo(rows)?.id ?? null,
     };
   }
 

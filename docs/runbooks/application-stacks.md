@@ -302,11 +302,21 @@ approval.
    is written; a backup none of whose volumes exist any more cannot be restored.
 6. **A restore that failed.** When it failed before anything was written, the application starts again by itself.
    When it failed **while writing**, or the panel cannot tell, the application **stays stopped**: its data may be
-   incomplete. Restore the newest «Prima di un ripristino» backup, which holds the data as they were; do not press
-   **Avvia** first unless losing that state is acceptable.
+   incomplete. The **Backup** section then names, by its date and time, the backup to restore: the newest
+   «Prima di un ripristino» backup taken from whole data. It is not always the newest of its kind: a restore asked
+   while the data were still half written saves a safety backup of those half written data, and the list marks it
+   («Questa copia è stata fatta dopo un ripristino non finito»). Do not press **Avvia** first unless losing the state
+   before the restore is acceptable. To see the marks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, status, started_at, incomplete_data, left_incomplete from app_stack_backups where stack_id = '<stackId>' and kind = 'pre_restore' order by started_at desc"
+   ```
+   `left_incomplete` on the newest row means the data are half written now; `incomplete_data` marks a copy of such
+   data.
 7. **What is kept.** For each application the three newest good backups made by hand and the three newest good safety
    backups, whatever their age; a failed backup until the retention period of the sites' backup policy is over (14 days
-   unless changed). The backups of a **deleted** application stay for that period, then every copy and row goes. The
+   unless changed). While the newest safety backup says its restore left the data half written (step 6), the safety
+   backup the section names to go back to is kept too, whatever the count of newer ones. The backups of a **deleted**
+   application stay for that period, then every copy and row goes. The
    clean-up runs with the nightly backup run (`stack.prune` in the history, «Pulizia dei backup»), so the list can
    show more than three for some hours. A destination that fails keeps the rows, and the next night finishes the work.
    On a server with no usable destination the nightly run does nothing, and no backup of an application is removed.

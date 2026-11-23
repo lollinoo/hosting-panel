@@ -316,7 +316,7 @@ describe("application stacks: lifecycle through HTTP (QA M4)", () => {
       });
       // The list says the same and offers nothing.
       const listed = await send("GET", stack.id, "/backups");
-      expect([status, listed.status, listed.body.data]).toEqual([status, 200, { backups: [], unavailableReason: "not_available" }]);
+      expect([status, listed.status, listed.body.data]).toEqual([status, 200, { backups: [], unavailableReason: "not_available", goBackTo: null }]);
       // What the request itself gets wrong is told first: a key the body may not carry, the missing Idempotency-Key.
       expectRefusal(await send("POST", stack.id, "/backups", { anything: true }), 400, "VALIDATION_ERROR");
       expectRefusal(await send("POST", stack.id, restorePath, {}), 400, "VALIDATION_ERROR");

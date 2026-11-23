@@ -14,7 +14,7 @@ import {
   type BackupTargetKind,
   type ErrorCode,
 } from "@hosting-panel/contracts";
-import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, sql } from "drizzle-orm";
+import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, notInArray, sql } from "drizzle-orm";
 import { AppStackRepositoryError, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
 import { resolveAppStackBackupTargets } from "./backup-targets-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
@@ -209,6 +209,25 @@ export async function enqueueAppStackBackupTransactional(
       throw new AppStackBackupRepositoryError("NO_DESTINATION", "No backup destination is configured on this server.");
     }
 
+    // The safety backup copies incomplete data when a restore that failed left the application stopped with them, and
+    // nothing but backups and clean-ups ran on it since (ADR-0038 K5).
+    let incompleteData = false;
+    if (source && stack.status === "stopped") {
+      const [last] = await tx
+        .select({ id: operations.id, kind: operations.kind })
+        .from(operations)
+        .where(and(eq(operations.lockKey, lockKey), notInArray(operations.kind, ["stack.backup", "stack.prune"])))
+        .orderBy(desc(operations.submittedAt), desc(operations.id))
+        .limit(1);
+      if (last?.kind === "stack.restore") {
+        const [previous] = await tx
+          .select({ leftIncomplete: appStackBackups.leftIncomplete })
+          .from(appStackBackups)
+          .where(eq(appStackBackups.operationId, last.id));
+        incompleteData = previous?.leftIncomplete ?? false;
+      }
+    }
+
     const backupId = newAppEntityId("sbak");
     const { operation } = await enqueueOperationTransactional(tx as unknown as HostingPanelDatabase, {
       organizationId: stack.organizationId,
@@ -242,6 +261,7 @@ export async function enqueueAppStackBackupTransactional(
         revisionId: stack.appliedRevisionId,
         volumeKeys: present,
         resumeAfter: stack.status !== "stopped",
+        incompleteData,
         startedAt: now,
       })
       .returning();
@@ -414,17 +434,39 @@ export async function settleAppStackBackupAggregate(db: DatabaseExecutor, backup
   return row?.status ?? null;
 }
 
-/** Ends the restore an operation started on the backup it reads; false when it already ended. */
+/**
+ * Ends the restore an operation started on the backup it reads; false when it already ended. A failed restore marks
+ * its safety backup when it left the data half written, or left them as half written as they already were.
+ */
 export async function settleAppStackRestore(
   db: DatabaseExecutor,
-  input: { readonly operationId: string; readonly status: "succeeded" | "failed"; readonly problem: string | null },
+  input: {
+    readonly operationId: string;
+    readonly status: "succeeded" | "failed";
+    readonly problem: string | null;
+    /** The job that writes the data back was accepted. Absent = not known: it may have been once the safety backup was good. */
+    readonly mayHaveWritten?: boolean;
+  },
 ): Promise<boolean> {
   const updated = await db
     .update(appStackBackups)
     .set({ restoreStatus: input.status, restoreProblem: input.status === "succeeded" ? null : input.problem, restoredAt: new Date() })
     .where(and(eq(appStackBackups.restoreOperationId, input.operationId), eq(appStackBackups.restoreStatus, "running")))
     .returning({ id: appStackBackups.id });
-  return updated.length > 0;
+  if (updated.length === 0) return false;
+  if (input.status === "failed") {
+    const wrote =
+      input.mayHaveWritten === undefined
+        ? sql`${appStackBackups.status} IN ('succeeded', 'partial')`
+        : input.mayHaveWritten
+          ? sql`TRUE`
+          : sql`FALSE`;
+    await db
+      .update(appStackBackups)
+      .set({ leftIncomplete: sql`(${wrote} OR ${appStackBackups.incompleteData})` })
+      .where(and(eq(appStackBackups.operationId, input.operationId), eq(appStackBackups.kind, "pre_restore")));
+  }
+  return true;
 }
 
 /** The backup a restore operation reads. */

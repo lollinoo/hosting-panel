@@ -3014,7 +3014,7 @@ x-hp-ingress:
       failed: "Failed. The reason is in the history below; your data is kept.",
       backupFailed: "The backup failed: the reason is in the list of backups. The application's data has not changed.",
       restoreFailed:
-        'The restore failed: the reason is in the list of backups. If the application stayed stopped, its data may be incomplete: restore the most recent "Before a restore" backup.',
+        "The restore failed: the reason is in the list of backups. If the data was left incomplete, the list says which backup to restore to go back to what it was.",
       longNote: "With a lot of data this can take a long time. You can leave this page: the operation continues.",
       unknown: "Outcome to be verified: the panel is checking the real state, reload the page shortly.",
       slow: "This is taking longer than expected. Reload the page later.",
@@ -3105,7 +3105,8 @@ x-hp-ingress:
         failed: "Restore from this backup failed",
       },
       restoreFailedNote:
-        'If the application stayed stopped, its data may be incomplete: restore the most recent "Before a restore" backup to go back to what it was.',
+        'The application\'s data may be incomplete: a restore did not finish. To go back to what it was before, restore the "Before a restore" backup of {date}.',
+      incompleteNote: "This copy was made after a restore that did not finish: the data in it may be incomplete.",
       steps: { copy: "Copying the data", restore: "Putting the data back", expire: "Removing expired backups" },
       problem: {
         tool_unavailable:

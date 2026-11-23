@@ -49,7 +49,11 @@ import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { enqueueAppStackPrune, listAppStackPruneCandidates } from "../src/app-stacks/app-stack-backup-retention.js";
+import {
+  appStackBackupToGoBackTo,
+  enqueueAppStackPrune,
+  listAppStackPruneCandidates,
+} from "../src/app-stacks/app-stack-backup-retention.js";
 import {
   APP_STACK_BACKUP_FAILED_TEXT,
   APP_STACK_BACKUP_POLL_GIVE_UP_MS,
@@ -903,6 +907,76 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await stepsOf(op.id)).toEqual(done("stack.prune"));
       expect((await stackOf(stackId)).status).toBe("stopped");
       expect(await listAppStackPruneCandidates(db(), new Date(START))).not.toContain(stackId);
+    });
+
+    it("restores that keep failing while writing never let the safety backup of the original data go", async () => {
+      const { stackId, source } = await withBackup();
+      const safety: string[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        // After the first failure the customer goes back to the safety backup of the original data.
+        const { operation: op, backup } = await request(stackId, "stack.restore", i === 0 ? source.id : safety[0]!);
+        await db()
+          .update(appStackBackups)
+          .set({ startedAt: new Date(START - (4 - i) * HOUR) })
+          .where(eq(appStackBackups.id, backup.id));
+        before = (req) => {
+          if (req.action === "stackRestore") sim.failNext("no_space");
+        };
+        expectFailed(await apply(op), "INTERNAL_ERROR", "stack.restore");
+        expect((await stackOf(stackId)).status).toBe("stopped");
+        safety.push(backup.id);
+      }
+      before = null;
+
+      expect(await apply(await prune(stackId))).toBeUndefined();
+
+      expect((await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id)).toEqual(expect.arrayContaining(safety));
+      expect(sim.appStackSnapshots(stackId)).toHaveLength(5);
+      // Only the first one copied whole data; every one of them left the data half written.
+      expect(await backupOf(safety[0]!)).toMatchObject({ incompleteData: false, leftIncomplete: true });
+      for (const id of safety.slice(1)) expect(await backupOf(id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      expect(appStackBackupToGoBackTo(await listAppStackBackupsForRetention(db(), stackId))?.id).toBe(safety[0]);
+
+      // Going back succeeds: the data are whole again, and the rule lets the oldest safety backup go.
+      const { operation: back, backup: last } = await request(stackId, "stack.restore", safety[0]!);
+      expect(await apply(back)).toBeUndefined();
+      expect(await backupOf(last.id)).toMatchObject({ incompleteData: true, leftIncomplete: false });
+      expect(appStackBackupToGoBackTo(await listAppStackBackupsForRetention(db(), stackId))).toBeNull();
+      expect(await apply(await prune(stackId))).toBeUndefined();
+      expect((await listAppStackBackupsForRetention(db(), stackId)).map((b) => b.id)).not.toContain(safety[0]);
+    });
+
+    it("data a failed restore left are whole again once the application ran, and stay half written after a restore refused before writing", async () => {
+      const { stackId, source } = await withBackup();
+      const { operation: first, backup: firstSafety } = await request(stackId, "stack.restore", source.id);
+      before = (req) => {
+        if (req.action === "stackRestore") sim.failNext("no_space");
+      };
+      expectFailed(await apply(first), "INTERNAL_ERROR", "stack.restore");
+      before = null;
+      // The customer starts it anyway and stops it: the data are taken as they are.
+      await lifecycle(stackId, "stack.start");
+      await lifecycle(stackId, "stack.stop");
+      const { operation: second, backup: secondSafety } = await request(stackId, "stack.restore", firstSafety.id);
+      expect(secondSafety.incompleteData).toBe(false);
+      expect(await apply(second)).toBeUndefined();
+
+      const { operation: third } = await request(stackId, "stack.restore", source.id);
+      before = (req) => {
+        if (req.action === "stackRestore") sim.failNext("no_space");
+      };
+      expectFailed(await apply(third), "INTERNAL_ERROR", "stack.restore");
+      const { operation: fourth, backup: fourthSafety } = await request(stackId, "stack.restore", source.id);
+      expect(fourthSafety.incompleteData).toBe(true);
+      // Refused before anything was written: the data stay as the third restore left them.
+      before = (req) => {
+        if (req.action === "stackRestore") throw busy();
+      };
+      expectFailed(await apply(fourth), "INTERNAL_ERROR", "stack.restore");
+      before = null;
+      expect(await backupOf(fourthSafety.id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+      const { backup: fifthSafety } = await request(stackId, "stack.restore", source.id);
+      expect(fifthSafety.incompleteData).toBe(true);
     });
 
     it("a destination that fails keeps the rows: the clean-up fails and the next one finishes the work", async () => {

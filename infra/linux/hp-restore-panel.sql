@@ -83,6 +83,10 @@ UPDATE app_stack_backups b
        finished_at = COALESCE(b.finished_at, now())
   FROM agg
  WHERE b.id = agg.id;
+-- A restore left open may have begun writing once its safety backup was good: that backup keeps the data to go back to.
+UPDATE app_stack_backups s SET left_incomplete = (s.status IN ('succeeded','partial') OR s.incomplete_data)
+  FROM app_stack_backups src
+ WHERE src.restore_status = 'running' AND src.restore_operation_id = s.operation_id AND s.kind = 'pre_restore';
 UPDATE app_stack_backups SET restore_status = 'failed', restore_problem = 'interrupted', restored_at = COALESCE(restored_at, now())
  WHERE restore_status = 'running';
 DELETE FROM user_sessions;

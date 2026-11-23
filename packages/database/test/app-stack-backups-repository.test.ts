@@ -518,6 +518,60 @@ describe("@hosting-panel/database — application backups", () => {
       expect((await backupOf(good.backup.id)).restoreOperationId).toBeNull();
     });
 
+    it("marks a safety backup of data a failed restore left half written, until anything but a backup runs the application", async () => {
+      const stack = await installed();
+      const source = await goodBackup(stack);
+      const restore = (over: Partial<EnqueueAppStackBackupInput> = {}) =>
+        request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id, ...over });
+      /** A restore whose safety copy was good, ended as the worker would; the application stays stopped. */
+      const ended = async (written: AppStackBackupWriteResult, outcome: "succeeded" | "failed", mayHaveWritten?: boolean) => {
+        await finish(written);
+        await settleAppStackRestore(db(), { operationId: written.operation.id, status: outcome, problem: outcome === "failed" ? "no_space" : null, mayHaveWritten });
+        await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+      };
+
+      const first = await restore();
+      expect(first.backup.incompleteData).toBe(false);
+      await ended(first, "failed", true);
+      expect(await backupOf(first.backup.id)).toMatchObject({ incompleteData: false, leftIncomplete: true });
+
+      // A backup of the stopped application changes nothing: the next safety backup copies the same half written data.
+      await goodBackup(await stackOf(stack.id));
+      const second = await restore();
+      expect(second.backup.incompleteData).toBe(true);
+      // Refused before writing: the data stay as they were, half written.
+      await ended(second, "failed", false);
+      expect(await backupOf(second.backup.id)).toMatchObject({ incompleteData: true, leftIncomplete: true });
+
+      // Not known whether it wrote (the panel was restored, or the worker's last resort): a good safety copy says it may have.
+      const third = await restore();
+      await finish(third);
+      await db().update(appStackBackups).set({ incompleteData: false }).where(eq(appStackBackups.id, third.backup.id));
+      await settleAppStackRestore(db(), { operationId: third.operation.id, status: "failed", problem: "interrupted" });
+      expect((await backupOf(third.backup.id)).leftIncomplete).toBe(true);
+      await db().update(appStacks).set({ status: "stopped" }).where(eq(appStacks.id, stack.id));
+
+      // The application ran since: its data are taken as they are.
+      await db().insert(operations).values({
+        id: `op_${hex("ran").slice(0, 24)}`,
+        organizationId: orgA,
+        kind: "stack.start",
+        resourceType: "stack",
+        resourceId: stack.id,
+        status: "succeeded",
+        lockKey: `stack:${stack.id}`,
+        idempotencyKey: `sb-ran-${String(counter)}`,
+      });
+      const fourth = await restore();
+      expect(fourth.backup.incompleteData).toBe(false);
+      await ended(fourth, "succeeded");
+      expect((await backupOf(fourth.backup.id)).leftIncomplete).toBe(false);
+
+      // A restore of a running application never copies half written data.
+      await db().update(appStacks).set({ status: "running" }).where(eq(appStacks.id, stack.id));
+      expect((await restore()).backup.incompleteData).toBe(false);
+    });
+
     it("accepts a partial backup: one good copy is enough", async () => {
       await setPolicyTargets(db(), policyId, [S3, LOCAL]);
       const stack = await installed();

@@ -1335,6 +1335,10 @@ export const appStackBackups = pgTable(
     restoreStatus: text("restore_status").$type<AppStackRestoreStatus>(),
     restoreProblem: text("restore_problem"),
     restoredAt: timestamp("restored_at", { withTimezone: true }),
+    /** A safety backup of data a failed restore had left half written (ADR-0038 K5). */
+    incompleteData: boolean("incomplete_data").notNull().default(false),
+    /** A safety backup whose own restore failed and left the data half written. */
+    leftIncomplete: boolean("left_incomplete").notNull().default(false),
   },
   (t) => [
     unique("uq_app_stack_backups_operation").on(t.operationId),

@@ -131,8 +131,8 @@ describe("application backups HTTP API (ADR-0038)", () => {
     const withData = await stopped("con-dati");
     await setPolicyTargets(db(), policyId, []);
     try {
-      expect((await list(noData)).body.data).toEqual({ backups: [], unavailableReason: "no_data" });
-      expect((await list(withData)).body.data).toEqual({ backups: [], unavailableReason: "no_destination" });
+      expect((await list(noData)).body.data).toEqual({ backups: [], unavailableReason: "no_data", goBackTo: null });
+      expect((await list(withData)).body.data).toEqual({ backups: [], unavailableReason: "no_destination", goBackTo: null });
       const before = await h.counts();
       expectRefusal(await backup(noData), 400, "VALIDATION_ERROR", { field: "backup", reason: "no_data" });
       expectRefusal(await backup(withData), 400, "VALIDATION_ERROR", { field: "backup", reason: "no_destination" });
@@ -142,7 +142,7 @@ describe("application backups HTTP API (ADR-0038)", () => {
     } finally {
       await setPolicyTargets(db(), policyId, [LOCAL]);
     }
-    expect((await list(withData)).body.data).toEqual({ backups: [], unavailableReason: null });
+    expect((await list(withData)).body.data).toEqual({ backups: [], unavailableReason: null, goBackTo: null });
     // Without data the destination does not matter.
     expect((await list(noData)).body.data.unavailableReason).toBe("no_data");
   });
@@ -177,7 +177,9 @@ describe("application backups HTTP API (ADR-0038)", () => {
       finishedAt: null,
       restore: null,
       restorable: false,
+      incompleteData: false,
     });
+    expect(queued.body.data.goBackTo).toBeNull();
 
     expect(await settle(stackId)).toBe("running");
     const done = await list(stackId);
@@ -278,7 +280,7 @@ describe("application backups HTTP API (ADR-0038)", () => {
 
     expect(await settle(stackId)).toBe("running");
     const done = (await list(stackId)).body.data.backups as Json[];
-    AppStackBackupsDtoSchema.parse({ backups: done, unavailableReason: null });
+    AppStackBackupsDtoSchema.parse({ backups: done, unavailableReason: null, goBackTo: null });
     expect(done.map((b) => [b.kind, b.status, b.restorable])).toEqual([
       ["pre_restore", "succeeded", true],
       ["manual", "succeeded", true],

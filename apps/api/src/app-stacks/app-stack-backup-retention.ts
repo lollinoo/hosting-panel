@@ -22,7 +22,23 @@ import { APP_STACK_STEP_LEASE_MS } from "./app-stack-runtime-policy.js";
 // Which backups of an application go, and the nightly request that removes them (ADR-0038 K7). The rule is the one
 // sites have: nothing here decides a number of its own.
 
-/** The backups of one application that the retention rule lets go. */
+const newestFirst = (a: AppStackBackupRow, b: AppStackBackupRow): number =>
+  b.startedAt.getTime() - a.startedAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
+
+/**
+ * While the last restore of an application left its data half written (its safety backup says so), the newest good
+ * safety backup of whole data: the one the page tells the customer to restore. Null otherwise (ADR-0038 K5).
+ */
+export function appStackBackupToGoBackTo(backups: readonly AppStackBackupRow[]): AppStackBackupRow | null {
+  const safety = backups.filter((b) => b.kind === "pre_restore").sort(newestFirst);
+  if (!safety[0]?.leftIncomplete) return null;
+  return safety.find((b) => !b.incompleteData && (b.status === "succeeded" || b.status === "partial")) ?? null;
+}
+
+/**
+ * The backups of one application that the retention rule lets go. While the data of a live application are half
+ * written, the safety backup to go back to stays whatever the count of newer ones (ADR-0038 K7).
+ */
 export function expiredAppStackBackups(
   backups: readonly AppStackBackupRow[],
   copies: ReadonlyMap<string, readonly AppStackBackupCopyRow[]>,
@@ -39,7 +55,8 @@ export function expiredAppStackBackups(
     startedAt: b.startedAt,
   }));
   const { forget, drop } = selectExpired(rows, now, retentionDays, live);
-  return [...forget, ...drop].map((row) => row.id);
+  const kept = live ? appStackBackupToGoBackTo(backups)?.id : undefined;
+  return [...forget, ...drop].map((row) => row.id).filter((id) => id !== kept);
 }
 
 /** The retention period of the server's backup policy: applications have none of their own. */

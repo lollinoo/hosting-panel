@@ -96,7 +96,9 @@ const SEED = `
     ('sbak_half','stk_run','o','manual','running','op_sb_half','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
     ('sbak_opt','stk_run','o','pre_restore','running','op_sb_opt','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
     ('sbak_none','stk_gone','o','manual','running','op_sb_none','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
-    ('sbak_src','stk_run','o','manual','succeeded','op_sb_src','["data"]',70,NULL,'2026-11-02T03:00:00Z','op_sb_rst','running',NULL,NULL),
+    ('sbak_src','stk_run','o','manual','succeeded','op_sb_src','["data"]',70,NULL,'2026-11-02T03:00:00Z','op_sb_opt','running',NULL,NULL),
+    ('sbak_src_b','stk_run','o','manual','succeeded','op_sb_src_b','["data"]',70,NULL,'2026-11-02T03:00:00Z','op_sb_safe_b','running',NULL,NULL),
+    ('sbak_safe_b','stk_run','o','pre_restore','running','op_sb_safe_b','["data"]',NULL,NULL,NULL,NULL,NULL,NULL,NULL),
     ('sbak_old','stk_run','o','manual','partial','op_sb_old','["data"]',60,'unreachable','2026-11-01T03:00:00Z','op_sb_rst_old','failed','timeout','2026-11-01T04:00:00Z'),
     ('sbak_done','stk_gone','o','manual','succeeded','op_sb_done','["data"]',50,NULL,'2026-11-01T03:00:00Z','op_sb_rst_done','succeeded',NULL,'2026-11-01T05:00:00Z');
   INSERT INTO app_stack_backup_copies (id, backup_id, target_id, priority, required, status, snapshot_id, size_bytes, problem, finished_at) VALUES
@@ -143,7 +145,7 @@ const LEDGER = `
   UNION ALL SELECT 'av', volume_key, status, NULL, NULL FROM app_stack_volumes
   UNION ALL SELECT 'am', id, status, cert_status, concat_ws('|', cert_expires_at, dns_next_check_at <= now()) FROM app_stack_domains
   UNION ALL SELECT 'ab', id, status, problem, concat_ws('|', COALESCE(size_bytes::text, '-'), COALESCE(finished_at::text, '-'),
-    COALESCE(restore_status, '-'), COALESCE(restore_problem, '-'), COALESCE(restored_at::text, '-')) FROM app_stack_backups
+    COALESCE(restore_status, '-'), COALESCE(restore_problem, '-'), COALESCE(restored_at::text, '-'), left_incomplete::text) FROM app_stack_backups
   UNION ALL SELECT 'ax', id, status, problem, concat_ws('|', COALESCE(snapshot_id, '-'), COALESCE(size_bytes::text, '-'),
     COALESCE(finished_at::text, '-')) FROM app_stack_backup_copies
   ORDER BY 1, 2`;
@@ -270,6 +272,14 @@ describe.each([
     expect(byId("ab", "sbak_src")).toMatchObject({ status: "succeeded", problem: null });
     expect(cols("ab", "sbak_src").slice(2, 4)).toEqual(["failed", "interrupted"]);
     expect(cols("ab", "sbak_src")[4]).not.toBe("-");
+    // its safety backup was good, so the restore may have begun writing: that backup holds the data to go back to
+    expect(byId("ab", "sbak_opt")).toMatchObject({ status: "succeeded" });
+    expect(cols("ab", "sbak_opt")[5]).toBe("true");
+    // a safety backup that reached no destination means nothing was written
+    expect(byId("ab", "sbak_safe_b")).toMatchObject({ status: "failed", problem: "interrupted" });
+    expect(cols("ab", "sbak_safe_b")[5]).toBe("false");
+    expect(cols("ab", "sbak_src_b").slice(2, 4)).toEqual(["failed", "interrupted"]);
+    expect(before.filter((r) => r.t === "ab" && String(r.x).split("|")[5] === "true")).toEqual([]);
     // settled rows are not touched, the backups of a deleted application included
     for (const [t, id] of [["ab", "sbak_old"], ["ab", "sbak_done"], ["ax", "sbc_src"], ["ax", "sbc_old_ok"], ["ax", "sbc_old_bad"], ["ax", "sbc_done"]] as const) {
       expect(byId(t, id), id).toEqual(before.find((r) => r.t === t && r.id === id));
