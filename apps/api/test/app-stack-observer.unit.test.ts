@@ -591,15 +591,34 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await deploys(waiting.id)).toEqual([]);
     });
 
-    it("queues none for stopped or failed stacks, nor when the desired revision differs from the applied one", async () => {
+    it("queues none for stopped or failed stacks", async () => {
       await seedStack({ status: "stopped", domains: [{ hostname: "stopped.example.com" }] });
       await seedStack({ status: "failed", domains: [{ hostname: "failed.example.com" }] });
-      await seedStack({ status: "running", desiredDiffers: true, domains: [{ hostname: "upgrade.example.com" }] });
 
       await observer().reconcileOnce(NOW);
 
       expect(await db().select().from(operations)).toEqual([]);
       expect(triggerAsync).not.toHaveBeenCalled();
+    });
+
+    it("a running stack whose newer version was not installed gets the routes of the revision that runs, and the refresh names that revision", async () => {
+      // An upgrade that failed before it changed anything: the desired revision stays the new one, the applied one runs.
+      const stack = await seedStack({ status: "running", desiredDiffers: true, domains: [{ hostname: "upgrade.example.com" }] });
+      await insertOperation(stack.id, "failed", at(-30));
+
+      await observer().reconcileOnce(NOW);
+
+      const [op, ...more] = await deploys(stack.id);
+      expect(more).toEqual([]);
+      expect(op!.idempotencyKey).toMatch(/^sys_routes_[0-9a-f]{32}$/);
+      const [deployment] = await db().select().from(appStackDeployments).where(eq(appStackDeployments.operationId, op!.id));
+      expect(deployment!.revisionId).toBe(stack.revisionId);
+      const [outbox] = await db().select().from(outboxEvents).where(eq(outboxEvents.aggregateId, stack.id));
+      expect(outbox!.payload).toMatchObject({ revisionId: stack.revisionId });
+      const [row] = await db().select().from(appStacks).where(eq(appStacks.id, stack.id));
+      expect(row).toMatchObject({ appliedRevisionId: stack.revisionId, desiredRevisionId: `${stack.revisionId}_b` });
+      expect(await audits(stack.id, "app.stack.deploy")).toMatchObject([{ details: { revisionId: stack.revisionId, trigger: "routes" } }]);
+      expect(mutatingCalls()).toEqual([]);
     });
 
     it("backs off for 10 minutes after a failed operation", async () => {
@@ -610,6 +629,19 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await deploys(stack.id)).toEqual([]);
 
       await observer().reconcileOnce(at(6));
+      expect(await deploys(stack.id)).toHaveLength(1);
+    });
+
+    it("a change of the routing options does not wait out those 10 minutes; a pass of the loop still does", async () => {
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "options.example.com" }] });
+      await insertOperation(stack.id, "failed", at(-5));
+      const obs = observer();
+
+      await obs.reconcileStack(ORG, stack.id, NOW);
+      await obs.reconcileOnce(NOW);
+      expect(await deploys(stack.id)).toEqual([]);
+
+      await obs.reconcileStack(ORG, stack.id, NOW, { optionsChanged: true });
       expect(await deploys(stack.id)).toHaveLength(1);
     });
 

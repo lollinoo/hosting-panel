@@ -135,6 +135,11 @@ export interface EnqueueAppStackOperationInput {
   readonly requestHash: string;
   /** upgrade/rollback: required; deploy: optional (null = redeploy the desired revision); start/stop/restart/delete: null. */
   readonly revision: NewAppStackRevision | null;
+  /**
+   * stack.deploy without a revision: the observer's route refresh, which installs nothing. Its deployment names the
+   * applied revision, the one whose routes it publishes, also when a newer one is desired.
+   */
+  readonly routesOnly?: boolean;
   /** stack.delete: sets retention_policy of every volume of the stack (true → 'destroy', false → 'retain'); ignored otherwise. */
   readonly destroyData: boolean;
 }
@@ -470,7 +475,8 @@ export async function enqueueAppStackOperationTransactional(
     if (target === null) {
       throw new AppStackRepositoryError("INVALID_TRANSITION", `This action is not available while the application is ${stack.status}.`, stack.status);
     }
-    if (revisionKind && next === null && (input.kind !== "stack.deploy" || stack.desiredRevisionId === null)) {
+    const redeployed = input.kind === "stack.deploy" && input.routesOnly === true ? stack.appliedRevisionId : stack.desiredRevisionId;
+    if (revisionKind && next === null && (input.kind !== "stack.deploy" || redeployed === null)) {
       throw new AppStackRepositoryError("NO_REVISION", "There is no version of this application to install.");
     }
 
@@ -520,7 +526,7 @@ export async function enqueueAppStackOperationTransactional(
         .set({ retentionPolicy: input.destroyData ? "destroy" : "retain", updatedAt: now })
         .where(eq(appStackVolumes.stackId, stack.id));
     }
-    const revisionId = revision?.id ?? stack.desiredRevisionId;
+    const revisionId = revision?.id ?? redeployed;
     const { deployment, operation } = await enqueueDeployment(tx, {
       ...scope,
       kind: input.kind,

@@ -830,6 +830,30 @@ describe("address options (ADR-0037)", () => {
     expect(alerts(h)).toHaveLength(0);
   });
 
+  it("the page says when the saved options take effect, as the answer says: in a few moments, or when the application starts", async () => {
+    const body = { redirectToDomainId: null, compression: true, protection: null, pathRoutes: [] };
+    for (const [applies, text] of [
+      ["shortly", o.saved],
+      ["at_start", o.savedAtStart],
+    ] as const) {
+      const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+      keyedSend.mockResolvedValue({ ok: true, data: { data: [DOMAIN, SECOND], applies } });
+      await save(out, body);
+      expect(sets.filter(([slot]) => slot === 7), applies).toEqual([[7, null], [7, text]]);
+    }
+    expect(o.savedAtStart).not.toBe(o.saved);
+    expect(itMsgs.apps.domains.options.savedAtStart).not.toBe(itMsgs.apps.domains.options.saved);
+  });
+
+  it("an application whose web address cannot be rewritten now refuses the change, and the dialog says why", async () => {
+    const body = { redirectToDomainId: null, compression: true, protection: null, pathRoutes: [] };
+    const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "failed" });
+    await save(out, body);
+    expect(sets).toContainEqual([4, format(en.apps.reasons.status, { status: en.apps.status.failed })]);
+    expect(sets.filter(([slot]) => slot === 6 || slot === 7)).toEqual([[7, null]]);
+  });
+
   it("a refusal keeps the dialog open and reads in words; while a request runs no second one is sent", async () => {
     const body = { redirectToDomainId: "sdom_2", compression: false, protection: null, pathRoutes: [] };
     for (const reason of ["redirect_target", "redirect_chain", "password_required", "unknown_ingress"] as const) {

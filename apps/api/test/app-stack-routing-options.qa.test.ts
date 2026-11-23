@@ -3,10 +3,10 @@
 // outbox and the operations never carry it or its verifier. Route files are covered by app-stack-domains.qa.test.ts.
 import { randomUUID } from "node:crypto";
 import { APP_IMAGE_ALLOWLIST, APP_ROUTE_PASSWORD_HASH_PATTERN, findForbiddenPublicDtoKeys } from "@hosting-panel/contracts";
-import { and, appStackDomains, appStacks, asc, auditEvents, eq, operations, outboxEvents } from "@hosting-panel/database";
+import { and, appStackDomains, appStacks, asc, auditEvents, eq, operations, outboxEvents, resourceQuotas } from "@hosting-panel/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { apr1Verifier } from "../src/app-stacks/apr1.js";
-import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness, type HarnessCustomer } from "./fixtures/app-stack-harness.js";
+import { APP_TEST_ALLOWLIST, NOTES_DEMO_SOURCE, startAppStackHarness, type AppStackHarness, type HarnessCustomer } from "./fixtures/app-stack-harness.js";
 
 type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 type Reply = Awaited<ReturnType<AppStackHarness["call"]>>;
@@ -18,6 +18,11 @@ const OTHER_PASSWORD = "Another-Canary-Pass-0002";
 const OFF = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] };
 const API_PATH = { pathPrefix: "/api", componentKey: "app", port: 8080, stripPrefix: true };
 const GHOST_DOMAIN = `sdom_${"3".repeat(24)}`;
+/** The notes application with its cache reachable from the web too: two entry points, app:8080 and cache:6379. */
+const TWO_DOORS = `${NOTES_DEMO_SOURCE.replace(
+  "      - 6379\n    deploy:",
+  "      - 6379\n    healthcheck:\n      kind: tcp\n      port: 6379\n      intervalSeconds: 15\n      timeoutSeconds: 3\n    deploy:",
+)}  - service: cache\n    port: 6379\n    protocol: http\n`;
 
 function expectRefusal(res: Reply, status: number, code: string, detail?: Json): void {
   expect(res.status, res.raw).toBe(status);
@@ -389,6 +394,137 @@ describe("routing options of an application address over HTTP (ADR-0037)", () =>
       expectRefusal(res, 409, "RESOURCE_LOCKED", { field: "status", reason: status });
       expect(await h.counts()).toEqual(before);
       expect((await rowOf(stackId, ids.leaving)).compression).toBe(false);
+    });
+  });
+
+  describe("a change reaches every route that may be published, or is refused", () => {
+    const stackRow = async (stackId: string) => (await h.dbClient.db.select().from(appStacks).where(eq(appStacks.id, stackId)))[0]!;
+    const verb = (stackId: string, name: string, body: unknown = {}) =>
+      h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/${name}`, body, { "Idempotency-Key": randomUUID() });
+
+    beforeAll(async () => {
+      // Every case installs an application of its own.
+      await h.dbClient.db
+        .update(resourceQuotas)
+        .set({ maxServices: 1000, maxCpuMilli: 1_000_000, maxMemoryBytes: String(2 ** 50) })
+        .where(eq(resourceQuotas.organizationId, h.a.orgId));
+    });
+
+    /** An address on a stack whose revision 1 was queued, its action over; then `status`, with revision 1 applied or not. */
+    async function installed(status: string, applied: boolean): Promise<{ stackId: string; id: string }> {
+      const { stackId, ids } = await withAddresses(["state"] as const);
+      expect((await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/secrets`, { parameterKey: "app_secret", value: "first-value" })).status).toBe(200);
+      expect((await verb(stackId, "deploy")).status).toBe(202);
+      await h.dbClient.db.update(operations).set({ status: "succeeded", completedAt: new Date() }).where(eq(operations.resourceId, stackId));
+      const { desiredRevisionId } = await stackRow(stackId);
+      await h.dbClient.db
+        .update(appStacks)
+        .set({ status: status as never, appliedRevisionId: applied ? desiredRevisionId : null })
+        .where(eq(appStacks.id, stackId));
+      return { stackId, id: ids.state };
+    }
+
+    it("an application not installed yet keeps the options and says they apply when it starts", async () => {
+      const { stackId, ids } = await withAddresses(["draft"] as const);
+      const res = await patch(stackId, ids.draft, { ...OFF, protection: { username: "guest", password: PASSWORD } });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.body.applies).toBe("at_start");
+      expect(res.body.data[0]).toMatchObject({ protection: { username: "guest" } });
+    });
+
+    it.each([
+      ["stopped", true],
+      ["queued", false],
+      ["deploying", false],
+      ["failed", false],
+    ] as const)("%s (revision applied: %s) publishes no route: the options are kept for the next start", async (status, applied) => {
+      const { stackId, id } = await installed(status, applied);
+      const res = await patch(stackId, id, { ...OFF, protection: { username: "guest", password: PASSWORD } });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.body.applies).toBe("at_start");
+      expect((await rowOf(stackId, id)).accessUsername).toBe("guest");
+    });
+
+    it.each(["running", "degraded"] as const)("%s with its revision applied: the routes are rewritten in a few moments", async (status) => {
+      const { stackId, id } = await installed(status, true);
+      const res = await patch(stackId, id, { ...OFF, compression: true });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.body.applies).toBe("shortly");
+    });
+
+    it.each(["failed", "unknown", "updating", "starting", "stopping"] as const)(
+      "%s with a revision applied may keep a route nothing rewrites now: 409, and nothing is written",
+      async (status) => {
+        const { stackId, id } = await installed(status, true);
+        const before = await h.counts();
+        const res = await patch(stackId, id, { ...OFF, compression: true, protection: { username: "guest", password: PASSWORD } });
+        expectRefusal(res, 409, "RESOURCE_LOCKED", { field: "status", reason: status });
+        expect(res.raw).not.toContain(PASSWORD);
+        expect(await h.counts()).toEqual(before);
+        expect(await rowOf(stackId, id)).toMatchObject({ compression: false, accessUsername: null, accessPasswordHash: null });
+      },
+    );
+
+    it("a running application the customer last asked to stop, whose stop failed, takes no change either", async () => {
+      const { stackId, id } = await installed("running", true);
+      expect((await verb(stackId, "stop")).status).toBe(202);
+      await h.dbClient.db.update(operations).set({ status: "failed", completedAt: new Date() }).where(and(eq(operations.resourceId, stackId), eq(operations.kind, "stack.stop")));
+      await h.dbClient.db.update(appStacks).set({ status: "degraded" }).where(eq(appStacks.id, stackId));
+      const before = await h.counts();
+      expectRefusal(await patch(stackId, id, { ...OFF, compression: true }), 409, "RESOURCE_LOCKED", { field: "status", reason: "degraded" });
+      expect(await h.counts()).toEqual(before);
+    });
+
+    describe("a path points at a part of the revision that runs and of the one asked for", () => {
+      const CACHE_PATH = { pathPrefix: "/cache", componentKey: "cache", port: 6379, stripPrefix: false };
+
+      /** Revision 1 of `from` runs; revision 2 of `to` was asked for and is not installed (its upgrade failed early). */
+      async function upgradeNotInstalled(from: string, to: string): Promise<{ stackId: string; id: string }> {
+        const { templateId, versionId } = await h.publish(from);
+        const res = await h.call(
+          h.a.token,
+          "POST",
+          `/v1/organizations/${h.a.orgId}/app-stacks`,
+          { templateVersionId: versionId, name: `app-${randomUUID().slice(0, 8)}`, deploy: false },
+          { "Idempotency-Key": randomUUID() },
+        );
+        expect(res.status, res.raw).toBe(201);
+        const stackId = res.body.data.stackId as string;
+        const added = await h.call(h.a.token, "POST", base(h.a, stackId), { hostname: host("two"), componentKey: "app", port: 8080 });
+        expect(added.status, added.raw).toBe(201);
+        expect((await h.call(h.a.token, "POST", `/v1/organizations/${h.a.orgId}/app-stacks/${stackId}/secrets`, { parameterKey: "app_secret", value: "first-value" })).status).toBe(200);
+        expect((await verb(stackId, "deploy")).status).toBe(202);
+        await h.dbClient.db.update(operations).set({ status: "succeeded", completedAt: new Date() }).where(eq(operations.resourceId, stackId));
+        const rev1 = (await stackRow(stackId)).desiredRevisionId;
+        await h.dbClient.db.update(appStacks).set({ status: "running", appliedRevisionId: rev1 }).where(eq(appStacks.id, stackId));
+        const v2 = await h.call(h.adminToken, "POST", `/v1/admin/app-templates/${templateId}/versions`, { source: to, makeDefault: true });
+        expect(v2.status, v2.raw).toBe(201);
+        const preview = await verb(stackId, "plan", { templateVersionId: v2.body.data.versionId });
+        expect(preview.status, preview.raw).toBe(200);
+        expect((await verb(stackId, "upgrade", { templateVersionId: v2.body.data.versionId, planHash: preview.body.data.planHash })).status).toBe(202);
+        await h.dbClient.db.update(operations).set({ status: "failed", completedAt: new Date() }).where(eq(operations.resourceId, stackId));
+        await h.dbClient.db.update(appStacks).set({ status: "running" }).where(eq(appStacks.id, stackId));
+        const row = await stackRow(stackId);
+        expect(row.appliedRevisionId).toBe(rev1);
+        expect(row.desiredRevisionId).not.toBe(rev1);
+        return { stackId, id: (added.body.data as Json[])[0]!.id as string };
+      }
+
+      it.each([
+        ["only the revision asked for has it", NOTES_DEMO_SOURCE, TWO_DOORS],
+        ["only the revision that runs has it", TWO_DOORS, NOTES_DEMO_SOURCE],
+      ])("a path to a part %s is 400 unknown_ingress and writes nothing", async (_label, from, to) => {
+        const { stackId, id } = await upgradeNotInstalled(from, to);
+        const before = await h.counts();
+        expectRefusal(await patch(stackId, id, { ...OFF, pathRoutes: [CACHE_PATH] }), 400, "VALIDATION_ERROR", {
+          field: "pathRoutes.0.componentKey",
+          reason: "unknown_ingress",
+        });
+        expect(await h.counts()).toEqual(before);
+        const fine = await patch(stackId, id, { ...OFF, pathRoutes: [API_PATH] });
+        expect(fine.status, fine.raw).toBe(200);
+        expect(fine.body.applies).toBe("shortly");
+      });
     });
   });
 

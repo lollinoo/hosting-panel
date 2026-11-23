@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST } from "@hosting-panel/contracts";
 import {
+  appStackDeployments,
   appStackDomains,
   appStacks,
   auditEvents,
@@ -71,6 +72,8 @@ describe("B3: application web addresses touch only the application's own route f
   let sim: InMemoryDockerSimulatorAdapter;
   let observer: AppStackObserverService;
   let calls: string[];
+  /** Every route request the API sent to the executor, as sent. */
+  let routeRequests: { plan: { stackId: string; revisionId: string }; routes: Json[] }[];
   let orgId: string;
   let ownerToken: string;
   let adminToken: string;
@@ -183,6 +186,7 @@ describe("B3: application web addresses touch only the application's own route f
     tmp = await mkdtemp(path.join(os.tmpdir(), "hp-b3-"));
     dynamicDir = path.join(tmp, "ingress", "dynamic");
     calls = [];
+    routeRequests = [];
     lookup = new Map();
     dbClient = createDatabaseClient({ mode: "pglite" });
     await dbClient.migrate();
@@ -207,6 +211,7 @@ describe("B3: application web addresses touch only the application's own route f
         if (typeof v !== "function" || typeof prop !== "string") return v;
         return (...args: unknown[]) => {
           calls.push(prop);
+          if (prop === "publishAppStackRoutes") routeRequests.push(structuredClone(args[0]) as (typeof routeRequests)[number]);
           return (v as (...a: unknown[]) => unknown).apply(target, args);
         };
       },
@@ -807,6 +812,83 @@ describe("B3: application web addresses touch only the application's own route f
       expect(siteRow!.certProblem).toBe("rate_limited");
       expect(siteRow!.certAttempts).toBe(1);
       expect(siteRow!.certRequestedAt).not.toBeNull();
+    });
+  });
+
+  // Last in the file: this application of its own moves nothing the tests above count.
+  describe("after an upgrade that failed before it changed anything, the options still reach the file (ADR-0037)", () => {
+    const HOST = "after-upgrade.example.test";
+    const PASSWORD = "Upgrade-Canary-Pass-0001";
+    const V2 = APP_BUILT_IN_TEMPLATES[0]!.source.replace("          memory: 64M", "          memory: 96M");
+    let appId: string;
+
+    const appRow = async () => (await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!;
+    const appPath = (verb: string) => `/v1/organizations/${orgId}/app-stacks/${appId}/${verb}`;
+
+    it("the application runs revision 1 and its address is published without a password", async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `up-${randomUUID().slice(0, 8)}`, source: APP_BUILT_IN_TEMPLATES[0]!.source }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: tpl.body.data.defaultVersionId, name: "app-up", deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await appRow()).status).toBe("running");
+      // DNS elsewhere: the address is routed, and no certificate request moves the file during this test.
+      lookup.set(HOST, []);
+      expect((await addHost(HOST, appId)).status).toBe(201);
+      await pass(600);
+      expect((await files()).get(`app_${appId}.yml`)).toContain(HOST);
+      expect((await files()).get(`app_${appId}.yml`)).not.toContain("basicAuth");
+
+      const v2 = await call("POST", `/v1/admin/app-templates/${tpl.body.data.id as string}/versions`, { source: V2, makeDefault: true }, adminToken);
+      expect(v2.status, v2.raw).toBe(201);
+      const preview = await owner("POST", appPath("plan"), { templateVersionId: v2.body.data.versionId });
+      expect(preview.status, preview.raw).toBe(200);
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      const up = await owner("POST", appPath("upgrade"), { templateVersionId: v2.body.data.versionId, planHash: preview.body.data.planHash });
+      expect(up.status, up.raw).toBe(202);
+      await drain();
+      const row = await appRow();
+      expect(row.status).toBe("running");
+      expect(row.appliedRevisionId).not.toBeNull();
+      expect(row.desiredRevisionId).not.toBe(row.appliedRevisionId);
+    });
+
+    it("a password set now is in the next route request of the revision that runs, and in the file", async () => {
+      const { appliedRevisionId } = await appRow();
+      const sentBefore = routeRequests.length;
+      const address = async () => (await dbClient.db.select().from(appStackDomains).where(eq(appStackDomains.hostname, HOST)))[0]!;
+      const res = await owner("PATCH", `${base(appId)}/${(await address()).id}`, {
+        redirectToDomainId: null,
+        compression: false,
+        protection: { username: "guest", password: PASSWORD },
+        pathRoutes: [],
+      });
+      expect(res.status, res.raw).toBe(200);
+      expect(res.raw).not.toContain(PASSWORD);
+      await pass(601);
+
+      const verifier = (await address()).accessPasswordHash!;
+      const sent = routeRequests.slice(sentBefore).filter((r) => r.plan.stackId === appId);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.plan.revisionId).toBe(appliedRevisionId);
+      expect(sent[0]!.routes.flatMap((e) => e.hosts as Json[]).find((h) => h.hostname === HOST)).toMatchObject({
+        protection: { username: "guest", passwordHash: verifier },
+      });
+      expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${verifier}"`);
+      // The refresh installed nothing and names the revision that runs; the newer one is still the one asked for.
+      const refreshes = (
+        await dbClient.db
+          .select({ key: operations.idempotencyKey, revisionId: appStackDeployments.revisionId, status: appStackDeployments.status })
+          .from(appStackDeployments)
+          .innerJoin(operations, eq(operations.id, appStackDeployments.operationId))
+          .where(eq(appStackDeployments.stackId, appId))
+      ).filter((d) => (d.key ?? "").startsWith("sys_routes_"));
+      expect(refreshes).toHaveLength(2);
+      for (const refresh of refreshes) expect(refresh).toMatchObject({ revisionId: appliedRevisionId, status: "succeeded" });
+      expect(await appRow()).toMatchObject({ status: "running", appliedRevisionId });
+      expect(res.body.applies).toBe("shortly");
     });
   });
 });

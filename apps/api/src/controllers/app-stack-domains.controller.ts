@@ -49,7 +49,10 @@ export class AppStackDomainsController {
     return { data: await this.domains.add(this.#context(auth, req, orgId), stack, input) };
   }
 
-  /** Routing options of one address (ADR-0037): redirect, password protection, compression, paths. */
+  /**
+   * Routing options of one address (ADR-0037): redirect, password protection, compression, paths. `applies` says when
+   * they reach the published address: in a few moments, or when the application next starts.
+   */
   @Patch(":domainId")
   public async update(
     @Req() req: FastifyRequest,
@@ -57,10 +60,11 @@ export class AppStackDomainsController {
     @Param("stackId") stackId: string,
     @Param("domainId") domainId: string,
     @Body() raw: unknown,
-  ): Promise<{ data: AppStackDomainDto[] }> {
+  ): Promise<{ data: AppStackDomainDto[]; applies: "shortly" | "at_start" }> {
     const { auth, stack } = await this.#require(req, orgId, stackId, "app.update");
     const input = UpdateAppStackDomainInputSchema.parse(raw ?? {});
-    return { data: await this.domains.update(this.#context(auth, req, orgId), stack, domainId, input) };
+    const { domains, applies } = await this.domains.update(this.#context(auth, req, orgId), stack, domainId, input);
+    return { data: domains, applies };
   }
 
   @Delete(":domainId")

@@ -3213,6 +3213,7 @@ x-hp-ingress:
         save: "Salva",
         saving: "Salvataggio…",
         saved: "Opzioni salvate: valgono tra qualche istante.",
+        savedAtStart: "Opzioni salvate: varranno quando l'applicazione verrà avviata.",
         problems: {
           username: "Usa lettere non accentate, cifre, punto, trattino o trattino basso (al massimo 32), iniziando con una lettera o una cifra.",
           password: "Usa da 12 a 128 caratteri: lettere non accentate, cifre e simboli comuni.",

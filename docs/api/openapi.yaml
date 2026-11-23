@@ -6269,10 +6269,14 @@ paths:
         `details[0].reason: password_required` when none is set). A redirect goes to another address of this
         application that does not redirect itself and that no address redirects to (`redirect_target`,
         `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
-        point of the application (`unknown_ingress`, `details[0].field: pathRoutes.<n>.componentKey`). The audit row
-        holds the user name and whether a password was sent, never the password. No Idempotency-Key. Returns 422
-        NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
-        false.
+        point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
+        pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
+        published or is refused: while a route file may be in place that the panel cannot rewrite now (an action in
+        progress, a failed or unknown application, or a stop the customer asked for that did not finish) the answer is
+        409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status, and nothing is
+        written. The audit row holds the user name and whether a password was sent, never the password. No
+        Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6285,17 +6289,24 @@ paths:
               $ref: "#/components/schemas/UpdateAppStackDomainInput"
       responses:
         "200":
-          description: The web addresses of the application
+          description: The web addresses of the application, and when the saved options reach the published address
           content:
             application/json:
               schema:
                 type: object
-                required: [data]
+                required: [data, applies]
                 properties:
                   data:
                     type: array
                     items:
                       $ref: "#/components/schemas/AppStackDomainDto"
+                  applies:
+                    type: string
+                    enum: [shortly, at_start]
+                    description: >-
+                      `shortly`: the panel rewrites the application's route file in a few moments, without a restart.
+                      `at_start`: nothing of the application is published now (not installed yet, or stopped); the
+                      options are used when it is next started.
         "400":
           $ref: "#/components/responses/ErrorResponse"
         "401":
@@ -6305,7 +6316,9 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: The application is being deleted (`RESOURCE_LOCKED`)
+          description: >-
+            The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"

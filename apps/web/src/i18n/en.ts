@@ -3185,6 +3185,7 @@ x-hp-ingress:
         save: "Save",
         saving: "Saving…",
         saved: "Options saved: they apply in a few moments.",
+        savedAtStart: "Options saved: they apply when the application is started.",
         problems: {
           username: "Use unaccented letters, digits, dot, hyphen or underscore (32 at most), starting with a letter or a digit.",
           password: "Use 12 to 128 characters: unaccented letters, digits and common symbols.",

@@ -56,7 +56,8 @@ export function AppStackDomains({
 
   if (initial === null) return <p className="text-sm text-muted-foreground">{m.apps.detail.sectionError}</p>;
 
-  async function send(name: string, method: string, url: string, body: object): Promise<boolean> {
+  /** The answer of the API, or null when it refused (the refusal is shown). */
+  async function send(name: string, method: string, url: string, body: object): Promise<{ data?: unknown; applies?: unknown } | null> {
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -64,12 +65,12 @@ export function AppStackDomains({
     setBusy(false);
     if (!sent.ok) {
       setError(appStackRefusalText(m, sent.code, sent.reason));
-      return false;
+      return null;
     }
-    const list = (sent.data as { data?: unknown } | null)?.data;
-    if (Array.isArray(list)) setRows(list as AppStackDomainDto[]);
+    const answer = (sent.data ?? {}) as { data?: unknown; applies?: unknown };
+    if (Array.isArray(answer.data)) setRows(answer.data as AppStackDomainDto[]);
     router.refresh();
-    return true;
+    return answer;
   }
 
   async function add(e: React.FormEvent) {
@@ -90,9 +91,11 @@ export function AppStackDomains({
   // A refusal stays in the dialog, with what was typed (the password field is emptied on every send).
   async function saveOptions(id: string, body: UpdateAppStackDomainInput) {
     if (busy) return;
-    if (await send(`options:${id}`, "PATCH", `${base}/${id}`, body)) {
+    const answer = await send(`options:${id}`, "PATCH", `${base}/${id}`, body);
+    if (answer) {
       setEditing(null);
-      setNotice(t.options.saved);
+      // Nothing of the application is published: the options take effect when it starts.
+      setNotice(answer.applies === "at_start" ? t.options.savedAtStart : t.options.saved);
     }
   }
 

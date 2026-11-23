@@ -3,6 +3,7 @@ import {
   aggregateAppStackStatus,
   canTransitionAppStack,
   effectiveComponentHealth,
+  isTerminalOperationStatus,
   type AppStackComponentHealth,
   type AppStackComponentObservation,
   type AppStackHostRoute,
@@ -12,6 +13,7 @@ import {
   type AppStackStepKey,
   type ApprovedStackPlan,
   type ErrorCode,
+  type OperationStatus,
   type SiteHostRoute,
 } from "@hosting-panel/contracts";
 import type { AppStackComponentRow, AppStackDomainRow, AppStackRow, DomainRow } from "@hosting-panel/database";
@@ -327,6 +329,36 @@ export function appStackRoutesRefresh(op: {
   readonly idempotencyKey: string | null;
 }): boolean {
   return op.kind === "stack.deploy" && op.requestedByUserId === null && op.idempotencyKey?.startsWith(APP_STACK_ROUTES_KEY_PREFIX) === true;
+}
+
+/**
+ * Whether the observer keeps the routes of this stack in line with its addresses: its applied revision runs (also when
+ * a newer one is desired: the refresh publishes what runs), no action is in progress, and its last one was not a stop.
+ */
+export function appStackRoutesFollowAddresses(
+  stack: Pick<AppStackRow, "status" | "appliedRevisionId">,
+  last: { readonly kind: string; readonly status: OperationStatus } | undefined,
+): boolean {
+  if (stack.status !== "running" && stack.status !== "degraded") return false;
+  if (stack.appliedRevisionId === null) return false;
+  // The routes of a stack the customer last asked to stop stay withdrawn.
+  if (last?.kind === "stack.stop") return false;
+  return last === undefined || isTerminalOperationStatus(last.status);
+}
+
+/**
+ * ADR-0037: when a change of the routing options reaches the route file. "shortly": the observer rewrites it now.
+ * "at_start": nothing of the stack is published (never installed, or stopped, which withdraws the routes) and the
+ * next start publishes the options. null: a route file may be in place that nothing rewrites until the customer acts,
+ * so the change is refused rather than shown as active.
+ */
+export function appStackOptionsApply(
+  stack: Pick<AppStackRow, "status" | "appliedRevisionId">,
+  last: { readonly kind: string; readonly status: OperationStatus } | undefined,
+): "shortly" | "at_start" | null {
+  if (appStackRoutesFollowAddresses(stack, last)) return "shortly";
+  if (stack.appliedRevisionId === null || stack.status === "stopped") return "at_start";
+  return null;
 }
 
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */

@@ -1,6 +1,7 @@
 import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APP_AUDIT_ACTIONS,
+  APP_STACK_RESOURCE_TYPE,
   ApprovedStackPlanSchema,
   type AppStackDomainDto,
   type AppStackDomainEntry,
@@ -9,10 +10,14 @@ import {
 } from "@hosting-panel/contracts";
 import {
   addAppStackDomainsTransactional,
+  and,
+  desc,
+  eq,
   getAppStack,
   getAppStackRevision,
   getAppTemplateVersion,
   listAppStackDomains,
+  operations,
   removeAppStackDomainTransactional,
   updateAppStackDomainRoutingTransactional,
   updateAppStackDomainState,
@@ -32,6 +37,7 @@ import { validatedSpec } from "./app-stack-compile.js";
 import { appStackDomainDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { mapAppStackError } from "./app-stack-errors.js";
 import { AppStackObserverService } from "./app-stack-observer.service.js";
+import { appStackOptionsApply } from "./app-stack-runtime-policy.js";
 import { apr1Verifier } from "./apr1.js";
 import type { AppStackRequestContext } from "./app-stacks.service.js";
 
@@ -92,14 +98,15 @@ export class AppStackDomainsService {
 
   /**
    * Routing options of one address (ADR-0037); the four are sent together, so an option left out of the form is cleared.
-   * The password stops here: only its verifier is stored, and neither is audited. The observer rewrites the route.
+   * The password stops here: only its verifier is stored, and neither is audited. The observer rewrites the route; where
+   * a route file may be in place that nothing rewrites now, the change is refused instead of being shown as active.
    */
   public async update(
     ctx: AppStackRequestContext,
     stack: AppStackRow,
     domainId: string,
     input: UpdateAppStackDomainInput,
-  ): Promise<AppStackDomainDto[]> {
+  ): Promise<{ domains: AppStackDomainDto[]; applies: "shortly" | "at_start" }> {
     assertNotLeaving(stack);
     await this.#assertPathTargets(this.dbClient.db, stack, input.pathRoutes);
     const password = input.protection?.password;
@@ -107,7 +114,7 @@ export class AppStackDomainsService {
       input.protection === null
         ? null
         : { username: input.protection.username, ...(password === undefined ? {} : { passwordHash: apr1Verifier(password) }) };
-    await guardedApp(mapAppStackError, () =>
+    const applies = await guardedApp(mapAppStackError, () =>
       this.dbClient.db.transaction(async (tx) => {
         const t = tx as unknown as HostingPanelDatabase;
         const { after } = await updateAppStackDomainRoutingTransactional(t, {
@@ -116,8 +123,20 @@ export class AppStackDomainsService {
           domainId,
           routing: { redirectToDomainId: input.redirectToDomainId, compression: input.compression, protection, pathRoutes: input.pathRoutes },
         });
-        // The stack row is locked now: an upgrade or rollback committed since the first check is the plan to match.
+        // The stack row is locked now: an upgrade or rollback committed since the first check is the plan to match, and
+        // no action can start or settle before this answer is committed.
         const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
+        const [last] = await t
+          .select({ kind: operations.kind, status: operations.status })
+          .from(operations)
+          .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stack.id)))
+          .orderBy(desc(operations.submittedAt))
+          .limit(1);
+        const when = appStackOptionsApply(locked, last);
+        if (when === null) {
+          const message = `This change cannot reach the web address while the application is ${locked.status}.`;
+          throw appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: locked.status }, false);
+        }
         await this.#assertPathTargets(t, locked, input.pathRoutes);
         await ctx.audit(t, {
           action: APP_AUDIT_ACTIONS.domainUpdate,
@@ -133,10 +152,11 @@ export class AppStackDomainsService {
             pathRoutes: after.pathRoutes,
           },
         });
+        return when;
       }),
     );
-    await this.#reconcile(stack);
-    return this.list(stack);
+    await this.#reconcile(stack, [], true);
+    return { domains: await this.list(stack), applies };
   }
 
   /** The observer withdraws the route. */
@@ -176,10 +196,17 @@ export class AppStackDomainsService {
     }
   }
 
-  /** A path sends its requests to an ingress of the same plan the addresses point at. */
+  /**
+   * A path sends its requests to an ingress of the revision that runs, whose plan the routes are published with, and of
+   * the desired one, which a deploy installs as it is: a target missing from either would stop routing unseen.
+   */
   async #assertPathTargets(db: DatabaseExecutor, stack: AppStackRow, paths: readonly AppStackDomainPathRoute[]): Promise<void> {
     if (paths.length === 0) return;
-    const targets = await this.#targets(db, stack);
+    let targets = await this.#targets(db, stack);
+    if (stack.appliedRevisionId !== null && stack.appliedRevisionId !== stack.desiredRevisionId) {
+      const applied = await this.#revisionIngress(db, stack, stack.appliedRevisionId);
+      targets = targets.filter((t) => applied.some((a) => a.componentKey === t.componentKey && a.port === t.port));
+    }
     paths.forEach((path, i) => {
       if (!targets.some((t) => t.componentKey === path.componentKey && t.port === path.port)) {
         const message = "This path cannot point at that part of the application.";
@@ -189,19 +216,17 @@ export class AppStackDomainsService {
   }
 
   async #targets(db: DatabaseExecutor, stack: AppStackRow): Promise<readonly { componentKey: string; port: number }[]> {
-    if (stack.desiredRevisionId !== null) {
-      const revision = await getAppStackRevision(db, {
-        organizationId: stack.organizationId,
-        stackId: stack.id,
-        revisionId: stack.desiredRevisionId,
-      });
-      const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
-      if (!plan?.success) throw damaged("The stored revision is damaged.");
-      return plan.data.ingress;
-    }
+    if (stack.desiredRevisionId !== null) return this.#revisionIngress(db, stack, stack.desiredRevisionId);
     const version = await getAppTemplateVersion(db, { templateId: stack.templateId, versionId: stack.templateVersionId });
     if (!version) throw damaged("The stored application is damaged.");
     return validatedSpec(version.source, this.validation).ingress.map((route) => ({ componentKey: route.service, port: route.port }));
+  }
+
+  async #revisionIngress(db: DatabaseExecutor, stack: AppStackRow, revisionId: string): Promise<readonly { componentKey: string; port: number }[]> {
+    const revision = await getAppStackRevision(db, { organizationId: stack.organizationId, stackId: stack.id, revisionId });
+    const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
+    if (!plan?.success) throw damaged("The stored revision is damaged.");
+    return plan.data.ingress;
   }
 
   #rows(stack: AppStackRow): Promise<AppStackDomainRow[]> {
@@ -215,7 +240,8 @@ export class AppStackDomainsService {
   }
 
   /** Best effort: the change is committed and the observer's loop retries. */
-  async #reconcile(stack: AppStackRow, forceDnsIds: readonly string[] = []): Promise<void> {
-    await this.observer?.reconcileStack(stack.organizationId, stack.id, new Date(), { forceDnsIds }).catch(() => undefined);
+  async #reconcile(stack: AppStackRow, forceDnsIds: readonly string[] = [], optionsChanged = false): Promise<void> {
+    const opts = optionsChanged ? { forceDnsIds, optionsChanged } : { forceDnsIds };
+    await this.observer?.reconcileStack(stack.organizationId, stack.id, new Date(), opts).catch(() => undefined);
   }
 }

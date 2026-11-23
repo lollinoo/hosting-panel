@@ -263,10 +263,18 @@ administrator's console has no such action, and nobody writes proxy configuratio
 
 1. **When a change applies.** Saving stores the options and asks for a route refresh of that stack at once; the
    panel's periodic check of the applications (every minute by default) asks again when the first try could not.
-   The refresh is a short action on the stack that rewrites `app_<stackId>.yml`: the proxy reads the file again by
-   itself and no container is restarted. An option change does not wait the five minutes of a health-only change.
-   No refresh is queued while the stack is stopped, has an action in progress or has a newer version waiting to be
-   deployed, nor for ten minutes after a failed action: the options apply once that is over.
+   The refresh is a short action on the stack that rewrites `app_<stackId>.yml` for the revision that runs, also
+   when a newer version was asked for and not installed (an upgrade that failed before it changed anything): the
+   proxy reads the file again by itself and no container is restarted. An option change waits neither the five
+   minutes of a health-only change nor the ten minutes after a failed action. A change either reaches every route
+   file of the stack that may be in place or is refused, so the panel never shows an option the live file lacks:
+   - running or partly running, with no action in progress and the last action not a stop: saved, and the page says
+     «Opzioni salvate: valgono tra qualche istante» (the API answers `applies: shortly`);
+   - not installed yet, or stopped (a stop withdraws the routes): saved, and the page says the options apply when the
+     application is started (`applies: at_start`); the next start publishes them;
+   - any other state (an action in progress, failed, outcome to be verified, or a stop the customer asked for that did
+     not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
+     nothing would rewrite. Let the action finish, or start or restart the application, then save again.
 2. **See the options of a stack** (read-only; the query leaves the verifier column out on purpose):
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, hostname, redirect_to_domain_id, compression, access_username, path_routes from app_stack_domains where stack_id = '<stackId>' order by hostname"
