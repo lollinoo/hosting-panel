@@ -14,8 +14,31 @@ export const TERMINAL_KILL_SCRIPT =
   'm="^HP_TERMINAL_SESSION=${1:-.*}\\$"; s=""; for p in /proc/[0-9]*; do grep -qz "$m" "$p/environ" 2>/dev/null || continue; ' +
   'i=$(ps -o sid= -p "${p#/proc/}"); i=${i##* }; [ "${i:-0}" -gt 1 ] && s="$s,$i"; kill -KILL "${p#/proc/}" 2>/dev/null; done; ' +
   '[ -z "$s" ] || pkill -KILL -s "${s#,}"; exit 0';
+// The same for a component of an application (ADR-0041), with nothing but what the shell has built in: the image may
+// have neither grep, ps nor pkill. Marked processes first (never pid 1), then every process in one of their sessions
+// (never session 0 or 1, which are the component's own). Session ids have one length, so none is the start of another.
+export const APP_STACK_TERMINAL_KILL_SCRIPT =
+  'm="HP_TERMINAL_SESSION=${1:-term_}"; s=" "; ' +
+  'marked() { while IFS= read -r x || [ -n "$x" ]; do case "$x" in *"$m"*) return 0;; esac; done 2>/dev/null <"$1/environ"; return 1; }; ' +
+  'sid() { l=""; while IFS= read -r x || [ -n "$x" ]; do l=$x; done 2>/dev/null <"$1/stat"; l=${l##*) }; set -- $l; i=${4:-0}; }; ' +
+  'for p in /proc/[0-9]*; do marked "$p" || continue; sid "$p"; [ "$i" -gt 1 ] 2>/dev/null && s="$s$i "; ' +
+  '[ "${p#/proc/}" -gt 1 ] && kill -KILL "${p#/proc/}" 2>/dev/null; done; ' +
+  'for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] || continue; sid "$p"; ' +
+  'case "$s" in *" $i "*) kill -KILL "${p#/proc/}" 2>/dev/null;; esac; done; exit 0';
 
 const SITE_LABEL = "io.hostingpanel.site_id"; // MANAGED_DOCKER_LABELS.siteId; not imported to keep this file free of the adapter
+const APP_COMPONENT_LABEL = "io.hostingpanel.app_component"; // APP_STACK_LABELS.component, for the same reason
+
+type KillResult = ReturnType<typeof runDockerExec>;
+
+/** What differs between a shell in a site and one in a component of an application. */
+interface ShellKind {
+  /** A site names the owner of its files and their folder; a component names neither (ADR-0041). */
+  readonly as: { readonly user?: string; readonly workingDir?: string };
+  readonly notRunning: string;
+  readonly inspectFailed: string;
+  readonly kill: (containerId: string, sessionId: string) => KillResult;
+}
 
 interface Inspected {
   readonly Name?: string;
@@ -24,7 +47,7 @@ interface Inspected {
 }
 
 /** Container inspect: null on 404; any other failure is DOCKER_ENGINE_UNAVAILABLE with a fixed sentence. */
-async function inspect(target: DockerExecTarget, containerId: string): Promise<Inspected | null> {
+async function inspect(target: DockerExecTarget, containerId: string, failed: string): Promise<Inspected | null> {
   const res = await target.request("GET", `/containers/${encodeURIComponent(containerId)}/json`).catch(() => null);
   if (res?.statusCode === 404) return null;
   try {
@@ -32,11 +55,11 @@ async function inspect(target: DockerExecTarget, containerId: string): Promise<I
   } catch {
     // fall through
   }
-  throw new ExecutorCodedError("Failed to inspect the site container", "DOCKER_ENGINE_UNAVAILABLE");
+  throw new ExecutorCodedError(failed, "DOCKER_ENGINE_UNAVAILABLE");
 }
 
 /** Runs the kill script as the type's file owner; sessionId "" kills every marked process. */
-function runKillScript(target: DockerExecTarget, containerId: string, sessionId: string, t: ExecutorSiteType) {
+function runKillScript(target: DockerExecTarget, containerId: string, sessionId: string, t: ExecutorSiteType): KillResult {
   return runDockerExec(
     target,
     { container: containerId, cmd: ["/bin/sh", "-c", TERMINAL_KILL_SCRIPT, "sh", sessionId], user: t.def.files.owner },
@@ -44,28 +67,50 @@ function runKillScript(target: DockerExecTarget, containerId: string, sessionId:
   );
 }
 
-/** Opens /bin/sh as the type's file owner in its files with a TTY; NOT_FOUND when the container is missing or stopped. */
-export async function startDockerTerminal(
+/** Runs the builtin-only kill script as the user the component runs as (no user is named); "" kills every marked process. */
+function runAppStackKillScript(target: DockerExecTarget, containerId: string, sessionId: string): KillResult {
+  return runDockerExec(
+    target,
+    { container: containerId, cmd: ["/bin/sh", "-c", APP_STACK_TERMINAL_KILL_SCRIPT, "sh", sessionId] },
+    { timeoutMs: TERMINAL_KILL_TIMEOUT_MS, maxOutputBytes: 0 },
+  );
+}
+
+const siteKind = (target: DockerExecTarget, t: ExecutorSiteType): ShellKind => ({
+  as: { user: t.def.files.owner, workingDir: t.def.files.mountPath },
+  notRunning: "The site container is not running",
+  inspectFailed: "Failed to inspect the site container",
+  kill: (containerId, sessionId) => runKillScript(target, containerId, sessionId, t),
+});
+
+const appStackKind = (target: DockerExecTarget): ShellKind => ({
+  as: {},
+  notRunning: "The component is not running",
+  inspectFailed: "Failed to inspect the component's container",
+  kill: (containerId, sessionId) => runAppStackKillScript(target, containerId, sessionId),
+});
+
+/** /bin/sh with a TTY in a running container; NOT_FOUND when the container is missing or stopped. */
+async function startShell(
   target: DockerExecTarget,
   containerId: string,
   sessionId: string,
   sink: TerminalShellSink,
-  t: ExecutorSiteType,
+  kind: ShellKind,
 ): Promise<{ readonly shell: TerminalShell; readonly containerName: string }> {
-  const seen = await inspect(target, containerId);
-  if (seen?.State?.Running !== true) throw new ExecutorCodedError("The site container is not running", "NOT_FOUND");
+  const seen = await inspect(target, containerId, kind.inspectFailed);
+  if (seen?.State?.Running !== true) throw new ExecutorCodedError(kind.notRunning, "NOT_FOUND");
   const startedAt = seen.State.StartedAt;
   const { socket } = await startDockerExec(target, {
     container: containerId,
     cmd: ["/bin/sh"],
-    user: t.def.files.owner,
-    workingDir: t.def.files.mountPath,
+    ...kind.as,
     env: ["TERM=dumb", "PS1=$PWD $ ", `HP_TERMINAL_SESSION=${sessionId}`],
     tty: true,
     consoleSize: TERMINAL_CONSOLE_SIZE,
   });
   // Worked: exit 0, or the container is gone or stopped (nothing is left to kill).
-  const kill = () => runKillScript(target, containerId, sessionId, t).then(
+  const kill = () => kind.kill(containerId, sessionId).then(
     (done) => done.exitCode === 0,
     (err: unknown) => err instanceof ExecutorCodedError && err.code === "NOT_FOUND",
   );
@@ -75,7 +120,7 @@ export async function startDockerTerminal(
     over = true;
     // Gone, stopped or started again means the container went away; otherwise the shell itself ended.
     void new Promise((settle) => setTimeout(settle, TERMINAL_END_SETTLE_MS))
-      .then(() => inspect(target, containerId))
+      .then(() => inspect(target, containerId, kind.inspectFailed))
       .then((now) => (now?.State?.Running === true && now.State.StartedAt === startedAt ? "shell_exited" : "container_gone"))
       .catch(() => "shell_exited" as const)
       .then((reason) => sink.exit(reason));
@@ -100,9 +145,34 @@ export async function startDockerTerminal(
   };
 }
 
-/** At executor start: kills, as the type's file owner, every marked process in running site containers that still have an exec. */
-export async function reapTerminalShells(target: DockerExecTarget, t: ExecutorSiteType): Promise<void> {
-  const filters = encodeURIComponent(JSON.stringify({ label: [SITE_LABEL] }));
+/** Opens /bin/sh as the type's file owner in its files with a TTY; NOT_FOUND when the container is missing or stopped. */
+export function startDockerTerminal(
+  target: DockerExecTarget,
+  containerId: string,
+  sessionId: string,
+  sink: TerminalShellSink,
+  t: ExecutorSiteType,
+): Promise<{ readonly shell: TerminalShell; readonly containerName: string }> {
+  return startShell(target, containerId, sessionId, sink, siteKind(target, t));
+}
+
+/**
+ * Opens /bin/sh with a TTY in the container of one component of an application (ADR-0041). The exec names no user and
+ * no folder: the shell is the user the container runs as, with its capabilities, mounts and networks and no more. The
+ * caller has found the container by its derived name and checked its labels; this takes the id it read there.
+ */
+export function startAppStackTerminal(
+  target: DockerExecTarget,
+  containerId: string,
+  sessionId: string,
+  sink: TerminalShellSink,
+): Promise<{ readonly shell: TerminalShell; readonly containerName: string }> {
+  return startShell(target, containerId, sessionId, sink, appStackKind(target));
+}
+
+/** Kills every marked process in the running containers with that label that still have an exec. */
+async function reap(target: DockerExecTarget, label: string, listFailed: string, kind: ShellKind): Promise<void> {
+  const filters = encodeURIComponent(JSON.stringify({ label: [label] }));
   const res = await target.request("GET", `/containers/json?filters=${filters}`).catch(() => null);
   let list: Array<{ readonly Id?: unknown }> | null = null;
   try {
@@ -110,18 +180,28 @@ export async function reapTerminalShells(target: DockerExecTarget, t: ExecutorSi
   } catch {
     // fall through
   }
-  if (!Array.isArray(list)) throw new ExecutorCodedError("Failed to list site containers", "DOCKER_ENGINE_UNAVAILABLE");
+  if (!Array.isArray(list)) throw new ExecutorCodedError(listFailed, "DOCKER_ENGINE_UNAVAILABLE");
   let failure: ExecutorCodedError | null = null;
   for (const { Id } of list) {
     if (typeof Id !== "string") continue;
     try {
-      const seen = await inspect(target, Id);
+      const seen = await inspect(target, Id, kind.inspectFailed);
       if (seen?.State?.Running !== true || !seen.ExecIDs?.length) continue;
-      const done = await runKillScript(target, Id, "", t);
+      const done = await kind.kill(Id, "");
       if (done.exitCode !== 0) throw new ExecutorCodedError("The terminal clean-up did not finish", "INTERNAL_ERROR");
     } catch (err) {
       failure ??= err instanceof ExecutorCodedError ? err : new ExecutorCodedError("The terminal clean-up failed", "INTERNAL_ERROR");
     }
   }
   if (failure) throw failure;
+}
+
+/** At executor start: kills, as the type's file owner, every marked process in running site containers that still have an exec. */
+export function reapTerminalShells(target: DockerExecTarget, t: ExecutorSiteType): Promise<void> {
+  return reap(target, SITE_LABEL, "Failed to list site containers", siteKind(target, t));
+}
+
+/** At executor start: the same in the running containers of application components, as the user each one runs as. */
+export function reapAppStackTerminalShells(target: DockerExecTarget): Promise<void> {
+  return reap(target, APP_COMPONENT_LABEL, "Failed to list application containers", appStackKind(target));
 }

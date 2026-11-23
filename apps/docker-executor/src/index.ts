@@ -284,11 +284,14 @@ export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps
 export type { TerminalLimits } from "./terminal-sessions.js";
 
 export {
+  APP_STACK_TERMINAL_KILL_SCRIPT,
   TERMINAL_CONSOLE_SIZE,
   TERMINAL_END_SETTLE_MS,
   TERMINAL_KILL_SCRIPT,
   TERMINAL_KILL_TIMEOUT_MS,
+  reapAppStackTerminalShells,
   reapTerminalShells,
+  startAppStackTerminal,
   startDockerTerminal,
 } from "./terminal-docker.js";
 

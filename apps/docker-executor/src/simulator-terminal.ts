@@ -1,9 +1,11 @@
-import type { SimulatorSiteType } from "./simulator-site-types.js";
 import type { TerminalShell, TerminalShellSink } from "./terminal-sessions.js";
 
+/** What the fake shell shows: the folder in its prompt and the answer to `id`. */
+export interface SimulatedShellLook { readonly folder: string; readonly id: string }
+
 /** A fake /bin/sh for the simulator: prompt, echo, `id`, `echo`, `exit`, Ctrl-C and Ctrl-D. */
-export function startSimulatedShell(sink: TerminalShellSink, type: SimulatorSiteType): TerminalShell {
-  const PROMPT = `${type.def.files.mountPath} $ `;
+export function startSimulatedShell(sink: TerminalShellSink, look: SimulatedShellLook): TerminalShell {
+  const PROMPT = `${look.folder} $ `;
   let line = "";
   let done = false;
   let lastCr = false;
@@ -15,7 +17,7 @@ export function startSimulatedShell(sink: TerminalShellSink, type: SimulatorSite
   const run = (cmd: string) => {
     const [name = "", ...args] = cmd.trim().split(/\s+/);
     if (name === "exit") return exit();
-    if (name === "id") out(`${type.shellId}\r\n`);
+    if (name === "id") out(`${look.id}\r\n`);
     else if (name === "echo") out(`${args.join(" ")}\r\n`);
     else if (name) out(`/bin/sh: 1: ${name}: not found\r\n`);
     out(PROMPT);
