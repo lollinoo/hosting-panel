@@ -1,12 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { APP_BUILT_IN_TEMPLATES, APP_STACK_COMPONENT_HEALTH, APP_STACK_REASONS, APP_STACK_STATUSES, APP_STACK_STEP_KEYS } from "@hosting-panel/contracts";
+import {
+  APP_BUILT_IN_TEMPLATES,
+  APP_STACK_BACKUP_KINDS,
+  APP_STACK_BACKUP_STATUSES,
+  APP_STACK_BACKUP_STEP_KEYS,
+  APP_STACK_BACKUP_UNAVAILABLE_REASONS,
+  APP_STACK_COMPONENT_HEALTH,
+  APP_STACK_REASONS,
+  APP_STACK_RESTORE_STATUSES,
+  APP_STACK_STATUSES,
+  APP_STACK_STEP_KEYS,
+  BACKUP_PROBLEMS,
+} from "@hosting-panel/contracts";
 import { errorMessage } from "@/i18n";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 import { appTemplateRefusalText } from "@/components/admin/app-template-text";
 import {
+  APP_STACK_BACKUP_SHARED_PROBLEMS,
   APP_STACK_STATUS_TONE,
   COMPONENT_HEALTH_TONE,
+  appStackBackupProblemText,
   appStackProblemText,
   appStackRefusalText,
   formatCpu,
@@ -96,6 +110,66 @@ describe("application refusal texts", () => {
     for (const status of ["running", "stopped", "failed"] as const)
       expect(appStackRefusalText(m, "VALIDATION_ERROR", "STACK_TEMPLATE_UNPUBLISHED", status), status).toBe(m.apps.reasons.STACK_TEMPLATE_UNPUBLISHED);
     expect(appStackRefusalText(m, "VALIDATION_ERROR", "STACK_SECRET_MISSING", "draft")).toBe(m.apps.reasons.STACK_SECRET_MISSING);
+  });
+});
+
+describe("application backup texts", () => {
+  it.each(locales)("%s: status, kind, restore and reason words follow the contract lists", (_n, m) => {
+    const t = m.apps.backups;
+    expect(Object.keys(t.status)).toEqual([...APP_STACK_BACKUP_STATUSES]);
+    expect(Object.keys(t.kind)).toEqual([...APP_STACK_BACKUP_KINDS]);
+    expect(Object.keys(t.lastRestore)).toEqual([...APP_STACK_RESTORE_STATUSES]);
+    expect(Object.keys(t.unavailable)).toEqual([...APP_STACK_BACKUP_UNAVAILABLE_REASONS]);
+  });
+
+  it.each(locales)("%s: every step of a backup, a restore and a clean-up has a label beside the ones every operation has", (_n, m) => {
+    const steps: Record<string, string> = { ...m.apps.steps, ...m.apps.backups.steps };
+    for (const k of APP_STACK_BACKUP_STEP_KEYS) expect(Object.hasOwn(steps, k), k).toBe(true);
+    for (const k of Object.keys(m.apps.backups.steps)) {
+      expect(APP_STACK_BACKUP_STEP_KEYS as readonly string[], k).toContain(k);
+      expect(Object.hasOwn(m.apps.steps, k), k).toBe(false);
+    }
+  });
+
+  it.each(locales)("%s: a problem reads in the application's words, a storage one in the shared words, anything else generically", (_n, m) => {
+    const own: Record<string, string> = m.apps.backups.problem;
+    const shared: Record<string, string> = m.site.backups.problem;
+    for (const p of Object.keys(own)) {
+      expect(BACKUP_PROBLEMS as readonly string[], p).toContain(p);
+      expect(appStackBackupProblemText(m, p), p).toBe(own[p]);
+    }
+    for (const p of APP_STACK_BACKUP_SHARED_PROBLEMS) {
+      expect(BACKUP_PROBLEMS as readonly string[], p).toContain(p);
+      expect(Object.hasOwn(own, p), p).toBe(false);
+      expect(shared[p], p).toBeTruthy();
+      expect(appStackBackupProblemText(m, p), p).toBe(shared[p]);
+    }
+    const known = new Set<string>([...Object.keys(own), ...APP_STACK_BACKUP_SHARED_PROBLEMS]);
+    const rest = BACKUP_PROBLEMS.filter((p) => !known.has(p));
+    expect(rest).toContain("database_dump_failed");
+    expect(rest).toContain("site_not_started");
+    for (const p of [...rest, "nope", "constructor", "__proto__", "toString", ""]) expect(appStackBackupProblemText(m, p), p).toBe(own.other);
+    expect(appStackBackupProblemText(m, null)).toBe(own.other);
+  });
+
+  it.each(locales)("%s: no sentence a backup problem can read names a site", (_n, m) => {
+    for (const p of [...BACKUP_PROBLEMS, "nope"]) expect(appStackBackupProblemText(m, p), p).not.toMatch(/\b(sito|siti|site|sites)\b/i);
+  });
+
+  it.each(locales)("%s: the refusals of a backup or a restore have their own sentences", (_n, m) => {
+    const reasons: Record<string, string> = m.apps.reasons;
+    for (const [code, reason] of [
+      ["VALIDATION_ERROR", "no_data"],
+      ["VALIDATION_ERROR", "no_destination"],
+      ["VALIDATION_ERROR", "not_restorable"],
+      ["QUOTA_EXCEEDED", "too_many_requests"],
+      ["VALIDATION_ERROR", "confirmation_mismatch"],
+    ] as const) {
+      const text = appStackRefusalText(m, code, reason);
+      expect(text, reason).toBe(reasons[reason]);
+      expect(text, reason).not.toBe(errorMessage(m, code));
+      expect(text, reason).not.toBe(m.apps.codes.QUOTA_EXCEEDED);
+    }
   });
 });
 

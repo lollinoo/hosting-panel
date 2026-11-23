@@ -394,7 +394,7 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
               <dd>{format(m.apps.resources.total, { cpu: formatCpu(entry.cpuMilli), memory: formatMemory(entry.memoryBytes) })}</dd>
             </dl>
             <p className="text-sm text-muted-foreground">{t.dataNote}</p>
-            <p className="text-sm text-muted-foreground">{m.apps.detail.backupUnavailable}</p>
+            <p className="text-sm text-muted-foreground">{t.backupNote}</p>
           </>
         )}
       </section>

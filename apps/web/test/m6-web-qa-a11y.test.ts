@@ -12,6 +12,7 @@ import {
   type AdminAppTemplateDetailDto,
   type AdminAppTemplateSummaryDto,
   type AdminAppTemplateUsageDto,
+  type AppStackBackupsDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackDomainDto,
@@ -69,6 +70,7 @@ import { AppTemplateEditor, type AppEditorTarget } from "@/components/admin/app-
 import { TemplateCatalog } from "@/components/admin/template-catalog";
 import { AppCatalog } from "@/components/app-stacks/app-catalog";
 import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
+import { AppStackBackups } from "@/components/app-stacks/app-stack-backups";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackList } from "@/components/app-stacks/app-stack-list";
@@ -251,6 +253,39 @@ const DOMAIN: AppStackDomainDto = {
   checkedAt: NOW,
 };
 const DOMAINS: AppStackDomainDto[] = [DOMAIN, { ...DOMAIN, id: "sdom_2", hostname: "wiki.example.test", status: "pending", certificateStatus: "requested", certificateExpiresAt: null }];
+const BACKUP: AppStackBackupsDto["backups"][number] = {
+  id: "sbak_4",
+  kind: "manual",
+  status: "succeeded",
+  problem: null,
+  sizeBytes: 5 * MIB,
+  volumeKeys: ["notes"],
+  copies: [{ priority: 1, status: "succeeded", problem: null }],
+  startedAt: NOW,
+  finishedAt: NOW,
+  restore: { status: "succeeded", problem: null, at: NOW },
+  restorable: true,
+};
+// One row per thing the list can say: running, restored, a failed copy with a failed restore, a failed backup.
+const BACKUPS: AppStackBackupsDto = {
+  backups: [
+    { ...BACKUP, id: "sbak_5", status: "running", sizeBytes: null, copies: [{ priority: 1, status: "running", problem: null }], finishedAt: null, restore: null, restorable: false },
+    BACKUP,
+    {
+      ...BACKUP,
+      id: "sbak_3",
+      kind: "pre_restore",
+      status: "partial",
+      copies: [
+        { priority: 1, status: "succeeded", problem: null },
+        { priority: 2, status: "failed", problem: "unreachable" },
+      ],
+      restore: { status: "failed", problem: "no_space", at: NOW },
+    },
+    { ...BACKUP, id: "sbak_2", status: "failed", problem: "timeout", sizeBytes: null, copies: [{ priority: 1, status: "failed", problem: "timeout" }], restore: null, restorable: false },
+  ],
+  unavailableReason: null,
+};
 
 const PARAMS: AppTemplateParameter[] = [
   { key: "title", label: "Board title", type: "string", default: "My notes", customer: true },
@@ -417,6 +452,7 @@ const wizard = (m: Messages, state: Record<number, unknown>, entry: CustomerAppT
 const deleteProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData: true };
 const secretsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", secrets: DETAIL.secretParameters };
 const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress };
+const backupsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", status: "running" as const, backups: BACKUPS as AppStackBackupsDto | null };
 const editor = (m: Messages, target: AppEditorTarget, state: Record<number, unknown> = {}) =>
   withState(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target }, m, state);
 const adminDetail = (m: Messages, tpl: AdminAppTemplateDetailDto, usage: AdminAppTemplateUsageDto | null, state: Record<number, unknown> = {}) =>
@@ -506,11 +542,28 @@ const SCENARIOS: Scenario[] = [
   { name: "domains · remove dialog", render: (m) => withState(AppStackDomains, domainsProps, m, { 5: "sdom_1" }) },
   { name: "domains · none", ids: ["app-domain-hostname"], render: (m) => withState(AppStackDomains, { ...domainsProps, initial: [] }, m) },
   { name: "domains · unreadable", render: (m) => withState(AppStackDomains, { ...domainsProps, initial: null }, m) },
+  { name: "backups", render: (m) => withState(AppStackBackups, backupsProps, m) },
+  { name: "backups · none yet", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { backups: [], unavailableReason: null } }, m) },
+  { name: "backups · not possible in this status", render: (m) => withState(AppStackBackups, { ...backupsProps, status: "deploying" as const }, m) },
+  { name: "backups · kept from before, none can be made", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { ...BACKUPS, unavailableReason: "no_destination" } }, m) },
+  ...(["not_available", "no_destination", "no_data"] as const).map((unavailableReason) => ({
+    name: `backups · unavailable (${unavailableReason})`,
+    render: (m: Messages) => withState(AppStackBackups, { ...backupsProps, backups: { backups: [], unavailableReason } }, m),
+  })),
+  { name: "backups · unreadable", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: null }, m) },
+  { name: "backups · create dialog", render: (m) => withState(AppStackBackups, backupsProps, m, { 0: true }) },
+  { name: "backups · create dialog refused", alerts: 1, render: (m) => withState(AppStackBackups, backupsProps, m, { 0: true, 4: m.apps.reasons.too_many_requests }) },
+  { name: "backups · restore dialog", ids: ["app-restore-name"], render: (m) => withState(AppStackBackups, backupsProps, m, { 1: "sbak_4" }) },
+  { name: "backups · restore dialog with the name typed", ids: ["app-restore-name"], render: (m) => withState(AppStackBackups, backupsProps, m, { 1: "sbak_4", 2: "team-notes" }) },
+  { name: "backups · restore dialog refused", ids: ["app-restore-name"], alerts: 1, render: (m) => withState(AppStackBackups, backupsProps, m, { 1: "sbak_3", 2: "team-notes", 4: m.apps.reasons.not_restorable }) },
   { name: "progress · running", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("processing") }) },
   { name: "progress · succeeded", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("succeeded"), 1: "done" }) },
   { name: "progress · failed", alerts: 1, render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("failed"), 1: "done" }) },
   { name: "progress · unknown", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("unknown"), 1: "done" }) },
   { name: "progress · slow and poll error", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("processing"), 2: true }) },
+  { name: "progress · backup running", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("processing", "stack.backup") }) },
+  { name: "progress · backup failed", alerts: 1, render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("failed", "stack.backup"), 1: "done" }) },
+  { name: "progress · restore failed", alerts: 1, render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("failed", "stack.restore"), 1: "done" }) },
   { name: "progress · signed out", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 1: "signedOut" }) },
   { name: "sections · components", render: (m) => html(createElement(AppStackComponents, { components: DETAIL.components, m, locale: localeOf(m) }), m) },
   { name: "sections · settings", render: (m) => html(createElement(AppStackSettings, { parameters: DETAIL.parameters, m }), m) },
@@ -575,7 +628,7 @@ describe("accessibility rules on every component, in Italian and English", () =>
     const rendered = SCENARIOS.map((s) => s.name).join("|");
     for (const part of [
       "unavailable", "application list", "catalog", "wizard · configure", "wizard · domains", "wizard · review", "wizard steps", "actions", "delete", "secrets",
-      "logs", "domains", "progress", "sections · components", "sections · history", "admin · template list", "admin · template detail", "admin · editor",
+      "logs", "domains", "backups", "backups · create dialog", "backups · restore dialog", "progress", "sections · components", "sections · history", "admin · template list", "admin · template detail", "admin · editor",
     ])
       expect(rendered, part).toContain(part);
   });
@@ -598,7 +651,7 @@ describe("accessibility rules on every component, in Italian and English", () =>
   it("an `id` of arch-web §7.1 the page never renders is a gap in the scenarios, not in the UI", () => {
     const wanted = [
       "app-template-source", "app-template-enabled", "app-name", "app-param-title", "app-domain-0", "app-logs-component", "app-secret-value",
-      "app-delete-name", "app-delete-data",
+      "app-delete-name", "app-delete-data", "app-restore-name",
     ];
     const seen = new Set(SCENARIOS.flatMap((s) => s.ids ?? []));
     for (const id of wanted) expect(seen.has(id), id).toBe(true);
@@ -877,18 +930,22 @@ describe("words, not colours", () => {
   it.each(LOCALES)("%s · the stack detail page puts the status in words and keeps a heading per section", async (_l, m) => {
     loc.value = localeOf(m);
     fetchUpstream.mockImplementation(async (p: string) =>
-      ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS) })[p] ?? { ok: false, status: 404, error: { error: { code: "NOT_FOUND" } } },
+      ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS), [`${UP}/backups`]: ok(BACKUPS) })[p] ?? {
+        ok: false,
+        status: 404,
+        error: { error: { code: "NOT_FOUND" } },
+      },
     );
     const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
     expectAccessible(h, "detail page");
     expect(inner(h, "h1")).toEqual(["team-notes"].map((n) => n));
     expect(inner(h, "h2")).toEqual(
-      ["components", "logs", "settings", "domains", "data", "resources", "history", "danger"].map((k) => (m.apps.detail.section as Record<string, string>)[k]),
+      ["components", "logs", "settings", "domains", "data", "backups", "resources", "history", "danger"].map((k) => (m.apps.detail.section as Record<string, string>)[k]),
     );
     // every section is a region named by its own heading
     const sections = tagsOf(h).filter((t) => t.name === "section");
     const headings = new Set(tagsOf(h).filter((t) => t.name === "h1" || t.name === "h2").map((t) => t.attrs.id));
-    expect(sections.length).toBe(9);
+    expect(sections.length).toBe(10);
     for (const s of sections) expect(headings.has(s.attrs["aria-labelledby"]!), s.attrs["aria-labelledby"]).toBe(true);
     expect(h).toContain(`>${m.apps.status.degraded}<`);
     for (const t of tagsOf(h).filter((x) => x.name === "time")) expect(t.attrs.datetime).toMatch(/^\d{4}-\d{2}-\d{2}T/);
@@ -901,7 +958,7 @@ describe("words, not colours", () => {
       ["unknown", m.apps.detail.unknownBody],
       ["draft", m.apps.detail.draftBody],
     ] as const) {
-      fetchUpstream.mockImplementation(async (p: string) => (p === UP ? ok({ ...DETAIL, status, revisionNumber: null }) : ok(p.endsWith("/domains") ? [] : [])));
+      fetchUpstream.mockImplementation(async (p: string) => (p === UP ? ok({ ...DETAIL, status, revisionNumber: null }) : ok(p.endsWith("/backups") ? { backups: [], unavailableReason: null } : [])));
       const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
       expect(withRole(h, "status").join(" "), status).toContain(text);
       expect(withRole(h, "alert"), status).toEqual([]);
@@ -1061,7 +1118,11 @@ describe("Italian and English", () => {
     const page = async (m: Messages) => {
       loc.value = localeOf(m);
       fetchUpstream.mockImplementation(async (p: string) =>
-        ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS) })[p] ?? { ok: false, status: 404, error: { error: { code: "NOT_FOUND" } } },
+        ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS), [`${UP}/backups`]: ok(BACKUPS) })[p] ?? {
+        ok: false,
+        status: 404,
+        error: { error: { code: "NOT_FOUND" } },
+      },
       );
       return html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
     };

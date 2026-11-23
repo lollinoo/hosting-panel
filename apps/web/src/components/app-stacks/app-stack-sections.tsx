@@ -69,7 +69,6 @@ export function AppStackData({ volumes, m }: { volumes: AppStackDetailDto["volum
         </ul>
       )}
       <p className={muted}>{t.keptNote}</p>
-      <p className={muted}>{m.apps.detail.backupUnavailable}</p>
     </div>
   );
 }

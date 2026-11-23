@@ -52,6 +52,8 @@ import * as secretsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/s
 import * as domainsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route";
 import * as domainRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route";
 import * as logsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route";
+import * as backupsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/route";
+import * as restoreRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/[backupId]/restore/route";
 import * as adminTemplatesRoute from "@/app/api/admin/app-templates/route";
 import * as adminValidateRoute from "@/app/api/admin/app-templates/validate/route";
 import * as adminTemplateRoute from "@/app/api/admin/app-templates/[templateId]/route";
@@ -404,6 +406,8 @@ describe("BFF routes pass the API's 403 and 404 through unchanged", () => {
     { name: "domain add", handler: domainsRoute.POST as unknown as Handler, method: "POST", params: { orgId: ORG_B, stackId: STACK }, body: { hostname: "notes.example.com", componentKey: "web", port: 8080 }, key: false, path: `${S}/${STACK}/domains` },
     { name: "domain remove", handler: domainRoute.DELETE as unknown as Handler, method: "DELETE", params: { orgId: ORG_B, stackId: STACK, domainId: "sdom_1" }, key: false, path: `${S}/${STACK}/domains/sdom_1` },
     { name: "logs", handler: logsRoute.GET as unknown as Handler, method: "GET", params: { orgId: ORG_B, stackId: STACK, componentKey: "web" }, key: false, path: `${S}/${STACK}/components/web/logs?tail=200` },
+    { name: "backup create", handler: backupsRoute.POST as unknown as Handler, method: "POST", params: { orgId: ORG_B, stackId: STACK }, body: {}, key: true, path: `${S}/${STACK}/backups` },
+    { name: "backup restore", handler: restoreRoute.POST as unknown as Handler, method: "POST", params: { orgId: ORG_B, stackId: STACK, backupId: "sbak_1" }, body: { confirmName: "Notes" }, key: true, path: `${S}/${STACK}/backups/sbak_1/restore` },
     // admin routes: the browser of a customer reaching them is refused by the API, and the BFF says so unchanged
     { name: "admin create", handler: adminTemplatesRoute.POST as unknown as Handler, method: "POST", params: {}, body: { slug: "notes", source: "x" }, key: true, path: "v1/admin/app-templates" },
     { name: "admin validate", handler: adminValidateRoute.POST as unknown as Handler, method: "POST", params: {}, body: { source: "x" }, key: false, path: "v1/admin/app-templates/validate" },

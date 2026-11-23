@@ -2,7 +2,7 @@ import * as React from "react";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppStackDeploymentDto, AppStackDetailDto, AppStackDomainDto } from "@hosting-panel/contracts";
+import type { AppStackBackupsDto, AppStackDeploymentDto, AppStackDetailDto, AppStackDomainDto } from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
@@ -121,6 +121,24 @@ const DOMAIN: AppStackDomainDto = {
   certificateExpiresAt: "2027-02-20T10:00:00.000Z",
   checkedAt: NOW,
 };
+const BACKUPS: AppStackBackupsDto = {
+  backups: [
+    {
+      id: "sbak_0123456789abcdef01234567",
+      kind: "manual",
+      status: "succeeded",
+      problem: null,
+      sizeBytes: 5 * MIB,
+      volumeKeys: ["notes"],
+      copies: [{ priority: 1, status: "succeeded", problem: null }],
+      startedAt: NOW,
+      finishedAt: NOW,
+      restore: null,
+      restorable: true,
+    },
+  ],
+  unavailableReason: null,
+};
 
 const decode = (s: string) => s.replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 const html = (node: ReactNode, m: Messages = en) =>
@@ -179,7 +197,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   loc.value = "en";
   mockData.getCustomerContext.mockResolvedValue(context());
-  answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok([DOMAIN]) });
+  answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok([DOMAIN]), [`${UP}/backups`]: ok(BACKUPS) });
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -229,17 +247,21 @@ describe("detail page", () => {
     expect(await page()).toMatch(open);
   });
 
-  it("reads the application, its history and its addresses and renders every section in order", async () => {
+  it("reads the application, its history, its addresses and its backups and renders every section in order", async () => {
     const h = await page();
-    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`]);
+    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`]);
     expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
     expect(h).toContain(en.apps.status.degraded);
     expect(h).toContain(format(en.apps.detail.versionLine, { name: "Notes", n: 2 }));
     expect(h).toContain(format(en.apps.detail.releaseLine, { n: 3 }));
     const s = en.apps.detail.section;
-    expect(h2s(h)).toEqual([s.components, s.logs, s.settings, s.domains, s.data, s.resources, s.history, s.danger]);
+    expect(h2s(h)).toEqual([s.components, s.logs, s.settings, s.domains, s.data, s.backups, s.resources, s.history, s.danger]);
     for (const id of [...h.matchAll(/aria-labelledby="([^"]+)"/g)].map((x) => x[1])) expect(h).toContain(`id="${id}"`);
-    expect(h.split(en.apps.detail.backupUnavailable)).toHaveLength(2);
+    // the backups section: its explanation once, the button, one row with a restore button, no address of a route
+    expect(h.split(en.apps.backups.intro)).toHaveLength(2);
+    expect(h).toContain(`>${en.apps.backups.create}</button>`);
+    expect(h).toContain(`>${en.apps.backups.restore}</button>`);
+    expect(h).toContain(en.apps.backups.kind.manual);
     expect(h).toContain(en.apps.delete.open);
     expect(h).toContain("notes.example.test");
     expect(h).toContain(en.apps.history.kind.upgrade);
@@ -271,10 +293,11 @@ describe("detail page", () => {
     expect(d).not.toContain(itMsgs.apps.detail.releaseLine.replace(" {n}", ""));
   });
 
-  it("a failed history or address read shows the section error and the page still renders", async () => {
+  it("a failed history, address or backup read shows the section error and the page still renders", async () => {
     answer({ [UP]: ok(DETAIL) });
     const h = await page();
-    expect(h.split(en.apps.detail.sectionError)).toHaveLength(3);
+    expect(h.split(en.apps.detail.sectionError)).toHaveLength(4);
+    expect(h).not.toContain(en.apps.backups.create);
     expect(h).toContain(en.apps.detail.section.danger);
   });
 
@@ -305,13 +328,13 @@ describe("sections", () => {
     expect(html(AppStackSettings({ parameters: [], m: en }))).toContain(en.apps.settings.none);
   });
 
-  it("data: a word per status, the keep note and the one backup line; none → the empty line", () => {
+  it("data: a word per status and the keep note; none → the empty line", () => {
     const h = html(AppStackData({ volumes: DETAIL.volumes, m: en }));
     expect(h).toContain("notes");
     expect(h).toContain(en.apps.data.status.present);
-    for (const t of [en.apps.data.keptNote, en.apps.detail.backupUnavailable]) expect(h).toContain(t);
+    expect(h).toContain(en.apps.data.keptNote);
     const none = html(AppStackData({ volumes: [], m: en }));
-    for (const t of [en.apps.data.none, en.apps.data.keptNote, en.apps.detail.backupUnavailable]) expect(none).toContain(t);
+    for (const t of [en.apps.data.none, en.apps.data.keptNote]) expect(none).toContain(t);
   });
 
   it("resources: the total and one line per component", () => {
