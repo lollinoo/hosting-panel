@@ -658,7 +658,13 @@ export class DockerExecutorIpcServer {
 
       const observedMatch = /^\/v1\/services\/([^/]+)\/observed-state$/.exec(pathname);
       if (method === "GET" && observedMatch && observedMatch[1]) {
-        const serviceInstanceId = decodeURIComponent(observedMatch[1]);
+        let serviceInstanceId: string;
+        try {
+          serviceInstanceId = decodeURIComponent(observedMatch[1]);
+        } catch {
+          // A malformed escape is a bad request; left untyped, the URIError would end as a 500.
+          throw new ExecutorCodedError("Malformed percent-escape in serviceInstanceId", "VALIDATION_ERROR");
+        }
         assertSafeIdentifier(serviceInstanceId, "serviceInstanceId");
         const state = await this.executor.getObservedState(serviceInstanceId);
         if (state === null) {
