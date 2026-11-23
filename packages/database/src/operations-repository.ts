@@ -1108,12 +1108,17 @@ export type OperationOutcome =
   | { readonly status: "succeeded" }
   | { readonly status: "failed"; readonly errorCode: ErrorCode; readonly errorMessage: string };
 
-/** Settles an operation in one transaction: row locked, caller's writes, end state. False when missing or already ended. */
+/**
+ * Settles an operation in one transaction: row locked, caller's writes, end state. False when missing or already ended.
+ * `after` runs in the same transaction once the row is terminal: the place to enqueue the next operation on the same
+ * lock (the unique index on active locks allows one active operation per key).
+ */
 export async function settleOperation(
   db: HostingPanelDatabase,
   operationId: string,
   outcome: OperationOutcome,
   write?: (tx: HostingPanelDatabase) => Promise<void>,
+  after?: (tx: HostingPanelDatabase) => Promise<void>,
 ): Promise<boolean> {
   try {
     return await db.transaction(async (tx) => {
@@ -1135,6 +1140,7 @@ export async function settleOperation(
           errorMessage: outcome.errorMessage,
         });
       }
+      await after?.(t);
       return true;
     });
   } catch (err) {

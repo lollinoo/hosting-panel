@@ -479,3 +479,92 @@ describe("0025 app stacks", () => {
     expect(await rows(pg, "SELECT hostname FROM domains ORDER BY hostname")).toEqual([{ hostname: "old.example" }]);
   });
 });
+
+describe("0027 app stack backups", () => {
+  // ADR-0038: after 0027 the previous release keeps running on the migrated schema; it never names the two new tables.
+  const M0027 = "0027_app_stack_backups.sql";
+  const HASH = "a".repeat(64);
+  let pg: PGlite;
+  const SEED_0025 = `
+    INSERT INTO platform_installations (id, name) VALUES ('pi','pi');
+    INSERT INTO hosts (id, platform_installation_id, name, hostname, ipv4_address, total_cpu_milli, total_memory_bytes, total_storage_bytes)
+      VALUES ('h','pi','h','h.example','192.0.2.1',1000,'1','1');
+    INSERT INTO organizations (id, platform_installation_id, name, slug) VALUES ('o','pi','o','o');
+    INSERT INTO host_allocations (id, host_id, organization_id) VALUES ('a','h','o');
+    INSERT INTO sites (id, organization_id, host_allocation_id, name, slug) VALUES ('s1','o','a','s1','s1');
+    INSERT INTO app_templates (id, slug, name, category) VALUES ('atpl_a','alpha','Alpha','web');
+    INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
+      VALUES ('atv_a1','atpl_a',1,'x',1,'{}','${HASH}');
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_a','o','a','atpl_a','atv_a1','Stack A','running');
+    INSERT INTO backup_targets (id, kind, name) VALUES ('bkt_app','local','Local');`;
+  // A backup of the application written by the new release before the rollback.
+  const BACKUP_ROWS = `
+    INSERT INTO app_stack_backups (id, stack_id, organization_id, kind, status, operation_id, volume_keys, size_bytes, finished_at)
+      VALUES ('sbak_a','stk_a','o','manual','succeeded','op_app_backup','["data"]',10,NOW());
+    INSERT INTO app_stack_backup_copies (id, backup_id, target_id, job_id, status, snapshot_id, size_bytes, finished_at)
+      VALUES ('sbkc_a','sbak_a','bkt_app','op_app_backup','succeeded','${SNAP_NEW}',10,NOW());`;
+  // The statements the previous release runs: none names a table added by 0027.
+  const OLD_RELEASE_WRITES = `
+    INSERT INTO operations (id, organization_id, kind, resource_type, resource_id) VALUES ('op_rb','o','stack.stop','stack','stk_a');
+    UPDATE operations SET status = 'succeeded' WHERE id = 'op_rb';
+    UPDATE app_stacks SET status = 'stopped' WHERE id = 'stk_a';
+    INSERT INTO site_backups (id, site_id, kind, status, operation_id, snapshot_id, size_bytes, finished_at)
+      VALUES ('bkp_rb','s1','manual','succeeded','op_rb_site','${SNAP_OLD}',20,NOW());
+    INSERT INTO site_backup_copies (id, backup_id, target_id, status, snapshot_id) VALUES ('bcp_rb','bkp_rb','bkt_app','succeeded','${SNAP_OLD}');
+    UPDATE backup_targets SET name = 'Renamed', enabled = FALSE WHERE id = 'bkt_app';
+    UPDATE backup_targets SET enabled = TRUE WHERE id = 'bkt_app';
+    DELETE FROM site_backup_copies WHERE id = 'bcp_rb';
+    DELETE FROM site_backups WHERE id = 'bkp_rb';
+    DELETE FROM operations WHERE id = 'op_rb';
+    UPDATE app_stacks SET status = 'deleted', deleted_at = NOW() WHERE id = 'stk_a';`;
+  const backups = () => rows(pg, "SELECT id, stack_id, status FROM app_stack_backups");
+  const copies = () => rows(pg, "SELECT id, target_id, status FROM app_stack_backup_copies");
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0027);
+    await pg.exec(SEED_0025);
+    await pg.exec(read(M0027));
+    await pg.exec(BACKUP_ROWS);
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("is the newest migration and creates two tables and nothing else", async () => {
+    expect(files.at(-1)).toBe(M0027);
+    const statements = read(M0027)
+      .split("\n")
+      .filter((line) => /^(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE)\b/.test(line));
+    expect(statements.every((line) => /^CREATE (TABLE|INDEX|UNIQUE INDEX) IF NOT EXISTS (\w+ ON )?app_stack_backup/.test(line))).toBe(true);
+    expect(statements).toHaveLength(6);
+  });
+
+  it("runs the previous release's writes on stacks, operations, site backups and destinations, and the backups stay", async () => {
+    await pg.exec(OLD_RELEASE_WRITES);
+    // Deleting the application leaves its backups: the retention period removes them, not the delete.
+    expect(await backups()).toEqual([{ id: "sbak_a", stack_id: "stk_a", status: "succeeded" }]);
+    expect(await copies()).toEqual([{ id: "sbkc_a", target_id: "bkt_app", status: "succeeded" }]);
+  });
+
+  it("refuses the previous release the delete of a destination that holds a copy of an application", async () => {
+    // 23001: the foreign key is ON DELETE RESTRICT.
+    await expect(pg.exec("DELETE FROM backup_targets WHERE id = 'bkt_app'")).rejects.toMatchObject({ code: "23001" });
+    expect(await rows(pg, "SELECT id FROM backup_targets WHERE id = 'bkt_app'")).toEqual([{ id: "bkt_app" }]);
+  });
+
+  it("runs 0027 again on a database with backups without harm", async () => {
+    await pg.exec(read(M0027));
+    expect(await backups()).toEqual([{ id: "sbak_a", stack_id: "stk_a", status: "succeeded" }]);
+    expect(await copies()).toEqual([{ id: "sbkc_a", target_id: "bkt_app", status: "succeeded" }]);
+  });
+
+  it("the copies go with their backup, and the destination can then be deleted", async () => {
+    await pg.exec("DELETE FROM app_stack_backups WHERE id = 'sbak_a'");
+    expect(await copies()).toEqual([]);
+    await pg.exec("DELETE FROM backup_targets WHERE id = 'bkt_app'");
+    expect(await rows(pg, "SELECT id FROM backup_targets WHERE id = 'bkt_app'")).toEqual([]);
+  });
+});
