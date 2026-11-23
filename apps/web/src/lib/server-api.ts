@@ -47,6 +47,7 @@ import type {
   AdminAppTemplateDetailDto,
   AdminAppTemplateVersionDto,
   AdminAppTemplateUsageDto,
+  AdminAppStackDto,
   AdminAppStacksDto,
   CustomerAppTemplatesDto,
   CustomerAppTemplateDto,
@@ -328,6 +329,12 @@ export async function fetchServerAdminAppTemplateUsage(templateId: string): Prom
 
 export async function fetchServerAdminAppStacks(): Promise<ServerResult<AdminAppStacksDto>> {
   return serverGet<AdminAppStacksDto>("v1/admin/app-stacks");
+}
+
+/** One customer's application for the server administrator (ADR-0041): who it belongs to and its components. */
+export async function fetchServerAdminAppStack(stackId: string): Promise<ServerResult<AdminAppStackDto>> {
+  if (!segments(stackId)) return NOT_ONE_SEGMENT;
+  return serverGet<AdminAppStackDto>(`v1/admin/app-stacks/${enc(stackId)}`);
 }
 
 export async function fetchServerOrgAppTemplates(orgId: string): Promise<ServerResult<CustomerAppTemplatesDto>> {
