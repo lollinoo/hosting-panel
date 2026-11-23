@@ -3026,6 +3026,10 @@ x-hp-ingress:
       releaseLine: "Release #{n}",
       draftBody: "The application is not installed yet: set the required private values and press Install.",
       unknownBody: "We do not know yet whether the last operation succeeded. Nothing is repeated automatically.",
+      platformWork: {
+        backups_cleanup:
+          "The panel is removing this application's expired backups: until it is done, no action on it can be started. It usually takes a few minutes.",
+      },
       sectionError: "This part could not be loaded. Reload the page.",
       section: {
         components: "Components",

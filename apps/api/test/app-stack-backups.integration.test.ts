@@ -27,7 +27,8 @@ import {
   users,
 } from "@hosting-panel/database";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
+import { enqueueAppStackPrune } from "../src/app-stacks/app-stack-backup-retention.js";
+import { BackupSchedulerService, ensurePlatformOpsOrg } from "../src/backups/backup-scheduler.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import { APP_TEST_ALLOWLIST, startAppStackHarness, type AppStackHarness, type HarnessCustomer } from "./fixtures/app-stack-harness.js";
 
@@ -363,6 +364,35 @@ describe("application backups HTTP API (ADR-0038)", () => {
     await saved(stackId, h.adminToken);
     // The administrator's action took no slot and freed none.
     expectRefusal(await backup(stackId), 409, "QUOTA_EXCEEDED", { reason: "too_many_requests" });
+  });
+
+  it("while the platform cleans up an application's backups, its page learns that it is busy and with what, and nothing else", async () => {
+    const stackId = await stopped("pulizia");
+    await saved(stackId);
+    await ensurePlatformOpsOrg(db());
+    expect(await enqueueAppStackPrune(db(), stackId)).toBe(true);
+    const [prune] = (await opsOf(stackId)).filter((op) => op.kind === "stack.prune");
+    expect(prune).toMatchObject({ organizationId: PLATFORM_OPS_ORG_ID, status: "queued" });
+
+    const detail = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+    expect(detail.status, detail.raw).toBe(200);
+    expect(detail.body.data).toMatchObject({ activeOperationId: null, platformWork: "backups_cleanup" });
+    expect(detail.raw).not.toContain(prune!.id);
+    // The operation stays the platform's: the customer cannot read it, and an action waits for its end.
+    expect((await h.call(h.a.token, "GET", `/v1/organizations/${h.a.orgId}/operations/${prune!.id}`)).status).toBe(404);
+    const listed = await h.call(h.a.token, "GET", `/v1/organizations/${h.a.orgId}/operations`);
+    expect(listed.status, listed.raw).toBe(200);
+    expect(listed.raw).not.toContain(prune!.id);
+    expectRefusal(await act(h.a.token, stackId, "start"), 409, "RESOURCE_LOCKED");
+
+    expect(await settle(stackId)).toBe("stopped");
+    expect((await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`)).body.data).toMatchObject({ activeOperationId: null, platformWork: null });
+    // The customer's own action is followed by its id, and is not the platform's work.
+    expect((await act(h.a.token, stackId, "start")).status).toBe(202);
+    const own = (await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`)).body.data;
+    expect(own.activeOperationId).not.toBeNull();
+    expect(own.platformWork).toBeNull();
+    await settle(stackId);
   });
 
   it("the nightly run keeps the three newest manual backups, and removes those of a deleted application after the retention period", async () => {

@@ -317,8 +317,10 @@ approval.
    unless changed). While the newest safety backup says its restore left the data half written (step 6), the safety
    backup the section names to go back to is kept too, whatever the count of newer ones. The backups of a **deleted**
    application stay for that period, then every copy and row goes. The
-   clean-up runs with the nightly backup run (`stack.prune` in the history, «Pulizia dei backup»), so the list can
-   show more than three for some hours. A destination that fails keeps the rows, and the next night finishes the work.
+   clean-up runs with the nightly backup run (`stack.prune`, «Pulizia dei backup»), so the list can show more than
+   three for some hours. It is an operation of the platform, not of the customer: the customer cannot open it, and
+   while it runs the application page says that its expired backups are being removed and every action on it answers
+   `409 RESOURCE_LOCKED`. A destination that fails keeps the rows, and the next night finishes the work.
    On a server with no usable destination the nightly run does nothing, and no backup of an application is removed.
 8. **Where the copies are** (server administrator). One encrypted repository per application per destination, next to
    the sites' ones and with their key: on a local destination the folder `stacks/<stackId>` under that destination's

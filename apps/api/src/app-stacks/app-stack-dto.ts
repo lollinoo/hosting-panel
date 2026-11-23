@@ -7,6 +7,7 @@ import {
   type AppStackDetailDto,
   type AppStackDomainDto,
   type AppStackOperationKind,
+  type AppStackPlatformWork,
   type AppStackSummaryDto,
   type AppTemplateSpec,
   type ApprovedStackPlan,
@@ -72,6 +73,7 @@ export function appStackDetailDto(input: {
   parameters: readonly AppStackParameterRow[];
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
+  platformWork: AppStackPlatformWork | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
   rollback: { revisionId: string; revisionNumber: number; templateVersionNumber: number } | null;
   now: Date;
@@ -105,6 +107,7 @@ export function appStackDetailDto(input: {
     templateVersionId: stack.templateVersionId,
     createdAt: stack.createdAt.toISOString(),
     activeOperationId: input.activeOperationId,
+    platformWork: input.platformWork,
     revisionNumber: desired?.revision.revisionNumber ?? null,
     components: components.map((c) => ({
       key: c.key,

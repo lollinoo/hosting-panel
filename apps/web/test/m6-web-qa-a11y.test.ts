@@ -214,6 +214,7 @@ const DETAIL: AppStackDetailDto = {
   templateVersionId: "atv_notes_2",
   createdAt: NOW,
   activeOperationId: null,
+  platformWork: null,
   revisionNumber: 3,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },

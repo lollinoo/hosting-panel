@@ -86,6 +86,7 @@ const DETAIL: AppStackDetailDto = {
   templateVersionId: "atv_notes_2",
   createdAt: NOW,
   activeOperationId: null,
+  platformWork: null,
   revisionNumber: 3,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
@@ -306,6 +307,19 @@ describe("detail page", () => {
   it("an operation in progress is followed on the page", async () => {
     answer({ [UP]: ok({ ...DETAIL, status: "deploying", activeOperationId: "op_7" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     expect(await page()).toContain(en.apps.progress.title.deploy);
+    expect(await page()).not.toContain(en.apps.detail.platformWork.backups_cleanup);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: work of the platform on the application says what it is, with nothing to follow", async (locale, m) => {
+    loc.value = locale;
+    answer({ [UP]: ok({ ...DETAIL, platformWork: "backups_cleanup" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    const h = await page();
+    expect(h.split(m.apps.detail.platformWork.backups_cleanup)).toHaveLength(2);
+    expect(h).not.toContain(m.apps.progress.title.prune);
+    expect(h).not.toMatch(/op_|stack\.prune|org_platform/);
   });
 });
 

@@ -3054,6 +3054,10 @@ x-hp-ingress:
       releaseLine: "Rilascio n. {n}",
       draftBody: "L'applicazione non è ancora installata: imposta i valori riservati obbligatori e premi Installa.",
       unknownBody: "Non sappiamo ancora se l'ultima operazione è riuscita. Nessuna azione viene ripetuta da sola.",
+      platformWork: {
+        backups_cleanup:
+          "Il pannello sta togliendo i backup scaduti di questa applicazione: finché non ha finito, nessuna azione su di lei si può avviare. Di solito bastano pochi minuti.",
+      },
       sectionError: "Questa parte non è stata caricata. Ricarica la pagina.",
       section: {
         components: "Componenti",

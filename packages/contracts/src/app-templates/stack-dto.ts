@@ -141,10 +141,14 @@ export const AppStackSummaryDtoSchema = z.object({
   updatedAt: IsoDateTimeSchema,
 });
 export type AppStackSummaryDto = z.infer<typeof AppStackSummaryDtoSchema>;
+/** Work of the platform that holds an application's lock: the page says what it is, nothing else of it (ADR-0038). */
+export const APP_STACK_PLATFORM_WORK = ["backups_cleanup"] as const;
+export type AppStackPlatformWork = (typeof APP_STACK_PLATFORM_WORK)[number];
 export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   templateVersionId: AppEntityIdSchema,
   createdAt: IsoDateTimeSchema,
-  activeOperationId: OperationIdSchema.nullable(),
+  activeOperationId: OperationIdSchema.nullable(), // the customer's own operation only
+  platformWork: z.enum(APP_STACK_PLATFORM_WORK).nullable(), // the application is busy with work of the platform
   revisionNumber: z.number().int().positive().nullable(), // desired revision; null for a draft
   // desired plan order; a draft: spec services by key
   components: z.array(

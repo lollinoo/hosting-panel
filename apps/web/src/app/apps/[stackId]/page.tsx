@@ -79,6 +79,12 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
             <AlertDescription>{d.draftBody}</AlertDescription>
           </Alert>
         )}
+        {/* Work of the platform holds the application: a refused action has this to point at. */}
+        {s.platformWork !== null && (
+          <Alert role="status">
+            <AlertDescription>{d.platformWork[s.platformWork]}</AlertDescription>
+          </Alert>
+        )}
         <AppStackActions {...ids} status={s.status} upgrade={s.upgrade} rollback={s.rollback} />
       </section>
       {s.activeOperationId !== null && <AppStackProgress orgId={orgId} operationId={s.activeOperationId} />}
