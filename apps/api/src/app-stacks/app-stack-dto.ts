@@ -69,6 +69,7 @@ export function appStackDetailDto(input: {
   parameters: readonly AppStackParameterRow[];
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
+  installed: { revisionNumber: number; templateVersionNumber: number } | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
   rollback: { revisionId: string; revisionNumber: number; templateVersionNumber: number } | null;
   now: Date;
@@ -103,6 +104,7 @@ export function appStackDetailDto(input: {
     createdAt: stack.createdAt.toISOString(),
     activeOperationId: input.activeOperationId,
     revisionNumber: desired?.revision.revisionNumber ?? null,
+    installed: input.installed,
     components: components.map((c) => ({
       key: c.key,
       ...componentHealth(rows.get(c.key), now),

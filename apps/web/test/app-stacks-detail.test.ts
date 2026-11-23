@@ -87,6 +87,7 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   revisionNumber: 3,
+  installed: null,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
     { key: "cache", health: "unhealthy", healthObservedAt: null, dependsOn: [], ingress: false, cpuMilli: 250, memoryBytes: String(128 * MIB) },
@@ -276,6 +277,28 @@ describe("detail page", () => {
     const h = await page();
     expect(h.split(en.apps.detail.sectionError)).toHaveLength(3);
     expect(h).toContain(en.apps.detail.section.danger);
+  });
+
+  it("a change that failed once its components were created: the page names the version installed and the one that was not", async () => {
+    const failed: AppStackDetailDto = { ...DETAIL, status: "failed", installed: { revisionNumber: 1, templateVersionNumber: 1 } };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      answer({ [UP]: ok(failed), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok([DOMAIN]) });
+      const h = await page();
+      expect(h).toContain(format(m.apps.detail.versionLine, { name: "Notes", n: 1 }));
+      expect(h).toContain(format(m.apps.detail.releaseLine, { n: 1 }));
+      expect(h).toContain(format(m.apps.detail.notInstalledLine, { version: 2, release: 3 }));
+      expect(h).not.toContain(format(m.apps.detail.versionLine, { name: "Notes", n: 2 }));
+    }
+    // While a change runs, the page names what is installed and says nothing failed.
+    loc.value = "en";
+    answer({ [UP]: ok({ ...failed, status: "updating", activeOperationId: "op_8" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    const busy = await page();
+    expect(busy).toContain(format(en.apps.detail.versionLine, { name: "Notes", n: 1 }));
+    expect(busy).not.toContain(format(en.apps.detail.notInstalledLine, { version: 2, release: 3 }));
+    // With what is installed being the current version, there is nothing to say.
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    expect(await page()).not.toContain(format(en.apps.detail.notInstalledLine, { version: 2, release: 3 }));
   });
 
   it("an operation in progress is followed on the page", async () => {

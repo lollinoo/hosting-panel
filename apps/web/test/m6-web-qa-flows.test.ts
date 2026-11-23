@@ -134,6 +134,7 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   createdAt: NOW,
   activeOperationId: null,
   revisionNumber: 1,
+  installed: null,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 250, memoryBytes: String(128 * MIB) },
     { key: "cache", health: "unhealthy", healthObservedAt: NOW, dependsOn: [], ingress: false, cpuMilli: 250, memoryBytes: String(128 * MIB) },

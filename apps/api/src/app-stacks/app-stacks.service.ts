@@ -341,6 +341,11 @@ export class AppStacksService {
       ? revisions.find((r) => r.revisionNumber < desired.revision.revisionNumber && r.planHash !== desired.revision.planHash)
       : undefined;
     const previousVersion = previous ? await this.#version(stack, previous.templateVersionId) : null;
+    // What runs is the applied revision: after a change that failed once create had started, not the desired one.
+    const applied = stack.appliedRevisionId !== stack.desiredRevisionId ? revisions.find((r) => r.id === stack.appliedRevisionId) : undefined;
+    const installed = applied
+      ? { revisionNumber: applied.revisionNumber, templateVersionNumber: (await this.#version(stack, applied.templateVersionId)).versionNumber }
+      : null;
     return appStackDetailDto({
       stack,
       templateName: template.name,
@@ -353,6 +358,7 @@ export class AppStacksService {
       parameters,
       secrets,
       activeOperationId: active?.id ?? null,
+      installed,
       upgrade:
         latest && latest.versionNumber > version.versionNumber ? { templateVersionId: latest.id, versionNumber: latest.versionNumber } : null,
       rollback:

@@ -133,7 +133,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     "stack detail",
     AppStackDetailDtoSchema,
     {
-      ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, revisionNumber: 1,
+      ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, revisionNumber: 1, installed: null,
       components: [{ key: "app", health: "healthy", healthObservedAt: AT, dependsOn: ["cache"], ingress: true, cpuMilli: 1000, memoryBytes: "536870912" }],
       parameters: [{ key: "workers", label: "Workers", value: 2 }],
       secretParameters: [{ key: "app_secret", label: "App secret", required: true, isSet: true, version: 1, setAt: AT }],

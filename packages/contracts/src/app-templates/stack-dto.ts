@@ -146,6 +146,8 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   createdAt: IsoDateTimeSchema,
   activeOperationId: OperationIdSchema.nullable(),
   revisionNumber: z.number().int().positive().nullable(), // desired revision; null for a draft
+  // the applied revision when it is not the desired one (a change still running, or one that failed after create)
+  installed: z.object({ revisionNumber: z.number().int().positive(), templateVersionNumber: z.number().int().positive() }).nullable(),
   // desired plan order; a draft: spec services by key
   components: z.array(
     z.object({

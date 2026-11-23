@@ -204,6 +204,7 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       templateVersionId: d.templateVersionId,
       version: d.templateVersionNumber,
       revision: d.revisionNumber,
+      installed: d.installed,
       upgrade: d.upgrade,
       rollback: d.rollback,
       parameters: d.parameters,
@@ -551,6 +552,8 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       expect(added.some((m) => m.startsWith("volume"))).toBe(false);
       expect(await stackRow(stackId)).toMatchObject({ status: "failed" });
       expectBystanderUntouched();
+      // Version 2 stays the target (a redeploy tries it again), but the page learns that version 1 is the one installed.
+      expect(await shown(stackId)).toMatchObject({ status: "failed", version: 2, revision: 2, installed: { revisionNumber: 1, templateVersionNumber: 1 } });
     });
   });
 });

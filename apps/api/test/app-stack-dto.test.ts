@@ -133,6 +133,7 @@ const detailInput = (change: Partial<Parameters<typeof appStackDetailDto>[0]> = 
   parameters: [],
   secrets: [],
   activeOperationId: null,
+  installed: null,
   upgrade: null,
   rollback: null,
   now: NOW,
@@ -239,6 +240,7 @@ describe("appStackDetailDto", () => {
       deployed([], {
         volumes: [{ stackId: STACK, organizationId: ORG, volumeKey: "data", retentionPolicy: "retain", status: "present", createdAt: NOW, updatedAt: NOW }],
         activeOperationId: "op_1",
+        installed: { revisionNumber: 2, templateVersionNumber: 1 },
         upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
         rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
       }),
@@ -246,9 +248,11 @@ describe("appStackDetailDto", () => {
     expect(dto).toMatchObject({
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       activeOperationId: "op_1",
+      installed: { revisionNumber: 2, templateVersionNumber: 1 },
       upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
       rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
     });
+    expect(AppStackDetailDtoSchema.strict().parse(dto)).toEqual(dto);
   });
 });
 

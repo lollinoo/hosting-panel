@@ -13451,7 +13451,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, installed, components, parameters, secretParameters, volumes, ingress, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -13466,6 +13466,20 @@ components:
               minimum: 1
               nullable: true
               description: "`null` for a draft"
+            installed:
+              type: object
+              nullable: true
+              description: >-
+                The revision that runs when it is not the current one: while a change runs, or after one that failed once
+                its components were being created; `null` otherwise, and when none ever ran
+              required: [revisionNumber, templateVersionNumber]
+              properties:
+                revisionNumber:
+                  type: integer
+                  minimum: 1
+                templateVersionNumber:
+                  type: integer
+                  minimum: 1
             components:
               type: array
               description: In deployment order; a draft's by key
