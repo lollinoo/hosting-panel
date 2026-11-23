@@ -16,6 +16,8 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type {
+  AlertKind,
+  AlertSeverity,
   AppStackComponentHealth,
   AppStackDeploymentStatus,
   AppStackRetentionPolicy,
@@ -43,6 +45,12 @@ import type {
   HostDaemonStatus,
   HostStatus,
   HostingMode,
+  NotificationChannelKind,
+  NotificationDeliveryStatus,
+  NotificationEvent,
+  NotificationGroup,
+  NotificationLocale,
+  NotificationProblem,
   OperationKind,
   OperationResourceType,
   OperationStatus,
@@ -1380,3 +1388,78 @@ export const firewallBlocks = pgTable("firewall_blocks", {
   note: text("note"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Notifications (ADR-0040). organizationId null is the server's scope. The address of a webhook, its signing key and
+// a bot token live only inside the encrypted config; displayHost and chat are what a page may show.
+export const notificationChannels = pgTable(
+  "notification_channels",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id").references(() => organizations.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<NotificationChannelKind>().notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    groups: jsonb("groups").$type<NotificationGroup[]>().notNull(),
+    recipients: jsonb("recipients").$type<string[]>(),
+    displayHost: text("display_host"),
+    chat: text("chat"),
+    signed: boolean("signed").notNull().default(false),
+    locale: text("locale").$type<NotificationLocale>().notNull().default("it"),
+    configCiphertextBase64: text("config_ciphertext_base64"),
+    configIvBase64: text("config_iv_base64"),
+    configAuthTagBase64: text("config_auth_tag_base64"),
+    configKeyVersion: text("config_key_version").notNull().default("v1"),
+    lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+    updatedByUserId: text("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("uq_notification_channels_server_kind").on(t.kind).where(sql`${t.organizationId} IS NULL`),
+    uniqueIndex("uq_notification_channels_org_kind").on(t.organizationId, t.kind).where(sql`${t.organizationId} IS NOT NULL`),
+  ],
+);
+
+// What a channel was already told: one row per alert open for it, with the event as it was when it opened.
+export const notificationChannelAlerts = pgTable(
+  "notification_channel_alerts",
+  {
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => notificationChannels.id, { onDelete: "cascade" }),
+    alertKey: text("alert_key").notNull(),
+    kind: text("kind").$type<AlertKind>().notNull(),
+    severity: text("severity").$type<AlertSeverity>().notNull(),
+    event: jsonb("event").$type<NotificationEvent>().notNull(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    announcedAt: timestamp("announced_at", { withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.channelId, t.alertKey] })],
+);
+
+export const notificationDeliveries = pgTable(
+  "notification_deliveries",
+  {
+    id: text("id").primaryKey(),
+    channelId: text("channel_id")
+      .notNull()
+      .references(() => notificationChannels.id, { onDelete: "cascade" }),
+    events: jsonb("events").$type<NotificationEvent[]>().notNull(),
+    omitted: integer("omitted").notNull().default(0),
+    openedCount: integer("opened_count").notNull().default(0),
+    closedCount: integer("closed_count").notNull().default(0),
+    test: boolean("test").notNull().default(false),
+    recipient: text("recipient"),
+    locale: text("locale").$type<NotificationLocale>().notNull(),
+    status: text("status").$type<NotificationDeliveryStatus>().notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    problem: text("problem").$type<NotificationProblem>(),
+    httpStatus: integer("http_status"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_notification_deliveries_due").on(t.nextAttemptAt).where(sql`${t.status} = 'pending'`),
+    index("idx_notification_deliveries_channel_created").on(t.channelId, t.createdAt),
+  ],
+);
