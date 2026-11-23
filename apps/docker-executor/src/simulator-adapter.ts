@@ -317,6 +317,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
       ingress: this.ingressFileManager,
       ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
       assertEngineAvailable: () => this.assertEngineAvailable(),
+      holdBackupLane: (stackId) => this.backupState.holdAppStackLane(stackId),
     });
   }
 

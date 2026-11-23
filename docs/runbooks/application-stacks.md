@@ -278,7 +278,9 @@ approval.
    each destination (one after the other), and the application is started again by an action of its own, which the
    history shows after the backup. **The application does not answer for the whole copy.** An application that was
    stopped stays stopped. While the backup runs, every other action on that application is refused
-   (`409 RESOURCE_LOCKED`, to try again later). The copy holds the data volumes only: no image, no settings, no web address and none of the **Valori riservati**.
+   (`409 RESOURCE_LOCKED`, to try again later). The executor keeps the rule by itself: while a copy, restore or
+   removal job of the application runs or is being cleaned up, it refuses to start, restart, install, update or remove
+   that application, also when the panel has already closed its action; stopping it stays possible. The copy holds the data volumes only: no image, no settings, no web address and none of the **Valori riservati**.
 4. **Read the result.** «Completato»: every destination has the copy. «Parziale»: one destination has it and the other
    failed; the backup can be restored. «Non riuscito»: no destination has it; the application runs again and its data
    did not change. The list gives a reason in words; the stable code is the `problem` of the row:

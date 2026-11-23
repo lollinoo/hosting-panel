@@ -64,6 +64,8 @@ export interface SimulatedAppStacksOptions {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
   readonly assertEngineAvailable: () => void;
   readonly now?: () => Date;
+  /** The simulated runner's holdAppStackLane (ADR-0038 K4); absent, no backup job ever holds a lane. */
+  readonly holdBackupLane?: (stackId: string) => (() => void) | null;
 }
 
 type SimState = "created" | "running" | "exited" | "dead";
@@ -102,6 +104,8 @@ const startIndex = (c: SimContainer) => Number(c.labels[APP_STACK_LABELS.startIn
 const byStartDesc = ([ka, a]: [string, SimContainer], [kb, b]: [string, SimContainer]) =>
   startIndex(b) - startIndex(a) || kb.localeCompare(ka);
 const notReady = (message: string) => new AppStackExecutorError("STACK_COMPONENT_NOT_READY", message);
+/** The steps the real engine refuses while a backup job holds the application's lane. */
+const OUTSIDE_BACKUPS: ReadonlySet<AppStackSimStep> = new Set(["create", "start", "restart", "remove"]);
 
 /** In-memory stack engine: the production plan check, names, labels and container builder over a simulated Engine. */
 export class SimulatedAppStacks implements StackExecutorPort {
@@ -402,6 +406,9 @@ export class SimulatedAppStacks implements StackExecutorPort {
     if (mutating && this.busy.has(call.stackId)) {
       throw new AppStackExecutorError("STACK_BUSY", "Another change of this application stack is running");
     }
+    const hold = OUTSIDE_BACKUPS.has(step) ? this.options.holdBackupLane : undefined;
+    const release = hold === undefined ? () => undefined : hold(call.stackId);
+    if (release === null) throw new AppStackExecutorError("STACK_BUSY", "A backup or a restore of this application is running");
     if (mutating) this.busy.add(call.stackId);
     try {
       const result = await fn(fault);
@@ -409,6 +416,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       return result;
     } finally {
       if (mutating) this.busy.delete(call.stackId);
+      release();
     }
   }
 

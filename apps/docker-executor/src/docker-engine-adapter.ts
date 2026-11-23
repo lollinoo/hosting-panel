@@ -1491,6 +1491,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
         },
       },
       readLogs: (ref, tail) => this.readContainerLogs(ref, tail),
+      backupLanes: this.backupRunner,
     });
   }
 

@@ -853,15 +853,24 @@ export class BackupRunner {
     if (existing) {
       return cloneJobStatus(existing.status);
     }
-    if (this.activeSiteIds.has(siteId) || this.activeJobCount >= BACKUP_MAX_RUNNING_JOBS) {
+    this.takeJobLane(siteId);
+    return this.launchJob(jobId, runner);
+  }
+
+  /** Takes the lane of a job and one running slot, or refuses. */
+  private takeJobLane(lane: string): void {
+    if (this.activeSiteIds.has(lane) || this.activeJobCount >= BACKUP_MAX_RUNNING_JOBS) {
       throw new ExecutorCodedError(
         "Another backup job is already in progress",
         "RESOURCE_LOCKED",
       );
     }
-
-    this.activeSiteIds.add(siteId);
+    this.activeSiteIds.add(lane);
     this.activeJobCount += 1;
+  }
+
+  /** Records a job whose lane is already taken and runs it in the background. */
+  private launchJob(jobId: string, runner: (entry: JobRecord) => Promise<void>): BackupJobStatus {
     const initial: BackupJobStatus = {
       jobId,
       state: "running",
@@ -2666,6 +2675,22 @@ export class BackupRunner {
     });
   }
 
+  /**
+   * The lane of an application, taken by the stack engine for a call that can make the application run or change it
+   * (ADR-0038 K4): null while a copy, restore or removal job of the application holds the lane, from its acceptance to
+   * the end of its clean-up. While the engine holds it, no job of the application is accepted. The release is idempotent.
+   */
+  public holdAppStackLane(stackId: string): (() => void) | null {
+    const lane = appStackBackupLane(stackId);
+    if (this.activeSiteIds.has(lane)) return null;
+    this.activeSiteIds.add(lane);
+    let held = true;
+    return () => {
+      if (held) this.activeSiteIds.delete(lane);
+      held = false;
+    };
+  }
+
   /** Executes a validated backup, restore, settle, or archive IPC request. */
   public async run<R extends BackupsIpcRequest>(
     req: R,
@@ -2699,8 +2724,17 @@ export class BackupRunner {
         // A request sent twice answers with the job it already started, without checking the application again.
         const known = this.jobs.get(request.jobId);
         if (known) return cloneJobStatus(known.status) as BackupsResultByAction[R["action"]];
-        await this.assertAppStackAtRest(request.stackId, request.organizationId, request.volumeKeys);
-        return this.startBackgroundJob(appStackBackupLane(request.stackId), request.jobId, (entry) =>
+        // The lane is taken before the check: no start of the stack engine can come between the check and the job.
+        const lane = appStackBackupLane(request.stackId);
+        this.takeJobLane(lane);
+        try {
+          await this.assertAppStackAtRest(request.stackId, request.organizationId, request.volumeKeys);
+        } catch (err) {
+          this.activeSiteIds.delete(lane);
+          this.activeJobCount = Math.max(0, this.activeJobCount - 1);
+          throw err;
+        }
+        return this.launchJob(request.jobId, (entry) =>
           request.action === "stackStart"
             ? this.runAppStackBackupJob(request, entry)
             : this.runAppStackRestoreJob(request, entry),

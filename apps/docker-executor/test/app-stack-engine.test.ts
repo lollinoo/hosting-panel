@@ -1106,6 +1106,76 @@ describe("busy lock", () => {
   });
 });
 
+describe("the backup lane of the application (ADR-0038 K4)", () => {
+  /** The runner's side of the lane: a copy, restore or removal job of the application holds it while `job` is true. */
+  function backupLanes() {
+    const held = new Set<string>();
+    const state = { job: false, asked: [] as string[] };
+    const holdAppStackLane = (stackId: string): (() => void) | null => {
+      state.asked.push(stackId);
+      if (state.job || held.has(stackId)) return null;
+      held.add(stackId);
+      return () => void held.delete(stackId);
+    };
+    return { held, state, holdAppStackLane };
+  }
+  const withLanes = (h: Harness, lanes: ReturnType<typeof backupLanes>) =>
+    new AppStackEngine({ ...h, request: h.fake.request, secretsRootDir: h.root, pullMissingImages: true, allowlist: TEST_ALLOWLIST, backupLanes: lanes });
+  const plan = appStackTestPlan();
+  const web = { plan, componentKey: "web", secretFileContents: [] };
+
+  it("refuses start, restart, create and remove with no Engine request while a job holds it; the other calls do not ask", async () => {
+    const h = await setup();
+    await prepared(h);
+    const lanes = backupLanes();
+    const engine = withLanes(h, lanes);
+    lanes.state.job = true;
+    for (const call of [
+      () => engine.startAppStackComponent(web),
+      () => engine.restartAppStackComponent(web),
+      () => engine.createAppStackComponents({ plan }),
+      () => engine.removeAppStack({ ...REF, removeVolumes: false }),
+    ]) {
+      await expect(call()).rejects.toMatchObject({
+        reason: "STACK_BUSY",
+        code: "RESOURCE_LOCKED",
+        message: "A backup or a restore of this application is running",
+      });
+    }
+    expect(h.fake.log).toEqual([]);
+    expect(lanes.state.asked).toEqual([ID, ID, ID, ID]);
+    // Stopping, reading and preparing never make the application write to its volumes.
+    await engine.stopAppStack(REF);
+    await engine.unpublishAppStackRoutes(REF);
+    await engine.pullAppStackImage({ plan, image: IMAGE });
+    await engine.prepareAppStack({ plan });
+    await engine.getAppStackStatus(REF);
+    await engine.removeAppStackComponents({ plan, componentKeys: ["worker"] });
+    expect(lanes.state.asked).toHaveLength(4);
+  });
+
+  it("is held for the whole change and given back after it, also after a refusal or a failure", async () => {
+    const h = await setup();
+    await prepared(h);
+    const lanes = backupLanes();
+    const engine = withLanes(h, lanes);
+    const held = h.fake.hold(/^POST \/containers\/[^/]+\/start$/);
+    const starting = engine.startAppStackComponent(web);
+    await vi.waitFor(() => expect(h.fake.log.some((line) => line.endsWith("/start"))).toBe(true));
+    expect([...lanes.held]).toEqual([ID]);
+    held.release();
+    await expect(starting).resolves.toMatchObject({ outcome: "started" });
+    expect(lanes.held.size).toBe(0);
+    await expect(engine.startAppStackComponent({ ...web, componentKey: "other" })).rejects.toMatchObject({ reason: "STACK_PLAN_INVALID" });
+    expect(lanes.held.size).toBe(0);
+    h.fake.failNext(/^POST \/containers\/[^/]+\/restart/, 500);
+    await expect(engine.restartAppStackComponent(web)).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+    expect(lanes.held.size).toBe(0);
+    await expect(engine.removeAppStack({ ...REF, removeVolumes: true })).resolves.toBeDefined();
+    expect(lanes.held.size).toBe(0);
+  });
+});
+
 describe("idempotency (5.18)", () => {
   it("a second identical call issues only the mutating requests of the table", async () => {
     const h = await setup();

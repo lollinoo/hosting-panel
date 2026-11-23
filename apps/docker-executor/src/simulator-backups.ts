@@ -168,6 +168,8 @@ export class SimulatedBackups {
   private readonly pendingFailures: BackupFailureClass[] = [];
   private readonly siteStates = new Map<string, BackupSiteState>();
   private readonly panelJobs: string[] = [];
+  /** Lanes of applications the simulated stack engine holds (see holdAppStackLane). */
+  private readonly engineLanes = new Set<string>();
   private held = false;
   private testInFlight = false;
 
@@ -223,8 +225,11 @@ export class SimulatedBackups {
       case "stackStart":
       case "stackRestore": {
         const known = this.jobs.has(req.jobId);
-        // The real runner checks the application before it accepts a new job, never for a request sent twice.
-        if (!known) this.assertAppStackAtRest(req.stackId, req.organizationId, req.volumeKeys);
+        // The real runner takes the lane, then checks the application; never for a request sent twice.
+        if (!known) {
+          this.assertCanStartJob(stackLane(req.stackId));
+          this.assertAppStackAtRest(req.stackId, req.organizationId, req.volumeKeys);
+        }
         const status =
           req.action === "stackStart"
             ? this.enqueueJob("start", req.jobId, stackLane(req.stackId), { target: req.target })
@@ -352,6 +357,20 @@ export class SimulatedBackups {
   /** Sets what siteState answers for a service instance. */
   public setSiteState(serviceInstanceId: string, state: BackupSiteState): void {
     this.siteStates.set(serviceInstanceId, { ...state });
+  }
+
+  /** The real runner's holdAppStackLane: null while a job of the application runs, else held until released. */
+  public holdAppStackLane(stackId: string): (() => void) | null {
+    const lane = stackLane(stackId);
+    if (this.engineLanes.has(lane) || [...this.jobs.values()].some((job) => job.state === "running" && job.siteId === lane)) {
+      return null;
+    }
+    this.engineLanes.add(lane);
+    let held = true;
+    return () => {
+      if (held) this.engineLanes.delete(lane);
+      held = false;
+    };
   }
 
   /** Lists every accepted copy or restore of an application, in order. */
@@ -509,6 +528,9 @@ export class SimulatedBackups {
   }
 
   private assertCanStartJob(siteId: string): void {
+    if (this.engineLanes.has(siteId)) {
+      throw new ExecutorCodedError("Another backup job is already in progress", "RESOURCE_LOCKED");
+    }
     let runningTotal = 0;
     for (const job of this.jobs.values()) {
       if (job.state !== "running") {

@@ -181,6 +181,27 @@ describe("simulated jobs of application backups", () => {
     await expect(status(sim, OP(2))).resolves.toMatchObject({ state: "unknown" });
   });
 
+  it("lets the stack engine hold the lane of an application, as the real runner does", async () => {
+    const sim = new SimulatedBackups();
+    const release = sim.holdAppStackLane(STACK);
+    expect(release).not.toBeNull();
+    expect(sim.holdAppStackLane(STACK)).toBeNull();
+    await expect(sim.handle(copyReq(OP(1)))).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    await expect(
+      sim.handle({ action: "stackForget", jobId: OP(1, "-forget"), stackId: STACK, target: S3, snapshotIds: ["f".repeat(64)] }),
+    ).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    expect(sim.appStackJobs()).toEqual([]);
+    // Another application is another lane.
+    await expect(sim.handle(copyReq(OP(2), { stackId: OTHER_STACK }))).resolves.toMatchObject({ state: "running" });
+    release?.();
+
+    sim.holdJobs();
+    await expect(sim.handle(copyReq(OP(3)))).resolves.toMatchObject({ state: "running" });
+    expect(sim.holdAppStackLane(STACK)).toBeNull();
+    sim.finishHeld();
+    expect(sim.holdAppStackLane(STACK)).not.toBeNull();
+  });
+
   it("forgets every job of an application at a restart, a restore included", async () => {
     const sim = new SimulatedBackups();
     const snapshotId = await copied(sim, OP(1));
@@ -305,6 +326,33 @@ describe("the simulated executor: backups of a simulated application", () => {
       state: "running",
     });
     await expect(sim.backups({ action: "status", jobId: OP(2, "-apply") })).resolves.toMatchObject({ state: "succeeded" });
+  });
+
+  it("refuses start, restart, create and remove while a job of the application runs; stop passes", async () => {
+    const sim = await deployed();
+    await sim.stopAppStack(ref);
+    sim.backupState.holdJobs();
+    await expect(sim.backups(copy(OP(1)))).resolves.toMatchObject({ state: "running" });
+    const mutations = sim.appStacks.appStackMutations.length;
+    const webCall = { plan, componentKey: "web", secretFileContents: [] };
+    const guarded = [
+      () => sim.startAppStackComponent(webCall),
+      () => sim.restartAppStackComponent(webCall),
+      () => sim.createAppStackComponents({ plan }),
+      () => sim.removeAppStack({ ...ref, removeVolumes: true }),
+    ];
+    for (const call of guarded) {
+      await expect(call()).rejects.toMatchObject({
+        code: "RESOURCE_LOCKED",
+        reason: "STACK_BUSY",
+        message: "A backup or a restore of this application is running",
+      });
+    }
+    expect(sim.appStacks.appStackMutations).toHaveLength(mutations);
+    await expect(sim.stopAppStack(ref)).resolves.toBeDefined();
+
+    sim.backupState.finishHeld();
+    for (const call of guarded) await expect(call()).resolves.toBeDefined();
   });
 
   it("refuses another customer's application, a volume the application does not have and an unknown application", async () => {

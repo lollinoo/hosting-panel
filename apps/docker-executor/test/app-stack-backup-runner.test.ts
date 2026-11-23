@@ -3,7 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import type { BackupsIpcRequest, BackupTarget } from "@hosting-panel/contracts";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { BackupRunner, type BackupRunnerDeps, type DockerRequest } from "../src/index.js";
+import { AppStackEngine } from "../src/app-stacks/index.js";
+import {
+  BACKUP_RESTORE_FETCH_TIMEOUT_MS,
+  BackupRunner,
+  DockerEngineSocketAdapter,
+  type BackupRunnerDeps,
+  type DockerRequest,
+} from "../src/index.js";
+import { createAppStackFakeEngine } from "./support/app-stack-fake-engine.js";
+import { TEST_ALLOWLIST, appStackTestPlan } from "./support/app-stack-plans.js";
 
 const BACKUP_KEY = "deadbeef".repeat(8);
 const SNAPSHOT_ID = "a1b2c3d4".repeat(8);
@@ -139,6 +148,15 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
   const created: Created[] = [];
   const requests: Array<{ method: string; path: string; body: unknown }> = [];
   const behaviors = new Map<string, StepBehavior>();
+  /** The first request whose "METHOD path" matches waits there until released. */
+  const gates: Array<{ readonly match: RegExp; readonly arrive: () => void; readonly released: Promise<void> }> = [];
+  const gate = (match: RegExp) => {
+    let arrive!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => (arrive = resolve));
+    gates.push({ match, arrive, released: new Promise<void>((resolve) => (release = resolve)) });
+    return { reached, release };
+  };
   const fetchSpy = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
     const method = (init?.method ?? "GET").toUpperCase();
     if (method === "GET") return new Response("<ListBucketResult/>", { status: 200 });
@@ -151,6 +169,12 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
   const empty = (statusCode: number) => ({ statusCode, body: Buffer.alloc(0) });
   const request: DockerRequest = async (method, reqPath, body) => {
     requests.push({ method, path: reqPath, body });
+    const held = gates.findIndex((g) => g.match.test(`${method} ${reqPath}`));
+    if (held >= 0) {
+      const [g] = gates.splice(held, 1);
+      g?.arrive();
+      await g?.released;
+    }
     const url = new URL(`http://docker${reqPath}`);
     const p = url.pathname;
     if (method === "GET" && p === "/containers/json") {
@@ -233,6 +257,7 @@ async function setup(opts?: { steps?: (name: string) => StepBehavior }) {
     requests,
     fetchSpy,
     networkSpy,
+    gate,
     createdNames: () => created.map((c) => c.name),
     lists: () => requests.filter((r) => r.path.startsWith("/containers/json")).length,
     newRunner: () => new BackupRunner(deps),
@@ -798,5 +823,169 @@ describe("the job lane of an application", () => {
       jobId: OP(1),
       state: "unknown",
     });
+  });
+});
+
+describe("the stack engine and a job of the same application (ADR-0038 K4)", () => {
+  const REF = { stackId: STACK, organizationId: ORG };
+  const BACKUP_RUNNING = {
+    code: "RESOURCE_LOCKED",
+    reason: "STACK_BUSY",
+    message: "A backup or a restore of this application is running",
+  };
+
+  /** The stack engine of the same executor on a Docker of its own, sharing the runner's lanes as the production adapter does. */
+  async function stackEngine(env: Env) {
+    const fake = createAppStackFakeEngine();
+    const plan = appStackTestPlan(REF);
+    const engine = new AppStackEngine({
+      request: fake.request,
+      secretsRootDir: await mkdtemp(path.join(env.tmp, "app-secrets-")),
+      pullMissingImages: false,
+      allowlist: TEST_ALLOWLIST,
+      routes: { write: async () => ({ changed: false, hostnames: [] }), remove: async () => false, read: async () => [] },
+      proxy: { containerName: "hp_ingress_proxy_test", ensure: async () => undefined },
+      readLogs: async () => [],
+      backupLanes: env.runner,
+    });
+    for (const { image } of plan.components) fake.images.set(image, { repoDigests: [image] });
+    await engine.prepareAppStack({ plan });
+    await engine.createAppStackComponents({ plan });
+    fake.log.length = 0;
+    const web = { plan, componentKey: "web", secretFileContents: [] };
+    return {
+      engine,
+      fake,
+      plan,
+      /** The calls that would make the application run, or change what it is made of, under a job. */
+      guarded: [
+        () => engine.startAppStackComponent(web),
+        () => engine.restartAppStackComponent(web),
+        () => engine.createAppStackComponents({ plan }),
+        () => engine.removeAppStack({ ...REF, removeVolumes: true }),
+      ],
+    };
+  }
+  type StackEngine = Awaited<ReturnType<typeof stackEngine>>;
+
+  async function expectEngineRefused(s: StackEngine): Promise<void> {
+    for (const call of s.guarded) await expect(call()).rejects.toMatchObject(BACKUP_RUNNING);
+    expect(s.fake.log).toEqual([]);
+  }
+
+  async function expectEngineFree(s: StackEngine): Promise<void> {
+    for (const call of s.guarded) await expect(call()).resolves.toBeDefined();
+  }
+
+  async function until(done: () => boolean): Promise<void> {
+    for (let i = 0; i < 1_000 && !done(); i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(done()).toBe(true);
+  }
+
+  it("refuses start, restart, create and remove while a restore writes, before any Engine request; stop passes", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2);
+    const s = await stackEngine(env);
+    const apply = OP(2, "-apply");
+    const writing = env.gate(new RegExp(`^POST /containers/id_hp_bk_${apply}_rs_data/start$`));
+    await expect(env.runner.run(restoreReq(apply))).resolves.toMatchObject({ state: "running" });
+    await writing.reached;
+    await expectEngineRefused(s);
+    // Stopping never harms a copy or a restore.
+    await expect(s.engine.stopAppStack(REF)).resolves.toMatchObject({ components: expect.any(Array) });
+    writing.release();
+    await expect(settled(env.runner, apply)).resolves.toMatchObject({ state: "succeeded" });
+    await expectEngineFree(s);
+  });
+
+  it("holds the lane from the acceptance of a job, before its first container, to the end of its clean-up after a kill", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2);
+    const s = await stackEngine(env);
+    const apply = OP(2, "-apply");
+    const creating = env.gate(new RegExp(`^POST /containers/create\\?name=hp_bk_${apply}_rs_data$`));
+    const hung = env.gate(new RegExp(`^POST /containers/id_hp_bk_${apply}_rs_data/wait$`));
+    const removing = env.gate(new RegExp(`^DELETE /containers/id_hp_bk_${apply}_rs_data\\?`));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    cleanups.push(async () => vi.useRealTimers());
+
+    await env.runner.run(restoreReq(apply));
+    await creating.reached;
+    await expectEngineRefused(s);
+    creating.release();
+    await hung.reached;
+    await vi.advanceTimersByTimeAsync(BACKUP_RESTORE_FETCH_TIMEOUT_MS);
+    await removing.reached;
+    expect(env.requests).toContainEqual(expect.objectContaining({ method: "POST", path: `/containers/id_hp_bk_${apply}_rs_data/kill` }));
+    await expectEngineRefused(s);
+    removing.release();
+    hung.release();
+    await expect(settled(env.runner, apply)).resolves.toMatchObject({ state: "failed", failure: "timeout" });
+    await expectEngineFree(s);
+  });
+
+  it("refuses a change of the engine that arrives while a job's check reads Docker", async () => {
+    const env = await setup({ steps: upStep });
+    const s = await stackEngine(env);
+    const checking = env.gate(/^GET \/containers\/json/);
+    const accepted = env.runner.run(copyReq(OP(1)));
+    await checking.reached;
+    await expectEngineRefused(s);
+    checking.release();
+    await expect(accepted).resolves.toMatchObject({ state: "running" });
+    await expect(settled(env.runner, OP(1))).resolves.toMatchObject({ state: "succeeded" });
+    await expectEngineFree(s);
+  });
+
+  it("refuses a copy or a restore while the engine starts the application, before the application is looked at", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2);
+    const s = await stackEngine(env);
+    const held = s.fake.hold(/^POST \/containers\/[^/]+\/start$/);
+    const starting = s.engine.startAppStackComponent({ plan: s.plan, componentKey: "web", secretFileContents: [] });
+    await until(() => s.fake.log.some((line) => line.endsWith("/start")));
+    for (const req of [copyReq(OP(3)), restoreReq(OP(2, "-apply"))]) {
+      await expect(env.runner.run(req)).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    }
+    expect(env.requests).toEqual([]);
+    held.release();
+    await expect(starting).resolves.toMatchObject({ outcome: "started" });
+    await expect(env.runner.run(copyReq(OP(3)))).resolves.toMatchObject({ state: "running" });
+    await expect(settled(env.runner, OP(3))).resolves.toMatchObject({ state: "succeeded" });
+  });
+
+  it("gives the lane and the job slot back when the check refuses", async () => {
+    const env = await setup({ steps: upStep });
+    const s = await stackEngine(env);
+    env.docker.containers = [containerView("running")];
+    for (const n of [1, 2, 3]) await expect(env.runner.run(copyReq(OP(n)))).rejects.toMatchObject({ code: "RESOURCE_LOCKED" });
+    await expect(s.guarded[0]!()).resolves.toMatchObject({ outcome: "started" });
+    env.docker.containers = [containerView("exited")];
+    await expect(env.runner.run(copyReq(OP(4)))).resolves.toMatchObject({ state: "running" });
+    await expect(env.runner.run(copyReq(OP(5), { stackId: OTHER_STACK, volumeKeys: ["data"] }))).resolves.toMatchObject({
+      state: "running",
+    });
+    await settled(env.runner, OP(4));
+    await settled(env.runner, OP(5));
+  });
+
+  it("is shared by the runner and the engine of the production adapter", async () => {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), "hp-runner-lane-"));
+    cleanups.push(() => rm(tmp, { recursive: true, force: true }));
+    const adapter = new DockerEngineSocketAdapter({
+      // No Docker answers here: a request that reached it would fail with DOCKER_ENGINE_UNAVAILABLE.
+      dockerSocketPath: path.join(tmp, "docker.sock"),
+      secretsRootDir: path.join(tmp, "secrets"),
+      ingressRootDir: path.join(tmp, "ingress"),
+      pullMissingImages: false,
+      appImageAllowlist: TEST_ALLOWLIST,
+    });
+    const runner = (adapter as unknown as { readonly backupRunner: BackupRunner }).backupRunner;
+    const web = { plan: appStackTestPlan(REF), componentKey: "web", secretFileContents: [] };
+    const release = runner.holdAppStackLane(STACK);
+    expect(release).not.toBeNull();
+    await expect(adapter.startAppStackComponent(web)).rejects.toMatchObject(BACKUP_RUNNING);
+    release?.();
+    await expect(adapter.startAppStackComponent(web)).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
   });
 });
