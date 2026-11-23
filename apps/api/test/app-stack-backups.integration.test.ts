@@ -26,7 +26,8 @@ import {
   setPolicyTargets,
   users,
 } from "@hosting-panel/database";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ExecutorIpcClientError } from "@hosting-panel/docker-executor";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { enqueueAppStackPrune } from "../src/app-stacks/app-stack-backup-retention.js";
 import { BackupSchedulerService, ensurePlatformOpsOrg } from "../src/backups/backup-scheduler.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
@@ -301,6 +302,56 @@ describe("application backups HTTP API (ADR-0038)", () => {
       status: "stopping",
     });
     expect(Object.keys(audit!.details as Json).sort()).toEqual(["backupId", "operationId", "outcome", "requestId", "sourceBackupId", "status"]);
+  });
+
+  it("a restore whose answer is lost holds the application until its job's end is read: no start in the panel or in the executor", async () => {
+    const starts = vi.spyOn(h.sim.appStacks, "startAppStackComponent");
+    const stackId = await running("in-sospeso");
+    const startReq = starts.mock.calls.map(([req]) => req).find((req) => req.plan.stackId === stackId)!;
+    starts.mockRestore();
+    const backupId = await saved(stackId);
+    const opRow = async (id: string) => (await db().select().from(operations).where(eq(operations.id, id)))[0]!;
+    const runningNow = () => Object.values(h.sim.appStacks.getAppStackSnapshot(stackId)?.containers ?? {}).filter((c) => c.state === "running");
+    const worker = h.app.nestApp.get(OutboxWorkerService);
+
+    // The executor accepts the write-back and goes on writing; its answer never reaches the panel.
+    const real = h.sim.backups;
+    h.sim.backups = (async (req: Parameters<typeof real>[0]) => {
+      if (req.action !== "stackRestore") return real.call(h.sim, req);
+      h.sim.backupState.holdJobs();
+      await real.call(h.sim, req);
+      throw new ExecutorIpcClientError("no answer", "OPERATION_AMBIGUOUS", 502, true);
+    }) as typeof real;
+    try {
+      const res = await restore(stackId, backupId, "in-sospeso");
+      expect(res.status, res.raw).toBe(202);
+      const operationId = res.body.data.operationId as string;
+      for (let round = 0; round < 6 && (await opRow(operationId)).status !== "unknown"; round += 1) await worker.processPendingOnce();
+      expect(await opRow(operationId)).toMatchObject({ status: "unknown", errorCode: "OPERATION_AMBIGUOUS" });
+
+      // The panel's lock refuses the customer's start, and the executor would refuse one that reached it.
+      expectRefusal(await act(h.a.token, stackId, "start"), 409, "RESOURCE_LOCKED");
+      await expect(h.sim.startAppStackComponent(startReq)).rejects.toMatchObject({ code: "RESOURCE_LOCKED", reason: "STACK_BUSY" });
+      expect(runningNow()).toEqual([]);
+
+      // Recovery only reads: while the job writes, the restore stays to be verified.
+      expect((await worker.recoverUnknownOperations()).recoveryErrors).toBeUndefined();
+      expect((await opRow(operationId)).status).toBe("unknown");
+      expectRefusal(await act(h.a.token, stackId, "start"), 409, "RESOURCE_LOCKED");
+
+      h.sim.backupState.finishHeld();
+      expect((await worker.recoverUnknownOperations()).recoveryErrors).toBeUndefined();
+      expect((await opRow(operationId)).status).toBe("succeeded");
+      expect(await settle(stackId)).toBe("running");
+      expect(runningNow()).not.toEqual([]);
+      const writes = h.sim.backupState.appStackJobs().filter((job) => job.stackId === stackId && job.action === "stackRestore");
+      expect(writes).toHaveLength(1);
+      const source = ((await list(stackId)).body.data.backups as Json[]).find((b) => b.id === backupId)!;
+      expect(source.restore).toMatchObject({ status: "succeeded", problem: null });
+    } finally {
+      h.sim.backups = real;
+      h.sim.backupState.finishHeld();
+    }
   });
 
   it("the Idempotency-Key is required; a replay answers the same action once; a second request waits its turn", async () => {
