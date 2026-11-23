@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Inject, Injectable } from "@nestjs/common";
+import { Inject, Injectable, Optional } from "@nestjs/common";
 import {
   APP_AUDIT_ACTIONS,
   APP_AUDIT_TARGET_TYPES,
@@ -52,6 +52,7 @@ import {
   DOCKER_EXECUTOR_TOKEN,
   type ControlPlaneRuntimeConfig,
 } from "../tokens.js";
+import { AppStackLinksApplier } from "./app-stack-links-applier.js";
 import {
   APP_STACK_OBSERVE_BATCH,
   APP_STACK_OBSERVE_PASS_BUDGET_MS,
@@ -107,6 +108,7 @@ export class AppStackObserverService {
     @Inject(DNS_LOOKUP_TOKEN) private readonly dns: DnsLookup,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) private readonly config: ControlPlaneRuntimeConfig,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
+    @Optional() @Inject(AppStackLinksApplier) private readonly links: AppStackLinksApplier | null = null,
   ) {}
 
   public startBackgroundLoop(): void {
@@ -153,7 +155,11 @@ export class AppStackObserverService {
     forceDns: (domainId: string) => boolean,
   ): Promise<void> {
     if (this.config.runtimeBackend === "disabled") return;
-    if (only === null) await this.#observeHealth(now);
+    if (only === null) {
+      await this.#observeHealth(now);
+      // Links between a database and an application that are still to attach or to detach (ADR-0039).
+      await this.links?.retry();
+    }
     const db = this.dbClient.db;
     const rows = await db
       .select({

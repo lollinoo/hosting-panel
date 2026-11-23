@@ -36,6 +36,7 @@ import { computeAppStackComponentHash, verifyAppStackPlanHash } from "@hosting-p
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
+import { AppStackLinksApplier } from "./app-stack-links-applier.js";
 import { recoverAppStackOperation } from "./app-stack-recovery.js";
 import {
   APP_STACK_FAILURE,
@@ -130,14 +131,17 @@ const healthMap = (rows: HealthRows) => new Map(rows.map((h) => [h.componentKey,
 @Injectable()
 export class AppStackRuntime {
   readonly #deps: AppStackRuntimeDeps;
+  readonly #links: AppStackLinksApplier;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) dbClient: DatabaseClient,
     @Inject(DOCKER_EXECUTOR_TOKEN) executor: DockerExecutorPort,
     @Inject(CONTROL_PLANE_CONFIG_TOKEN) config: ControlPlaneRuntimeConfig,
     @Optional() @Inject(APP_STACK_RUNTIME_CLOCK) clock?: AppStackRuntimeClock,
+    @Optional() @Inject(AppStackLinksApplier) links?: AppStackLinksApplier,
   ) {
     this.#deps = { db: dbClient.db, executor, config, clock: clock ?? SYSTEM_APP_STACK_CLOCK };
+    this.#links = links ?? new AppStackLinksApplier(dbClient, executor, config);
   }
 
   /** Worker dispatch for every APP_STACK_OPERATION_KINDS kind. Throws to fail. */
@@ -365,6 +369,9 @@ export class AppStackRuntime {
         ctx,
         "start",
         async () => {
+          // Private links to databases (ADR-0039) are in place before anything starts; none of them can fail this step.
+          await this.#renew(ctx);
+          await this.#links.rollout(stack, plan.components);
           const files = await this.#secretFiles(ctx, plan);
           const again = deploy ? (st.previous === null ? [] : appStackRestartSet(plan, st.created ?? [])) : restart ? plan.components.map((c) => c.key) : [];
           for (const component of plan.components) {

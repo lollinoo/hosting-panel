@@ -6,6 +6,8 @@ import {
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
   type AppStackCreateIpcResult,
+  type AppStackLinksIpcRequest,
+  type AppStackLinksIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPrepareIpcResult,
@@ -218,6 +220,33 @@ export class FakeStackExecutor implements StackExecutorPort {
       for (const v of removedVolumes) s.volumes.delete(v);
       return { removedComponents, removedNetworks, removedVolumes, retainedVolumes: volumes.filter((v) => !removedVolumes.includes(v)) };
     });
+  }
+
+  /** Applications each database is attached to (ADR-0039). */
+  public readonly links = new Map<string, Set<string>>();
+
+  public syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    return this.#call(
+      "syncAppStackLinks",
+      req,
+      () => {
+        const attached = this.links.get(req.stackId) ?? new Set<string>();
+        this.links.set(req.stackId, attached);
+        if (!this.stack(req.stackId).components.has(req.componentKey)) {
+          return { container: false, links: req.consumerStackIds.map((consumerStackId) => ({ consumerStackId, outcome: "pending" as const })), disconnected: [] };
+        }
+        const disconnected = [...attached].filter((id) => !req.consumerStackIds.includes(id)).sort();
+        for (const id of disconnected) attached.delete(id);
+        const links = req.consumerStackIds.map((consumerStackId) => {
+          if (attached.has(consumerStackId)) return { consumerStackId, outcome: "already_connected" as const };
+          if (!this.stack(consumerStackId).networks.internal) return { consumerStackId, outcome: "pending" as const };
+          attached.add(consumerStackId);
+          return { consumerStackId, outcome: "connected" as const };
+        });
+        return { container: true, links, disconnected };
+      },
+      req.componentKey,
+    );
   }
 
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {

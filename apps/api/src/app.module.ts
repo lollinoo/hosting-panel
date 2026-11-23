@@ -9,6 +9,7 @@ import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
+import { AppStackLinksApplier } from "./app-stacks/app-stack-links-applier.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
@@ -249,6 +250,7 @@ export class AppModule {
         AppTemplatesService,
         AppStacksService,
         AppStackDomainsService,
+        AppStackLinksApplier,
         AppStackRuntime,
         AppStackObserverService,
         // One per app: site and stack log reads share the panel-wide caps (ADR 0026 limit 27).
