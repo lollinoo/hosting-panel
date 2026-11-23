@@ -18,7 +18,12 @@ const digestsOf = (templates: readonly { source: string }[]) => [
 // The applications of ADR-0035; the databases came with ADR-0039, which names their images itself.
 const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => t.category !== APP_DATABASE_TEMPLATE_CATEGORY));
 const databaseDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => t.category === APP_DATABASE_TEMPLATE_CATEGORY));
-const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
+const scripts = [
+  "accept-app-stack-engine.mjs",
+  "accept-app-stack-http-cache.mjs",
+  "accept-app-stack-worker-storage.mjs",
+  "accept-app-stack-databases.mjs",
+];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
   it("ADR-0035 is approved and cites existing paths", () => {
