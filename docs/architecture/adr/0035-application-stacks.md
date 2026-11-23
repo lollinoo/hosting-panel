@@ -146,7 +146,7 @@ Il TLS dei domini degli stack è solo ACME, con il risolutore che già serve i s
 
 ### 2.11 Volumi e backup
 
-I volumi sono volumi Docker con nome per stack (`hp_appvol_<stackId>_<volumeKey>`, driver locale, nessuna quota di dimensione). La conservazione predefinita è `retain`: upgrade e rollback non toccano mai un volume, e la cancellazione di uno stack lascia i volumi salvo una richiesta esplicita, che chiede di riscrivere il nome dello stack e una casella separata. Il backup degli stack **non è supportato** in questo rilascio (D6): la route esiste solo per rispondere `422 NOT_SUPPORTED` (prova B4), e i backup locali e S3 dei siti e del pannello non includono gli stack.
+I volumi sono volumi Docker con nome per stack (`hp_appvol_<stackId>_<volumeKey>`, driver locale, nessuna quota di dimensione). La conservazione predefinita è `retain`: upgrade e rollback non toccano mai un volume, e la cancellazione di uno stack lascia i volumi salvo una richiesta esplicita, che chiede di riscrivere il nome dello stack e una casella separata. Il backup degli stack **non è supportato** in questo rilascio (D6): la route esiste solo per rispondere `422 NOT_SUPPORTED` (prova B4), e i backup locali e S3 dei siti e del pannello non includono gli stack. **Sostituito da `ADR-0038`** (`docs/architecture/adr/0038-application-backups.md`): dove il backup dei siti è disponibile la route avvia un backup dei volumi dell'applicazione; i backup dei siti e del pannello continuano a non includere gli stack.
 
 ### 2.12 Il catalogo iniziale
 
@@ -295,7 +295,7 @@ Le dodici decisioni del §24 della specifica, proposte e assunte da questa esecu
 | D3 | al più 8 componenti per stack | `APP_TEMPLATE_LIMITS.services = 8`, ricontrollato dall'esecutore | approvata dal proprietario (2026-11-22) |
 | D4 | immagini approvate e fissate a digest | digest obbligatorio e allowlist di codice di tre righe (§2.5) | approvata dal proprietario (2026-11-22); l'allowlist e i digest restano da confermare (§8.1, BLOCKED.md #4) |
 | D5 | parametri `secret` sempre come file | `X_FILE` e file in sola lettura; nessun segreto nell'ambiente | approvata dal proprietario (2026-11-22) |
-| D6 | backup degli stack non supportato | `NOT_SUPPORTED`; nessun flag | approvata dal proprietario (2026-11-22) |
+| D6 | backup degli stack non supportato | `NOT_SUPPORTED`; nessun flag | approvata dal proprietario (2026-11-22); sostituita da `ADR-0038` (`PROPOSTO`) |
 | D7 | porte TCP/UDP dietro un gate | `stackPublicPortsAvailable = false`; `x-hp-ports` rifiutato | approvata dal proprietario (2026-11-22) |
 | D8 | build Git dietro un gate | `gitBuildsAvailable = false`; `build` rifiutato | approvata dal proprietario (2026-11-22) |
 | D9 | la rollback non inverte i database | i volumi non si toccano; avviso nell'anteprima del cambio | approvata dal proprietario (2026-11-22) |
@@ -353,7 +353,7 @@ Codice: `apps/web/src/components/admin/template-catalog.tsx`, `apps/web/src/comp
 2. **Il gate di downgrade non vede i volumi conservati di stack cancellati**: i dati restano in volumi Docker che la release più vecchia non vede e non rimuove.
 3. **Dopo un downgrade forzato** (`--allow-feature-loss`) i container degli stack restano accesi senza gestione.
 4. **La console `hp-web` (tcp 3000) è raggiungibile da ogni bridge** per la regola congelata del firewall; è protetta dalla sessione. Nella prova su questa macchina la porta 3000 è risultata rifiutata da entrambi i gateway degli stack (passo `no-control-plane-reach`), ma la regola resta quella e il limite vale dove si applica.
-5. **Nessun backup degli stack** (D6).
+5. **Nessun backup degli stack** (D6). Vale per questo rilascio: `ADR-0038` aggiunge il backup e il ripristino di un'applicazione.
 6. **Nessuna porta TCP/UDP pubblica e nessuna build Git** (Wave P e Wave G).
 7. **I digest si aggiornano a mano**: un'immagine nuova richiede una versione nuova del modello.
 8. **Le descrizioni inglesi dei modelli iniziali non sono memorizzate**: esistono solo nel codice e nella documentazione.

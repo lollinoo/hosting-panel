@@ -134,9 +134,39 @@ Backup programmati delle applicazioni, ripristino in un'applicazione nuova o dop
 
 ## 4. Come è stato costruito
 
-Compilato a lavoro finito.
+- **Contratti.** `packages/contracts/src/app-templates/stack-backups.ts` ha i tipi, gli stati e le classi di problema di un backup, i numeri della conservazione e del limite orario e la forma della risposta; `packages/contracts/src/app-templates/stack-operations.ts` aggiunge `stack.backup`, `stack.restore` e `stack.prune`; `packages/contracts/src/ipc-schemas.ts` aggiunge i lavori dell'esecutore (la copia, `stackRestore`, `stackForget`).
+- **Database.** `packages/database/migrations/0027_app_stack_backups.sql` crea le due tabelle di K9; `packages/database/src/app-stack-backups-repository.ts` le legge e le scrive, e chiude una riga rimasta aperta.
+- **Esecutore.** `apps/docker-executor/src/app-stack-backup-jobs.ts` costruisce i container dei lavori (K4); `apps/docker-executor/src/backup-runner.ts` li esegue e, prima di accettarne uno, controlla che i volumi siano dell'applicazione e che nessun suo container sia acceso; `apps/docker-executor/src/backup-jobs.ts` dà la cartella `stacks/<stackId>` del repository. `apps/docker-executor/src/simulator-backups.ts` risponde allo stesso modo senza Docker.
+- **API.** `apps/api/src/app-stacks/app-stack-backups.service.ts` controlla la richiesta e la mette in coda; `apps/api/src/app-stacks/app-stack-backup-runtime.ts` è il lavoro delle tre operazioni (K2, K5, K6), con la lettura dello stato dopo una risposta persa; `apps/api/src/app-stacks/app-stack-backup-retention.ts` applica la regola di K7 e `apps/api/src/backups/backup-scheduler.service.ts` la avvia con il giro notturno; le route di K11 sono in `apps/api/src/controllers/app-stacks.controller.ts` e in `docs/api/openapi.yaml`.
+- **Pagina.** `apps/web/src/components/app-stacks/app-stack-backups.tsx` è la sezione «Backup» della pagina dell'applicazione; i testi sono in `apps/web/src/i18n/it.ts` e `apps/web/src/i18n/en.ts`.
+- **Installazione.** `infra/linux/lib/common.sh` e `infra/linux/update.sh` hanno il controllo del downgrade (K10); `infra/linux/hp-restore-panel.sql` chiude i backup e i ripristini rimasti aperti (K9).
+
+Scostamenti dalla proposta scritta prima del codice:
+
+- **Il comando di ripristino è cambiato dopo la prova su Docker reale.** La prima forma (`<snapshot>:/data/<volumeKey>` come origine) riportava il contenuto del volume ma non il proprietario e i permessi della cartella del volume stesso: un volume `65534:65534` con permessi `750` tornava `0:0` con `755`. K5 descrive la forma che è nel codice.
+- **Il numero dei backup di sicurezza conservati** (`APP_STACK_PRE_RESTORE_BACKUPS_KEPT`) è quello che la pagina mostra; la regola dei siti, che il codice riusa, conta per conto suo. Che i due numeri coincidano lo tiene fermo una prova (`apps/api/test/app-stack-backup-retention.unit.test.ts`), non una riga di codice.
 
 ## 5. Che cosa è provato
 
 - **Con Docker reale, prima del codice** (prova usa-e-getta del 2026-11-23, `restic` 0.19.1): `restic init` come `0:<gid>` senza capacità su una cartella `0770`; copia come utente `0` con la sola `DAC_READ_SEARCH` di due volumi con file di più proprietari, permessi `0000`, setuid, setgid, collegamenti e una pipe; la stessa copia senza la capacità fallisce (uscita `3`); ripristino per volume con le quattro capacità e il repository in sola lettura, elenco di proprietari, permessi, collegamenti e contenuti identico a prima.
-- Il resto è compilato a lavoro finito.
+- **Con Docker reale, sul codice** (`infra/linux/accept-app-stack-backups.mjs`, 24 passi su 24 il 2026-11-23, una destinazione locale): l'adattatore di produzione dietro un socket che lascia passare solo le richieste previste (74 richieste, nessuna rifiutata, 9 container creati). Un'applicazione accesa è rifiutata, come quella di un altro cliente e un volume che manca; a applicazione ferma un solo snapshot contiene i due volumi; i container dei lavori hanno i privilegi di K4 e nient'altro; i file del repository sono del gruppo dell'esecutore, senza permessi per gli altri, e non contengono in chiaro né i dati né la chiave; dopo aver rovinato i dati, il ripristino riporta contenuti, proprietari, permessi (setuid e setgid compresi) e date delle cartelle, e l'applicazione riparte e li legge; lo stesso identificativo di lavoro risponde lo stesso lavoro senza una seconda richiesta a Docker; la rimozione di uno snapshot lo toglie, e su un repository che non esiste non crea nulla. Alla fine nessun oggetto preesistente è cambiato e nulla resta sul server.
+- **Costruzione dei lavori** (`apps/docker-executor/test/app-stack-backup-jobs.test.ts`): volumi in sola lettura per la copia, un solo volume scrivibile e il repository in sola lettura per il ripristino, capacità di K4, nessuna etichetta `io.hostingpanel.stack_id`, nessun segreto nell'ambiente del container (solo percorsi di file).
+- **Esecuzione dei lavori** (`apps/docker-executor/test/app-stack-backup-runner.test.ts`, `apps/docker-executor/test/simulator-app-stack-backups.test.ts`): i rifiuti prima di qualunque lettura o scrittura, la cartella `stacks/<stackId>`, la ripetizione di un lavoro già noto.
+- **Operazioni** (`apps/api/test/app-stack-backup-runtime.unit.test.ts`): il fermo e la ripartenza anche quando la copia fallisce; due destinazioni e il backup parziale; nessuna scrittura senza il backup di sicurezza; un ripristino fallito durante la scrittura lascia l'applicazione ferma; dopo una risposta persa lo stato si legge e nessuna copia o ripristino parte due volte; la pulizia toglie prima le copie e poi le righe, e le lascia se una destinazione fallisce.
+- **Route** (`apps/api/test/app-stack-backups.integration.test.ts`): il nome riscritto, i motivi per cui un backup non si può fare, `409` per una bozza e per un'azione già in corso, la stessa `Idempotency-Key` che risponde una sola azione, sei azioni l'ora per applicazione; nessuna risposta, operazione, riga di audit o dell'outbox contiene una destinazione, un percorso o uno snapshot. L'applicazione di un altro cliente risponde `404` (`apps/api/test/app-stacks-tenancy.qa.test.ts`).
+- **Conservazione** (`apps/api/test/app-stack-backup-retention.unit.test.ts`): tre backup manuali e tre di sicurezza, ciascun tipo per conto suo; un backup fallito va via solo con il periodo; un'applicazione cancellata tiene i suoi backup per il periodo e poi li perde tutti.
+- **Database** (`packages/database/test/app-stack-backups-repository.test.ts`, `packages/database/test/rollback-compat.test.ts`, `packages/database/test/restore-panel-sql.test.ts`, `packages/database/test/app-stack-backups-downgrade-gate.test.ts`): i vincoli di K9, la release precedente che lavora con le tabelle nuove presenti, la chiusura delle righe aperte dopo un ripristino del pannello, il testo SQL del controllo del downgrade eseguito sullo schema vero.
+- **Pagina** (`apps/web/test/app-stacks-backups.test.ts`): ciò che la sezione mostra per ogni stato di un backup e di un ripristino, il motivo quando non offre comandi, il nome da riscrivere prima di un ripristino, nessun identificativo e nessuna indicazione di dove stanno le copie.
+
+Non provato:
+
+- **Su Docker reale:** attributi estesi, capacità dei file, file di dispositivo, una destinazione S3 (per S3 è provata solo la costruzione dei container e dell'indirizzo del repository).
+- **Il ripristino dei dati dopo `hp-restore-panel`** (K12).
+- **`infra/linux/accept-m3-panel.mjs`** non è stato rieseguito con le righe nuove di `infra/linux/hp-restore-panel.sql`; quelle righe sono provate su PGlite.
+- **Le pagine viste da una persona** su un pannello installato.
+
+Punti aperti:
+
+- Un server senza destinazioni utilizzabili non fa il giro notturno: i backup di un'applicazione cancellata restano finché una destinazione torna utilizzabile.
+- Se la chiusura di un'azione fallita fallisce a sua volta, l'applicazione può restare nello stato `stopping`; che cosa la riporta a uno stato leggibile non è provato.
+- Un'applicazione viva tiene i suoi backup riusciti più recenti senza limite di età: il controllo del downgrade (K10) vale finché l'applicazione esiste.

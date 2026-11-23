@@ -124,3 +124,82 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     }
   });
 });
+
+describe("ADR-0038 docs and the application backups check", () => {
+  it("ADR-0038 has its header and cites existing paths", () => {
+    const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0038-.*\.md$/.test(f));
+    expect(adrs).toHaveLength(1);
+    const file = `docs/architecture/adr/${adrs[0]!}`;
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento", "Migrazioni"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    expect(adr).toMatch(/^- \*\*Stato:\*\* `(?:PROPOSTO|APPROVATO)`/m);
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    expect(paths.size, file).toBeGreaterThanOrEqual(10);
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    for (const s of ["ADR-0035", "0027_app_stack_backups.sql", "app-stack-backups", "accept-app-stack-backups.mjs", "K12"]) expect(adr, s).toContain(s);
+    // The two sections filled at the end of the work are filled.
+    expect(adr).not.toMatch(/ompilato a lavoro finito/);
+    // The decision it replaces points here.
+    const stacks = read("docs/architecture/adr/0035-application-stacks.md");
+    expect(stacks).toContain(file);
+    expect(stacks.split("\n").filter((l) => l.startsWith("| D6 |")).join("\n")).toContain("`ADR-0038`");
+  });
+
+  it("README, HARNESS, runbooks, ER diagram and the decisions name the backups", () => {
+    const readme = read("README.md");
+    for (const s of ["ADR-0038", "docs/architecture/adr/0038-application-backups.md", "app-stack-backups"]) expect(readme, s).toContain(s);
+    expect(readme).not.toContain("nessun backup degli stack");
+    const harness = read("HARNESS.md");
+    for (const s of ["ADR-0038", "0027_app_stack_backups.sql", "accept-app-stack-backups.mjs"]) expect(harness, s).toContain(s);
+    // The guards the forbidden action names are files of this repository.
+    const rule = harness.split("\n").filter((l) => l.includes("`ADR-0038`; guarded by"));
+    expect(rule).toHaveLength(1);
+    const guards = [...rule[0]!.matchAll(/`((?:apps|packages|infra)\/[^`\s]+)`/g)].map((m) => m[1]!);
+    expect(guards.length).toBeGreaterThanOrEqual(4);
+    for (const p of guards) expect(existsSync(join(root, p)), `HARNESS: ${p}`).toBe(true);
+    const runbook = read("docs/runbooks/application-stacks.md");
+    // Its number moves when another procedure lands before it; its title does not.
+    expect(runbook).toMatch(/^## \d+\. Backup and restore of an application$/m);
+    for (const s of ["ADR-0038", "app-stack-backups", "accept-app-stack-backups.mjs", "app_stack_backups"]) expect(runbook, s).toContain(s);
+    expect(runbook).not.toContain("**Stack data is in no backup.**");
+    // No procedure tells the operator to read a snapshot id out of the database.
+    for (const line of runbook.split("\n").filter((l) => l.includes("psql"))) expect(line).not.toContain("snapshot_id");
+    expect(read("docs/runbooks/tls-and-backup-targets.md")).toContain("app-stack-backups");
+    const er = read("docs/architecture/diagrams/domain-er-and-boundaries.md");
+    for (const s of ["0027_app_stack_backups.sql", "app_stack_backups", "app_stack_backup_copies", "ck_app_stack_backup_copies_snapshot"]) {
+      expect(er, s).toContain(s);
+    }
+    expect(read(".agents/brain/decisions.md")).toContain("ADR-0038");
+  });
+
+  it("the application backups check is registered and machine-safe", () => {
+    const file = "infra/linux/accept-app-stack-backups.mjs";
+    const script = read(file);
+    for (const s of ["DockerEngineSocketAdapter", "hp_swarmtest_", "swarmtest_"]) expect(script, `${file} ${s}`).toContain(s);
+    // It builds its own plan: a seed template would bring an address, and with it an edge network.
+    for (const s of ["compileAppStackPlan", "APP_BUILT_IN_TEMPLATES"]) expect(script, `${file} ${s}`).not.toContain(s);
+    const steps = [
+      "preflight", "gate-self-test", "snapshot-before", "local-target-init", "deploy-and-seed", "application-reads-its-data",
+      "refused-while-running", "stop-application", "refused-for-another-customer-or-a-missing-volume", "backup-copies-every-volume",
+      "job-hardening", "repository-is-ciphertext-under-own-folder", "snapshot-holds-both-volumes", "same-job-id-answers-the-same-job",
+      "damage-data", "restore-brings-data-back", "restore-job-hardening", "application-starts-and-reads-restored-data",
+      "forget-removes-the-snapshot", "forget-on-missing-repository-is-done", "no-secret-anywhere", "foreign-untouched", "gate-clean"
+    ];
+    for (const step of steps) expect(script, step).toContain(`step("${step}"`);
+    expect(script).toContain('"PASS nothing-left"');
+    expect(script, file).not.toMatch(/shell:\s*true|(?<![.\w])exec\(|execSync|spawnSync/);
+    expect(script, file).not.toMatch(/["'`]hp_(?:ingress_proxy|ingress_net|mariadb|phpmyadmin)["'`]/);
+    expect(script, file).not.toMatch(/["'](?:prune|system|pull)["']/);
+    expect(script, file).not.toMatch(/:latest\b/);
+    // Nothing is published, and nothing it creates by hand carries a label: a live executor adopts what it finds labelled.
+    expect(script, file).not.toMatch(/["']-p["']|["']--publish["']/);
+    expect(script, file).not.toContain("0.0.0.0");
+    expect(script, file).not.toMatch(/["']--label(?:=[^"']*)?["']/);
+    expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000), file).toEqual([]);
+    // The gate forwards only what it recognises: its judge ends in a denial.
+    expect(between(script, "function judge(", "\n}\n").trimEnd(), file).toMatch(/\n {2}return deny\("[^"]+"\);$/);
+    expect(script, file).toMatch(/console\.log\(`RESULT \$\{/);
+    expect(script, file).toMatch(/nothing was created \(this script never pulls\)/);
+    expect(script, file).toMatch(/skipped \(not counted in n\/m\)/);
+  });
+});
