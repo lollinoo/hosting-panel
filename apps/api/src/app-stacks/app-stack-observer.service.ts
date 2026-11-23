@@ -97,8 +97,8 @@ export class AppStackObserverService {
   #timer: NodeJS.Timeout | null = null;
   #serial: Promise<unknown> = Promise.resolve();
   readonly #certSeenAt = new Map<string, number>();
-  /** Stack id → when its last route refresh was queued. */
-  readonly #routesQueuedAt = new Map<string, number>();
+  /** Stack id → when its last route refresh was queued, and the routes of its addresses with every target in then. */
+  readonly #routesQueuedAt = new Map<string, { readonly at: number; readonly addresses: string }>();
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) private readonly dbClient: DatabaseClient,
@@ -453,11 +453,15 @@ export class AppStackObserverService {
     const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
     const { entries } = appStackRoutePlan({ ...routes, include: new Set(healthy.map((c) => c.componentKey)) });
     if ((entries.length > 0 ? appStackRoutesHash(entries) : null) === stack.appliedRoutesHash) return false;
-    // A flapping target is refreshed at most every five minutes; a change of the addresses (one removed) never waits.
-    const queuedAt = this.#routesQueuedAt.get(stack.stackId);
+    // A flapping target is refreshed at most every five minutes; a change of the addresses (one removed) or of their
+    // options never waits. The routes with every target in tell the two apart: they move only with the addresses (a new
+    // path to a target the published routes leave out would otherwise read as a health change).
+    const addresses = appStackRoutesHash(appStackRoutePlan({ ...routes, include: new Set(plan.ingress.map((r) => r.componentKey)) }).entries);
+    const queued = this.#routesQueuedAt.get(stack.stackId);
     if (
-      queuedAt !== undefined &&
-      now.getTime() - queuedAt < APP_STACK_ROUTE_REFRESH_INTERVAL_MS &&
+      queued !== undefined &&
+      queued.addresses === addresses &&
+      now.getTime() - queued.at < APP_STACK_ROUTE_REFRESH_INTERVAL_MS &&
       appStackRoutesHealthOnly({ ...routes, appliedRoutesHash: stack.appliedRoutesHash })
     ) {
       return false;
@@ -500,7 +504,7 @@ export class AppStackObserverService {
           },
         });
       });
-      this.#routesQueuedAt.set(stackId, now.getTime());
+      this.#routesQueuedAt.set(stackId, { at: now.getTime(), addresses });
       return true;
     } catch (err) {
       const code = (err as { code?: unknown } | null)?.code;

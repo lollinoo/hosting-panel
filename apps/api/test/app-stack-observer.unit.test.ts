@@ -132,11 +132,31 @@ describe("AppStackObserverService (PGlite)", () => {
     desiredDiffers?: boolean;
     routesHash?: string | null;
     domains?: readonly Partial<typeof appStackDomains.$inferInsert>[];
+    ingress?: ApprovedStackPlan["ingress"];
   }): Promise<Seeded> {
     counter += 1;
     const id = `stk_obs_${String(counter).padStart(3, "0")}`;
     const revisionId = `astr_obs_${String(counter)}`;
-    const plan: ApprovedStackPlan = { ...PLAN, stackId: id, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: "atv_obs1", revisionId };
+    const plan: ApprovedStackPlan = {
+      ...PLAN,
+      stackId: id,
+      organizationId: ORG,
+      hostAllocationId: ALLOC,
+      templateVersionId: "atv_obs1",
+      revisionId,
+      // Another entry point: its component gets the health check every ingress target has.
+      ...(input.ingress
+        ? {
+            ingress: input.ingress,
+            components: PLAN.components.map((c) => {
+              const port = input.ingress!.find((i) => i.componentKey === c.key)?.port;
+              return c.healthcheck === null && port !== undefined
+                ? { ...c, healthcheck: { kind: "tcp" as const, port, intervalSeconds: 15, timeoutSeconds: 3 } }
+                : c;
+            }),
+          }
+        : {}),
+    };
     await db()
       .insert(appStacks)
       .values({
@@ -731,6 +751,51 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await allDeploys(stack.id)).toHaveLength(3);
       await obs.reconcileOnce(at(5 + APP_STACK_ROUTE_REFRESH_INTERVAL_MS / 60_000));
       expect(await allDeploys(stack.id)).toHaveLength(4);
+      expect(mutatingCalls()).toEqual([]);
+    });
+
+    it("a change of the options never waits the five minutes: a path to the other entry point a minute after compression is refreshed at once", async () => {
+      const obs = observer();
+      const stack = await seedStack({
+        status: "running",
+        ingress: [
+          { componentKey: "app", port: 8080 },
+          { componentKey: "cache", port: 6379 },
+        ],
+        domains: [{ hostname: "two.example.com" }],
+      });
+      /** The routes of today's rows with both entry points healthy, as a refresh publishes them. */
+      const published = async () => {
+        const rows = await db().select().from(appStackDomains).where(eq(appStackDomains.stackId, stack.id));
+        const plan = { ingress: [{ componentKey: "app", port: 8080 }, { componentKey: "cache", port: 6379 }] };
+        return appStackRoutesHash(appStackRoutePlan({ plan, domains: rows, include: new Set(["app", "cache"]), now: NOW, acmeEnabled: true }).entries);
+      };
+      const settle = async () => {
+        await db().update(operations).set({ status: "succeeded", completedAt: NOW }).where(eq(operations.resourceId, stack.id));
+        await db().update(appStacks).set({ status: "running", appliedRoutesHash: await published() }).where(eq(appStacks.id, stack.id));
+      };
+      const address = eq(appStackDomains.stackId, stack.id);
+      await settle();
+
+      // t0: compression is turned on; the refresh is queued and runs.
+      await db().update(appStackDomains).set({ compression: true }).where(address);
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      await settle();
+
+      // t0 + 1 min: a path to the other entry point, which is healthy.
+      await db()
+        .update(appStackDomains)
+        .set({ pathRoutes: [{ pathPrefix: "/api", componentKey: "cache", port: 6379, stripPrefix: false }] })
+        .where(address);
+      await obs.reconcileOnce(at(1));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      await settle();
+
+      // Only health changes from here: the five minutes hold again.
+      cache = "stopped";
+      await obs.reconcileOnce(at(2));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
       expect(mutatingCalls()).toEqual([]);
     });
   });
