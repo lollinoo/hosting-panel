@@ -247,20 +247,25 @@ export class SimulatedAppStacks implements StackExecutorPort {
       if (plan.components.some((c) => !this.images.has(c.image))) {
         throw new AppStackExecutorError("STACK_IMAGE_MISSING", "The image is not available on this server");
       }
+      // Like the engine: every body is built and checked before the first removal or create.
+      const payloads = new Map<string, AppStackContainerCreatePayload>();
+      for (const { key } of plan.components) {
+        if (stack.containers.get(key)?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) continue;
+        const payload = buildAppStackContainerCreatePayload(plan, key, { secretsRootDir: this.secretsRoot, secretContents });
+        assertAppStackPayloadHardening(payload, { secretsRootDir: this.secretsRoot, plan });
+        payloads.set(key, payload);
+      }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents = [...stack.containers.keys()].filter((key) => !keys.has(key)).sort();
       for (const key of removedComponents) await this.removeComponent(stack, plan.stackId, key);
       const components = plan.components.map(({ key }) => {
         const existing = stack.containers.get(key);
-        if (existing?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) {
-          return { componentKey: key, outcome: "unchanged" as const };
-        }
+        const payload = payloads.get(key);
+        if (payload === undefined) return { componentKey: key, outcome: "unchanged" as const };
         if (existing !== undefined) {
           stack.containers.delete(key);
           this.mutate("container_remove", existing.name);
         }
-        const payload = buildAppStackContainerCreatePayload(plan, key, { secretsRootDir: this.secretsRoot, secretContents });
-        assertAppStackPayloadHardening(payload, { secretsRootDir: this.secretsRoot, plan });
         const name = appStackContainerName(plan.stackId, key);
         stack.containers.set(key, { name, labels: payload.Labels, payload, state: "created", startedAt: null, restartCount: 0, exitCode: null });
         this.mutate("container_create", name);

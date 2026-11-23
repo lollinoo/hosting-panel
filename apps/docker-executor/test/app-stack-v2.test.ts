@@ -574,6 +574,21 @@ describe("AppStackEngine with a version 2 plan", () => {
     expect(await readdir(h.root)).toEqual([]);
     expect(h.fake.containers.size).toBe(0);
   });
+
+  it("refuses a body over the 32 768-byte bound before it removes or replaces anything", async () => {
+    const h = await setup();
+    await deployed(h);
+    const before = [idOf(h, DB), idOf(h, WEB), idOf(h, CACHE)];
+    const rotated = withDbPasswordVersion(2);
+    const next = rehash({ ...rotated, components: rotated.components.slice(0, 2) });
+    const secretContents = [{ parameterKey: "db_password", version: 2, content: "p".repeat(32_768) }, v2SecretEntry("db_root_password")];
+    await expect(h.engine.createAppStackComponents({ plan: next, secretContents })).rejects.toMatchObject({
+      reason: "STACK_PLAN_INVALID",
+      message: "An environment value of component web is too long",
+    });
+    expect(mutations(h.fake.log)).toEqual([]);
+    expect([idOf(h, DB), idOf(h, WEB), idOf(h, CACHE)]).toEqual(before);
+  });
 });
 
 describe("resolveAppStackImage", () => {
@@ -701,6 +716,24 @@ describe("the simulator with a version 2 plan", () => {
     const status = await sim.getAppStackStatus(REF);
     expect(status.components.map((c) => c.state)).toEqual(["running", "running", "running"]);
     for (const value of VALUES) expect(JSON.stringify(status)).not.toContain(value);
+  });
+
+  it("checks every body before it removes or replaces anything, like the engine", async () => {
+    const sim = simulator();
+    await pulled(sim);
+    await sim.createAppStackComponents({ plan, secretContents: [...V2_CREATE_SECRETS] });
+    const before = sim.appStacks.getAppStackSnapshot(ID);
+    const mutationCount = sim.appStacks.appStackMutations.length;
+    // cache leaves the plan and db_password grows to the bound: db's body passes, web's URL is over it.
+    const rotated = withDbPasswordVersion(2);
+    const next = rehash({ ...rotated, components: rotated.components.slice(0, 2) });
+    const secretContents = [{ parameterKey: "db_password", version: 2, content: "p".repeat(32_768) }, v2SecretEntry("db_root_password")];
+    await expect(sim.createAppStackComponents({ plan: next, secretContents })).rejects.toMatchObject({
+      reason: "STACK_PLAN_INVALID",
+      message: "An environment value of component web is too long",
+    });
+    expect(sim.appStacks.getAppStackSnapshot(ID)).toEqual(before);
+    expect(sim.appStacks.appStackMutations).toHaveLength(mutationCount);
   });
 
   it("replaces the readers of a secret that moved to a new version", async () => {
