@@ -27,7 +27,7 @@ describe("private links between a database and an application (ADR-0039)", () =>
     expect(APP_DATABASE_TEMPLATE_CATEGORY).toBe("database");
     expect(MAX_APP_STACK_LINKS_PER_APPLICATION).toBe(4);
     expect(MAX_APP_STACK_LINKS_PER_DATABASE).toBe(8);
-    expect(APP_STACK_LINK_STATES).toEqual(["pending", "active"]);
+    expect(APP_STACK_LINK_STATES).toEqual(["pending", "active", "removing"]);
     expect(APP_STACK_LINK_OUTCOMES).toEqual(["connected", "already_connected", "pending"]);
     expect(APP_ID_PREFIXES.link).toBe("slnk");
     expect(APP_AUDIT_ACTIONS.linkCreate).toBe("app.stack.link.create");

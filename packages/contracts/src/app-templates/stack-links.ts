@@ -12,8 +12,9 @@ export const MAX_APP_STACK_LINKS_PER_APPLICATION = 4;
 /** Applications one database can be linked to. */
 export const MAX_APP_STACK_LINKS_PER_DATABASE = 8;
 
-/** pending: recorded, not yet applied on the server (a side is not installed yet, or the last attempt did not go through). */
-export const APP_STACK_LINK_STATES = ["pending", "active"] as const;
+/** pending: recorded, not yet applied on the server (a side is not installed yet, or the last attempt did not go through).
+ *  removing: the customer disconnected it; the row stays until the server confirms the database is detached. */
+export const APP_STACK_LINK_STATES = ["pending", "active", "removing"] as const;
 export const AppStackLinkStateSchema = z.enum(APP_STACK_LINK_STATES);
 export type AppStackLinkState = z.infer<typeof AppStackLinkStateSchema>;
 
