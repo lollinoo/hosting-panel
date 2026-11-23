@@ -20,6 +20,7 @@ import {
   appStackContainerPathProblem,
   appStackEnvValueNameProblem,
   appStackSecretEnvNameProblem,
+  appStackTaskArgvProblem,
 } from "./text.js";
 
 const noControlCharacter = (text: string): boolean => !/\p{Cc}/u.test(text);
@@ -113,6 +114,25 @@ export type AppTemplateService = z.infer<typeof AppTemplateServiceSchema>;
 
 export const AppTemplateIngressSchema = z.object({ service: AppStackKeySchema, port: AppStackPortSchema }).strict();
 
+/**
+ * A command the template declares for one of its components (ADR-0042). A customer runs it or chooses when it runs;
+ * nobody sends its arguments, and nothing is filled into them.
+ */
+export const AppTemplateTaskSchema = z
+  .object({
+    key: AppStackKeySchema.max(APP_STACK_COMPONENT_KEY_MAX),
+    label: z.string().min(1).max(APP_TEMPLATE_LIMITS.taskLabel).refine(noControlCharacter),
+    /** "" when the source has none. */
+    description: z.string().max(APP_TEMPLATE_LIMITS.taskDescription).refine(noControlCharacter),
+    service: AppStackKeySchema,
+    /** The arguments exactly as they are run: no placeholder, and a "$$" of the source is already "$". */
+    command: z.array(z.string()).refine((argv) => appStackTaskArgvProblem(argv) === null),
+    /** The default is already applied by the validator. */
+    timeoutSeconds: z.number().int().min(APP_TEMPLATE_LIMITS.taskTimeoutMin).max(APP_TEMPLATE_LIMITS.taskTimeoutMax),
+  })
+  .strict();
+export type AppTemplateTask = z.infer<typeof AppTemplateTaskSchema>;
+
 type Path = (string | number)[];
 
 /**
@@ -130,6 +150,8 @@ export const AppTemplateSpecSchema = z
     services: z.array(AppTemplateServiceSchema).min(1).max(APP_TEMPLATE_LIMITS.services),
     volumes: z.array(z.object({ key: AppStackKeySchema }).strict()).max(APP_TEMPLATE_LIMITS.volumes),
     ingress: z.array(AppTemplateIngressSchema).max(APP_TEMPLATE_LIMITS.ingress),
+    /** Only when the source declares a task, in its order: a template without tasks keeps its spec and its hash. */
+    tasks: z.array(AppTemplateTaskSchema).min(1).max(APP_TEMPLATE_LIMITS.tasks).optional(),
   })
   .strict()
   .superRefine((spec, ctx) => {
@@ -195,6 +217,12 @@ export const AppTemplateSpecSchema = z
       const target = services.get(route.service);
       if (!target || target.healthcheck === null) refuse(["ingress", i, "service"], "The ingress target needs a health check");
       else if (!target.expose.includes(route.port)) refuse(["ingress", i, "port"], "The ingress port is not exposed");
+    });
+
+    const tasks = spec.tasks ?? [];
+    unique(tasks.map((task) => task.key), (t) => ["tasks", t, "key"], "Duplicate task key");
+    tasks.forEach((task, t) => {
+      if (!services.has(task.service)) refuse(["tasks", t, "service"], "The task names no component of this template");
     });
   });
 export type AppTemplateSpec = z.infer<typeof AppTemplateSpecSchema>;

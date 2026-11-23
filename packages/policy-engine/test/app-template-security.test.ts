@@ -80,6 +80,11 @@ describe("A4: every refused key at every level", () => {
     resources: app("deploy", "resources"),
     limits: app("deploy", "resources", "limits"),
     ingress: ["x-hp-ingress", 0],
+    task: ["x-hp-tasks", 0],
+  };
+  /** The fixture declares no task: the task level is checked on one added to it. */
+  const SETUP: Partial<Record<string, Edit[]>> = {
+    task: [[["x-hp-tasks"], [{ key: "tidy", label: "Tidy up", service: "app", command: ["/app/bin/tidy"] }]]],
   };
   const rows = Object.entries(APP_TEMPLATE_KEY_LEVELS).flatMap(([level, { refusals }]) => {
     const at = LEVEL_PATHS[level as keyof typeof APP_TEMPLATE_KEY_LEVELS];
@@ -87,12 +92,12 @@ describe("A4: every refused key at every level", () => {
     return [...refusedKeys, [level, "x-not-a-key", "KEY_UNKNOWN"] as const].map(([name, key, code]) => [name, key, code, at] as const);
   });
 
-  it("covers all ten levels", () => {
-    expect(new Set(rows.map(([level]) => level)).size).toBe(10);
+  it("covers all eleven levels", () => {
+    expect(new Set(rows.map(([level]) => level)).size).toBe(11);
   });
 
-  it.each(rows)("%s: %s -> %s", (_level, key, code, at) => {
-    refused(build([[...at, key], null]), code as AppTemplateIssueCode, formatTemplatePath([...at, key]));
+  it.each(rows)("%s: %s -> %s", (level, key, code, at) => {
+    refused(build(...(SETUP[level] ?? []), [[...at, key], null]), code as AppTemplateIssueCode, formatTemplatePath([...at, key]));
   });
 
   it("refuses an own __proto__ key without touching Object.prototype", () => {

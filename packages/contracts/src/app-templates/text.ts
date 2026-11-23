@@ -61,6 +61,24 @@ export function appStackArgvExecutableProblem(argv0: string): "empty" | "shell" 
   return basenameOf(argv0) === "" ? "empty" : appStackArgvItemProblem(argv0);
 }
 
+export type AppStackTaskArgvProblem = "empty" | "too_many" | "item" | "shell";
+
+/**
+ * The arguments of a task as they are run (ADR-0042): the rules of a component's command once nothing is left to fill
+ * in. One rule for the spec schema, the API and the executor, which checks again what it is asked to run.
+ */
+export function appStackTaskArgvProblem(argv: readonly unknown[]): AppStackTaskArgvProblem | null {
+  if (argv.length === 0) return "empty";
+  if (argv.length > APP_TEMPLATE_LIMITS.argvItems) return "too_many";
+  for (const [index, item] of argv.entries()) {
+    if (typeof item !== "string" || item === "" || item.length > APP_TEMPLATE_LIMITS.argvItemLength) return "item";
+    if (appStackTextProblem(item) !== null) return "item";
+    const problem = index === 0 ? appStackArgvExecutableProblem(item) : appStackArgvItemProblem(item);
+    if (problem !== null) return problem === "shell" ? "shell" : "item";
+  }
+  return null;
+}
+
 /** Platform-owned besides FORBIDDEN_CONTAINER_MOUNT_TARGETS: /run (secret files) and /tmp (the bounded tmpfs). */
 export const APP_STACK_RESERVED_CONTAINER_PATHS = ["/run", "/tmp"] as const;
 
