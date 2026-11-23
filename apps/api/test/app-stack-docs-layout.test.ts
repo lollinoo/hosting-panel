@@ -113,6 +113,15 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
         "container-hardening", "worker-writes-storage", "network-shape", "idempotent-reapply", "data-survives-upgrade-and-rollback",
         "pull-failure-consistent", "network-failure-consistent", "health-timeout-consistent", "recovery-reads-only",
         "remove-keeps-volumes", "destroy-data-removes-volume", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
+      ],
+      // ADR-0039: the built-in databases and the private link between a database and an application.
+      "accept-app-stack-databases.mjs": [
+        "gate-self-test", "preflight", "snapshot-before", "plans-compile-from-seeds", "applications-deploy",
+        "mariadb-starts-hardened", "postgresql-starts-hardened", "valkey-starts-hardened", "data-survives-restart",
+        "unlinked-application-cannot-reach", "link-reaches-by-alias", "link-idempotent", "two-applications-stay-apart",
+        "link-follows-a-replaced-database", "application-removal-detaches-running-database",
+        "stopped-database-survives-application-removal", "stale-attachment-repaired", "refuses-foreign-targets",
+        "detach-removes-reachability", "remove-everything", "host-nft-metadata-drop-on-stack-net", "gate-clean", "nothing-left"
       ]
     };
     const harness = read("HARNESS.md");
@@ -128,7 +137,14 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
       expect(script, file).not.toMatch(/:latest\b/);
       expect(script, file).not.toMatch(/["']-p["']|["']--publish["']/);
       const anyHost = script.split("\n").filter((l) => l.includes("0.0.0.0"));
-      if (name.includes("worker-storage")) expect(anyHost, file).toEqual([]);
+      if (!name.includes("http-cache")) expect(anyHost, file).toEqual([]);
+      if (name.includes("databases")) {
+        // Private networks only, and no image download: a live panel on the machine attaches its proxy to every edge network.
+        for (const s of ["body.Internal === true", 'body.Labels?.[ROLE_LABEL] === "app_internal"', 'return deny("image change")']) {
+          expect(script, `${file} ${s}`).toContain(s);
+        }
+        expect(script, file).not.toContain("appStackEdgeNetworkName");
+      }
       for (const line of anyHost) expect(line, file).toContain("HostIp");
       expect([...script.matchAll(/\b(1[0-9]{4})\b/g)].map((m) => Number(m[1])).filter((p) => p >= 10000 && p < 16000), file).toEqual([]);
       // The gate forwards only what it recognises: its judge ends in a denial.
