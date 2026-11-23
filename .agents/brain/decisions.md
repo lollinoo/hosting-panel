@@ -317,3 +317,16 @@ Source: the owner's feedback after the demo and the lead rulings L22–L31 of ru
 - **L29 Unchanged rules.** No new npm dependency or environment variable; WordPress behaviour, API contracts (apart from the additive reads of L27 and L31), database and executor untouched; nothing copied from other panels; customer pages never read an organisation id from the address.
 - **L30 Documents.** README, HARNESS, runbooks, `ADR-0035` (approved, §2.16), the acceptance report and `.agents/brain` use the new names where they tell an operator where to click; README still does not contain the spec's id.
 - **L31 A WordPress row shows its web address.** A second additive read-only route, `GET /v1/organizations/:orgId/managed-sites` (`site.read`, the same sites the customer can already read, at most 200, with the primary domain), feeds the address column of `/apps`.
+
+## A one-image application template form (2026-11-23)
+Source: the owner's directive of 2026-11-22 («vorrei funzionasse come funziona Coolify»; row "single Docker image" of the feature table: take it) and the agent's calls I1–I8, waiting for the owner (`ADR-0043`, `PROPOSTO`; issue #79, PR #80).
+- **I1 For whom.** The server administrator. A customer never names an image; nothing changes for a customer.
+- **I2 What it produces.** The source of a one-component `HCP-STACK/v1` template. The form saves nothing, installs nothing and calls no route: the source opens in the existing editor, and the server's validator stays the only authority.
+- **I3 The image.** Chosen from a menu of the allowlisted repositories, never free text; the `sha256:` digest is required and typed by the administrator; no registry is contacted; `latest` is refused.
+- **I4 The fields.** Name, category, description; image, tag, digest; port, web address, health check; settings; one folder to keep; processor and memory. The component is `app`, the volume `data`.
+- **I5 Settings.** Fixed value (a `$` is written `$$`), chosen by the customer (a string parameter, key = the variable's name in lower case), private (a secret parameter, variable ending in `_FILE`). At most 24, 8 of them private.
+- **I6 What the form refuses.** Only what could never be a valid source (shapes, limits, a web address without a port or without a health check, a health check without a port). What only the validator judges is refused by the server, in the editor, with its line.
+- **I7 Unchanged.** No API route, table, template key, allowlist row or executor rule; no new permission, flag or dependency.
+- **I8 Out of scope.** A customer naming an image, an image outside the allowlist or without a digest, looking a digest up on a registry, more than one component, a custom start command, more ports or folders, installing straight from the form, reopening a template in the form.
+- **Rejected.** A form for the customer; an API route that writes the source; the validator in the browser; free text for the image; a registry lookup.
+
