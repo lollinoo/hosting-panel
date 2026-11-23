@@ -61,4 +61,28 @@ UPDATE app_stack_domains SET status = 'pending', cert_status = 'none', cert_expi
 UPDATE app_stacks SET status = 'delete_failed', applied_routes_hash = NULL, updated_at = now() WHERE status = 'deleting';
 UPDATE app_stacks SET status = 'failed', applied_routes_hash = NULL, updated_at = now()
  WHERE deleted_at IS NULL AND status NOT IN ('draft','failed','delete_failed','deleting');
+-- Backups of applications (ADR-0038): a copy still open did not finish. Its backup then follows its copies by the
+-- rule of settleAppStackBackupAggregate: a copy that succeeded stays good, its snapshot is on the destination.
+UPDATE app_stack_backup_copies SET status = 'failed', snapshot_id = NULL, size_bytes = NULL, problem = 'interrupted',
+       finished_at = COALESCE(finished_at, now())
+ WHERE status = 'running';
+WITH agg AS (
+  SELECT b.id,
+         COALESCE(bool_or(c.status = 'succeeded'), FALSE) AS any_good,
+         COALESCE(bool_and(c.status = 'succeeded' OR NOT c.required), FALSE) AS all_good,
+         (array_agg(c.size_bytes ORDER BY c.priority) FILTER (WHERE c.status = 'succeeded'))[1] AS size_bytes,
+         (array_agg(c.problem ORDER BY c.priority)
+            FILTER (WHERE c.required AND c.status <> 'succeeded' AND c.problem IS NOT NULL))[1] AS problem
+    FROM app_stack_backups b LEFT JOIN app_stack_backup_copies c ON c.backup_id = b.id
+   WHERE b.status = 'running'
+   GROUP BY b.id)
+UPDATE app_stack_backups b
+   SET status = CASE WHEN agg.any_good AND agg.all_good THEN 'succeeded' WHEN agg.any_good THEN 'partial' ELSE 'failed' END,
+       size_bytes = agg.size_bytes,
+       problem = CASE WHEN agg.any_good AND agg.all_good THEN NULL ELSE COALESCE(agg.problem, 'interrupted') END,
+       finished_at = COALESCE(b.finished_at, now())
+  FROM agg
+ WHERE b.id = agg.id;
+UPDATE app_stack_backups SET restore_status = 'failed', restore_problem = 'interrupted', restored_at = COALESCE(restored_at, now())
+ WHERE restore_status = 'running';
 DELETE FROM user_sessions;
