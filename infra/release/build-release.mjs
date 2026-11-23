@@ -110,7 +110,7 @@ export function releaseNodeVersion(nodeVersionFile, runningVersion) {
 
 // Features an older release cannot read; update.sh refuses a downgrade that drops one in use (exit 8).
 // Stable identifiers, one-line in RELEASE.json so sed reads them; never translated.
-export const RELEASE_FEATURES = ["manual-tls", "backup-targets", "site-templates", "app-stacks"];
+export const RELEASE_FEATURES = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-tasks"];
 
 // The images a release names (D17), from the built constants: sorted, each once.
 export function releaseImages(contracts, traefikImage) {

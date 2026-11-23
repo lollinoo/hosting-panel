@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   APP_BUILT_IN_TEMPLATES,
   APP_IMAGE_ALLOWLIST,
@@ -19,6 +20,7 @@ import {
   resourceQuotas,
   rolePermissions,
   roles,
+  sql,
 } from "@hosting-panel/database";
 import type { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -50,6 +52,10 @@ x-hp-tasks:
     timeoutSeconds: 30
 `;
 const CANARY = "PRINTED-canary-41c7";
+/** The question `hp-update` asks before it goes back to a release without tasks, as infra/linux/lib/common.sh writes it. */
+const IN_USE_QUERY = /"(select 'app-tasks' where exists \([^"]+\))"/.exec(
+  readFileSync(new URL("../../../infra/linux/lib/common.sh", import.meta.url), "utf8"),
+)![1]!;
 const HOUR = 3_600_000;
 
 function expectRefusal(res: Reply, status: number, code: string, detail?: Json): void {
@@ -65,6 +71,8 @@ describe("tasks of an application (ADR-0042)", () => {
   let sim: InMemoryDockerSimulatorAdapter;
   let worker: OutboxWorkerService;
   let scheduler: AppStackTaskSchedulerService;
+  let inUseBefore: unknown[];
+  const inUse = async (): Promise<unknown[]> => (await h.dbClient.db.execute(sql.raw(IN_USE_QUERY))).rows.map((row) => Object.values(row)[0]);
   const allowlist: AppImageAllowlistEntry[] = [...APP_TEST_ALLOWLIST, ...APP_IMAGE_ALLOWLIST];
 
   beforeAll(async () => {
@@ -73,8 +81,9 @@ describe("tasks of an application (ADR-0042)", () => {
       .update(resourceQuotas)
       .set({ maxServices: 1000, maxCpuMilli: 1_000_000, maxMemoryBytes: String(2 ** 50) })
       .where(eq(resourceQuotas.organizationId, h.a.orgId));
-    withTasks = (await h.publish(TASKS_SOURCE)).versionId;
     plain = (await h.publish(PLAIN_SOURCE)).versionId;
+    inUseBefore = await inUse();
+    withTasks = (await h.publish(TASKS_SOURCE)).versionId;
     sim = h.app.nestApp.get<InMemoryDockerSimulatorAdapter>(DOCKER_EXECUTOR_TOKEN);
     worker = h.app.nestApp.get(OutboxWorkerService);
     scheduler = h.app.nestApp.get(AppStackTaskSchedulerService);
@@ -126,6 +135,12 @@ describe("tasks of an application (ADR-0042)", () => {
     await worker.processPendingOnce();
     return res.body.data as { runId: string; operationId: string };
   }
+
+  it("the release feature app-tasks is in use as soon as a template version declares a task, and not before", async () => {
+    expect(IN_USE_QUERY).toContain("app_template_versions");
+    expect(inUseBefore).toEqual([]);
+    expect(await inUse()).toEqual(["app-tasks"]);
+  });
 
   it("lists the tasks of the installed version in the order of the template, and none before an install", async () => {
     const stackId = await running();

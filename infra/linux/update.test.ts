@@ -102,6 +102,26 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
+  it("refuses a downgrade while an application template declares tasks (exit 8), unless forced (ADR-0042)", () => {
+    const features = "manual-tls backup-targets site-templates app-stacks app-tasks";
+    const f = gated("echo app-tasks", features);
+    const r = update(["--archive", old(), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["app-tasks", "--allow-feature-loss", "declares tasks"]) expect(r.err).toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates"]) expect(r.err).not.toContain(t);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+
+    const forced = gated("echo app-tasks", features);
+    const done = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], forced.env);
+    expect(done.code, done.err).toBe(0);
+    expect(done.err).toContain("app-tasks stays unreachable");
+    expect(cur(forced.root)).toBe("releases/0.1.0");
+    // Nothing in use: the older release is installed without the flag.
+    const unused = gated("true", features);
+    expect(update(["--archive", old(), "--allow-downgrade"], unused.env).code).toBe(0);
+  });
+
   it("--allow-feature-loss lets the downgrade through", () => {
     const f = gated("echo manual-tls");
     const r = update(["--archive", old(), "--allow-downgrade", "--allow-feature-loss"], f.env);
