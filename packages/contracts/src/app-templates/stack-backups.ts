@@ -110,7 +110,7 @@ export const AppStackBackupDtoSchema = z.object({
   restore: z
     .object({ status: z.enum(APP_STACK_RESTORE_STATUSES), problem: ProblemSchema, at: IsoDateTimeSchema.nullable() })
     .nullable(),
-  /** At least one good copy on a destination that is still configured. */
+  /** At least one good copy, and data that still belongs to the application. */
   restorable: z.boolean(),
 });
 export type AppStackBackupDto = z.infer<typeof AppStackBackupDtoSchema>;

@@ -2,6 +2,7 @@ import {
   effectiveComponentHealth,
   sumAppStackPlanResources,
   type AppStackAcceptedEnvelope,
+  type AppStackBackupDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackDomainDto,
@@ -11,6 +12,8 @@ import {
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
 import type {
+  AppStackBackupCopyRow,
+  AppStackBackupRow,
   AppStackComponentRow,
   AppStackDeploymentRow,
   AppStackDomainRow,
@@ -168,6 +171,31 @@ export function appStackDeploymentDto(
     problem: row.problem,
     startedAt: row.startedAt.toISOString(),
     endedAt: iso(row.endedAt),
+  };
+}
+
+/**
+ * What the customer sees of a backup: whether each copy is good, never where it is. `presentVolumeKeys` are the data
+ * volumes the application holds now: a backup none of whose data belongs to it any more cannot be restored.
+ */
+export function appStackBackupDto(
+  row: AppStackBackupRow,
+  copies: readonly AppStackBackupCopyRow[],
+  presentVolumeKeys: ReadonlySet<string>,
+): AppStackBackupDto {
+  const good = (row.status === "succeeded" || row.status === "partial") && copies.some((copy) => copy.status === "succeeded");
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    problem: row.problem,
+    sizeBytes: row.sizeBytes,
+    volumeKeys: row.volumeKeys,
+    copies: copies.map((copy) => ({ priority: copy.priority, status: copy.status, problem: copy.problem })),
+    startedAt: row.startedAt.toISOString(),
+    finishedAt: iso(row.finishedAt),
+    restore: row.restoreStatus === null ? null : { status: row.restoreStatus, problem: row.restoreProblem, at: iso(row.restoredAt) },
+    restorable: good && row.volumeKeys.some((key) => presentVolumeKeys.has(key)),
   };
 }
 

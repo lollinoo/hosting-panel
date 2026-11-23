@@ -318,7 +318,9 @@ describe("application stacks HTTP API (H5)", () => {
     ["GET", "/components/app/logs"],
     ["GET", "/components/app/health"],
     ["POST", "/secrets", { parameterKey: "app_secret", value: "v" }],
+    ["GET", "/backups"],
     ["POST", "/backups", {}],
+    ["POST", `/backups/sbak_${"0".repeat(24)}/restore`, { confirmName: "x" }],
   ];
 
   it("B1: another organisation gets 404 on every route of a stack; a collaborator without the key gets 403 and one denied row", async () => {
@@ -347,10 +349,16 @@ describe("application stacks HTTP API (H5)", () => {
     expect({ ...(await h.counts()), audit_events: 0 }).toEqual({ ...before, audit_events: 0 });
   });
 
-  it("B4: a stack backup request is NOT_SUPPORTED, a foreign one is 404", async () => {
+  it("B4: on a server without backups a backup request is NOT_SUPPORTED and the list says why; a foreign one is 404", async () => {
     const stackId = await draft();
+    const before = await h.counts();
     expectRefusal(await act(h.a, stackId, "backups"), 422, "NOT_SUPPORTED", { reason: "STACK_UNSUPPORTED_FEATURE" });
+    const listed = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/backups`);
+    expect(listed.status, listed.raw).toBe(200);
+    expect(listed.body.data).toEqual({ backups: [], unavailableReason: "not_available" });
     expectRefusal(await act(h.b, stackId, "backups"), 404, "NOT_FOUND");
+    expectRefusal(await h.call(h.b.token, "GET", `${base(h.a)}/${stackId}/backups`), 404, "NOT_FOUND");
+    expect(await h.counts()).toEqual(before);
   });
 
   it("a deploy without a change reuses the desired revision; after a secret rotation it builds a new one", async () => {
@@ -504,7 +512,9 @@ describe("application stacks with the capability off", () => {
         ["GET", `${base}/${stackId}/components/app/logs`],
         ["GET", `${base}/${stackId}/components/app/health`],
         ["POST", `${base}/${stackId}/secrets`, { parameterKey: "app_secret", value: "v" }],
+        ["GET", `${base}/${stackId}/backups`],
         ["POST", `${base}/${stackId}/backups`, {}],
+        ["POST", `${base}/${stackId}/backups/sbak_0123456789abcdef01234567/restore`, { confirmName: "x" }],
       ];
       for (const [method, path, body] of routes) {
         const res = await off.call(off.a.token, method, path, body, { "Idempotency-Key": randomUUID() });
