@@ -16,6 +16,30 @@ const digests = [...new Set(APP_BUILT_IN_TEMPLATES.flatMap((t) => [...t.source.m
 const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
+  it("ADR-0042 (tasks of applications) names the migration, the feature and guard files that exist", () => {
+    const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0042-.*\.md$/.test(f));
+    expect(adrs).toEqual(["0042-application-scheduled-tasks.md"]);
+    const adr = read(`docs/architecture/adr/${adrs[0]!}`);
+    for (const s of ["PROPOSTO", "0031_app_stack_tasks.sql", "x-hp-tasks", "app-tasks", "stack.task", "Come è stato costruito", "Che cosa è provato", "Non provato", "Punti aperti"]) {
+      expect(adr, s).toContain(s);
+    }
+    const harness = read("HARNESS.md");
+    const rule = harness.split("\n").find((line) => line.includes("`ADR-0042`; guarded by"));
+    expect(rule, "the HARNESS rule on tasks").toBeDefined();
+    const guards = [...rule!.matchAll(/`((?:packages|apps|infra)\/[^`]+)`/g)].map((m) => m[1]!);
+    expect(guards).toHaveLength(5);
+    for (const file of guards) expect(existsSync(join(root, file)), file).toBe(true);
+    expect(harness).toContain("0031_app_stack_tasks.sql");
+    const runbook = read("docs/runbooks/application-stacks.md");
+    for (const s of ["## 4a. Tasks of an application (ADR-0042)", "x-hp-tasks", "app_stack_task_runs", "app-tasks", "infra/linux/accept-app-tasks.mjs"]) {
+      expect(runbook, s).toContain(s);
+    }
+    const er = read("docs/architecture/diagrams/domain-er-and-boundaries.md");
+    for (const s of ["app_stack_task_schedules", "app_stack_task_runs", "0031_app_stack_tasks.sql", "trg_app_stacks_forget_tasks"]) expect(er, s).toContain(s);
+    expect(read("README.md")).toContain("ADR-0042");
+    expect(read("docs/api/openapi.yaml")).toContain("/v1/organizations/{orgId}/app-stacks/{stackId}/tasks/{taskKey}/runs:");
+  });
+
   it("ADR-0035 is approved and cites existing paths", () => {
     const adrs = readdirSync(join(root, "docs/architecture/adr")).filter((f) => /^0035-.*\.md$/.test(f));
     expect(adrs).toHaveLength(1);

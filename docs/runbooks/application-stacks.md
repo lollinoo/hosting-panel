@@ -139,6 +139,63 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    them. Remove them by hand (procedure 3) only if the data is not needed.
 5. The automatic rollback of a failed update stays ungated: migration `0025` is additive.
 
+## 4a. Tasks of an application (ADR-0042)
+
+A template may declare up to eight **tasks** under `x-hp-tasks`: a command for one of its components. The customer
+sees each task by its name on the application's page (section «Attività programmate»), runs it now or chooses when it
+runs by itself (never, every hour, every day or every week at a whole hour, UTC). Nobody can send a command: a request
+names only the key of a task, and the command is read from the template version of the **installed** revision.
+
+1. **Declare a task** (server administrator, in the template source):
+   ```yaml
+   x-hp-tasks:
+     - key: tidy
+       label: Tidy up old notes
+       description: Removes the notes deleted more than 30 days ago.
+       service: app
+       command: ["/app/bin/tidy", "--older-than", "30d"]
+       timeoutSeconds: 120
+   ```
+   `command` is a list of arguments under the rules of a component's command: no argument may name a shell (`sh`,
+   `bash`, `busybox`, `env`, …), and there is no placeholder (`${...}` is refused; `$$` is a literal dollar). `timeoutSeconds` is 5 to 600 (default 60). The
+   component needs `/bin/sh`: the executor uses it only for its own clean-up, and a component without it answers
+   «cannot run tasks» at the first run.
+2. **What a run is.** The command is started directly in the component's running container, as the component's user,
+   with nothing added but the environment variable `HP_TASK_RUN`. At its time limit the executor kills it and
+   everything it started. One task of an application runs at a time, and while it is queued or running the
+   application cannot be changed (`409 RESOURCE_LOCKED`); its status does not change.
+3. **See the runs of an application** (the last 20 per task are kept; the exit code is here and not on the page):
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, task_key, run_trigger, status, problem, exit_code, requested_at, ended_at from app_stack_task_runs where stack_id = '<stack id>' order by requested_at desc limit 20"
+   ```
+   Do not select `output` into a ticket or a chat: it is what the command printed (secrets of the component are
+   masked, anything else is not).
+   A run that failed with `exit_code` 127 and no output: the program of the task is not in the component's image
+   (126: it is there but cannot be executed). Fix the template; the customer sees only «non riuscita».
+4. **See the schedules and the times that were skipped:**
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select stack_id, task_key, frequency, hour_utc, weekday, served_slot_at, skipped_slot_at, skip_reason from app_stack_task_schedules order by stack_id, task_key"
+   ```
+   `busy` = the application was being changed, `not_running` = it was stopped or failed, `missed` = nothing tried the
+   time within 30 minutes (the panel was off). A skipped time is never caught up.
+5. **A run reads «esito non noto» (`unknown`).** The answer of the executor was lost and the executor no longer knows
+   the run (it restarted). The panel never starts it again by itself: check the application, then press «Esegui ora»
+   if running it twice is safe. While the executor still knows the run, the application stays held and the panel asks
+   again at every recovery pass.
+6. **The executor restarted while a task was running.** At start it kills what tasks left in the components
+   (`journalctl -u hp-docker-executor | grep app_task_` shows `app_task_reap_failed` or `app_task_cleanup_failed` with
+   a code only when that clean-up could not finish; restart the application to be sure nothing is left).
+7. **Downgrade.** `hp-update --allow-downgrade` exits with **code 8** when the target release does not list the feature
+   `app-tasks` and a template version that declares tasks exists: an older release refuses the source of such a version
+   and cannot show the applications that use it. Template versions are never deleted, so the only way back is
+   `--allow-feature-loss`. See them:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select v.id, t.slug, v.version_number from app_template_versions v join app_templates t on t.id = v.template_id where jsonb_array_length(coalesce(v.compiled_schema -> 'tasks', '[]'::jsonb)) > 0"
+   ```
+   The automatic rollback of a failed update stays ungated: migration `0031` is additive. A run queued at that moment
+   is closed as failed by the older release and its row is repaired at the next upgrade.
+8. The real-Docker check is `infra/linux/accept-app-tasks.mjs` (procedure 9: build first, run it alone).
+
 ## 5. Restore the panel on a new server
 
 1. After `hp-restore-panel` (README, «Il server è perso»), the new server has no stack container, network, volume or

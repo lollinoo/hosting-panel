@@ -142,3 +142,102 @@ Ciascuno è un lavoro successivo, con la sua issue: un comando scritto da un cli
 - **Un processo che toglie il segno dal proprio ambiente e lascia la sessione sopravvive alla pulizia** finché l'applicazione non viene riavviata. Resta dentro i limiti del componente.
 - **Gli orari sono in UTC e a ore intere**, e due attività della stessa applicazione alla stessa ora partono una dopo l'altra.
 - **Chi scrive un modello decide che cosa può essere lanciato** in ogni applicazione che lo usa, anche in quelle già installate, quando vengono aggiornate a quella versione.
+
+## 4. Come è stato costruito
+
+Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro le decisioni A1–A12. Aspettano la stessa approvazione.
+
+**Formato (`packages/contracts`, `packages/policy-engine`).**
+
+- Il comando di un'attività usa la stessa grammatica del `$` di un comando di componente: `$$` è un dollaro, qualunque `${NOME}` è rifiutato (`TASK_COMMAND_PLACEHOLDER`), un `$` da solo è un errore di sintassi. Nel modello compilato gli argomenti sono scritti **come vengono eseguiti** (dopo `$$` → `$`).
+- `tasks` è facoltativo e, quando c'è, ha almeno un elemento: un modello senza la chiave, o con `x-hp-tasks: []`, dà lo stesso modello compilato di prima, byte per byte, e lo stesso piano. Le attività non sono nel piano né nella sua impronta.
+- Le attività restano nell'ordine del sorgente. `service` deve essere un componente dichiarato. Dentro un'attività sono rifiutate per nome `user`, `privileged`, `cap_add`, `group_add` (sicurezza) e `schedule`, `cron`, `environment`, `working_dir`, `entrypoint`, `shell`, `tty`, `stdin_open` (non previste).
+- Una sola regola sugli argomenti, `appStackTaskArgvProblem`, usata dal validatore, dall'API e dall'esecutore. Come per il comando di un componente, **nessun argomento** può avere il nome di una shell o di un programma che ne lancia una (`sh`, `bash`, `busybox`, `env`, …: conta il nome dopo l'ultima `/`).
+
+**Database (`packages/database`, migrazione `0031`).**
+
+- Nessuna riga in `app_stack_task_schedules` vuol dire «mai»: scegliere «mai» cancella la riga. Una programmazione cambiata riparte pulita: nessun orario precedente al cambio è dovuto.
+- Un'esecuzione è una riga di `app_stack_task_runs` e un'operazione `stack.task`, scritte nella stessa transazione, sotto il blocco dell'applicazione. `stack.task` è un tipo di operazione ma **non** uno dei tipi che cambiano l'applicazione: nessuna riga di installazione, nessuna revisione, stato invariato. Si può chiedere solo mentre l'applicazione è `running` o `degraded`; mentre un'esecuzione è in coda o in corso, una modifica dell'applicazione è rifiutata (`409`).
+- Le applicazioni si cancellano scrivendo `deleted_at` (la riga resta): un trigger toglie le loro programmazioni e le loro esecuzioni. Le operazioni restano.
+- Per ogni attività restano le ultime 20 esecuzioni. Un'esecuzione che **non è partita** non ha un'ora di inizio, anche se era già stata inviata all'esecutore.
+- Un'esecuzione rimasta `queued` o `running` con l'operazione già chiusa (il pannello si è fermato fra le due scritture) viene chiusa dalla passata della programmazione: la prima come non partita, la seconda come esito non noto. Nessuna delle due viene rilanciata.
+
+**Esecutore (`packages/executor-contracts`, `apps/docker-executor`).**
+
+- Una porta facoltativa a parte, `StackTaskExecutorPort`, con due chiamate: `runAppStackTask` e `getAppStackTaskRun`. Sull'IPC: `POST /v1/app-stacks/tasks/run` e `GET /v1/app-stacks/<stackId>/task-runs/<runId>`; la lettura è un `GET` perché non può mai essere una chiamata dall'esito ambiguo. Un esecutore senza la porta risponde `422 NOT_SUPPORTED`. Il client aspetta la risposta per il limite di tempo dell'attività più 120 secondi.
+- Il codice sta in file nuovi (`app-stacks/tasks.ts`, `app-stacks/task-ipc.ts`, `simulator-app-stack-tasks.ts`), non nel motore delle applicazioni.
+- L'ordine di un'esecuzione: richiesta ricontrollata con lo schema; esecuzione già vista (stessa risposta di prima, mai un secondo avvio); una sola per applicazione; container cercato per il nome che l'esecutore deriva, con etichette, nome e stato ricontrollati; da lì in poi il container è indicato con l'id letto in quel controllo, mai restituito; pulizia provata **prima** del comando (se non riesce, il comando non parte); comando avviato con il solo segno `HP_TASK_RUN=<id>` nell'ambiente; ultime righe raccolte fino alla fine o al limite; pulizia per quell'esecuzione; lettura del codice di uscita.
+- L'ingresso standard viene aperto e chiuso subito (è la strada già usata dagli altri comandi dell'esecutore): il comando legge «fine dell'input».
+- Se l'avvio del comando fallisce e non si può dire se il processo è partito, l'esecutore lo tratta come **forse partito**: fa la pulizia e risponde `failed` senza codice di uscita.
+- L'esecutore aspetta la fine dell'uscita del comando, non interroga il processo. Su Docker reale l'uscita finisce quando finisce il comando, anche se ha lasciato un processo fuori dalla sua sessione: l'esito è quello del comando e la pulizia chiude subito ciò che è rimasto. Se l'uscita restasse aperta, l'esecuzione finirebbe al limite di tempo come `timed_out`.
+- Quando il motore non riesce ad avviare il programma (non è nell'immagine, codice 127; non è eseguibile, codice 126) scrive un suo messaggio che nomina il programma. L'esecutore non lo restituisce come uscita dell'esecuzione: resta il codice di uscita, nella riga.
+- Di ciò che il comando stampa l'esecutore tiene gli ultimi 64 KiB mentre gira; poi maschera i segreti del componente e taglia a 200 righe e 16 KiB. Una riga spezzata dal taglio iniziale viene tolta.
+- L'esecutore ricorda le ultime 200 esecuzioni finite, in memoria. Dopo un suo riavvio non ne conosce nessuna.
+- Se la pulizia dopo un'esecuzione fallisce viene ritentata 5 volte a 5 secondi di distanza; poi l'esecutore scrive nel suo registro `app_task_cleanup_failed` con un codice e nient'altro. La pulizia all'inizio dell'esecuzione successiva e quella all'avvio dell'esecutore sono le altre due reti.
+- All'avvio l'esecutore fa la pulizia in ogni componente in esecuzione che ha ancora un comando aperto (`app_task_reap_failed` se non riesce). Un componente senza shell non ha mai eseguito attività e non è un errore.
+
+**API (`apps/api`).**
+
+- Quattro rotte sotto l'applicazione (in `docs/api/openapi.yaml`): elenco delle attività, ultime esecuzioni di una, «esegui ora» (`202`, con `Idempotency-Key`, corpo vuoto), programmazione (`PUT`). La risposta al cliente non ha il codice di uscita: resta nella riga, per chi amministra.
+- Le attività si leggono dal **sorgente** della versione del modello della revisione installata, ricontrollato con le regole di oggi: una versione che oggi non passerebbe i controlli non ha attività, e niente di suo viene eseguito. Così fanno l'elenco, la richiesta, il lavoratore e la programmazione.
+- Una corsia a parte nel lavoratore: le attività del server girano una dopo l'altra, senza fermare installazioni, backup o lavori dei siti.
+- L'operazione tiene il suo blocco per il limite di tempo più 180 secondi. Se la risposta dell'esecutore si perde, l'operazione resta `unknown` e a ogni passata di recupero il pannello **legge** dall'esecutore: finita → esito scritto; ancora in corso → si aspetta, e l'applicazione resta ferma; non conosciuta → esito non noto, operazione chiusa come fallita, niente rilancio.
+- Un rifiuto certo dell'esecutore chiude l'esecuzione come non partita, con il motivo: componente fermo, il server non poteva (motore non raggiungibile, un'altra attività già in corso, esecutore senza la porta), rifiutata (etichette o richiesta non valide).
+- Mentre un'attività è in coda o in corso l'aggiornamento del pannello, l'aggiornamento del sistema e il riavvio dell'esecutore dall'amministrazione aspettano, come per i backup: `stack.task` è fra i lavori che li bloccano.
+- La passata della programmazione gira ogni minuto, senza variabile d'ambiente e senza una passata all'avvio. A ogni passata conta solo l'orario più recente di ogni programmazione.
+- Dopo un ritorno automatico alla release precedente, il lavoratore vecchio chiude come fallita un'operazione di un tipo che non conosce: il blocco dell'applicazione si libera. La riga dell'esecuzione viene sistemata alla passata successiva della release nuova.
+
+**Pagine (`apps/web`).**
+
+- La sezione «Attività programmate» compare, dopo i registri, solo se la versione installata ha attività. Mostra il nome, la descrizione, quando parte da sola (ora UTC e ora locale), l'orario saltato e il perché, l'esito dell'ultima esecuzione; «Esegui ora»; la scelta della programmazione; le ultime esecuzioni con ciò che hanno stampato. Non mostra il componente, il comando o il codice di uscita.
+- Un'attività in coda o in corso compare nel riquadro di avanzamento della pagina con parole sue, e alla fine la pagina si aggiorna.
+
+**Aggiornamenti (`infra`).** La funzione di rilascio `app-tasks`: `hp-update` rifiuta di tornare a una release che non la conosce mentre esiste una versione di modello con attività. Le versioni dei modelli non si cancellano, quindi da lì si torna indietro solo con `--allow-feature-loss`.
+
+## 5. Che cosa è provato
+
+**Prove automatiche** (tutte verdi su questo ramo; i file nominati nella regola di `HARNESS.md` esistono):
+
+- *Formato*: `packages/policy-engine/test/app-template-tasks.test.ts` (ogni rifiuto con il suo codice; un modello senza attività dà lo stesso modello compilato e lo stesso piano) e `packages/contracts/test/app-stack-tasks.test.ts` (schemi, orari, limiti dell'uscita).
+- *Database*: `packages/database/test/app-stack-tasks-database.test.ts` (105 casi: vincoli, trigger alla cancellazione, un orario al più una volta, rifiuto mentre l'applicazione è occupata o ferma, chiusura delle esecuzioni rimaste a metà) e `rollback-compat.test.ts` (la release precedente lavora sul database migrato).
+- *Esecutore*: `apps/docker-executor/test/app-stack-tasks.test.ts` (34 casi contro un motore finto: richiesta esatta inviata a Docker, senza utente, cartella e terminale; etichette sbagliate, componente fermo o mancante; nessuna shell → non parte; limite di tempo; codici di uscita; mascheramento e limiti dell'uscita; una per applicazione; mai due volte; lettura solo per quell'applicazione e quel cliente; pulizia ritentata; pulizia all'avvio; rotte IPC firmate; simulatore) e `packages/executor-contracts/test/stack-task-port.test.ts`.
+- *API*: `apps/api/test/app-stack-tasks.integration.test.ts` (12 casi su HTTP, lavoratore e programmazione con l'esecutore simulato: permessi, altro cliente, nessun comando accettato, comando letto dal modello, stato dell'applicazione invariato, uscita solo nella riga dell'esecuzione, orario in coda una volta sola, risposte perse mai rilanciate, cancellazione) e `apps/api/test/app-stack-task-runtime.unit.test.ts` (7 casi sul lavoratore con un esecutore a copione). La corsia a parte e il recupero sono in `app-stack-lane.unit.test.ts`.
+- *Pagine*: `apps/web/test/app-stacks-detail.test.ts` (la sezione, le parole, «Esegui ora», la programmazione, le ultime esecuzioni, il riquadro di avanzamento), `app-stacks-bff.test.ts` (le tre rotte: sessione, CSRF, corpo rifiutato prima dell'API) e `m6-web-qa-guards.test.ts` (inventario delle rotte).
+- *Aggiornamenti*: `infra/linux/features-gate.test.ts`, `infra/linux/update.test.ts` e `infra/release/release-manifest.test.ts`; la domanda che `hp-update` fa al database è eseguita sullo schema migrato nel test di integrazione dell'API.
+
+**Docker reale** (`infra/linux/accept-app-tasks.mjs`, eseguito il 2026-11-23 su Docker Engine 29.10.0): `RESULT 17/17 passed, 1 skipped`. Due applicazioni di un cliente e una di un altro, dal modello integrato «Lavoro periodico con archivio» (immagine Alpine, shell busybox); l'adattatore di produzione dietro un cancello che nega tutto ciò che non è di quella prova; nessuna immagine scaricata, nessuna rete «edge» creata, tutto rimosso alla fine, le reti del proxy del pannello vivo uguali prima e dopo. Ha mostrato che:
+
+- il comando gira con lo stesso utente, gli stessi gruppi e la stessa cartella del componente, e vede il segno della propria esecuzione; il componente non viene riavviato;
+- una shell come comando è rifiutata prima di qualunque richiesta a Docker;
+- il codice di uscita e l'uscita tornano come sono; un programma che non c'è nell'immagine dà `failed` con codice 127 e nessuna uscita;
+- al limite di tempo (5 secondi) la risposta arriva dopo 5,2 secondi e nel componente non resta il comando; lo stesso per un comando lanciato da un altro programma (`timeout … sleep`) e per uno che lascia la sessione (`setsid sleep`): in quel caso l'esecuzione finisce come il comando e il processo rimasto viene chiuso subito;
+- una seconda attività nella stessa applicazione è rifiutata mentre la prima gira, un'altra applicazione no; la stessa esecuzione chiesta due volte non manda un secondo comando; un altro cliente legge «non conosciuta»;
+- sei container messi sotto il nome di un componente con etichette sbagliate sono rifiutati prima di qualunque comando, come il cliente sbagliato, il componente fermo e l'applicazione che non esiste;
+- un esecutore chiuso con `SIGKILL` lascia il comando in esecuzione; la pulizia all'avvio dell'esecutore successivo lo chiude, senza riavviare componenti e senza toccare quelli che non avevano comandi aperti;
+- il cancello ha visto solo le due forme previste (il comando con il suo segno, la pulizia) e non ha negato nulla.
+
+**Controllo complessivo**: build, lint, controllo dei tipi e i test collegati alla modifica passano in locale; il controllo completo è quello della CI sulla PR.
+
+## 6. Non provato
+
+- **Su un pannello installato.** I flag delle applicazioni sono `false` su `main`: le rotte e la sezione rispondono solo nei test, che li accendono.
+- **Le pagine in un browser.** Sono coperte dai test delle pagine, non viste da una persona.
+- **Un componente senza `/bin/sh` su Docker reale.** Ogni immagine ammessa in questo ramo ha una shell: il passo è saltato. Il comportamento atteso (codice 126 o 127 dalla pulizia → l'attività non parte) è provato solo contro il motore finto.
+- **Lo script di pulizia in una shell diversa da quella di busybox** (dash, bash): usa solo comandi interni e `/proc`, ma su Docker reale è stato eseguito solo nell'immagine Alpine.
+- **Il mascheramento dei segreti su Docker reale**: il modello usato non ha segreti. È provato contro il motore finto e nel simulatore.
+- **La programmazione attraverso un'ora vera** e il limite di 600 secondi: i test muovono l'orologio.
+- **Un ritorno alla release precedente con un'esecuzione in coda**: il comportamento del lavoratore vecchio è stato letto nel codice, non eseguito con una release precedente vera.
+- **Più attività lunghe di applicazioni diverse insieme**: la corsia è una; non è stata misurata l'attesa.
+
+## 7. Punti aperti
+
+- **Le decisioni A1–A12 e quelle del §4 sono dell'agente.** Nessun proprietario le ha approvate.
+- **Niente di questo è raggiungibile su un pannello installato**, finché `applicationStacksAvailable` resta `false` (lo accende la PR #43 per il backend `linux-systemd`).
+- **La corsia delle attività è una per tutto il server.** Un'attività di dieci minuti ritarda le attività delle altre applicazioni; non le installazioni.
+- **Un processo che toglie il segno dal proprio ambiente e lascia la sessione sfugge alla pulizia**, fino al riavvio dell'applicazione. Resta nei limiti del componente.
+- **Un'immagine che avesse già `HP_TASK_RUN=srun_…` nel proprio ambiente** vedrebbe i propri processi (non il primo) chiusi dalla pulizia. Un modello non può scriverlo (i nomi che cominciano con `HP_` sono riservati); le immagini ammesse le sceglie l'amministratore, e l'effetto resterebbe dentro quell'applicazione.
+- **La regola sulla shell guarda i nomi degli argomenti.** Un programma che al suo interno lancia una shell (uno script con la sua prima riga, un programma che esegue altri programmi) non viene riconosciuto, come oggi nel comando di un componente. Il modello lo scrive l'amministratore.
+- **Finché l'esecutore non è raggiungibile, un'esecuzione dalla risposta persa tiene ferma la sua applicazione.** Si sblocca quando l'esecutore risponde (se è ripartito: esito non noto).
+- **Nessun avviso quando un'attività fallisce** (A12): si vede nella pagina. Le notifiche della PR #72 non conoscono le attività.
+- **Nessuna attività nei modelli integrati e nel catalogo** (A12): oggi un'attività esiste solo in un modello scritto da un amministratore.
+- **Questa PR e le PR #43, #54, #57, #67, #72 e #74 toccano le stesse righe** di alcuni file (`HARNESS.md`, `README.md`, il diagramma, il runbook, `openapi.yaml`, i messaggi, il lavoratore, l'adattatore dell'esecutore): chi entra dopo deve unire `main` e tenere entrambe le parti. La migrazione è la `0031`; i numeri da `0026` a `0030` sono sulle altre.

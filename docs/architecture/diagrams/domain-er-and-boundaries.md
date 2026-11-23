@@ -508,6 +508,8 @@ erDiagram
     app_stacks ||--o{ app_stack_domains : "(stack_id, organization_id) CASCADE"
     app_stack_components ||--o{ app_stack_domains : "(stack_id, component_key)"
     app_stacks ||--o{ app_stack_deployments : "(stack_id, organization_id) CASCADE"
+    app_stacks ||--o{ app_stack_task_schedules : "(stack_id, organization_id) CASCADE (0031)"
+    app_stacks ||--o{ app_stack_task_runs : "(stack_id, organization_id) CASCADE (0031)"
     app_stack_revisions |o--o{ app_stack_deployments : "(revision_id, stack_id)"
 
     organizations {
@@ -601,6 +603,32 @@ erDiagram
         text status "queued, running, succeeded, failed, unknown, cancelled"
         text problem "codice stabile o NULL"
     }
+
+    app_stack_task_schedules {
+        text stack_id PK "con task_key; FK con organization_id"
+        text task_key PK "chiave dell'attività nel modello"
+        text frequency "hourly, daily, weekly (nessuna riga = mai)"
+        integer hour_utc "0-23, NULL per hourly"
+        integer weekday "1 (lunedì) - 7, solo weekly"
+        timestamptz changed_at "prima di questo istante nulla è dovuto"
+        timestamptz served_slot_at "ultimo orario già trattato"
+        timestamptz skipped_slot_at "ultimo orario non eseguito"
+        text skip_reason "busy, not_running, missed"
+    }
+
+    app_stack_task_runs {
+        text id PK "srun_<24 hex>"
+        text stack_id FK "con organization_id"
+        text task_key "chiave dell'attività"
+        text component_key "componente in cui gira"
+        text run_trigger "manual, schedule"
+        timestamptz slot_at "orario programmato, UNIQUE per attività"
+        text operation_id UK "una riga per operazione (senza FK)"
+        text status "queued, running, succeeded, failed, timed_out, not_started, unknown"
+        text problem "perché non è partita, o outcome_lost"
+        integer exit_code "0-255 o NULL; non esposto al cliente"
+        text output "ultime righe, mascherate, al più 16 KiB"
+    }
 ```
 
 Note di lettura:
@@ -659,6 +687,11 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 - **Versioni 0023 e 0024 (`ADR-0034` e `ADR-0033`, additive)**:
   - `0023_organization_site_limit.sql`: colonna `organizations.max_sites` (`NULL` = nessun limite, `CHECK >= 0`).
   - `0024_site_templates.sql`: tabelle `site_templates` e `site_template_versions` (immutabili), colonne `sites.template_version_id` (chiave esterna `RESTRICT`) e `sites.template_parameters` (array JSONB), indice parziale `idx_sites_template_version`; il modello integrato WordPress (`stpl_wordpress`, versione `stv_wordpress_1`) è garantito a ogni avvio dell'API da `ensureBuiltInSiteTemplates` (`packages/database`), non dalla migrazione.
+- **Versione 0031 (`0031_app_stack_tasks.sql`, `ADR-0042`, additiva)**:
+  - Due tabelle: `app_stack_task_schedules` (quando un'attività parte da sola; nessuna riga vuol dire «mai») e `app_stack_task_runs` (una riga per esecuzione, con ciò che ha stampato: mascherato e limitato dall'esecutore, non sta in nessun'altra tabella). Il comando di un'attività non è in nessuna delle due: si legge dalla versione del modello quando l'esecuzione comincia.
+  - Un indice unico parziale `uq_app_stack_task_runs_slot (stack_id, task_key, slot_at)`: un orario programmato entra in coda al più una volta.
+  - Un trigger su `app_stacks` (`trg_app_stacks_forget_tasks`): quando un'applicazione viene cancellata (`deleted_at` passa da `NULL` a un istante) le sue righe nelle due tabelle spariscono; la riga di `app_stacks` resta, quindi la cascata della chiave esterna da sola non basterebbe.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le due tabelle e il trigger continua a togliere ciò che le attività hanno lasciato. I numeri da `0026` a `0030` sono di altre modifiche in corso.
 - **Versione 0025 (`0025_app_stacks.sql`, `ADR-0035`, additiva)**:
   - Dieci tabelle: `app_templates`, `app_template_versions` (immutabili), `app_stacks`, `app_stack_parameters`, `app_stack_secrets` (immutabili), `app_stack_revisions` (immutabili), `app_stack_components`, `app_stack_volumes`, `app_stack_domains` e `app_stack_deployments`.
   - Una colonna nulla: `organizations.max_app_stacks` (`NULL` = nessun limite, `CHECK >= 0`).
