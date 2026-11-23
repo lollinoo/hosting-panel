@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_COMPONENT_HEALTH,
+  APP_STACK_LINK_STATES,
   APP_STACK_STATUSES,
   CERT_STATUSES,
   DOMAIN_STATUSES,
@@ -15,6 +16,8 @@ import {
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackDomainDto,
+  type AppStackLinkDto,
+  type AppStackLinksDto,
   type AppStackPlanDiffDto,
   type AppStackSummaryDto,
   type AppTemplateParameter,
@@ -71,6 +74,7 @@ import { AppCatalog } from "@/components/app-stacks/app-catalog";
 import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
+import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
 import { AppStackList } from "@/components/app-stacks/app-stack-list";
 import { AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
@@ -417,6 +421,27 @@ const wizard = (m: Messages, state: Record<number, unknown>, entry: CustomerAppT
 const deleteProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData: true };
 const secretsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", secrets: DETAIL.secretParameters };
 const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress };
+const LINK: AppStackLinkDto = {
+  id: "slnk_1",
+  state: "active",
+  createdAt: NOW,
+  databaseStackId: "stk_db1",
+  databaseName: "orders-db",
+  databaseKind: "Database MariaDB",
+  applicationStackId: "stk_a1",
+  applicationName: "team-notes",
+  connection: { host: "stk-0123456789abcdef01234567", port: 3306 },
+};
+const LINKS: AppStackLinksDto = {
+  stackId: "stk_a1",
+  role: "application",
+  connection: null,
+  links: [LINK],
+  candidates: [{ stackId: "stk_db2", name: "cache", kind: "Archivio Valkey" }],
+  limit: 4,
+};
+const DATABASE_LINKS: AppStackLinksDto = { stackId: "stk_db1", role: "database", connection: LINK.connection, links: [LINK], candidates: [], limit: 8 };
+const linksProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: LINKS as AppStackLinksDto | null };
 const editor = (m: Messages, target: AppEditorTarget, state: Record<number, unknown> = {}) =>
   withState(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target }, m, state);
 const adminDetail = (m: Messages, tpl: AdminAppTemplateDetailDto, usage: AdminAppTemplateUsageDto | null, state: Record<number, unknown> = {}) =>
@@ -506,6 +531,19 @@ const SCENARIOS: Scenario[] = [
   { name: "domains · remove dialog", render: (m) => withState(AppStackDomains, domainsProps, m, { 5: "sdom_1" }) },
   { name: "domains · none", ids: ["app-domain-hostname"], render: (m) => withState(AppStackDomains, { ...domainsProps, initial: [] }, m) },
   { name: "domains · unreadable", render: (m) => withState(AppStackDomains, { ...domainsProps, initial: null }, m) },
+  { name: "links", ids: ["app-link-database"], render: (m) => withState(AppStackLinks, linksProps, m) },
+  { name: "links · waiting", ids: ["app-link-database"], render: (m) => withState(AppStackLinks, { ...linksProps, initial: { ...LINKS, links: [{ ...LINK, state: "pending" as const }] } }, m) },
+  { name: "links · refused", ids: ["app-link-database"], alerts: 1, render: (m) => withState(AppStackLinks, linksProps, m, { 3: m.apps.reasons.plan_changed }) },
+  { name: "links · disconnect dialog", ids: ["app-link-database"], render: (m) => withState(AppStackLinks, linksProps, m, { 4: "slnk_1" }) },
+  { name: "links · none, no database to pick", render: (m) => withState(AppStackLinks, { ...linksProps, initial: { ...LINKS, links: [], candidates: [] } }, m) },
+  {
+    name: "links · at the limit",
+    render: (m) =>
+      withState(AppStackLinks, { ...linksProps, initial: { ...LINKS, links: [1, 2, 3, 4].map((n) => ({ ...LINK, id: `slnk_${n}`, databaseStackId: `stk_db${n}` })) } }, m),
+  },
+  { name: "links · database side", render: (m) => withState(AppStackLinks, { ...linksProps, stackId: "stk_db1", initial: DATABASE_LINKS }, m) },
+  { name: "links · database nobody uses, not linkable", render: (m) => withState(AppStackLinks, { ...linksProps, stackId: "stk_db1", initial: { ...DATABASE_LINKS, connection: null, links: [] } }, m) },
+  { name: "links · unreadable", render: (m) => withState(AppStackLinks, { ...linksProps, initial: null }, m) },
   { name: "progress · running", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("processing") }) },
   { name: "progress · succeeded", render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("succeeded"), 1: "done" }) },
   { name: "progress · failed", alerts: 1, render: (m) => withState(AppStackProgress, { orgId: ORG, operationId: "op_1" }, m, { 0: operation("failed"), 1: "done" }) },
@@ -575,7 +613,7 @@ describe("accessibility rules on every component, in Italian and English", () =>
     const rendered = SCENARIOS.map((s) => s.name).join("|");
     for (const part of [
       "unavailable", "application list", "catalog", "wizard · configure", "wizard · domains", "wizard · review", "wizard steps", "actions", "delete", "secrets",
-      "logs", "domains", "progress", "sections · components", "sections · history", "admin · template list", "admin · template detail", "admin · editor",
+      "logs", "domains", "links", "progress", "sections · components", "sections · history", "admin · template list", "admin · template detail", "admin · editor",
     ])
       expect(rendered, part).toContain(part);
   });
@@ -876,23 +914,44 @@ describe("words, not colours", () => {
 
   it.each(LOCALES)("%s · the stack detail page puts the status in words and keeps a heading per section", async (_l, m) => {
     loc.value = localeOf(m);
+    let links = LINKS;
     fetchUpstream.mockImplementation(async (p: string) =>
-      ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS) })[p] ?? { ok: false, status: 404, error: { error: { code: "NOT_FOUND" } } },
+      ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS), [`${UP}/links`]: ok(links) })[p] ?? {
+        ok: false,
+        status: 404,
+        error: { error: { code: "NOT_FOUND" } },
+      },
     );
     const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
     expectAccessible(h, "detail page");
     expect(inner(h, "h1")).toEqual(["team-notes"].map((n) => n));
     expect(inner(h, "h2")).toEqual(
-      ["components", "logs", "settings", "domains", "data", "resources", "history", "danger"].map((k) => (m.apps.detail.section as Record<string, string>)[k]),
+      ["components", "logs", "settings", "links", "domains", "data", "resources", "history", "danger"].map((k) => (m.apps.detail.section as Record<string, string>)[k]),
     );
     // every section is a region named by its own heading
     const sections = tagsOf(h).filter((t) => t.name === "section");
     const headings = new Set(tagsOf(h).filter((t) => t.name === "h1" || t.name === "h2").map((t) => t.attrs.id));
-    expect(sections.length).toBe(9);
+    expect(sections.length).toBe(10);
     for (const s of sections) expect(headings.has(s.attrs["aria-labelledby"]!), s.attrs["aria-labelledby"]).toBe(true);
     expect(h).toContain(`>${m.apps.status.degraded}<`);
     for (const t of tagsOf(h).filter((x) => x.name === "time")) expect(t.attrs.datetime).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(tagsOf(h).filter((x) => x.name === "time").length).toBeGreaterThanOrEqual(5);
+    // on the page of a database the same section is named for what it shows there
+    links = DATABASE_LINKS;
+    const database = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
+    expectAccessible(database, "detail page of a database");
+    expect(inner(database, "h2")).toContain(m.apps.detail.section.connection);
+    expect(inner(database, "h2")).not.toContain(m.apps.detail.section.links);
+  });
+
+  it.each(LOCALES)("%s · every state of a link to a database is a distinct word", (_l, m) => {
+    const words = APP_STACK_LINK_STATES.map((state) => {
+      const h = withState(AppStackLinks, { ...linksProps, initial: { ...LINKS, links: [{ ...LINK, state }] } }, m);
+      expect(h, state).toContain(`>${m.apps.links.state[state]}<`);
+      expect(m.apps.links.state[state], state).toMatch(/\p{L}{3,}/u);
+      return m.apps.links.state[state];
+    });
+    expect(new Set(words).size).toBe(APP_STACK_LINK_STATES.length);
   });
 
   it.each(LOCALES)("%s · the draft and unknown states explain themselves in a status region", async (_l, m) => {
@@ -901,7 +960,9 @@ describe("words, not colours", () => {
       ["unknown", m.apps.detail.unknownBody],
       ["draft", m.apps.detail.draftBody],
     ] as const) {
-      fetchUpstream.mockImplementation(async (p: string) => (p === UP ? ok({ ...DETAIL, status, revisionNumber: null }) : ok(p.endsWith("/domains") ? [] : [])));
+      fetchUpstream.mockImplementation(async (p: string) =>
+        p === UP ? ok({ ...DETAIL, status, revisionNumber: null }) : ok(p.endsWith("/links") ? { ...LINKS, links: [] } : []),
+      );
       const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
       expect(withRole(h, "status").join(" "), status).toContain(text);
       expect(withRole(h, "alert"), status).toEqual([]);
@@ -1029,6 +1090,7 @@ describe("Italian and English", () => {
     "SITE_TITLE", "MAX_USERS", "ADMIN_PASSWORD", "MAIL_KEY", "title", "port", "mode", "small", "large", "stk_a1", "my-notes", "team-board", "Acme Srl", "atpl_notes",
     "Title", "Database password", "db_password", "secret", "string", "msg", "services.web", "IMAGE_DIGEST_REQUIRED", "odd-kind", "Check the form", "Bad name", "Bad port",
     "bad host", "x", "No", "Shared notes for the team.", "mystery", "this line is not aligned with its siblings", "notes.example.test:8080", "Notes.Example.test", "https", "HTTP", "Docker",
+    "orders-db", "Database MariaDB", "Archivio Valkey", "stk-0123456789abcdef01234567",
   ]);
   const bothLanguagesAlike = new Set(
     [...sections].flatMap(([, pick]) => {
@@ -1061,7 +1123,11 @@ describe("Italian and English", () => {
     const page = async (m: Messages) => {
       loc.value = localeOf(m);
       fetchUpstream.mockImplementation(async (p: string) =>
-        ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS) })[p] ?? { ok: false, status: 404, error: { error: { code: "NOT_FOUND" } } },
+        ({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok(DEPLOYMENTS), [`${UP}/domains`]: ok(DOMAINS), [`${UP}/links`]: ok(LINKS) })[p] ?? {
+          ok: false,
+          status: 404,
+          error: { error: { code: "NOT_FOUND" } },
+        },
       );
       return html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);
     };
