@@ -38,7 +38,13 @@ Ogni modello ha un solo componente, un volume di dati che resta quando l'applica
 
 ### D2 — Immagini
 
-L'elenco delle immagini ammesse (`APP_IMAGE_ALLOWLIST`) guadagna due righe: `mariadb` e `postgres`, entrambe con utente `999:999`. La riga di `valkey/valkey` esiste già. Come per le altre, ogni riga aspetta la conferma del proprietario; le immagini sono fissate per digest nei modelli.
+L'elenco delle immagini ammesse (`APP_IMAGE_ALLOWLIST`) guadagna due righe: `mariadb` e `postgres`, entrambe con utente `999:999`. La riga di `valkey/valkey` esiste già. Come per le altre, ogni riga aspetta la conferma del proprietario; le immagini sono fissate per digest nei modelli:
+
+| Modello | Immagine |
+|---|---|
+| Database MariaDB | `mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3` |
+| Database PostgreSQL | `postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1` |
+| Archivio Valkey | `valkey/valkey:9.2.0-alpine3.24@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882` |
 
 ### D3 — Protezioni del container
 

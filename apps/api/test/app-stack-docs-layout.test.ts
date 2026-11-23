@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { APP_BUILT_IN_TEMPLATES } from "@hosting-panel/contracts";
+import { APP_BUILT_IN_TEMPLATES, APP_DATABASE_TEMPLATE_CATEGORY } from "@hosting-panel/contracts";
 
 const root = resolve(__dirname, "../../..");
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
@@ -12,7 +12,12 @@ const between = (text: string, from: string, to?: string) => {
   return text.slice(start, end < 0 ? undefined : end);
 };
 
-const digests = [...new Set(APP_BUILT_IN_TEMPLATES.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0])))];
+const digestsOf = (templates: readonly { source: string }[]) => [
+  ...new Set(templates.flatMap((t) => [...t.source.matchAll(/sha256:[0-9a-f]{64}/g)].map((m) => m[0]))),
+];
+// The applications of ADR-0035; the databases came with ADR-0039, which names their images itself.
+const digests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => t.category !== APP_DATABASE_TEMPLATE_CATEGORY));
+const databaseDigests = digestsOf(APP_BUILT_IN_TEMPLATES.filter((t) => t.category === APP_DATABASE_TEMPLATE_CATEGORY));
 const scripts = ["accept-app-stack-engine.mjs", "accept-app-stack-http-cache.mjs", "accept-app-stack-worker-storage.mjs"];
 
 describe("hcp-spec-005 docs and acceptance scripts", () => {
@@ -28,6 +33,16 @@ describe("hcp-spec-005 docs and acceptance scripts", () => {
     for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
     for (const s of ["app-stacks", "0025_app_stacks.sql", "APP_IMAGE_ALLOWLIST", "HCP-STACK/v1", "D12", ...digests]) expect(adr, s).toContain(s);
     expect(digests.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("ADR-0039 names the image of every built-in database and cites existing paths", () => {
+    const file = "docs/architecture/adr/0039-application-databases.md";
+    const adr = read(file);
+    for (const h of ["Stato", "Data", "Riferimento", "Migrazioni"]) expect(adr, h).toMatch(new RegExp(`^- \\*\\*${h}:\\*\\* `, "m"));
+    const paths = new Set([...adr.matchAll(/`((?:apps|packages|infra|docs|\.github)\/[^`\s]+)`/g)].map((m) => m[1]!.replace(/:[\d,-]+$/, "")));
+    for (const p of paths) expect(existsSync(join(root, p)), `${file}: ${p}`).toBe(true);
+    expect(databaseDigests.length).toBeGreaterThanOrEqual(3);
+    for (const s of ["0028_app_stack_links.sql", "APP_IMAGE_ALLOWLIST", "D12", ...databaseDigests]) expect(adr, s).toContain(s);
   });
 
   it("README, HARNESS, runbook, ER diagram and the brain files name the feature", () => {
