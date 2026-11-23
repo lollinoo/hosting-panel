@@ -5624,7 +5624,9 @@ paths:
       description: >-
         Volumes are kept unless `destroyData` is true. A name that does not match exactly is refused
         (`VALIDATION_ERROR`, `details[0].field: confirmName`, `details[0].reason: confirmation_mismatch`) and nothing
-        is written. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        is written. A database that an application still uses is refused (`VALIDATION_ERROR`,
+        `details[0].field: links`, `details[0].reason: database_in_use`): disconnect it from every application first.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
         `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -5896,7 +5898,9 @@ paths:
         `details[0].reason: plan_changed`). Without `parameters` the stored settings the new version still declares
         are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
-        drops is refused with `domain_target_removed`. Volumes are never removed by an upgrade. Returns 422
+        drops is refused with `domain_target_removed`. A database that an application still uses is refused with
+        `database_in_use` (`details[0].field: links`) when the new version is no longer one component with one port.
+        Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
         false.
       parameters:
@@ -5945,7 +5949,9 @@ paths:
         refused (`details[0].reason: plan_changed`). Other refusals on `revisionId` are `unknown_revision`,
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
-        refused with `domain_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
+        refused with `domain_target_removed`. A database that an application still uses is refused with
+        `database_in_use` (`details[0].field: links`) when that revision is not one component with one port. Volume
+        data is never touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
