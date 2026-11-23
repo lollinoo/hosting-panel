@@ -1,6 +1,7 @@
 import { ERROR_CODE_HTTP_STATUS, type AppTemplateIssue } from "@hosting-panel/contracts";
 import {
   AppStackDomainError,
+  AppStackLinkError,
   AppStackQuotaError,
   AppStackRepositoryError,
   AppStackSecretError,
@@ -54,6 +55,10 @@ describe("mapAppStackError", () => {
         reason: "domain_target_removed",
       }),
     ],
+    [
+      "DATABASE_IN_USE",
+      one(400, "VALIDATION_ERROR", "Applications still use this database. Disconnect them first.", { field: "links", reason: "database_in_use" }),
+    ],
   ] as const)("AppStackRepositoryError %s", (code, expected) => {
     expect(mapped(new AppStackRepositoryError(code, "repository text"))).toMatchObject(expected);
   });
@@ -63,6 +68,23 @@ describe("mapAppStackError", () => {
       ...one(409, "RESOURCE_LOCKED", "This action is not possible while the application is stopping.", { field: "status", reason: "stopping" }),
       retryable: false,
     });
+  });
+
+  it("maps the link errors (ADR-0039)", () => {
+    expect(mapped(new AppStackLinkError("NOT_FOUND", "repository text"))).toMatchObject({ status: 404, code: "NOT_FOUND", message: APP_NOT_FOUND, details: [] });
+    expect(mapped(new AppStackLinkError("STACK_BUSY", "repository text", "updating"))).toEqual({
+      ...one(409, "RESOURCE_LOCKED", "This action is not possible while the application is updating.", { field: "status", reason: "updating" }),
+      retryable: false,
+    });
+    expect(mapped(new AppStackLinkError("LINK_EXISTS", "repository text"))).toMatchObject(
+      one(409, "ALREADY_EXISTS", "The application is already connected to this database.", { field: "databaseStackId", reason: "link_exists" }),
+    );
+    expect(mapped(new AppStackLinkError("LINK_LIMIT_APPLICATION", "repository text"))).toMatchObject(
+      one(400, "VALIDATION_ERROR", "An application can be connected to at most 4 databases.", { field: "links", reason: "STACK_QUOTA_EXCEEDED" }),
+    );
+    expect(mapped(new AppStackLinkError("LINK_LIMIT_DATABASE", "repository text"))).toMatchObject(
+      one(400, "VALIDATION_ERROR", "A database can be connected to at most 8 applications.", { field: "links", reason: "STACK_QUOTA_EXCEEDED" }),
+    );
   });
 
   it("a quota refusal is the one-detail QUOTA_EXCEEDED of the limit helper", () => {
