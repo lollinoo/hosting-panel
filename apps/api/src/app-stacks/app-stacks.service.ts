@@ -336,7 +336,10 @@ export class AppStacksService {
       defaultVersionId !== stack.templateVersionId
         ? await getAppTemplateVersion(db, { templateId: template.id, versionId: defaultVersionId })
         : null;
-    const previous = desired ? revisions.find((r) => r.revisionNumber < desired.revision.revisionNumber) : undefined;
+    // A revision with the current plan (an upgrade that failed before create, then asked again) leads nowhere else.
+    const previous = desired
+      ? revisions.find((r) => r.revisionNumber < desired.revision.revisionNumber && r.planHash !== desired.revision.planHash)
+      : undefined;
     const previousVersion = previous ? await this.#version(stack, previous.templateVersionId) : null;
     return appStackDetailDto({
       stack,

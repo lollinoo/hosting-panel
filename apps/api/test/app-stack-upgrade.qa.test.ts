@@ -479,6 +479,7 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       const all = await revisions(stackId);
       expect(all.map((r) => r.revisionNumber)).toEqual([1, 2, 3]);
       expect(await stackRow(stackId)).toMatchObject({ status: "running", appliedRevisionId: all[2]!.id, templateVersionId: v2 });
+      expect(await shown(stackId)).toMatchObject({ version: 2, revision: 3, upgrade: null, rollback: { revisionId: rev1!.id, templateVersionNumber: 1 } });
     });
   });
 
