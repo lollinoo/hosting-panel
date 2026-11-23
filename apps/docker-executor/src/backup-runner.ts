@@ -239,6 +239,8 @@ interface JobRecord {
   status: BackupJobStatus;
   settledAtMs: number | null;
   readonly seq: number;
+  /** The application whose volumes a copy job (`stackStart`) saved. */
+  readonly copyOf?: string;
 }
 
 interface ReadyArchiveRecord {
@@ -871,7 +873,7 @@ export class BackupRunner {
   }
 
   /** Records a job whose lane is already taken and runs it in the background. */
-  private launchJob(jobId: string, runner: (entry: JobRecord) => Promise<void>): BackupJobStatus {
+  private launchJob(jobId: string, runner: (entry: JobRecord) => Promise<void>, copyOf?: string): BackupJobStatus {
     const initial: BackupJobStatus = {
       jobId,
       state: "running",
@@ -879,7 +881,7 @@ export class BackupRunner {
       snapshot: null,
     };
     this.nextSeq += 1;
-    const entry: JobRecord = { status: initial, settledAtMs: null, seq: this.nextSeq };
+    const entry: JobRecord = { status: initial, settledAtMs: null, seq: this.nextSeq, ...(copyOf === undefined ? {} : { copyOf }) };
     this.jobs.set(jobId, entry);
 
     void runner(entry);
@@ -2517,6 +2519,23 @@ export class BackupRunner {
     }
   }
 
+  /**
+   * A write-back (`<op>-apply`) needs a good safety copy of the same application's data, taken by this process under
+   * the same operation: `<op>` or `<op>-t2`, one is enough (HARNESS.md, ADR-0038 K5). Only the in-memory record of the
+   * copy job proves it, so after an executor restart the write-back is refused. A snapshot tag in the repository would
+   * outlive a restart, but the safety copy may sit on the other destination, which the request does not name.
+   */
+  private assertAppStackSafetyCopy(req: AppStackRestoreRequest): void {
+    const op = req.jobId.slice(0, -"-apply".length);
+    const saved = [op, `${op}-t2`].some((jobId) => {
+      const copy = this.jobs.get(jobId);
+      return copy?.copyOf === req.stackId && copy.status.state === "succeeded" && copy.status.snapshot !== null;
+    });
+    if (!saved) {
+      throw new ExecutorCodedError("No good safety copy of this application's data was taken first", "VALIDATION_ERROR");
+    }
+  }
+
   /** The repository of an application, ready for a job: key, destination, tool, network and the secret files. */
   private async openAppStackRepository(
     req: { readonly jobId: string; readonly stackId: string; readonly target: BackupRepositoryTarget },
@@ -2746,15 +2765,19 @@ export class BackupRunner {
         this.takeJobLane(lane);
         try {
           await this.assertAppStackAtRest(request.stackId, request.organizationId, request.volumeKeys);
+          if (request.action === "stackRestore") this.assertAppStackSafetyCopy(request);
         } catch (err) {
           this.activeSiteIds.delete(lane);
           this.activeJobCount = Math.max(0, this.activeJobCount - 1);
           throw err;
         }
-        return this.launchJob(request.jobId, (entry) =>
-          request.action === "stackStart"
-            ? this.runAppStackBackupJob(request, entry)
-            : this.runAppStackRestoreJob(request, entry),
+        return this.launchJob(
+          request.jobId,
+          (entry) =>
+            request.action === "stackStart"
+              ? this.runAppStackBackupJob(request, entry)
+              : this.runAppStackRestoreJob(request, entry),
+          request.action === "stackStart" ? request.stackId : undefined,
         ) as BackupsResultByAction[R["action"]];
       }
       case "stackForget":

@@ -229,6 +229,7 @@ export class SimulatedBackups {
         if (!known) {
           this.assertCanStartJob(stackLane(req.stackId));
           this.assertAppStackAtRest(req.stackId, req.organizationId, req.volumeKeys);
+          if (req.action === "stackRestore") this.assertAppStackSafetyCopy(req.jobId, req.stackId);
         }
         const status =
           req.action === "stackStart"
@@ -407,6 +408,18 @@ export class SimulatedBackups {
     }
     if (readiness === "foreign") {
       throw new ExecutorCodedError("A volume with the name of this application is not its own", "HOST_POLICY_DENIED");
+    }
+  }
+
+  /** The real runner's rule: a write-back needs a good copy of the same application as `<op>` or `<op>-t2`. */
+  private assertAppStackSafetyCopy(jobId: string, stackId: string): void {
+    const op = jobId.slice(0, -"-apply".length);
+    const saved = [op, `${op}-t2`].some((id) => {
+      const copy = this.jobs.get(id);
+      return copy?.action === "start" && copy.siteId === stackLane(stackId) && copy.state === "succeeded" && copy.snapshot !== null;
+    });
+    if (!saved) {
+      throw new ExecutorCodedError("No good safety copy of this application's data was taken first", "VALIDATION_ERROR");
     }
   }
 

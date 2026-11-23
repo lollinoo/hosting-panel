@@ -617,6 +617,7 @@ async function main() {
   let FP0 = null;
   let backup = null; // { jobId, snapshotId }
   let restoreJobId = null;
+  let safetySnapshotId = null;
 
   try {
     const ready = await step("preflight", async () => {
@@ -986,7 +987,13 @@ async function main() {
 
     await step("restore-brings-data-back", async () => {
       assert(backup !== null, "a backup exists", "none");
-      restoreJobId = `${newJobId()}-apply`;
+      // As the panel does: the safety copy of the data as they are, under the operation, before its write-back.
+      const op = newJobId();
+      await bk(startReq(op));
+      const safety = await settled(op);
+      assert(safety.state === "succeeded" && safety.snapshot !== null, "the safety copy of the data as they are succeeded", JSON.stringify(safety));
+      safetySnapshotId = safety.snapshot.snapshotId;
+      restoreJobId = `${op}-apply`;
       const accepted = await bk(restoreReq(restoreJobId, backup.snapshotId));
       assert(accepted.jobId === restoreJobId, "the job is accepted", JSON.stringify(accepted));
       const done = await settled(restoreJobId);
@@ -1040,13 +1047,14 @@ async function main() {
     await step("forget-removes-the-snapshot", async () => {
       assert(backup !== null, "a backup exists", "none");
       const jobId = `${newJobId()}-forget`;
-      await bk(forgetReq(jobId, A, [backup.snapshotId]));
+      const snapshotIds = [backup.snapshotId, ...(safetySnapshotId === null ? [] : [safetySnapshotId])];
+      await bk(forgetReq(jobId, A, snapshotIds));
       const done = await settled(jobId);
       assert(done.state === "succeeded" && done.failure === null, "the forget succeeded, with the application running", JSON.stringify(done));
       const jobs = createdOf(jobId);
       assert(same(jobs.map((c) => c.name), [`hp_bk_${jobId}_repo`, `hp_bk_${jobId}_forget`]), "the repository step, then the forget", jobs.map((c) => c.name).join(","));
       assert(jobs.every((c) => c.body.HostConfig.CapAdd === undefined && c.body.HostConfig.Binds.every(isSecretBind)), "no capability and no volume for a forget", "found");
-      assert(same(jobs[1].body.Cmd, ["forget", "--prune", backup.snapshotId]), "the snapshot is forgotten and its data removed", jobs[1].body.Cmd.join(" "));
+      assert(same(jobs[1].body.Cmd, ["forget", "--prune", ...snapshotIds]), "the snapshots are forgotten and their data removed", jobs[1].body.Cmd.join(" "));
       const snapshots = JSON.parse(await resticRead("snapshots", ["snapshots", "--no-lock", "--json"])) ?? [];
       assert(snapshots.length === 0, "restic, run apart from the adapter, lists no snapshot", JSON.stringify(snapshots).slice(0, 200));
     });

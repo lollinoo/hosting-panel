@@ -335,10 +335,13 @@ const forgetReq = (jobId: string, extra: Partial<ForgetRequest> = {}): ForgetReq
 const upStep = (name: string): StepBehavior => (name.endsWith("_up") ? { stdout: summaryLine() } : {});
 const repoDir = (env: Env, stackId = STACK): string => path.join(env.root, TARGET_ID, "stacks", stackId);
 
-/** A copy that succeeded, then a clean slate: the repository folder of the application exists. */
-async function copied(env: Env, n = 90): Promise<void> {
-  await env.runner.run(copyReq(OP(n)));
-  await expect(settled(env.runner, OP(n))).resolves.toMatchObject({ state: "succeeded" });
+/**
+ * A copy that succeeded, then a clean slate: the repository folder of the application exists (on a local destination).
+ * Copy n is also the safety copy a write-back `OP(n, "-apply")` needs.
+ */
+async function copied(env: Env, n = 90, extra: Partial<CopyRequest> = {}, suffix = ""): Promise<void> {
+  await env.runner.run(copyReq(OP(n, suffix), extra));
+  await expect(settled(env.runner, OP(n, suffix))).resolves.toMatchObject({ state: "succeeded" });
   env.created.length = 0;
   env.requests.length = 0;
 }
@@ -661,7 +664,7 @@ describe("the copy of an application's volumes", () => {
 describe("the restore of an application's volumes (ADR-0038 K5)", () => {
   it("writes each volume back in its own container, reading the repository only", async () => {
     const env = await setup({ steps: upStep });
-    await copied(env);
+    await copied(env, 2);
     await expect(env.runner.run(restoreReq(OP(2, "-apply"), { volumeKeys: ["db", "data"] }))).resolves.toMatchObject({
       state: "running",
     });
@@ -702,7 +705,7 @@ describe("the restore of an application's volumes (ADR-0038 K5)", () => {
 
   it("stops at the first volume that fails", async () => {
     const env = await setup({ steps: (name) => (name.endsWith("_rs_data") ? { exitCode: 12 } : upStep(name)) });
-    await copied(env);
+    await copied(env, 2);
     await env.runner.run(restoreReq(OP(2, "-apply")));
     await expect(settled(env.runner, OP(2, "-apply"))).resolves.toMatchObject({ state: "failed", failure: "wrong_key" });
     expect(env.createdNames()).toEqual([`hp_bk_${OP(2, "-apply")}_rs_data`]);
@@ -711,7 +714,7 @@ describe("the restore of an application's volumes (ADR-0038 K5)", () => {
 
   it("reports a later volume's failure after the earlier ones were written", async () => {
     const env = await setup({ steps: (name) => (name.endsWith("_rs_db") ? { exitCode: 1, stderr: "Fatal: boom" } : upStep(name)) });
-    await copied(env);
+    await copied(env, 2);
     await env.runner.run(restoreReq(OP(2, "-apply")));
     await expect(settled(env.runner, OP(2, "-apply"))).resolves.toMatchObject({ state: "failed", snapshot: null });
     expect(env.createdNames()).toEqual([`hp_bk_${OP(2, "-apply")}_rs_data`, `hp_bk_${OP(2, "-apply")}_rs_db`]);
@@ -719,6 +722,8 @@ describe("the restore of an application's volumes (ADR-0038 K5)", () => {
 
   it("never creates the repository folder: an application with no copy on this destination fails untouched", async () => {
     const env = await setup({ steps: upStep });
+    // The safety copy went to the other destination.
+    await copied(env, 2, { target: S3_TARGET });
     await env.runner.run(restoreReq(OP(2, "-apply")));
     await expect(settled(env.runner, OP(2, "-apply"))).resolves.toMatchObject({ state: "failed", failure: "other" });
     expect(env.created).toEqual([]);
@@ -727,6 +732,7 @@ describe("the restore of an application's volumes (ADR-0038 K5)", () => {
 
   it("reads an S3 repository on the backup network", async () => {
     const env = await setup({ steps: upStep });
+    await copied(env, 2, { target: S3_TARGET });
     await env.runner.run(restoreReq(OP(2, "-apply"), { target: S3_TARGET, volumeKeys: ["data"] }));
     await expect(settled(env.runner, OP(2, "-apply"))).resolves.toMatchObject({ state: "succeeded" });
     expect(env.createdNames()).toEqual([`hp_bk_${OP(2, "-apply")}_rs_data`]);
@@ -750,6 +756,64 @@ describe("the restore of an application's volumes (ADR-0038 K5)", () => {
     ]);
     expect(Object.keys(c?.secrets ?? {}).sort()).toEqual(["AWS_SHARED_CREDENTIALS", "RESTIC_PASSWORD"]);
     await expectClean(env);
+  });
+});
+
+describe("the safety copy a write-back needs (HARNESS.md, ADR-0038 K5)", () => {
+  async function expectNoWriteBack(runner: BackupRunner, env: Env, req: RestoreRequest): Promise<void> {
+    await expect(runner.run(req)).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(env.created).toEqual([]);
+    await expect(runner.run({ action: "status", jobId: req.jobId })).resolves.toMatchObject({ state: "unknown" });
+  }
+
+  it("refuses a write-back without a good copy of the same application under the same operation, before any container", async () => {
+    const env = await setup({ steps: (name) => (name === `hp_bk_${OP(3)}_up` ? { exitCode: 12 } : upStep(name)) });
+    await expectNoWriteBack(env.runner, env, restoreReq(OP(2, "-apply")));
+    // A good copy of another operation (the backup being restored, say) is not the safety copy.
+    await copied(env, 90);
+    await expectNoWriteBack(env.runner, env, restoreReq(OP(2, "-apply")));
+    // The copy of the operation failed.
+    await env.runner.run(copyReq(OP(3)));
+    await expect(settled(env.runner, OP(3))).resolves.toMatchObject({ state: "failed" });
+    env.created.length = 0;
+    await expectNoWriteBack(env.runner, env, restoreReq(OP(3, "-apply")));
+    // The copy under that operation id is another application's.
+    await copied(env, 4, { stackId: OTHER_STACK, volumeKeys: ["data"] });
+    await expectNoWriteBack(env.runner, env, restoreReq(OP(4, "-apply")));
+    // The lane and the job slot are free again.
+    await copied(env, 5);
+  });
+
+  it("refuses a write-back after an executor restart: the safety copy it saw went with the process", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2);
+    await expectNoWriteBack(env.newRunner(), env, restoreReq(OP(2, "-apply")));
+  });
+
+  it.each([
+    ["the first", ""],
+    ["the second", "-t2"],
+  ])("writes back when only %s of the two safety copies is good", async (_label, good) => {
+    const bad = good === "" ? "-t2" : "";
+    const env = await setup({ steps: (name) => (name === `hp_bk_${OP(2, bad)}_up` ? { exitCode: 12 } : upStep(name)) });
+    // The backup being restored, on the local destination the write-back reads.
+    await copied(env, 90);
+    await env.runner.run(copyReq(OP(2, bad), { target: S3_TARGET }));
+    await expect(settled(env.runner, OP(2, bad))).resolves.toMatchObject({ state: "failed", failure: "wrong_key" });
+    await copied(env, 2, good === "" ? {} : { target: S3_TARGET }, good);
+    await expect(env.runner.run(restoreReq(OP(2, "-apply")))).resolves.toMatchObject({ state: "running" });
+    await expect(settled(env.runner, OP(2, "-apply"))).resolves.toMatchObject({ state: "succeeded" });
+  });
+
+  it("answers a write-back sent twice with the job it started, never with a second run", async () => {
+    const env = await setup({ steps: upStep });
+    await copied(env, 2);
+    const first = await env.runner.run(restoreReq(OP(2, "-apply")));
+    await expect(env.runner.run(restoreReq(OP(2, "-apply")))).resolves.toEqual(first);
+    const done = await settled(env.runner, OP(2, "-apply"));
+    expect(done).toMatchObject({ state: "succeeded" });
+    await expect(env.runner.run(restoreReq(OP(2, "-apply")))).resolves.toEqual(done);
+    expect(env.createdNames()).toEqual([`hp_bk_${OP(2, "-apply")}_rs_data`, `hp_bk_${OP(2, "-apply")}_rs_db`]);
   });
 });
 

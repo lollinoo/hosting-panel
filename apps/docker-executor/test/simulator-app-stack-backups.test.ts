@@ -79,6 +79,8 @@ describe("simulated jobs of application backups", () => {
   it("writes a known snapshot back and fails on one the repository does not hold", async () => {
     const sim = new SimulatedBackups();
     const snapshotId = await copied(sim, OP(1));
+    // The safety copy of the restore operation comes first, as the panel sends it.
+    const safety = await copied(sim, OP(2));
 
     const started = await sim.handle(restoreReq(OP(2, "-apply"), snapshotId, { volumeKeys: ["db"] }));
     expect(started).toEqual({ jobId: OP(2, "-apply"), state: "running", failure: null, snapshot: null });
@@ -90,25 +92,28 @@ describe("simulated jobs of application backups", () => {
       snapshot: null,
     });
     // A restore neither adds nor removes a snapshot.
-    expect(sim.appStackSnapshots(STACK)).toEqual([snapshotId]);
+    expect(sim.appStackSnapshots(STACK)).toEqual([snapshotId, safety]);
 
     // The same snapshot id on another destination, or in another application's repository, is not there.
     for (const [n, extra] of [
       [3, { target: LOCAL }],
       [4, { stackId: OTHER_STACK }],
     ] as const) {
+      await copied(sim, OP(n), "stackId" in extra ? extra : {});
       await sim.handle(restoreReq(OP(n, "-apply"), snapshotId, extra));
       expect(await status(sim, OP(n, "-apply"))).toMatchObject({ state: "failed", failure: "other" });
     }
+    await copied(sim, OP(5));
     await sim.handle(restoreReq(OP(5, "-apply"), "f".repeat(64)));
     expect(await status(sim, OP(5, "-apply"))).toMatchObject({ state: "failed", failure: "other" });
 
-    expect(sim.appStackJobs().map((job) => [job.action, job.jobId, job.volumeKeys, job.snapshotId])).toEqual([
-      ["stackStart", OP(1), ["data", "db"], null],
-      ["stackRestore", OP(2, "-apply"), ["db"], snapshotId],
-      ["stackRestore", OP(3, "-apply"), ["data", "db"], snapshotId],
-      ["stackRestore", OP(4, "-apply"), ["data", "db"], snapshotId],
-      ["stackRestore", OP(5, "-apply"), ["data", "db"], "f".repeat(64)],
+    expect(
+      sim.appStackJobs().filter((job) => job.action === "stackRestore").map((job) => [job.jobId, job.volumeKeys, job.snapshotId]),
+    ).toEqual([
+      [OP(2, "-apply"), ["db"], snapshotId],
+      [OP(3, "-apply"), ["data", "db"], snapshotId],
+      [OP(4, "-apply"), ["data", "db"], snapshotId],
+      [OP(5, "-apply"), ["data", "db"], "f".repeat(64)],
     ]);
   });
 
@@ -149,6 +154,7 @@ describe("simulated jobs of application backups", () => {
     expect(sim.appStackSnapshots(STACK)).toEqual([]);
 
     const snapshotId = await copied(sim, OP(2));
+    await copied(sim, OP(3));
     sim.failNext("wrong_key");
     await sim.handle(restoreReq(OP(3, "-apply"), snapshotId));
     expect(await status(sim, OP(3, "-apply"))).toMatchObject({ state: "failed", failure: "wrong_key" });
@@ -181,6 +187,35 @@ describe("simulated jobs of application backups", () => {
     await expect(status(sim, OP(2))).resolves.toMatchObject({ state: "unknown" });
   });
 
+  it("refuses a write-back without a good safety copy of the same application under the same operation", async () => {
+    const sim = new SimulatedBackups();
+    const snapshotId = await copied(sim, OP(1));
+    const refused = async (jobId: string): Promise<void> => {
+      await expect(sim.handle(restoreReq(jobId, snapshotId))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(await status(sim, jobId)).toMatchObject({ state: "unknown" });
+    };
+    await refused(OP(2, "-apply"));
+    sim.failNext("no_space");
+    await sim.handle(copyReq(OP(3)));
+    expect(await status(sim, OP(3))).toMatchObject({ state: "failed" });
+    await refused(OP(3, "-apply"));
+    await copied(sim, OP(4), { stackId: OTHER_STACK });
+    await refused(OP(4, "-apply"));
+    // The real runner keeps the copies it saw in memory only.
+    await copied(sim, OP(5));
+    sim.simulateRestart();
+    await refused(OP(5, "-apply"));
+    expect(sim.appStackJobs().filter((job) => job.action === "stackRestore")).toEqual([]);
+
+    // One good copy of the two is enough.
+    sim.failNext("unreachable");
+    await sim.handle(copyReq(OP(6)));
+    expect(await status(sim, OP(6))).toMatchObject({ state: "failed" });
+    await copied(sim, OP(6, "-t2"), { target: LOCAL });
+    await expect(sim.handle(restoreReq(OP(6, "-apply"), snapshotId))).resolves.toMatchObject({ state: "running" });
+    expect(await status(sim, OP(6, "-apply"))).toMatchObject({ state: "succeeded" });
+  });
+
   it("lets the stack engine hold the lane of an application, as the real runner does", async () => {
     const sim = new SimulatedBackups();
     const release = sim.holdAppStackLane(STACK);
@@ -205,6 +240,7 @@ describe("simulated jobs of application backups", () => {
   it("forgets every job of an application at a restart, a restore included", async () => {
     const sim = new SimulatedBackups();
     const snapshotId = await copied(sim, OP(1));
+    const safety = await copied(sim, OP(2));
     sim.holdJobs();
     await sim.handle(restoreReq(OP(2, "-apply"), snapshotId));
     sim.simulateRestart();
@@ -213,7 +249,7 @@ describe("simulated jobs of application backups", () => {
     expect(await status(sim, OP(1))).toMatchObject({ state: "unknown" });
     expect(await status(sim, OP(2, "-apply"))).toMatchObject({ state: "unknown" });
     // The repository is on the destination: it outlives the process.
-    expect(sim.appStackSnapshots(STACK)).toEqual([snapshotId]);
+    expect(sim.appStackSnapshots(STACK)).toEqual([snapshotId, safety]);
   });
 });
 
@@ -322,6 +358,8 @@ describe("the simulated executor: backups of a simulated application", () => {
     expect(Object.keys(snapshot?.volumes ?? {})).toEqual(["data"]);
     expect(sim.appStacks.backupReadiness(ref.stackId, ref.organizationId, ["data"])).toBe("ready");
 
+    await sim.backups(copy(OP(2)));
+    await expect(sim.backups({ action: "status", jobId: OP(2) })).resolves.toMatchObject({ state: "succeeded" });
     await expect(sim.backups(restoreReq(OP(2, "-apply"), snapshotId, { ...ref, volumeKeys: ["data"] }))).resolves.toMatchObject({
       state: "running",
     });
