@@ -295,9 +295,11 @@ describe("the rule that reads the password of an address (ADR-0036 §8.4)", () =
     ["http://hooks:8443?to=ops@example.com", "refused", [], ["8443?to=ops"], true],
     ["postgres://app:pa?ss@db/app", "refused", [], ["pa?ss"], true],
     ["postgres://app:pa#ss@db/app", "refused", [], ["pa#ss"], true],
-    // Decided: an address the template check would let through (no user, or a user with an '@') is replaced whole.
-    ["redis://:pa?ss1234@cache:6379", { secret: "addr" }, [], ["pa?ss1234"], false],
+    ["redis://:pa?ss1234@cache:6379", "refused", [], ["pa?ss1234"], true],
+    // Decided: an address the template check would let through (a user with an '@') is replaced whole.
     ["smtp://me@x.org:pa#ss1234@mail:587", { secret: "addr" }, [], ["pa#ss1234"], false],
+    // No host after the '@': no password is read, and the template check's credentials make the value a secret whole.
+    ["redis://:pw@/0", { secret: "addr" }, [], ["pw"], false],
     // R4: another '@' after the host and before a '?', ',' or ';' asks for a check; after a '/' it is in the path (decided).
     ["postgres://app:S3cretPa55@db:5432?notify=ops@example.com", "postgres://app:${addr_password}@db:5432?notify=ops@example.com", ["addr_password"], ["S3cretPa55"], true],
     ["postgres://app:S3cretPa55@db:5432,admin@example.com", "postgres://app:${addr_password}@db:5432,admin@example.com", ["addr_password"], ["S3cretPa55"], true],

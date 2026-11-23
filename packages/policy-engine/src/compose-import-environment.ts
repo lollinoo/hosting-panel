@@ -329,7 +329,7 @@ export function convertComposeEnvironment(
     const problems = checked.map((text) => envValueProblem(text) ?? (appStackTextProblem(text) === "metadata_endpoint" ? "METADATA" : null));
     const secretLike = problems.includes("ENV_VALUE_SECRET_LIKE");
     // An address left as written goes to the template check, which refuses the draft for the credentials it sees there.
-    // One the check would let through (no user, or a user with an '@') is not kept in clear either.
+    // One the check would let through (a user with an '@') is not kept in clear either.
     if (asWritten ? !secretLike : secretLike) {
       replaceBySecret(entry);
       continue;
