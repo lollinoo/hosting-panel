@@ -42,6 +42,9 @@ const EXPECTED_ROUTES = [
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/plan/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/secrets/route.ts",
+  // ADR-0042: the runs of a task (read, and run now) and when it runs by itself.
+  "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/tasks/[taskKey]/runs/route.ts",
+  "app/api/bff/orgs/[orgId]/app-stacks/[stackId]/tasks/[taskKey]/schedule/route.ts",
   "app/api/bff/orgs/[orgId]/app-stacks/route.ts",
 ].sort();
 
@@ -90,7 +93,7 @@ describe("M6 web guards: browser-side hazards", () => {
 });
 
 describe("M6 web guards: the BFF route inventory", () => {
-  it("is exactly the thirteen routes of the design, no more (no ports, backups, Git, health, admin stack routes)", () => {
+  it("is exactly the routes of the design, no more (no ports, backups, Git, health, admin stack routes)", () => {
     expect(routeFiles.map(rel).sort()).toEqual(EXPECTED_ROUTES);
   });
 
@@ -101,14 +104,17 @@ describe("M6 web guards: the BFF route inventory", () => {
       expect(c, rel(f)).toMatch(/from "@\/lib\/bff-(idempotent|proxy)"/);
       // no hand-rolled upstream call that would skip session, CSRF or Origin checks
       expect(c, rel(f)).not.toMatch(/\bfetch(Upstream)?\s*\(/);
-      expect(c, rel(f)).not.toMatch(/\bGET\b[^\n]*\bPOST\b[^\n]*=>|export (const|async function) (PUT|HEAD|OPTIONS)\b/);
+      expect(c, rel(f)).not.toMatch(/\bGET\b[^\n]*\bPOST\b[^\n]*=>|export (const|async function) (HEAD|OPTIONS)\b/);
+      // One route replaces a value and is a PUT: the schedule of a task (ADR-0042). No other route exports PUT.
+      const exportsPut = /export (const|async function) PUT\b/.test(c);
+      expect(exportsPut, rel(f)).toBe(rel(f).endsWith("/tasks/[taskKey]/schedule/route.ts"));
     }
   });
 
   it("routes that forward a body veto it with a contract schema (value import from @hosting-panel/contracts)", () => {
     for (const f of routeFiles) {
       const c = code(f);
-      if (/"(POST|PATCH|DELETE)"/.test(c)) {
+      if (/"(POST|PUT|PATCH|DELETE)"/.test(c)) {
         expect(c, rel(f)).toMatch(/from "@hosting-panel\/contracts"/);
         expect(c, rel(f)).toMatch(/\.safeParse\(/);
       }
@@ -133,8 +139,8 @@ describe("M6 web guards: the BFF route inventory", () => {
     for (const a of ["delete", "plan", "secrets", "domains", "logs", "ports", "backups", "git"]) expect(c).not.toMatch(new RegExp(`\\b${a}:\\s*\\{`));
   });
 
-  it("only the two idempotent verbs of the design carry no Idempotency-Key (secrets, domains, plan, logs)", () => {
-    const sync = ["secrets", "domains", "plan", "components"];
+  it("only the synchronous routes of the design carry no Idempotency-Key (secrets, domains, plan, logs, the schedule of a task)", () => {
+    const sync = ["secrets", "domains", "plan", "components", "schedule"];
     for (const f of customerRoutes) {
       const r = rel(f);
       const isSync = sync.some((s) => r.includes(`/${s}/`) || r.includes(`/${s}`));
