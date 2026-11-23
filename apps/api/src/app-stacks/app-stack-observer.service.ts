@@ -98,6 +98,8 @@ export class AppStackObserverService {
   #stopped = false;
   #timer: NodeJS.Timeout | null = null;
   #serial: Promise<unknown> = Promise.resolve();
+  /** A full pass queued and not started yet: a call meanwhile joins it, so a long pass is followed by one pass, not one per tick. */
+  #waitingPass: Promise<void> | null = null;
   readonly #certSeenAt = new Map<string, number>();
   /** Stack id → when its last route refresh was queued. */
   readonly #routesQueuedAt = new Map<string, number>();
@@ -130,7 +132,13 @@ export class AppStackObserverService {
   }
 
   public reconcileOnce(now = new Date()): Promise<void> {
-    return this.#queue(() => this.#run(null, now, () => false));
+    if (this.#waitingPass !== null) return this.#waitingPass;
+    const pass = this.#queue(() => {
+      this.#waitingPass = null;
+      return this.#run(null, now, () => false);
+    });
+    this.#waitingPass = pass;
+    return pass;
   }
 
   /** After a domain add/remove/check; `forceDnsIds` looks those addresses up now even when not due. */

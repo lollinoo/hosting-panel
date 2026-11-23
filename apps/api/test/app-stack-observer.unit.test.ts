@@ -59,7 +59,8 @@ describe("AppStackObserverService (PGlite)", () => {
   let counter = 0;
   let calls: { method: string; stackId?: string }[];
   let failing: Set<string>;
-  let onStatusRead: () => void;
+  /** A promise it returns holds the read until it settles. */
+  let onStatusRead: () => void | Promise<void>;
   let cache: "running" | "stopped" | "missing";
   let appHealth: "healthy" | "unhealthy";
   let report: CertificateStatusReport;
@@ -97,8 +98,9 @@ describe("AppStackObserverService (PGlite)", () => {
       ),
       getAppStackStatus: (req: { stackId: string }) => {
         calls.push({ method: "getAppStackStatus", stackId: req.stackId });
-        onStatusRead();
-        return failing.has(req.stackId) ? Promise.reject(new Error("engine down")) : Promise.resolve(observation(req.stackId));
+        const held = onStatusRead();
+        const read = () => (failing.has(req.stackId) ? Promise.reject(new Error("engine down")) : Promise.resolve(observation(req.stackId)));
+        return held ? held.then(read) : read();
       },
       getCertificateStatus: () => {
         calls.push({ method: "getCertificateStatus" });
@@ -336,6 +338,26 @@ describe("AppStackObserverService (PGlite)", () => {
         spy.mockRestore();
       }
       expect(statusReads()).toEqual(stacks.map((s) => s.id));
+    });
+
+    it("queues no full pass while another one waits: a pass that runs long is followed by one pass, not one per tick", async () => {
+      const stack = await seedStack({ status: "running", observedAt: at(-1) });
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      onStatusRead = () => held;
+      const o = observer();
+      const running = o.reconcileOnce(NOW);
+      await vi.waitFor(() => expect(statusReads()).toHaveLength(1));
+      const ticks = [o.reconcileOnce(at(1)), o.reconcileOnce(at(2)), o.reconcileOnce(at(3))];
+      onStatusRead = () => undefined;
+      release();
+      await Promise.all([running, ...ticks]);
+
+      expect(statusReads()).toEqual([stack.id, stack.id]);
+      // The pass that waited is the first one queued after the running one.
+      expect((await health(stack.id)).map((c) => c.healthObservedAt)).toEqual([at(1), at(1)]);
     });
 
     it("a failed read records every component unknown at the current time", async () => {
