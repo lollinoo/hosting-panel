@@ -1,11 +1,13 @@
-import type { ApprovedStackPlan } from "@hosting-panel/contracts";
+import { APP_IMAGE_ALLOWLIST, type ApprovedStackPlan } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { describe, expect, it } from "vitest";
 import {
   APP_STACK_LOG_CONFIG,
   APP_STACK_RESTART_POLICY,
+  APP_STACK_SCRATCH_TMPFS_OPTIONS,
   APP_STACK_STOP_TIMEOUT_SECONDS,
   APP_STACK_TMPFS,
+  appStackTmpfs,
   assertAppStackPayloadHardening,
   assertAppStackSecretContents,
   buildAppStackContainerCreatePayload,
@@ -252,6 +254,77 @@ describe("assertAppStackPayloadHardening", () => {
     for (const key of ["web", "worker"]) {
       expect(() => assertAppStackPayloadHardening(buildAppStackContainerCreatePayload(texts, key, ctx), ctx)).not.toThrow();
     }
+  });
+});
+
+describe("temporary areas follow the allowlist row of the image (ADR-0039)", () => {
+  const SCRATCH = "rw,noexec,nosuid,nodev,size=1m";
+  const row = (scratchPaths?: string[]) => [
+    { repository: "registry.test/acme/web", runAsUser: "65534:65534", note: "Test image.", ...(scratchPaths ? { scratchPaths } : {}) },
+  ];
+  const declared = { ...ctx, allowlist: row(["/run/postgresql"]) };
+  const denied = expect.objectContaining({ code: "HOST_POLICY_DENIED", message: "The application container body breaks the Tmpfs rule" });
+
+  it("gives /tmp alone to an image whose row declares none: the bodies of existing applications do not change", () => {
+    expect(appStackTmpfs(web.image)).toEqual(APP_STACK_TMPFS);
+    expect(appStackTmpfs(web.image, row())).toEqual(APP_STACK_TMPFS);
+    for (const key of ["web", "worker"]) {
+      expect(buildAppStackContainerCreatePayload(plan, key, { ...ctx, allowlist: row() })).toStrictEqual(
+        buildAppStackContainerCreatePayload(plan, key, ctx),
+      );
+    }
+  });
+
+  it("adds exactly the declared area, small and not executable, and changes nothing else", () => {
+    const built = buildAppStackContainerCreatePayload(plan, "web", declared);
+    expect(APP_STACK_SCRATCH_TMPFS_OPTIONS).toBe(SCRATCH);
+    expect(built.HostConfig.Tmpfs).toStrictEqual({ "/tmp": "rw,noexec,nosuid,nodev,size=64m", "/run/postgresql": SCRATCH });
+    const plain = buildAppStackContainerCreatePayload(plan, "web", ctx);
+    expect({ ...built, HostConfig: { ...built.HostConfig, Tmpfs: plain.HostConfig.Tmpfs } }).toStrictEqual(plain);
+    expect(() => assertAppStackPayloadHardening(built, declared)).not.toThrow();
+    expect(() => assertAppStackPayloadHardening(built, { ...declared, plan })).not.toThrow();
+  });
+
+  it("in the real allowlist only PostgreSQL has one: the directory of its socket", () => {
+    const withArea = APP_IMAGE_ALLOWLIST.filter((entry) => (entry.scratchPaths ?? []).length > 0).map((entry) => entry.repository);
+    expect(withArea).toEqual(["postgres"]);
+    for (const entry of APP_IMAGE_ALLOWLIST) {
+      const areas = appStackTmpfs(`${entry.repository}@sha256:${"a".repeat(64)}`);
+      expect(areas).toEqual(entry.repository === "postgres" ? { ...APP_STACK_TMPFS, "/run/postgresql": SCRATCH } : APP_STACK_TMPFS);
+    }
+  });
+
+  it("refuses a body whose areas are not the ones the row of its image gives", () => {
+    const built = buildAppStackContainerCreatePayload(plan, "web", declared);
+    const plain = buildAppStackContainerCreatePayload(plan, "web", ctx);
+    const tmpfs = (areas: Record<string, string>) =>
+      ({ ...built, HostConfig: { ...built.HostConfig, Tmpfs: areas } }) as unknown as AppStackContainerCreatePayload;
+    // An area the row does not declare, a declared area that is missing, other options, an area of another image.
+    expect(() => assertAppStackPayloadHardening(built, ctx)).toThrow(denied);
+    expect(() => assertAppStackPayloadHardening(plain, declared)).toThrow(denied);
+    expect(() => assertAppStackPayloadHardening(tmpfs({ ...APP_STACK_TMPFS, "/run/postgresql": "rw,exec,size=1g" }), declared)).toThrow(denied);
+    expect(() => assertAppStackPayloadHardening(tmpfs({ ...APP_STACK_TMPFS, "/run/mysqld": SCRATCH }), declared)).toThrow(denied);
+    expect(() => assertAppStackPayloadHardening(tmpfs({ "/run/postgresql": SCRATCH }), declared)).toThrow(denied);
+    expect(() =>
+      assertAppStackPayloadHardening({ ...built, Image: `registry.test/acme/other@sha256:${"d".repeat(64)}` }, declared),
+    ).toThrow(denied);
+  });
+
+  it.each([
+    ["a path outside /run", ["/var/lib/postgresql"]],
+    ["the directory of the reserved values", ["/run/secrets"]],
+    ["/run itself", ["/run"]],
+    ["/tmp again", ["/tmp"]],
+    ["a nested path", ["/run/postgresql/data"]],
+    ["a path that climbs out", ["/run/../etc"]],
+    ["the Docker socket", ["/run/docker.sock"]],
+    ["more areas than the cap", ["/run/a", "/run/b", "/run/c"]],
+    ["the same area twice", ["/run/a", "/run/a"]],
+  ])("refuses a row that declares %s", (_name, paths) => {
+    expect(() => appStackTmpfs(web.image, row(paths))).toThrow(denied);
+    expect(() => buildAppStackContainerCreatePayload(plan, "web", { ...ctx, allowlist: row(paths) })).toThrow(denied);
+    const plain = buildAppStackContainerCreatePayload(plan, "web", ctx);
+    expect(() => assertAppStackPayloadHardening(plain, { ...ctx, allowlist: row(paths) })).toThrow(denied);
   });
 });
 

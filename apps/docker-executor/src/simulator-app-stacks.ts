@@ -231,8 +231,9 @@ export class SimulatedAppStacks implements StackExecutorPort {
           stack.containers.delete(key);
           this.mutate("container_remove", existing.name);
         }
-        const payload = buildAppStackContainerCreatePayload(plan, key, { secretsRootDir: this.secretsRoot });
-        assertAppStackPayloadHardening(payload, { secretsRootDir: this.secretsRoot });
+        const ctx = { secretsRootDir: this.secretsRoot, ...(this.options.allowlist ? { allowlist: this.options.allowlist } : {}) };
+        const payload = buildAppStackContainerCreatePayload(plan, key, ctx);
+        assertAppStackPayloadHardening(payload, ctx);
         const name = appStackContainerName(plan.stackId, key);
         stack.containers.set(key, { name, labels: payload.Labels, payload, state: "created", startedAt: null, restartCount: 0, exitCode: null });
         this.mutate("container_create", name);

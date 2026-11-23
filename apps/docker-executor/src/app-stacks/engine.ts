@@ -330,7 +330,11 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const listed = await this.listContainers(plan);
       // Every body and every derived name is checked before the first removal or create.
-      const ctx = { secretsRootDir: this.deps.secretsRootDir, plan };
+      const ctx = {
+        secretsRootDir: this.deps.secretsRootDir,
+        plan,
+        ...(this.deps.allowlist === undefined ? {} : { allowlist: this.deps.allowlist }),
+      };
       const bodies = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
         const existing = listed.find((c) => c.key === key);

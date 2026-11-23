@@ -1,11 +1,15 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
+  APP_IMAGE_SCRATCH_PATH_PATTERN,
+  APP_IMAGE_SCRATCH_PATHS_MAX,
   APP_STACK_KEY_PATTERN,
   APP_STACK_PIDS_LIMIT,
   APP_TEMPLATE_LIMITS,
   appStackHealthPathProblem,
+  appStackImageScratchPaths,
   appStackSecretFilePath,
+  type AppImageAllowlistEntry,
   type AppStackHealthcheck,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
@@ -22,6 +26,8 @@ import {
 } from "./names.js";
 
 export const APP_STACK_TMPFS = Object.freeze({ "/tmp": "rw,noexec,nosuid,nodev,size=64m" });
+/** A scratch area the allowlist row of an image declares (ADR-0039): in memory, 1 MB, nothing executable. */
+export const APP_STACK_SCRATCH_TMPFS_OPTIONS = "rw,noexec,nosuid,nodev,size=1m";
 export const APP_STACK_STOP_TIMEOUT_SECONDS = 10;
 export const APP_STACK_RESTART_POLICY = Object.freeze({ Name: "unless-stopped" });
 export const APP_STACK_LOG_CONFIG = Object.freeze({
@@ -63,11 +69,27 @@ export interface AppStackContainerCreatePayload {
   };
 }
 
+/**
+ * The temporary areas of a component: `/tmp`, and the ones the allowlist row of its image declares (ADR-0039). No plan,
+ * template or customer names one. The row is checked again here, so a row that asks for anything else is refused.
+ */
+export function appStackTmpfs(image: string, allowlist?: readonly AppImageAllowlistEntry[]): Record<string, string> {
+  const paths = appStackImageScratchPaths(image, allowlist);
+  if (
+    paths.length > APP_IMAGE_SCRATCH_PATHS_MAX ||
+    new Set(paths).size !== paths.length ||
+    paths.some((scratch) => typeof scratch !== "string" || !APP_IMAGE_SCRATCH_PATH_PATTERN.test(scratch))
+  ) {
+    throw new ExecutorCodedError("The application container body breaks the Tmpfs rule", "HOST_POLICY_DENIED");
+  }
+  return { ...APP_STACK_TMPFS, ...Object.fromEntries(paths.map((scratch) => [scratch, APP_STACK_SCRATCH_TMPFS_OPTIONS])) };
+}
+
 /** The stack container create body (L16): no CapAdd, no ports, no Entrypoint, read-only root filesystem. */
 export function buildAppStackContainerCreatePayload(
   plan: ApprovedStackPlan,
   componentKey: string,
-  ctx: { readonly secretsRootDir: string },
+  ctx: { readonly secretsRootDir: string; readonly allowlist?: readonly AppImageAllowlistEntry[] },
 ): AppStackContainerCreatePayload {
   const c = plan.components.find((component) => component.key === componentKey);
   if (c === undefined) throw new RangeError(`Unknown stack component: ${componentKey}`);
@@ -91,7 +113,7 @@ export function buildAppStackContainerCreatePayload(
       CapDrop: ["ALL"],
       SecurityOpt: ["no-new-privileges:true"],
       ReadonlyRootfs: true,
-      Tmpfs: { ...APP_STACK_TMPFS },
+      Tmpfs: appStackTmpfs(c.image, ctx.allowlist),
       PidsLimit: APP_STACK_PIDS_LIMIT,
       NanoCpus: c.resources.cpuMilli * 1_000_000,
       Memory: Number(c.resources.memoryBytes),
@@ -142,10 +164,11 @@ const onlyKeys = (value: object, allowed: ReadonlySet<string>) => Object.keys(va
 const inRange = (value: number, min: number, max: number) => Number.isSafeInteger(value) && value >= min && value <= max;
 
 /** Run on every body before POST /containers/create: refuses a body that lost any hardening property.
- *  With the plan, the User and the edge network must also be the plan component's. */
+ *  With the plan, the User and the edge network must also be the plan component's. The temporary areas must be
+ *  exactly the ones the image of the body gives (`appStackTmpfs`), under the same allowlist the plan was checked with. */
 export function assertAppStackPayloadHardening(
   payload: AppStackContainerCreatePayload,
-  ctx: { readonly secretsRootDir: string; readonly plan?: ApprovedStackPlan },
+  ctx: { readonly secretsRootDir: string; readonly plan?: ApprovedStackPlan; readonly allowlist?: readonly AppImageAllowlistEntry[] },
 ): void {
   const refuse = (rule: string): never => {
     throw new ExecutorCodedError(`The application container body breaks the ${rule} rule`, "HOST_POLICY_DENIED");
@@ -180,7 +203,7 @@ export function assertAppStackPayloadHardening(
   if (!isDeepStrictEqual(host.CapDrop, ["ALL"])) refuse("CapDrop");
   if (!isDeepStrictEqual(host.SecurityOpt, ["no-new-privileges:true"])) refuse("SecurityOpt");
   if (host.ReadonlyRootfs !== true) refuse("ReadonlyRootfs");
-  if (!isDeepStrictEqual(host.Tmpfs, APP_STACK_TMPFS)) refuse("Tmpfs");
+  if (typeof payload.Image !== "string" || !isDeepStrictEqual(host.Tmpfs, appStackTmpfs(payload.Image, ctx.allowlist))) refuse("Tmpfs");
   if (host.PidsLimit !== APP_STACK_PIDS_LIMIT) refuse("PidsLimit");
   // The body carries no plan: the limits must be ones a plan can hold (memory = swap, whole millicores).
   const { memoryBytesMin, memoryBytesMax, cpuMilliMin, cpuMilliMax } = APP_TEMPLATE_LIMITS;
