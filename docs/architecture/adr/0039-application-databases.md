@@ -60,7 +60,7 @@ Le password sono **Valori riservati** che il cliente imposta, come per ogni appl
 - **PostgreSQL:** database `app`, utente `app` (amministratore di quel server) con la password del cliente. Dalla rete la password è sempre richiesta.
 - **Valkey:** senza password. È raggiungibile solo dalle applicazioni collegate (D5). Il programma accetta una password solo come argomento o in un file di regole che il cliente dovrebbe scrivere a mano; nessuna delle due forme passa per un file riservato senza una shell, che i modelli non possono usare.
 
-Nome del database e utente sono fissi: il formato dei modelli di oggi non sa limitare i caratteri di un testo libero, e un nome sbagliato farebbe fallire la prima inizializzazione lasciando un volume a metà. Password, utenti e nomi generati dal pannello hanno bisogno del formato esteso (#42, non ancora unito) e sono un'issue successiva.
+Nome del database e utente sono fissi: il formato dei modelli di oggi non sa limitare i caratteri di un testo libero, e un nome sbagliato farebbe fallire la prima inizializzazione lasciando un volume a metà. Password, utenti e nomi generati dal pannello, e una password per Valkey, hanno bisogno del formato esteso (#42, non ancora unito) e sono l'issue #68.
 
 ### D5 — Collegamento privato
 
@@ -75,8 +75,10 @@ Un collegamento attacca il container del database alla **rete privata dell'appli
 
 - Il **database** è un'applicazione il cui modello ha categoria `database` e il cui piano ha un solo componente con una sola porta dichiarata. La regola è letta dall'API al momento del collegamento; il formato dei modelli non cambia.
 - L'**applicazione** è una qualunque altra applicazione dello stesso cliente che non sia a sua volta un database.
-- Al massimo 4 database per applicazione e 8 applicazioni per database.
+- Al massimo 4 database per applicazione e 8 applicazioni per database. Un collegamento che si sta ancora togliendo (D8) conta finché il server non ha confermato.
 - Un collegamento si può creare anche prima che una delle due parti sia installata: resta «in attesa» e si attiva da solo (D9).
+- Non si crea un collegamento mentre una delle due parti sta cambiando (un'installazione, un avvio, un fermo o una cancellazione in corso) o mentre la sua cancellazione è rimasta a metà: la richiesta risponde `409` e si ripete dopo.
+- **Finché un'applicazione lo usa, un database resta collegabile.** Una versione nuova del database il cui piano non ha più un solo componente con una sola porta è rifiutata (`database_in_use`): prima si tolgono i collegamenti.
 
 ### D7 — Nome interno
 
@@ -84,29 +86,44 @@ Il nome è l'identificativo dell'applicazione-database con `-` al posto di `_`: 
 
 ### D8 — Dati
 
-Migrazione additiva `0028_app_stack_links.sql`, tabella `app_stack_links`: identificativo, cliente, applicazione (`consumer_stack_id`), database (`provider_stack_id`), componente del database, stato (`pending` o `active`), chi l'ha creato e quando. Una sola riga per coppia; le due parti sono diverse e dello stesso cliente (chiavi esterne composte verso `app_stacks(id, organization_id)`).
+Migrazione additiva `0028_app_stack_links.sql`, tabella `app_stack_links`: identificativo, cliente, applicazione (`consumer_stack_id`), database (`provider_stack_id`), stato, chi l'ha creato, quando è stato creato e quando è cambiato l'ultima volta. Una sola riga per coppia; le due parti sono diverse e dello stesso cliente (chiavi esterne composte verso `app_stacks(id, organization_id)`).
 
-`active` significa: attaccato all'ultima applicazione dei collegamenti. Non è una lettura continua dello stato di Docker.
+Il componente e la porta del database **non** sono nella riga: si leggono dal piano del database ogni volta che il collegamento viene applicato o mostrato. Una versione nuova del database non può così lasciare una riga che nomina un componente che non c'è più.
+
+Gli stati sono tre:
+
+- `pending` — registrato, non attaccato sul server, o non più per quanto il pannello ne sa (D9). La pagina dice «In attesa».
+- `active` — attaccato, secondo l'ultima risposta del server. Non è una lettura continua dello stato di Docker.
+- `removing` — il cliente l'ha tolto. La riga resta finché il server conferma che il database è staccato, poi è cancellata: un collegamento tolto mentre il server non risponde non sparisce dal pannello restando attaccato. Collegare di nuovo la stessa coppia nel frattempo riporta la stessa riga a `pending`.
 
 ### D9 — Come si applica
 
 L'esecutore ha **una** chiamata nuova, `syncAppStackLinks`: per un database, l'elenco delle applicazioni a cui deve essere collegato. La chiamata legge lo stato e cambia solo ciò che differisce:
 
-1. legge il container del database; se non c'è, risponde che ogni collegamento è in attesa;
-2. controlla dalle etichette che Docker conserva che il container sia di quell'applicazione e di quel cliente, e che ogni rete da attaccare sia la rete privata dell'applicazione nominata, dello stesso cliente; rifiuta tutto se il container è attaccato a una rete che non è sua né la rete privata di un'applicazione;
-3. solo dopo che ogni controllo è passato: stacca le reti private di altre applicazioni che non sono nell'elenco (comprese quelle rimaste da una rete che non esiste più), poi attacca quelle che mancano. Una rete che non esiste ancora lascia il collegamento in attesa.
+1. calcola il nome interno dall'identificativo del database (D7) e rifiuta un elenco che contiene il database stesso o un identificativo che non è quello di un'applicazione;
+2. legge il container del database; se non c'è, risponde che ogni collegamento è in attesa e non tocca nulla. Se l'applicazione ha più di un container, o il container ha un'altra chiave, rifiuta: si collega solo un'applicazione con un componente;
+3. controlla dalle etichette che Docker conserva che il container sia di quell'applicazione e di quel cliente. Rifiuta tutto, prima di cambiare qualcosa, se il container è attaccato a una rete che non è una delle sue due né la rete privata di un'altra applicazione, o se una rete da attaccare non è la rete privata dell'applicazione nominata, dello stesso cliente;
+4. solo dopo che ogni controllo è passato: stacca le reti private delle applicazioni che non sono nell'elenco; stacca e rifà un attacco che il server non può più onorare (la rete non esiste più, è stata ricreata con lo stesso nome, o l'attacco non porta il nome interno); poi attacca quelle che mancano. Un'applicazione la cui rete non esiste ancora, o che l'esecutore sta cambiando in quel momento, lascia il collegamento in attesa.
 
-La chiamata non avvia, non riavvia e non ricrea nessun container.
+La chiamata non avvia, non riavvia e non ricrea nessun container. La risposta dice, per ogni applicazione, «attaccato», «già attaccato» o «in attesa», e non contiene identificativi di Docker. Mentre l'esecutore sta cambiando il database, o sta già applicando i suoi collegamenti, la chiamata è rifiutata: una modifica del database non aspetta mai un collegamento.
 
-L'API la invoca in quattro momenti, sempre con l'elenco completo letto dal database del pannello:
+L'API la invoca in tre momenti, sempre con l'elenco completo letto dal database del pannello e un passaggio alla volta per ogni database:
 
 - quando un collegamento è creato o tolto (la risposta alla richiesta del cliente dice già se è attivo);
-- all'inizio del passo di avvio di un'installazione, aggiornamento, ritorno, avvio o riavvio: per un database i suoi collegamenti (il container può essere appena stato sostituito e ha perso gli attacchi), per un'applicazione ogni database a cui è collegata (la sua rete può essere appena nata);
-- dall'osservatore, ogni minuto, per i collegamenti in attesa le cui due parti sono installate e senza operazioni in corso.
+- all'inizio del passo di avvio di un'installazione, aggiornamento, ritorno, avvio o riavvio: per un'applicazione ogni database a cui è collegata (la sua rete può essere appena nata); per un database i suoi collegamenti (il container può essere appena stato sostituito e ha perso gli attacchi). Per un database la chiamata parte **sempre**, anche senza collegamenti registrati: un attacco rimasto verso una rete che non esiste più viene così tolto prima dell'avvio che farebbe fallire (§1);
+- dall'osservatore, a ogni suo giro completo (ogni minuto, se l'intervallo non è impostato diversamente), per al più 20 database senza operazioni in corso, quello che aspetta da più tempo per primo: quelli che hanno un collegamento da togliere, il collegamento di un'applicazione cancellata, oppure un collegamento in attesa verso un'applicazione senza operazioni in corso, quando database e applicazione hanno già una versione.
 
-Un collegamento che non si riesce ad applicare **non fa fallire** l'operazione in corso: resta in attesa. Dopo una risposta persa non si ripete nulla alla cieca: il collegamento è segnato in attesa e il passaggio successivo legge lo stato prima di cambiare qualcosa. Non c'è un tipo di operazione nuovo né un passo nuovo.
+Che cosa il pannello registra dopo la chiamata:
 
-**Cancellazioni.** Un database che qualche applicazione usa ancora non si cancella: prima si tolgono i collegamenti. Cancellare un'applicazione toglie i suoi collegamenti nella stessa transazione che mette in coda la cancellazione; l'esecutore, prima di cancellare la rete privata di un'applicazione, stacca i componenti di altre applicazioni dello stesso cliente che vi sono attaccati, fermi o accesi (è la risposta al pericolo del §1). Se sulla rete c'è qualcos'altro, la cancellazione è rifiutata come oggi.
+- un collegamento attaccato diventa `active`; uno che il server non ha attaccato resta o torna `pending`; uno `removing` è cancellato a ogni risposta, perché la chiamata stacca tutto ciò che non è nell'elenco;
+- se l'esecutore rifiuta o non risponde, del server non si sa nulla: i collegamenti `active` di quel database tornano `pending` e l'osservatore chiede di nuovo. Non si ripete nulla alla cieca: ogni passaggio legge lo stato prima di cambiare qualcosa;
+- una riga che il cliente ha cambiato mentre il passaggio era in corso non è sovrascritta: ogni scrittura vale solo per una riga ancora nello stato in cui era stata letta;
+- di un database mai installato sul server non c'è nulla: i collegamenti restano in attesa e quelli tolti sono cancellati senza chiedere;
+- se il pannello non ha un server a cui chiedere, o la versione applicata del database ha più di un componente, le righe restano come sono.
+
+Un collegamento che non si riesce ad applicare **non fa fallire** l'operazione in corso: resta in attesa. Non c'è un tipo di operazione nuovo né un passo nuovo.
+
+**Cancellazioni.** Un database che qualche applicazione usa ancora non si cancella (`database_in_use`): prima si tolgono i collegamenti. Cancellare un'applicazione toglie i suoi collegamenti nella stessa transazione che mette in coda la cancellazione. L'esecutore, prima di cancellare la rete privata di un'applicazione, stacca i componenti di altre applicazioni dello stesso cliente che vi sono attaccati, fermi o accesi (è la risposta al pericolo del §1); se uno non si lascia staccare la rete resta e la cancellazione fallisce, e se sulla rete c'è qualcos'altro la cancellazione è rifiutata come oggi. I collegamenti di un'applicazione cancellata da una release che non li conosce sono tolti al primo passaggio del loro database.
 
 ### D10 — Permessi
 
@@ -114,17 +131,22 @@ Nessun permesso nuovo: `app.read` per leggere i collegamenti, `app.update` per c
 
 ### D11 — API
 
-- `GET /v1/organizations/:orgId/app-stacks/:stackId/links` — i collegamenti dell'applicazione nei due ruoli, l'indirizzo interno se è un database, i database che si possono ancora collegare se non lo è.
-- `POST /v1/organizations/:orgId/app-stacks/:stackId/links` con `{ databaseStackId }` — collega un database all'applicazione `:stackId`.
-- `DELETE /v1/organizations/:orgId/app-stacks/:stackId/links/:linkId` — toglie il collegamento, da una qualunque delle due parti.
+- `GET /v1/organizations/:orgId/app-stacks/:stackId/links` — che cosa è l'applicazione (`database` o `application`), i suoi collegamenti e il loro limite; se è un database il suo indirizzo interno, se non lo è i database che si possono ancora collegare (al più 50, per nome).
+- `POST /v1/organizations/:orgId/app-stacks/:stackId/links` con `{ databaseStackId }` — collega un database all'applicazione `:stackId`. Si chiama solo dalla parte dell'applicazione. Risponde `201` con l'elenco aggiornato, che dice già se il collegamento è attivo.
+- `DELETE /v1/organizations/:orgId/app-stacks/:stackId/links/:linkId` — toglie il collegamento, da una qualunque delle due parti, e risponde l'elenco aggiornato.
 
-Righe di audit `app.stack.link.create` e `app.stack.link.remove`. Nessuna risposta contiene un nome di rete, un identificativo di Docker o una password.
+Le tre route sono sincrone come quelle degli indirizzi web: nessuna `Idempotency-Key`, nessuna operazione. L'indirizzo interno (nome e porta) è vuoto per un database che non è collegabile.
+
+I rifiuti: `404` per un'applicazione o un database che non è del cliente; `400` con motivo `database_as_application`, `not_a_database`, `database_not_linkable` o `STACK_QUOTA_EXCEEDED` (limite raggiunto); `409` con motivo `link_exists`, oppure con lo stato dell'applicazione come motivo mentre una delle due parti sta cambiando; `422` finché la funzione delle applicazioni è spenta. La cancellazione e l'aggiornamento di un database in uso rispondono `400` con motivo `database_in_use` dalle route delle applicazioni che esistono già.
+
+Righe di audit `app.stack.link.create` e `app.stack.link.remove`, con i due identificativi di applicazione e nient'altro. Nessuna risposta contiene un nome di rete, un identificativo di Docker o una password.
 
 ### D12 — Interfaccia, downgrade, fuori ambito
 
 - **Pagina.** Sulla pagina di un database: l'indirizzo interno, la porta e le applicazioni che lo usano. Sulla pagina di un'applicazione: i database che usa, con i comandi per collegarne uno e per scollegarlo. Italiano e inglese, senza vocaboli di Docker. L'indirizzo va copiato dal cliente nelle impostazioni dell'applicazione: il pannello non scrive variabili nell'applicazione collegata.
 - **Downgrade.** Nome di funzione `app-stack-links` per `hp-update`: in uso appena esiste una riga in `app_stack_links`. Una release precedente non saprebbe riattaccare un database dopo averne sostituito il container.
-- **Fuori ambito**, ciascuno un'issue successiva: credenziali generate dal pannello (serve #42); copia di un database senza fermarlo (#58); database raggiungibile da fuori del server; MySQL, MongoDB e altri motori; collegamento tra due applicazioni nessuna delle quali è un database; variabili scritte automaticamente nell'applicazione collegata.
+- **Ripristino del pannello.** Dopo `hp-restore-panel` sul server nuovo non c'è nessun container: i collegamenti `active` tornano `pending` e si attivano di nuovo quando le due applicazioni sono reinstallate.
+- **Fuori ambito:** credenziali generate dal pannello e una password per Valkey (#68; serve #42); copia di un database senza fermarlo (#58); database raggiungibile da fuori del server; MySQL, MongoDB e altri motori; collegamento tra due applicazioni nessuna delle quali è un database; variabili scritte automaticamente nell'applicazione collegata. Le voci senza numero non hanno ancora un'issue.
 
 ### Alternative scartate
 
@@ -140,14 +162,59 @@ Righe di audit `app.stack.link.create` e `app.stack.link.remove`. Nessuna rispos
 - Un cliente può avere un database senza un sito WordPress, e più applicazioni possono usare lo stesso database.
 - La regola di `ADR-0035` «un componente sta solo sulle reti della propria applicazione» ha ora un'eccezione scritta: il solo componente di un database, sulla rete privata di un'applicazione dello stesso cliente, attaccato dall'esecutore dopo i controlli di D9. `HARNESS.md` la fissa come azione vietata in ogni altra forma.
 - Il container di un database collegato vede i componenti delle applicazioni che lo usano (D5).
+- Un database in uso non si cancella e non passa a una versione che non è più collegabile: prima si tolgono i collegamenti.
+- Il cliente copia a mano indirizzo, porta, utente e password nelle impostazioni dell'applicazione (D4, D12).
 - Finché esiste un collegamento, `hp-update` rifiuta di tornare a una release che non conosce la funzione (codice 8), salvo `--allow-feature-loss`.
 - Le quattro funzioni delle applicazioni restano spente su questo ramo come su `main` (le accende #43): nessun cliente raggiunge queste pagine finché non sono accese.
 
 ## 4. Come è stato costruito
 
-Compilato a lavoro finito.
+- **Contratti.** `packages/contracts/src/app-templates/stack-links.ts` ha la categoria che fa di un'applicazione un database, i due limiti, i tre stati, il nome interno calcolato dall'identificativo (D7), la regola «un solo componente, una sola porta» (D6), la richiesta e la risposta della chiamata dell'esecutore e la forma delle risposte al cliente; `packages/contracts/src/app-templates/stack-operations.ts` aggiunge le due azioni di audit; `packages/contracts/src/app-templates/images.ts` ha le righe `mariadb` e `postgres` e le aree temporanee dichiarate per immagine (D2, D3); `packages/contracts/src/app-templates/built-in.ts` ha i tre modelli (D1); `packages/executor-contracts/src/stack-port.ts` aggiunge la chiamata alla porta dell'esecutore.
+- **Database.** `packages/database/migrations/0028_app_stack_links.sql` crea la tabella di D8; `packages/database/src/app-stack-links-repository.ts` la legge e la scrive: la creazione con i limiti e il blocco delle due applicazioni, i tre stati, l'elenco dei database da ripassare; `packages/database/src/app-stacks-repository.ts` rifiuta la cancellazione e la versione non collegabile di un database in uso e toglie i collegamenti di un'applicazione cancellata.
+- **Esecutore.** `apps/docker-executor/src/app-stacks/engine.ts` ha la chiamata di D9 e lo stacco dei database prima di cancellare una rete privata; `apps/docker-executor/src/app-stacks/container-payload.ts` dà a un componente `/tmp` e le aree dichiarate dalla riga della sua immagine e rifiuta ogni altro insieme (D3); `apps/docker-executor/src/server.ts` e `apps/docker-executor/src/client.ts` portano la chiamata sul canale firmato tra API ed esecutore (`POST /v1/app-stacks/links`, attesa massima di 60 secondi); `apps/docker-executor/src/simulator-app-stacks.ts` risponde allo stesso modo senza Docker.
+- **API.** `apps/api/src/controllers/app-stack-links.controller.ts` ha le tre route di D11; `apps/api/src/app-stacks/app-stack-links.service.ts` controlla la richiesta, scrive la riga e l'audit e compone le risposte; `apps/api/src/app-stacks/app-stack-links-applier.ts` porta il server alle righe (D9) e non restituisce mai un errore a chi lo chiama; `apps/api/src/app-stacks/app-stack-runtime.ts` lo chiama all'inizio del passo di avvio e `apps/api/src/app-stacks/app-stack-observer.service.ts` a ogni giro; `apps/api/src/app-stacks/app-stack-errors.ts` traduce i rifiuti; `docs/api/openapi.yaml` descrive le route.
+- **Pagina.** `apps/web/src/components/app-stacks/app-stack-links.tsx` è la sezione della pagina dell'applicazione (`apps/web/src/app/apps/[stackId]/page.tsx`): «Collegamento» per un database, con indirizzo, porta e applicazioni che lo usano; «Database» per ogni altra applicazione, con i database collegati e quelli che si possono collegare. Le richieste passano per `apps/web/src/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/links/route.ts` e `apps/web/src/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/links/[linkId]/route.ts`; i testi sono in `apps/web/src/i18n/it.ts` e `apps/web/src/i18n/en.ts`.
+- **Installazione.** `infra/linux/lib/common.sh` e `infra/linux/update.sh` hanno il controllo del downgrade e `infra/release/build-release.mjs` il nome della funzione (D12); `infra/linux/hp-restore-panel.sql` riporta a `pending` i collegamenti `active` dopo un ripristino del pannello.
+
+Scostamenti dalla proposta scritta prima del codice:
+
+- **Un terzo stato, `removing`.** La proposta aveva `pending` e `active` e cancellava la riga subito. Con il server che non risponde, il collegamento sarebbe sparito dal pannello restando attaccato su Docker.
+- **Il componente del database non è più nella riga** (D8): si legge dal piano.
+- **Un database in uso non passa a una versione non collegabile** (D6). La proposta non lo diceva; senza il rifiuto un aggiornamento avrebbe lasciato collegamenti che nessuno può più applicare.
+- **All'avvio di un database la chiamata parte sempre**, anche senza collegamenti (D9). La proposta la faceva partire solo per i collegamenti registrati; così un attacco rimasto verso una rete cancellata non veniva tolto prima dell'avvio.
+- **La chiamata ripara più casi**: oltre alla rete che non esiste più, la rete ricreata con lo stesso nome e l'attacco senza il nome interno. La rete sparita e la rete ricreata sono provate su Docker reale (passo `stale-attachment-repaired`, §5).
+- **I momenti in cui l'API chiama sono tre**; la proposta ne annunciava quattro e ne elencava tre.
+- **Dopo un ripristino del pannello i collegamenti tornano in attesa** (D12): la proposta non ne parlava.
 
 ## 5. Che cosa è provato
 
 - **Prima del codice, su Docker reale** (2026-11-23, comandi `docker` a mano su oggetti usa-e-getta): i quattro punti del §1, e in più che PostgreSQL si inizializza con l'area temporanea in `/run/postgresql`, che un collegamento fatto su un container creato e mai avviato è attivo dopo l'avvio, e che staccare un database fermo permette di cancellare la rete e di riavviare il database.
-- Il resto è compilato a lavoro finito.
+- **Con Docker reale, sul codice** (`infra/linux/accept-app-stack-databases.mjs`, 22 passi su 22 il 2026-11-23 su Docker Engine 29.10.0, un passo saltato perché chiede `root`): l'adattatore di produzione dietro un socket che lascia passare solo le richieste previste (417 richieste, nessuna rifiutata, nessuna immagine scaricata, nessuna rete del proxy creata o nominata).
+  - I tre database partono dai modelli incorporati con le protezioni di ogni componente (PostgreSQL con `/run/postgresql` come sola area in più) e nessun processo come `root`. Le password sono solo file in sola lettura su un'area temporanea e non compaiono nella descrizione del container che Docker restituisce, nei piani e nelle risposte dell'esecutore. Una password sbagliata è rifiutata; l'amministratore di MariaDB è rifiutato dalla rete e accettato dal socket locale. I dati restano dopo un riavvio.
+  - Un'applicazione non collegata non risolve il nome di un database e non ne raggiunge l'indirizzo. Dopo il collegamento lo raggiunge con il nome interno e solo con quello (non con `db`), senza che il database sia riavviato o ricreato; la risposta non nomina oggetti di Docker; un secondo passaggio uguale non manda nessuna scrittura.
+  - Due applicazioni collegate allo stesso database leggono gli stessi dati e non si raggiungono tra loro.
+  - Un riavvio del database tiene gli attacchi; un container sostituito da una versione nuova li riceve prima dell'avvio e risponde allo stesso nome con i dati di prima.
+  - Cancellare un'applicazione stacca il database, acceso (che continua a girare) o fermo (che poi riparte).
+  - Un attacco verso una rete che non esiste più impedisce l'avvio del database; il passaggio successivo lo toglie e il database parte. Una rete ricreata con lo stesso nome è sostituita nell'attacco dal passaggio prima dell'avvio.
+  - Sono rifiutati senza cambiare nulla: il database nel suo stesso elenco, un identificativo non valido, un'applicazione con due componenti come database, un'altra chiave di componente (`STACK_PLAN_INVALID`); un'applicazione di un altro cliente, da una parte o dall'altra (`STACK_NAMESPACE_CONFLICT`). Nessun rifiuto nomina oggetti di Docker.
+  - Staccare toglie la raggiungibilità senza riavvii; un database collegato si cancella con i suoi dati lasciando intatta la rete dell'applicazione; alla fine non resta nulla della prova e nulla di ciò che c'era prima è stato tolto.
+  - **Limite di questa prova:** l'immagine usata come applicazione non ha un client di MariaDB o di PostgreSQL. Dal container dell'applicazione sono provate la risoluzione del nome e l'apertura della porta per i tre database, e lettura e scrittura per Valkey. L'accesso con utente e password a MariaDB e a PostgreSQL al nome del collegamento è fatto dal client del database, dentro il container del database.
+- **Contratti e modelli** (`packages/contracts/test/app-stack-links.test.ts`, `packages/contracts/test/app-template-images.test.ts`, `packages/contracts/test/app-template-built-in.test.ts`, `packages/policy-engine/test/app-template-built-in.test.ts`): il nome interno è un nome DNS valido, diverso per ogni identificativo e mai uguale a una chiave di componente; il bersaglio è il solo componente sulla sua sola porta; richiesta e risposta dell'esecutore rifiutano chiavi in più; le risposte al cliente non hanno nomi di Docker né valori riservati. Solo la riga `postgres` dichiara un'area temporanea, sotto `/run` e mai `/run/secrets`. I tre modelli danno un piano con un componente, l'utente atteso, le password come file e nessun indirizzo web; MariaDB e PostgreSQL non danno un piano finché il cliente non ha impostato le password.
+- **Database** (`packages/database/test/app-stack-links-repository.test.ts`, `packages/database/test/app-stacks-lifecycle.test.ts`, `packages/database/test/rollback-compat.test.ts`, `packages/database/test/restore-panel-sql.test.ts`, `packages/database/test/app-stack-links-downgrade-gate.test.ts`): i vincoli di D8; i rifiuti di D6 (stessa coppia, altro cliente, parte cancellata, in corso di modifica o cancellata a metà) e i due limiti; lo stato `removing` da una parte e dall'altra e il ritorno a `pending`; le scritture che valgono solo per una riga ancora nello stato letto; un database in uso non si cancella e non passa a una versione non collegabile; cancellare un'applicazione toglie i suoi collegamenti; la release precedente lavora con la tabella presente; dopo un ripristino del pannello nessun collegamento resta `active`; il controllo del downgrade scatta per una riga in qualunque stato.
+- **Esecutore** (`apps/docker-executor/test/app-stack-links.test.ts`, `apps/docker-executor/test/app-stack-payload.test.ts`, `apps/docker-executor/test/app-stack-hardening.qa.test.ts`): attacco con il nome calcolato, anche di un container creato e mai avviato, senza avviarlo; stacco di ciò che non è nell'elenco; i rifiuti prima di qualunque modifica; la chiamata cede a una modifica del database in corso e non la fa mai aspettare né fallire; nulla è attaccato a un'applicazione che sta cambiando; le riparazioni degli attacchi; la cancellazione di un'applicazione stacca i database collegati e, se non ci riesce, fallisce tenendo la rete; il simulatore tiene lo stesso contratto. Le aree temporanee seguono la riga dell'immagine: `/tmp` da sola per ogni immagine che non ne dichiara, e un insieme diverso è rifiutato.
+- **Route e passaggi** (`apps/api/test/app-stack-links.integration.test.ts`, `apps/api/test/app-stack-errors.test.ts`): che cosa vedono un database e un'applicazione; un collegamento verso una parte non installata aspetta e si applica da solo; collegare e scollegare cambiano solo l'attacco; i rifiuti non scrivono nulla; `app.read` e `app.update`, con `403` e una riga di accesso negato; quattro database e otto applicazioni; un server che non risponde lascia il collegamento in attesa e l'osservatore lo applica dopo; un collegamento che non si può applicare non fa fallire un avvio.
+- **Pagina** (`apps/web/test/app-stacks-detail.test.ts`, `apps/web/test/app-stacks-bff.test.ts`, `apps/web/test/m6-web-qa-guards.test.ts`): ciò che la sezione mostra nei due ruoli e nei tre stati, il limite, collegare e scollegare, i testi dei rifiuti, il nome della sezione; le due route del collegamento sono le sole aggiunte alla pagina e non portano `Idempotency-Key`.
+- **Installazione** (`infra/linux/features-gate.test.ts`, `infra/linux/update.test.ts`, `infra/release/release-manifest.test.ts`): un downgrade è rifiutato con codice 8 finché un database è collegato, e una release che conosce i collegamenti non è trattenuta.
+
+Non provato:
+
+- **Su Docker reale** (#70): il passo che legge le regole del firewall dell'host (chiede `root`); l'accesso a MariaDB e a PostgreSQL dal container di un'applicazione; un riavvio dell'host con database collegati.
+- **`infra/linux/accept-m3-panel.mjs`** non è stato rieseguito con la riga nuova di `infra/linux/hp-restore-panel.sql`; quella riga è provata su PGlite (#70).
+- **Le pagine viste da una persona** su un pannello installato.
+
+Punti aperti:
+
+- Le credenziali sono scritte a mano dal cliente e Valkey non ha password (#68).
+- Un avvio rifiutato per un attacco verso una rete che non esiste più dice «Component db is not created», che non è la causa (#69). Dalle operazioni del pannello il caso non si presenta, perché il passaggio dei collegamenti viene prima dell'avvio.
+- Quando il pannello non ha un server a cui chiedere, un collegamento `active` resta scritto così fino al primo passaggio che raggiunge l'esecutore.
+- Un collegamento creato mentre la versione applicata del database ha ancora più di un componente aspetta l'installazione della versione collegabile.
