@@ -518,7 +518,7 @@ export class AppStacksService {
     // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit.
     const { secretBytes } = APP_STACK_SECRET_ENV_LIMITS;
     if (appTemplateEnvironmentSecretKeys(spec).has(input.parameterKey) && Buffer.byteLength(input.value, "utf8") > secretBytes) {
-      throw refusal("value", "STACK_PARAMETER_INVALID", `This value is too long for this application: at most ${String(secretBytes)} bytes.`);
+      throw refusal("value", "value_too_long", `This value is too long for this application: at most ${String(secretBytes)} bytes.`);
     }
     const meta = await this.#write(async (tx) => {
       const stored = await setAppStackSecretTransactional(tx, {
