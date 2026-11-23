@@ -342,7 +342,7 @@ describe("job containers of application backups (ADR-0038 K4)", () => {
     ]);
   });
 
-  it("restores one volume per container, deleting what the backup does not hold, without locking the repository", () => {
+  it("restores one volume per container, its own folder included, deleting what the backup does not hold, without locking the repository", () => {
     const restore = buildAppStackRestoreContainerPayload({
       ...base(localRepo(STACK, true), RESTORE_JOB),
       volumeKey: "db-files",
@@ -351,11 +351,14 @@ describe("job containers of application backups (ADR-0038 K4)", () => {
     expect(restore.containerName).toBe(`hp_bk_${RESTORE_JOB}_rs_db-files`);
     expect(restore.payload.HostConfig.Binds).toEqual([`hp_appvol_${STACK}_db-files:/data/db-files`, ...SECRET_BINDS]);
     expect(restore.payload.HostConfig.Mounts).toEqual([expect.objectContaining({ ReadOnly: true })]);
+    // The snapshot's /data onto /data, taking only this volume's folder: its owner and mode come back with the files.
     expect(restore.payload.Cmd).toEqual([
       "restore",
-      `${SNAPSHOT}:/data/db-files`,
+      `${SNAPSHOT}:/data`,
       "--target",
-      "/data/db-files",
+      "/data",
+      "--include",
+      "/db-files",
       "--delete",
       "--no-lock",
       "--json",

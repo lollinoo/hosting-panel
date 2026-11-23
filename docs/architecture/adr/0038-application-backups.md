@@ -58,7 +58,7 @@ Il ripristino riporta i dati **nella stessa applicazione**. Chi lo chiede riscri
 
 1. l'applicazione viene fermata;
 2. si fa un backup di sicurezza dei dati attuali (tipo `pre_restore`). Se non riesce su almeno una destinazione, nulla viene toccato e l'applicazione riparte;
-3. per ogni volume presente sia nel backup sia nell'applicazione di oggi, `restic restore <snapshot>:/data/<volumeKey>` scrive nel volume e cancella ciò che nel backup non c'è (`--delete`);
+3. per ogni volume presente sia nel backup sia nell'applicazione di oggi, `restic restore <snapshot>:/data --target /data --include /<volumeKey>` scrive nel volume e cancella ciò che nel backup non c'è (`--delete`). La forma con `--include` riporta anche proprietario, permessi e data della cartella del volume stesso; `<snapshot>:/data/<volumeKey>` riporterebbe solo ciò che contiene (provato su Docker reale);
 4. l'applicazione riparte.
 
 La versione dell'applicazione non cambia: tornano i dati, non il software. La copia usata è la prima riuscita, in ordine di priorità, la cui destinazione è ancora configurata. Un volume aggiunto dopo il backup non viene toccato; un volume che non esiste più viene saltato.

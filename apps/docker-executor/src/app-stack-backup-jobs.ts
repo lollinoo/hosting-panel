@@ -96,8 +96,12 @@ export function buildAppStackJobLabels(stackId: string, jobId: string): Readonly
   };
 }
 
+/** The folder of a job container that holds the volumes, one folder per volume key. */
+const APP_STACK_BACKUP_DATA_ROOT = "/data";
+
 /** Where a volume is mounted in a job container; the same path is the folder of that volume inside a snapshot. */
-export const appStackBackupDataPath = (volumeKey: string): string => `/data/${assertVolumeKey(volumeKey)}`;
+export const appStackBackupDataPath = (volumeKey: string): string =>
+  `${APP_STACK_BACKUP_DATA_ROOT}/${assertVolumeKey(volumeKey)}`;
 
 /** The volumes of one job, in the order asked: 1..8 keys, each once. */
 function volumeBinds(stackId: string, volumeKeys: readonly string[], readOnly: boolean): { binds: string[]; paths: string[] } {
@@ -178,9 +182,12 @@ export function buildAppStackPartialSnapshotDropContainerPayload(
 }
 
 /**
- * Writes one volume back from a snapshot: its folder in the snapshot onto the volume, deleting what the backup does
- * not hold. One container per volume, so a job never mounts more data than it writes. The repository is only read
- * (`--no-lock`; a local one is mounted read-only by the caller).
+ * Writes one volume back from a snapshot, deleting what the backup does not hold. restic restores the snapshot's
+ * `/data` onto the container's `/data` and takes only the folder of this volume (`--include`): that folder is the
+ * volume's own, so its owner, mode and time come back with the files (`<snapshot>:/data/<key>` would restore only what
+ * is inside it; real-Docker check: infra/linux/accept-app-stack-backups.mjs). With `--include`, `--delete` removes
+ * only what is under that folder. One container per volume, so a job never mounts more data than it writes. The
+ * repository is only read (`--no-lock`; a local one is mounted read-only by the caller).
  */
 export function buildAppStackRestoreContainerPayload(
   input: JobIds & { readonly volumeKey: string; readonly snapshotId: string },
@@ -190,8 +197,7 @@ export function buildAppStackRestoreContainerPayload(
     throw new ExecutorCodedError("Invalid restore jobId", "VALIDATION_ERROR");
   }
   const snapshotId = assertSnapshotId(input.snapshotId);
-  const { binds, paths } = volumeBinds(stackId, [input.volumeKey], false);
-  const dataPath = paths[0] ?? "";
+  const { binds } = volumeBinds(stackId, [input.volumeKey], false);
   return {
     containerName: `hp_bk_${jobId}_rs_${input.volumeKey}`,
     payload: withCapabilities(
@@ -205,9 +211,11 @@ export function buildAppStackRestoreContainerPayload(
         cmd: [
           ...input.repo.resticOptions,
           "restore",
-          `${snapshotId}:${dataPath}`,
+          `${snapshotId}:${APP_STACK_BACKUP_DATA_ROOT}`,
           "--target",
-          dataPath,
+          APP_STACK_BACKUP_DATA_ROOT,
+          "--include",
+          `/${input.volumeKey}`,
           "--delete",
           "--no-lock",
           "--json",
