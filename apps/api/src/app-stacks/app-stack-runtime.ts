@@ -429,9 +429,11 @@ export class AppStackRuntime {
         return settle({ stackStatus: "degraded", ...(deploy ? { appliedRevisionId: st.plan!.revisionId } : {}) }, ctx.lastHealth);
       }
       if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare"))) {
-        // Pre-flight: no container was touched; an applied stack keeps the status its previous revision shows.
-        const { stack, previous } = st;
-        const observed = deploy && stack && previous ? await this.#status(ctx) : null;
+        // Pre-flight: create was never called, so no container was touched; the stack keeps the status the plan that
+        // runs shows.
+        const { stack } = st;
+        const previous = deploy ? st.previous : st.plan;
+        const observed = stack && previous ? await this.#status(ctx) : null;
         if (!stack || !previous || !observed) return settle({ stackStatus: "failed" });
         const health = appStackHealthRows(previous, observed, "observer");
         const stackStatus: AppStackStatus = appStackAggregate({

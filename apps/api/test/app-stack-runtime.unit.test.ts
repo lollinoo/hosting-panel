@@ -618,6 +618,39 @@ describe("AppStackRuntime (RT3)", () => {
       expect((await stackOf(stackId)).status).toBe("failed");
     });
 
+    it("a restart or a start refused at validate touches nothing and shows what runs; the operation fails with its reason", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("running");
+      // The pinned version is gone (versions are immutable: only this test can lose one): every start of the plan is
+      // refused before the executor is asked anything.
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      fake.calls.length = 0;
+
+      const restart = await enqueue(stackId, "stack.restart");
+      expectFailure(await run(restart), "STACK_SECRET_MISSING");
+
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("running");
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+      expect(await deploymentOf(restart)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+      expect((await opOf(restart.operation!.id)).status).toBe("failed");
+      expect((await stepsOf(restart))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+
+      // A stop cut short by an API restart leaves it unknown while it still serves: a refused start shows that it does.
+      await db().update(appStacks).set({ status: "unknown" }).where(eq(appStacks.id, stackId));
+      fake.calls.length = 0;
+      const start = await enqueue(stackId, "stack.start");
+      expectFailure(await run(start), "STACK_SECRET_MISSING");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("running");
+      expect(await deploymentOf(start)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+    });
+
     it("a stop that fails after the routes are withdrawn settles degraded with no routes hash", async () => {
       const { stackId } = await running();
       fake.failNext("stopAppStack", "definite");
