@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_COMPONENT_TIMEOUT_MS,
   APP_STACK_CREATE_TIMEOUT_MS,
+  APP_STACK_LINKS_TIMEOUT_MS,
   APP_STACK_LOGS_TIMEOUT_MS,
   APP_STACK_PREPARE_TIMEOUT_MS,
   APP_STACK_PULL_TIMEOUT_MS,
@@ -41,6 +42,13 @@ const routes = [
   { componentKey: "web", internalPort: 8080, hosts: [{ hostname: "shop.example.org", tls: true, httpsRedirect: true, redirectTo: null }] },
 ];
 const at = "2026-11-22T03:00:00.000Z";
+// A link needs ids longer than any component key (ADR-0039).
+const links = {
+  stackId: "stk_0123456789abcdef01234567",
+  organizationId: plan.organizationId,
+  componentKey: "db",
+  consumerStackIds: ["stk_89abcdef0123456701234567"],
+};
 
 const RESULTS = {
   pullAppStackImage: { image, pulled: true },
@@ -53,6 +61,11 @@ const RESULTS = {
   unpublishAppStackRoutes: { routeCount: 0, hostnames: [], changed: true },
   removeAppStack: { removedComponents: ["web"], removedNetworks: ["app_internal"], removedVolumes: [], retainedVolumes: ["data"] },
   removeAppStackComponents: { removedComponents: ["worker"] },
+  syncAppStackLinks: {
+    container: true,
+    links: [{ consumerStackId: "stk_89abcdef0123456701234567", outcome: "connected" }],
+    disconnected: ["stk_fedcba987654321001234567"],
+  },
   getAppStackStatus: {
     stackId: plan.stackId,
     observedAt: at,
@@ -79,7 +92,7 @@ const RESULTS = {
 
 type StackMethod = (typeof APP_STACK_EXECUTOR_METHODS)[number];
 
-/** A DockerExecutorPort (the Phase 1 refusals) with the 12 stack methods as spies. */
+/** A DockerExecutorPort (the Phase 1 refusals) with the stack methods as spies. */
 function stackStub() {
   const fns = Object.fromEntries(
     APP_STACK_EXECUTOR_METHODS.map((m) => [m, vi.fn(async (_req: unknown): Promise<unknown> => structuredClone(RESULTS[m]))]),
@@ -176,6 +189,7 @@ const CALLS: ReadonlyArray<{ method: StackMethod; request: unknown; call: (c: Cl
     request: { plan, componentKeys: ["worker"] },
     call: (c) => c.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
   },
+  { method: "syncAppStackLinks", request: links, call: (c) => c.syncAppStackLinks(links) },
   { method: "getAppStackStatus", request: ref, call: (c) => c.getAppStackStatus(ref) },
   {
     method: "getAppStackComponentLogs",
@@ -345,6 +359,7 @@ describe("application stack IPC routes", () => {
       APP_STACK_STOP_TIMEOUT_MS,
       APP_STACK_ROUTES_TIMEOUT_MS,
       APP_STACK_REMOVE_TIMEOUT_MS,
+      APP_STACK_LINKS_TIMEOUT_MS,
       APP_STACK_STATUS_TIMEOUT_MS,
       APP_STACK_LOGS_TIMEOUT_MS,
     }).toEqual({
@@ -355,6 +370,7 @@ describe("application stack IPC routes", () => {
       APP_STACK_STOP_TIMEOUT_MS: 150_000,
       APP_STACK_ROUTES_TIMEOUT_MS: 300_000,
       APP_STACK_REMOVE_TIMEOUT_MS: 180_000,
+      APP_STACK_LINKS_TIMEOUT_MS: 60_000,
       APP_STACK_STATUS_TIMEOUT_MS: 60_000,
       APP_STACK_LOGS_TIMEOUT_MS: 35_000,
     });
@@ -377,6 +393,7 @@ describe("application stack IPC routes", () => {
       ["POST", "/v1/app-stacks/unpublish", 300_000],
       ["POST", "/v1/app-stacks/remove", 180_000],
       ["POST", "/v1/app-stacks/remove-components", 180_000],
+      ["POST", "/v1/app-stacks/links", 60_000],
       ["GET", `/v1/app-stacks/${plan.stackId}/status?${q}`, 60_000],
       ["GET", `/v1/app-stacks/${plan.stackId}/components/web/logs?${q}&tail=50`, 35_000],
     ]);

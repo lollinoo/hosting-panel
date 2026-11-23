@@ -1,5 +1,10 @@
+import {
+  appStackLinkAlias,
+  type AppImageAllowlistEntry,
+  type AppStackLinksIpcRequest,
+  type AppStackLinksIpcResult,
+} from "@hosting-panel/contracts";
 import type {
-  AppImageAllowlistEntry,
   AppStackComponentActionIpcResult,
   AppStackComponentIpcRequest,
   AppStackComponentObservation,
@@ -55,7 +60,8 @@ import {
 } from "./traefik-config.js";
 
 export type AppStackSimStep =
-  | "pull" | "prepare" | "create" | "start" | "restart" | "stop" | "routes" | "unpublish" | "remove" | "remove_components" | "status" | "logs";
+  | "pull" | "prepare" | "create" | "start" | "restart" | "stop" | "routes" | "unpublish" | "remove" | "remove_components" | "links"
+  | "status" | "logs";
 export type AppStackSimFault = "engine_unavailable" | "pull_failed" | "ambiguous_before" | "ambiguous_after";
 
 export interface SimulatedAppStacksOptions {
@@ -77,6 +83,8 @@ interface SimContainer {
   startedAt: string | null;
   restartCount: number;
   exitCode: number | null;
+  /** The applications whose private network this container is attached to (ADR-0039); gone with the container. */
+  links: Set<string>;
 }
 
 interface SimStack {
@@ -113,7 +121,8 @@ export class SimulatedAppStacks implements StackExecutorPort {
   public readonly appStackMutations: Array<{
     readonly kind:
       | "pull" | "network" | "volume" | "container_create" | "container_remove" | "container_start" | "container_stop"
-      | "container_restart" | "route_write" | "route_remove" | "volume_remove" | "network_remove";
+      | "container_restart" | "route_write" | "route_remove" | "volume_remove" | "network_remove" | "network_connect"
+      | "network_disconnect";
     readonly name: string;
   }> = [];
   private readonly images = new Set<string>();
@@ -147,6 +156,13 @@ export class SimulatedAppStacks implements StackExecutorPort {
 
   public setAppStackComponentLogs(stackId: string, componentKey: string, lines: readonly ServiceLogLine[]): void {
     this.logs.set(appStackContainerName(stackId, componentKey), lines.map((line) => ({ ...line })));
+  }
+
+  /** The applications a stack's components are attached to through a link, ascending; [] when it has none. */
+  public getAppStackLinkedApplications(stackId: string): string[] {
+    const linked = new Set<string>();
+    for (const c of this.stacks.get(stackId)?.containers.values() ?? []) for (const id of c.links) linked.add(id);
+    return [...linked].sort();
   }
 
   public getAppStackSnapshot(stackId: string): AppStackSimSnapshot | null {
@@ -235,7 +251,16 @@ export class SimulatedAppStacks implements StackExecutorPort {
         const payload = buildAppStackContainerCreatePayload(plan, key, ctx);
         assertAppStackPayloadHardening(payload, ctx);
         const name = appStackContainerName(plan.stackId, key);
-        stack.containers.set(key, { name, labels: payload.Labels, payload, state: "created", startedAt: null, restartCount: 0, exitCode: null });
+        stack.containers.set(key, {
+          name,
+          labels: payload.Labels,
+          payload,
+          state: "created",
+          startedAt: null,
+          restartCount: 0,
+          exitCode: null,
+          links: new Set(),
+        });
         this.mutate("container_create", name);
         return { componentKey: key, outcome: existing === undefined ? ("created" as const) : ("replaced" as const) };
       });
@@ -315,6 +340,8 @@ export class SimulatedAppStacks implements StackExecutorPort {
       }
       stack.secrets.clear();
       for (const role of ["app_edge", "app_internal"] as const) {
+        // The databases linked to this application are detached before its private network goes (ADR-0039).
+        if (role === "app_internal" && stack.networks.has(role)) this.detachLinked(req.stackId);
         if (stack.networks.delete(role)) {
           this.mutate("network_remove", this.networkName(req.stackId, role));
           result.removedNetworks.push(role);
@@ -331,6 +358,47 @@ export class SimulatedAppStacks implements StackExecutorPort {
       }
       if (stack.volumes.size === 0) this.stacks.delete(req.stackId);
       return result;
+    });
+  }
+
+  /** The engine's rules over the simulated objects: one component, the same customer, a private network that exists. */
+  public syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    const call = { method: "syncAppStackLinks" as const, stackId: req.stackId, componentKey: req.componentKey };
+    return this.run("links", call, false, async () => {
+      // It gives way to a change of the database that is running, and holds nothing a change waits for.
+      if (this.busy.has(req.stackId)) throw new AppStackExecutorError("STACK_BUSY", "Another change of this application stack is running");
+      const desired = [...new Set(req.consumerStackIds)];
+      if (appStackLinkAlias(req.stackId) === null || desired.includes(req.stackId)) {
+        throw new AppStackExecutorError("STACK_PLAN_INVALID", "This application cannot be linked");
+      }
+      const stack = this.own(req.stackId, req.organizationId);
+      if (stack === undefined || stack.containers.size === 0) {
+        return { container: false, links: desired.map((consumerStackId) => ({ consumerStackId, outcome: "pending" as const })), disconnected: [] };
+      }
+      const container = stack.containers.get(req.componentKey);
+      if (container === undefined || stack.containers.size > 1) {
+        throw new AppStackExecutorError("STACK_PLAN_INVALID", "Only an application with one component can be linked");
+      }
+      for (const consumer of desired) this.own(consumer, req.organizationId);
+      const disconnected = [...container.links].filter((id) => !desired.includes(id)).sort();
+      for (const id of disconnected) {
+        container.links.delete(id);
+        this.mutate("network_disconnect", appStackInternalNetworkName(id));
+      }
+      const links = desired.map((consumerStackId) => {
+        const name = appStackInternalNetworkName(consumerStackId);
+        const present = this.stacks.get(consumerStackId)?.networks.has("app_internal") === true;
+        if (container.links.has(consumerStackId)) {
+          if (present) return { consumerStackId, outcome: "already_connected" as const };
+          container.links.delete(consumerStackId);
+          this.mutate("network_disconnect", name);
+        }
+        if (!present || this.busy.has(consumerStackId)) return { consumerStackId, outcome: "pending" as const };
+        container.links.add(consumerStackId);
+        this.mutate("network_connect", name);
+        return { consumerStackId, outcome: "connected" as const };
+      });
+      return { container: true, links, disconnected };
     });
   }
 
@@ -423,6 +491,14 @@ export class SimulatedAppStacks implements StackExecutorPort {
       this.mutate(step === "start" ? "container_start" : "container_restart", container.name);
       return { componentKey: component.key, outcome: step === "start" ? "started" : "restarted" };
     });
+  }
+
+  private detachLinked(consumerStackId: string): void {
+    for (const other of this.stacks.values()) {
+      for (const c of other.containers.values()) {
+        if (c.links.delete(consumerStackId)) this.mutate("network_disconnect", appStackInternalNetworkName(consumerStackId));
+      }
+    }
   }
 
   private checkPlan(plan: unknown): ApprovedStackPlan {

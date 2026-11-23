@@ -2,7 +2,7 @@ import type {
   AppStackComponentActionIpcResult, AppStackComponentIpcRequest, AppStackCreateIpcResult, AppStackLogsIpcRequest,
   AppStackPlanIpcRequest, AppStackPrepareIpcResult, AppStackPullIpcRequest, AppStackPullIpcResult, AppStackRefIpcRequest,
   AppStackRemoveIpcRequest, AppStackRemoveIpcResult, AppStackComponentsRemoveIpcRequest, AppStackComponentsRemoveIpcResult,
-  AppStackRoutesIpcRequest, AppStackRoutesIpcResult,
+  AppStackLinksIpcRequest, AppStackLinksIpcResult, AppStackRoutesIpcRequest, AppStackRoutesIpcResult,
   AppStackStatusIpcResult, AppStackStopIpcResult,
 } from "@hosting-panel/contracts";
 import type { ServiceLogLine } from "./port.js";
@@ -28,6 +28,9 @@ export interface StackExecutorPort {
   removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult>;
   /** Only the named containers (+ their secret dirs); volumes, networks and routes untouched (upgrade cleanup). */
   removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult>;
+  /** The private networks of other applications a database's only component is attached to, made equal to the
+   *  declared links (ADR-0039). Never starts, stops or recreates anything; no container yet = nothing done. */
+  syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult>;
   /** Read-only observation + bounded tcp/http probes. */
   getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult>;
   /** Masked tail of one component. */
@@ -37,7 +40,7 @@ export interface StackExecutorPort {
 export const APP_STACK_EXECUTOR_METHODS = [
   "pullAppStackImage", "prepareAppStack", "createAppStackComponents", "startAppStackComponent",
   "restartAppStackComponent", "stopAppStack", "publishAppStackRoutes", "unpublishAppStackRoutes", "removeAppStack",
-  "removeAppStackComponents", "getAppStackStatus", "getAppStackComponentLogs",
+  "removeAppStackComponents", "syncAppStackLinks", "getAppStackStatus", "getAppStackComponentLogs",
 ] as const satisfies readonly (keyof StackExecutorPort)[];
 
 export function isStackExecutor(value: unknown): value is StackExecutorPort {

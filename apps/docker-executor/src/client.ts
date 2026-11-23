@@ -4,6 +4,7 @@ import {
   AppStackComponentActionIpcResultSchema,
   AppStackComponentsRemoveIpcResultSchema,
   AppStackCreateIpcResultSchema,
+  AppStackLinksIpcResultSchema,
   AppStackLogsIpcResultSchema,
   AppStackPrepareIpcResultSchema,
   AppStackPullIpcResultSchema,
@@ -16,6 +17,8 @@ import {
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
   type AppStackCreateIpcResult,
+  type AppStackLinksIpcRequest,
+  type AppStackLinksIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPrepareIpcResult,
@@ -192,6 +195,7 @@ export const APP_STACK_COMPONENT_TIMEOUT_MS = 60_000; // start, restart (t=10) o
 export const APP_STACK_STOP_TIMEOUT_MS = 150_000; // <= 8 x stop t=10
 export const APP_STACK_ROUTES_TIMEOUT_MS = 300_000; // may run ensureIngressProxy (= DEPLOY_TIMEOUT_MS)
 export const APP_STACK_REMOVE_TIMEOUT_MS = 180_000;
+export const APP_STACK_LINKS_TIMEOUT_MS = 60_000; // <= 8 applications: one inspect, one attach or detach each
 export const APP_STACK_STATUS_TIMEOUT_MS = 60_000; // GET; probes run in parallel, each <= 30 s
 export const APP_STACK_LOGS_TIMEOUT_MS = 35_000; // GET
 
@@ -678,6 +682,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
   public async removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
     const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/remove-components", req, APP_STACK_REMOVE_TIMEOUT_MS);
     return z.object({ data: AppStackComponentsRemoveIpcResultSchema }).parse(json).data;
+  }
+
+  public async syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
+    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/links", req, APP_STACK_LINKS_TIMEOUT_MS);
+    return z.object({ data: AppStackLinksIpcResultSchema }).parse(json).data;
   }
 
   public async getAppStackStatus(req: AppStackRefIpcRequest): Promise<AppStackStatusIpcResult> {

@@ -5,12 +5,12 @@ const stub = (): Record<string, unknown> =>
   Object.fromEntries(APP_STACK_EXECUTOR_METHODS.map((m) => [m, () => Promise.resolve()]));
 
 describe("@hosting-panel/executor-contracts — StackExecutorPort (ADR-0035)", () => {
-  it("lists 12 unique methods", () => {
-    expect(APP_STACK_EXECUTOR_METHODS).toHaveLength(12);
-    expect(new Set(APP_STACK_EXECUTOR_METHODS).size).toBe(12);
+  it("lists 13 unique methods", () => {
+    expect(APP_STACK_EXECUTOR_METHODS).toHaveLength(13);
+    expect(new Set(APP_STACK_EXECUTOR_METHODS).size).toBe(13);
   });
 
-  it("detects an object with all 12 functions", () => {
+  it("detects an object with all 13 functions", () => {
     expect(isStackExecutor(stub())).toBe(true);
   });
 
