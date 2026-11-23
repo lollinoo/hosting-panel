@@ -7,6 +7,15 @@ import { describe, expect, it } from "vitest";
 import { type AppTemplateSpec } from "@hosting-panel/contracts";
 import { validateAppTemplateSource } from "../src/app-template-validation.js";
 import { importComposeToAppTemplate, listComposeImages, type ComposeImportResult } from "../src/compose-import.js";
+import {
+  claimLiteralSecrets,
+  convertComposeEnvironment,
+  readComposeEnvironment,
+  recordEnvironmentVariables,
+  type DraftEnvEntry,
+} from "../src/compose-import-environment.js";
+import { ParameterRegistry, VariableCensus } from "../src/compose-import-parameters.js";
+import { ImportReport } from "../src/compose-import-report.js";
 
 /** Distinctive on purpose: eight characters or more, of two kinds. */
 const MARKER = "hunter2XQ";
@@ -43,6 +52,24 @@ const expectNoMarker = (result: ComposeImportResult): void => {
 };
 
 const generated = (key: string, label: string): unknown => ({ key, label, type: "secret", required: true, customer: false, generate: { kind: "password", length: 32 } });
+
+/** A file with one service, `web`, whose environment is `environment`: JSON, which the importer reads as YAML. */
+const webWith = (environment: Readonly<Record<string, string>>): string => JSON.stringify({ services: { web: { image: IMAGE, environment } } });
+
+/** What a note adds when an address of the value can be read in more than one way. */
+const CHECK_BY_HAND = "check by hand that it keeps its host and holds no part of the password";
+
+/** The environment as the conversion writes it, before the template check: where a value the check refuses can be read. */
+function converted(environment: Readonly<Record<string, string>>): DraftEnvEntry[] {
+  const report = new ImportReport();
+  const path = ["services", "web", "environment"];
+  const entries = readComposeEnvironment(report, environment, path);
+  const census = new VariableCensus();
+  recordEnvironmentVariables(census, entries);
+  const registry = new ParameterRegistry(report, census);
+  claimLiteralSecrets(registry, census, [entries]);
+  return [...convertComposeEnvironment(report, registry, entries, path).entries];
+}
 
 describe("a secret under a name that holds one", () => {
   it.each(["MYSQL_PWD", "PGPASSWORD", "RABBITMQ_DEFAULT_PASS", "SMTP_PASS", "GPG_PASSPHRASE", "ERLANG_COOKIE", "API_KEYS", "REDIS_MASTERAUTH", "HASH_SALT", "JWT_PRIVATEKEY"])(
@@ -154,8 +181,6 @@ describe("a secret in the password of an address", () => {
     ]);
   });
 
-  /** What the note of an extracted secret adds when an address of the value can be read in more than one way. */
-  const CHECK_BY_HAND = "check by hand that it keeps its host and holds no part of the password";
   const extractedNotes = (result: ComposeImportResult): string[] => messagesOf(result, "SECRET_EXTRACTED");
 
   it.each([
@@ -176,11 +201,11 @@ describe("a secret in the password of an address", () => {
     expectNoMarker(result);
   });
 
-  it("reads a '?', a '#' or an '@' inside a password, and a list of addresses one host at a time, without a note", () => {
+  it("reads an '@' inside a password, and a list of addresses one host at a time, without a note", () => {
     const result = run(
       web(
         "environment:",
-        `  DATABASE_URL: "postgres://app:p?a#ss@${MARKER}@db/app"`,
+        `  DATABASE_URL: "postgres://app:p@ss@${MARKER}@db/app"`,
         `  REPLICA_URL: "postgres://app:${MARKER}-2@db1:5432,db2:5432/app"`,
         `  BROKER_URL: "amqp://u:${MARKER}-3@h0,amqp://u:${MARKER}-4@h1"`,
       ),
@@ -194,12 +219,9 @@ describe("a secret in the password of an address", () => {
     expectNoMarker(result);
   });
 
-  it.each([
-    ["a password with an '@' before a '?'", "postgres://app:p@ss?word@db/app", "postgres://app:${database_password}@ss?word@db/app"],
-    ["a user with an '@' and no password", "postgres://app@db:5432?notify=ops@example.com", "postgres://app@db:${database_password}@example.com"],
-  ])("asks for a check by hand of an address it cannot read one way only: %s", (_title, address, kept) => {
-    const result = run(web("environment:", `  DATABASE_URL: "${address}"`));
-    expect(environmentOf(result)).toEqual([{ name: "DATABASE_URL", value: kept }]);
+  it("says why it asks for a check by hand of an address with another '@' after its host", () => {
+    const result = run(web("environment:", '  DATABASE_URL: "postgres://app:p@ss?word@db/app"'));
+    expect(environmentOf(result)).toEqual([{ name: "DATABASE_URL", value: "postgres://app:${database_password}@ss?word@db/app" }]);
     expect(extractedNotes(result)).toEqual([
       "A part of the value of DATABASE_URL is a secret (the password of an address, or a secret the file also writes elsewhere): that part is replaced by the generated secret parameter 'database_password', and the rest of the value is kept. An address of the value can be read in more than one way (it holds another '@'): check by hand that it keeps its host and holds no part of the password.",
     ]);
@@ -226,6 +248,154 @@ describe("a secret in the password of an address", () => {
     const inAddress = run(web("expose: [8080]", "healthcheck:", `  test: curl -f http://admin:${MARKER}@localhost:8080/health`));
     expect(specOf(inAddress).services[0]?.healthcheck).toMatchObject({ kind: "tcp", port: 8080 });
     expectNoMarker(inAddress);
+  });
+});
+
+describe("the rule that reads the password of an address (ADR-0036 §8.4)", () => {
+  /** The value in the draft: its text, a secret parameter that replaces it whole, or the value kept for the template check to refuse. */
+  type Draft = string | { readonly secret: string } | "refused";
+  /**
+   * The value of ADDR; its draft; the parameters its passwords became, first address first; the passwords the rule reads
+   * there, each taken out when a parameter is given for it and left where it is otherwise; whether the report asks for a
+   * check by hand.
+   */
+  type Row = readonly [value: string, draft: Draft, keys: readonly string[], passwords: readonly string[], check: boolean];
+  const pw = "Pw12345678";
+  const at = (address: string): string => address.replace(pw, "${addr_password}");
+  const ROWS: readonly Row[] = [
+    // R1: the first '@' before any '/' that a host follows, then a port, then the end or a character that ends a host.
+    ["postgres://app:S3cret@Pa55word@db:5432/app", "postgres://app:${addr_password}@db:5432/app", ["addr_password"], ["S3cret@Pa55word"], false],
+    ...[
+      `url=postgres://app:${pw}@db:5432;mail=ops@example.com`,
+      `url=postgres://app:${pw}@db:5432&mail=ops@example.com`,
+      `url=postgres://app:${pw}@db:5432|mail=ops@example.com`,
+      `<postgres://app:${pw}@db:5432>ops@example.com`,
+      `"postgres://app:${pw}@db:5432",ops@example.com`,
+    ].map((value): Row => [value, at(value), ["addr_password"], [pw], true]),
+    ...[`<postgres://app:${pw}@db:5432>`, `"postgres://app:${pw}@db:5432"`, `'postgres://app:${pw}@db:5432'`, `(postgres://app:${pw}@db:5432)`].map(
+      (value): Row => [value, at(value), ["addr_password"], [pw], false],
+    ),
+    ["smtp://me@x.org:pw@mail:587", "smtp://me@x.org:${addr_password}@mail:587", ["addr_password"], ["pw"], false],
+    ["redis://:hunter2XQ@cache:6379", "redis://:${addr_password}@cache:6379", ["addr_password"], ["hunter2XQ"], false],
+    ["http://u:pw123456@[fd12::1]:5432/x", "http://u:${addr_password}@[fd12::1]:5432/x", ["addr_password"], ["pw123456"], false],
+    ["mongodb://u:pw123456@h1:27017,h2:27017/db", "mongodb://u:${addr_password}@h1:27017,h2:27017/db", ["addr_password"], ["pw123456"], false],
+    ["postgres://app:hunter2XQ@${DB_HOST:-db}/app", "postgres://app:${addr_password}@${db_host}/app", ["addr_password"], ["hunter2XQ"], false],
+    ["postgres://app:${DB_PASSWORD}@db/app", "postgres://app:${db_password}@db/app", [], [], false],
+    ["--db=postgres://app:hunter2XQ@db:5432/app --verbose", "--db=postgres://app:${addr_password}@db:5432/app --verbose", ["addr_password"], ["hunter2XQ"], false],
+    // R2: a user alone is not a secret, whatever follows the host.
+    ["postgres://app@db:5432/x", "postgres://app@db:5432/x", [], [], false],
+    ["postgres://app@db:5432?x=a@b", "postgres://app@db:5432?x=a@b", [], [], false],
+    ["postgres://app@db:${DB_PORT:-5432}?x=a@b", "postgres://app@db:${db_port}?x=a@b", [], [], false],
+    ["${X:-postgres://app@db:5432?x=a@b}", "${x}", [], [], false],
+    ["http://[::1]:8080/", "http://[::1]:8080/", [], [], false],
+    ["mailto:a@b.org", "mailto:a@b.org", [], [], false],
+    ["git@github.com:org/repo.git", "git@github.com:org/repo.git", [], [], false],
+    ["ssh://git@host/repo", "ssh://git@host/repo", [], [], false],
+    // R3: a '?' or a '#' before the '@': kept as written, for the template check to refuse; nothing is looked for elsewhere.
+    ["http://hooks:8443?to=ops@example.com", "refused", [], ["8443?to=ops"], true],
+    ["postgres://app:pa?ss@db/app", "refused", [], ["pa?ss"], true],
+    ["postgres://app:pa#ss@db/app", "refused", [], ["pa#ss"], true],
+    // Decided: an address the template check would let through (no user, or a user with an '@') is replaced whole.
+    ["redis://:pa?ss1234@cache:6379", { secret: "addr" }, [], ["pa?ss1234"], false],
+    ["smtp://me@x.org:pa#ss1234@mail:587", { secret: "addr" }, [], ["pa#ss1234"], false],
+    // R4: another '@' after the host and before a '?', ',' or ';' asks for a check; after a '/' it is in the path (decided).
+    ["postgres://app:S3cretPa55@db:5432?notify=ops@example.com", "postgres://app:${addr_password}@db:5432?notify=ops@example.com", ["addr_password"], ["S3cretPa55"], true],
+    ["postgres://app:S3cretPa55@db:5432,admin@example.com", "postgres://app:${addr_password}@db:5432,admin@example.com", ["addr_password"], ["S3cretPa55"], true],
+    ["https://u:p4ssw0rdXY@host/a@b", "https://u:${addr_password}@host/a@b", ["addr_password"], ["p4ssw0rdXY"], false],
+    // Decided: a list of addresses gives each its own password, and the '://' of the next one ends the search for an '@'.
+    ["s://a:pw111111@h1,s://c:pw222222@h2", "s://a:${addr_password}@h1,s://c:${addr_password_2}@h2", ["addr_password", "addr_password_2"], ["pw111111", "pw222222"], false],
+    // The inputs of the earlier rounds.
+    ["redis://:S3cret@hunter2XQ@redis:6379/0", "redis://:${addr_password}@redis:6379/0", ["addr_password"], ["S3cret@hunter2XQ"], false],
+    ["postgres://app:p@ss@hunter2XQ@db/app", "postgres://app:${addr_password}@db/app", ["addr_password"], ["p@ss@hunter2XQ"], false],
+    ["postgres://app:hunter2XQ@db:5432/app?options=a@b", "postgres://app:${addr_password}@db:5432/app?options=a@b", ["addr_password"], ["hunter2XQ"], false],
+    ["postgres://app:hunter2XQ@[::1]:5432/app", "postgres://app:${addr_password}@[::1]:5432/app", ["addr_password"], ["hunter2XQ"], false],
+    ["smtp://app@example.invalid:hunter2XQ@mail:587", "smtp://app@example.invalid:${addr_password}@mail:587", ["addr_password"], ["hunter2XQ"], false],
+    ["amqp://u:hunter2XQ-3@h0,amqp://u:hunter2XQ-4@h1", "amqp://u:${addr_password}@h0,amqp://u:${addr_password_2}@h1", ["addr_password", "addr_password_2"], ["hunter2XQ-3", "hunter2XQ-4"], false],
+    ["postgres://app:p@ss?word@db/app", "postgres://app:${addr_password}@ss?word@db/app", ["addr_password"], ["p"], true],
+    ["postgres://app@db:5432?notify=ops@example.com", "postgres://app@db:5432?notify=ops@example.com", [], [], false],
+    ["postgres://app@[::1]:5432/app?x=a@b", "postgres://app@[::1]:5432/app?x=a@b", [], [], false],
+    ["http://hooks:8443/?to=ops@example.com", "http://hooks:8443/?to=ops@example.com", [], [], false],
+  ];
+
+  it.each(ROWS)("%s", (value, draft, keys, passwords, check) => {
+    // Every password of 8 characters or more is written again before the address: the scan before conversion knows it.
+    const echoed = passwords.filter((password) => password.length >= 8);
+    const environment = Object.fromEntries([...echoed.map((password, index) => [`ECHO${index}`, `-Dpw=${password}`]), ["ADDR", value]]);
+    const result = run(webWith(environment));
+    const echoes = echoed.map((password, index) => {
+      const key = keys[passwords.indexOf(password)];
+      return { name: `ECHO${index}`, value: key === undefined ? `-Dpw=${password}` : `-Dpw=\${${key}}` };
+    });
+
+    // Neither a password nor a piece of one is in the report.
+    const report = JSON.stringify(result.report);
+    for (const piece of passwords.flatMap((password) => [password, ...password.split(/[@?#]/)])) {
+      if (piece.length >= 4) expect(report).not.toContain(piece);
+    }
+    const asked = result.report.filter((note) => note.message.includes(CHECK_BY_HAND)).map((note) => note.path);
+    expect([...new Set(asked)]).toEqual(check ? ["services.web.environment.ADDR"] : []);
+
+    if (draft === "refused") {
+      // The safety net: the template check refuses a draft that still holds credentials in an address, at its line.
+      expect(notes(result).filter((note) => note.startsWith("refused "))).toEqual([`refused DRAFT_INVALID services.web.environment[${echoes.length}].value`]);
+      expect(messagesOf(result, "DRAFT_INVALID")).toEqual(["The draft does not pass the template check (ENV_VALUE_SECRET_LIKE) and is not returned."]);
+      expect(converted(environment)).toEqual([...echoes, { name: "ADDR", value }]);
+      return;
+    }
+    expect(environmentOf(result)).toEqual([...echoes, typeof draft === "string" ? { name: "ADDR", value: draft } : { name: "ADDR", secretParameter: draft.secret }]);
+    const secrets = specOf(result).parameters.flatMap((parameter) => (parameter.type === "secret" ? [parameter.key] : []));
+    expect(secrets).toEqual(expect.arrayContaining([...keys]));
+  });
+
+  it.each([
+    ["under a name that looks like a secret's", "HOOK_TOKEN_URL", "http://hooks:8443?to=ops@example.com"],
+    ["whose '$' form cannot be read", "HOOK_URL", "http://hooks:8443?to=ops@example.com&r=${R:+x}"],
+  ])("looks for no password of an address it cannot read one way only, in a value replaced whole %s", (_title, name, value) => {
+    const result = run(webWith({ NOTE: "port=8443?to=ops", [name]: value }));
+    expect(environmentOf(result)).toEqual([
+      { name: "NOTE", value: "port=8443?to=ops" },
+      { name, secretParameter: name.toLowerCase() },
+    ]);
+  });
+
+  it("gives a value with no password the draft the importer gave it before the rule (f15fe65)", () => {
+    // Written as f15fe65 converted them: no variable of these values became a secret, and no default was lost.
+    const result = run(
+      webWith({
+        A: "postgres://app@db:5432?x=a@b",
+        B: "postgres://app@db:${DB_PORT:-5432}?x=a@b",
+        PORT: "${DB_PORT:-5432}",
+        C: "${X:-postgres://app@db:5432?x=a@b}",
+        D: "https://user@host:8443?to=ops@example.com",
+        E: "smtp://me@x.org@mail:587",
+        F: "http://hooks:8443/?to=ops@example.com",
+        G: "postgres://${DB_USER}@db:${DB_PORT}?x=a@b",
+        H: "postgres://app:@db/app",
+        I: "http://u?x@host/",
+        J: "a@b c://d@e:1?f@g",
+        K: "port=8443?to=ops",
+      }),
+    );
+    expect(specOf(result).parameters).toEqual([
+      { key: "db_port", label: "DB_PORT", type: "string", default: "5432", customer: false },
+      { key: "x", label: "X", type: "string", default: "postgres://app@db:5432?x=a@b", customer: false },
+      { key: "db_user", label: "DB_USER", type: "string", default: "", customer: true },
+    ]);
+    expect(environmentOf(result)).toEqual([
+      { name: "A", value: "postgres://app@db:5432?x=a@b" },
+      { name: "B", value: "postgres://app@db:${db_port}?x=a@b" },
+      { name: "PORT", value: "${db_port}" },
+      { name: "C", value: "${x}" },
+      { name: "D", value: "https://user@host:8443?to=ops@example.com" },
+      { name: "E", value: "smtp://me@x.org@mail:587" },
+      { name: "F", value: "http://hooks:8443/?to=ops@example.com" },
+      { name: "G", value: "postgres://${db_user}@db:${db_port}?x=a@b" },
+      { name: "H", value: "postgres://app:@db/app" },
+      { name: "I", value: "http://u?x@host/" },
+      { name: "J", value: "a@b c://d@e:1?f@g" },
+      { name: "K", value: "port=8443?to=ops" },
+    ]);
+    expect(notes(result).filter((note) => /SECRET/.test(note))).toEqual([]);
   });
 });
 

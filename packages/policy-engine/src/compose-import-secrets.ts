@@ -43,60 +43,152 @@ export function isPlainSetting(name: string, value: string): boolean {
   return AMOUNT.test(value) && !isSecretLastWord(words(name).at(-1));
 }
 
-/**
- * `scheme://user:password@host`, the user possibly empty: a form the rule of a template lets through, and the importer
- * does not. The user ends at its first ':'; the password at the first '@' followed by a host, that is by text without
- * '@' up to a '/', '?', '#', ',' (a list of hosts or of addresses), a blank or the end. So an unencoded '@', '?' or '#'
- * stays in the password, and a later '@' of a query or of a list never takes the host into it.
- */
-const URL_PASSWORD = /:\/\/([^/\s:]*):([^/\s]+?)@(?=([^@/?#,\s]*)(?:[/?#,\s]|$))/g;
-/** What follows a host up to the path or a blank: another '@' there means the address can be read in more than one way. */
-const BEFORE_PATH = /[^/\s]*/y;
-
-export interface TextSpan {
-  readonly start: number;
-  readonly end: number;
-  /** The user, or what follows the host before the path, holds another '@': the password could end elsewhere. */
-  readonly unclear: boolean;
-}
-
-/** Where a text carries the password of a URL. */
-export function urlPasswordSpans(text: string): TextSpan[] {
-  const spans: TextSpan[] = [];
-  for (const match of text.matchAll(URL_PASSWORD)) {
-    const end = match.index + match[0].length - 1;
-    BEFORE_PATH.lastIndex = end + 1 + (match[3]?.length ?? 0);
-    const rest = BEFORE_PATH.exec(text)?.[0] ?? "";
-    spans.push({ start: end - (match[2]?.length ?? 0), end, unclear: (match[1] ?? "").includes("@") || rest.includes("@") });
-  }
-  return spans;
-}
-
 /** Stands for one variable in the text a pattern reads: like the placeholder of a parameter, it is part of a word. */
 const STAND_IN = "\u0000";
 
+const BLANK = /\s/;
+const HOST_CHARACTER = /[A-Za-z0-9.-]/;
+const IPV6_CHARACTER = /[A-Za-z0-9:.%_~-]/;
+const DIGIT = /[0-9]/;
+const NAME_START = /[A-Za-z_]/;
+const NAME_CHARACTER = /[A-Za-z0-9_]/;
+/** Also an '@' and a '/': a variable read as a host never reaches past the next '@' or into the path, so each one is read once. */
+const NOT_IN_BRACES = /[\s${}@/]/;
+
+const is = (kind: RegExp, character: string | undefined): boolean => character !== undefined && kind.test(character);
+
+/** Where the variable written at `index` ends ('${...}', '$NAME' or the stand-in of one already read); -1 when none starts there. */
+function variableEnd(text: string, index: number): number {
+  if (text[index] === STAND_IN) return index + 1;
+  if (text[index] !== "$") return -1;
+  let end = index + 1;
+  if (text[end] === "{") {
+    end += 1;
+    while (end < text.length && !is(NOT_IN_BRACES, text[end])) end += 1;
+    return text[end] === "}" && end > index + 2 ? end + 1 : -1;
+  }
+  if (!is(NAME_START, text[end])) return -1;
+  while (is(NAME_CHARACTER, text[end])) end += 1;
+  return end;
+}
+
 /**
- * The spans of `urlPasswordSpans` over a value made of literal text and of variables, as the pieces they cover:
- * `first` and `last` are indexes in `literals` (null marks a variable), `from` and `to` offsets in the first piece when
- * the span lies inside one literal piece.
+ * Where the host that follows the '@' at `at` ends, its port included; -1 when no host follows it: letters, digits, '.',
+ * '-' and variables, or an IPv6 address in brackets; then ':' and 1 to 5 digits or a variable; then the end, or a
+ * character that ends a host and is neither ':' nor '@'.
  */
-export function urlPasswordsIn(
-  literals: readonly (string | null)[],
-): { readonly first: number; readonly last: number; readonly from: number; readonly to: number; readonly unclear: boolean }[] {
+function hostEnd(text: string, at: number): number {
+  let end = at + 1;
+  if (text[end] === "[") {
+    end += 1;
+    while (is(IPV6_CHARACTER, text[end])) end += 1;
+    if (text[end] !== "]" || end === at + 2) return -1;
+    end += 1;
+  } else {
+    for (;;) {
+      if (is(HOST_CHARACTER, text[end])) {
+        end += 1;
+        continue;
+      }
+      const variable = variableEnd(text, end);
+      if (variable === -1) break;
+      end = variable;
+    }
+    if (end === at + 1) return -1;
+  }
+  if (text[end] === ":") {
+    let port = variableEnd(text, end + 1);
+    if (port === -1) {
+      port = end + 1;
+      while (port < end + 6 && is(DIGIT, text[port])) port += 1;
+      if (port === end + 1) return -1;
+    }
+    end = port;
+  }
+  const after = text[end];
+  return after !== undefined && (is(HOST_CHARACTER, after) || after === ":" || after === "@") ? -1 : end;
+}
+
+/** The first '@' at or after `from` that comes before a '/' or a blank; -1 when there is none. */
+function nextAt(text: string, from: number): number {
+  for (let index = from; index < text.length && text[index] !== "/" && !is(BLANK, text[index]); index++) {
+    if (text[index] === "@") return index;
+  }
+  return -1;
+}
+
+/** R1: the '@' that ends the user and password of the address read from `start`, and where its host ends; null when none does. */
+function separatorAfter(text: string, start: number): { readonly at: number; readonly hostEnd: number } | null {
+  for (let at = nextAt(text, start); at !== -1; at = nextAt(text, at + 1)) {
+    const end = hostEnd(text, at);
+    if (end !== -1) return { at, hostEnd: end };
+  }
+  return null;
+}
+
+export interface UrlCredentials {
+  /** Where the password lies in the text; null when the address is left as written. */
+  readonly password: { readonly start: number; readonly end: number } | null;
+  /** The address can be read in more than one way: the report asks for a check by hand. */
+  readonly unclear: boolean;
+}
+
+/**
+ * The credentials of the addresses of a text, `scheme://user:password@host` with the user possibly empty: a form the
+ * rule of a template lets through only in part, and the importer not at all (ADR-0036 §8.4). After each '://':
+ * - R1: the user and password end at the first '@' before any '/' or blank that a host follows (`hostEnd`);
+ * - R2: without a ':' before that '@' there is a user alone, which is not a secret; else the password runs from the
+ *   first ':' to the '@', and an empty one is none;
+ * - R3: a '?' or a '#' before the '@' is where a URL parser may end the address: it is left as written, and unclear;
+ * - R4: another '@' after the host, before the path or a blank, means the password could end there: unclear.
+ * Each character is read a bounded number of times, however many '@' or '://' the text piles up.
+ */
+export function urlCredentials(text: string): UrlCredentials[] {
+  const found: UrlCredentials[] = [];
+  let scheme = text.indexOf("://");
+  while (scheme !== -1) {
+    const start = scheme + 3;
+    const separator = separatorAfter(text, start);
+    if (separator === null) {
+      scheme = text.indexOf("://", scheme + 1);
+      continue;
+    }
+    scheme = text.indexOf("://", separator.at + 1);
+    const userinfo = text.slice(start, separator.at);
+    const colon = userinfo.indexOf(":");
+    if (colon === -1 || colon === userinfo.length - 1) continue;
+    if (/[?#]/.test(userinfo)) found.push({ password: null, unclear: true });
+    else found.push({ password: { start: start + colon + 1, end: separator.at }, unclear: nextAt(text, separator.hostEnd) !== -1 });
+  }
+  return found;
+}
+
+/**
+ * `urlCredentials` over a value made of literal text and of variables, the password as the pieces it covers: `first`
+ * and `last` are indexes in `literals` (null marks a variable), `from` and `to` offsets in the first piece when the
+ * password lies inside one literal piece.
+ */
+export function urlPasswordsIn(literals: readonly (string | null)[]): {
+  readonly password: { readonly first: number; readonly last: number; readonly from: number; readonly to: number } | null;
+  readonly unclear: boolean;
+}[] {
   const starts: number[] = [];
   let text = "";
   for (const literal of literals) {
     starts.push(text.length);
     text += literal ?? STAND_IN;
   }
+  // The passwords come first to last: the piece of each is found by walking on from the one before.
+  let piece = 0;
   const pieceAt = (offset: number): number => {
-    let index = starts.length - 1;
-    while (index > 0 && (starts[index] ?? 0) > offset) index -= 1;
-    return index;
+    while (piece + 1 < starts.length && (starts[piece + 1] ?? 0) <= offset) piece += 1;
+    return piece;
   };
-  return urlPasswordSpans(text).map((span) => {
-    const first = pieceAt(span.start);
-    return { first, last: pieceAt(span.end - 1), from: span.start - (starts[first] ?? 0), to: span.end - (starts[first] ?? 0), unclear: span.unclear };
+  return urlCredentials(text).map(({ password, unclear }) => {
+    if (password === null) return { password: null, unclear };
+    const first = pieceAt(password.start);
+    const offset = starts[first] ?? 0;
+    return { password: { first, last: pieceAt(password.end - 1), from: password.start - offset, to: password.end - offset }, unclear };
   });
 }
 

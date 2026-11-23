@@ -11,7 +11,7 @@ import {
   type TemplatePath,
 } from "@hosting-panel/contracts";
 import { clip, type ComposeImportCode, type ComposeImportLevel, type ImportReport } from "./compose-import-report.js";
-import { isDistinctiveSecret, isPlainSetting, looksSecretName, urlPasswordSpans } from "./compose-import-secrets.js";
+import { isDistinctiveSecret, isPlainSetting, looksSecretName, urlCredentials } from "./compose-import-secrets.js";
 import { classifyComposeVariable } from "./compose-import-variables.js";
 import { envValueProblem } from "./site-template-env.js";
 
@@ -71,7 +71,7 @@ export class VariableCensus {
   /** `asSecret`: the variable stands where a secret stands, as a whole secret-looking value or as the password of a URL. */
   record(variable: string, fallback: string | null, asSecret: boolean): void {
     if (classifyComposeVariable(variable).kind !== "ordinary") return;
-    const forced = asSecret || (fallback !== null && (envValueProblem(fallback) === "ENV_VALUE_SECRET_LIKE" || urlPasswordSpans(fallback).length > 0));
+    const forced = asSecret || (fallback !== null && (envValueProblem(fallback) === "ENV_VALUE_SECRET_LIKE" || urlCredentials(fallback).length > 0));
     const plain = fallback !== null && isPlainSetting(variable, fallback);
     const known = this.seen.get(variable);
     if (known === undefined) {

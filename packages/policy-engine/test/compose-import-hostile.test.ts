@@ -386,11 +386,11 @@ describe("files written to take long", () => {
   });
 
   it("refuses a file once it writes more secrets than the importer follows, without a parameter for each further address", () => {
-    const distinct = Array.from({ length: 64 }, (_unused, index) => `://:p${index}@`).join("");
-    /** One value: `before`, as many addresses as the file has room for, `after`. Over 9 000 passwords named after one variable. */
+    const distinct = Array.from({ length: 64 }, (_unused, index) => `://:p${index}@h,`).join("");
+    /** One value: `before`, as many addresses as the file has room for, `after`. Over 7 000 passwords named after one variable. */
     const crowded = (name: string, before: string, after: string): string => {
       const room = 65_536 - Buffer.byteLength(web("environment:", `  ${name}: '${before}${after}'`));
-      return web("environment:", `  ${name}: '${before}${"://:zz@".repeat(Math.floor(room / 7))}${after}'`);
+      return web("environment:", `  ${name}: '${before}${"://:zz@h,".repeat(Math.floor(room / 9))}${after}'`);
     };
     // The scan before conversion reads the addresses first to last, also under a name that looks like a secret's.
     for (const compose of [crowded("A", distinct, ""), crowded("DB_PASSWORD", `\${SERVICE_PASSWORD_X}${distinct}`, "")]) {

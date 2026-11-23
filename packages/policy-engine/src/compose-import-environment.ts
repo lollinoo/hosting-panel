@@ -14,7 +14,7 @@ import {
 import { isMapping } from "./compose-import-document.js";
 import { describeGenerate, type DraftParameter, type ParameterRegistry, type VariableCensus } from "./compose-import-parameters.js";
 import type { ImportReport } from "./compose-import-report.js";
-import { isPlainSetting, looksSecretName, urlPasswordName, urlPasswordSpans, urlPasswordsIn } from "./compose-import-secrets.js";
+import { isPlainSetting, looksSecretName, urlCredentials, urlPasswordName, urlPasswordsIn } from "./compose-import-secrets.js";
 import { classifyComposeVariable, scanComposeValue, type ComposeScan } from "./compose-import-variables.js";
 import { envNameProblem, envValueProblem } from "./site-template-env.js";
 
@@ -33,6 +33,10 @@ export interface DraftEnvironment {
   /** One per platform URL variable met: the port its name asks for (null when it names none) and where it stands. */
   readonly ingress: readonly { readonly port: number | null; readonly path: TemplatePath }[];
 }
+
+/** What a note adds about an address the importer reads one way, or leaves as written, when it could be read another way. */
+const checkByHand = (why: string): string =>
+  ` An address of the value can be read in more than one way (${why}): check by hand that it keeps its host and holds no part of the password.`;
 
 /** A stretch of a value: text as the container receives it, or the parameter that stands there. */
 type Part = { readonly literal: string } | { readonly parameter: DraftParameter };
@@ -122,8 +126,9 @@ export function recordEnvironmentVariables(census: VariableCensus, entries: read
     const { pieces } = entry.scan;
     const alone = pieces.length === 1 && isSecretEntry(entry);
     const passwords = new Set<number>();
-    for (const span of urlPasswordsIn(pieces.map((piece) => ("literal" in piece ? piece.literal : null)))) {
-      for (let index = span.first; index <= span.last; index++) passwords.add(index);
+    for (const { password } of urlPasswordsIn(pieces.map((piece) => ("literal" in piece ? piece.literal : null)))) {
+      if (password === null) continue;
+      for (let index = password.first; index <= password.last; index++) passwords.add(index);
     }
     pieces.forEach((piece, index) => {
       if ("variable" in piece) census.record(piece.variable, piece.fallback, alone || passwords.has(index));
@@ -151,16 +156,19 @@ export function claimLiteralSecrets(registry: ParameterRegistry, census: Variabl
   for (const entry of entries) {
     if (!entry.scan.ok) {
       // The '$' form cannot be read: the text as written, where a password without '$' is what the container receives.
-      for (const span of urlPasswordSpans(entry.written)) {
-        const password = entry.written.slice(span.start, span.end);
-        if (!password.includes("$")) registry.forLiteralSecret(urlPasswordName(entry.name), password);
+      for (const { password } of urlCredentials(entry.written)) {
+        if (password === null) continue;
+        const text = entry.written.slice(password.start, password.end);
+        if (!text.includes("$")) registry.forLiteralSecret(urlPasswordName(entry.name), text);
       }
       continue;
     }
     const pieces = entry.scan.pieces.map((piece) => ("literal" in piece ? piece.literal : null));
-    for (const span of urlPasswordsIn(pieces)) {
-      const piece = pieces[span.first];
-      if (span.first === span.last && typeof piece === "string") registry.forLiteralSecret(urlPasswordName(entry.name), piece.slice(span.from, span.to));
+    for (const { password } of urlPasswordsIn(pieces)) {
+      const piece = password === null ? undefined : pieces[password.first];
+      if (password !== null && password.first === password.last && typeof piece === "string") {
+        registry.forLiteralSecret(urlPasswordName(entry.name), piece.slice(password.from, password.to));
+      }
     }
   }
   for (const entry of entries) {
@@ -213,7 +221,7 @@ export function convertComposeEnvironment(
     // The template check keeps a narrower list of secret-looking names than the importer, and refuses a plain value under one of them.
     const reserved = envNameProblem(name) === "ENV_NAME_SECRET_LIKE";
     if (!scan.ok) {
-      if (looksSecretName(name) || envValueProblem(entry.written) === "ENV_VALUE_SECRET_LIKE" || urlPasswordSpans(entry.written).length > 0) replaceBySecret(entry);
+      if (looksSecretName(name) || envValueProblem(entry.written) === "ENV_VALUE_SECRET_LIKE" || urlCredentials(entry.written).length > 0) replaceBySecret(entry);
       else report.dropped("ENV_VARIABLE_SYNTAX", entry.path, `The value of ${name} uses a '$' form the importer cannot read: the variable is dropped. Write a literal dollar as '$$'.`);
       continue;
     }
@@ -260,8 +268,14 @@ export function convertComposeEnvironment(
     // The password of an address: text of its own is replaced by a secret, a secret parameter already is one.
     let whole = false;
     let unclear = false;
-    for (const span of urlPasswordsIn(parts.map((part) => ("literal" in part ? part.literal : null))).reverse()) {
-      unclear ||= span.unclear;
+    /** An address of the value is left as written: where its password ends is not safe to say. */
+    let asWritten = false;
+    for (const { password: span, unclear: twofold } of urlPasswordsIn(parts.map((part) => ("literal" in part ? part.literal : null))).reverse()) {
+      if (span === null) {
+        asWritten = true;
+        continue;
+      }
+      unclear ||= twofold;
       const part = parts[span.first];
       if (part === undefined || span.first !== span.last || ("parameter" in part && !part.parameter.secret)) {
         whole = true;
@@ -313,11 +327,14 @@ export function convertComposeEnvironment(
     // Both spellings of a value without a secret: what the draft says ('$$') and what the container receives ('$').
     const checked = secrets > 0 ? around : [value, ...around];
     const problems = checked.map((text) => envValueProblem(text) ?? (appStackTextProblem(text) === "metadata_endpoint" ? "METADATA" : null));
-    if (problems.includes("ENV_VALUE_SECRET_LIKE")) {
+    const secretLike = problems.includes("ENV_VALUE_SECRET_LIKE");
+    // An address left as written goes to the template check, which refuses the draft for the credentials it sees there.
+    // One the check would let through (no user, or a user with an '@') is not kept in clear either.
+    if (asWritten ? !secretLike : secretLike) {
       replaceBySecret(entry);
       continue;
     }
-    if (problems.some((problem) => problem !== null)) {
+    if (problems.some((problem) => problem !== null && problem !== "ENV_VALUE_SECRET_LIKE")) {
       report.dropped(
         "ENV_VALUE_DROPPED",
         entry.path,
@@ -338,12 +355,19 @@ export function convertComposeEnvironment(
       continue;
     }
     // The importer settles on one reading of such an address and does not guess silently.
-    const check = unclear ? " An address of the value can be read in more than one way (it holds another '@'): check by hand that it keeps its host and holds no part of the password." : "";
+    const check = unclear ? checkByHand("it holds another '@'") : "";
     for (const key of extracted) {
       report.changed(
         "SECRET_EXTRACTED",
         entry.path,
         `A part of the value of ${name} is a secret (the password of an address, or a secret the file also writes elsewhere): that part is replaced by the generated secret parameter '${key}', and the rest of the value is kept.${check}`,
+      );
+    }
+    if (asWritten) {
+      report.info(
+        "SECRET_ADDRESS_UNCLEAR",
+        entry.path,
+        `Nothing is taken out of an address in the value of ${name}, and the template check refuses the draft for a password left in it.${checkByHand("a '?' or a '#' stands before its '@'")}`,
       );
     }
     out.push({ name, value });

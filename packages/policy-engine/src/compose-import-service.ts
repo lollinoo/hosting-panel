@@ -17,7 +17,7 @@ import { isImageLookup, isMapping, isPort, own, type Mapping } from "./compose-i
 import { checkComposeKeys } from "./compose-import-keys.js";
 import type { ParameterRegistry, VariableCensus } from "./compose-import-parameters.js";
 import { clip, type ImportReport } from "./compose-import-report.js";
-import { commandOption, isPlainSetting, looksSecretName, urlPasswordSpans } from "./compose-import-secrets.js";
+import { commandOption, isPlainSetting, looksSecretName, urlCredentials } from "./compose-import-secrets.js";
 import { scanComposeValue } from "./compose-import-variables.js";
 import { parseImageReference } from "./image-reference.js";
 import { envValueProblem } from "./site-template-env.js";
@@ -373,7 +373,7 @@ function carriesSecret(registry: ParameterRegistry, literal: string, option: str
   const set = commandOption(literal);
   if (option !== null && set === null && !isPlainSetting(option, literal)) return true;
   if (set !== null && set.inline !== null && set.inline !== "" && looksSecretName(set.name) && !isPlainSetting(set.name, set.inline)) return true;
-  return urlPasswordSpans(literal).length > 0 || envValueProblem(literal) === "ENV_VALUE_SECRET_LIKE" || registry.holdsSecret(literal);
+  return urlCredentials(literal).length > 0 || envValueProblem(literal) === "ENV_VALUE_SECRET_LIKE" || registry.holdsSecret(literal);
 }
 
 /**
