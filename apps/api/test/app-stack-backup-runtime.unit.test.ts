@@ -36,6 +36,7 @@ import {
   operations,
   operationSteps,
   organizations,
+  outboxEvents,
   platformInstallations,
   setPolicyTargets,
   transitionOperation,
@@ -45,6 +46,7 @@ import {
 } from "@hosting-panel/database";
 import { SimulatedBackups } from "@hosting-panel/docker-executor";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
+import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { enqueueAppStackPrune, listAppStackPruneCandidates } from "../src/app-stacks/app-stack-backup-retention.js";
@@ -63,6 +65,10 @@ import {
   APP_STACK_UNCERTAIN_TEXT,
 } from "../src/app-stacks/app-stack-runtime-policy.js";
 import { ControlPlaneError } from "../src/common/control-plane.error.js";
+import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
+import type { SiteProvisioner } from "../src/runtime/site-provisioner.js";
+import type { SiteDomainsApplier } from "../src/sites/site-domains-applier.js";
+import type { SiteFilesApplier } from "../src/sites/site-files-applier.js";
 import type { ControlPlaneRuntimeConfig } from "../src/tokens.js";
 import { FakeStackExecutor } from "./support/fake-stack-executor.js";
 
@@ -864,6 +870,62 @@ describe("AppStackRuntime: backup, restore and clean-up of an application (ADR-0
       expect(await opOf(op.id)).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
       expect(await stepsOf(op.id)).toEqual({ validate: SKIPPED, expire: SKIPPED, settle: SKIPPED });
       expect((await stackOf(stackId)).status).toBe("stopped");
+    });
+  });
+
+  describe("in the outbox worker", () => {
+    it("a backup of one application that is still copying does not hold up a restart of another", async () => {
+      const a = await stopped();
+      const b = await running();
+      // The tests above ran their operations by hand: their events are not this worker's.
+      await db().update(outboxEvents).set({ status: "published" }).where(eq(outboxEvents.status, "pending"));
+      const { operation: backup } = await request(a.stackId);
+      n += 1;
+      const { operation: restart } = await enqueueAppStackOperationTransactional(db(), {
+        organizationId: ORG,
+        stackId: b.stackId,
+        kind: "stack.restart",
+        requestedByUserId: null,
+        idempotencyKey: `bk-${String(n)}`,
+        requestHash: hex(`lifecycle ${String(n)}`),
+        revision: null,
+        destroyData: false,
+      });
+      sim.holdJobs();
+      // The copy ends once the restart has ended, or after 100 reads of its state if the restart is still waiting.
+      let released: "after the restart" | "restart still waiting" | null = null;
+      let waits = 0;
+      clock.sleep = async (ms) => {
+        clock.advance(ms);
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        if (released !== null) return;
+        const restarted = (await opOf(restart!.id)).status === "succeeded";
+        if (!restarted && ++waits < 100) return;
+        released = restarted ? "after the restart" : "restart still waiting";
+        sim.finishHeld();
+      };
+      const worker = new OutboxWorkerService(
+        dbClient,
+        fake,
+        {} as unknown as HostAgentPort,
+        config,
+        {} as unknown as SiteProvisioner,
+        {} as unknown as SiteDomainsApplier,
+        {} as unknown as SiteFilesApplier,
+        undefined,
+        undefined,
+        undefined,
+        runtime(),
+      );
+
+      await worker.processPendingOnce();
+      await worker.stop();
+
+      expect(released).toBe("after the restart");
+      expect((await opOf(restart!.id)).status).toBe("succeeded");
+      expect((await stackOf(b.stackId)).status).toBe("running");
+      expect((await opOf(backup.id)).status).toBe("succeeded");
+      expect(sim.appStackSnapshots(a.stackId)).toHaveLength(1);
     });
   });
 });

@@ -55,9 +55,9 @@ import {
 } from "./app-stack-runtime-policy.js";
 import { parkAppStackOperationUnknown } from "./app-stack-settle.js";
 
-// Backup, restore and nightly clean-up of an application (ADR-0038). The three kinds run in the stack lane under the
-// application's lock. Every outcome is written by one settleOperation transaction: steps, copies, the restore mark,
-// the application's status and, when the application has to start again, the operation that starts it.
+// Backup, restore and nightly clean-up of an application (ADR-0038). The three kinds run in worker lanes of their own
+// under the application's lock. Every outcome is written by one settleOperation transaction: steps, copies, the
+// restore mark, the application's status and, when the application has to start again, the operation that starts it.
 
 type OperationRow = typeof operations.$inferSelect;
 

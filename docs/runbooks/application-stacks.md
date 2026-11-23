@@ -283,7 +283,9 @@ approval.
    that application, also when the panel has already closed its action; stopping it stays possible. A new copy or
    restore is refused too while a job container of an earlier one still runs (the executor could not stop or remove
    it: `sudo docker ps --filter label=io.hostingpanel.app_backup_of=<stackId>`); one that has stopped does not count,
-   and the executor removes it at its next start. The copy holds the data volumes only: no image, no settings, no web address and none of the **Valori riservati**.
+   and the executor removes it at its next start. Actions on other applications are not held up: backups and restores
+   run in a worker lane of their own, one at a time (a second one waits for its turn), and the nightly clean-ups in
+   another. The copy holds the data volumes only: no image, no settings, no web address and none of the **Valori riservati**.
 4. **Read the result.** «Completato»: every destination has the copy. «Parziale»: one destination has it and the other
    failed; the backup can be restored. «Non riuscito»: no destination has it; the application runs again and its data
    did not change. The list gives a reason in words; the stable code is the `problem` of the row:
