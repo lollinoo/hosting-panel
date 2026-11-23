@@ -60,9 +60,9 @@ L'elenco delle capability è misurato (§7), non copiato: senza `DAC_OVERRIDE` o
 Molte immagini leggono le password solo dall'ambiente. Nel v2 una voce `secret:` il cui nome non finisce in `_FILE` è consegnata come variabile d'ambiente, e `${chiave}` di un parametro segreto è ammesso dentro un `value` dell'ambiente (mai in `command`).
 
 - Il **piano non contiene il valore**: porta `secretEnvironment[{ name, pieces }]`, dove ogni pezzo è un testo letterale oppure `{ parameterKey, version }`, come già fa `secretFiles`. Piano, anteprima, hash, outbox, audit, DTO e log non vedono il testo in chiaro.
-- Il valore viaggia solo nella chiamata IPC firmata `create` (campo transitorio `secretContents`, inviato solo se il piano ne ha bisogno) e in quella di avvio; l'esecutore lo scrive in `Config.Env` del container e non lo restituisce mai (non legge `Config.Env` nelle ispezioni che espone).
+- Il valore viaggia solo nella chiamata IPC firmata `create` (campo transitorio `secretContents`, inviato solo se il piano ne ha bisogno) e in quella di avvio; l'esecutore lo scrive in `Config.Env` del container e non lo restituisce mai: legge `Config.Env` solo nel lettore dei log, per sapere che cosa mascherare, e nessuna ispezione che espone lo contiene.
 - Ruotare un segreto = nuova versione → nuovo piano → il componente è ricreato (l'hash del componente copre i pezzi).
-- L'esecutore scrive comunque ogni segreto del componente nella sua directory su tmpfs, così il mascheramento dei log copre anche i segreti d'ambiente; nel container sono montati solo quelli di tipo file.
+- Il mascheramento dei log prende i valori dei segreti d'ambiente dal container stesso (§8.1), così non cambia dopo un riavvio dell'host, che svuota la directory dei segreti su tmpfs. All'avvio l'esecutore scrive comunque ogni segreto del componente in quella directory, e il lettore maschera anche quei valori; nel container sono montati solo quelli di tipo file. Se i valori da mascherare non si possono stabilire, il lettore rifiuta la chiamata invece di restituire righe in chiaro.
 - Una voce senza riferimenti a segreti conserva le regole del v1 (nomi e valori che sembrano segreti sono rifiutati).
 
 Limite accettato: chi può eseguire `docker inspect` sull'host (root) legge l'ambiente di un container; è lo stesso livello di fiducia che già legge i file dei segreti su tmpfs.
@@ -115,7 +115,7 @@ Funzione pura in `packages/policy-engine`: Compose in ingresso, bozza v2 più un
 | Minaccia | Contromisura |
 |---|---|
 | T17 — Un modello v2 chiede più privilegi di quelli del profilo | la sorgente e il piano non hanno chiavi per capability, utente, dispositivi o percorsi; il profilo è un nome chiuso; l'esecutore ricostruisce e ricontrolla il corpo |
-| T18 — Segreto d'ambiente che esce dal piano, dall'anteprima, dai log o dagli errori | il piano porta solo chiave e versione; i tre cercatori di chiavi vietate girano sull'intero piano; mascheramento dei log sui valori del componente; l'esecutore non restituisce `Config.Env` |
+| T18 — Segreto d'ambiente che esce dal piano, dall'anteprima, dai log o dagli errori | il piano porta solo chiave e versione; i tre cercatori di chiavi vietate girano sull'intero piano; mascheramento dei log sui valori del componente, presi dal suo container e dai file dei segreti, e nessuna riga se non si possono stabilire; l'esecutore non restituisce `Config.Env` |
 | T19 — Immagine ostile o sostituita | digest obbligatorio, pull per digest, controllo di `RepoDigests`; l'immagine gira nella gabbia del profilo, su reti dello stack, senza porte dell'host |
 | T20 — L'importatore traduce in silenzio qualcosa di pericoloso | ciò che tocca l'host è rifiutato; ogni cambiamento è una riga del rapporto; la bozza passa dal validatore stretto prima di essere salvata |
 | T21 — Risoluzione dei digest usata per sondare la rete | solo l'amministratore, attraverso il motore Docker, senza credenziali; nome dell'immagine validato |
@@ -150,6 +150,7 @@ Questa sezione registra ciò che il codice fa dove il testo dei §2–§4 e del 
 - **Il v2 contiene il v1.** Una sorgente v1 in cui si scrive `schemaVersion: 2` è una sorgente v2 valida; i suoi servizi hanno il profilo `strict`.
 - **Dal tag al digest** (§2.7): è la route IPC di sola lettura `GET /v1/app-stacks/image-digest?image=…` dell'esecutore. La ricerca nel motore ha un tempo massimo di 30 s, la chiamata del client di 40 s. Per un'immagine che il registro non conosce il motore non risponde `200` (misurato: `403`) e l'esecutore rifiuta con `STACK_IMAGE_PULL_FAILED`.
 - **Controllo del corpo** (`assertAppStackPayloadHardening` in `apps/docker-executor/src/app-stacks/container-payload.ts`): `Env` deve contenere le voci in chiaro del piano, uguali e nello stesso ordine, poi una voce per ogni segreto d'ambiente con il nome scritto nel piano. Il valore di un segreto è opaco per il controllo; il testo letterale intorno è quello del piano ed è controllato, anche per `docker.sock`. Un corpo con le chiavi del profilo `standard` è accettato solo insieme al piano che dichiara quel profilo.
+- **Mascheramento dei log** (`appStackLogMaskValues` in `apps/docker-executor/src/app-stacks/secrets.ts`). Un container con segreti d'ambiente porta l'etichetta `io.hostingpanel.app_secret_env`: per ogni segreto d'ambiente il nome e i pezzi, con il testo del modello com'è e `null` al posto di ogni segreto, mai un valore. Un componente senza segreti d'ambiente, e quindi ogni corpo v1, non la porta; il controllo del corpo la vuole uguale a quella del piano. Il lettore dei log ispeziona il container, ritrova ogni variabile nel suo `Config.Env`, ne ricava i segreti togliendo il testo del modello e li maschera insieme ai valori dei file su tmpfs, che dopo un riavvio dell'host mancano. Prima di leggere una riga rifiuta la chiamata (`DOCKER_ENGINE_UNAVAILABLE`) se l'etichetta non ha la forma dell'esecutore, se una variabile manca o compare due volte, se un valore non contiene il testo del modello, o se il testo non divide il valore in un modo solo (due segreti attaccati, o il testo fra due segreti presente anche dentro uno di essi) e i file mancano. L'avvio di un componente già in esecuzione non riscrive i file: non raggiungerebbe il container, e il mascheramento non ne ha bisogno.
 
 ### 8.2 API
 
@@ -211,6 +212,7 @@ Lo script `infra/linux/accept-app-stack-wordpress.mjs` è stato eseguito il 2026
 12. I segreti generati alla creazione contano, dopo, nel limite orario dei segreti che il cliente può cambiare.
 13. Un segreto di tipo file lungo fino a 24 576 byte, impostato sotto una versione precedente e poi usato più volte in un valore d'ambiente dopo un upgrade, può superare i 32 768 byte: la creazione è rifiutata con `STACK_PLAN_INVALID` prima che qualcosa sia rimosso.
 14. WordPress resta aperto alla prima configurazione finché qualcuno non la completa: chi apre il dominio per primo sceglie l'utente amministratore.
+15. Dopo un riavvio dell'host, i log di un componente con un valore d'ambiente che il testo del modello non divide in un modo solo (§8.1) non si leggono finché **Riavvia** non riscrive i file dei segreti.
 
 ### 8.9 Da approvare dal proprietario
 
@@ -234,4 +236,4 @@ Ogni seguito è una issue del repository; nessuno fa parte di questa PR.
 | #51 | Chiudere la finestra della prima configurazione di un WordPress appena installato | §4, 14 |
 | #52 | Gli script di accettazione più vecchi nascondono la rete edge della prova a un pannello in funzione | §8.7 |
 
-Restano limiti scritti, senza issue: il 2 (è la scelta del §2.5) e i limiti 7, 8, 9, 10 e 13. Una capability in più per il profilo `standard` (per esempio `KILL`) si valuta solo quando un'immagine la chiede: oggi nessuna delle due immagini misurate ne ha bisogno.
+Restano limiti scritti, senza issue: il 2 (è la scelta del §2.5) e i limiti 7, 8, 9, 10, 13 e 15. Una capability in più per il profilo `standard` (per esempio `KILL`) si valuta solo quando un'immagine la chiede: oggi nessuna delle due immagini misurate ne ha bisogno.

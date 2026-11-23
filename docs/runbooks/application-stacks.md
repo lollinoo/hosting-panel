@@ -34,8 +34,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   not see the retained volumes of deleted stacks; after a forced downgrade the stack containers keep running without
   management; the panel console (`hp-web`, tcp 3000) is reachable from every Docker bridge, stack networks included, and
   is protected by its session only; a new image digest needs a new template version; after a host reboot the components
-  that use secrets stay broken until someone restarts them (procedure 8); volumes have no size limit; a server reboot,
-  the metadata drop on a real cloud VM and an ACME issuance on a real hostname were not proven on the build machine.
+  that read a secret file stay broken until someone restarts them (procedure 8); volumes have no size limit; a server
+  reboot, the metadata drop on a real cloud VM and an ACME issuance on a real hostname were not proven on the build
+  machine.
 
 ## 1. See a stack's real state
 
@@ -211,13 +212,20 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. A stack's secret files live under `/run/hosting-panel/secrets`, a tmpfs that is empty after every boot. Docker
    starts the stack containers again (`unless-stopped`) before the executor runs, so a component that reads a secret
-   file finds none and fails or runs without it. Nothing repairs this by itself. Components without secrets are not
-   affected.
-2. The stacks that have secrets:
+   file finds none and fails or runs without it. Nothing repairs this by itself. A secret given in the environment
+   (extended format, `ADR-0036` §2.5) is kept by Docker in the container, so a component whose secrets are all in its
+   environment keeps working. Components without secrets are not affected.
+2. The component logs stay masked. The executor takes the values of the environment secrets from the container
+   itself (its label `io.hostingpanel.app_secret_env` names them, its environment holds them) and adds the values of
+   the secret files it finds. One case needs the files: a value in which the template's text does not separate two
+   secrets in one way only (two secrets side by side, or that text also inside a secret). Until **Riavvia** writes the
+   files again, the executor refuses that component's logs, and the panel says they are not available right now; it
+   never shows them unmasked.
+3. The stacks that have secrets:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and exists (select 1 from app_stack_secrets x where x.stack_id = s.id)"
    ```
-3. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
+4. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
    writes the secret files again, then restarts every component. **Avvia** does not rewrite the files of a component
    that is already running.
 
