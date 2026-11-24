@@ -1,4 +1,10 @@
-import type { APP_STACK_DIFF_CHANGES, AppStackPlanDiffDto, AppTemplateParameterEntry, ApprovedStackPlan } from "@hosting-panel/contracts";
+import {
+  appStackPlanSecretRefs,
+  type APP_STACK_DIFF_CHANGES,
+  type AppStackPlanDiffDto,
+  type AppTemplateParameterEntry,
+  type ApprovedStackPlan,
+} from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { appStackReplacedComponents, appStackRestartSet } from "./app-stack-runtime-policy.js";
 
@@ -21,8 +27,8 @@ function componentHashes(plan: ApprovedStackPlan | null): Map<string, string> {
 function parameterTokens(plan: ApprovedStackPlan | null, entries: readonly AppTemplateParameterEntry[]): Map<string, string> {
   const tokens = new Map(entries.map((e) => [e.key, `value:${JSON.stringify(e.value)}`]));
   const versions = new Map<string, number>();
-  for (const file of plan?.components.flatMap((c) => c.secretFiles) ?? []) {
-    versions.set(file.parameterKey, Math.max(versions.get(file.parameterKey) ?? 0, file.version));
+  for (const ref of plan === null ? [] : appStackPlanSecretRefs(plan)) {
+    versions.set(ref.parameterKey, Math.max(versions.get(ref.parameterKey) ?? 0, ref.version));
   }
   for (const [key, version] of versions) tokens.set(key, `secret:${version}`);
   return tokens;
@@ -36,6 +42,8 @@ export function diffAppStackPlans(input: {
   readonly to: ApprovedStackPlan;
   readonly fromParameters: readonly AppTemplateParameterEntry[];
   readonly toParameters: readonly AppTemplateParameterEntry[];
+  /** Parameter keys left out of `parameters`: the secrets the customer never sees (ADR-0036). */
+  readonly hidden?: ReadonlySet<string>;
 }): Pick<AppStackPlanDiffDto, "components" | "volumes" | "parameters" | "ingress" | "downtime" | "dataRisk"> {
   const { from, to } = input;
   const replaced = from === null ? [] : appStackReplacedComponents(from, to);
@@ -56,7 +64,9 @@ export function diffAppStackPlans(input: {
   return {
     components,
     volumes: keyed(volumeKeys(from), volumeKeys(to)),
-    parameters: keyed(parameterTokens(from, input.fromParameters), parameterTokens(to, input.toParameters)),
+    parameters: keyed(parameterTokens(from, input.fromParameters), parameterTokens(to, input.toParameters)).filter(
+      ({ key }) => input.hidden?.has(key) !== true,
+    ),
     ingress,
     downtime: fromRoutes.some((r) => {
       const c = byKey.get(r.componentKey);

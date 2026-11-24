@@ -1,5 +1,6 @@
 import {
   APP_STACK_REASONS,
+  APP_STACK_SECRET_ENV_LIMITS,
   APP_STACK_STATUSES,
   type AppStackComponentHealth,
   type AppStackStatus,
@@ -42,6 +43,7 @@ const isStatus = (s: string | undefined): s is AppStackStatus => (APP_STACK_STAT
 export function appStackRefusalText(m: Messages, code: string, reason?: string, status?: AppStackStatus): string {
   const { reasons, codes } = m.apps;
   if (reason === "STACK_TEMPLATE_UNPUBLISHED" && status === "draft") return reasons.draftUnpublished;
+  if (reason === "value_too_long") return format(reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
   if (reason !== undefined && Object.hasOwn(reasons, reason)) return (reasons as Record<string, string>)[reason]!;
   if (isStatus(reason)) return format(reasons.status, { status: m.apps.status[reason] });
   if (Object.hasOwn(codes, code)) return (codes as Record<string, string>)[code]!;
@@ -53,6 +55,33 @@ export function appStackProblemText(m: Messages, problem: string | null): string
   if (problem === null) return null;
   if ((APP_STACK_REASONS as readonly string[]).includes(problem)) return (m.apps.reasons as Record<string, string>)[problem]!;
   return Object.hasOwn(m.apps.codes, problem) ? (m.apps.codes as Record<string, string>)[problem]! : m.apps.history.problemGeneric;
+}
+
+/** Problem classes about the place the copies are kept: the sites' sentences name no site, so they are shared. */
+export const APP_STACK_BACKUP_SHARED_PROBLEMS = [
+  "unreachable",
+  "tls_failed",
+  "wrong_region",
+  "auth_failed",
+  "bucket_missing",
+  "write_denied",
+  "wrong_key",
+  "key_file_missing",
+  "local_target_unmounted",
+  "local_target_readonly",
+  "local_target_unsafe",
+  "backup_copy_missing",
+] as const;
+
+/** Why a backup, a copy or a restore of an application failed: its own sentence, a shared one, or the generic one. Never the raw class. */
+export function appStackBackupProblemText(m: Messages, problem: string | null): string {
+  const own: Record<string, string> = m.apps.backups.problem;
+  if (problem !== null && Object.hasOwn(own, problem)) return own[problem]!;
+  const shared: Record<string, string> = m.site.backups.problem;
+  if (problem !== null && (APP_STACK_BACKUP_SHARED_PROBLEMS as readonly string[]).includes(problem) && Object.hasOwn(shared, problem)) {
+    return shared[problem]!;
+  }
+  return m.apps.backups.problem.other;
 }
 
 export function formatCpu(cpuMilli: number): string {

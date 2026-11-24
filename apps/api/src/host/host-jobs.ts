@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  APP_STACK_BACKUP_OPERATION_KINDS,
   APP_STACK_OPERATION_KINDS,
   APP_STACK_TASK_KIND,
   HOST_JOB_KIND,
@@ -51,6 +52,7 @@ export const SITE_WORK_KINDS = [
   ...BACKUP_OPERATION_KINDS,
   ...Object.values(SITE_TYPES).flatMap((t) => t.heavyOperationKinds),
   ...APP_STACK_OPERATION_KINDS,
+  ...APP_STACK_BACKUP_OPERATION_KINDS,
   APP_STACK_TASK_KIND,
 ];
 export const HOST_JOB_END_ACTION: Record<HostJob, string> = {

@@ -5,10 +5,16 @@ import path from "node:path";
 import {
   APP_STACK_ID_PATTERN,
   APP_STACK_KEY_PATTERN,
+  AppStackRoutePathSchema,
+  AppStackRouteProtectionSchema,
+  MAX_APP_ROUTE_PATHS,
   MAX_APP_STACK_DOMAINS,
   VOLUME_SUFFIX_PATTERN,
   isSiteOrigin,
   normalizeSiteDomain,
+  type AppStackHostRoute,
+  type AppStackRoutePath,
+  type AppStackRouteProtection,
   type ErrorCode,
   type SiteHostRoute,
 } from "@hosting-panel/contracts";
@@ -513,10 +519,12 @@ export function buildSiteDynamicTraefikYaml(
 export interface AppStackRouteEntry {
   readonly componentKey: string;
   readonly internalPort: number;
-  readonly hosts: readonly SiteHostRoute[];
+  readonly hosts: readonly AppStackHostRoute[];
 }
 
 const APP_STACK_FILE_PATTERN = /^app_([a-z][a-z0-9_]{0,63})\.yml$/;
+/** What a browser may show when it asks for the password of a protected address: never the name of the proxy. */
+const APP_PROTECTION_REALM = "Restricted";
 
 function invalidAppRoute(): never {
   throw new ExecutorCodedError("Invalid application route", "VALIDATION_ERROR");
@@ -527,7 +535,44 @@ function assertAppStackId(stackId: string): void {
   assertSafeIdentifier(stackId, "stackId");
 }
 
-/** HTTP host routing only: no manual certificate, no redirect, nothing from the template. */
+/**
+ * One host of an application, re-checked value by value (ADR-0037 R7): no manual certificate, and each option either
+ * matches its contract pattern or refuses the whole file. Options are appended in a fixed order and only when set, so
+ * a host without options is the object the site check returns.
+ */
+function assertAppHostRoute(host: AppStackHostRoute, reserved: ReadonlySet<string>): AppStackHostRoute {
+  if (host.source !== undefined) hostPolicyDenied("certificate source");
+  const base = assertSiteHostRoute(host, reserved);
+  const options: { compress?: true; protection?: AppStackRouteProtection; paths?: AppStackRoutePath[] } = {};
+  if (host.compress !== undefined) {
+    if (host.compress !== true) invalidAppRoute();
+    options.compress = true;
+  }
+  if (host.protection !== undefined) {
+    const parsed = AppStackRouteProtectionSchema.safeParse(host.protection);
+    if (!parsed.success) invalidAppRoute();
+    options.protection = { username: parsed.data.username, passwordHash: parsed.data.passwordHash };
+  }
+  if (host.paths !== undefined) {
+    if (!Array.isArray(host.paths) || host.paths.length < 1 || host.paths.length > MAX_APP_ROUTE_PATHS) invalidAppRoute();
+    const paths = host.paths.map((path): AppStackRoutePath => {
+      const parsed = AppStackRoutePathSchema.safeParse(path);
+      if (!parsed.success) invalidAppRoute();
+      const { pathPrefix, componentKey, internalPort, stripPrefix } = parsed.data;
+      return { pathPrefix, componentKey, internalPort, stripPrefix };
+    });
+    if (new Set(paths.map((path) => path.pathPrefix)).size !== paths.length) invalidAppRoute();
+    options.paths = paths.sort((a, b) => (a.pathPrefix < b.pathPrefix ? -1 : 1));
+  }
+  // A redirecting host answers with the redirect alone: nothing to protect, compress or split by path.
+  if (base.redirectTo !== null && Object.keys(options).length > 0) invalidAppRoute();
+  return { ...base, ...options };
+}
+
+/**
+ * HTTP host routing of one application, nothing from the template. Per host: an optional redirect to another host of
+ * the same file, or the content with optional password protection, compression and path rules (ADR-0037).
+ */
 export function buildAppStackDynamicTraefikYaml(
   stackId: string,
   routes: readonly AppStackRouteEntry[],
@@ -546,25 +591,27 @@ export function buildAppStackDynamicTraefikYaml(
       ) {
         invalidAppRoute();
       }
-      if (route.hosts.some((host) => host.source !== undefined || host.redirectTo !== null)) {
-        hostPolicyDenied("certificate source");
-      }
       return {
         componentKey: route.componentKey,
         internalPort: route.internalPort,
-        hosts: assertSiteHostRoutes(route.hosts, reserved).sort((a, b) => a.hostname.localeCompare(b.hostname)),
+        hosts: route.hosts
+          .map((host) => assertAppHostRoute(host, reserved))
+          .sort((a, b) => a.hostname.localeCompare(b.hostname)),
       };
     })
     .sort((a, b) => a.componentKey.localeCompare(b.componentKey) || a.internalPort - b.internalPort);
 
   const pairs = new Set(activeRoutes.map((route) => `${route.componentKey}:${String(route.internalPort)}`));
-  const allHostnames = activeRoutes.flatMap((route) => route.hosts.map((h) => h.hostname));
-  if (
-    pairs.size !== activeRoutes.length ||
-    allHostnames.length > MAX_APP_STACK_DOMAINS ||
-    new Set(allHostnames).size !== allHostnames.length
-  ) {
+  const allHosts = activeRoutes.flatMap((route) => route.hosts);
+  const byHostname = new Map(allHosts.map((host) => [host.hostname, host]));
+  if (pairs.size !== activeRoutes.length || allHosts.length > MAX_APP_STACK_DOMAINS || byHostname.size !== allHosts.length) {
     invalidAppRoute();
+  }
+  // A redirect lands on another host of this application that serves content, whichever route entry holds it.
+  for (const host of allHosts) {
+    if (host.redirectTo === null) continue;
+    const target = byHostname.get(host.redirectTo.replace(/^https?:\/\//, ""));
+    if (target === undefined || target.redirectTo !== null) hostPolicyDenied("redirect target");
   }
   if (activeRoutes.length === 0) {
     return "";
@@ -574,47 +621,115 @@ export function buildAppStackDynamicTraefikYaml(
   for (const route of activeRoutes) {
     lines.push(`# @hp-app-route ${JSON.stringify(route)}`);
   }
+  const names = new Set<string>();
+  /** Router and middleware names are built from hashes of what the customer typed: two equal names refuse the file. */
+  const named = (name: string): string => {
+    if (names.has(name)) invalidAppRoute();
+    names.add(name);
+    return name;
+  };
+  const targets = new Map<string, { componentKey: string; internalPort: number }>();
+  const serviceKey = (componentKey: string, internalPort: number): string => {
+    const key = `app_${stackId}_${componentKey}_${String(internalPort)}`;
+    targets.set(key, { componentKey, internalPort });
+    return key;
+  };
+  const compress = `app_${stackId}_compress`;
+  let compressUsed = false;
   const routers: string[] = [];
   const middlewares: string[] = [];
-  const services: string[] = [];
   for (const route of activeRoutes) {
-    const port = String(route.internalPort);
-    const key = `app_${stackId}_${route.componentKey}_${port}`;
+    const key = serviceKey(route.componentKey, route.internalPort);
     let needsHttpsRedirect = false;
     for (const host of route.hosts) {
       const i = hostSuffix(host.hostname);
+      const tls = host.tls && opts.acmeEnabled;
+      const dns01 = host.challenge === "dns-01";
+      const hostRule = `Host(\`${host.hostname}\`)`;
+      const router = (name: string, entryPoint: "web" | "websecure", rule: string, service: string, use: readonly string[]) => {
+        routers.push(
+          `    ${named(name)}:`,
+          "      entryPoints:",
+          `        - "${entryPoint}"`,
+          `      rule: "${rule}"`,
+          `      service: "${service}"`,
+        );
+        if (use.length > 0) routers.push("      middlewares:", ...use.map((middleware) => `        - "${middleware}"`));
+        if (entryPoint === "websecure") {
+          routers.push(
+            ...(dns01 && !opts.dnsChallenge
+              ? ["      tls: {}"]
+              : ["      tls:", `        certResolver: ${dns01 ? DNS_RESOLVER_NAME : "le"}`]),
+          );
+        }
+      };
+      if (host.redirectTo !== null) {
+        // Straight to the other address from both entry points, as the canonical redirect of a site does.
+        const to = `${key}_${i}_to`;
+        router(`${key}_${i}`, "web", hostRule, key, [to]);
+        if (tls) router(`${key}_${i}_tls`, "websecure", hostRule, key, [to]);
+        middlewares.push(
+          `    ${named(to)}:`,
+          "      redirectRegex:",
+          '        regex: "^https?://[^/]+(.*)$"',
+          `        replacement: "${host.redirectTo}\${1}"`,
+          "        permanent: true",
+        );
+        continue;
+      }
       const httpsRedirect = opts.acmeEnabled && host.httpsRedirect;
       needsHttpsRedirect ||= httpsRedirect;
-      const router = (name: string, entryPoint: string) => [
-        `    ${name}:`,
-        "      entryPoints:",
-        `        - "${entryPoint}"`,
-        `      rule: "Host(\`${host.hostname}\`)"`,
-        `      service: "${key}"`,
-      ];
-      routers.push(...router(`${key}_${i}`, "web"));
-      if (httpsRedirect) routers.push("      middlewares:", `        - "${key}_https"`);
-      if (host.tls && opts.acmeEnabled) {
-        const dns01 = host.challenge === "dns-01";
-        routers.push(
-          ...router(`${key}_${i}_tls`, "websecure"),
-          ...(dns01 && !opts.dnsChallenge
-            ? ["      tls: {}"]
-            : ["      tls:", `        certResolver: ${dns01 ? DNS_RESOLVER_NAME : "le"}`]),
+      // What every router serving the content of this host goes through, in this order.
+      const content: string[] = [];
+      if (host.protection !== undefined) {
+        const auth = `${key}_${i}_auth`;
+        content.push(auth);
+        middlewares.push(
+          `    ${named(auth)}:`,
+          "      basicAuth:",
+          "        users:",
+          `          - "${host.protection.username}:${host.protection.passwordHash}"`,
+          `        realm: "${APP_PROTECTION_REALM}"`,
+          "        removeHeader: true",
         );
+      }
+      if (host.compress === true) {
+        compressUsed = true;
+        content.push(compress);
+      }
+      // With the HTTPS redirect the plain router serves no content: it only sends the browser to HTTPS, password unasked.
+      router(`${key}_${i}`, "web", hostRule, key, httpsRedirect ? [`${key}_https`] : content);
+      if (tls) router(`${key}_${i}_tls`, "websecure", hostRule, key, content);
+      for (const path of host.paths ?? []) {
+        if (httpsRedirect && !tls) continue;
+        const pathKey = serviceKey(path.componentKey, path.internalPort);
+        const j = hostSuffix(`${host.hostname}${path.pathPrefix}`);
+        // Longer than the host rule, and longer the deeper the path: the proxy tries the most specific rule first.
+        const rule = `${hostRule} && (Path(\`${path.pathPrefix}\`) || PathPrefix(\`${path.pathPrefix}/\`))`;
+        const use = [...content];
+        if (path.stripPrefix) {
+          const strip = `${pathKey}_${j}_strip`;
+          use.push(strip);
+          middlewares.push(`    ${named(strip)}:`, "      stripPrefix:", "        prefixes:", `          - "${path.pathPrefix}"`);
+        }
+        if (!httpsRedirect) router(`${pathKey}_${j}`, "web", rule, pathKey, use);
+        if (tls) router(`${pathKey}_${j}_tls`, "websecure", rule, pathKey, use);
       }
     }
     if (needsHttpsRedirect) {
-      middlewares.push(`    ${key}_https:`, "      redirectScheme:", "        scheme: https", "        permanent: true");
+      middlewares.push(`    ${named(`${key}_https`)}:`, "      redirectScheme:", "        scheme: https", "        permanent: true");
     }
-    services.push(
+  }
+  if (compressUsed) middlewares.push(`    ${named(compress)}:`, "      compress: {}");
+  const services = [...targets.entries()]
+    .sort(([, a], [, b]) => a.componentKey.localeCompare(b.componentKey) || a.internalPort - b.internalPort)
+    .flatMap(([key, target]) => [
       `    ${key}:`,
       "      loadBalancer:",
       "        passHostHeader: true",
       "        servers:",
-      `          - url: "http://hp_app_${stackId}_${route.componentKey}:${port}"`,
-    );
-  }
+      `          - url: "http://hp_app_${stackId}_${target.componentKey}:${String(target.internalPort)}"`,
+    ]);
 
   lines.push("http:", "  routers:", ...routers);
   if (middlewares.length > 0) {
@@ -624,7 +739,7 @@ export function buildAppStackDynamicTraefikYaml(
   return lines.join("\n");
 }
 
-/** Lines "# @hp-app-route {json}" only; malformed lines are skipped. */
+/** Lines "# @hp-app-route {json}" only; malformed lines are skipped. The builder re-checks every value it reads here. */
 export function parsePersistedAppStackRoutesFromYaml(yamlContent: string): AppStackRouteEntry[] {
   const routes: AppStackRouteEntry[] = [];
   for (const line of yamlContent.split("\n")) {
@@ -638,7 +753,7 @@ export function parsePersistedAppStackRoutesFromYaml(yamlContent: string): AppSt
         typeof parsed.componentKey === "string" &&
         typeof parsed.internalPort === "number" &&
         Array.isArray(parsed.hosts) &&
-        parsed.hosts.every(isSiteHostRouteShape)
+        parsed.hosts.every(isAppHostRouteShape)
       ) {
         routes.push({ componentKey: parsed.componentKey, internalPort: parsed.internalPort, hosts: parsed.hosts });
       }
@@ -647,6 +762,25 @@ export function parsePersistedAppStackRoutesFromYaml(yamlContent: string): AppSt
     }
   }
   return routes;
+}
+
+function isAppHostRouteShape(value: unknown): value is AppStackHostRoute {
+  if (!isSiteHostRouteShape(value)) return false;
+  const h = value as { compress?: unknown; protection?: unknown; paths?: unknown };
+  const protection = h.protection as { username?: unknown; passwordHash?: unknown } | null | undefined;
+  return (
+    (h.compress === undefined || h.compress === true) &&
+    (protection === undefined ||
+      (protection !== null && typeof protection.username === "string" && typeof protection.passwordHash === "string")) &&
+    (h.paths === undefined ||
+      (Array.isArray(h.paths) &&
+        h.paths.every((path: { pathPrefix?: unknown; componentKey?: unknown; internalPort?: unknown; stripPrefix?: unknown } | null) =>
+          typeof path?.pathPrefix === "string" &&
+          typeof path.componentKey === "string" &&
+          typeof path.internalPort === "number" &&
+          typeof path.stripPrefix === "boolean",
+        )))
+  );
 }
 
 function isSiteHostRouteShape(value: unknown): value is SiteHostRoute {

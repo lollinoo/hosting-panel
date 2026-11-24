@@ -8,6 +8,7 @@ import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
+import { AppStackBackupsService } from "./app-stacks/app-stack-backups.service.js";
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
@@ -20,6 +21,7 @@ import {
   resolveAppTemplateValidationOptions,
 } from "./app-templates/app-template-validation-options.js";
 import { AppTemplatesService } from "./app-templates/app-templates.service.js";
+import { ComposeImportService } from "./app-templates/compose-import.service.js";
 import { AuthzContextService } from "./auth/authz-context.service.js";
 import { LoginService } from "./auth/login.service.js";
 import { OidcService } from "./auth/oidc.service.js";
@@ -123,7 +125,7 @@ export interface AppModuleOptions {
   readonly dnsLookup?: DnsLookup;
   /** Test seam of the certificate validator (clock, trust anchors); production registers `{}`. */
   readonly tlsValidatorOptions?: TlsValidatorOptions;
-  /** Tests only: HCP-SPEC-005 feature switches; production registers every flag false. */
+  /** Tests only: HCP-SPEC-005 feature switches over those of the runtime backend; production registers the backend's own. */
   readonly appFeatures?: Partial<AppFeatureFlags>;
   /** Tests only: image allowlist rows for HCP-STACK/v1 validation; production registers `{}` (the code allowlist). */
   readonly appTemplateValidation?: AppTemplateValidationOptions;
@@ -208,7 +210,7 @@ export class AppModule {
         },
         {
           provide: APP_FEATURE_GATE_TOKEN,
-          useValue: resolveAppFeatureGate(options.appFeatures),
+          useValue: resolveAppFeatureGate(options.config.runtimeBackend, options.appFeatures),
         },
         {
           provide: APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
@@ -252,7 +254,9 @@ export class AppModule {
         FirewallService,
         UpdatesService,
         AppTemplatesService,
+        ComposeImportService,
         AppStacksService,
+        AppStackBackupsService,
         AppStackDomainsService,
         AppStackRuntime,
         AppStackObserverService,

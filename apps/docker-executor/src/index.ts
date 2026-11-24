@@ -151,6 +151,7 @@ export {
   APP_STACK_COMPONENT_TIMEOUT_MS,
   APP_STACK_CREATE_TIMEOUT_MS,
   APP_STACK_LOGS_TIMEOUT_MS,
+  APP_STACK_RESOLVE_TIMEOUT_MS,
   APP_STACK_PREPARE_TIMEOUT_MS,
   APP_STACK_PULL_TIMEOUT_MS,
   APP_STACK_REMOVE_TIMEOUT_MS,
@@ -247,7 +248,9 @@ export {
   APP_STACK_LOG_MASK,
   APP_STACK_LOG_MASK_MIN_LENGTH,
   APP_STACK_PULL_ENGINE_TIMEOUT_MS,
+  APP_STACK_RESOLVE_ENGINE_TIMEOUT_MS,
   APP_STACK_RESTART_POLICY,
+  APP_STACK_STANDARD_CAP_ADD,
   APP_STACK_STOP_TIMEOUT_SECONDS,
   APP_STACK_TASK_CLEANUP_RETRIES,
   APP_STACK_TASK_CLEANUP_RETRY_MS,
@@ -280,12 +283,14 @@ export {
   appStackTaskReadPath,
   appStackVolumeLabels,
   appStackVolumeName,
+  assertAppStackCreateSecretContents,
   assertAppStackPayloadHardening,
   assertAppStackSecretContents,
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
   decodeAppStackHealthLabel,
   encodeAppStackHealthLabel,
+  expandAppStackSecretEnvironment,
   isOwnAppStackResource,
   maskAppStackLogLines,
   probeAppStackHealth,
@@ -369,7 +374,12 @@ export {
 
 export { SimulatedSiteDatabases } from "./simulator-databases.js";
 
-export { SimulatedBackups } from "./simulator-backups.js";
+export {
+  SimulatedBackups,
+  type SimulatedAppStackBackupJob,
+  type SimulatedAppStackReadiness,
+  type SimulatedBackupsOptions,
+} from "./simulator-backups.js";
 
 export {
   BackupRunner,
@@ -498,6 +508,20 @@ export {
   type BackupResticRepoKind,
   type BackupSnapshotSummary,
 } from "./backup-jobs.js";
+
+export {
+  APP_STACK_BACKUP_COPY_CAPABILITIES,
+  APP_STACK_BACKUP_OF_LABEL,
+  APP_STACK_JOB_USER,
+  APP_STACK_RESTORE_CAPABILITIES,
+  appStackBackupDataPath,
+  buildAppStackBackupCopyContainerPayload,
+  buildAppStackForgetContainerPayload,
+  buildAppStackJobLabels,
+  buildAppStackPartialSnapshotDropContainerPayload,
+  buildAppStackRepoContainerPayload,
+  buildAppStackRestoreContainerPayload,
+} from "./app-stack-backup-jobs.js";
 
 export {
   DEFAULT_PHPMYADMIN_CONFIG_DIR,

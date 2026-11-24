@@ -3,9 +3,9 @@ import { constants as fsc, type BigIntStats } from "node:fs";
 import { lstat, mkdir, open, readdir, readlink, realpath, rename, rmdir, statfs, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { BACKUP_DISK_FREE_FLOOR_BYTES } from "./backup-jobs.js";
+import { BACKUP_DISK_FREE_FLOOR_BYTES, backupRepoSegments } from "./backup-jobs.js";
 import type { BackupResticRepoKind, GuardedLocalRepo } from "./backup-jobs.js";
-import { assertSafeIdentifier, ExecutorCodedError } from "./traefik-config.js";
+import { ExecutorCodedError } from "./traefik-config.js";
 
 /**
  * Guard for local backup repositories (HCP-SPEC-004 E4/E8). Every path is walked one segment at a time through
@@ -294,7 +294,8 @@ function assertIds(targetId: string, scope: BackupResticRepoKind): void {
   if (!LOCAL_TARGET_ID_PATTERN.test(targetId)) {
     throw new ExecutorCodedError("Invalid local backup target id", "VALIDATION_ERROR");
   }
-  if (scope.kind === "site") assertSafeIdentifier(scope.siteId, "siteId");
+  // Checks the id of the scope (site or application) before any path is built from it.
+  backupRepoSegments(scope);
 }
 
 function leafLocation(
@@ -302,7 +303,7 @@ function leafLocation(
   targetId: string,
   scope: BackupResticRepoKind,
 ): { readonly hostDir: string; readonly containerPath: string; readonly segments: readonly string[] } {
-  const segments = scope.kind === "site" ? ["sites", scope.siteId] : ["panel"];
+  const segments = backupRepoSegments(scope);
   return {
     hostDir: path.posix.join(root, targetId, ...segments),
     containerPath: path.posix.join("/backup/repository", ...segments),

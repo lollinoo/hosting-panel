@@ -20,6 +20,7 @@ import {
   createAppTemplate,
   createDatabaseClient,
   enqueueAppStackOperationTransactional,
+  enqueueAppStackResumeTransactional,
   eq,
   hostAllocations,
   hosts,
@@ -521,7 +522,7 @@ describe("AppStackRuntime (RT3)", () => {
       expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "stopped" });
     });
 
-    it("a pre-flight failure of an upgrade touches no component and the stack keeps its observed status", async () => {
+    it("a pre-flight failure of an upgrade touches no component, keeps the observed status and takes its target back", async () => {
       const { stackId, rev } = await running([CACHE, WEB]);
       const v2 = revision(stackId, [CACHE, WEB_V2]);
       const upgrade = await enqueue(stackId, "stack.upgrade", v2);
@@ -533,7 +534,34 @@ describe("AppStackRuntime (RT3)", () => {
       const stack = await stackOf(stackId);
       expect(stack.status).toBe("running");
       expect(stack.appliedRevisionId).toBe(rev.revisionId);
-      expect(stack.desiredRevisionId).toBe(v2.revisionId);
+      expect(stack.desiredRevisionId).toBe(rev.revisionId);
+      // The history keeps what was tried.
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", revisionId: v2.revisionId });
+      expect((await opOf(upgrade.operation!.id)).status).toBe("failed");
+    });
+
+    it("a rollback that fails at prepare goes back to the revision that runs, not to the one it asked for", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      expect(await run(await enqueue(stackId, "stack.upgrade", v2))).toBeUndefined();
+      const rollback = await enqueue(stackId, "stack.rollback", revision(stackId, rev.plan.components as AppStackPlanComponent[]));
+      fake.failNext("prepareAppStack", "definite");
+
+      expectFailure(await run(rollback), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: v2.revisionId, desiredRevisionId: v2.revisionId });
+      expect(fake.stack(stackId).components.get("web")!.componentHash).toBe(computeAppStackComponentHash(v2.plan as ApprovedStackPlan, "web"));
+    });
+
+    it("a failure at create keeps the target: the executor may have replaced a component", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("createAppStackComponents", "definite");
+
+      expectFailure(await run(upgrade), "DOCKER_ENGINE_UNAVAILABLE");
+
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
     });
 
     it("a rollback runs the deploy path and re-applies the older plan", async () => {
@@ -616,6 +644,90 @@ describe("AppStackRuntime (RT3)", () => {
 
       expectFailure(await run(await enqueue(stackId, "stack.start")), "DOCKER_ENGINE_UNAVAILABLE");
       expect((await stackOf(stackId)).status).toBe("failed");
+    });
+
+    it("a restart or a start refused at validate touches nothing and shows what runs; the operation fails with its reason", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("running");
+      // The pinned version is gone (versions are immutable: only this test can lose one): every start of the plan is
+      // refused before the executor is asked anything.
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      fake.calls.length = 0;
+
+      const restart = await enqueue(stackId, "stack.restart");
+      expectFailure(await run(restart), "STACK_SECRET_MISSING");
+
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("running");
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+      expect(await deploymentOf(restart)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+      expect((await opOf(restart.operation!.id)).status).toBe("failed");
+      expect((await stepsOf(restart))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+
+      // A stop cut short by an API restart leaves it unknown while it still serves: a refused start shows that it does.
+      await db().update(appStacks).set({ status: "unknown" }).where(eq(appStacks.id, stackId));
+      fake.calls.length = 0;
+      const start = await enqueue(stackId, "stack.start");
+      expectFailure(await run(start), "STACK_SECRET_MISSING");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("running");
+      expect(await deploymentOf(start)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+    });
+
+    it("a start of a stopped application refused at validate leaves it stopped, with or without a reading; the operation fails with its reason", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      fake.calls.length = 0;
+
+      const start = await enqueue(stackId, "stack.start");
+      expectFailure(await run(start), "STACK_SECRET_MISSING");
+      expect(trace()).toEqual(["getAppStackStatus"]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+      expect(await deploymentOf(start)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+      expect((await opOf(start.operation!.id)).status).toBe("failed");
+      expect((await stepsOf(start))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+
+      // The executor cannot be read: nothing was touched either, so it stays stopped.
+      fake.failNext("getAppStackStatus", "definite");
+      const again = await enqueue(stackId, "stack.start");
+      expectFailure(await run(again), "STACK_SECRET_MISSING");
+      expect((await stackOf(stackId)).status).toBe("stopped");
+      expect(await deploymentOf(again)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING" });
+    });
+
+    it("the start that follows a backup, refused at validate, ends failed: the platform stopped the application, not the customer", async () => {
+      const web = component("web", { secretFiles: [{ envName: "APP_SECRET_FILE", parameterKey: "app_secret", version: 1 }] });
+      const { stackId, write } = await create([CACHE, web]);
+      await setAppStackSecretTransactional(db(), { organizationId: ORG, stackId, parameterKey: "app_secret", value: "first", masterKey: config.secretsMasterKey });
+      expect(await run(write)).toBeUndefined();
+      // The backup's stop: the containers are stopped and the application with them.
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      await db().execute(sql`ALTER TABLE app_stack_secrets DISABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      await db().delete(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      await db().execute(sql`ALTER TABLE app_stack_secrets ENABLE TRIGGER trg_prevent_app_stack_secrets_mutation`);
+      const queued = await db().transaction((tx) =>
+        enqueueAppStackResumeTransactional(tx, { organizationId: ORG, stackId, requestedByUserId: null, sourceOperationId: `op_backup_${String(n)}` }),
+      );
+      expect(queued?.kind).toBe("stack.start");
+      const resume: AppStackWriteResult = { stack: await stackOf(stackId), revision: null, deployment: queued!.deployment, operation: queued!.operation, idempotentReplay: false };
+
+      expectFailure(await run(resume), "STACK_SECRET_MISSING");
+      expect((await stackOf(stackId)).status).toBe("failed");
+      expect(await deploymentOf(resume)).toMatchObject({ status: "failed", problem: "STACK_SECRET_MISSING", replacedStatus: null });
+      expect((await opOf(queued!.operation.id)).status).toBe("failed");
     });
 
     it("a stop that fails after the routes are withdrawn settles degraded with no routes hash", async () => {

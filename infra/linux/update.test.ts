@@ -102,13 +102,74 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
+  it("refuses a downgrade to a release that knows the stacks but not their extended format (exit 8), naming only that feature", () => {
+    const known = "manual-tls backup-targets site-templates app-stacks";
+    const f = gated("printf 'app-stacks\\napp-format-v2\\n'", `${known} app-format-v2`);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["0.1.0 does not know app-format-v2, which", "--allow-feature-loss", "extended application format"]) expect(r.err).toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks"]) expect(r.err).not.toContain(t);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("stacks of the first format only do not block a downgrade to a release that knows the stacks", () => {
+    const known = "manual-tls backup-targets site-templates app-stacks";
+    const f = gated("echo app-stacks", `${known} app-format-v2`);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(asked(f)).toBe(true);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+  });
+
+  it("refuses a downgrade while an application address has routing options (exit 8), naming only that feature", () => {
+    const all = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options";
+    const f = gated("echo app-routing-options", all);
+    // The target knows application stacks and their extended format, not the options of their addresses.
+    const older = makeArchive("0.1.0", "0.1.0", "", "manual-tls backup-targets site-templates app-stacks app-format-v2");
+    const r = update(["--archive", older, "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["app-routing-options", "--allow-feature-loss", "password-protected address"]) expect(r.err).toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2"]) expect(r.err).not.toContain(t);
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+  });
+
+  it("refuses a downgrade while an application backup exists (exit 8), naming only that feature", () => {
+    const known = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options";
+    const f = gated("echo app-stack-backups", `${known} app-stack-backups`);
+    // the target knows everything but the backups of applications
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["0.1.0 does not know app-stack-backups,", "--allow-feature-loss", "backups of applications", "retention period"]) {
+      expect(r.err).toContain(t);
+    }
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options"]) {
+      expect(r.err).not.toContain(t);
+    }
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+    expect(existsSync(join(f.root, "releases/0.1.0"))).toBe(false);
+  });
+
+  it("a target that knows the backups of applications is not held back by them", () => {
+    const all = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups";
+    const f = gated("echo app-stack-backups", all);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", all), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(asked(f)).toBe(false);
+  });
+
   it("refuses a downgrade while an application template declares tasks (exit 8), unless forced (ADR-0042)", () => {
-    const features = "manual-tls backup-targets site-templates app-stacks app-tasks";
+    const features = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-tasks";
     const f = gated("echo app-tasks", features);
     const r = update(["--archive", old(), "--allow-downgrade"], f.env);
     expect(r.code, r.err).toBe(8);
     for (const t of ["app-tasks", "--allow-feature-loss", "declares tasks"]) expect(r.err).toContain(t);
-    for (const t of ["manual-tls", "backup-targets", "site-templates"]) expect(r.err).not.toContain(t);
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options", "app-stack-backups"]) {
+      expect(r.err).not.toContain(t);
+    }
     expect(cur(f.root)).toBe("releases/0.2.0");
     expect(readFileSync(f.log, "utf8")).toBe("");
 

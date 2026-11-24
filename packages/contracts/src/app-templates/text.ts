@@ -21,7 +21,8 @@ export function appStackTextProblem(text: string): AppStackTextProblem | null {
   if (CONTROL_CHARACTER.test(text)) return "control_character";
   if (/docker\.sock/i.test(text)) return "docker_socket";
   if (METADATA_ENDPOINTS.some((pattern) => pattern.test(text))) return "metadata_endpoint";
-  if (/:\/\/[^/\s:@]+:[^/\s@]+@/.test(text)) return "url_credentials";
+  // scheme://user:password@host; the user may be empty (redis://:password@host).
+  if (/:\/\/[^/\s:@]*:[^/\s@]+@/.test(text)) return "url_credentials";
   return null;
 }
 
@@ -114,6 +115,12 @@ export function appStackSecretEnvNameProblem(name: string): "invalid" | null {
   if (!APP_STACK_ENV_NAME_PATTERN.test(name) || !name.endsWith("_FILE")) return "invalid";
   const base = name.slice(0, -"_FILE".length);
   return base === "" || isReservedEnvName(name) || isReservedEnvName(base) ? "invalid" : null;
+}
+
+/** Environment secret (v2): the name of a variable that carries a secret value. Same rule as a value name; it may
+ *  look like a secret, which is its purpose. A name ending in "_FILE" is a secret file, not an environment secret. */
+export function appStackSecretEnvironmentNameProblem(name: string): "invalid" | "reserved" | null {
+  return appStackEnvValueNameProblem(name);
 }
 
 export function appStackHealthPathProblem(path: string): "invalid" | null {

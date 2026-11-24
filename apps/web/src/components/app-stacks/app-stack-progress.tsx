@@ -66,10 +66,14 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
   const { operation, outcome, pollError } = useOperationPoll(orgId, operationId);
   const kind = operation?.kind.slice("stack.".length) ?? "deploy";
   const titles: Record<string, string> = t.title;
-  const steps: Record<string, string> = m.apps.steps;
+  // A backup and a restore have steps of their own beside the ones every stack operation has.
+  const steps: Record<string, string> = { ...m.apps.steps, ...m.apps.backups.steps };
   const status = operation?.status;
   // The run of a task (ADR-0042) has one step and its own words.
   const isTask = operation?.kind === "stack.task";
+  // They have no entry in the history: the reason of a failure is on the row of the backup.
+  const failed = isTask ? t.taskFailed : kind === "backup" ? t.backupFailed : kind === "restore" ? t.restoreFailed : t.failed;
+  const long = (kind === "backup" || kind === "restore") && outcome === "polling";
 
   return (
     <Card>
@@ -96,7 +100,7 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
         )}
         {(status === "failed" || status === "cancelled") && (
           <Alert variant="destructive" role="alert">
-            <AlertDescription>{isTask ? t.taskFailed : t.failed}</AlertDescription>
+            <AlertDescription>{failed}</AlertDescription>
           </Alert>
         )}
         {status === "unknown" && (
@@ -104,6 +108,7 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
             <AlertDescription>{t.unknown}</AlertDescription>
           </Alert>
         )}
+        {long && <p className="text-xs text-muted-foreground">{t.longNote}</p>}
         {pollError && outcome === "polling" && (
           <p role="status" className="text-xs text-muted-foreground">
             {t.pollError}

@@ -2,15 +2,19 @@ import {
   effectiveComponentHealth,
   sumAppStackPlanResources,
   type AppStackAcceptedEnvelope,
+  type AppStackBackupDto,
   type AppStackDeploymentDto,
   type AppStackDetailDto,
   type AppStackDomainDto,
   type AppStackOperationKind,
+  type AppStackPlatformWork,
   type AppStackSummaryDto,
   type AppTemplateSpec,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
 import type {
+  AppStackBackupCopyRow,
+  AppStackBackupRow,
   AppStackComponentRow,
   AppStackDeploymentRow,
   AppStackDomainRow,
@@ -21,7 +25,7 @@ import type {
   AppStackVolumeRow,
   AppStackWriteResult,
 } from "@hosting-panel/database";
-import { appStackDisplayStatus } from "./app-stack-runtime-policy.js";
+import { appStackDisplayStatus, appStackRoutesPending } from "./app-stack-runtime-policy.js";
 
 const iso = (at: Date | null): string | null => at?.toISOString() ?? null;
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -37,6 +41,7 @@ export function appStackSummaryDto(input: {
   stack: AppStackRow;
   templateName: string;
   templateVersionNumber: number;
+  installed: { revisionNumber: number; templateVersionNumber: number } | null;
   components: readonly AppStackComponentRow[];
   domains: readonly AppStackDomainRow[];
   now: Date;
@@ -50,6 +55,7 @@ export function appStackSummaryDto(input: {
     templateId: stack.templateId,
     templateName: input.templateName,
     templateVersionNumber: input.templateVersionNumber,
+    installed: input.installed,
     componentCount: components.length,
     unhealthyCount: components.filter((c) => ["unhealthy", "missing"].includes(componentHealth(c, now).health)).length,
     primaryHostname: (domains.find((d) => d.status === "active") ?? domains[0])?.hostname ?? null,
@@ -63,12 +69,16 @@ export function appStackDetailDto(input: {
   templateVersionNumber: number;
   spec: AppTemplateSpec;
   desired: { revision: AppStackRevisionRow; plan: ApprovedStackPlan } | null;
+  /** The plan of the revision that runs, whose routes are published; null when none was applied. */
+  appliedPlan: ApprovedStackPlan | null;
   components: readonly AppStackComponentRow[];
   volumes: readonly AppStackVolumeRow[];
   domains: readonly AppStackDomainRow[];
   parameters: readonly AppStackParameterRow[];
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
+  installed: { revisionNumber: number; templateVersionNumber: number } | null;
+  platformWork: AppStackPlatformWork | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
   rollback: { revisionId: string; revisionNumber: number; templateVersionNumber: number } | null;
   now: Date;
@@ -95,13 +105,15 @@ export function appStackDetailDto(input: {
   for (const meta of input.secrets) {
     if ((latestSecrets.get(meta.parameterKey)?.version ?? 0) < meta.version) latestSecrets.set(meta.parameterKey, meta);
   }
-  const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : null;
+  // The status follows what runs: the applied revision's plan, also while the desired one differs.
+  const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : input.appliedPlan;
   return {
     ...appStackSummaryDto(input),
     status: appStackDisplayStatus({ stack, plan: applied, components: input.components, domainCount: input.domains.length, now }),
     templateVersionId: stack.templateVersionId,
     createdAt: stack.createdAt.toISOString(),
     activeOperationId: input.activeOperationId,
+    platformWork: input.platformWork,
     revisionNumber: desired?.revision.revisionNumber ?? null,
     components: components.map((c) => ({
       key: c.key,
@@ -117,8 +129,9 @@ export function appStackDetailDto(input: {
         return label === undefined ? [] : [{ key: row.parameterKey, label, value: row.publicValue }];
       })
       .sort((a, b) => byText(a.key, b.key)),
+    // A secret the platform generated and the customer may not replace (ADR-0036) is not listed.
     secretParameters: spec.parameters.flatMap((p) => {
-      if (p.type !== "secret") return [];
+      if (p.type !== "secret" || !p.customer) return [];
       const meta = latestSecrets.get(p.key);
       return [
         {
@@ -133,6 +146,13 @@ export function appStackDetailDto(input: {
     }),
     volumes: input.volumes.map((v) => ({ key: v.volumeKey, status: v.status, retentionPolicy: v.retentionPolicy })),
     ingress,
+    // A path must point at an entry point of the plan that runs too (the API refuses any other).
+    pathTargets: ingress.filter((i) => input.appliedPlan?.ingress.some((a) => a.componentKey === i.componentKey && a.port === i.port) ?? true),
+    routesPending: appStackRoutesPending({
+      domains: input.domains,
+      appliedRoutesHash: stack.appliedRoutesHash,
+      appliedAddressesHash: stack.appliedAddressesHash,
+    }),
     cpuMilli: totals.cpuMilli,
     memoryBytes: totals.memoryBytes,
     upgrade: input.upgrade,
@@ -151,6 +171,16 @@ export function appStackDomainDto(row: AppStackDomainRow): AppStackDomainDto {
     certificateProblem: row.certProblem,
     certificateExpiresAt: iso(row.certExpiresAt),
     checkedAt: iso(row.dnsCheckedAt),
+    redirectToDomainId: row.redirectToDomainId,
+    compression: row.compression,
+    // The user name only: the verifier of the password stays in the row.
+    protection: row.accessUsername === null ? null : { username: row.accessUsername },
+    pathRoutes: row.pathRoutes.map((path) => ({
+      pathPrefix: path.pathPrefix,
+      componentKey: path.componentKey,
+      port: path.port,
+      stripPrefix: path.stripPrefix,
+    })),
   };
 }
 
@@ -171,6 +201,32 @@ export function appStackDeploymentDto(
   };
 }
 
+/**
+ * What the customer sees of a backup: whether each copy is good, never where it is. `presentVolumeKeys` are the data
+ * volumes the application holds now: a backup none of whose data belongs to it any more cannot be restored.
+ */
+export function appStackBackupDto(
+  row: AppStackBackupRow,
+  copies: readonly AppStackBackupCopyRow[],
+  presentVolumeKeys: ReadonlySet<string>,
+): AppStackBackupDto {
+  const good = (row.status === "succeeded" || row.status === "partial") && copies.some((copy) => copy.status === "succeeded");
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    problem: row.problem,
+    sizeBytes: row.sizeBytes,
+    volumeKeys: row.volumeKeys,
+    copies: copies.map((copy) => ({ priority: copy.priority, status: copy.status, problem: copy.problem })),
+    startedAt: row.startedAt.toISOString(),
+    finishedAt: iso(row.finishedAt),
+    restore: row.restoreStatus === null ? null : { status: row.restoreStatus, problem: row.restoreProblem, at: iso(row.restoredAt) },
+    restorable: good && row.volumeKeys.some((key) => presentVolumeKeys.has(key)),
+    incompleteData: row.incompleteData,
+  };
+}
+
 export function appStackAcceptedEnvelope(organizationId: string, r: AppStackWriteResult): AppStackAcceptedEnvelope {
   const operationId = r.operation?.id ?? null;
   return {
@@ -179,5 +235,16 @@ export function appStackAcceptedEnvelope(organizationId: string, r: AppStackWrit
       stack: `/v1/organizations/${organizationId}/app-stacks/${r.stack.id}`,
       operation: operationId === null ? null : `/v1/organizations/${organizationId}/operations/${operationId}`,
     },
+  };
+}
+
+/** Audit details of a new address; `compression` is named only when the address is created with it on (ADR-0037). */
+export function assignedAddressDetails(row: AppStackDomainRow): Record<string, unknown> {
+  return {
+    domainId: row.id,
+    hostname: row.hostname,
+    componentKey: row.componentKey,
+    internalPort: row.internalPort,
+    ...(row.compression ? { compression: true } : {}),
   };
 }

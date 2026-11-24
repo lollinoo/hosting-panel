@@ -39,7 +39,7 @@ const ORG = "org_a1";
 const PLANTED = "S3cr3t-planted";
 const t = en.apps.wizard;
 
-const PARAMS: AppTemplateParameter[] = [
+const PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "title", label: "Board title", type: "string", default: "My notes", customer: true },
   { key: "port", label: "Listen port", type: "integer", min: 1024, max: 65535, default: 8080, customer: true },
   { key: "mode", label: "Mode", type: "enum", options: ["small", "large"], default: "small", customer: true },
@@ -206,8 +206,8 @@ describe("missingSecretKeys and buildDomainEntries", () => {
       { hostname: "b.example.test", target: 0 },
     ];
     expect(buildDomainEntries(rows, ENTRY.ingress)).toEqual([
-      { hostname: "notes.example.test", componentKey: "admin", port: 9000 },
-      { hostname: "b.example.test", componentKey: "web", port: 8080 },
+      { hostname: "notes.example.test", componentKey: "admin", port: 9000, compression: true },
+      { hostname: "b.example.test", componentKey: "web", port: 8080, compression: true },
     ]);
     expect(buildDomainEntries([], ENTRY.ingress)).toEqual([]);
   });
@@ -375,7 +375,7 @@ describe("AppWizard markup", () => {
     expect(out).toContain("notes.example.test");
     expect(out).toContain("CPU 0.5 vCPU · Memory 256 MiB");
     expect(out).toContain(t.dataNote);
-    expect(out).toContain(en.apps.detail.backupUnavailable);
+    expect(out).toContain(en.apps.wizard.backupNote);
     for (const step of ["configure", "domains", "review", "install"]) {
       for (const m of [en, itMsgs]) expect(html(wizard({ ...state, 0: step }, { 0: values }, ENTRY, m).tree, m)).not.toContain(PLANTED);
     }
@@ -400,7 +400,7 @@ describe("AppWizard install", () => {
       templateVersionId: "atv_notes_2",
       name: "team-notes",
       parameters: [{ key: "port", value: 9000 }],
-      domains: [{ hostname: "notes.example.test", componentKey: "web", port: 8080 }],
+      domains: [{ hostname: "notes.example.test", componentKey: "web", port: 8080, compression: true }],
       deploy: false,
     });
     expect(sent[1]!.body).toEqual({ parameterKey: "admin_password", value: PLANTED });

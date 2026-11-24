@@ -13,7 +13,11 @@ import {
   AppTemplateSourceSchema,
   AppTemplateValidationDtoSchema,
   ArchiveAppTemplateInputSchema,
+  COMPOSE_IMPORT_REPORT_MAX,
+  ComposeImportDtoSchema,
+  ComposeImportNoteDtoSchema,
   CreateAppTemplateInputSchema,
+  ImportComposeInputSchema,
   UpdateAppTemplateInputSchema,
   ValidateAppTemplateInputSchema,
 } from "../src/app-templates/admin-dto.js";
@@ -65,11 +69,20 @@ const CUSTOMER_SUMMARY = {
 };
 const STACK_SUMMARY = {
   id: "ast_demo", name: "My notes", status: "running", templateId: "atpl_demo", templateName: "Notes", templateVersionNumber: 1,
-  componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com", updatedAt: AT,
+  installed: { revisionNumber: 1, templateVersionNumber: 1 }, componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com",
+  updatedAt: AT,
 };
+
+const NOTE = { level: "changed", code: "IMAGE_PINNED", path: "services.app.image", message: "The image is pinned to the digest its registry gave." };
 
 const SAMPLES: [string, z.ZodType, unknown][] = [
   ["validation", AppTemplateValidationDtoSchema, { valid: false, issues: [ISSUE], parameters: SPEC.parameters, preview: PREVIEW }],
+  [
+    "compose import",
+    ComposeImportDtoSchema,
+    { source: "x-hp-stack: {}\n", report: [NOTE], validation: { valid: true, issues: [], parameters: SPEC.parameters, preview: PREVIEW } },
+  ],
+  ["compose import refused", ComposeImportDtoSchema, { source: null, report: [{ ...NOTE, level: "refused", code: "IMAGE_UNRESOLVED" }], validation: null }],
   ["admin summary", AdminAppTemplateSummaryDtoSchema, SUMMARY],
   ["admin detail", AdminAppTemplateDetailDtoSchema, DETAIL],
   ["version created", AdminAppTemplateVersionCreatedDtoSchema, { template: DETAIL, versionId: "atv_demo_1", versionNumber: 1, created: true }],
@@ -133,12 +146,15 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     "stack detail",
     AppStackDetailDtoSchema,
     {
-      ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, revisionNumber: 1,
+      ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, platformWork: "backups_cleanup", revisionNumber: 1,
+      installed: null,
       components: [{ key: "app", health: "healthy", healthObservedAt: AT, dependsOn: ["cache"], ingress: true, cpuMilli: 1000, memoryBytes: "536870912" }],
       parameters: [{ key: "workers", label: "Workers", value: 2 }],
       secretParameters: [{ key: "app_secret", label: "App secret", required: true, isSet: true, version: 1, setAt: AT }],
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       ingress: [{ componentKey: "app", port: 8080 }],
+      pathTargets: [{ componentKey: "app", port: 8080 }],
+      routesPending: false,
       cpuMilli: 1500, memoryBytes: "805306368",
       upgrade: { templateVersionId: "atv_demo_2", versionNumber: 2 },
       rollback: { revisionId: "astr_1", revisionNumber: 1, templateVersionNumber: 1 },
@@ -155,7 +171,8 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     AppStackDomainDtoSchema,
     {
       id: "asd_1", hostname: "notes.example.com", componentKey: "app", port: 8080, status: "active", certificateStatus: "active",
-      certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT,
+      certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT, redirectToDomainId: null, compression: true,
+      protection: { username: "team" }, pathRoutes: [{ pathPrefix: "/api", componentKey: "api", port: 3000, stripPrefix: true }],
     },
   ],
   [
@@ -180,7 +197,7 @@ defaultVersionNumber installations componentCount hasIngress hasVolumes updatedA
 versionId created templateId source stacks organizationId organizationName status truncated cpuMilli memoryBytes volumeCount templates
 categories ingress components key componentKey port hostname templateVersionId domains deploy revisionId planHash confirmName
 destroyData parameterKey value limit cursor tail stackId operationId deploymentId links stack operation templateName
-templateVersionNumber unhealthyCount primaryHostname activeOperationId revisionNumber health healthObservedAt dependsOn label
+templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork revisionNumber health healthObservedAt dependsOn label
 secretParameters required isSet version setAt volumes retentionPolicy upgrade rollback kind problem startedAt endedAt certificateStatus
 certificateProblem certificateExpiresAt checkedAt fromRevisionId fromVersionNumber toTemplateVersionId toVersionNumber newRevision
 change restart downtime dataRisk lines at stream text observedAt stale`.split(/\s+/);
@@ -201,6 +218,7 @@ describe("app API DTO keys pass the public-DTO and plaintext-secret guards", () 
 
 const INPUTS: [string, z.ZodType, Record<string, unknown>, boolean][] = [
   ["validate", ValidateAppTemplateInputSchema, { source: "x" }, true],
+  ["import compose", ImportComposeInputSchema, { compose: "services: {}", name: "Notes", category: "productivity" }, true],
   ["create template", CreateAppTemplateInputSchema, { slug: "notes-demo", source: "x" }, true],
   ["add version", AddAppTemplateVersionInputSchema, { source: "x" }, true],
   ["update template", UpdateAppTemplateInputSchema, { enabled: false }, true],
@@ -219,6 +237,26 @@ const INPUTS: [string, z.ZodType, Record<string, unknown>, boolean][] = [
   ["logs query", AppStackLogsQuerySchema, { tail: "10" }, false],
 ];
 
+describe("a new web address and compression (ADR-0037)", () => {
+  const entry = { hostname: "notes.example.com", componentKey: "app", port: 8080 };
+
+  it("takes true or false, and an entry without it parses to the same keys as before", () => {
+    expect(AddAppStackDomainInputSchema.parse(entry)).toEqual(entry);
+    for (const compression of [true, false]) expect(AddAppStackDomainInputSchema.parse({ ...entry, compression })).toEqual({ ...entry, compression });
+    for (const compression of ["true", 1, null]) expect(AddAppStackDomainInputSchema.safeParse({ ...entry, compression }).success, String(compression)).toBe(false);
+  });
+
+  it("is taken per address when an application is created", () => {
+    const made = CreateAppStackInputSchema.parse({
+      templateVersionId: "atv_demo_1",
+      name: "My notes",
+      deploy: false,
+      domains: [{ ...entry, compression: true }, { ...entry, hostname: "wiki.example.com" }],
+    });
+    expect(made.domains).toEqual([{ ...entry, compression: true }, { ...entry, hostname: "wiki.example.com" }]);
+  });
+});
+
 describe("app API input schemas", () => {
   it.each(INPUTS)("%s: strict, and {} refused when a field is required", (_name, schema, valid, hasRequired) => {
     expect(schema.safeParse(valid).success).toBe(true);
@@ -232,6 +270,35 @@ describe("app API input schemas", () => {
     expect(AppTemplateSourceSchema.safeParse("é".repeat(32_768)).success).toBe(true);
     expect(AppTemplateSourceSchema.safeParse(`${"é".repeat(32_768)}a`).success).toBe(false);
     expect(AppTemplateSourceSchema.safeParse("").success).toBe(false);
+  });
+
+  it("a Compose file is bounded like a template source, and its name and category like a template's", () => {
+    const parse = (input: unknown): boolean => ImportComposeInputSchema.safeParse(input).success;
+    expect(parse({ compose: "a".repeat(65_536) })).toBe(true);
+    expect(parse({ compose: "a".repeat(65_537) })).toBe(false);
+    expect(parse({ compose: `${"é".repeat(32_768)}a` })).toBe(false);
+    expect(parse({ compose: "" })).toBe(false);
+    expect(parse({ compose: 1 })).toBe(false);
+    expect(parse({ compose: "x", name: "n".repeat(81) })).toBe(false);
+    expect(parse({ compose: "x", name: "a\u0000b" })).toBe(false);
+    expect(parse({ compose: "x", category: "Not A Slug" })).toBe(false);
+    expect(parse({ compose: "x", name: undefined })).toBe(true);
+  });
+
+  it("an import report holds at most 200 notes, each with a known level, a code in capitals and a bounded text", () => {
+    const report = (count: number): unknown => ({ source: null, report: Array.from({ length: count }, () => NOTE), validation: null });
+    expect(COMPOSE_IMPORT_REPORT_MAX).toBe(200);
+    expect(ComposeImportDtoSchema.safeParse(report(200)).success).toBe(true);
+    expect(ComposeImportDtoSchema.safeParse(report(201)).success).toBe(false);
+    const note = (change: Record<string, unknown>): boolean => ComposeImportNoteDtoSchema.safeParse({ ...NOTE, ...change }).success;
+    expect(note({})).toBe(true);
+    expect(note({ path: "" })).toBe(true);
+    expect(note({ level: "warning" })).toBe(false);
+    expect(note({ code: "image_pinned" })).toBe(false);
+    expect(note({ path: "p".repeat(513) })).toBe(false);
+    expect(note({ message: "" })).toBe(false);
+    expect(note({ message: "m".repeat(601) })).toBe(false);
+    expect(note({ extra: 1 })).toBe(false);
   });
 
   it("a template update must change something", () => {

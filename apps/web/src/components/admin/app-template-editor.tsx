@@ -4,6 +4,7 @@ import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   APP_TEMPLATE_SLUG_PATTERN,
+  appTemplateSecretGenerate,
   parseTemplateYaml,
   type AppTemplateIssue,
   type AppTemplateValidationDto,
@@ -44,6 +45,13 @@ export function canSaveAppTemplate(s: { source: string; syntaxOk: boolean; busy:
   return s.slug === null || APP_TEMPLATE_SLUG_PATTERN.test(s.slug);
 }
 
+/** The «default» cell of a parameter: never the value of a secret, and for a secret the platform generates, how it is made. */
+export function appParameterDefaultText(t: EditorMessages, p: AppTemplateValidationDto["parameters"][number]): string {
+  if (p.type !== "secret") return String(p.default);
+  const generate = appTemplateSecretGenerate(p);
+  return generate === null ? t.secretNoDefault : format(t.secretGenerated, { kind: generate.kind, length: generate.length });
+}
+
 /** The issues as a list; also shown by the edit page for a stored version that no longer passes. */
 export function AppIssueList({ issues }: { issues: readonly AppTemplateIssue[] }) {
   const t = useMessages().admin.appTemplates.editor;
@@ -56,14 +64,20 @@ export function AppIssueList({ issues }: { issues: readonly AppTemplateIssue[] }
   );
 }
 
-/** The HCP-STACK/v1 editor: instant syntax feedback, the server's validation with the sanitised plan, and the save. */
+/**
+ * The editor of an application template source (HCP-STACK/v1 or v2): instant syntax feedback, the server's validation
+ * with the sanitised plan, and the save. `initialResult` is the server's verdict on `initialSource` when the caller
+ * already has it (the Compose import): the editor then opens with it, and the first edit drops it like any other.
+ */
 export function AppTemplateEditor({
   csrfToken,
   initialSource,
+  initialResult = null,
   target,
 }: {
   csrfToken: string;
   initialSource: string;
+  initialResult?: AppTemplateValidationDto | null;
   target: AppEditorTarget;
 }) {
   const m = useMessages();
@@ -71,7 +85,7 @@ export function AppTemplateEditor({
   const t = m.admin.appTemplates;
   const e = t.editor;
   const [source, setSource] = useState(initialSource);
-  const [result, setResult] = useState<AppTemplateValidationDto | null>(null);
+  const [result, setResult] = useState<AppTemplateValidationDto | null>(initialResult);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"validate" | "save" | null>(null);
   const [makeDefault, setMakeDefault] = useState(true);
@@ -276,7 +290,7 @@ export function AppTemplateEditor({
                         <TableCell>{p.label}</TableCell>
                         <TableCell className="font-mono">{p.type}</TableCell>
                         <TableCell>{p.customer ? e.customerYes : e.customerNo}</TableCell>
-                        <TableCell className="font-mono">{p.type === "secret" ? e.secretNoDefault : String(p.default)}</TableCell>
+                        <TableCell className="font-mono">{appParameterDefaultText(e, p)}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

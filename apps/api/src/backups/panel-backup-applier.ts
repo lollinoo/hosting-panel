@@ -108,6 +108,10 @@ export class PanelBackupApplier {
       await this.parent.safeUpdateStep(op.id, "upload", "running", "Sending the copy to the backup storage");
 
       const retentionDays = (await getPolicy(db, "panel")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
+      // The nightly clean-ups of applications, queued in the same run, and a customer's application backup can take both
+      // job slots of the executor: the copy waits for a free one within the night's one wait, which the sites' nightly
+      // backups share, for every destination together.
+      const busyWait = await this.parent.nightlyBusyWait();
       // One dump, one copy per target (at most two), in priority order and one after the other: the panel lane runs a single
       // job at a time. The second job (`<op>-t2`) reads the first one's dump, so the file stays until every copy settled.
       // A copy that fails does not stop the next one; an unknown outcome stops the run and keeps the file for recovery.
@@ -119,14 +123,18 @@ export class PanelBackupApplier {
             await this.#settleCopy(copy, "failed", "other");
             continue;
           }
-          const startRes = await this.dockerExecutor.backups({
-            action: "panelStart",
-            jobId,
-            ...(jobId === op.id ? {} : { dumpId: op.id }),
-            target,
-            masterKey: this.config.secretsMasterKey.toString("hex"),
-            retentionDays,
-          });
+          const startRes = await this.parent.startWhenFree(
+            op.id,
+            {
+              action: "panelStart",
+              jobId,
+              ...(jobId === op.id ? {} : { dumpId: op.id }),
+              target,
+              masterKey: this.config.secretsMasterKey.toString("hex"),
+              retentionDays,
+            },
+            busyWait,
+          );
           await this.#settleCopyFromStatus(copy, await this.parent.pollJobStatus(op.id, jobId, startRes));
         } catch (err) {
           if (isAmbiguousError(err)) throw err;

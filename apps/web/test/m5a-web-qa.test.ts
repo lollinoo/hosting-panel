@@ -153,8 +153,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// The browser adds the panel's Origin to every POST of its pages.
 const bff = (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) =>
-  new Request(`http://localhost:3000${url}`, { method: init.method ?? "POST", headers: init.headers, body: init.body });
+  new Request(`http://localhost:3000${url}`, {
+    method: init.method ?? "POST",
+    headers: { Origin: "http://localhost:3000", ...init.headers },
+    body: init.body,
+  });
 const json = { "Content-Type": "application/json" };
 const loggedIn = { ...json, Cookie: "hp_session=SENTINEL-cookie; hp_locale=en", Authorization: "Bearer SENTINEL-browser", "X-CSRF-Token": "csrf-ok" };
 const admin = { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf-ok", ...json };

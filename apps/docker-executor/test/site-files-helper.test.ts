@@ -125,6 +125,8 @@ async function createFakeHelperDocker(): Promise<{
   server.on("upgrade", (req, socket, head) => {
     openSockets.add(socket);
     socket.once("close", () => openSockets.delete(socket));
+    // The HTTP server drops its own error handler on upgrade.
+    socket.on("error", () => undefined);
     const urlPath = (req.url ?? "/").replace(apiPrefix, "").split("?")[0] ?? "/";
     const match = /^\/exec\/([^/]+)\/start$/.exec(urlPath);
     const execId = match?.[1] ? decodeURIComponent(match[1]) : "";

@@ -5,6 +5,7 @@ import {
   AppStackDetailDtoSchema,
   AppStackDomainDtoSchema,
   AppStackSummaryDtoSchema,
+  findForbiddenPublicDtoKeys,
   type AppImageAllowlistEntry,
   type AppStackComponentHealth,
   type ApprovedStackPlan,
@@ -26,6 +27,7 @@ import {
   appStackDomainDto,
   appStackSummaryDto,
 } from "../src/app-stacks/app-stack-dto.js";
+import { appStackAddressesHash, appStackRoutePlan, appStackRoutesHash } from "../src/app-stacks/app-stack-runtime-policy.js";
 
 const fixture = (name: string): string =>
   readFileSync(new URL(`../../../packages/contracts/test/fixtures/app-stack-notes-demo/${name}`, import.meta.url), "utf8");
@@ -65,6 +67,7 @@ const stackRow = (change: Partial<AppStackRow> = {}): AppStackRow => ({
   appliedRevisionId: null,
   resourceQuotaId: null,
   appliedRoutesHash: null,
+  appliedAddressesHash: null,
   idempotencyKey: "k-1",
   requestHash: "h",
   createdBy: "usr_1",
@@ -104,6 +107,11 @@ const domain = (id: string, hostname: string, status: AppStackDomainRow["status"
   certAttempts: 0,
   certExpiresAt: null,
   certTrusted: true,
+  redirectToDomainId: null,
+  compression: false,
+  accessUsername: null,
+  accessPasswordHash: null,
+  pathRoutes: [],
   createdAt: NOW,
   updatedAt: NOW,
 });
@@ -127,12 +135,15 @@ const detailInput = (change: Partial<Parameters<typeof appStackDetailDto>[0]> = 
   templateVersionNumber: 1,
   spec: SPEC,
   desired: null,
+  appliedPlan: null,
   components: [],
   volumes: [],
   domains: [],
   parameters: [],
   secrets: [],
   activeOperationId: null,
+  installed: null,
+  platformWork: null,
   upgrade: null,
   rollback: null,
   now: NOW,
@@ -142,13 +153,22 @@ const deployed = (components: AppStackComponentRow[], change: Partial<Parameters
   detailInput({
     stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION }),
     desired: { revision, plan: PLAN },
+    appliedPlan: PLAN,
     components,
     ...change,
   });
 
 describe("appStackSummaryDto", () => {
   const summary = (components: AppStackComponentRow[], domains: AppStackDomainRow[] = []) =>
-    appStackSummaryDto({ stack: stackRow({ status: "running" }), templateName: "Notes Demo", templateVersionNumber: 2, components, domains, now: NOW });
+    appStackSummaryDto({
+      stack: stackRow({ status: "running" }),
+      templateName: "Notes Demo",
+      templateVersionNumber: 2,
+      installed: { revisionNumber: 4, templateVersionNumber: 1 },
+      components,
+      domains,
+      now: NOW,
+    });
 
   it("counts unhealthy and missing components; a stale observation reads unknown and is not counted", () => {
     const dto = summary([
@@ -158,7 +178,7 @@ describe("appStackSummaryDto", () => {
       component("web", "healthy", FRESH),
       component("never", "unhealthy", null),
     ]);
-    expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2 });
+    expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2, installed: { revisionNumber: 4, templateVersionNumber: 1 } });
     expect(AppStackSummaryDtoSchema.strict().parse(dto)).toEqual(dto);
   });
 
@@ -207,11 +227,35 @@ describe("appStackDetailDto", () => {
     expect(dto.components[0]).toMatchObject({ key: "cache", health: "unknown", healthObservedAt: STALE.toISOString() });
   });
 
-  it("keeps the stored status while the desired revision is not the applied one", () => {
-    const dto = appStackDetailDto(
-      deployed([component("app", "healthy", STALE)], { stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: "srev_old" }) }),
-    );
-    expect(dto.status).toBe("running");
+  it("while the desired revision is not the applied one, the status follows the applied revision's plan", () => {
+    // The target runs only the cache; what runs is the full plan, whose web part is the essential one.
+    const target = {
+      revision: { ...revision, id: "srev_new", revisionNumber: 4 },
+      plan: { ...PLAN, revisionId: "srev_new", components: PLAN.components.filter((c) => c.key === "cache"), ingress: [] } as ApprovedStackPlan,
+    };
+    const shown = (components: AppStackComponentRow[]) =>
+      appStackDetailDto(
+        detailInput({
+          stack: stackRow({ status: "running", desiredRevisionId: "srev_new", appliedRevisionId: REVISION }),
+          desired: target,
+          appliedPlan: PLAN,
+          components,
+        }),
+      ).status;
+    expect(shown([component("app", "healthy", FRESH), component("cache", "healthy", FRESH)])).toBe("running");
+    // A crash of what runs shows, and so does an observation gone stale.
+    expect(shown([component("app", "stopped", FRESH), component("cache", "healthy", FRESH)])).toBe("failed");
+    expect(shown([component("app", "healthy", STALE), component("cache", "healthy", FRESH)])).toBe("unknown");
+    // No readable applied plan: the stored status.
+    expect(
+      appStackDetailDto(
+        detailInput({
+          stack: stackRow({ status: "running", desiredRevisionId: "srev_new", appliedRevisionId: REVISION }),
+          desired: target,
+          components: [component("app", "stopped", FRESH)],
+        }),
+      ).status,
+    ).toBe("running");
   });
 
   it("joins secret parameters with their latest metadata and never lists a secret key among the parameters", () => {
@@ -234,11 +278,81 @@ describe("appStackDetailDto", () => {
     ]);
   });
 
-  it("passes volumes, the active operation, upgrade and rollback through", () => {
+  it("says when the saved addresses and options are not those the last published route file was made from (ADR-0037)", () => {
+    const shop = domain("sdom_1", "shop.example.test", "active");
+    const hashOf = (rows: AppStackDomainRow[], include = new Set(["app"])) => {
+      const { entries } = appStackRoutePlan({ plan: PLAN, domains: rows, include, now: NOW, acmeEnabled: false });
+      return entries.length > 0 ? appStackRoutesHash(entries) : null;
+    };
+    /** The stack as a publication made from `from` leaves it, with `include` the targets that were healthy then. */
+    const live = (domains: AppStackDomainRow[], from: AppStackDomainRow[] | null, include = new Set(["app"])) => {
+      const appliedRoutesHash = from === null ? null : hashOf(from, include);
+      const appliedAddressesHash = from === null ? null : appStackAddressesHash(from, appliedRoutesHash);
+      return appStackDetailDto(
+        deployed([component("app", "healthy", FRESH)], {
+          stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION, appliedRoutesHash, appliedAddressesHash }),
+          appliedPlan: PLAN,
+          domains,
+        }),
+      ).routesPending;
+    };
+    expect(live([shop], [shop])).toBe(false);
+    // Published while the target read unhealthy, so the file holds no route: nothing the customer saved is missing.
+    expect(live([shop], [shop], new Set())).toBe(false);
+    const protectedShop = { ...shop, accessUsername: "guest", accessPasswordHash: "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/" };
+    expect(live([protectedShop], [shop])).toBe(true);
+    expect(live([protectedShop], [protectedShop])).toBe(false);
+    // Saved after that publication: pending even though the target is not healthy, so a refresh would not show it yet.
+    expect(live([protectedShop], [shop], new Set())).toBe(true);
+    expect(live([shop, domain("sdom_2", "new.example.test", "pending")], [shop])).toBe(true);
+    expect(live([], [shop])).toBe(true);
+    // The first address of a stack published with none.
+    expect(live([shop], [])).toBe(true);
+    // Stopped or never installed: nothing published holds nothing back.
+    expect(live([protectedShop], null)).toBe(false);
+    expect(appStackDetailDto(detailInput({ domains: [protectedShop] })).routesPending).toBe(false);
+  });
+
+  it("a routes hash without its fingerprint, or written after it by a release that does not know it, reads pending", () => {
+    const shop = domain("sdom_1", "shop.example.test", "active");
+    const { entries } = appStackRoutePlan({ plan: PLAN, domains: [shop], include: new Set(["app"]), now: NOW, acmeEnabled: false });
+    const published = appStackRoutesHash(entries);
+    const pending = (appliedRoutesHash: string | null, appliedAddressesHash: string | null) =>
+      appStackDetailDto(
+        deployed([component("app", "healthy", FRESH)], {
+          stack: stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION, appliedRoutesHash, appliedAddressesHash }),
+          appliedPlan: PLAN,
+          domains: [shop],
+        }),
+      ).routesPending;
+    expect(pending(published, appStackAddressesHash([shop], published))).toBe(false);
+    expect(pending(published, null)).toBe(true);
+    expect(pending("0".repeat(64), appStackAddressesHash([shop], published))).toBe(true);
+    expect(pending(null, appStackAddressesHash([shop], published))).toBe(true);
+  });
+
+  it("offers as path targets the entry points of both the revision that runs and the desired one, as the API accepts them", () => {
+    const app = { componentKey: "app", port: 8080 };
+    const cache = { componentKey: "cache", port: 6379 };
+    const withIngress = (ingress: ApprovedStackPlan["ingress"]): ApprovedStackPlan => ({ ...PLAN, ingress });
+    const stack = stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: "srev_old" });
+    const of = (desired: ApprovedStackPlan, applied: ApprovedStackPlan | null) =>
+      appStackDetailDto(deployed([], { stack, desired: { revision, plan: desired }, appliedPlan: applied }));
+    // An upgrade asked for and not installed adds an entry point: the address can take it, a path cannot yet.
+    expect(of(withIngress([app, cache]), withIngress([app]))).toMatchObject({ ingress: [app, cache], pathTargets: [app] });
+    // It removes one: neither can.
+    expect(of(withIngress([app]), withIngress([app, cache]))).toMatchObject({ ingress: [app], pathTargets: [app] });
+    expect(appStackDetailDto(deployed([])).pathTargets).toEqual(PLAN.ingress);
+    expect(appStackDetailDto(detailInput())).toMatchObject({ ingress: [app], pathTargets: [app] });
+  });
+
+  it("passes volumes, the active operation, the platform's work, upgrade and rollback through", () => {
     const dto = appStackDetailDto(
       deployed([], {
         volumes: [{ stackId: STACK, organizationId: ORG, volumeKey: "data", retentionPolicy: "retain", status: "present", createdAt: NOW, updatedAt: NOW }],
         activeOperationId: "op_1",
+        installed: { revisionNumber: 2, templateVersionNumber: 1 },
+        platformWork: "backups_cleanup",
         upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
         rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
       }),
@@ -246,9 +360,12 @@ describe("appStackDetailDto", () => {
     expect(dto).toMatchObject({
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       activeOperationId: "op_1",
+      installed: { revisionNumber: 2, templateVersionNumber: 1 },
+      platformWork: "backups_cleanup",
       upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
       rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
     });
+    expect(AppStackDetailDtoSchema.strict().parse(dto)).toEqual(dto);
   });
 });
 
@@ -266,8 +383,30 @@ describe("row mappers", () => {
       certificateProblem: "not_pointing",
       certificateExpiresAt: expires.toISOString(),
       checkedAt: NOW.toISOString(),
+      redirectToDomainId: null,
+      compression: false,
+      protection: null,
+      pathRoutes: [],
     });
     expect(AppStackDomainDtoSchema.strict().parse(dto)).toEqual(dto);
+  });
+
+  it("maps the routing options of a domain row: the user name, never the verifier of the password", () => {
+    const verifier = "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/";
+    const pathRoutes = [{ pathPrefix: "/api", componentKey: "api", port: 3000, stripPrefix: true }];
+    const dto = appStackDomainDto({
+      ...domain("sdom_1", "app.example.test", "active"),
+      compression: true,
+      accessUsername: "team",
+      accessPasswordHash: verifier,
+      pathRoutes,
+    });
+    expect(dto).toMatchObject({ redirectToDomainId: null, compression: true, protection: { username: "team" }, pathRoutes });
+    expect(JSON.stringify(dto)).not.toContain("apr1");
+    expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);
+    expect(AppStackDomainDtoSchema.strict().parse(dto)).toEqual(dto);
+    const redirecting = appStackDomainDto({ ...domain("sdom_2", "old.example.test", "active"), redirectToDomainId: "sdom_1" });
+    expect(redirecting).toMatchObject({ redirectToDomainId: "sdom_1", protection: null, pathRoutes: [] });
   });
 
   it("maps a deployment row with its operation kind and revision number", () => {
@@ -281,6 +420,8 @@ describe("row mappers", () => {
       problem: "STACK_HEALTH_TIMEOUT",
       startedAt: FRESH,
       endedAt: null,
+      replacedRevisionId: null,
+      replacedStatus: null,
     };
     const dto = appStackDeploymentDto(row, "stack.deploy", 3);
     expect(dto).toEqual({

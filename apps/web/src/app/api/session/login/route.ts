@@ -2,10 +2,14 @@ import { generateCsrfToken, type SessionData } from "@/lib/session";
 import { setSessionCookie } from "@/lib/server-session";
 import { bffJsonResponse, bffErrorResponse } from "@/lib/bff-response";
 import { bffUpstreamResponse, readBoundedJsonBody } from "@/lib/bff-proxy";
+import { validateOrigin } from "@/lib/bff-guard";
 import { fetchUpstream } from "@/lib/upstream";
 import type { LoginResultDto, MeDto } from "@hosting-panel/contracts";
 
 export async function POST(req: Request) {
+  // No session and no CSRF token yet: the Origin is what keeps another site from signing the browser in.
+  const originError = validateOrigin(req, { required: true });
+  if (originError) return originError;
   const read = await readBoundedJsonBody(req, { requireJsonBody: true });
   if (!read.ok) return read.response;
   const body = read.body as Record<string, unknown>;

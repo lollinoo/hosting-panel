@@ -54,7 +54,10 @@ import {
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcRequest,
   type AppStackCreateIpcResult,
+  type AppStackImageResolveIpcRequest,
+  type AppStackImageResolveIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPrepareIpcResult,
@@ -1501,6 +1504,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
         },
       },
       readLogs: (ref, tail) => this.readContainerLogs(ref, tail),
+      backupLanes: this.backupRunner,
       // The engine and the tasks of one application exclude each other (ADR-0042).
       taskRunning: (stackId) => this.appStackTasks.isRunning(stackId),
     });
@@ -1532,8 +1536,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     return this.appStackEngine.prepareAppStack(req);
   }
 
-  public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
     return this.appStackEngine.createAppStackComponents(req);
+  }
+
+  public resolveAppStackImage(req: AppStackImageResolveIpcRequest): Promise<AppStackImageResolveIpcResult> {
+    return this.appStackEngine.resolveAppStackImage(req);
   }
 
   public startAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
@@ -3207,8 +3215,12 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
         "DOCKER_ENGINE_UNAVAILABLE",
       );
     }
+    // One container that cannot be removed does not keep the others: the first failure is reported at the end.
+    let failure: unknown = null;
     for (const job of JSON.parse(res.body.toString("utf8")) as DockerContainerListSummary[]) {
-      await this.stopAndRemoveContainer(job.Id);
+      await this.stopAndRemoveContainer(job.Id).catch((err: unknown) => {
+        failure ??= err;
+      });
     }
     const entries = await readdir(this.secretsRootDir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
@@ -3218,6 +3230,7 @@ export class DockerEngineSocketAdapter implements DockerExecutorPort, StackExecu
     }
     await this.siteFilesHelpers.removeAll();
     await this.backupRunner.removeOrphans();
+    if (failure !== null) throw failure;
   }
 
   /** Idempotent. The API deletes the site's services first, so any non-job container left means "not yet". */

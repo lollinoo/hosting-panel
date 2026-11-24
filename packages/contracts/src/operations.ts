@@ -67,6 +67,9 @@ export const OPERATION_KINDS = [
   "stack.upgrade",
   "stack.rollback",
   "stack.delete",
+  "stack.backup",
+  "stack.restore",
+  "stack.prune",
   "stack.task",
 ] as const;
 

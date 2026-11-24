@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { APP_STACK_OPERATION_KINDS, type OperationKind } from "@hosting-panel/contracts";
+import { APP_STACK_BACKUP_OPERATION_KINDS, APP_STACK_OPERATION_KINDS, type OperationKind } from "@hosting-panel/contracts";
 import {
   DEMO_IDS,
   and,
@@ -135,11 +135,32 @@ describe("outbox stack lane (RT5)", () => {
     const takers = claims.filter((c) => c.operationIds.includes(operation.id));
     expect(takers.map((c) => c.filter)).toEqual([{ includeKinds: APP_STACK_OPERATION_KINDS }]);
     const main = claims.find((c) => (c.filter as { excludeKinds?: string[] }).excludeKinds !== undefined);
-    expect((main!.filter as { excludeKinds: string[] }).excludeKinds).toEqual(expect.arrayContaining([...APP_STACK_OPERATION_KINDS]));
+    expect((main!.filter as { excludeKinds: string[] }).excludeKinds).toEqual(
+      expect.arrayContaining([...APP_STACK_OPERATION_KINDS, ...APP_STACK_BACKUP_OPERATION_KINDS]),
+    );
     expect(runtime.apply).toHaveBeenCalledTimes(1);
     expect(runtime.apply.mock.calls[0]![0].id).toBe(operation.id);
     expect(runtime.apply.mock.calls[0]![1]).toMatchObject({ operationId: operation.id, stackId: operation.resourceId });
     expect((await opRow(operation.id)).status).toBe("succeeded");
+    runtime.apply.mockReset();
+  });
+
+  it("claims a backup and a restore through a lane of their own, a clean-up through another, and runs them with AppStackRuntime", async () => {
+    runtime.apply.mockImplementation(succeed);
+    const backup = await enqueueStack("stack.backup");
+    const restore = await enqueueStack("stack.restore");
+    const prune = await enqueueStack("stack.prune");
+    claims.length = 0;
+
+    await worker.processPendingOnce();
+
+    const taker = (id: string) => claims.filter((c) => c.operationIds.includes(id)).map((c) => c.filter);
+    expect(taker(backup.operation.id)).toEqual([{ includeKinds: ["stack.backup", "stack.restore"] }]);
+    expect(taker(restore.operation.id)).toEqual([{ includeKinds: ["stack.backup", "stack.restore"] }]);
+    expect(taker(prune.operation.id)).toEqual([{ includeKinds: ["stack.prune"] }]);
+    expect(runtime.apply.mock.calls.map((c) => (c[0] as { id: string }).id).sort()).toEqual(
+      [backup.operation.id, restore.operation.id, prune.operation.id].sort(),
+    );
     runtime.apply.mockReset();
   });
 

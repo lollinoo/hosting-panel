@@ -3,7 +3,10 @@ import {
   APP_IMAGE_ALLOWLIST,
   AppStackOperationPayloadSchema,
   ApprovedStackPlanSchema,
+  appStackComponentSecretRefs,
+  appStackPlanEnvironmentSecretRefs,
   appStackPlanImageProblems,
+  appStackPlanSecretRefs,
   type AppStackComponentHealth,
   type AppStackStatus,
   type AppStackStepKey,
@@ -15,6 +18,7 @@ import {
   appStackDeployments,
   eq,
   getAppStack,
+  getAppStackDeployment,
   getAppStackRevision,
   listAppStackDomains,
   listAppStackVolumes,
@@ -36,6 +40,7 @@ import { computeAppStackComponentHash, verifyAppStackPlanHash } from "@hosting-p
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
+import { AppStackBackupRuntime, isAppStackBackupKind } from "./app-stack-backup-runtime.js";
 import { recoverAppStackOperation } from "./app-stack-recovery.js";
 import {
   APP_STACK_FAILURE,
@@ -48,6 +53,7 @@ import {
   APP_STACK_STEP_NOT_NEEDED_TEXT,
   APP_STACK_STEP_RUNNING_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
+  appStackAddressesHash,
   appStackAggregate,
   appStackComponentReady,
   appStackEssentialKeys,
@@ -130,6 +136,7 @@ const healthMap = (rows: HealthRows) => new Map(rows.map((h) => [h.componentKey,
 @Injectable()
 export class AppStackRuntime {
   readonly #deps: AppStackRuntimeDeps;
+  readonly #backups: AppStackBackupRuntime;
 
   public constructor(
     @Inject(DATABASE_CLIENT_TOKEN) dbClient: DatabaseClient,
@@ -138,10 +145,13 @@ export class AppStackRuntime {
     @Optional() @Inject(APP_STACK_RUNTIME_CLOCK) clock?: AppStackRuntimeClock,
   ) {
     this.#deps = { db: dbClient.db, executor, config, clock: clock ?? SYSTEM_APP_STACK_CLOCK };
+    this.#backups = new AppStackBackupRuntime(this.#deps);
   }
 
-  /** Worker dispatch for every APP_STACK_OPERATION_KINDS kind. Throws to fail. */
+  /** Worker dispatch for every kind of the stack lane. Throws to fail. */
   public async apply(op: OperationRow, payload: Readonly<Record<string, unknown>>): Promise<void> {
+    // Backups have their own payload and no deployment row (ADR-0038).
+    if (isAppStackBackupKind(op.kind)) return this.#backups.apply(op);
     const parsed = AppStackOperationPayloadSchema.safeParse(payload);
     if (!parsed.success || parsed.data.stackId !== op.resourceId) {
       const failure = APP_STACK_FAILURE.STACK_TEMPLATE_INVALID;
@@ -192,6 +202,7 @@ export class AppStackRuntime {
 
   /** Worker recovery for an `unknown` stack operation; read-only. */
   public recover(op: OperationRow): Promise<"pending" | "settled"> {
+    if (isAppStackBackupKind(op.kind)) return this.#backups.recover(op);
     return recoverAppStackOperation(this.#deps, op);
   }
 
@@ -297,14 +308,15 @@ export class AppStackRuntime {
     return own ? plan : null;
   }
 
-  /** The pinned (parameterKey, version) pairs of the plan, decrypted. */
+  /** The pinned (parameterKey, version) pairs of the plan, decrypted: the ones delivered as files and, in a version 2
+   *  plan, the ones the executor writes into a component's environment (ADR-0036). */
   async #secretFiles(ctx: StackContext, plan: ApprovedStackPlan) {
-    const refs = new Map<string, { parameterKey: string; version: number }>();
-    for (const c of plan.components) {
-      for (const f of c.secretFiles) refs.set(`${f.parameterKey}:${String(f.version)}`, { parameterKey: f.parameterKey, version: f.version });
-    }
     try {
-      return await readAppStackSecretFiles(this.#deps.db, { ...ctx.ref, masterKey: this.#deps.config.secretsMasterKey, refs: [...refs.values()] });
+      return await readAppStackSecretFiles(this.#deps.db, {
+        ...ctx.ref,
+        masterKey: this.#deps.config.secretsMasterKey,
+        refs: appStackPlanSecretRefs(plan),
+      });
     } catch (err) {
       if (err instanceof AppStackSecretError && err.code === "SECRET_MISSING") throw new AppStackStepRefusal("STACK_SECRET_MISSING");
       throw err;
@@ -347,7 +359,14 @@ export class AppStackRuntime {
           await setAppStackVolumeStatusTransactional(db, { ...ctx.ref, volumeKeys: prepared.volumes.map((v) => v.volumeKey), status: "present" });
         });
         await this.#step(ctx, "create", async () => {
-          const result = await port.createAppStackComponents({ plan });
+          // Only a plan with environment secrets carries values to the creation, and only those: a version 1 request
+          // stays the one it was.
+          const wanted = appStackPlanEnvironmentSecretRefs(plan);
+          const secretContents =
+            wanted.length === 0
+              ? []
+              : (await this.#secretFiles(ctx, plan)).filter((f) => wanted.some((w) => w.parameterKey === f.parameterKey && w.version === f.version));
+          const result = await port.createAppStackComponents(wanted.length === 0 ? { plan } : { plan, secretContents });
           st.created = result.components.filter((c) => c.outcome !== "unchanged").map((c) => c.componentKey);
         });
       }
@@ -366,15 +385,15 @@ export class AppStackRuntime {
         "start",
         async () => {
           const files = await this.#secretFiles(ctx, plan);
+          const mine = (component: ApprovedStackPlan["components"][number]) => {
+            const refs = appStackComponentSecretRefs(component);
+            return files.filter((f) => refs.some((r) => r.parameterKey === f.parameterKey && r.version === f.version));
+          };
           const again = deploy ? (st.previous === null ? [] : appStackRestartSet(plan, st.created ?? [])) : restart ? plan.components.map((c) => c.key) : [];
           for (const component of plan.components) {
             const depsReady = (o: ObservedAppStack) => component.dependsOn.every((d) => appStackComponentReady(appStackObservedComponent(o, d)));
             if (component.dependsOn.length > 0 && !(await readyWithin(depsReady))) return true;
-            const request = {
-              plan,
-              componentKey: component.key,
-              secretFileContents: files.filter((f) => component.secretFiles.some((s) => s.parameterKey === f.parameterKey && s.version === f.version)),
-            };
+            const request = { plan, componentKey: component.key, secretFileContents: mine(component) };
             await this.#renew(ctx);
             await (again.includes(component.key) ? port.restartAppStackComponent(request) : port.startAppStackComponent(request));
           }
@@ -410,6 +429,8 @@ export class AppStackRuntime {
         stackStatus: status,
         ...(deploy ? { appliedRevisionId: plan.revisionId } : {}),
         appliedRoutesHash: routesHash,
+        // What the routes were made from, read before they were written (with no address too: an address added next differs).
+        appliedAddressesHash: appStackAddressesHash(domains, routesHash),
         health: { observedAt: this.#now(), components: health },
       });
     };
@@ -429,10 +450,19 @@ export class AppStackRuntime {
         return settle({ stackStatus: "degraded", ...(deploy ? { appliedRevisionId: st.plan!.revisionId } : {}) }, ctx.lastHealth);
       }
       if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare"))) {
-        // Pre-flight: no container was touched; an applied stack keeps the status its previous revision shows.
-        const { stack, previous } = st;
-        const observed = deploy && stack && previous ? await this.#status(ctx) : null;
-        if (!stack || !previous || !observed) return settle({ stackStatus: "failed" });
+        // Pre-flight: create was never called, so no container was touched; the stack keeps the status the plan that
+        // runs shows, and an upgrade or a rollback takes back what its request wrote.
+        const { stack } = st;
+        const previous = deploy ? st.previous : st.plan;
+        const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
+        const observed = stack && previous ? await this.#status(ctx) : null;
+        // A stopped application whose start is refused stays stopped, read or not: nothing was started.
+        const replaced =
+          ctx.op.kind === "stack.start" ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId }) : null;
+        if (replaced?.replacedStatus === "stopped") {
+          return settle({ stackStatus: "stopped" }, previous && observed ? appStackHealthRows(previous, observed, "observer") : undefined);
+        }
+        if (!stack || !previous || !observed) return settle({ stackStatus: "failed", ...restore });
         const health = appStackHealthRows(previous, observed, "observer");
         const stackStatus: AppStackStatus = appStackAggregate({
           plan: previous,
@@ -440,7 +470,7 @@ export class AppStackRuntime {
           domainCount: (await listAppStackDomains(db, ctx.ref)).length,
           routesPublished: stack.appliedRoutesHash !== null,
         });
-        return settle({ stackStatus }, health);
+        return settle({ stackStatus, ...restore }, health);
       }
       const plan = st.plan!;
       if (!deploy || st.previous === null) {
@@ -489,8 +519,9 @@ export class AppStackRuntime {
       await (entries.length > 0 ? port.publishAppStackRoutes({ plan, routes: entries }) : port.unpublishAppStackRoutes(ctx.ref));
     }
     // An address goes live (and gets its certificate) only once its route is written.
+    const written = new Set(entries.flatMap((e) => e.hosts.map((h) => h.hostname)));
     for (const row of domains) {
-      if (row.status === "pending" && ready.has(row.componentKey)) {
+      if (row.status === "pending" && written.has(row.hostname)) {
         await updateAppStackDomainState(this.#deps.db, { domainId: row.id, set: { status: "active" } });
       }
     }
@@ -526,6 +557,7 @@ export class AppStackRuntime {
         problem: null,
         stackStatus: status === "running" ? "running" : "degraded",
         appliedRoutesHash: routesHash,
+        appliedAddressesHash: appStackAddressesHash(domains, routesHash),
       });
     };
     // The previous route file stays in place on a definite failure.

@@ -6,8 +6,8 @@ const stub = (): Record<string, unknown> =>
 
 describe("@hosting-panel/executor-contracts — StackExecutorPort (ADR-0035)", () => {
   it("lists 12 unique methods", () => {
-    expect(APP_STACK_EXECUTOR_METHODS).toHaveLength(12);
-    expect(new Set(APP_STACK_EXECUTOR_METHODS).size).toBe(12);
+    expect(APP_STACK_EXECUTOR_METHODS).toHaveLength(13);
+    expect(new Set(APP_STACK_EXECUTOR_METHODS).size).toBe(13);
   });
 
   it("detects an object with all 12 functions", () => {

@@ -19,6 +19,8 @@ import * as secretsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/s
 import * as domainsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route";
 import * as domainRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route";
 import * as logsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route";
+import * as backupsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/route";
+import * as restoreRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/[backupId]/restore/route";
 import * as taskRunsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/tasks/[taskKey]/runs/route";
 import * as taskScheduleRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/tasks/[taskKey]/schedule/route";
 
@@ -26,11 +28,17 @@ type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) 
 
 const ORG = "org_1";
 const STACK = "stk_a1";
+const BACKUP = "sbak_0123456789abcdef01234567";
 const BASE = `v1/organizations/${ORG}/app-stacks`;
 const HASH = "a".repeat(64);
 const SECRET = "S3cr3t-planted";
 const NOW = "2026-11-22T10:00:00.000Z";
 const domain = { hostname: "notes.example.com", componentKey: "web", port: 8080 };
+// ADR-0037: the four routing options of one address, always sent together.
+const apiPath = { pathPrefix: "/api", componentKey: "web", port: 8080, stripPrefix: true };
+const options = { redirectToDomainId: null, compression: true, protection: { username: "guest", password: "correct horse battery" }, pathRoutes: [apiPath] };
+const plain = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] };
+const VERIFIER = ["", "apr1", "a".repeat(8), "b".repeat(22)].join("$");
 const create = {
   templateVersionId: "atv_notes_2",
   name: "Notes",
@@ -46,7 +54,7 @@ const twice = [
 interface Case {
   name: string;
   handler: Handler;
-  method: "GET" | "POST" | "PUT" | "DELETE";
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   params: Record<string, string>;
   path: string;
   body?: unknown;
@@ -191,7 +199,51 @@ const cases: Case[] = [
     idempotency: false,
     status: 201,
     timeoutMs: 8_000,
-    badBodies: [{ hostname: domain.hostname }, { ...domain, port: 0 }, { ...domain, componentKey: "Web_1" }, { ...domain, extra: 1 }, [domain]],
+    okBodies: [{ ...domain, compression: true }, { ...domain, compression: false }],
+    badBodies: [
+      { hostname: domain.hostname },
+      { ...domain, port: 0 },
+      { ...domain, componentKey: "Web_1" },
+      { ...domain, extra: 1 },
+      { ...domain, compression: "yes" },
+      { ...domain, protection: { username: "guest", password: "correct horse battery" } },
+      [domain],
+    ],
+  },
+  {
+    name: "domain options",
+    handler: domainRoute.PATCH as unknown as Handler,
+    method: "PATCH",
+    params: { orgId: ORG, stackId: STACK, domainId: "sdom_1" },
+    path: `${BASE}/${STACK}/domains/sdom_1`,
+    body: options,
+    idempotency: false,
+    status: 200,
+    timeoutMs: 8_000,
+    okBodies: [plain, { ...plain, redirectToDomainId: "sdom_2", compression: true }, { ...plain, protection: { username: "guest" } }],
+    badBodies: [
+      {},
+      { compression: true },
+      { ...plain, extra: 1 },
+      { ...plain, compression: "yes" },
+      { ...plain, redirectToDomainId: "../x" },
+      // a redirecting address takes neither a password nor paths
+      { ...options, redirectToDomainId: "sdom_2" },
+      { ...plain, redirectToDomainId: "sdom_2", pathRoutes: [apiPath] },
+      // the browser sends a password, never a ready-made verifier
+      { ...plain, protection: { username: "guest", passwordHash: VERIFIER } },
+      { ...plain, protection: { username: "guest", password: "short" } },
+      { ...plain, protection: { username: "-guest", password: "correct horse battery" } },
+      { ...plain, protection: { password: "correct horse battery" } },
+      { ...plain, pathRoutes: [{ ...apiPath, pathPrefix: "/.well-known" }] },
+      { ...plain, pathRoutes: [{ ...apiPath, pathPrefix: "api" }] },
+      { ...plain, pathRoutes: [apiPath, { ...apiPath, stripPrefix: false }] },
+      { ...plain, pathRoutes: [{ ...apiPath, port: 0 }] },
+      { ...plain, pathRoutes: [{ ...apiPath, middleware: "x" }] },
+      { ...plain, pathRoutes: Array.from({ length: 5 }, (_, i) => ({ ...apiPath, pathPrefix: `/p${i}` })) },
+      [plain],
+      null,
+    ],
   },
   {
     name: "domain remove",
@@ -204,6 +256,31 @@ const cases: Case[] = [
     timeoutMs: 8_000,
     okBodies: [{}],
     badBodies: [{ x: 1 }, [], null],
+  },
+  {
+    name: "backup create",
+    handler: backupsRoute.POST as unknown as Handler,
+    method: "POST",
+    params: { orgId: ORG, stackId: STACK },
+    path: `${BASE}/${STACK}/backups`,
+    body: {},
+    idempotency: true,
+    status: 202,
+    timeoutMs: 8_000,
+    badBodies: EMPTY_ONLY,
+  },
+  {
+    name: "backup restore",
+    handler: restoreRoute.POST as unknown as Handler,
+    method: "POST",
+    params: { orgId: ORG, stackId: STACK, backupId: BACKUP },
+    path: `${BASE}/${STACK}/backups/${BACKUP}/restore`,
+    body: { confirmName: "Notes" },
+    idempotency: true,
+    status: 202,
+    timeoutMs: 8_000,
+    okBodies: [{ confirmName: "a".repeat(64) }],
+    badBodies: [{}, { confirmName: 1 }, { confirmName: "Notes", extra: 1 }, { confirmName: "a".repeat(65) }, { confirmName: "Notes", backupId: BACKUP }, [], null],
   },
   {
     name: "component logs",

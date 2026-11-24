@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   APP_STACK_EXECUTOR_REASON_CODES,
   type AppStackComponentActionIpcResult,
@@ -5,7 +6,10 @@ import {
   type AppStackComponentObservation,
   type AppStackComponentsRemoveIpcRequest,
   type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcRequest,
   type AppStackCreateIpcResult,
+  type AppStackImageResolveIpcRequest,
+  type AppStackImageResolveIpcResult,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPrepareIpcResult,
@@ -69,6 +73,8 @@ export class FakeStackExecutor implements StackExecutorPort {
   public readonly stacks = new Map<string, FakeStackModel>();
   /** Volume keys removeAppStack keeps (reported in retainedVolumes) even with removeVolumes. */
   public readonly volumesInUse = new Set<string>();
+  /** Scripted answers of resolveAppStackImage (reference -> "sha256:<hex>"). */
+  public readonly imageDigests = new Map<string, string>();
   readonly #faults: { method: FakeStackMethod; mode: "definite" | "ambiguous"; reason?: string }[] = [];
   readonly #health = new Map<string, "healthy" | "unhealthy">();
   readonly #unhealthyReads = new Map<string, number>();
@@ -141,7 +147,15 @@ export class FakeStackExecutor implements StackExecutorPort {
     });
   }
 
-  public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+  /** A registry that knows every reference: `imageDigests` scripts an answer, otherwise the SHA-256 of the reference. */
+  public resolveAppStackImage(req: AppStackImageResolveIpcRequest): Promise<AppStackImageResolveIpcResult> {
+    return this.#call("resolveAppStackImage", req, () => ({
+      image: req.image,
+      digest: this.imageDigests.get(req.image) ?? `sha256:${createHash("sha256").update(req.image).digest("hex")}`,
+    }));
+  }
+
+  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
     return this.#call("createAppStackComponents", req, () => {
       const { plan } = req;
       const s = this.stack(plan.stackId);

@@ -24,7 +24,10 @@ async function serve(pick: (servername: string) => "a" | "b"): Promise<number> {
     a: createSecureContext({ cert: CERT_A, key: KEY_A }),
     b: createSecureContext({ cert: CERT_B, key: KEY_B }),
   };
-  const server = createServer({ SNICallback: (name, cb) => cb(null, contexts[pick(name)]) }, (s) => s.end());
+  const server = createServer({ SNICallback: (name, cb) => cb(null, contexts[pick(name)]) }, (s) => {
+    s.on("error", () => undefined);
+    s.end();
+  });
   servers.push(server);
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   return (server.address() as net.AddressInfo).port;

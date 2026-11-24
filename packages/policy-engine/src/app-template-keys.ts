@@ -1,8 +1,11 @@
 /**
- * Allowed keys and refused keys at every level of an `HCP-STACK/v1` source. A key in neither list is KEY_UNKNOWN, so a
- * Compose feature that could reach the host can never slip in by being forgotten. The A4 security test iterates it.
+ * Allowed keys and refused keys at every level of an `HCP-STACK/v1` source, and the same table for `HCP-STACK/v2`
+ * (ADR-0036). A key in neither list is KEY_UNKNOWN, so a Compose feature that could reach the host can never slip in by
+ * being forgotten. The A4 security test iterates both tables.
  * Pure, synchronous and never throws; a message never echoes a value.
  */
+import type { AppTemplateSpecVersion } from "@hosting-panel/contracts";
+
 export type AppTemplateRefusalCode = "KEY_FORBIDDEN_SECURITY" | "KEY_FORBIDDEN_NETWORK" | "KEY_FORBIDDEN_HOST_ACCESS" | "KEY_UNSUPPORTED";
 
 export interface AppTemplateKeyLevel {
@@ -65,12 +68,36 @@ export const APP_TEMPLATE_KEY_LEVELS: Readonly<Record<
   }),
 });
 
-/** allowed → null; listed → its refusal code; anything else → "KEY_UNKNOWN". */
+const copyOf = (row: AppTemplateKeyLevel, added: readonly string[]): AppTemplateKeyLevel =>
+  level(
+    [...row.allowed, ...added],
+    Object.fromEntries(Object.entries(row.refusals).map(([code, keys]) => [code, [...keys]])),
+  );
+
+/**
+ * `HCP-STACK/v2`: every v1 row, plus `generate` on a parameter (and its own level), and the closed run profile on a
+ * service. Every key v1 refuses is still refused: a v2 source names no capability, device, host path, port or user.
+ */
+export const APP_TEMPLATE_KEY_LEVELS_V2: Readonly<Record<keyof typeof APP_TEMPLATE_KEY_LEVELS | "generate", AppTemplateKeyLevel>> =
+  Object.freeze({
+    ...APP_TEMPLATE_KEY_LEVELS,
+    parameter: copyOf(APP_TEMPLATE_KEY_LEVELS.parameter, ["generate"]),
+    generate: level(["kind", "length"]),
+    service: copyOf(APP_TEMPLATE_KEY_LEVELS.service, ["x-hp-profile"]),
+  });
+
+export type AppTemplateKeyLevelName = keyof typeof APP_TEMPLATE_KEY_LEVELS_V2;
+
+/** allowed → null; listed → its refusal code; anything else → "KEY_UNKNOWN". `version` picks the table (default v1). */
 export function appTemplateKeyVerdict(
-  level: keyof typeof APP_TEMPLATE_KEY_LEVELS,
+  level: AppTemplateKeyLevelName,
   key: string,
+  version: AppTemplateSpecVersion = 1,
 ): AppTemplateRefusalCode | "KEY_UNKNOWN" | null {
-  const row = APP_TEMPLATE_KEY_LEVELS[level];
+  const table: Readonly<Partial<Record<AppTemplateKeyLevelName, AppTemplateKeyLevel>>> =
+    version === 2 ? APP_TEMPLATE_KEY_LEVELS_V2 : APP_TEMPLATE_KEY_LEVELS;
+  const row = table[level];
+  if (row === undefined) return "KEY_UNKNOWN";
   if (row.allowed.includes(key)) return null;
   for (const [code, keys] of Object.entries(row.refusals)) if (keys.includes(key)) return code as AppTemplateRefusalCode;
   return "KEY_UNKNOWN";

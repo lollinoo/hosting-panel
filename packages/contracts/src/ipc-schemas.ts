@@ -24,6 +24,7 @@ import {
 } from "./site-files.js";
 import { PhpSettingsSchema } from "./php-settings.js";
 import { SiteTypeKeySchema } from "./site-types/keys.js";
+import { APP_FOREIGN_ID_PATTERN, APP_STACK_ID_PATTERN, APP_TEMPLATE_LIMITS, AppStackKeySchema } from "./app-templates/limits.js";
 import {
   MailFailureDtoSchema,
   MailRelayHostSchema,
@@ -855,7 +856,8 @@ export type BackupFailureClass = (typeof BACKUP_FAILURE_CLASSES)[number];
 export const BACKUP_JOB_STATES = ["running", "succeeded", "failed", "unknown"] as const;
 export type BackupJobState = (typeof BACKUP_JOB_STATES)[number];
 
-export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2|-forget|-forget-t[2-9])?$/;
+/** `-apply` is the job that writes an application's data back (ADR-0038). */
+export const BACKUP_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2|-forget|-forget-t[2-9]|-apply)?$/;
 const BackupOpJobIdSchema = z.string().regex(/^op_[0-9a-f]{32}$/);
 const BackupSnapshotIdSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const BackupPathIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);
@@ -917,6 +919,15 @@ export const isLocalBackupTarget = (target: BackupDispatchTarget): target is Loc
 /** Job id of one copy of a logical backup: the first copy keeps `op_x`, the second is `op_x-t2`. */
 export const BACKUP_COPY_JOB_ID_PATTERN = /^op_[0-9a-f]{32}(?:-t2)?$/;
 const BackupCopyJobIdSchema = z.string().regex(BACKUP_COPY_JOB_ID_PATTERN);
+
+/** The job that writes an application's data back: one per restore operation. */
+export const APP_STACK_RESTORE_JOB_ID_PATTERN = /^op_[0-9a-f]{32}-apply$/;
+const BackupStackIdSchema = z.string().regex(APP_STACK_ID_PATTERN);
+const BackupStackVolumeKeysSchema = z
+  .array(AppStackKeySchema)
+  .min(1)
+  .max(APP_TEMPLATE_LIMITS.volumes)
+  .refine((keys) => new Set(keys).size === keys.length, { message: "Each volume once." });
 
 export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
   z
@@ -1016,6 +1027,37 @@ export const BackupsIpcRequestSchema = z.discriminatedUnion("action", [
       siteType: SiteTypeKeySchema.optional(),
     })
     .strict(),
+  // Applications (ADR-0038). The executor names the volumes itself from the stack id and the keys.
+  z
+    .object({
+      action: z.literal("stackStart"),
+      jobId: BackupCopyJobIdSchema,
+      stackId: BackupStackIdSchema,
+      organizationId: z.string().regex(APP_FOREIGN_ID_PATTERN),
+      volumeKeys: BackupStackVolumeKeysSchema,
+      target: BackupDispatchTargetSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("stackRestore"),
+      jobId: z.string().regex(APP_STACK_RESTORE_JOB_ID_PATTERN),
+      stackId: BackupStackIdSchema,
+      organizationId: z.string().regex(APP_FOREIGN_ID_PATTERN),
+      volumeKeys: BackupStackVolumeKeysSchema,
+      target: BackupDispatchTargetSchema,
+      snapshotId: BackupSnapshotIdSchema,
+    })
+    .strict(),
+  z
+    .object({
+      action: z.literal("stackForget"),
+      jobId: z.string().regex(BACKUP_JOB_ID_PATTERN),
+      stackId: BackupStackIdSchema,
+      target: BackupDispatchTargetSchema,
+      snapshotIds: z.array(BackupSnapshotIdSchema).min(1).max(100),
+    })
+    .strict(),
 ]);
 
 const BackupCountSchema = z.number().int().nonnegative();
@@ -1093,6 +1135,9 @@ export const BACKUPS_RESULT_SCHEMAS = {
   settle: BackupJobStatusSchema,
   panelStart: BackupJobStatusSchema,
   siteState: BackupSiteStateSchema,
+  stackStart: BackupJobStatusSchema,
+  stackRestore: BackupJobStatusSchema,
+  stackForget: BackupJobStatusSchema,
 } as const satisfies { [K in BackupsAction]: z.ZodType };
 
 export type BackupsResultByAction = {

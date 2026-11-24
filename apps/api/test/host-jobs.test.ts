@@ -183,7 +183,8 @@ describe("SITE_WORK_KINDS", () => {
     expect([...SITE_WORK_KINDS].sort()).toEqual([
       "panel.backups.create", "site.backups.create", "site.backups.download", "site.backups.prune",
       "site.backups.restore", "site.wordpress.import", "site.wordpress.update",
-      "stack.delete", "stack.deploy", "stack.restart", "stack.rollback", "stack.start", "stack.stop", "stack.task", "stack.upgrade",
+      "stack.backup", "stack.delete", "stack.deploy", "stack.prune", "stack.restart", "stack.restore", "stack.rollback",
+      "stack.start", "stack.stop", "stack.task", "stack.upgrade",
     ]);
   });
 });

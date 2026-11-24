@@ -9,6 +9,7 @@ import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
 import { APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
+import { AppStackDomainRoutingDtoShape } from "./stack-routing.js";
 import {
   APP_STACK_RETENTION_POLICIES,
   APP_STACK_VOLUME_STATUSES,
@@ -45,7 +46,7 @@ export const CustomerAppTemplatesDtoSchema = z.object({
 });
 export type CustomerAppTemplatesDto = z.infer<typeof CustomerAppTemplatesDtoSchema>;
 export const CustomerAppTemplateDtoSchema = CustomerAppTemplateSummaryDtoSchema.extend({
-  parameters: z.array(AppTemplateParameterSchema), // customer:true only (secret too), source order
+  parameters: z.array(AppTemplateParameterSchema), // appTemplateInstallParameters: customer:true, never a generated secret; source order
   ingress: z.array(AppStackPlanIngressSchema), // {componentKey: service, port}, sorted
   components: z.array(z.object({ key: AppStackKeySchema, cpuMilli: z.number().int(), memoryBytes: MemoryBytesText })), // by key
 });
@@ -53,8 +54,9 @@ export type CustomerAppTemplateDto = z.infer<typeof CustomerAppTemplateDtoSchema
 
 // ---- inputs ----
 export const AppStackNameSchema = z.string().trim().min(1).max(64).refine(noControl); // = 0025 CHECK 1..64
+/** `compression: true` creates the address with compression on (ADR-0037 R4); left out, it is off. */
 export const AppStackDomainEntrySchema = z
-  .object({ hostname: SiteDomainSchema, componentKey: AppStackKeySchema, port: AppStackPortSchema })
+  .object({ hostname: SiteDomainSchema, componentKey: AppStackKeySchema, port: AppStackPortSchema, compression: z.boolean().optional() })
   .strict();
 export type AppStackDomainEntry = z.infer<typeof AppStackDomainEntrySchema>;
 export const CreateAppStackInputSchema = z
@@ -135,16 +137,23 @@ export const AppStackSummaryDtoSchema = z.object({
   templateId: AppEntityIdSchema,
   templateName: z.string(),
   templateVersionNumber: z.number().int().positive(),
+  // the applied revision whenever it is not the desired one (a change running, a failure after create, a take-back
+  // declined, a deploy with new settings that failed before create); the detail's status follows its plan
+  installed: z.object({ revisionNumber: z.number().int().positive(), templateVersionNumber: z.number().int().positive() }).nullable(),
   componentCount: z.number().int().nonnegative(),
   unhealthyCount: z.number().int().nonnegative(), // effective health unhealthy or missing (stale reads as unknown)
   primaryHostname: z.string().nullable(), // first active domain by hostname, else first domain, else null
   updatedAt: IsoDateTimeSchema,
 });
 export type AppStackSummaryDto = z.infer<typeof AppStackSummaryDtoSchema>;
+/** Work of the platform that holds an application's lock: the page says what it is, nothing else of it (ADR-0038). */
+export const APP_STACK_PLATFORM_WORK = ["backups_cleanup"] as const;
+export type AppStackPlatformWork = (typeof APP_STACK_PLATFORM_WORK)[number];
 export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   templateVersionId: AppEntityIdSchema,
   createdAt: IsoDateTimeSchema,
-  activeOperationId: OperationIdSchema.nullable(),
+  activeOperationId: OperationIdSchema.nullable(), // the customer's own operation only
+  platformWork: z.enum(APP_STACK_PLATFORM_WORK).nullable(), // the application is busy with work of the platform
   revisionNumber: z.number().int().positive().nullable(), // desired revision; null for a draft
   // desired plan order; a draft: spec services by key
   components: z.array(
@@ -173,6 +182,8 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
     z.object({ key: AppStackKeySchema, status: z.enum(APP_STACK_VOLUME_STATUSES), retentionPolicy: z.enum(APP_STACK_RETENTION_POLICIES) }),
   ),
   ingress: z.array(AppStackPlanIngressSchema),
+  pathTargets: z.array(AppStackPlanIngressSchema), // ADR-0037: what a path rule may point at now (the plan that runs and the desired one)
+  routesPending: z.boolean(), // ADR-0037: the saved addresses/options are not what the last published route file holds
   cpuMilli: z.number().int().nonnegative(),
   memoryBytes: MemoryBytesText,
   upgrade: z.object({ templateVersionId: AppEntityIdSchema, versionNumber: z.number().int().positive() }).nullable(),
@@ -209,6 +220,7 @@ export const AppStackDomainDtoSchema = z.object({
   certificateProblem: z.string().nullable(),
   certificateExpiresAt: IsoDateTimeSchema.nullable(),
   checkedAt: IsoDateTimeSchema.nullable(), // dns_checked_at
+  ...AppStackDomainRoutingDtoShape, // ADR-0037
 });
 export type AppStackDomainDto = z.infer<typeof AppStackDomainDtoSchema>;
 export const APP_STACK_DIFF_CHANGES = ["added", "updated", "removed", "unchanged"] as const;
@@ -222,7 +234,7 @@ export const AppStackPlanDiffDtoSchema = z.object({
   newRevision: z.boolean(), // false: deploy would redeploy the desired revision as is
   components: z.array(z.object({ key: AppStackKeySchema, change: Change, restart: z.boolean() })),
   volumes: z.array(z.object({ key: AppStackKeySchema, change: Change })), // "removed" = no longer mounted, data kept
-  parameters: z.array(z.object({ key: AppTemplateParameterKeySchema, change: Change })), // names only, secrets included
+  parameters: z.array(z.object({ key: AppTemplateParameterKeySchema, change: Change })), // names only, secrets included (not the ones the customer never sees)
   ingress: z.array(z.object({ componentKey: AppStackKeySchema, port: z.number().int(), change: Change })),
   downtime: z.boolean(),
   dataRisk: z.boolean(),

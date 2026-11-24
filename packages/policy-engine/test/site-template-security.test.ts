@@ -345,6 +345,7 @@ describe("23-30 the environment", () => {
     ["an AWS key id", "AKIAIOSFODNN7EXAMPLE"],
     ["a GitHub token", `ghp_${"a1".repeat(15)}`],
     ["credentials in a URL", "https://user:s3cretpw@host.example/"],
+    ["credentials in a URL with an empty user", "redis://:s3cretpw@cache:6379"],
   ])("the secret-looking value: %s", (_name, value) => {
     const errors = refused(env("WP_X", value), "ENV_VALUE_SECRET_LIKE", at("WP_X"));
     expect(leaks(errors, value)).toBe(false);

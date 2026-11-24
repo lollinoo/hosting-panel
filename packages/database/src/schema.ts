@@ -16,8 +16,13 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type {
+  AppStackBackupCopyStatus,
+  AppStackBackupKind,
+  AppStackBackupStatus,
   AppStackComponentHealth,
   AppStackDeploymentStatus,
+  AppStackDomainPathRoute,
+  AppStackRestoreStatus,
   AppStackRetentionPolicy,
   AppStackStatus,
   AppStackTaskRunProblem,
@@ -404,6 +409,8 @@ export const appStacks = pgTable(
     appliedRevisionId: text("applied_revision_id"),
     resourceQuotaId: text("resource_quota_id").references(() => resourceQuotas.id, { onDelete: "set null" }),
     appliedRoutesHash: text("applied_routes_hash"),
+    // 0026 (ADR-0037): the addresses and options the routes of applied_routes_hash were published from; NULL = not known.
+    appliedAddressesHash: text("applied_addresses_hash"),
     idempotencyKey: text("idempotency_key"),
     requestHash: text("request_hash"),
     createdBy: text("created_by"),
@@ -555,17 +562,27 @@ export const appStackDomains = pgTable(
     certAttempts: integer("cert_attempts").notNull().default(0),
     certExpiresAt: timestamp("cert_expires_at", { withTimezone: true }),
     certTrusted: boolean("cert_trusted").notNull().default(true),
+    // Routing options (0026, ADR-0037). The CHECKs live in the migration.
+    redirectToDomainId: text("redirect_to_domain_id"),
+    compression: boolean("compression").notNull().default(false),
+    accessUsername: text("access_username"),
+    /** An `$apr1$` verifier, never the password; never selected into a DTO, an audit row or an outbox payload. */
+    accessPasswordHash: text("access_password_hash"),
+    pathRoutes: jsonb("path_routes").$type<AppStackDomainPathRoute[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     unique("uq_app_stack_domains_hostname").on(t.hostname),
+    unique("uq_app_stack_domains_stack_id").on(t.stackId, t.id),
     stackOrg("fk_app_stack_domains_stack_org", t),
     foreignKey({
       columns: [t.stackId, t.componentKey],
       foreignColumns: [appStackComponents.stackId, appStackComponents.componentKey],
       name: "fk_app_stack_domains_component",
     }),
+    // In the database: ON DELETE SET NULL (redirect_to_domain_id), which this builder cannot express.
+    foreignKey({ columns: [t.stackId, t.redirectToDomainId], foreignColumns: [t.stackId, t.id], name: "fk_app_stack_domains_redirect" }),
     index("idx_app_stack_domains_stack").on(t.stackId),
     index("idx_app_stack_domains_dns_due").on(t.dnsNextCheckAt),
   ],
@@ -583,6 +600,10 @@ export const appStackDeployments = pgTable(
     problem: text("problem"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    // 0032: the desired revision a request that wrote a new one replaced; null when it replaced none.
+    replacedRevisionId: text("replaced_revision_id"),
+    // 0032: the stack status the request replaced; null for the first deploy of a create and for the start after a backup.
+    replacedStatus: text("replaced_status").$type<AppStackStatus>(),
   },
   (t) => [
     unique("uq_app_stack_deployments_operation").on(t.operationId),
@@ -591,6 +612,11 @@ export const appStackDeployments = pgTable(
       columns: [t.revisionId, t.stackId],
       foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
       name: "fk_app_stack_deployments_revision",
+    }),
+    foreignKey({
+      columns: [t.replacedRevisionId, t.stackId],
+      foreignColumns: [appStackRevisions.id, appStackRevisions.stackId],
+      name: "fk_app_stack_deployments_replaced_revision",
     }),
     index("idx_app_stack_deployments_stack").on(t.stackId, t.startedAt),
   ],
@@ -1359,6 +1385,71 @@ export const siteBackupCopies = pgTable(
     unique("uq_site_backup_copies_backup_priority").on(t.backupId, t.priority),
     uniqueIndex("uq_site_backup_copies_job").on(t.jobId).where(sql`${t.jobId} IS NOT NULL`),
     index("idx_site_backup_copies_target_status").on(t.targetId, t.status),
+  ],
+);
+
+// Backups of applications (ADR-0038, migration 0027). No foreign key to app_stacks: the backups of a deleted
+// application stay until the retention period removes them.
+export const appStackBackups = pgTable(
+  "app_stack_backups",
+  {
+    id: text("id").primaryKey(),
+    stackId: text("stack_id").notNull(),
+    organizationId: text("organization_id").notNull(),
+    kind: text("kind").$type<AppStackBackupKind>().notNull(),
+    status: text("status").$type<AppStackBackupStatus>().notNull().default("running"),
+    operationId: text("operation_id").notNull(),
+    revisionId: text("revision_id"),
+    volumeKeys: jsonb("volume_keys").$type<string[]>().notNull(),
+    /** The application was not stopped when the backup was asked: it is started again afterwards. */
+    resumeAfter: boolean("resume_after").notNull().default(false),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    /** A backup problem class or an ErrorCode, never free text. */
+    problem: text("problem"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    // The last restore that read this backup.
+    restoreOperationId: text("restore_operation_id"),
+    restoreStatus: text("restore_status").$type<AppStackRestoreStatus>(),
+    restoreProblem: text("restore_problem"),
+    restoredAt: timestamp("restored_at", { withTimezone: true }),
+    /** A backup, by hand or a safety one, of data an earlier restore had left half written (ADR-0038 K5). */
+    incompleteData: boolean("incomplete_data").notNull().default(false),
+    /** A safety backup whose own restore left the data half written: it failed so, or wrote back a copy of such data. */
+    leftIncomplete: boolean("left_incomplete").notNull().default(false),
+  },
+  (t) => [
+    unique("uq_app_stack_backups_operation").on(t.operationId),
+    index("idx_app_stack_backups_stack").on(t.stackId, t.startedAt),
+    index("idx_app_stack_backups_restore_operation").on(t.restoreOperationId).where(sql`${t.restoreOperationId} IS NOT NULL`),
+  ],
+);
+
+export const appStackBackupCopies = pgTable(
+  "app_stack_backup_copies",
+  {
+    id: text("id").primaryKey(),
+    backupId: text("backup_id")
+      .notNull()
+      .references(() => appStackBackups.id, { onDelete: "cascade" }),
+    targetId: text("target_id")
+      .notNull()
+      .references(() => backupTargets.id, { onDelete: "restrict" }),
+    priority: integer("priority").notNull().default(1),
+    required: boolean("required").notNull().default(true),
+    jobId: text("job_id"),
+    status: text("status").$type<AppStackBackupCopyStatus>().notNull(),
+    snapshotId: text("snapshot_id"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    problem: text("problem").$type<BackupProblem>(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    unique("uq_app_stack_backup_copies_backup_target").on(t.backupId, t.targetId),
+    unique("uq_app_stack_backup_copies_backup_priority").on(t.backupId, t.priority),
+    uniqueIndex("uq_app_stack_backup_copies_job").on(t.jobId).where(sql`${t.jobId} IS NOT NULL`),
+    index("idx_app_stack_backup_copies_target_status").on(t.targetId, t.status),
   ],
 );
 

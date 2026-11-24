@@ -31,6 +31,8 @@ import {
   type AppImageAllowlistEntry,
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
+  type AppStackCreateIpcRequest,
+  type AppStackImageResolveIpcRequest,
   type AppStackLogsIpcRequest,
   type AppStackPlanIpcRequest,
   type AppStackPullIpcRequest,
@@ -242,7 +244,10 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
   private readonly siteServices = new Map<string, Set<string>>();
   public readonly files: SimulatedSiteFiles;
   public readonly databases = new SimulatedSiteDatabases();
-  public readonly backupState = new SimulatedBackups();
+  public readonly backupState = new SimulatedBackups({
+    appStackReadiness: (stackId, organizationId, volumeKeys) =>
+      this.appStacks.backupReadiness(stackId, organizationId, volumeKeys),
+  });
   private ingressProxyContainer: MutableSimulatedContainer | null = null;
   public readonly jobs: SiteJobRequest[] = [];
   public readonly deployedSpecs: ApprovedServiceSpec[] = [];
@@ -323,6 +328,7 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
       ingress: this.ingressFileManager,
       ...(options?.appImageAllowlist ? { allowlist: options.appImageAllowlist } : {}),
       assertEngineAvailable: () => this.assertEngineAvailable(),
+      holdBackupLane: (stackId) => this.backupState.holdAppStackLane(stackId),
     });
   }
 
@@ -1357,7 +1363,8 @@ export class InMemoryDockerSimulatorAdapter implements DockerExecutorPort, Stack
 
   public pullAppStackImage(req: AppStackPullIpcRequest) { return this.appStacks.pullAppStackImage(req); }
   public prepareAppStack(req: AppStackPlanIpcRequest) { return this.appStacks.prepareAppStack(req); }
-  public createAppStackComponents(req: AppStackPlanIpcRequest) { return this.appStacks.createAppStackComponents(req); }
+  public createAppStackComponents(req: AppStackCreateIpcRequest) { return this.appStacks.createAppStackComponents(req); }
+  public resolveAppStackImage(req: AppStackImageResolveIpcRequest) { return this.appStacks.resolveAppStackImage(req); }
   public startAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.startAppStackComponent(req); }
   public restartAppStackComponent(req: AppStackComponentIpcRequest) { return this.appStacks.restartAppStackComponent(req); }
   public stopAppStack(req: AppStackRefIpcRequest) { return this.appStacks.stopAppStack(req); }

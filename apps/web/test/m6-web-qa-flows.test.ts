@@ -4,7 +4,7 @@ import * as React from "react";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppStackDetailDto, AppStackPlanDiffDto, AppTemplateParameter, CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import type { AppStackBackupsDto, AppStackDetailDto, AppStackPlanDiffDto, CustomerAppTemplateDto } from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
@@ -64,7 +64,7 @@ const locales = [
 ] as const;
 
 // ---- fixtures: two harmless applications ------------------------------------------------------------------------------
-const WEB_PARAMS: AppTemplateParameter[] = [
+const WEB_PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "site_title", label: "Board title", type: "string", default: "My board", customer: true },
   { key: "admin_password", label: "Admin password", type: "secret", required: true, customer: true },
   { key: "cache_size", label: "Hidden cache size", type: "size", default: "64m", customer: false },
@@ -88,7 +88,7 @@ const WEB_APP: CustomerAppTemplateDto = {
     { key: "web", cpuMilli: 250, memoryBytes: String(128 * MIB) },
   ],
 };
-const WORKER_PARAMS: AppTemplateParameter[] = [
+const WORKER_PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "queue_name", label: "Queue name", type: "string", default: "jobs", customer: true },
   { key: "concurrency", label: "Parallel jobs", type: "integer", min: 1, max: 8, default: 2, customer: true },
   { key: "shard_hint", label: "Hidden shard hint", type: "enum", options: ["a", "b"], default: "a", customer: false },
@@ -133,7 +133,9 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   templateVersionId: WEB_APP.versionId,
   createdAt: NOW,
   activeOperationId: null,
+  platformWork: null,
   revisionNumber: 1,
+  installed: null,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 250, memoryBytes: String(128 * MIB) },
     { key: "cache", health: "unhealthy", healthObservedAt: NOW, dependsOn: [], ingress: false, cpuMilli: 250, memoryBytes: String(128 * MIB) },
@@ -142,6 +144,8 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   secretParameters: [{ key: "admin_password", label: "Admin password", required: true, isSet: true, version: 1, setAt: NOW }],
   volumes: [],
   ingress: [{ componentKey: "web", port: 8080 }],
+  pathTargets: [{ componentKey: "web", port: 8080 }],
+  routesPending: false,
   cpuMilli: 500,
   memoryBytes: String(256 * MIB),
   upgrade: null,
@@ -401,16 +405,17 @@ describe("A16: retries and Idempotency-Key", () => {
 // ---- detail: A15, A17, B4 -------------------------------------------------------------------------------------------------
 describe("application page", () => {
   const UP = (id: string) => `v1/organizations/${ORG}/app-stacks/${id}`;
-  const serve = (stack: AppStackDetailDto) =>
+  const serve = (stack: AppStackDetailDto, backups?: AppStackBackupsDto) =>
     fetchUpstream.mockImplementation(async (p: string) => {
       if (p === UP(stack.id)) return ok(stack);
       if (p === `${UP(stack.id)}/deployments?limit=20`) return ok([]);
       if (p === `${UP(stack.id)}/domains`) return ok([]);
+      if (backups && p === `${UP(stack.id)}/backups`) return ok(backups);
       return fail(404, "NOT_FOUND");
     });
-  const page = async (stack: AppStackDetailDto, m: Messages = en) => {
+  const page = async (stack: AppStackDetailDto, m: Messages = en, backups?: AppStackBackupsDto) => {
     loc.value = m === en ? "en" : "it";
-    serve(stack);
+    serve(stack, backups);
     return html(await AppStackPage({ params: Promise.resolve({ stackId: stack.id }) }), m);
   };
 
@@ -452,20 +457,27 @@ describe("application page", () => {
     expect(h).not.toContain("Non riuscita");
   });
 
-  it.each(locales)("B4: the backup line is shown once, without any backup control, for both fixtures (%s)", async (_l, m) => {
-    for (const stack of [webStack({ status: "running" }), workerStack({ status: "running" })]) {
-      const h = await page(stack, m);
-      expect(h.split(m.apps.detail.backupUnavailable), stack.id).toHaveLength(2);
-      expect(h, stack.id).not.toMatch(/<(button|a|input)[^>]*(backup|restore)/i);
-      expect(h, stack.id).not.toMatch(/href="[^"]*backup/i);
-      expect(h, stack.id).not.toMatch(/\/backups?\b/);
+  it.each(locales)("B4: a backup is offered only where there is data to save, by a button and never by a link (%s)", async (_l, m) => {
+    // web + cache keeps no data: one sentence says so and there is no control
+    const web = await page(webStack({ status: "running" }), m, { backups: [], unavailableReason: "no_data", goBackTo: null });
+    expect(web.split(m.apps.backups.unavailable.no_data)).toHaveLength(2);
+    expect(web).not.toContain(`>${m.apps.backups.create}<`);
+    expect(web).not.toMatch(/<(button|a|input)[^>]*(backup|restore)/i);
+    // worker + storage keeps data: the button and the empty list
+    const worker = await page(workerStack({ status: "running" }), m, { backups: [], unavailableReason: null, goBackTo: null });
+    expect(worker.split(`>${m.apps.backups.create}</button>`)).toHaveLength(2);
+    expect(worker).toContain(m.apps.backups.none);
+    expect(worker).not.toMatch(/<button[^>]*\sdisabled=""[^>]*>[^<]*backup/i);
+    for (const h of [web, worker]) {
+      expect(h).not.toMatch(/href="[^"]*backup/i);
+      expect(h).not.toMatch(/\/backups?\b/);
     }
   });
 
-  it("B4: the wizard review repeats the backup line and offers no backup choice", () => {
+  it("B4: the wizard review says a backup is made by hand from the application's page and offers no backup choice", () => {
     for (const { app } of FIXTURES) {
       const out = html(wizard(app, { 0: "review", 1: "x-app" }).tree);
-      expect(out).toContain(en.apps.detail.backupUnavailable);
+      expect(out).toContain(en.apps.wizard.backupNote);
       expect(out).not.toMatch(/<(button|input)[^>]*backup/i);
     }
   });

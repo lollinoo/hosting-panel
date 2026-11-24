@@ -98,6 +98,7 @@ describe("controller routes and docs/api/openapi.yaml agree", () => {
     for (const route of [
       "GET /v1/admin/app-templates",
       "POST /v1/admin/app-templates/validate",
+      "POST /v1/admin/app-templates/import-compose",
       "POST /v1/admin/app-templates",
       "GET /v1/admin/app-templates/{templateId}",
       "PATCH /v1/admin/app-templates/{templateId}",
@@ -120,7 +121,9 @@ describe("controller routes and docs/api/openapi.yaml agree", () => {
       "GET /v1/organizations/{orgId}/app-stacks/{stackId}/components/{componentKey}/logs",
       "GET /v1/organizations/{orgId}/app-stacks/{stackId}/components/{componentKey}/health",
       "POST /v1/organizations/{orgId}/app-stacks/{stackId}/secrets",
+      "GET /v1/organizations/{orgId}/app-stacks/{stackId}/backups",
       "POST /v1/organizations/{orgId}/app-stacks/{stackId}/backups",
+      "POST /v1/organizations/{orgId}/app-stacks/{stackId}/backups/{backupId}/restore",
       "GET /v1/organizations/{orgId}/app-stacks/{stackId}/domains",
       "POST /v1/organizations/{orgId}/app-stacks/{stackId}/domains",
       "DELETE /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}",

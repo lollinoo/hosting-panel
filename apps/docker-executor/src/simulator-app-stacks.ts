@@ -1,25 +1,30 @@
-import type {
-  AppImageAllowlistEntry,
-  AppStackComponentActionIpcResult,
-  AppStackComponentIpcRequest,
-  AppStackComponentObservation,
-  AppStackComponentsRemoveIpcRequest,
-  AppStackComponentsRemoveIpcResult,
-  AppStackCreateIpcResult,
-  AppStackLogsIpcRequest,
-  AppStackNetworkRole,
-  AppStackPlanIpcRequest,
-  AppStackPrepareIpcResult,
-  AppStackPullIpcRequest,
-  AppStackPullIpcResult,
-  AppStackRefIpcRequest,
-  AppStackRemoveIpcRequest,
-  AppStackRemoveIpcResult,
-  AppStackRoutesIpcRequest,
-  AppStackRoutesIpcResult,
-  AppStackStatusIpcResult,
-  AppStackStopIpcResult,
-  ApprovedStackPlan,
+import { createHash } from "node:crypto";
+import {
+  appStackImageLookupProblem,
+  type AppImageAllowlistEntry,
+  type AppStackComponentActionIpcResult,
+  type AppStackComponentIpcRequest,
+  type AppStackComponentObservation,
+  type AppStackComponentsRemoveIpcRequest,
+  type AppStackComponentsRemoveIpcResult,
+  type AppStackCreateIpcRequest,
+  type AppStackCreateIpcResult,
+  type AppStackImageResolveIpcRequest,
+  type AppStackImageResolveIpcResult,
+  type AppStackLogsIpcRequest,
+  type AppStackNetworkRole,
+  type AppStackPlanIpcRequest,
+  type AppStackPrepareIpcResult,
+  type AppStackPullIpcRequest,
+  type AppStackPullIpcResult,
+  type AppStackRefIpcRequest,
+  type AppStackRemoveIpcRequest,
+  type AppStackRemoveIpcResult,
+  type AppStackRoutesIpcRequest,
+  type AppStackRoutesIpcResult,
+  type AppStackStatusIpcResult,
+  type AppStackStopIpcResult,
+  type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import type { APP_STACK_EXECUTOR_METHODS, ServiceLogLine, StackExecutorPort } from "@hosting-panel/executor-contracts";
@@ -29,10 +34,13 @@ import {
   appStackContainerName,
   appStackEdgeNetworkName,
   appStackInternalNetworkName,
+  appStackLogMaskValues,
   appStackNetworkLabels,
   appStackVolumeLabels,
   appStackVolumeName,
+  assertAppStackCreateSecretContents,
   assertAppStackPayloadHardening,
+  assertAppStackRoutesInPlan,
   assertAppStackSecretContents,
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
@@ -55,7 +63,8 @@ import {
 } from "./traefik-config.js";
 
 export type AppStackSimStep =
-  | "pull" | "prepare" | "create" | "start" | "restart" | "stop" | "routes" | "unpublish" | "remove" | "remove_components" | "status" | "logs";
+  | "pull" | "prepare" | "create" | "start" | "restart" | "stop" | "routes" | "unpublish" | "remove" | "remove_components" | "status" | "logs"
+  | "resolve";
 export type AppStackSimFault = "engine_unavailable" | "pull_failed" | "ambiguous_before" | "ambiguous_after";
 
 export interface SimulatedAppStacksOptions {
@@ -64,6 +73,8 @@ export interface SimulatedAppStacksOptions {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
   readonly assertEngineAvailable: () => void;
   readonly now?: () => Date;
+  /** The simulated runner's holdAppStackLane (ADR-0038 K4); absent, no backup job ever holds a lane. */
+  readonly holdBackupLane?: (stackId: string) => (() => void) | null;
 }
 
 type SimState = "created" | "running" | "exited" | "dead";
@@ -102,6 +113,8 @@ const startIndex = (c: SimContainer) => Number(c.labels[APP_STACK_LABELS.startIn
 const byStartDesc = ([ka, a]: [string, SimContainer], [kb, b]: [string, SimContainer]) =>
   startIndex(b) - startIndex(a) || kb.localeCompare(ka);
 const notReady = (message: string) => new AppStackExecutorError("STACK_COMPONENT_NOT_READY", message);
+/** The steps the real engine refuses while a backup job holds the application's lane. */
+const OUTSIDE_BACKUPS: ReadonlySet<AppStackSimStep> = new Set(["create", "start", "restart", "remove", "remove_components"]);
 
 /** In-memory stack engine: the production plan check, names, labels and container builder over a simulated Engine. */
 export class SimulatedAppStacks implements StackExecutorPort {
@@ -116,6 +129,8 @@ export class SimulatedAppStacks implements StackExecutorPort {
       | "container_restart" | "route_write" | "route_remove" | "volume_remove" | "network_remove";
     readonly name: string;
   }> = [];
+  /** The references asked to resolveAppStackImage, in order (a lookup belongs to no stack, so it is not in appStackCalls). */
+  public readonly appStackImageLookups: string[] = [];
   private readonly images = new Set<string>();
   private readonly stacks = new Map<string, SimStack>();
   private readonly faults = new Map<AppStackSimStep, AppStackSimFault[]>();
@@ -147,6 +162,19 @@ export class SimulatedAppStacks implements StackExecutorPort {
 
   public setAppStackComponentLogs(stackId: string, componentKey: string, lines: readonly ServiceLogLine[]): void {
     this.logs.set(appStackContainerName(stackId, componentKey), lines.map((line) => ({ ...line })));
+  }
+
+  /** What a copy or a restore of this application's volumes would find (ADR-0038 K4). */
+  public backupReadiness(
+    stackId: string,
+    organizationId: string,
+    volumeKeys: readonly string[],
+  ): "ready" | "running" | "volume_missing" | "foreign" {
+    const stack = this.stacks.get(stackId);
+    if (stack === undefined) return "volume_missing";
+    if (stack.organizationId !== organizationId) return "foreign";
+    if ([...stack.containers.values()].some((c) => c.state === "running")) return "running";
+    return volumeKeys.every((key) => stack.volumes.has(key)) ? "ready" : "volume_missing";
   }
 
   public getAppStackSnapshot(stackId: string): AppStackSimSnapshot | null {
@@ -224,9 +252,28 @@ export class SimulatedAppStacks implements StackExecutorPort {
     });
   }
 
-  public createAppStackComponents(req: AppStackPlanIpcRequest): Promise<AppStackCreateIpcResult> {
+  /** A registry that knows every well-formed reference: the digest is the SHA-256 of the reference text. */
+  public async resolveAppStackImage(req: AppStackImageResolveIpcRequest): Promise<AppStackImageResolveIpcResult> {
+    this.appStackImageLookups.push(req.image);
+    this.options.assertEngineAvailable();
+    const fault = this.faults.get("resolve")?.shift();
+    if (fault === "engine_unavailable") {
+      throw new ExecutorCodedError("Simulated Docker Engine is currently unreachable", "DOCKER_ENGINE_UNAVAILABLE");
+    }
+    if (fault === "ambiguous_before" || fault === "ambiguous_after") throw ambiguous();
+    if (appStackImageLookupProblem(req.image) !== null) {
+      throw new AppStackExecutorError("STACK_PLAN_INVALID", "The image reference is not valid");
+    }
+    if (fault === "pull_failed") {
+      throw new AppStackExecutorError("STACK_IMAGE_PULL_FAILED", "Could not find the software of the application in its registry");
+    }
+    return { image: req.image, digest: `sha256:${createHash("sha256").update(req.image).digest("hex")}` };
+  }
+
+  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
     return this.run("create", { method: "createAppStackComponents", stackId: req.plan.stackId }, true, async () => {
       const plan = this.checkPlan(req.plan);
+      const secretContents = assertAppStackCreateSecretContents(plan, req.secretContents);
       const stack = this.own(plan.stackId, plan.organizationId);
       if (stack === undefined || !stack.networks.has("app_internal") || (plan.ingress.length > 0 && !stack.networks.has("app_edge"))) {
         throw notReady("The stack network is not prepared");
@@ -235,20 +282,25 @@ export class SimulatedAppStacks implements StackExecutorPort {
       if (plan.components.some((c) => !this.images.has(c.image))) {
         throw new AppStackExecutorError("STACK_IMAGE_MISSING", "The image is not available on this server");
       }
+      // Like the engine: every body is built and checked before the first removal or create.
+      const payloads = new Map<string, AppStackContainerCreatePayload>();
+      for (const { key } of plan.components) {
+        if (stack.containers.get(key)?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) continue;
+        const payload = buildAppStackContainerCreatePayload(plan, key, { secretsRootDir: this.secretsRoot, secretContents });
+        assertAppStackPayloadHardening(payload, { secretsRootDir: this.secretsRoot, plan });
+        payloads.set(key, payload);
+      }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents = [...stack.containers.keys()].filter((key) => !keys.has(key)).sort();
       for (const key of removedComponents) await this.removeComponent(stack, plan.stackId, key);
       const components = plan.components.map(({ key }) => {
         const existing = stack.containers.get(key);
-        if (existing?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) {
-          return { componentKey: key, outcome: "unchanged" as const };
-        }
+        const payload = payloads.get(key);
+        if (payload === undefined) return { componentKey: key, outcome: "unchanged" as const };
         if (existing !== undefined) {
           stack.containers.delete(key);
           this.mutate("container_remove", existing.name);
         }
-        const payload = buildAppStackContainerCreatePayload(plan, key, { secretsRootDir: this.secretsRoot });
-        assertAppStackPayloadHardening(payload, { secretsRootDir: this.secretsRoot });
         const name = appStackContainerName(plan.stackId, key);
         stack.containers.set(key, { name, labels: payload.Labels, payload, state: "created", startedAt: null, restartCount: 0, exitCode: null });
         this.mutate("container_create", name);
@@ -283,21 +335,11 @@ export class SimulatedAppStacks implements StackExecutorPort {
   public publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult> {
     return this.run("routes", { method: "publishAppStackRoutes", stackId: req.plan.stackId }, true, async () => {
       const plan = this.checkPlan(req.plan);
-      for (const route of req.routes) {
-        if (!plan.ingress.some((i) => i.componentKey === route.componentKey && i.port === route.internalPort)) {
-          throw new AppStackExecutorError("STACK_PLAN_INVALID", "The route is not an ingress of the plan");
-        }
-        if (route.hosts.some((host) => host.source !== undefined || host.redirectTo !== null)) {
-          throw new AppStackExecutorError(
-            "STACK_UNSUPPORTED_FEATURE",
-            "Only automatic certificates and plain host routes are supported for applications",
-          );
-        }
-      }
+      const receiving = assertAppStackRoutesInPlan(plan, req.routes);
       const stack = this.own(plan.stackId, plan.organizationId);
       if (req.routes.length > 0) {
         if (stack?.networks.has("app_edge") !== true) throw notReady("The stack network is not prepared");
-        for (const { componentKey } of req.routes) this.readyContainer(stack, plan, componentKey, true);
+        for (const componentKey of receiving) this.readyContainer(stack, plan, componentKey, true);
       }
       const yaml = buildAppStackDynamicTraefikYaml(plan.stackId, req.routes, siteRouteOptions(null));
       const written = this.options.ingress
@@ -382,9 +424,10 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
       if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
-      const values = this.options.secretsRootDir !== null
+      const files = this.options.secretsRootDir !== null
         ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
         : (stack?.secrets.get(req.componentKey) ?? []);
+      const values = appStackLogMaskValues(req.componentKey, { labels: container.labels, env: container.payload.Env }, files);
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }
@@ -405,6 +448,9 @@ export class SimulatedAppStacks implements StackExecutorPort {
     if (mutating && this.busy.has(call.stackId)) {
       throw new AppStackExecutorError("STACK_BUSY", "Another change of this application stack is running");
     }
+    const hold = OUTSIDE_BACKUPS.has(step) ? this.options.holdBackupLane : undefined;
+    const release = hold === undefined ? () => undefined : hold(call.stackId);
+    if (release === null) throw new AppStackExecutorError("STACK_BUSY", "A backup or a restore of this application is running");
     if (mutating) this.busy.add(call.stackId);
     try {
       const result = await fn(fault);
@@ -412,6 +458,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       return result;
     } finally {
       if (mutating) this.busy.delete(call.stackId);
+      release();
     }
   }
 
@@ -431,7 +478,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       }
       const container = this.readyContainer(stack, plan, component.key, false);
       if (step === "start" && container.state === "running") return { componentKey: component.key, outcome: "already_running" };
-      await this.writeSecrets(stack!, plan.stackId, component.key, component.secretFiles.length > 0 ? contents : null);
+      await this.writeSecrets(stack!, plan.stackId, component.key, Object.keys(contents).length > 0 ? contents : null);
       container.state = "running";
       container.startedAt = this.now().toISOString();
       container.exitCode = null;
