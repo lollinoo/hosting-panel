@@ -86,6 +86,7 @@ function parseHostIpv6(value: string): string {
  * `hostIpv4Kind`: "given" (typed by the administrator, the default) records the IPv4; "default" (what the installer
  * kept or detected) records it only when there is no host row yet.
  * `hostIpv6`: an address records it, null removes it, undefined leaves the recorded one as it is.
+ * `recordedIpv4` is the IPv4 the host row holds afterwards.
  */
 export async function setupInstallation(
   db: HostingPanelDatabase,
@@ -96,7 +97,7 @@ export async function setupInstallation(
     hostIpv4Kind?: "given" | "default";
     hostIpv6?: string | null;
   },
-): Promise<{ installationId: string; hostId: string }> {
+): Promise<{ installationId: string; hostId: string; recordedIpv4: string }> {
   const inputIpv4 = parseHostIpv4(input.hostIpv4);
   const ipv6 = input.hostIpv6 === undefined || input.hostIpv6 === null ? input.hostIpv6 : parseHostIpv6(input.hostIpv6);
   await ensurePresetRolesAndPermissions(db);
@@ -137,7 +138,7 @@ export async function setupInstallation(
         },
       });
     }
-    return { installationId: inst.id, hostId: host.id };
+    return { installationId: inst.id, hostId: host.id, recordedIpv4: ipv4 };
   }
 
   const fs = await statfs("/");
@@ -159,7 +160,7 @@ export async function setupInstallation(
     totalStorageBytes: String(fs.blocks * fs.bsize),
   });
   await audit(db, "accounts.setup", "platform_installation", installationId);
-  return { installationId, hostId };
+  return { installationId, hostId, recordedIpv4: inputIpv4 };
 }
 
 export async function createServerAdmin(
@@ -296,15 +297,16 @@ export async function runCli(argv: readonly string[], dbClient = databaseClientF
       const ipv4Default = argv.includes("--ipv4-default");
       if (ipv4Default && argv.includes("--ipv4")) throw new Error("Give --ipv4 or --ipv4-default, not both.");
       const ipv6 = argv.includes("--ipv6") ? required(argv, "--ipv6") : undefined;
-      out(
-        await setupInstallation(db, {
-          installationName: required(argv, "--name"),
-          hostHostname: required(argv, "--hostname"),
-          hostIpv4: required(argv, ipv4Default ? "--ipv4-default" : "--ipv4"),
-          hostIpv4Kind: ipv4Default ? "default" : "given",
-          hostIpv6: ipv6 === "none" ? null : ipv6,
-        }),
-      );
+      const { recordedIpv4, ...ids } = await setupInstallation(db, {
+        installationName: required(argv, "--name"),
+        hostHostname: required(argv, "--hostname"),
+        hostIpv4: required(argv, ipv4Default ? "--ipv4-default" : "--ipv4"),
+        hostIpv4Kind: ipv4Default ? "default" : "given",
+        hostIpv6: ipv6 === "none" ? null : ipv6,
+      });
+      out(ids);
+      // A line of its own: install.sh compares it with the IPv4 it uses, and warns when they differ.
+      out({ recordedIpv4 });
     } else if (command === "create-admin") {
       const password = process.env["HP_NEW_PASSWORD"] ?? (await promptHidden("Password: "));
       out(

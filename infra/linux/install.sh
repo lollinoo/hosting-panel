@@ -70,6 +70,14 @@ is_private_ipv4() { # is_private_ipv4 <addr>: RFC1918, CGNAT, loopback, link-loc
   esac
   return 1
 }
+# recorded_ipv4_warning <hp-accounts setup output> <IPv4 of this run>: a rerun of an older installer could leave
+# executor.env and the panel with different addresses. Only --ipv4 changes the recorded one, so this only tells.
+recorded_ipv4_warning() {
+  local recorded
+  recorded="$(sed -n 's/^{"recordedIpv4":"\([0-9.]*\)"}$/\1/p' <<<"$1")"
+  [[ -n "${recorded}" && "${recorded}" != "$2" ]] || return 0
+  info "WARNING: the panel has ${recorded} recorded as this server's public IPv4, but this run uses $2. Run the installer again with --ipv4 <address> to record the right one."
+}
 
 # Rewrites KEY=VALUE lines in an env file atomically (0400 root:root); other lines are kept
 # byte for byte, missing keys are appended. Values are never printed.
@@ -227,7 +235,6 @@ main() {
   # Validation at the trust boundary: these values end up in env files and DB rows.
   local fqdn_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
   local email_re='^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
-  local ipv4_re='^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
   local ipv6_re='^[0-9A-Fa-f.:]+$'
   [[ -n "${hostname}" ]] || { usage >&2; die 2 "--hostname is required"; }
   [[ "${hostname}" =~ ${fqdn_re} ]] || die 2 "Invalid --hostname: ${hostname}"
@@ -240,7 +247,7 @@ main() {
     example.com | example.net | example.org | *.example | *.test | *.invalid | *.localhost)
       die 2 "Use a real --acme-email: Let's Encrypt rejects ${acme_domain}" ;;
   esac
-  [[ -z "${ipv4}" || "${ipv4}" =~ ${ipv4_re} ]] || die 2 "Invalid --ipv4: ${ipv4}"
+  [[ -z "${ipv4}" || "${ipv4}" =~ ${_hp_ipv4_re} ]] || die 2 "Invalid --ipv4: ${ipv4}"
   # Only the shape: hp-accounts setup parses the address, and refuses one that cannot be public, before storing it.
   if ((ipv6_given)) && [[ "${ipv6}" != none ]] && ! [[ "${ipv6}" =~ ${ipv6_re} && "${ipv6}" == *:*:* ]]; then
     die 2 "Invalid --ipv6: ${ipv6} (an IPv6 address without brackets, zone or prefix length, or none)"
@@ -369,7 +376,7 @@ main() {
   # Behind NAT the default route leaves from a private address: a rerun keeps what the last run recorded.
   saved_ipv4="$(env_value "${STATE_DIR}/executor.env" HP_PANEL_IPV4)"
   [[ -n "${ipv4}" ]] || ipv4_flag=--ipv4-default
-  if [[ -z "${ipv4}" && "${saved_ipv4}" =~ ${ipv4_re} ]]; then
+  if [[ -z "${ipv4}" && "${saved_ipv4}" =~ ${_hp_ipv4_re} ]]; then
     ipv4="${saved_ipv4}"
     ipv4_from="kept from the last run, HP_PANEL_IPV4 in ${STATE_DIR}/executor.env; pass --ipv4 to change it"
   elif [[ -z "${ipv4}" ]]; then
@@ -618,7 +625,9 @@ SQL
   else
     # Every run, so --ipv4 and --ipv6 given on a rerun reach the panel. An IPv4 the installer kept or detected
     # (--ipv4-default) is recorded only if the panel has none: behind NAT it would replace the public one.
-    /usr/local/sbin/hp-accounts setup "${setup_args[@]}" >/dev/null
+    local setup_out
+    setup_out="$(/usr/local/sbin/hp-accounts setup "${setup_args[@]}")"
+    recorded_ipv4_warning "${setup_out}" "${ipv4}"
     if ((admin_done == 0)); then
       local has_admin
       has_admin="$(panel_has_admin "${api_env}")"
