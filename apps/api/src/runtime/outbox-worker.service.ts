@@ -1187,7 +1187,9 @@ export class OutboxWorkerService {
           try {
             obs = await this.dockerExecutor.getObservedState(op.resourceId);
           } catch {
-            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey
+            // Executor IPC temporarily unreachable; preserve 'unknown' status and lockKey.
+            // Not bounded (issue #183): a service row has no state that says "to be checked", so closing the operation
+            // would leave the service looking settled while nobody knows what it runs. It stays for break-glass unlock.
             continue;
           }
 
