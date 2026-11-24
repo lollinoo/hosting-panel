@@ -356,7 +356,8 @@ describe("support access tenancy over every organization route", () => {
     const answers = await walk(orgA, adminToken);
     const table = answers.map((a) => ({ route: a.route, permission: permissionOf.get(a.route)!, status: a.status, code: a.code }));
     const wrong = answers.filter((a) => {
-      const inside = SUPPORT_KEYS.includes(permissionOf.get(a.route)!);
+      // The generic site route asks site.create, a visit's key, and refuses a visit all the same (#116, ADR 0029 §2).
+      const inside = SUPPORT_KEYS.includes(permissionOf.get(a.route)!) && a.route !== "POST /v1/organizations/:orgId/sites";
       const denied = a.status === 403 && a.code === "PERMISSION_DENIED" && a.rows.length === 1
         && (a.rows[0]!.details as Json).reason === "SUPPORT_ACCESS_PERMISSION_DENIED";
       // Inside: a 404 here can only be a missing resource (a valid grant never hides the organization), so no denied row may appear.

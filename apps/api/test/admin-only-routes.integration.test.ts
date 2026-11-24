@@ -1,10 +1,17 @@
 import {
+  appStackComponents,
+  appStackDomains,
+  appStacks,
+  appTemplates,
+  appTemplateVersions,
   auditEvents,
   DEMO_IDS,
+  domains,
   eq,
   membershipRoles,
   memberships,
   serviceInstances,
+  sites,
   stackRevisions,
   supportAccessGrants,
   users,
@@ -21,6 +28,10 @@ const SERVICE = DEMO_IDS.services.acmeShopWp;
 const GIB = 1024n ** 3n;
 // A server administrator who is also a member of the organisation with the owner's role.
 const ADMIN_MEMBER = "usr_admin_member";
+// A site with no type, through the generic route (#116).
+const SITE_BODY = { name: "Generic Site", slug: "generic-site", hostAllocationId: DEMO_IDS.allocations.acme, initialDomain: "generic.example.test" };
+// The typed route's answer for an address another site or a server already has.
+const TAKEN = "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.";
 
 // R207 orgs.2, orgs.3 and addendum 4 A: the organisation check first, then the server administrator's permission.
 describe("generic service routes and invitations are for the server administrator only", () => {
@@ -49,6 +60,8 @@ describe("generic service routes and invitations are for the server administrato
     revisions: await countOf(app.dbClient.db.select().from(stackRevisions)),
     memberships: await countOf(app.dbClient.db.select().from(memberships)),
     users: await countOf(app.dbClient.db.select().from(users)),
+    sites: await countOf(app.dbClient.db.select().from(sites)),
+    domains: await countOf(app.dbClient.db.select().from(domains)),
   });
   const rowsOf = (userId: string) => app.dbClient.db.select().from(auditEvents).where(eq(auditEvents.actorId, userId));
   const deniedRows = async (userId: string) =>
@@ -106,6 +119,8 @@ describe("generic service routes and invitations are for the server administrato
     ["a revision", `/services/${SERVICE}/revisions`, {}],
     ["a revision with a valid body", `/services/${SERVICE}/revisions`, { declarativeConfig: { WP_DEBUG: "false" } }],
     ["an invitation", "/invitations", { email: "new-member@example.test", role: "customer_collaborator" }],
+    ["a site", "/sites", {}],
+    ["a site with a valid body", "/sites", SITE_BODY],
   ];
 
   for (const [what, path, body] of refused) {
@@ -131,6 +146,7 @@ describe("generic service routes and invitations are for the server administrato
     }],
     ["a revision", "service.configuration.manage", `/services/${SERVICE}/revisions`, { declarativeConfig: { WP_DEBUG: "false" } }],
     ["an invitation", "organization.members.manage", "/invitations", { email: "visit-member@example.test", role: "customer_collaborator" }],
+    ["a site", "site.create", "/sites", SITE_BODY],
   ];
 
   /** Calls the route and returns the answer with the actor's new audit rows. */
@@ -161,6 +177,7 @@ describe("generic service routes and invitations are for the server administrato
       expect(res.rows[0]!.action).toBe(key);
     });
 
+    // site.create is one of a visit's permissions (the typed route needs it), and the site route refuses the visit all the same.
     it(`refuses ${what} with 403 and one SUPPORT_ACCESS_PERMISSION_DENIED row to an administrator on an open visit`, async () => {
       await visit(new Date(Date.now() + 60_000));
       const res = await answer(DEMO_IDS.users.infra, path, body);
@@ -174,6 +191,70 @@ describe("generic service routes and invitations are for the server administrato
       expect(res.rows[0]!.action).toBe("platform.users.manage");
     });
   }
+
+  it("stores an administrator's first domain of a site the way the typed route writes it (L43)", async () => {
+    for (const [slug, initialDomain, hostname] of [
+      ["generic-case", "  Generic-Admin.Example.TEST. ", "generic-admin.example.test"],
+      ["generic-idn", "Bücher.example.test", "xn--bcher-kva.example.test"],
+    ]) {
+      const created = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug, initialDomain });
+      expect(created.status).toBe(201);
+      expect(created.body.data.domains.map((d: Json) => d.hostname)).toEqual([hostname]);
+      const rows = await app.dbClient.db.select().from(domains).where(eq(domains.siteId, created.body.data.id as string));
+      expect(rows.map((row) => row.hostname)).toEqual([hostname]);
+    }
+  });
+
+  it("refuses an administrator's first domain the typed route refuses, with the typed route's error, and stores nothing (L43)", async () => {
+    const before = await stored();
+    for (const initialDomain of ["bad_name.example.test", "192.168.10.11", "nodot"]) {
+      const res = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-refused", initialDomain });
+      expect([initialDomain, res.status, res.body.error?.code]).toEqual([initialDomain, 400, "VALIDATION_ERROR"]);
+    }
+    // Another site's address in another case, and a server's own name.
+    for (const initialDomain of ["NEGOZIO.acme.it", "node-acme.internal"]) {
+      const res = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-taken", initialDomain });
+      expect([initialDomain, res.status, res.body.error?.code, res.body.error?.message]).toEqual([initialDomain, 409, "DOMAIN_CONFLICT", TAKEN]);
+    }
+    expect(await stored()).toEqual(before);
+  });
+
+  it("refuses an administrator's first domain that is an application's address with the typed route's 409, not a 500 (L43)", async () => {
+    const db = app.dbClient.db;
+    await db.insert(appTemplates).values({ id: "atpl_admin_only", slug: "admin-only-app", name: "App", category: "web" });
+    await db.insert(appTemplateVersions).values({
+      id: "atv_admin_only",
+      templateId: "atpl_admin_only",
+      versionNumber: 1,
+      source: "x",
+      specVersion: 1,
+      compiledSchema: {},
+      specHash: "a".repeat(64),
+    });
+    await db.insert(appStacks).values({
+      id: "stk_admin_only",
+      organizationId: ORG,
+      hostAllocationId: DEMO_IDS.allocations.acme,
+      templateId: "atpl_admin_only",
+      templateVersionId: "atv_admin_only",
+      name: "App",
+    });
+    await db.insert(appStackComponents).values({ stackId: "stk_admin_only", organizationId: ORG, componentKey: "web" });
+    await db.insert(appStackDomains).values({
+      id: "sdom_admin_only",
+      stackId: "stk_admin_only",
+      organizationId: ORG,
+      componentKey: "web",
+      internalPort: 8080,
+      hostname: "app.example.test",
+      status: "active",
+    });
+    const before = await stored();
+    // The database trigger refuses it (SQLSTATE 23505) after the check of other sites and the servers.
+    const res = await call(ADMIN_MEMBER, "/sites", { ...SITE_BODY, slug: "generic-app", initialDomain: "App.Example.TEST" });
+    expect([res.status, res.body.error?.code, res.body.error?.message]).toEqual([409, "DOMAIN_CONFLICT", TAKEN]);
+    expect(await stored()).toEqual(before);
+  });
 
   it("lets an administrator who is also an owner create a service and a revision", async () => {
     const created = await call(ADMIN_MEMBER, `/sites/${SITE}/services`, {

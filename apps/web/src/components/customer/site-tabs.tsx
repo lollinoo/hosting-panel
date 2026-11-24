@@ -21,15 +21,26 @@ export const SITE_TABS: {
 
 // Route tabs are page links, so they are a nav with aria-current rather than an ARIA tablist.
 // The site type's own tabs follow the overview; the layout passes them as plain data.
-export function SiteTabs({ siteId, typeTabs = [] }: { siteId: string; typeTabs?: WebSiteType["tabs"] }) {
+// A site with no known type is not managed (ADR 0029 §2): every tab but the overview is hidden for it.
+export function SiteTabs({
+  siteId,
+  typeTabs = [],
+  managed = true,
+}: {
+  siteId: string;
+  typeTabs?: WebSiteType["tabs"];
+  managed?: boolean;
+}) {
   const m = useMessages();
   const pathname = usePathname();
 
-  const tabs = [
-    SITE_TABS[0]!,
-    ...typeTabs.map((t) => ({ key: t.key, href: (id: string) => `/sites/${id}/${t.path}` })),
-    ...SITE_TABS.slice(1),
-  ];
+  const tabs = managed
+    ? [
+        SITE_TABS[0]!,
+        ...typeTabs.map((t) => ({ key: t.key, href: (id: string) => `/sites/${id}/${t.path}` })),
+        ...SITE_TABS.slice(1),
+      ]
+    : [SITE_TABS[0]!];
 
   return (
     <nav aria-label={m.site.tabsLabel} className="border-b">

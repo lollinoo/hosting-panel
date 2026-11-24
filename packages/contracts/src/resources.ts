@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { PresetRoleNameSchema } from "./permissions.js";
-import { SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
+import { SiteDomainSchema, SUPPORTED_PHP_VERSIONS } from "./site-runtime.js";
 import { CertificateAlertDtoSchema } from "./site-domains.js";
 import { AdminSiteTemplateRefDtoSchema } from "./site-templates/dto.js";
 import { SiteTypeKeySchema } from "./site-types/keys.js";
@@ -830,7 +830,8 @@ export const CreateSiteInputSchema = z.object({
   name: z.string().min(1),
   slug: z.string().min(1),
   hostAllocationId: EntityIdSchema,
-  initialDomain: z.string().min(1).optional(),
+  // normalised and checked as the typed route's domain is
+  initialDomain: SiteDomainSchema.optional(),
 });
 export type CreateSiteInput = z.infer<typeof CreateSiteInputSchema>;
 

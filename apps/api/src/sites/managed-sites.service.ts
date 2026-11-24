@@ -144,6 +144,39 @@ export async function stoppedSiteIds(db: HostingPanelDatabase, siteIds: readonly
   return new Set(rows.map((r) => r.siteId));
 }
 
+const ADDRESS_TAKEN =
+  "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.";
+
+/**
+ * A refused site create, as both create routes answer it: the site limit; an address another site, an application or
+ * the panel holds (SQLSTATE 23505, raised by the unique index or the hostname trigger); a manual certificate that
+ * captures the address; a template that cannot render. Anything else passes through.
+ */
+export function newSiteError(err: unknown): unknown {
+  if (err instanceof SiteLimitReachedError) return siteLimitError(err);
+  if (isUniqueViolation(err)) return new ControlPlaneError("DOMAIN_CONFLICT", ADDRESS_TAKEN);
+  return coverageError(renderRefusal(err));
+}
+
+/** A new site's addresses, already normalised, are no other site's and no server's name or address (the panel's included). */
+export async function assertNewSiteAddressesFree(db: HostingPanelDatabase, names: string[]): Promise<void> {
+  const [usedDomain] = await db
+    .select({ id: domains.id })
+    .from(domains)
+    .where(inArray(domains.hostname, names))
+    .limit(1);
+  const [panelHost] = await db
+    .select({ id: hosts.id })
+    .from(hosts)
+    .where(
+      or(inArray(hosts.hostname, names), inArray(hosts.ipv4Address, names)),
+    )
+    .limit(1);
+  if (usedDomain || panelHost) {
+    throw new ControlPlaneError("DOMAIN_CONFLICT", ADDRESS_TAKEN);
+  }
+}
+
 function slugify(name: string): string {
   const base =
     name
@@ -191,25 +224,7 @@ export class ManagedSitesService {
     const phpVersion = Object.hasOwn(values, PHP_VERSION_PARAMETER_KEY) ? (values[PHP_VERSION_PARAMETER_KEY] as PhpVersion) : null;
 
     const partner = body.includeWww ? wwwPartner(body.domain) : null;
-    const names = partner ? [body.domain, partner] : [body.domain];
-    const [usedDomain] = await db
-      .select({ id: domains.id })
-      .from(domains)
-      .where(inArray(domains.hostname, names))
-      .limit(1);
-    const [panelHost] = await db
-      .select({ id: hosts.id })
-      .from(hosts)
-      .where(
-        or(inArray(hosts.hostname, names), inArray(hosts.ipv4Address, names)),
-      )
-      .limit(1);
-    if (usedDomain || panelHost) {
-      throw new ControlPlaneError(
-        "DOMAIN_CONFLICT",
-        "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
-      );
-    }
+    await assertNewSiteAddressesFree(db, partner ? [body.domain, partner] : [body.domain]);
 
     const [allocation] = await db
       .select()
@@ -321,22 +336,13 @@ export class ManagedSitesService {
         return { siteId: site.id, operationId };
       });
     } catch (err) {
-      // A concurrent create with the same key took the last slot first: the key replays that one, it is no refusal.
-      if (err instanceof SiteLimitReachedError) {
+      // A concurrent create with the same key took the last slot first, or passed the address check above and
+      // committed first: the key replays that one, it is no refusal.
+      if (err instanceof SiteLimitReachedError || isUniqueViolation(err)) {
         const twin = await this.#replay(organizationId, idempotencyKey);
         if (twin) return twin;
-        throw siteLimitError(err);
       }
-      // A concurrent create passed the check above and committed first: the same key replays it.
-      if (isUniqueViolation(err)) {
-        const twin = await this.#replay(organizationId, idempotencyKey);
-        if (twin) return twin;
-        throw new ControlPlaneError(
-          "DOMAIN_CONFLICT",
-          "This web address is already used by another site or by the panel. Remove it from the other site first, or ask your administrator.",
-        );
-      }
-      throw coverageError(renderRefusal(err));
+      throw newSiteError(err);
     }
   }
 
