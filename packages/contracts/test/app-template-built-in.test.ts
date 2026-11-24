@@ -18,7 +18,7 @@ const FIRST_FORMAT = APP_BUILT_IN_TEMPLATES.filter((t) => !isExtended(t));
 const EXTENDED = APP_BUILT_IN_TEMPLATES.filter(isExtended);
 /** WORDPRESS_CONFIG_EXTRA as written in the source: a "$$" is one "$" for PHP. */
 const CONFIG_EXTRA_YAML =
-  "\"$$hcp_host = isset($$_SERVER['HTTP_HOST']) ? strtolower($$_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$$/D', $$hcp_host)) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$hcp_host); define('WP_SITEURL', WP_HOME); }\"";
+  "\"$$hcp_host = isset($$_SERVER['HTTP_HOST']) ? strtolower($$_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$$/D', $$hcp_host)) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$hcp_host); define('WP_SITEURL', WP_HOME); } unset($$hcp_host);\"";
 
 describe("APP_BUILT_IN_TEMPLATES", () => {
   it("holds the six seeds with their fixed ids, frozen", () => {

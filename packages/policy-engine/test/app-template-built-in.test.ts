@@ -59,9 +59,9 @@ const WORDPRESS_SECRETS = new Map([
   ["db_root_password", 1],
 ]);
 /** WORDPRESS_CONFIG_EXTRA as PHP reads it (one line): the site's address is the name it is asked by, lower-cased, when
- *  that is a host name with a letter or digit at both ends and an optional port. */
+ *  that is a host name with a letter or digit at both ends and an optional port; its variable does not outlive it. */
 const CONFIG_EXTRA =
-  "$hcp_host = isset($_SERVER['HTTP_HOST']) ? strtolower($_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$/D', $hcp_host)) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $hcp_host); define('WP_SITEURL', WP_HOME); }";
+  "$hcp_host = isset($_SERVER['HTTP_HOST']) ? strtolower($_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$/D', $hcp_host)) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $hcp_host); define('WP_SITEURL', WP_HOME); } unset($hcp_host);";
 const UPLOADS_ARGV = ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"];
 
 describe("the built-in application templates", () => {
@@ -296,6 +296,10 @@ describe("the built-in application templates", () => {
       expect(CONFIG_EXTRA).not.toContain("\n");
       expect([...CONFIG_EXTRA.matchAll(/define\('([A-Z_]+)'/g)].map((m) => m[1])).toEqual(["WP_HOME", "WP_SITEURL"]);
       expect(CONFIG_EXTRA).not.toMatch(/eval|\$\{|\$\$/);
+      // The line runs in the global scope of every request: what it assigns, it unsets at the end.
+      const assigned = [...CONFIG_EXTRA.matchAll(/(\$[a-z_]+) = /g)].map((m) => m[1]);
+      expect(assigned).toEqual(["$hcp_host"]);
+      expect(CONFIG_EXTRA.endsWith(` unset(${assigned.join(", ")});`)).toBe(true);
       // Its variable is not named like a platform object, which a real-Docker acceptance gate refuses in a request.
       expect(CONFIG_EXTRA).not.toMatch(/(?<![A-Za-z0-9])hp_/);
       expect(appStackComponentSecretEnvironment(component(p, "db")!)).toEqual([

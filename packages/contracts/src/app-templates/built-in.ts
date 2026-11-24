@@ -276,10 +276,11 @@ const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
     // ports are configurable, so the browser may send one); otherwise WordPress keeps its stored address. So it answers
     // on every address of the application instead of sending visitors back to the first one. The proxy forwards only
     // the application's own addresses. Neither WordPress nor the image's wp-config.php uses $hcp_host, and it is no
-    // hp_ name, which the real-Docker acceptance gate refuses in a request. A "$$" is one "$" for PHP.
+    // hp_ name, which the real-Docker acceptance gate refuses in a request. The line runs in the global scope of the
+    // request, so it unsets its variable at the end. A "$$" is one "$" for PHP.
     environment: [
       "      - name: WORDPRESS_CONFIG_EXTRA",
-      `        value: "$$hcp_host = isset($$_SERVER['HTTP_HOST']) ? strtolower($$_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$$/D', $$hcp_host)) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$hcp_host); define('WP_SITEURL', WP_HOME); }"`,
+      `        value: "$$hcp_host = isset($$_SERVER['HTTP_HOST']) ? strtolower($$_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$$/D', $$hcp_host)) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$hcp_host); define('WP_SITEURL', WP_HOME); } unset($$hcp_host);"`,
     ],
   }),
   // Version 1 as it shipped: the stacks installed on it are offered version 2.
