@@ -86,7 +86,7 @@ message is **Non consegnato** for good. A pass sends at most 20 messages; the re
 | `rejected` | The receiver answered 4xx. | Webhook: the path or its key is wrong, or the receiver refuses the signature. Telegram: `401` or `404` is a wrong or revoked token, `400` or `403` a wrong chat or a bot that is not a member of it. |
 | `server_error` | The receiver answered 5xx. | The fault is on the receiver's side; the panel tries again by itself. |
 | `expired` | An hour passed without a successful send, or the message was waiting when the panel was restored on a new server. | Fix the cause shown by the earlier attempts; the next alert is a new message. |
-| `channel_changed` | The channel was turned off, changed or removed before the send, or the mail address was taken off the list. | Nothing: the message was dropped on purpose. |
+| `channel_changed` | The channel was turned off, changed or removed before the send, every group of the message was turned off, or the mail address was taken off the list. | Nothing: the message was dropped on purpose. |
 
 What the API logs about notifications holds no address, key or token, only that something failed:
 
