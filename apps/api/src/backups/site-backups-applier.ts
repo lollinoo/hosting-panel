@@ -218,7 +218,7 @@ export class SiteBackupsApplier {
       return this.#restore.recover(op, reads);
     }
     if (op.kind === "panel.backups.create") {
-      return this.panel.recover(op);
+      return this.panel.recover(op, reads);
     }
     const db = this.dbClient.db;
     const steps = await db

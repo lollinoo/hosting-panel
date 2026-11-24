@@ -31,6 +31,7 @@ import {
   settleSiteBackup,
   siteBackups,
   sites,
+  unlockOperationBreakGlassTransactional,
   updatePolicySettings,
   upsertBackupSettings,
   type DatabaseClient,
@@ -53,6 +54,12 @@ import {
 } from "../src/backups/site-backups-applier.js";
 import { setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
+import {
+  RECOVERY_READ_GIVE_UP_MS,
+  RECOVERY_UNCONFIRMED_AUDIT_ACTION,
+  RECOVERY_UNCONFIRMED_TEXT,
+  RecoveryReadBound,
+} from "../src/runtime/recovery-read-bound.js";
 
 const KEY = Buffer.alloc(32, 9);
 const KEY_HEX = KEY.toString("hex");
@@ -833,6 +840,168 @@ describe("nightly panel copy (panel.backups.create)", () => {
     sim.backupState.simulateRestart();
     await app.outboxWorker.recoverUnknownOperations();
     expect((await panelCopies(opId))[0]).toMatchObject({ status: "failed", problem: "interrupted" });
+  });
+
+  describe("Recovery (issue #183): a read of the copy job that keeps failing", () => {
+    const MINUTE = 60_000;
+    const clock = { t: Date.now() };
+    const coded = (code: string) => Object.assign(new Error(`executor said ${code}`), { code });
+    const worker = () => {
+      app.outboxWorker.recoveryReads = new RecoveryReadBound(() => clock.t);
+      return app.outboxWorker;
+    };
+    const unconfirmed = async (opId: string) =>
+      (await dbClient.db.select().from(auditEvents)).filter(
+        (a) => a.action === RECOVERY_UNCONFIRMED_AUDIT_ACTION && a.targetId === opId,
+      );
+    const stepsOf = async (opId: string) =>
+      Object.fromEntries(
+        (await dbClient.db.select().from(operationSteps).where(eq(operationSteps.operationId, opId))).map((s) => [
+          s.key,
+          [s.status, s.message],
+        ]),
+      );
+
+    /** Every status read runs `fault.before`, then throws `fault.err` while it is not null (else the simulator answers). */
+    function faulty(fault: { err: unknown; before?: () => Promise<void> }) {
+      const original = sim.backups;
+      let reads = 0;
+      sim.backups = (async (req: BackupsIpcRequest) => {
+        if (req.action === "status") {
+          reads += 1;
+          await fault.before?.();
+          if (fault.err !== null) throw fault.err;
+        }
+        return original(req);
+      }) as typeof sim.backups;
+      return { reads: () => reads, restore: () => (sim.backups = original) };
+    }
+
+    afterEach(() => {
+      sim.backupState.holdJobs(false);
+      sim.backupState.finishHeld();
+    });
+
+    it("is closed as not confirmed after the bound: copy interrupted, the night's line failed, one audit, the file removed, only reads sent", async () => {
+      const opId = await runUntilAmbiguous();
+      const sent = calls.length;
+      const fault = faulty({ err: coded("INTERNAL_ERROR") });
+      try {
+        const w = worker();
+        await w.recoverUnknownOperations();
+        clock.t += RECOVERY_READ_GIVE_UP_MS - 1;
+        await w.recoverUnknownOperations();
+        expect((await panelOps())[0]!.status).toBe("unknown");
+        expect(await dumpFiles()).toEqual([`${opId}.dump`]);
+
+        clock.t += 1;
+        await w.recoverUnknownOperations();
+
+        expect((await panelOps())[0]).toMatchObject({
+          status: "failed",
+          errorCode: "OPERATION_AMBIGUOUS",
+          errorMessage: RECOVERY_UNCONFIRMED_TEXT,
+        });
+        expect((await panelCopies(opId)).map((c) => [c.status, c.problem])).toEqual([["failed", "interrupted"]]);
+        expect(await settingsRow()).toMatchObject({ lastPanelBackupStatus: "failed", lastPanelBackupProblem: "interrupted" });
+        expect(await stepsOf(opId)).toEqual({
+          dump: ["succeeded", "Panel database copied"],
+          upload: ["failed", RECOVERY_UNCONFIRMED_TEXT],
+        });
+        // One audit row for the closing, not the copy's own outcome row as well.
+        expect(await panelAudits()).toEqual([]);
+        const rows = await unconfirmed(opId);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]!.details).toEqual({
+          operationId: opId,
+          kind: "panel.backups.create",
+          resourceType: "host",
+          resourceId: "panel",
+          minutesWaited: 30,
+          failure: "error_code",
+        });
+        // The operation is no longer active: its file goes, as the start sweep would remove it.
+        expect(await dumpFiles()).toEqual([]);
+        expect(fault.reads()).toBe(3);
+        expect(calls.slice(sent).filter((c) => c.action !== "status")).toEqual([]);
+
+        // A second pass finds nothing in doubt: no read, no row.
+        const [closed] = await panelOps();
+        await w.recoverUnknownOperations();
+        expect(fault.reads()).toBe(3);
+        expect((await panelOps())[0]).toEqual(closed);
+        expect(await unconfirmed(opId)).toHaveLength(1);
+        expect(w.recoveryReads.size).toBe(0);
+        await expectNoSecrets();
+      } finally {
+        fault.restore();
+      }
+    });
+
+    it("an executor that cannot be reached never closes it; an answer it can read starts the count again", async () => {
+      const opId = await runUntilAmbiguous();
+      const honest = [coded("DOCKER_ENGINE_UNAVAILABLE"), Object.assign(coded("OPERATION_AMBIGUOUS"), { ambiguousOutcome: true }), coded("RESOURCE_LOCKED")];
+      const f: { err: unknown } = { err: honest[0] };
+      const fault = faulty(f);
+      try {
+        const w = worker();
+        for (let pass = 0; pass < 48; pass += 1) {
+          f.err = honest[pass % honest.length];
+          await w.recoverUnknownOperations();
+          clock.t += 30 * MINUTE;
+        }
+        expect((await panelOps())[0]!.status).toBe("unknown");
+        expect(fault.reads()).toBe(48);
+        expect(w.recoveryReads.size).toBe(0);
+
+        // Counted, then an answer it can read (the job runs), then counted again: the bound is counted from the last one.
+        f.err = coded("INTERNAL_ERROR");
+        await w.recoverUnknownOperations();
+        clock.t += 20 * MINUTE;
+        f.err = null;
+        await w.recoverUnknownOperations();
+        clock.t += 20 * MINUTE;
+        f.err = coded("INTERNAL_ERROR");
+        await w.recoverUnknownOperations();
+        clock.t += RECOVERY_READ_GIVE_UP_MS - MINUTE;
+        await w.recoverUnknownOperations();
+        expect((await panelOps())[0]!.status).toBe("unknown");
+
+        clock.t += MINUTE;
+        await w.recoverUnknownOperations();
+        expect((await panelOps())[0]).toMatchObject({ status: "failed", errorCode: "OPERATION_AMBIGUOUS" });
+        expect((await unconfirmed(opId))[0]!.details).toMatchObject({ minutesWaited: 30 });
+        expect(calls.filter((c) => c.action === "panelStart")).toHaveLength(1);
+      } finally {
+        fault.restore();
+      }
+    });
+
+    it("an operation unlocked by hand while the last read fails is left as the unlock wrote it, its file kept", async () => {
+      const opId = await runUntilAmbiguous();
+      let unlockNow = false;
+      const fault = faulty({
+        err: coded("INTERNAL_ERROR"),
+        before: async () => {
+          if (unlockNow) await unlockOperationBreakGlassTransactional(dbClient.db, { operationId: opId, reason: "checked by hand" });
+        },
+      });
+      try {
+        const w = worker();
+        await w.recoverUnknownOperations();
+        clock.t += RECOVERY_READ_GIVE_UP_MS;
+        unlockNow = true;
+        await w.recoverUnknownOperations();
+
+        expect((await panelOps())[0]).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
+        expect(await unconfirmed(opId)).toEqual([]);
+        expect((await panelCopies(opId))[0]!.status).toBe("running");
+        expect(await panelAudits()).toEqual([]);
+        expect(await dumpFiles()).toEqual([`${opId}.dump`]);
+      } finally {
+        fault.restore();
+      }
+    });
   });
 
   it("Dump file: the start sweep keeps an active operation's file and removes a finished one's", async () => {
