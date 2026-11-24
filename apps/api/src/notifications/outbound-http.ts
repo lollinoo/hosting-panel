@@ -75,7 +75,7 @@ function interfaceAddresses(): string[] {
 /** The public addresses the panel records for its servers: behind address translation no interface has them. */
 export type RecordedAddresses = () => Promise<readonly string[]>;
 
-/** Every IPv4 and IPv6 address of every host row. What is not an address is left to the check, which ignores it. */
+/** Every IPv4 and IPv6 address of every host row, as stored: the check decides what a value that is not an address means. */
 export async function recordedServerAddresses(db: HostingPanelDatabase): Promise<string[]> {
   const rows = await db.select({ ipv4: hosts.ipv4Address, ipv6: hosts.ipv6Address }).from(hosts);
   return rows.flatMap((row) => (row.ipv6 === null ? [row.ipv4] : [row.ipv4, row.ipv6]));
@@ -141,6 +141,8 @@ export function createOutboundHttp(dns: DnsLookup, recorded: RecordedAddresses, 
     }
     // Fail closed: nothing is called while it is not known which addresses are this server's.
     if (kept === null) return "unreachable";
+    // A recorded value that is not an address leaves them unknown too (an empty one is no address recorded).
+    if (kept.some((address) => address !== "" && isIP(address) === 0)) return "unreachable";
     const own = new BlockList();
     for (const address of [...(test.localAddresses ? test.localAddresses() : interfaceAddresses()), ...kept]) {
       const family = isIP(address);

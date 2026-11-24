@@ -2,8 +2,9 @@
 import { createServer as createPlainServer, type Server as PlainServer } from "node:net";
 import { createServer, type Server } from "node:https";
 import type { AddressInfo } from "node:net";
+import type { HostingPanelDatabase } from "@hosting-panel/database";
 import { afterEach, describe, expect, it } from "vitest";
-import { createOutboundHttp, isPublicAddress, type OutboundHttpTestOptions, type RecordedAddresses } from "../src/notifications/outbound-http.js";
+import { createOutboundHttp, isPublicAddress, recordedServerAddresses, type OutboundHttpTestOptions, type RecordedAddresses } from "../src/notifications/outbound-http.js";
 import type { DnsLookup } from "../src/sites/dns-check.js";
 import { issuePki } from "./fixtures/tls-certgen.js";
 
@@ -143,9 +144,24 @@ describe("the address check", () => {
     expect(await out.check("https://other.example.test/")).toBeNull();
     recorded = [OTHER_V6];
     expect(await out.check("https://other.example.test/")).toBe("address_not_allowed");
-    // What is not an address is ignored.
-    const odd = createOutboundHttp(dns, async () => ["", " ", "not-an-address", "203.0.113.0/24"], documentation);
-    expect(await odd.check(`https://${NAME}/`)).toBeNull();
+  });
+
+  it("calls nothing while a recorded value is not an address, and takes an empty or missing one for none", async () => {
+    const documentation = { treatAsPublic: () => true, localAddresses: () => [] } satisfies OutboundHttpTestOptions;
+    const dns = resolver({ [NAME]: { a: ["203.0.113.5"] }, "other.example.test": { a: [OTHER_V4] } });
+    // The installer's pattern takes a leading zero: the address it stands for may be the one the name resolves to.
+    const zero = createOutboundHttp(dns, async () => ["203.0.113.05"], documentation);
+    expect(await zero.check(`https://${NAME}/`)).toBe("unreachable");
+    expect(await zero.check("https://other.example.test/")).toBe("unreachable");
+    for (const odd of [" ", "not-an-address", "203.0.113.0/24"]) {
+      expect(await createOutboundHttp(dns, async () => [SELF_V4, odd], documentation).check("https://other.example.test/"), odd).toBe("unreachable");
+    }
+    expect(await createOutboundHttp(dns, async () => ["", OTHER_V6], documentation).check(`https://${NAME}/`)).toBeNull();
+    // A host row with no IPv6 next to a good IPv4.
+    const db = { select: () => ({ from: async () => [{ ipv4: "203.0.113.5", ipv6: null }] }) } as unknown as HostingPanelDatabase;
+    const row = createOutboundHttp(dns, () => recordedServerAddresses(db), documentation);
+    expect(await row.check(`https://${NAME}/`)).toBe("address_not_allowed");
+    expect(await row.check("https://other.example.test/")).toBeNull();
   });
 
   it("calls nothing while the addresses the panel records cannot be read", async () => {
@@ -341,6 +357,20 @@ describe("the request", () => {
     expect(seen).toEqual([]);
     // Readable, and not this server's: it goes.
     expect(await outbound({}, async () => [SELF_V4, SELF_V6]).postJson(url, "{}")).toEqual({ problem: null, httpStatus: 200 });
+    expect(seen).toHaveLength(1);
+  });
+
+  it("sends nothing while a recorded value is not an address", async () => {
+    const port = await listen(200);
+    const url = `https://${NAME}:${String(port)}/`;
+    // The test server stands for this server, recorded with a leading zero the installer's pattern takes.
+    for (const recorded of ["127.0.0.01", "203.0.113.05"]) {
+      expect(await outbound({}, async () => [recorded]).postJson(url, "{}"), recorded).toEqual({ problem: "unreachable", httpStatus: null });
+    }
+    expect(seen).toEqual([]);
+    // A host row with no IPv6 next to a good IPv4 that is not this server's: it goes.
+    const db = { select: () => ({ from: async () => [{ ipv4: SELF_V4, ipv6: null }] }) } as unknown as HostingPanelDatabase;
+    expect(await outbound({}, () => recordedServerAddresses(db)).postJson(url, "{}")).toEqual({ problem: null, httpStatus: 200 });
     expect(seen).toHaveLength(1);
   });
 });
