@@ -720,7 +720,9 @@ export async function startMockDockerDaemon(options?: {
           // Let the frames leave before the stream is cut without an end.
           setTimeout(() => socket.destroy(), 20);
         } else if (planned.plan.stayOpen === true) {
-          planned.socket = socket;
+          // An exec ended before its stream arrived (a test ends it as soon as it exists) ends the stream at once.
+          if (planned.ended) socket.end();
+          else planned.socket = socket;
         } else {
           planned.ended = true;
           socket.end();

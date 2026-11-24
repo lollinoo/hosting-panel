@@ -1005,6 +1005,47 @@ describe("runAppStackTask on the Docker Engine", () => {
   });
 });
 
+describe("the mock engine of these tests", () => {
+  it("ends the stream of an exec that was ended before its stream arrived, as it ends one that is attached", async () => {
+    // A test that holds an exec open ends it as soon as the exec exists; on a busy machine the stream can come after.
+    const { mockDaemon } = await setup({ command: () => ({ stayOpen: true }) });
+    const body = JSON.stringify({ Cmd: ["sleep", "60"] });
+    const execId = await new Promise<string>((resolve, reject) => {
+      const req = http.request(
+        { socketPath: mockDaemon.socketPath, method: "POST", path: `/containers/${WEB}_id/exec`, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => resolve((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { Id: string }).Id));
+        },
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+    mockDaemon.endExec(execId, 0);
+
+    const ended = await new Promise<boolean>((resolve, reject) => {
+      const req = http.request({ socketPath: mockDaemon.socketPath, method: "POST", path: `/exec/${execId}/start`, headers: { Connection: "Upgrade", Upgrade: "tcp" } });
+      req.on("error", reject);
+      req.on("upgrade", (_res, socket) => {
+        const give = setTimeout(() => {
+          socket.destroy();
+          resolve(false);
+        }, 1_000);
+        socket.on("error", () => undefined);
+        socket.on("end", () => {
+          clearTimeout(give);
+          socket.destroy();
+          resolve(true);
+        });
+        socket.resume();
+      });
+      req.end(JSON.stringify({ Detach: false, Tty: false }));
+    });
+    expect(ended).toBe(true);
+  });
+});
+
 describe("reapAppStackTasks at the start of the executor", () => {
   it("cleans every running component, also one whose execs have all ended, and nothing else", async () => {
     const { adapter, mockDaemon } = await setup();
