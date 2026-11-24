@@ -288,6 +288,20 @@ approval.
    Actions on other applications are not held up: backups and restores
    run in a worker lane of their own, one at a time (a second one waits for its turn), and the nightly clean-ups in
    another. The copy holds the data volumes only: no image, no settings, no web address and none of the **Valori riservati**.
+
+   A job container that never exits blocks start, restart, install, update and removal of that application for good,
+   and the customer only reads that the action could not finish. The way out (server administrator), either:
+   - restart the executor, `sudo systemctl restart hp-docker-executor`: at its start it stops and removes every job
+     container (label `io.hostingpanel.role=site_job`), running ones included. That also ends every other backup job
+     running at that moment (of a site, of the panel, of another application), which then closes as interrupted: first
+     check with `sudo docker ps --filter label=io.hostingpanel.role=site_job` that the leftover is the only one listed;
+   - or remove that one container by the name the `app_backup_of` filter prints (the one `docker rm` this procedure
+     allows): `sudo docker rm -f <name>`.
+
+   Afterwards `sudo docker ps -a --filter label=io.hostingpanel.app_backup_of=<stackId>` lists nothing (if it still
+   lists the container, Docker itself cannot remove it: `sudo systemctl status docker`), and only then the customer
+   presses **Avvia**. A name with `_rs_` was a restore writing a volume back: its data may be half written, so read
+   step 6 first (the **Backup** section names the backup to restore).
 4. **Read the result.** «Completato»: every destination has the copy. «Parziale»: one destination has it and the other
    failed; the backup can be restored. «Non riuscito»: no destination has it; the application runs again and its data
    did not change. The list gives a reason in words; the stable code is the `problem` of the row:
