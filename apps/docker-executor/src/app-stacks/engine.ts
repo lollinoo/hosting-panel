@@ -8,6 +8,7 @@ import {
   APP_STACK_LOG_TAIL_MAX,
   APP_STACK_NETWORK_ROLES,
   appStackImageLookupProblem,
+  appStackImageRegistryProblem,
   appStackLinkAlias,
   type AppImageAllowlistEntry,
   type AppStackComponentActionIpcResult,
@@ -328,6 +329,8 @@ export class AppStackEngine implements StackExecutorPort {
       const pulled = found === null;
       if (found === null) {
         if (!this.deps.pullMissingImages) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
+        // Never ask the Engine to reach this server or a private network (ADR-0036); an image already here still runs.
+        if (appStackImageRegistryProblem(image) !== null) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
         const res = await this.deps.request("POST", `/images/create?fromImage=${enc(image)}`, undefined, {
           timeoutMs: APP_STACK_PULL_ENGINE_TIMEOUT_MS,
         });
