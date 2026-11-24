@@ -322,11 +322,11 @@ describe("AppWizard markup", () => {
     ]);
   });
 
-  it("Next refuses a private value that carries a platform process mark, and says why (ADR-0041)", () => {
+  it("Next refuses a private value or a text setting that carries a platform process mark, and says why (ADR-0041)", () => {
     const values = secretsRef({ admin_password: "pw HP_TERMINAL_SESSION=term_", api_token: "APP_ENV=production\nPHP_CLI_SERVER_WORKERS=4\n" });
-    const refused = wizard({ 1: "team-notes", 3: ["admin_password", "api_token"] }, { 0: values });
+    const refused = wizard({ 1: "team-notes", 2: { title: "Board xHP_TASK_RUN=srun_1" }, 3: ["admin_password", "api_token"] }, { 0: values });
     click(refused.tree, t.next);
-    expect(refused.sets).toEqual([[5, { "param:admin_password": t.valueReserved }]]);
+    expect(refused.sets).toEqual([[5, { "param:title": t.valueReserved, "param:admin_password": t.valueReserved }]]);
     expect(JSON.stringify(refused.sets)).not.toContain("term_");
     // The sentence names every mark, so it stays true when the list changes.
     for (const m of [en, itMsgs]) for (const mark of APP_STACK_PROCESS_MARKS) expect(m.apps.wizard.valueReserved).toContain(`${mark}=`);

@@ -146,6 +146,9 @@ export function AppWizard({ orgId, csrfToken, entry }: { orgId: string; csrfToke
       for (const k of typedSecrets) {
         if (APP_STACK_PROCESS_MARK_PATTERN.test(secretValues.current.get(k) ?? "")) errors[`param:${k}`] = t.valueReserved;
       }
+      for (const [k, v] of Object.entries(inputs)) {
+        if (typeof v === "string" && APP_STACK_PROCESS_MARK_PATTERN.test(v)) errors[`param:${k}`] = t.valueReserved;
+      }
     }
     if (step === "domains") {
       // The same hostname rules the server applies, so a refusal never lands on a step without the field.
