@@ -139,9 +139,6 @@ export type AppStackComponentsRemoveIpcRequest = z.infer<typeof AppStackComponen
 export const AppStackLogsIpcRequestSchema = AppStackRefIpcRequestSchema.extend({
   componentKey: AppStackKeySchema,
   tail: z.number().int().min(1).max(APP_STACK_LOG_TAIL_MAX),
-  /** Secret values the plan the component runs from gives it as files: the executor refuses the read when it finds fewer
-   *  (a reboot emptied the tmpfs). A number, never a key or a value; absent from an API one release older. */
-  secretFileCount: z.number().int().min(0).max(APP_TEMPLATE_LIMITS.secretParameters).optional(),
 }).strict();
 export type AppStackLogsIpcRequest = z.infer<typeof AppStackLogsIpcRequestSchema>;
 /** Opens a terminal in one component (ADR-0041): no container name, no user and no command; the executor derives and checks them. */

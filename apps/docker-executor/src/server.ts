@@ -862,12 +862,9 @@ export class DockerExecutorIpcServer {
       const componentKey = segment(logs[2]);
       return (s) => {
         const tail = param("tail");
-        // Absent (an API one release older) stays absent; anything but plain digits reaches the schema as it came.
-        const count = param("secretFileCount");
-        const counted = count === null ? {} : { secretFileCount: typeof count === "string" && /^\d{1,3}$/.test(count) ? Number(count) : count };
         const req = this.parseAppStackValue(
           AppStackLogsIpcRequestSchema,
-          { stackId, organizationId: param("organizationId"), componentKey, tail: Array.isArray(tail) ? tail : Number(tail), ...counted },
+          { stackId, organizationId: param("organizationId"), componentKey, tail: Array.isArray(tail) ? tail : Number(tail) },
           "logs",
         );
         return s.getAppStackComponentLogs(req);
