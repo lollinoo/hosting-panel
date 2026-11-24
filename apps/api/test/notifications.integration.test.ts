@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   NotificationSettingsDtoSchema,
   NotificationWebhookBodySchema,
+  notificationEventFromAlert,
   type AdminAlertDto,
   type NotificationEvent,
 } from "@hosting-panel/contracts";
@@ -9,8 +10,11 @@ import {
   auditEvents,
   createDatabaseClient,
   createNotificationDelivery,
+  domains,
   eq,
   hostAllocations,
+  inArray,
+  insertTlsCertificateWithVersion,
   membershipRoles,
   memberships,
   notificationChannelAlerts,
@@ -23,6 +27,7 @@ import {
   recordObservedStateReconciliationTransactional,
   serviceInstances,
   sites,
+  tlsCertificateVersions,
   upsertHostAgentHeartbeat,
   users,
   hosts,
@@ -51,6 +56,7 @@ const PW = "sentinel-password-0001";
 const SETUP = { installationName: "Notify Test", hostHostname: "panel.example.test", hostIpv4: "10.0.0.1" };
 const RELAY = { host: "smtp.example.test", port: 587, username: "relay", password: "sentinel-relay-pass", senderDomain: "mail.example.test" };
 const MIN = 60_000;
+const DAY = 24 * 60 * MIN;
 const T0 = new Date("2026-11-23T10:00:00.000Z");
 const at = (minutes: number) => new Date(T0.getTime() + minutes * MIN);
 const ADMIN_HOOK = "https://hooks.example.test/in/SENTINELPATH?k=SENTINELQUERY";
@@ -258,6 +264,8 @@ describe("notifications (ADR-0040)", () => {
       seen.alerts = [disk()];
       await tick(at(0));
       expect(outbound.calls).toEqual([]);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(at(2));
       await tick(at(2));
       expect(outbound.calls).toHaveLength(1);
       const opened = NotificationWebhookBodySchema.parse(outbound.calls[0]!.body);
@@ -406,8 +414,9 @@ describe("notifications (ADR-0040)", () => {
         // Kinds for the administrator only, also when they name the customer's own site.
         { kind: "backup_site_without_target", severity: "warning", subject: mine.siteId, since: null, details: { siteId: mine.siteId, siteName: "Sito Mario" } } as AdminAlertDto,
         disk(),
-        // A certificate that is of no site is of no customer.
+        // A certificate the panel does not know, and an alert that names neither a site nor a certificate, are of no customer.
         manualCertificate("warning"),
+        { kind: "certificate_not_issued", severity: "warning", subject: "loose.example.test", since: null, details: { siteId: null, siteName: null, hostname: "loose.example.test", problem: null } } as unknown as AdminAlertDto,
       ];
       await tick(at(0));
       await tick(at(2));
@@ -430,7 +439,7 @@ describe("notifications (ADR-0040)", () => {
 
       const server = outbound.to(ADMIN_HOOK);
       expect(server).toHaveLength(1);
-      expect(NotificationWebhookBodySchema.parse(server[0]!.body).events).toHaveLength(7);
+      expect(NotificationWebhookBodySchema.parse(server[0]!.body).events).toHaveLength(8);
     });
 
     it("forgets without a word the alerts of a group that is turned off", async () => {
@@ -640,6 +649,29 @@ describe("notifications (ADR-0040)", () => {
       expect(new Set((await deliveries()).map((d) => d.status))).toEqual(new Set(["sent"]));
     });
 
+    it("signs each webhook message with the time it leaves, not the time its pass began", async () => {
+      await start();
+      await adminWebhook({ signingKey: SIGNING_KEY });
+      const [channel] = await dbClient.db.select({ id: notificationChannels.id }).from(notificationChannels);
+      const event = notificationEventFromAlert(disk(), "a".repeat(24), "opened");
+      for (let i = 0; i < 2; i += 1) {
+        await createNotificationDelivery(dbClient.db, { channelId: channel!.id, events: [event], omitted: 0, test: false, recipient: null, locale: "it", now: at(0) });
+      }
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(at(1));
+      // The first send of the pass takes ninety seconds.
+      outbound.duringSend = async () => {
+        vi.setSystemTime(at(1).getTime() + 90_000);
+      };
+      await tick(at(1));
+
+      expect(outbound.calls).toHaveLength(2);
+      const seconds = outbound.calls.map((c) => Number(/^t=(\d+),v1=[0-9a-f]{64}$/.exec(c.headers[NOTIFICATION_SIGNATURE_HEADER]!)![1]));
+      expect(seconds).toEqual([at(1).getTime() / 1000, at(1).getTime() / 1000 + 90]);
+      outbound.calls.forEach((c, i) => expect(c.headers[NOTIFICATION_SIGNATURE_HEADER]).toBe(notificationSignature(SIGNING_KEY, seconds[i]!, c.raw)));
+      expect(outbound.calls.map((c) => c.body["sentAt"])).toEqual([at(1).toISOString(), new Date(at(1).getTime() + 90_000).toISOString()]);
+    });
+
     it("mails every address of the server and every owner of the customer, each in their language", async () => {
       await start();
       await configureRelay();
@@ -737,6 +769,47 @@ describe("notifications (ADR-0040)", () => {
       expect(body.events.filter((e) => e.kind === "operation_stuck").map((e) => [e.state, e.operation, e.site])).toEqual([["opened", "stack.backup", null]]);
       expect(body.text).toContain("stack.backup");
       expect(outbound.to(CUSTOMER_HOOK)).toEqual([]);
+    });
+
+    it("with the real look: a certificate shared by sites of one customer reaches that customer, and no other", async () => {
+      await start({ stub: false });
+      const mario = await createCustomer("Hotel Mario", "mario@hotel.example.test");
+      const anna = await secondCustomer("Studio Anna", "anna@studio.example.test");
+      const uno = await createSite(mario.orgId, "Sito Uno", "uno.example.test");
+      const due = await createSite(mario.orgId, "Sito Due", "due.example.test");
+      const tre = await createSite(mario.orgId, "Sito Tre", "tre.example.test");
+      await adminWebhook();
+      expect((await save(mario.base, mario.token, "webhook", { enabled: true, groups: CUSTOMER_GROUPS, url: CUSTOMER_HOOK })).status).toBe(200);
+      expect((await save(anna.base, anna.token, "webhook", { enabled: true, groups: CUSTOMER_GROUPS, url: OTHER_HOOK })).status).toBe(200);
+      // A certificate of the customer, on the domains of the given sites, that ends in five days.
+      const certificate = async (name: string, siteIds: string[]) => {
+        const { versionId } = await insertTlsCertificateWithVersion(dbClient.db, {
+          organizationId: mario.orgId, name, createdForSiteId: siteIds[0]!, createdByUserId: null, masterKey: KEY,
+          version: {
+            leafPem: "LEAF-MARKER", chainPem: "", privateKeyPem: "KEY-MARKER", subject: `CN=${name}`, issuer: "CN=CA", serialNumber: "01",
+            fingerprintSha256: randomUUID().replace(/-/g, "").repeat(2), notBefore: new Date(Date.now() - 60 * DAY),
+            notAfter: new Date(Date.now() + 5 * DAY), sanDns: ["*.example.test"], keyType: "ec", keyBits: 256,
+          },
+        });
+        await dbClient.db.update(tlsCertificateVersions).set({ status: "active" }).where(eq(tlsCertificateVersions.id, versionId));
+        await dbClient.db.update(domains).set({ certMode: "manual", manualCertificateVersionId: versionId, certStatus: "active" }).where(inArray(domains.siteId, siteIds));
+      };
+      await certificate("Condiviso", [uno.siteId, due.siteId]);
+      await certificate("Solo", [tre.siteId]);
+
+      await app.notifications.tick();
+      await app.notifications.tick();
+      const certificates = (c: { body: Json }) =>
+        (c.body["events"] as NotificationEvent[])
+          .filter((e) => e.kind === "manual_certificate_expiring")
+          .map((e) => [e.state, e.site, e.name])
+          .sort((a, b) => String(a[2]).localeCompare(String(b[2])));
+      const customer = outbound.to(CUSTOMER_HOOK);
+      expect(customer).toHaveLength(1);
+      // The shared one names no site, as on the server's channel; the one of a single site names it.
+      expect(certificates(customer[0]!)).toEqual([["opened", null, "Condiviso"], ["opened", "Sito Tre", "Solo"]]);
+      expect(certificates(outbound.to(ADMIN_HOOK)[0]!)).toEqual([["opened", null, "Condiviso"], ["opened", "Sito Tre", "Solo"]]);
+      expect(outbound.to(OTHER_HOOK)).toEqual([]);
     });
   });
 

@@ -24,7 +24,6 @@ import type { NotificationField as Field, NotificationFieldErrors as FieldErrors
 
 const EXAMPLE_ADDRESS = "https://hooks.example.com/alerts"; // examples, not copy
 const EXAMPLE_CHAT = "-1001234567890";
-const DASH = "—";
 
 interface ChannelCardProps {
   kind: NotificationChannelKind;
@@ -388,10 +387,8 @@ export function NotificationSettings({
   const locale = useLocale();
   const [data, setData] = useState(initial);
   const when = (iso: string) => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }).format(new Date(iso));
-  const to = (d: NotificationDeliveryDto): string =>
-    d.recipient ??
-    (d.channel === "webhook" ? data.channels.webhook?.host : d.channel === "telegram" ? data.channels.telegram?.chat : null) ??
-    DASH;
+  // Only a mail keeps where it went; a webhook or a chat message does not, and its channel may point elsewhere now.
+  const to = (d: NotificationDeliveryDto): string => d.recipient ?? t[d.channel].title;
 
   return (
     <div className="space-y-6">

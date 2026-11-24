@@ -200,7 +200,7 @@ export class NotificationSettingsService {
     let failures = 0;
     for (const recipient of to) {
       const message = { id: newNotificationDeliveryId(), events: [], omitted: 0, test: true, recipient: recipient.email, locale: recipient.locale };
-      const result = await this.sender.send(channel, message, now);
+      const result = await this.sender.send(channel, message);
       await createNotificationDelivery(db, {
         ...message,
         channelId: channel.id,
