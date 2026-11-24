@@ -76,8 +76,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    (`HARNESS.md`, `TH-08`):
    - deploy, upgrade, rollback, start, restart: every component of the plan exists with the plan's hash → `running` or
      `degraded` (`failed` if an essential component is not healthy); if instead the previous revision is still the one
-     running, the operation fails (`OPERATION_INTERRUPTED`) and the stack keeps the status of that revision; otherwise
-     the stack is `failed` with `OPERATION_INTERRUPTED`;
+     running, the operation fails (`OPERATION_INTERRUPTED`) and the stack keeps the status of that revision (an upgrade
+     or a rollback whose create step never started also goes back to the version, settings and quota its request
+     replaced); otherwise the stack is `failed` with `OPERATION_INTERRUPTED`;
    - route refresh (the panel's own `stack.deploy`, no user, which only changes routes): done when the routes seen are
      today's addresses of the healthy targets, otherwise it fails with `OPERATION_INTERRUPTED`; the stack is `running`
      when it is done and every component is healthy, otherwise `degraded`, never `failed`; a later route refresh
@@ -105,6 +106,20 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
      version and the customer upgrades;
    - `DOCKER_ENGINE_UNAVAILABLE`, `OPERATION_INTERRUPTED`: the action was cut (Docker, the executor, an API restart or a
      restore); check procedure 2 step 3, then **Riavvia** or **Reinstalla**.
+
+   An upgrade or a rollback that fails before its components are created (download, preparation) goes back to what its
+   request replaced: the version, settings, components and quota asked for before that request (usually those of the
+   version installed, but not after a change that failed past create, nor on an application never installed), the
+   upgrade on offer again, and the failed attempt in the history. Not so when a web address or one of its paths was
+   meanwhile pointed at a part only the new version has: the new version stays the one asked for and **Reinstalla**
+   installs it. One that fails later leaves the stack `failed`: the page and the list show the version still installed
+   and the page says which one was not (while they differ, the status shown follows the components of the installed
+   one); **Reinstalla** tries that one again, the way back reinstalls the previous one. The way back only offers a
+   version that ran (an install, upgrade or rollback of it succeeded, or failed only at publishing its routes once its
+   components were healthy), never a failed attempt. A start of a stopped application refused before anything is
+   touched leaves it `stopped`; any other start or restart refused that way takes the status the containers show (so
+   does the start that follows a backup or a restore, which then ends `failed`: the panel stopped it, not the customer);
+   the history names the reason.
 
    **Reinstalla** (`stack.deploy`) recreates what differs from the plan; **Avvia** only starts components that exist.
    At API start, a stack left busy without an active operation becomes `failed` (`delete_failed` when it was deleting,

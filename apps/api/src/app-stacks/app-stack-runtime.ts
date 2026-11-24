@@ -18,6 +18,7 @@ import {
   appStackDeployments,
   eq,
   getAppStack,
+  getAppStackDeployment,
   getAppStackRevision,
   listAppStackDomains,
   listAppStackVolumes,
@@ -456,10 +457,19 @@ export class AppStackRuntime {
         return settle({ stackStatus: "degraded", ...(deploy ? { appliedRevisionId: st.plan!.revisionId } : {}) }, ctx.lastHealth);
       }
       if (step === "validate" || (deploy && (step === "reserve" || step === "pull" || step === "prepare"))) {
-        // Pre-flight: no container was touched; an applied stack keeps the status its previous revision shows.
-        const { stack, previous } = st;
-        const observed = deploy && stack && previous ? await this.#status(ctx) : null;
-        if (!stack || !previous || !observed) return settle({ stackStatus: "failed" });
+        // Pre-flight: create was never called, so no container was touched; the stack keeps the status the plan that
+        // runs shows, and an upgrade or a rollback takes back what its request wrote.
+        const { stack } = st;
+        const previous = deploy ? st.previous : st.plan;
+        const restore = ctx.op.kind === "stack.upgrade" || ctx.op.kind === "stack.rollback" ? { restoreReplaced: true } : {};
+        const observed = stack && previous ? await this.#status(ctx) : null;
+        // A stopped application whose start is refused stays stopped, read or not: nothing was started.
+        const replaced =
+          ctx.op.kind === "stack.start" ? await getAppStackDeployment(db, { organizationId: ctx.ref.organizationId, deploymentId: ctx.deploymentId }) : null;
+        if (replaced?.replacedStatus === "stopped") {
+          return settle({ stackStatus: "stopped" }, previous && observed ? appStackHealthRows(previous, observed, "observer") : undefined);
+        }
+        if (!stack || !previous || !observed) return settle({ stackStatus: "failed", ...restore });
         const health = appStackHealthRows(previous, observed, "observer");
         const stackStatus: AppStackStatus = appStackAggregate({
           plan: previous,
@@ -467,7 +477,7 @@ export class AppStackRuntime {
           domainCount: (await listAppStackDomains(db, ctx.ref)).length,
           routesPublished: stack.appliedRoutesHash !== null,
         });
-        return settle({ stackStatus }, health);
+        return settle({ stackStatus, ...restore }, health);
       }
       const plan = st.plan!;
       if (!deploy || st.previous === null) {

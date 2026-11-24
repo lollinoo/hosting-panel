@@ -69,7 +69,8 @@ const CUSTOMER_SUMMARY = {
 };
 const STACK_SUMMARY = {
   id: "ast_demo", name: "My notes", status: "running", templateId: "atpl_demo", templateName: "Notes", templateVersionNumber: 1,
-  componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com", updatedAt: AT,
+  installed: { revisionNumber: 1, templateVersionNumber: 1 }, componentCount: 2, unhealthyCount: 0, primaryHostname: "notes.example.com",
+  updatedAt: AT,
 };
 
 const NOTE = { level: "changed", code: "IMAGE_PINNED", path: "services.app.image", message: "The image is pinned to the digest its registry gave." };
@@ -146,6 +147,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     AppStackDetailDtoSchema,
     {
       ...STACK_SUMMARY, templateVersionId: "atv_demo_1", createdAt: AT, activeOperationId: OP, platformWork: "backups_cleanup", revisionNumber: 1,
+      installed: null,
       components: [{ key: "app", health: "healthy", healthObservedAt: AT, dependsOn: ["cache"], ingress: true, cpuMilli: 1000, memoryBytes: "536870912" }],
       parameters: [{ key: "workers", label: "Workers", value: 2 }],
       secretParameters: [{ key: "app_secret", label: "App secret", required: true, isSet: true, version: 1, setAt: AT }],

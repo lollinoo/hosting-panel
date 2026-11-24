@@ -59,6 +59,8 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
   const ids = { orgId, stackId, csrfToken };
+  // The version that runs: after a change that failed once its components were being created, not the one asked for.
+  const shown = s.installed ?? { templateVersionNumber: s.templateVersionNumber, revisionNumber: s.revisionNumber };
 
   return (
     <div className="space-y-8">
@@ -69,8 +71,11 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
           </h1>
           <StackStatusBadge status={s.status} m={m} />
         </div>
-        <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: s.templateVersionNumber })}</p>
-        {s.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: s.revisionNumber })}</p>}
+        <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: shown.templateVersionNumber })}</p>
+        {shown.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: shown.revisionNumber })}</p>}
+        {s.installed && s.activeOperationId === null && s.revisionNumber !== null && (
+          <p className="text-sm">{format(d.notInstalledLine, { version: s.templateVersionNumber, release: s.revisionNumber })}</p>
+        )}
         {s.status === "unknown" && (
           <Alert variant="warning" role="status">
             <AlertTitle>{m.apps.status.unknown}</AlertTitle>

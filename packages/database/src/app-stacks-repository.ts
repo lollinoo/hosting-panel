@@ -247,7 +247,11 @@ async function usedByAnApplication(tx: DatabaseExecutor, providerStackId: string
 }
 
 /** Inserts the plan's new components and volumes; drops components the plan no longer has (volumes are never dropped). */
-async function syncComponentsAndVolumes(tx: DatabaseExecutor, scope: StackScope, revision: NewAppStackRevision): Promise<void> {
+async function syncComponentsAndVolumes(
+  tx: DatabaseExecutor,
+  scope: StackScope,
+  revision: Pick<NewAppStackRevision, "componentKeys" | "volumeKeys">,
+): Promise<void> {
   const owner = { stackId: scope.stackId, organizationId: scope.organizationId };
   try {
     await tx
@@ -286,11 +290,69 @@ async function revisionOf(db: DatabaseExecutor, stackId: string, revisionId: str
   return row ?? null;
 }
 
+const planKeys = (plan: Readonly<Record<string, unknown>>) => planList(plan, "components").map((c) => String(c.key));
+
+/**
+ * Takes back what enqueueing an upgrade or a rollback wrote, to the desired revision that request replaced: parameters,
+ * component rows and quota (the caller writes desired_revision_id and template_version_id). Null, and nothing written,
+ * when the deployment replaced no revision, when its revision is no longer the desired one, or when a web address or one
+ * of its paths now targets a pair only the desired plan has.
+ */
+async function restoreReplacedRevision(
+  db: DatabaseExecutor,
+  stack: AppStackRow,
+  deployment: { readonly revisionId: string | null; readonly replacedRevisionId: string | null },
+  now: Date,
+): Promise<AppStackRevisionRow | null> {
+  if (deployment.replacedRevisionId === null || deployment.revisionId !== stack.desiredRevisionId) return null;
+  const replaced = await revisionOf(db, stack.id, deployment.replacedRevisionId);
+  if (!replaced) return null;
+  const ingress = planList(replaced.plan, "ingress");
+  const domains = await db
+    .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort, pathRoutes: appStackDomains.pathRoutes })
+    .from(appStackDomains)
+    .where(eq(appStackDomains.stackId, stack.id));
+  const isIngress = (componentKey: string, port: number) => ingress.some((route) => route.componentKey === componentKey && route.port === port);
+  // ADR-0037: a path saved while the operation ran was checked against the desired plan only.
+  if (domains.some((d) => !isIngress(d.componentKey, d.internalPort) || d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port)))) {
+    return null;
+  }
+
+  const scope = { organizationId: stack.organizationId, stackId: stack.id };
+  await db.delete(appStackParameters).where(eq(appStackParameters.stackId, stack.id));
+  await insertParameters(db, scope, replaced.parameters.map((p) => ({ parameterKey: p.key, value: p.value })));
+  await syncComponentsAndVolumes(db, scope, { componentKeys: planKeys(replaced.plan), volumeKeys: [] });
+  // A row the request dropped comes back as the applied revision left it (none when that revision lacks it); its health
+  // is the next observation's.
+  const applied = await revisionOf(db, stack.id, stack.appliedRevisionId);
+  if (applied) {
+    await db
+      .update(appStackComponents)
+      .set({ appliedRevisionId: applied.id, updatedAt: now })
+      .where(and(eq(appStackComponents.stackId, stack.id), inArray(appStackComponents.componentKey, planKeys(applied.plan))));
+  }
+  const desired = await revisionOf(db, stack.id, stack.desiredRevisionId);
+  // The exact reverse of the request's charge; never refused, as another application may have taken a share it freed.
+  await chargeAppStackQuota(db, {
+    ...scope,
+    hostAllocationId: stack.hostAllocationId,
+    resourceQuotaId: stack.resourceQuotaId,
+    previous: desired && totals(desired),
+    next: totals(replaced),
+    restore: true,
+  });
+  return replaced;
+}
+
 async function enqueueDeployment(
   tx: DatabaseExecutor,
   input: StackScope & {
     kind: AppStackOperationKind;
     revisionId: string | null;
+    /** The desired revision this request replaced with `revisionId`; null when it wrote none. */
+    replacedRevisionId: string | null;
+    /** The stack status the request replaced; null for the first deploy of a create and for the start after a backup. */
+    replacedStatus: AppStackStatus | null;
     requestedByUserId: string | null;
     idempotencyKey: string;
     requestHash: string;
@@ -317,6 +379,8 @@ async function enqueueDeployment(
       organizationId: input.organizationId,
       operationId: operation.id,
       revisionId: input.revisionId,
+      replacedRevisionId: input.replacedRevisionId,
+      replacedStatus: input.replacedStatus,
       status: "queued",
       startedAt: new Date(),
     })
@@ -423,6 +487,8 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
       ...scope,
       kind: "stack.deploy",
       revisionId: revision.id,
+      replacedRevisionId: null,
+      replacedStatus: null,
       requestedByUserId: input.createdBy,
       idempotencyKey: input.idempotencyKey,
       requestHash: input.requestHash,
@@ -564,6 +630,8 @@ export async function enqueueAppStackOperationTransactional(
       ...scope,
       kind: input.kind,
       revisionId,
+      replacedRevisionId: revision ? stack.desiredRevisionId : null,
+      replacedStatus: stack.status,
       requestedByUserId: input.requestedByUserId,
       idempotencyKey: input.idempotencyKey,
       requestHash: input.requestHash,
@@ -612,6 +680,9 @@ export async function enqueueAppStackResumeTransactional(
     stackId: stack.id,
     kind,
     revisionId: stack.desiredRevisionId,
+    replacedRevisionId: null,
+    // The platform stopped it, not the customer: a resume refused before create shows failed, never a quiet stopped.
+    replacedStatus: null,
     requestedByUserId: input.requestedByUserId,
     idempotencyKey: key,
     requestHash: createHash("sha256").update(key).digest("hex"),
@@ -661,6 +732,8 @@ export async function transitionAppStackTransactional(
 /**
  * Deployment progress/outcome plus the stack status in one call. `ended_at` is set on a terminal deployment status.
  * appliedRevisionId: sets app_stacks.applied_revision_id and applied_revision_id of every component row.
+ * restoreReplaced: an upgrade or a rollback that changed nothing on the executor; the desired revision, template version,
+ * parameters, component rows and quota become those of the revision its request replaced (see restoreReplacedRevision).
  * stackStatus "deleted" finalises: quota released, domain rows deleted, volumes retain→retained / destroy, pending or missing→removed,
  * component rows deleted, status + deleted_at set, then secret versions purged when no volume is `retained`.
  */
@@ -675,6 +748,7 @@ export async function updateAppStackDeploymentTransactional(
     readonly appliedRoutesHash?: string | null;
     /** Written with appliedRoutesHash only; a routes hash written without it clears it (not known). */
     readonly appliedAddressesHash?: string;
+    readonly restoreReplaced?: boolean;
   },
 ): Promise<AppStackRow> {
   const stack = await lockStack(db, input, false);
@@ -685,7 +759,7 @@ export async function updateAppStackDeploymentTransactional(
     .update(appStackDeployments)
     .set({ status: input.deploymentStatus, problem: input.problem, ...(terminal ? { endedAt: now } : {}) })
     .where(and(eq(appStackDeployments.id, input.deploymentId), eq(appStackDeployments.stackId, stack.id)))
-    .returning({ id: appStackDeployments.id });
+    .returning({ revisionId: appStackDeployments.revisionId, replacedRevisionId: appStackDeployments.replacedRevisionId });
   if (!deployment) throw new AppStackRepositoryError("NOT_FOUND", "Deployment not found.");
   if (input.appliedRevisionId !== undefined) {
     await db
@@ -693,6 +767,7 @@ export async function updateAppStackDeploymentTransactional(
       .set({ appliedRevisionId: input.appliedRevisionId, updatedAt: now })
       .where(eq(appStackComponents.stackId, stack.id));
   }
+  const restored = input.restoreReplaced === true ? await restoreReplacedRevision(db, stack, deployment, now) : null;
 
   const deleted = input.stackStatus === "deleted" && stack.status !== "deleted";
   if (deleted) {
@@ -725,6 +800,7 @@ export async function updateAppStackDeploymentTransactional(
       ...(input.appliedRoutesHash !== undefined
         ? { appliedRoutesHash: input.appliedRoutesHash, appliedAddressesHash: input.appliedAddressesHash ?? null }
         : {}),
+      ...(restored ? { desiredRevisionId: restored.id, templateVersionId: restored.templateVersionId } : {}),
     })
     .where(eq(appStacks.id, stack.id))
     .returning();

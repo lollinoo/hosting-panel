@@ -14024,7 +14024,7 @@ components:
 
     AppStackSummaryDto:
       type: object
-      required: [id, name, status, templateId, templateName, templateVersionNumber, componentCount, unhealthyCount, primaryHostname, updatedAt]
+      required: [id, name, status, templateId, templateName, templateVersionNumber, installed, componentCount, unhealthyCount, primaryHostname, updatedAt]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -14039,6 +14039,24 @@ components:
         templateVersionNumber:
           type: integer
           minimum: 1
+        installed:
+          type: object
+          nullable: true
+          description: >-
+            The revision that runs (the applied one) whenever it is not the current one: while a change runs; after a
+            change that failed once its components were being created; after an upgrade or a rollback that failed before
+            that but was not taken back, because a web address now points at a part only the new version has; after a
+            deploy with new settings that failed before its components were created (a deploy is not taken back). The
+            `status` of the detail then follows the components of this revision. `null` when the current revision is the
+            one that runs, and when none ever ran
+          required: [revisionNumber, templateVersionNumber]
+          properties:
+            revisionNumber:
+              type: integer
+              minimum: 1
+            templateVersionNumber:
+              type: integer
+              minimum: 1
         componentCount:
           type: integer
           minimum: 0
@@ -14196,7 +14214,10 @@ components:
             rollback:
               type: object
               nullable: true
-              description: The revision before the current one, if any
+              description: >-
+                The way back: the newest earlier revision that ran (a deploy, an upgrade or a rollback of it succeeded,
+                or failed only at publishing its routes once its components were healthy) and whose plan is not the
+                current one; `null` if none
               required: [revisionId, revisionNumber, templateVersionNumber]
               properties:
                 revisionId:

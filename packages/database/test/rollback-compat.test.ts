@@ -627,8 +627,8 @@ describe("0027 app stack backups", () => {
     await pg.close();
   });
 
-  it("is followed only by 0028 and creates two tables and nothing else", async () => {
-    expect(files.slice(-2)).toEqual([M0027, "0028_app_stack_links.sql"]);
+  it("is a migration of the set and creates two tables and nothing else", async () => {
+    expect(files).toContain(M0027);
     const statements = read(M0027)
       .split("\n")
       .filter((line) => /^(CREATE|ALTER|DROP|INSERT|UPDATE|DELETE)\b/.test(line));

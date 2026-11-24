@@ -53,7 +53,10 @@ export function AppStackList({
                         <p className="mt-1 text-xs text-amber-700 dark:text-amber-300">{format(t.unhealthy, { n: e.stack.unhealthyCount })}</p>
                       )}
                     </TableCell>
-                    <TableCell>{format(t.version, { name: e.stack.templateName, n: e.stack.templateVersionNumber })}</TableCell>
+                    {/* The version that runs, as the detail shows it: not one asked for and not installed. */}
+                    <TableCell>
+                      {format(t.version, { name: e.stack.templateName, n: (e.stack.installed ?? e.stack).templateVersionNumber })}
+                    </TableCell>
                     <TableCell>{e.stack.primaryHostname ?? <span className="text-muted-foreground">{t.noAddress}</span>}</TableCell>
                   </>
                 ) : (

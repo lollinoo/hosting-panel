@@ -41,6 +41,7 @@ export function appStackSummaryDto(input: {
   stack: AppStackRow;
   templateName: string;
   templateVersionNumber: number;
+  installed: { revisionNumber: number; templateVersionNumber: number } | null;
   components: readonly AppStackComponentRow[];
   domains: readonly AppStackDomainRow[];
   now: Date;
@@ -54,6 +55,7 @@ export function appStackSummaryDto(input: {
     templateId: stack.templateId,
     templateName: input.templateName,
     templateVersionNumber: input.templateVersionNumber,
+    installed: input.installed,
     componentCount: components.length,
     unhealthyCount: components.filter((c) => ["unhealthy", "missing"].includes(componentHealth(c, now).health)).length,
     primaryHostname: (domains.find((d) => d.status === "active") ?? domains[0])?.hostname ?? null,
@@ -75,6 +77,7 @@ export function appStackDetailDto(input: {
   parameters: readonly AppStackParameterRow[];
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
+  installed: { revisionNumber: number; templateVersionNumber: number } | null;
   platformWork: AppStackPlatformWork | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
   rollback: { revisionId: string; revisionNumber: number; templateVersionNumber: number } | null;
@@ -102,7 +105,8 @@ export function appStackDetailDto(input: {
   for (const meta of input.secrets) {
     if ((latestSecrets.get(meta.parameterKey)?.version ?? 0) < meta.version) latestSecrets.set(meta.parameterKey, meta);
   }
-  const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : null;
+  // The status follows what runs: the applied revision's plan, also while the desired one differs.
+  const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : input.appliedPlan;
   return {
     ...appStackSummaryDto(input),
     status: appStackDisplayStatus({ stack, plan: applied, components: input.components, domainCount: input.domains.length, now }),

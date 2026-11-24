@@ -204,6 +204,7 @@ const STACK: AppStackSummaryDto = {
   templateId: "atpl_notes",
   templateName: "Notes",
   templateVersionNumber: 2,
+  installed: null,
   componentCount: 2,
   unhealthyCount: 1,
   primaryHostname: "notes.example.test",
