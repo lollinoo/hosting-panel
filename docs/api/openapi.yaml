@@ -14213,11 +14213,12 @@ components:
             - $ref: "#/components/schemas/AppEntityId"
           nullable: true
           description: >-
-            While the application's data are half written, that is while the newest action asked of it other than a
-            backup, a clean-up or a failed action that is not a restore is a restore that left them so: the newest good
-            `pre_restore` backup of whole data, the one to restore to go back (the nightly clean-up never removes it
-            meanwhile). `null` otherwise, and from the moment any other action, a start above all, is asked: it takes
-            the data as they are, unless it fails
+            While the application's data are half written, that is while the newest action of it that decides (a
+            restore that was not cancelled, or another action that succeeded; never a backup or a clean-up) is a
+            restore that left them so: the newest good `pre_restore` backup of whole data, the one to restore to go
+            back (the nightly clean-up never removes it meanwhile). `null` otherwise, and from the moment any other
+            action, a start above all, has succeeded: it took the data as they are. An action under way or failed, and
+            a restore cancelled before it ran, change nothing
 
     AppStackDomainDto:
       type: object

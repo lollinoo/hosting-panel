@@ -609,7 +609,7 @@ describe("@hosting-panel/database — application backups", () => {
       expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
     });
 
-    it("takes the data as they are once anything but a backup or a clean-up is asked of the application", async () => {
+    it("takes the data as they are once anything but a backup or a clean-up has succeeded on the application", async () => {
       const stack = await installed();
       const source = await goodBackup(stack);
       const failed = await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id });
@@ -634,10 +634,11 @@ describe("@hosting-panel/database — application backups", () => {
       await operation("stack.prune", "succeeded");
       expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(failed.backup.id);
 
-      // A start takes them as they are from the moment it is asked; a later safety backup copies whole data.
+      // A start takes them as they are once it succeeded, not while it is under way; a later safety backup copies whole data.
       await operation("stack.start", "queued");
-      expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(failed.backup.id);
       await db().update(operations).set({ status: "succeeded" }).where(eq(operations.idempotencyKey, "sb-stack.start-mark"));
+      expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
       expect((await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id })).backup.incompleteData).toBe(false);
     });
 
@@ -664,6 +665,12 @@ describe("@hosting-panel/database — application backups", () => {
         });
       const first = await failedRestore();
 
+      // A restore cancelled before the worker took it up never ran: its safety backup says nothing of the data.
+      const cancelled = await request(stack, { kind: "stack.restore", sourceBackupId: source.backup.id });
+      await finish(cancelled, "failed");
+      await db().update(operations).set({ status: "cancelled" }).where(eq(operations.id, cancelled.operation.id));
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(first.backup.id);
+
       // The customer presses Start and it fails before any part runs (or never leaves the queue): nothing ran on the data.
       await start("failed");
       expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(first.backup.id);
@@ -675,8 +682,10 @@ describe("@hosting-panel/database — application backups", () => {
       expect(second.backup.incompleteData).toBe(true);
       expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(second.backup.id);
 
-      // A start that is not over takes the data as they are.
+      // A start under way has not taken the data yet; once it succeeded it has.
       await start("queued");
+      expect((await getAppStackIncompleteDataMark(db(), stack.id))?.id).toBe(second.backup.id);
+      await db().update(operations).set({ status: "succeeded" }).where(eq(operations.idempotencyKey, "sb-start-queued"));
       expect(await getAppStackIncompleteDataMark(db(), stack.id)).toBeNull();
     });
 

@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS app_stack_backups (
   -- incomplete_data (any kind): the data it copied had been left half written by an earlier restore.
   -- left_incomplete (pre_restore rows only): its own restore left the data so (it failed while writing, or before
   -- writing data that already were, or it wrote back a copy of such data). While the newest operation of the
-  -- application other than a backup, a clean-up or a failed action that is not a restore is a restore whose safety
-  -- backup has left_incomplete, the newest one of whole data is never removed (K7).
+  -- application that decides (a restore that was not cancelled, or another action that succeeded; never a backup or a
+  -- clean-up) is a restore whose safety backup has left_incomplete, the newest one of whole data is never removed (K7).
   incomplete_data BOOLEAN NOT NULL DEFAULT FALSE,
   left_incomplete BOOLEAN NOT NULL DEFAULT FALSE,
   CONSTRAINT uq_app_stack_backups_operation UNIQUE (operation_id)

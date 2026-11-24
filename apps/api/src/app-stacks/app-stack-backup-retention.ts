@@ -28,7 +28,7 @@ const newestFirst = (a: AppStackBackupRow, b: AppStackBackupRow): number =>
 
 /**
  * While the application's data are half written (`dataIncomplete`: getAppStackIncompleteDataMark found the restore that
- * left them so, and nothing else was asked of the application since), the newest good safety backup of whole data: the
+ * left them so, and nothing else succeeded on the application since), the newest good safety backup of whole data: the
  * one the page tells the customer to restore. Null otherwise (ADR-0038 K5).
  */
 export function appStackBackupToGoBackTo(backups: readonly AppStackBackupRow[], dataIncomplete: boolean): AppStackBackupRow | null {

@@ -651,7 +651,7 @@ Note di lettura:
 
 - `app_stack_backups` non ha chiavi esterne verso `app_stacks` né verso `organizations`: i backup di un'applicazione cancellata restano finché il periodo di conservazione non è passato, e li toglie solo la pulizia notturna (`stack.prune`).
 - Una copia punta alla sua destinazione con `RESTRICT`: una destinazione che conserva copie di applicazioni non si cancella.
-- `left_incomplete` ha senso solo sulle righe `pre_restore`, `incomplete_data` su tutte (K5): finché l'ultima operazione dell'applicazione, a parte backup, pulizie e azioni fallite che non siano ripristini, è un ripristino il cui backup di sicurezza ha `left_incomplete`, la più recente di dati interi non è mai rimossa (K7) e la pagina la indica per tornare indietro.
+- `left_incomplete` ha senso solo sulle righe `pre_restore`, `incomplete_data` su tutte (K5): finché l'ultima operazione dell'applicazione che decide (un ripristino non annullato o un'altra azione riuscita; mai un backup o una pulizia) è un ripristino il cui backup di sicurezza ha `left_incomplete`, la più recente di dati interi non è mai rimossa (K7) e la pagina la indica per tornare indietro.
 - `snapshot_id` non esce mai dal database verso un DTO, una riga di audit o un payload dell'outbox.
 
 ---
