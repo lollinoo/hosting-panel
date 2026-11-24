@@ -30,20 +30,20 @@ Un database è un'applicazione installata da un modello di categoria `database`.
 
 | Modello | Immagine | Porta | Dati |
 | :--- | :--- | :--- | :--- |
-| `mariadb` | `mariadb:12.3.3` | 3306 | `/var/lib/mysql` |
-| `postgresql` | `postgres:18-bookworm` (PostgreSQL 18.7) | 5432 | `/var/lib/postgresql` |
+| `mariadb` | `docker.io/library/mariadb:12.3.3` | 3306 | `/var/lib/mysql` |
+| `postgresql` | `docker.io/library/postgres:18-bookworm` (PostgreSQL 18.7) | 5432 | `/var/lib/postgresql` |
 | `valkey` | `valkey/valkey:9.2.0-alpine3.24` | 6379 | `/data` |
 
 Ogni modello ha un solo componente, un volume di dati che resta quando l'applicazione viene cancellata (salvo richiesta esplicita) e nessun indirizzo web.
 
 ### D2 — Immagini
 
-L'elenco delle immagini ammesse (`APP_IMAGE_ALLOWLIST`) guadagna due righe: `mariadb` e `postgres`, entrambe con utente `999:999`. La riga di `valkey/valkey` esiste già. Come per le altre, ogni riga aspetta la conferma del proprietario; le immagini sono fissate per digest nei modelli:
+L'elenco delle immagini ammesse (`APP_IMAGE_ALLOWLIST`) guadagna due righe: `docker.io/library/mariadb` e `docker.io/library/postgres`, entrambe con utente `999:999`. La riga di `valkey/valkey` esiste già. Una riga vale solo per il nome scritto esattamente come lei, e queste due sono scritte per intero di proposito: `mariadb` e `postgres` scritti corti restano senza riga e non vanno mai «normalizzati» (`packages/contracts/test/app-image-allowlist-spelling.test.ts`). Il modello WordPress della release 0.10.0 (formato esteso, `ADR-0036`) scrive `mariadb` corto e fa girare il suo database con l'utente dell'immagine: una riga corta gli imporrebbe `999:999` e farebbe rifiutare dall'API e dall'esecutore i piani salvati delle applicazioni già installate. Come per le altre, ogni riga aspetta la conferma del proprietario; le immagini sono fissate per digest nei modelli:
 
 | Modello | Immagine |
 |---|---|
-| Database MariaDB | `mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3` |
-| Database PostgreSQL | `postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1` |
+| Database MariaDB | `docker.io/library/mariadb:12.3.3@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3` |
+| Database PostgreSQL | `docker.io/library/postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1` |
 | Archivio Valkey | `valkey/valkey:9.2.0-alpine3.24@sha256:c8e2d17498838af5d91e12eb7c11220b3434a7b7131a333e3af52ad5e0b80882` |
 
 ### D3 — Protezioni del container
