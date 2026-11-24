@@ -468,6 +468,8 @@ const planDialog = (m: Messages, plan: "upgrade" | "rollback", diffState: Record
 };
 const wizard = (m: Messages, state: Record<number, unknown>, entry: CustomerAppTemplateDto = ENTRY) =>
   withState(AppWizard, { orgId: ORG, csrfToken: "csrf", entry }, m, state);
+/** A create sent whose answer never came. */
+const SENT_CREATE = { templateVersionId: "atv_notes_2", name: "my-notes", parameters: [], domains: [], deploy: false };
 const deleteProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData: true };
 const secretsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", secrets: DETAIL.secretParameters };
 const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress, pathTargets: DETAIL.pathTargets, pending: false };
@@ -544,6 +546,18 @@ const SCENARIOS: Scenario[] = [
   { name: "wizard · review", render: (m) => wizard(m, { 0: "review", 1: "my-notes", 3: ["admin_password"], 4: [{ hostname: "Notes.Example.test", target: 1 }] }) },
   { name: "wizard · installing", render: (m) => wizard(m, { 0: "install", 1: "my-notes", 7: true }) },
   { name: "wizard · install failed after the stack exists", alerts: 1, render: (m) => wizard(m, { 0: "install", 1: "my-notes", 6: m.apps.wizard.secretFailed, 8: "stk_a1" }) },
+  {
+    name: "wizard · a private value left to save after the stack exists",
+    ids: ["app-param-admin_password"],
+    alerts: 1,
+    render: (m) =>
+      wizard(m, { 0: "install", 1: "my-notes", 3: ["admin_password"], 5: { "param:admin_password": m.errors.generic }, 6: m.apps.wizard.secretFailed, 8: "stk_a1", 9: ["api_token"] }),
+  },
+  {
+    name: "wizard · a create whose outcome is unknown",
+    alerts: 1,
+    render: (m) => wizard(m, { 0: "install", 1: "my-notes", 3: ["admin_password"], 6: m.apps.wizard.createUnknown, 10: SENT_CREATE }),
+  },
   ...WIZARD_STEPS.map((step) => ({ name: `wizard steps · ${step}`, render: (m: Messages) => withState(WizardSteps, { current: step }, m) })),
   // ---- detail page parts
   { name: "actions", render: (m) => withState(AppStackActions, actionProps, m) },
@@ -877,12 +891,35 @@ describe("wizard", () => {
     expect(controls(wizard(m, {})).filter((c) => c.attrs["aria-invalid"])).toEqual([]);
   });
 
-  it.each(LOCALES)("%s · a created stack that failed to finish offers a link inside the alert", (_l, m) => {
+  it.each(LOCALES)("%s · a created stack that failed to finish says so in the alert and offers its page beside Retry, never Back", (_l, m) => {
     const h = wizard(m, { 0: "install", 6: m.apps.wizard.secretFailed, 8: "stk_a1" });
     const alert = [...h.matchAll(/<div\b[^>]*role="alert"[^>]*>([\s\S]*?)<\/div>/g)][0]![1]!;
     expect(alert).toContain(m.apps.wizard.secretFailed);
-    expect(alert).toContain('href="/apps/stk_a1"');
-    expect(strip(alert)).toContain(m.apps.wizard.openApp);
+    expect(h).toContain(m.apps.wizard.created);
+    expect(inner(h, "a")).toEqual([m.apps.wizard.openApp]);
+    expect(h).toContain('href="/apps/stk_a1"');
+    expect(inner(h, "button")).toEqual([m.apps.wizard.retry]);
+  });
+
+  it.each(LOCALES)("%s · a create whose outcome is unknown says so in the alert and offers Retry and the list of applications: no Back, no field", (_l, m) => {
+    for (const step of WIZARD_STEPS) {
+      const h = wizard(m, { 0: step, 1: "my-notes", 3: ["admin_password"], 6: m.apps.wizard.createUnknown, 10: SENT_CREATE });
+      expect(withRole(h, "alert"), step).toEqual([m.apps.wizard.createUnknown]);
+      expect(inner(h, "h2"), step).toEqual([m.apps.wizard.step.install]);
+      expect(inner(h, "button"), step).toEqual([m.apps.wizard.retry]);
+      expect(inner(h, "a"), step).toEqual([m.apps.wizard.appsLink]);
+      expect(h, step).toContain('href="/apps"');
+      expect(controls(h), step).toEqual([]);
+    }
+  });
+
+  // The key lives in the page only: Retry here is safe, a create started from another page is not.
+  it.each(LOCALES)("%s · the text of an unknown create says Retry here is safe and to look at the applications before installing again elsewhere, never to reload", (l, m) => {
+    const text = m.apps.wizard.createUnknown;
+    expect(text).toContain(l === "it" ? "non sa ancora" : "does not know yet");
+    expect(text).toContain(l === "it" ? "Riprovare da questa pagina è sicuro" : "Trying again from this page is safe");
+    expect(text).toContain(l === "it" ? "da un'altra pagina, guarda tra le tue applicazioni" : "from another page, look at your applications");
+    expect(text).not.toMatch(/reload|refresh|start again|start over|ricarica|aggiorna la pagina|ricomincia|da capo/i);
   });
 });
 

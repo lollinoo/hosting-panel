@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### The wizard closes its earlier steps once the application is created (2026-11-24)
+*hosting-panel v0.17.2*
+
+**Bug Fixes & Stability**
+- **web**: The wizard closes its earlier steps once the application is created
+
+---
+
 ### An upgrade asks for the private values the new version adds (2026-11-24)
 *hosting-panel v0.17.1*
 
