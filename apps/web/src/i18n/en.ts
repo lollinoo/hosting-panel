@@ -3120,7 +3120,7 @@ x-hp-ingress:
         repository_locked: "Another operation on this application's backups was already running. Try again in a few minutes.",
         timeout: "The operation took too long and was stopped. Try again later; if it happens again, contact your hosting provider.",
         interrupted: "The operation stopped because the server restarted. Try again.",
-        site_busy: "The application was finishing another change. Try again in a few minutes.",
+        site_busy: "Other backups were running on the server. Try again in a few minutes.",
         other: "The operation failed. Try again; if it happens again, contact your hosting provider.",
       },
     },

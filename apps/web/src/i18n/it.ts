@@ -3149,7 +3149,7 @@ x-hp-ingress:
         timeout:
           "L'operazione ha impiegato troppo tempo ed è stata fermata. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
         interrupted: "L'operazione si è interrotta perché il server si è riavviato. Riprova.",
-        site_busy: "L'applicazione stava completando un'altra modifica. Riprova tra qualche minuto.",
+        site_busy: "Sul server erano in corso altri backup. Riprova tra qualche minuto.",
         other: "L'operazione non è riuscita. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
       },
     },

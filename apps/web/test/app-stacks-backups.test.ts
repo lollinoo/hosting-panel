@@ -290,6 +290,11 @@ describe("backups of an application: the list", () => {
     expect(markup).not.toContain("href=");
   });
 
+  it("a backup refused as busy says that other backups were running on the server", () => {
+    expect(en.apps.backups.problem.site_busy).toBe("Other backups were running on the server. Try again in a few minutes.");
+    expect(itMsgs.apps.backups.problem.site_busy).toBe("Sul server erano in corso altri backup. Riprova tra qualche minuto.");
+  });
+
   it("every status has a badge tone", () => {
     expect(Object.keys(APP_STACK_BACKUP_STATUS_TONE)).toEqual([...APP_STACK_BACKUP_STATUSES]);
     for (const tone of Object.values(APP_STACK_BACKUP_STATUS_TONE)) expect(TONES).toContain(tone);
