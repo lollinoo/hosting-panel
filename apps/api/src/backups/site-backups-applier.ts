@@ -452,7 +452,7 @@ export class SiteBackupsApplier {
       );
 
       // A nightly backup refused because the executor's job slots are taken is asked again within the one wait of its
-      // run; one a person asked for, or the one before a WordPress update, is refused at once.
+      // run; one a person asked for, or the one taken before an update of the site, is refused at once.
       const busyWait = kind === "nightly" ? await this.nightlyBusyWait() : null;
       const failures: CopyFailure[] = [];
       for (const copy of (await this.#copiesOf(backupId)).filter((c) => c.status === "running")) {
