@@ -7,6 +7,7 @@ import {
   getAppStackRevision,
   listAppStackDomains,
   listAppStackVolumes,
+  operationSteps,
   settleOperation,
   type operations,
 } from "@hosting-panel/database";
@@ -124,6 +125,15 @@ export async function recoverAppStackOperation(
     domainCount: domains.length,
     destroyVolumes: (await listAppStackVolumes(db, scope)).some((volume) => volume.retentionPolicy === "destroy"),
   });
+  // A create step still pending was never called: an upgrade or a rollback in doubt before it changed nothing, so what
+  // its request wrote is taken back. Once create has started, the executor may have replaced components.
+  const [create] =
+    (kind === "stack.upgrade" || kind === "stack.rollback") && !v.applied
+      ? await db
+          .select({ status: operationSteps.status })
+          .from(operationSteps)
+          .where(and(eq(operationSteps.operationId, op.id), eq(operationSteps.key, "create")))
+      : [];
   // Routes seen published keep the stored hash; else none is published. The observer republishes a stale route set
   // through a tracked operation.
   await settleAppStackOperation(db, op, deployment.id, {
@@ -131,6 +141,7 @@ export async function recoverAppStackOperation(
     problem: v.problem,
     stackStatus: v.stackStatus,
     ...(v.applied && plan ? { appliedRevisionId: plan.revisionId } : {}),
+    ...(create?.status === "pending" ? { restoreReplaced: true } : {}),
     ...(kind === "stack.delete" || observed.routes.published ? {} : { appliedRoutesHash: null }),
     ...(v.health.length > 0 ? { health: { observedAt: now, components: v.health } } : {}),
     failedStep: null,

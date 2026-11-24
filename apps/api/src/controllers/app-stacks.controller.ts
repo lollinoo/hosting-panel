@@ -4,14 +4,17 @@ import {
   AppStackActionInputSchema,
   AppStackListQuerySchema,
   AppStackLogsQuerySchema,
+  CreateAppStackBackupInputSchema,
   CreateAppStackInputSchema,
   DeleteAppStackInputSchema,
   DeployAppStackInputSchema,
   PlanAppStackInputSchema,
+  RestoreAppStackBackupInputSchema,
   RollbackAppStackInputSchema,
   SetAppStackSecretInputSchema,
   UpgradeAppStackInputSchema,
   type AppStackAcceptedEnvelope,
+  type AppStackBackupsDto,
   type AppStackComponentHealthDto,
   type AppStackComponentLogsDto,
   type AppStackDeploymentDto,
@@ -26,9 +29,9 @@ import {
 import type { AppStackRow, AppStackWriteResult } from "@hosting-panel/database";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { APP_FEATURE_GATE_TOKEN, requireAppFeature, type AppFeatureGate } from "../app-stacks/app-feature-gate.js";
+import { AppStackBackupsService, type AppStackBackupRequester } from "../app-stacks/app-stack-backups.service.js";
 import { appStackAcceptedEnvelope } from "../app-stacks/app-stack-dto.js";
 import { AppStacksService, type AppStackRequestContext } from "../app-stacks/app-stacks.service.js";
-import { appRefusal } from "../app-templates/app-template-errors.js";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
 import { parsePaginationQuery, requireIdempotencyKey, resolveRequestId, type PaginationParams } from "../common/control-plane.error.js";
 import { peekBody } from "../common/deferred-body-error.js";
@@ -47,6 +50,7 @@ const headersOf = (req: FastifyRequest) => req.headers as Record<string, string 
 export class AppStacksController {
   public constructor(
     @Inject(AppStacksService) private readonly stacks: AppStacksService,
+    @Inject(AppStackBackupsService) private readonly backups: AppStackBackupsService,
     @Inject(AuthzContextService) private readonly authz: AuthzContextService,
     @Inject(OutboxWorkerService) private readonly outboxWorker: OutboxWorkerService,
     @Inject(APP_FEATURE_GATE_TOKEN) private readonly gate: AppFeatureGate,
@@ -222,12 +226,45 @@ export class AppStacksController {
     return { data: await this.stacks.setSecret(this.#context(auth, req, orgId, ""), stack, input) };
   }
 
-  /** Stack backups are out of scope (spec §19 B4): after the guard and the lookup, so a foreign id is still 404. */
+  /** Backups of the application, newest first (ADR-0038): whether each copy is good, never where it is. */
+  @Get(":stackId/backups")
+  public async listBackups(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+  ): Promise<{ data: AppStackBackupsDto }> {
+    const stack = await this.#read(req, orgId, stackId, "app.read");
+    return { data: await this.backups.list(stack) };
+  }
+
+  /** The application is stopped for the copy and started again afterwards; one that was stopped stays stopped. */
   @Post(":stackId/backups")
-  public async backup(@Req() req: FastifyRequest, @Param("orgId") orgId: string, @Param("stackId") stackId: string): Promise<never> {
-    await this.#read(req, orgId, stackId, "app.control");
-    const message = "Application backups are not available yet.";
-    throw appRefusal("NOT_SUPPORTED", message, { message, reason: "STACK_UNSUPPORTED_FEATURE" });
+  @HttpCode(HttpStatus.ACCEPTED)
+  public async createBackup(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+    @Body() raw: unknown,
+  ): Promise<AppStackAcceptedEnvelope> {
+    return this.#queueBackup(req, orgId, stackId, (ctx, stack, requester) => {
+      CreateAppStackBackupInputSchema.parse(raw ?? {});
+      return this.backups.create(ctx, stack, requester);
+    });
+  }
+
+  /** Into the same application, after its name is typed again; the data as they are now are saved first. */
+  @Post(":stackId/backups/:backupId/restore")
+  @HttpCode(HttpStatus.ACCEPTED)
+  public async restoreBackup(
+    @Req() req: FastifyRequest,
+    @Param("orgId") orgId: string,
+    @Param("stackId") stackId: string,
+    @Param("backupId") backupId: string,
+    @Body() raw: unknown,
+  ): Promise<AppStackAcceptedEnvelope> {
+    return this.#queueBackup(req, orgId, stackId, (ctx, stack, requester) =>
+      this.backups.restore(ctx, stack, backupId, RestoreAppStackBackupInputSchema.parse(raw ?? {}), requester),
+    );
   }
 
   #act(req: FastifyRequest, orgId: string, stackId: string, raw: unknown, kind: "stack.start" | "stack.stop" | "stack.restart") {
@@ -247,6 +284,20 @@ export class AppStacksController {
     const auth = await this.#guard(req, orgId, permission, stackId);
     const ctx = this.#context(auth, req, orgId, requireIdempotencyKey(headersOf(req)));
     return this.#accepted(orgId, await run(ctx, await this.stacks.require(orgId, stackId)));
+  }
+
+  /** Like #queue; the hourly limit is the customer's, a server administrator is not counted (ADR-0038 K8). */
+  async #queueBackup(
+    req: FastifyRequest,
+    orgId: string,
+    stackId: string,
+    run: (ctx: AppStackRequestContext, stack: AppStackRow, requester: AppStackBackupRequester) => Promise<AppStackWriteResult>,
+  ): Promise<AppStackAcceptedEnvelope> {
+    const auth = await this.#guard(req, orgId, "app.control", stackId);
+    const ctx = this.#context(auth, req, orgId, requireIdempotencyKey(headersOf(req)));
+    const stack = await this.stacks.require(orgId, stackId);
+    const limited = !(auth.principal.globalRoles ?? []).includes("infrastructure_admin");
+    return this.#accepted(orgId, await run(ctx, stack, { limited }));
   }
 
   async #read(req: FastifyRequest, orgId: string, stackId: string, permission: PermissionKey): Promise<AppStackRow> {

@@ -36,7 +36,11 @@ const statusTag = (html: string) => html.match(/<[^>]*role="status"[^>]*>/)?.[0]
 const render = (el: ReactElement, locale: "en" | "it" = "en") =>
   renderToStaticMarkup(createElement(I18nProvider, { locale, messages: locale === "en" ? en : itMsgs, children: el }));
 const post = (body: string, headers: Record<string, string> = {}) =>
-  new Request("http://localhost:3000/x", { method: "POST", headers: { "Content-Type": "application/json", ...headers }, body });
+  new Request("http://localhost:3000/x", {
+    method: "POST",
+    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "Content-Type": "application/json", ...headers },
+    body,
+  });
 
 describe("password-reset BFF routes", () => {
   beforeEach(() => fetchUpstream.mockReset());
@@ -76,6 +80,24 @@ describe("password-reset BFF routes", () => {
       expect((await route(post("{not json"))).status).toBe(400);
       expect((await route(post(""))).status).toBe(400);
       expect((await route(post(JSON.stringify({ email: "a".repeat(1_100_000) })))).status).toBe(413);
+      expect(fetchUpstream).not.toHaveBeenCalled();
+    });
+
+    it(`${name}: a foreign Origin, a missing Origin and a body not sent as JSON are refused before the upstream (L46)`, async () => {
+      const body = JSON.stringify({ email: "someone@example.test", token: TOKEN, newPassword: "SENTINEL-new-pass" });
+      const foreign = await route(post(body, { Origin: "https://evil.example.test" }));
+      expect(foreign.status).toBe(403);
+      expect((await foreign.json()).error.code).toBe("PERMISSION_DENIED");
+      const missing = await route(
+        new Request("http://localhost:3000/x", { method: "POST", headers: { Host: "localhost:3000", "Content-Type": "application/json" }, body }),
+      );
+      expect(missing.status).toBe(403);
+      // What a cross-site form can send without a preflight.
+      for (const type of ["text/plain", "application/x-www-form-urlencoded"]) {
+        const res = await route(post(body, { "Content-Type": type }));
+        expect(res.status, type).toBe(415);
+        expect((await res.json()).error.code).toBe("VALIDATION_ERROR");
+      }
       expect(fetchUpstream).not.toHaveBeenCalled();
     });
 

@@ -33,11 +33,27 @@ export async function readBoundedText(req: Request, maxBytes: number): Promise<s
   return Buffer.concat(chunks, total).toString("utf8");
 }
 
-// Check Content-Length, stream size (1 MiB cap), and JSON syntax before calling upstream.
+// JSON is UTF-8 (RFC 8259); no other charset is read.
+const JSON_CONTENT_TYPE = /^application\/json\s*(?:;\s*charset\s*=\s*"?utf-8"?\s*)?$/i;
+
+function unsupportedContentType(): BoundedJsonBodyResult {
+  return {
+    ok: false,
+    response: bffErrorResponse("VALIDATION_ERROR", "Tipo di contenuto non supportato: inviare application/json", 415),
+  };
+}
+
+// Check Content-Type, Content-Length, stream size (1 MiB cap), and JSON syntax before calling upstream.
+// A cross-site form can post text/plain or a form type without a preflight; the panel's pages send JSON.
 export async function readBoundedJsonBody(
   req: Request,
   opts?: { requireJsonBody?: boolean },
 ): Promise<BoundedJsonBodyResult> {
+  const contentType = req.headers.get("content-type");
+  if (contentType !== null ? !JSON_CONTENT_TYPE.test(contentType.trim()) : opts?.requireJsonBody) {
+    return unsupportedContentType();
+  }
+
   const contentLengthHeader = req.headers.get("content-length");
   if (contentLengthHeader !== null) {
     const contentLength = Number(contentLengthHeader);
@@ -66,6 +82,8 @@ export async function readBoundedJsonBody(
     }
     return { ok: true, body: undefined };
   }
+  // A body with no type at all (an untyped Blob) is not the panel's JSON either.
+  if (contentType === null) return unsupportedContentType();
 
   try {
     return { ok: true, body: JSON.parse(raw) };

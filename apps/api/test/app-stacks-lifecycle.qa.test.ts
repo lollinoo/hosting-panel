@@ -303,19 +303,31 @@ describe("application stacks: lifecycle through HTTP (QA M4)", () => {
     expect([after.operations! - before.operations!, after.outbox_events! - before.outbox_events!]).toEqual([1, 1]);
   });
 
-  it("B4: a stack backup request is NOT_SUPPORTED in every status and writes nothing", async () => {
+  it("B4: on a server without backups a backup or a restore is NOT_SUPPORTED in every status and writes nothing", async () => {
+    const restorePath = `/backups/sbak_${"0".repeat(24)}/restore`;
     for (const status of ["draft", "running", "stopped", "failed", "deleting"] as const) {
       const stack = await stackIn(status);
       const before = await h.counts();
-      for (const body of [undefined, {}, { anything: true }]) {
+      for (const body of [undefined, {}]) {
         expectRefusal(await send("POST", stack.id, "/backups", body), 422, "NOT_SUPPORTED", { reason: "STACK_UNSUPPORTED_FEATURE" });
       }
-      // No Idempotency-Key is needed either: the answer does not depend on it.
-      expectRefusal(await h.call(h.a.token, "POST", `${root()}/${stack.id}/backups`, {}), 422, "NOT_SUPPORTED");
+      expectRefusal(await send("POST", stack.id, restorePath, { confirmName: stack.name }), 422, "NOT_SUPPORTED", {
+        reason: "STACK_UNSUPPORTED_FEATURE",
+      });
+      // The list says the same and offers nothing.
+      const listed = await send("GET", stack.id, "/backups");
+      expect([status, listed.status, listed.body.data]).toEqual([status, 200, { backups: [], unavailableReason: "not_available", goBackTo: null }]);
+      // What the request itself gets wrong is told first: a key the body may not carry, the missing Idempotency-Key.
+      expectRefusal(await send("POST", stack.id, "/backups", { anything: true }), 400, "VALIDATION_ERROR");
+      expectRefusal(await send("POST", stack.id, restorePath, {}), 400, "VALIDATION_ERROR");
+      expectRefusal(await h.call(h.a.token, "POST", `${root()}/${stack.id}/backups`, {}), 400, "VALIDATION_ERROR");
       expect(await h.counts()).toEqual(before);
       expect((await stackRow(stack.id)).status).toBe(status);
     }
-    expectRefusal(await h.call(h.b.token, "POST", `/v1/organizations/${h.b.orgId}/app-stacks/${(await stackIn("running")).id}/backups`, {}), 404, "NOT_FOUND");
+    const foreign = `/v1/organizations/${h.b.orgId}/app-stacks/${(await stackIn("running")).id}`;
+    expectRefusal(await h.call(h.b.token, "POST", `${foreign}/backups`, {}, idem()), 404, "NOT_FOUND");
+    expectRefusal(await h.call(h.b.token, "GET", `${foreign}/backups`), 404, "NOT_FOUND");
+    expectRefusal(await h.call(h.b.token, "POST", `${foreign}${restorePath}`, { confirmName: "x" }, idem()), 404, "NOT_FOUND");
   });
 
   it("a suspended organisation reads but cannot change anything: 403 ORGANIZATION_SUSPENDED, nothing written", async () => {
@@ -335,8 +347,16 @@ describe("application stacks: lifecycle through HTTP (QA M4)", () => {
       ["POST", `/${stack.id}/plan`, {}],
       ["POST", `/${stack.id}/domains`, { hostname: "suspended.example.test", componentKey: "storage", port: 6379 }],
       ["POST", `/${stack.id}/backups`, {}],
+      ["POST", `/${stack.id}/backups/sbak_${"0".repeat(24)}/restore`, { confirmName: stack.name }],
     ];
-    const reads: readonly string[] = ["", `/${stack.id}`, `/${stack.id}/deployments`, `/${stack.id}/components/storage/health`, `/${stack.id}/domains`];
+    const reads: readonly string[] = [
+      "",
+      `/${stack.id}`,
+      `/${stack.id}/deployments`,
+      `/${stack.id}/components/storage/health`,
+      `/${stack.id}/domains`,
+      `/${stack.id}/backups`,
+    ];
 
     await h.dbClient.db.update(organizations).set({ status: "suspended" }).where(eq(organizations.id, h.a.orgId));
     try {
@@ -410,13 +430,15 @@ describe("application stacks with the capability off: every stack and domain rou
         ["GET", `${base}/${stackId}/components/app/logs`],
         ["GET", `${base}/${stackId}/components/app/health`],
         ["POST", `${base}/${stackId}/secrets`, { parameterKey: "app_secret", value: "v" }],
+        ["GET", `${base}/${stackId}/backups`],
         ["POST", `${base}/${stackId}/backups`, {}],
+        ["POST", `${base}/${stackId}/backups/sbak_0123456789abcdef01234567/restore`, { confirmName: "x" }],
         ["GET", `${base}/${stackId}/domains`],
         ["POST", `${base}/${stackId}/domains`, { hostname: "off.example.test", componentKey: "app", port: 8080 }],
         ["DELETE", `${base}/${stackId}/domains/${domainId}`, {}],
         ["POST", `${base}/${stackId}/domains/${domainId}/check`, {}],
       ];
-      expect(routes).toHaveLength(20);
+      expect(routes).toHaveLength(22);
       for (const [method, path, body] of routes) {
         const res = await off.call(off.a.token, method, path, body, { "Idempotency-Key": randomUUID() });
         expect([method, path, res.status, res.body.error?.code]).toEqual([method, path, 422, "NOT_SUPPORTED"]);

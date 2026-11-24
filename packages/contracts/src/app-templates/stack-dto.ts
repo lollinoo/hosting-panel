@@ -137,16 +137,23 @@ export const AppStackSummaryDtoSchema = z.object({
   templateId: AppEntityIdSchema,
   templateName: z.string(),
   templateVersionNumber: z.number().int().positive(),
+  // the applied revision whenever it is not the desired one (a change running, a failure after create, a take-back
+  // declined, a deploy with new settings that failed before create); the detail's status follows its plan
+  installed: z.object({ revisionNumber: z.number().int().positive(), templateVersionNumber: z.number().int().positive() }).nullable(),
   componentCount: z.number().int().nonnegative(),
   unhealthyCount: z.number().int().nonnegative(), // effective health unhealthy or missing (stale reads as unknown)
   primaryHostname: z.string().nullable(), // first active domain by hostname, else first domain, else null
   updatedAt: IsoDateTimeSchema,
 });
 export type AppStackSummaryDto = z.infer<typeof AppStackSummaryDtoSchema>;
+/** Work of the platform that holds an application's lock: the page says what it is, nothing else of it (ADR-0038). */
+export const APP_STACK_PLATFORM_WORK = ["backups_cleanup"] as const;
+export type AppStackPlatformWork = (typeof APP_STACK_PLATFORM_WORK)[number];
 export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   templateVersionId: AppEntityIdSchema,
   createdAt: IsoDateTimeSchema,
-  activeOperationId: OperationIdSchema.nullable(),
+  activeOperationId: OperationIdSchema.nullable(), // the customer's own operation only
+  platformWork: z.enum(APP_STACK_PLATFORM_WORK).nullable(), // the application is busy with work of the platform
   revisionNumber: z.number().int().positive().nullable(), // desired revision; null for a draft
   // desired plan order; a draft: spec services by key
   components: z.array(

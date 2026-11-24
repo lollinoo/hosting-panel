@@ -1,5 +1,6 @@
 import { notFound } from "next/navigation";
 import { AppStackActions } from "@/components/app-stacks/app-stack-actions";
+import { AppStackBackups } from "@/components/app-stacks/app-stack-backups";
 import { AppStackDelete } from "@/components/app-stacks/app-stack-delete";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackLogs } from "@/components/app-stacks/app-stack-logs";
@@ -12,7 +13,12 @@ import { LoadError } from "@/components/shared/load-error";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { format, getMessages } from "@/i18n";
 import { getRequestLocale } from "@/i18n/server";
-import { fetchServerOrgAppStack, fetchServerOrgAppStackDeployments, fetchServerOrgAppStackDomains } from "@/lib/server-api";
+import {
+  fetchServerOrgAppStack,
+  fetchServerOrgAppStackBackups,
+  fetchServerOrgAppStackDeployments,
+  fetchServerOrgAppStackDomains,
+} from "@/lib/server-api";
 import { getCustomerContext } from "@/app/sites/data";
 
 function Section({ id, title, children }: { id: string; title: string; children: React.ReactNode }) {
@@ -42,13 +48,16 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
     return r.code === "NOT_SUPPORTED" ? <AppsUnavailable m={m} reason="off" /> : <LoadError m={m} />;
   }
   const s = r.data;
-  const [deployments, domains] = await Promise.all([
+  const [deployments, domains, backups] = await Promise.all([
     fetchServerOrgAppStackDeployments(orgId, stackId),
     fetchServerOrgAppStackDomains(orgId, stackId),
+    fetchServerOrgAppStackBackups(orgId, stackId),
   ]);
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
   const ids = { orgId, stackId, csrfToken };
+  // The version that runs: after a change that failed once its components were being created, not the one asked for.
+  const shown = s.installed ?? { templateVersionNumber: s.templateVersionNumber, revisionNumber: s.revisionNumber };
 
   return (
     <div className="space-y-8">
@@ -59,8 +68,11 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
           </h1>
           <StackStatusBadge status={s.status} m={m} />
         </div>
-        <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: s.templateVersionNumber })}</p>
-        {s.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: s.revisionNumber })}</p>}
+        <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: shown.templateVersionNumber })}</p>
+        {shown.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: shown.revisionNumber })}</p>}
+        {s.installed && s.activeOperationId === null && s.revisionNumber !== null && (
+          <p className="text-sm">{format(d.notInstalledLine, { version: s.templateVersionNumber, release: s.revisionNumber })}</p>
+        )}
         {s.status === "unknown" && (
           <Alert variant="warning" role="status">
             <AlertTitle>{m.apps.status.unknown}</AlertTitle>
@@ -70,6 +82,12 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         {s.status === "draft" && (
           <Alert role="status">
             <AlertDescription>{d.draftBody}</AlertDescription>
+          </Alert>
+        )}
+        {/* Work of the platform holds the application: a refused action has this to point at. */}
+        {s.platformWork !== null && (
+          <Alert role="status">
+            <AlertDescription>{d.platformWork[s.platformWork]}</AlertDescription>
           </Alert>
         )}
         <AppStackActions {...ids} status={s.status} upgrade={s.upgrade} rollback={s.rollback} />
@@ -90,6 +108,9 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
       </Section>
       <Section id="data" title={d.section.data}>
         <AppStackData volumes={s.volumes} m={m} />
+      </Section>
+      <Section id="backups" title={d.section.backups}>
+        <AppStackBackups {...ids} stackName={s.name} status={s.status} backups={backups} />
       </Section>
       <Section id="resources" title={d.section.resources}>
         <AppStackResources cpuMilli={s.cpuMilli} memoryBytes={s.memoryBytes} components={s.components} m={m} />
