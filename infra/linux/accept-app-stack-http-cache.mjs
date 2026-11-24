@@ -19,7 +19,11 @@
  *  - Every adapter directory and name option points into the temp dir, /dev/shm/hp_swarmtest_stk_<hex>-secrets or a
  *    nonexistent own *_unused name. The only proxy is a throwaway one created through the ingressProxyContainerName /
  *    ingressNetworkName seams, published on 127.0.0.1:16780/16743 only; the gate denies a connect or disconnect of a
- *    container that is not this run's, so no live proxy can be attached.
+ *    container that is not this run's, so this run attaches no live proxy.
+ *  - A live panel's own executor attaches its proxy to every network whose role label is app_edge, whoever created
+ *    it. The gate therefore writes another value of that label for this run's edge networks and translates it in both
+ *    directions, so a live executor never finds them; network-shape proves it, and no-cross-stack and
+ *    remove-leaves-no-orphans check that only this run's containers are on them before each removal.
  *  - The docker CLI (an independent observer) is called with an argv array only and refuses any argument naming an hp_
  *    object of another run; inspect/exec/top/stats only ever name this run's objects.
  *  - Images: the digest-pinned refs of the http-cache seed in APP_BUILT_IN_TEMPLATES, pulled by the product through the
@@ -73,6 +77,11 @@ const HOST = "127.0.0.1";
 const PORT = { http: 16780, https: 16743 };
 const DOCKER_SOCK = "/var/run/docker.sock";
 const ROLE_LABEL = "io.hostingpanel.network_role";
+// The executor of a live panel on this machine attaches its own proxy to every network whose role label is app_edge,
+// whoever created it. Docker therefore holds another value for this run's edge networks, and the gate translates it in
+// both directions: the adapter writes and reads app_edge, a live executor never finds the networks.
+const EDGE_ROLE = "app_edge";
+const EDGE_ROLE_IN_DOCKER = "app_edge_under_test";
 const hex = randomBytes(6).toString("hex");
 const marker = `swarmtest_${hex}`;
 const runPrefix = `hp_swarmtest_stk_${hex}`;
@@ -255,15 +264,17 @@ function judge(method, rawUrl, bodyText) {
     const ref = tag === "" ? from : tag.startsWith("sha256:") ? `${from}@${tag}` : null;
     return ref !== null && ref.includes("@sha256:") && IMAGES.has(ref) ? fwd() : deny("image pull");
   }
-  if (method === "GET" && ["/containers/json", "/networks", "/volumes"].includes(p)) return fwd({ filterList: p });
+  if (method === "GET" && ["/containers/json", "/networks", "/volumes"].includes(p)) return fwd({ filterList: p, url: p === "/networks" ? edgeRoleFilterForDocker(rawUrl) : undefined });
   if (method === "POST" && p === "/networks/create") {
     const role = body.Labels?.[ROLE_LABEL];
     const ok =
       [undefined, "bridge"].includes(body.Driver) &&
       body.Options?.["com.docker.network.bridge.name"] === undefined &&
       body.IPAM === undefined &&
-      ((String(body.Name).includes(marker) && ["app_internal", "app_edge"].includes(role)) || (body.Name === ingressNet && role === "ingress_public"));
-    return ok ? fwd() : deny("network create");
+      ((String(body.Name).includes(marker) && ["app_internal", EDGE_ROLE].includes(role)) || (body.Name === ingressNet && role === "ingress_public"));
+    if (!ok) return deny("network create");
+    if (role !== EDGE_ROLE) return fwd();
+    return fwd({ body: JSON.stringify({ ...body, Labels: { ...body.Labels, [ROLE_LABEL]: EDGE_ROLE_IN_DOCKER } }) });
   }
   if (method === "POST" && p === "/volumes/create") {
     const ok = String(body.Name).includes(marker) && body.DriverOpts === undefined && [undefined, "local"].includes(body.Driver);
@@ -288,16 +299,32 @@ function judge(method, rawUrl, bodyText) {
     if (method === (sub === undefined ? "DELETE" : sub === "json" || sub === "logs" ? "GET" : "POST")) return fwd({ inspect: sub === "json" });
   }
   if ((m = p.match(/^\/(networks|volumes)\/([^/]+)$/)) && isOwn(m[2])) {
-    if (method === "GET" || (method === "DELETE" && !(m[1] === "volumes" && u.searchParams.has("force")))) return fwd();
+    if (method === "GET" || (method === "DELETE" && !(m[1] === "volumes" && u.searchParams.has("force")))) return fwd({ network: method === "GET" && m[1] === "networks" });
   }
   return deny("not an allowed request");
 }
 
+/** The address Docker receives: a label filter for the edge role names the value Docker holds. */
+function edgeRoleFilterForDocker(rawUrl) {
+  const u = new URL(rawUrl, "http://docker");
+  const filters = JSON.parse(u.searchParams.get("filters") ?? "{}");
+  const asked = `${ROLE_LABEL}=${EDGE_ROLE}`;
+  if (!Array.isArray(filters.label) || !filters.label.includes(asked)) return undefined;
+  filters.label = filters.label.map((l) => (l === asked ? `${ROLE_LABEL}=${EDGE_ROLE_IN_DOCKER}` : l));
+  u.searchParams.set("filters", JSON.stringify(filters));
+  return `${u.pathname}${u.search}`;
+}
+/** A network as the adapter wrote it: the edge role under its own name. */
+function edgeRoleForAdapter(network) {
+  if (network?.Labels?.[ROLE_LABEL] !== EDGE_ROLE_IN_DOCKER) return network;
+  return { ...network, Labels: { ...network.Labels, [ROLE_LABEL]: EDGE_ROLE } };
+}
 /** A list answer with this run's objects only. */
 function ownOnly(listPath, text) {
   const data = JSON.parse(text);
   if (listPath === "/volumes") return { ...data, Volumes: (data.Volumes ?? []).filter((v) => ours(String(v.Name))) };
-  return data.filter((x) => ours(String(listPath === "/networks" ? x.Name : x.Names?.[0])));
+  if (listPath === "/networks") return data.filter((x) => ours(String(x.Name))).map(edgeRoleForAdapter);
+  return data.filter((x) => ours(String(x.Names?.[0])));
 }
 
 function startGate(socketPath) {
@@ -323,13 +350,14 @@ function startGate(socketPath) {
       const headers = { ...req.headers, host: "docker" };
       delete headers["transfer-encoding"];
       if (out.length > 0 || req.method === "POST") headers["content-length"] = String(out.length);
-      const up = http.request({ socketPath: DOCKER_SOCK, method: req.method, path: req.url, headers }, (ures) => {
+      const up = http.request({ socketPath: DOCKER_SOCK, method: req.method, path: verdict.url ?? req.url, headers }, (ures) => {
         const parts = [];
         ures.on("data", (c) => parts.push(c));
         ures.on("end", () => {
           let body = Buffer.concat(parts);
           if (verdict.register && ures.statusCode === 201) ownIds.add(JSON.parse(body.toString("utf8")).Id);
           if (verdict.filterList && ures.statusCode === 200) body = Buffer.from(JSON.stringify(ownOnly(verdict.filterList, body.toString("utf8"))));
+          if (verdict.network && ures.statusCode === 200) body = Buffer.from(JSON.stringify(edgeRoleForAdapter(JSON.parse(body.toString("utf8")))));
           // The proxy's ports are loopback in Docker: show the executor the HostIp its payload asked for.
           if (verdict.inspect) body = Buffer.from(body.toString("utf8").replaceAll('"HostIp":"127.0.0.1"', '"HostIp":"0.0.0.0"'));
           const rh = { ...ures.headers, "content-length": String(body.length) };
@@ -686,7 +714,8 @@ async function main() {
     });
 
     await step("network-shape", async () => {
-      for (const [name, role, internal] of [[appStackInternalNetworkName(A), "app_internal", true], [appStackEdgeNetworkName(A), "app_edge", false]]) {
+      // Docker holds the edge role under the name the gate gives it (see EDGE_ROLE_IN_DOCKER); the adapter read app_edge.
+      for (const [name, role, internal] of [[appStackInternalNetworkName(A), "app_internal", true], [appStackEdgeNetworkName(A), EDGE_ROLE_IN_DOCKER, false]]) {
         const n = await networkOf(name);
         assert(
           n.Driver === "bridge" && n.Internal === internal && Object.keys(n.Options ?? {}).length === 0 && n.Labels?.[ROLE_LABEL] === role,
@@ -704,6 +733,9 @@ async function main() {
         const off = (await nets(c.slice(`hp_app_${A}_`.length))).filter((n) => !n.includes(marker));
         assert(off.length === 0, `${c} is on no network of another owner`, off.join(","));
       }
+      // What the executor of a live panel asks Docker before it attaches its proxy: this run's network is not in the answer.
+      const edgeRoleList = await lines(["network", "ls", "--filter", `label=${ROLE_LABEL}=${EDGE_ROLE}`, "--format", "{{.Name}}"]);
+      assert(!edgeRoleList.some(ours), "Docker's own list of the networks with the edge role does not hold this run's network", edgeRoleList.filter(ours).join(","));
     });
 
     await step("no-control-plane-reach", async () => {
@@ -744,6 +776,8 @@ async function main() {
         const on = Object.keys((await inspectOf(name)).NetworkSettings.Networks).filter((n) => aNets.includes(n));
         assert(on.length === 0, `${name} is on no network of stack a`, on.join(","));
       }
+      const attached = Object.values((await networkOf(appStackEdgeNetworkName(B))).Containers ?? {}).map((c) => String(c.Name));
+      assert(attached.every(ours), "only this run's containers are on the edge network of stack b", attached.filter((n) => !ours(n)).join(","));
       await adapter.removeAppStack({ stackId: B, organizationId: ORG, removeVolumes: true });
       const left = ownNames(await snapshot(), B);
       assert(same(left, { containers: [], networks: [], volumes: [] }), "stack b is gone completely", JSON.stringify(left));
@@ -856,6 +890,8 @@ async function main() {
     });
 
     await step("remove-leaves-no-orphans", async () => {
+      const attached = Object.values((await networkOf(appStackEdgeNetworkName(A))).Containers ?? {}).map((c) => String(c.Name));
+      assert(attached.every(ours), "only this run's containers are on the edge network", attached.filter((n) => !ours(n)).join(","));
       const unpublished = await adapter.unpublishAppStackRoutes({ stackId: A, organizationId: ORG });
       assert(unpublished.changed === true, "the route file is withdrawn", JSON.stringify(unpublished));
       const r = await adapter.removeAppStack({ stackId: A, organizationId: ORG, removeVolumes: false });
