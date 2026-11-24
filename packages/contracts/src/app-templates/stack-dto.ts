@@ -2,7 +2,7 @@ import { z } from "zod";
 import { DOMAIN_STATUSES } from "../resources.js";
 import { CERT_STATUSES } from "../site-domains.js";
 import { SiteDomainSchema } from "../site-runtime.js";
-import { APP_STACK_HASH_PATTERN, AppStackKeySchema, AppStackPortSchema, AppTemplateParameterKeySchema } from "./limits.js";
+import { APP_STACK_HASH_PATTERN, APP_TEMPLATE_LIMITS, AppStackKeySchema, AppStackPortSchema, AppTemplateParameterKeySchema } from "./limits.js";
 import { AppTemplateParameterEntriesSchema, AppTemplateParameterValueSchema } from "./parameters.js";
 import { AppStackPlanIngressSchema } from "./plan.js";
 import { AppTemplateParameterSchema } from "./spec.js";
@@ -87,8 +87,23 @@ export const PlanAppStackInputSchema = z
   .refine((p) => !(p.templateVersionId !== undefined && p.revisionId !== undefined), { message: "Choose a version or a revision." })
   .refine((p) => !(p.revisionId !== undefined && p.parameters !== undefined), { message: "A rollback keeps the settings of that revision." });
 export type PlanAppStackInput = z.infer<typeof PlanAppStackInputSchema>;
+/** A private value an upgrade brings (issue #89): the same rule as SetAppStackSecretInputSchema, write-only alike. */
+const UpgradeAppStackSecretSchema = z
+  .object({ parameterKey: AppTemplateParameterKeySchema, value: AppStackSecretFileContentSchema.shape.content })
+  .strict();
 export const UpgradeAppStackInputSchema = z
-  .object({ templateVersionId: AppEntityIdSchema, parameters: AppTemplateParameterEntriesSchema.optional(), planHash: HashSchema })
+  .object({
+    templateVersionId: AppEntityIdSchema,
+    parameters: AppTemplateParameterEntriesSchema.optional(),
+    planHash: HashSchema,
+    // The required private values the target version brings and the application has none of (the plan's `newSecrets`).
+    // Their values are never echoed, logged or hashed into a request hash: the hash covers their keys only.
+    secrets: z
+      .array(UpgradeAppStackSecretSchema)
+      .max(APP_TEMPLATE_LIMITS.secretParameters)
+      .refine((s) => new Set(s.map((e) => e.parameterKey)).size === s.length, { message: "Each private value once." })
+      .optional(),
+  })
   .strict();
 export type UpgradeAppStackInput = z.infer<typeof UpgradeAppStackInputSchema>;
 export const RollbackAppStackInputSchema = z.object({ revisionId: AppEntityIdSchema, planHash: HashSchema }).strict();
@@ -235,6 +250,9 @@ export const AppStackPlanDiffDtoSchema = z.object({
   components: z.array(z.object({ key: AppStackKeySchema, change: Change, restart: z.boolean() })),
   volumes: z.array(z.object({ key: AppStackKeySchema, change: Change })), // "removed" = no longer mounted, data kept
   parameters: z.array(z.object({ key: AppTemplateParameterKeySchema, change: Change })), // names only, secrets included (not the ones the customer never sees)
+  // upgrade: the required private values the customer types that the new version brings and the application has none
+  // of; the upgrade must carry them. Empty for a deploy and a rollback.
+  newSecrets: z.array(z.object({ key: AppTemplateParameterKeySchema, label: z.string() })),
   ingress: z.array(z.object({ componentKey: AppStackKeySchema, port: z.number().int(), change: Change })),
   downtime: z.boolean(),
   dataRisk: z.boolean(),
