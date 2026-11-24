@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### An application call whose answer cannot be read has an unknown outcome (2026-11-24)
+*hosting-panel v0.17.3*
+
+**Bug Fixes & Stability**
+- **executor**: An application call whose answer cannot be read has an unknown outcome
+
+---
+
 ### The wizard closes its earlier steps once the application is created (2026-11-24)
 *hosting-panel v0.17.2*
 
