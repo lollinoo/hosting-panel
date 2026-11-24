@@ -98,7 +98,7 @@ export async function updateOrganizationAppStackLimitTransactional(
  * Inside the stack writer's transaction, after the stack row lock: applies next − previous to the organization's
  * resource_quotas row (FOR UPDATE), refusing a positive delta of processor or memory that would pass its maximum. The
  * count of components (used_services) is kept but never refused: max_services is the default of the earlier generic
- * services (20, no setter), while the application limit times the components of a plan already bounds the count. The
+ * services (20, no setter), and the processor and memory every component asks for already bound the count. The
  * row is looked up only on the first charge (no quota id and no previous revision) and its id recorded on the stack; a
  * stack charged nothing then is never charged. `next: null` releases the previous totals and clears the stack's quota id.
  */
