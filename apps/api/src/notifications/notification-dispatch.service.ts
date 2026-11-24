@@ -24,6 +24,7 @@ import {
   listEnabledNotificationChannels,
   listNotificationChannelAlerts,
   listNotificationOwners,
+  lockNotificationChannel,
   pruneNotificationDeliveries,
   putNotificationChannelAlert,
   recordNotificationDelivery,
@@ -114,7 +115,12 @@ export class NotificationDispatchService {
     }
     if (seen !== null) {
       const owners = await this.#siteOwners(seen.alerts);
-      for (const channel of channels) await this.#compare(channel, seen, owners, now);
+      for (const channel of channels) {
+        // One channel that cannot be compared costs the others neither their messages nor the sends below.
+        await this.#compare(channel.id, seen, owners, now).catch(() => {
+          console.warn(JSON.stringify({ event: "notification_channel_failed" }));
+        });
+      }
     }
 
     await expireNotificationDeliveries(db, new Date(now.getTime() - NOTIFICATION_GIVE_UP_AFTER_MS), now);
@@ -155,19 +161,22 @@ export class NotificationDispatchService {
   }
 
   /** What one channel is told by this pass, written together with the message that tells it. */
-  async #compare(channel: NotificationChannelRecord, seen: AlertObservation, owners: ReadonlyMap<string, string>, now: Date): Promise<void> {
-    const audience = notificationAudienceOf(channel);
-    const groups = new Set(channel.groups);
-    const hears = (kind: AdminAlertDto["kind"]): boolean => audienceHearsKind(audience, kind) && groups.has(NOTIFICATION_GROUP_OF[kind]);
-    const open = new Map<string, AdminAlertDto>();
-    for (const alert of seen.alerts) {
-      if (!hears(alert.kind)) continue;
-      // A customer hears of their own sites only.
-      if (channel.organizationId !== null && owners.get(siteOf(alert) ?? "") !== channel.organizationId) continue;
-      open.set(notificationAlertKey(alert), alert);
-    }
-
+  async #compare(channelId: string, seen: AlertObservation, owners: ReadonlyMap<string, string>, now: Date): Promise<void> {
     await this.dbClient.db.transaction(async (tx) => {
+      // Read again and held: the look took time, and a save or a removal of the channel waits for what this writes.
+      const channel = await lockNotificationChannel(tx, channelId);
+      if (channel === null || !channel.enabled) return;
+      const audience = notificationAudienceOf(channel);
+      const groups = new Set(channel.groups);
+      const hears = (kind: AdminAlertDto["kind"]): boolean => audienceHearsKind(audience, kind) && groups.has(NOTIFICATION_GROUP_OF[kind]);
+      const open = new Map<string, AdminAlertDto>();
+      for (const alert of seen.alerts) {
+        if (!hears(alert.kind)) continue;
+        // A customer hears of their own sites only.
+        if (channel.organizationId !== null && owners.get(siteOf(alert) ?? "") !== channel.organizationId) continue;
+        open.set(notificationAlertKey(alert), alert);
+      }
+
       const told = await listNotificationChannelAlerts(tx, channel.id);
       const known = new Map(told.map((row) => [row.alertKey, row]));
       const opened: NotificationEvent[] = [];

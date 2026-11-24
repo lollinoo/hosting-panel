@@ -92,6 +92,12 @@ export async function getNotificationChannel(
   return row ? toChannel(row) : null;
 }
 
+/** The channel as it is now, held until the caller's transaction ends: a save or a removal of it waits. null: it is gone. */
+export async function lockNotificationChannel(tx: DatabaseExecutor, channelId: string): Promise<NotificationChannelRecord | null> {
+  const [row] = await tx.select().from(notificationChannels).where(eq(notificationChannels.id, channelId)).for("update");
+  return row ? toChannel(row) : null;
+}
+
 /** Every channel that is on, of every scope: what one pass works through. */
 export async function listEnabledNotificationChannels(db: DatabaseExecutor): Promise<NotificationChannelRecord[]> {
   const rows = await db.select().from(notificationChannels).where(eq(notificationChannels.enabled, true)).orderBy(asc(notificationChannels.id));

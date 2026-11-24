@@ -51,6 +51,7 @@ const CUSTOMER_HOOK = "https://customer-hooks.example.test/in/CUSTOMERPATH";
 const OTHER_HOOK = "https://other-hooks.example.test/in/OTHERPATH";
 const SIGNING_KEY = "sentinel-signing-key-0001";
 const BOT_TOKEN = `123456789:${"A".repeat(35)}`;
+const TELEGRAM_URL = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
 const CHAT = "-1001234567890";
 const SERVER_GROUPS = ["availability", "backups", "certificates", "server"];
 const CUSTOMER_GROUPS = ["availability", "backups", "certificates"];
@@ -103,6 +104,8 @@ describe("notifications (ADR-0040)", () => {
   let adminToken: string;
   let seen: { alerts: AdminAlertDto[]; unseen: Set<string> };
   let looks: number;
+  /** Runs once inside the next look: what a person changes while a pass is under way. */
+  let duringLook: (() => Promise<void>) | null;
 
   async function login(email: string, password: string, totpSecret?: string): Promise<string> {
     const res = await fetch(`${app.baseUrl!}/v1/auth/login`, {
@@ -152,9 +155,13 @@ describe("notifications (ADR-0040)", () => {
     adminToken = await login("admin@example.test", PW, admin.totpSecretBase32);
     seen = { alerts: [], unseen: new Set() };
     looks = 0;
+    duringLook = null;
     if (opts.stub !== false) {
       vi.spyOn(app.nestApp.get(AdminHealthService), "observe").mockImplementation(async (): Promise<AlertObservation> => {
         looks += 1;
+        const change = duringLook;
+        duringLook = null;
+        await change?.();
         return { alerts: [...seen.alerts], unseen: new Set(seen.unseen) };
       });
     }
@@ -454,6 +461,72 @@ describe("notifications (ADR-0040)", () => {
       await tick(at(8));
       expect(outbound.calls).toHaveLength(2);
       expect(eventsOf(outbound.calls[1]!)).toEqual([["disk_high", "opened"]]);
+    });
+
+    it("a group turned off while a pass looks at the alerts is not told by that pass", async () => {
+      await start();
+      await adminWebhook({ groups: ["server", "backups"] });
+      seen.alerts = [backupFailed("site_a")];
+      await tick(at(0));
+      duringLook = () => adminWebhook({ groups: ["server"] });
+      await tick(at(2));
+      expect(outbound.calls).toEqual([]);
+      expect(await deliveries()).toEqual([]);
+      expect(await told()).toEqual([]);
+    });
+
+    it("a channel turned off while a pass looks keeps nothing from that pass; turned on again, the open alerts are new", async () => {
+      await start();
+      await adminWebhook();
+      seen.alerts = [disk()];
+      await tick(at(0));
+      await tick(at(2));
+      expect(outbound.calls).toHaveLength(1);
+      duringLook = () => adminWebhook({ enabled: false });
+      await tick(at(4));
+      expect(await told()).toEqual([]);
+      expect((await deliveries()).map((d) => d.status)).toEqual(["sent"]);
+
+      await adminWebhook();
+      await tick(at(6));
+      expect(outbound.calls).toHaveLength(1);
+      await tick(at(8));
+      expect(outbound.calls).toHaveLength(2);
+      expect(eventsOf(outbound.calls[1]!)).toEqual([["disk_high", "opened"]]);
+    });
+
+    it("a channel removed while a pass looks is skipped, and the other channels are told and sent to by that pass", async () => {
+      await start();
+      await adminWebhook();
+      expect((await save(ADMIN_BASE, adminToken, "telegram", { enabled: true, groups: SERVER_GROUPS, botToken: BOT_TOKEN, chat: CHAT })).status).toBe(200);
+      seen.alerts = [disk()];
+      await tick(at(0));
+      duringLook = async () => {
+        expect((await call("DELETE", `${ADMIN_BASE}/channels/webhook`, adminToken)).status).toBe(200);
+      };
+      await tick(at(2));
+      expect(outbound.calls.map((c) => c.url)).toEqual([TELEGRAM_URL]);
+      expect(outbound.calls[0]!.body["text"]).toContain("95");
+      expect((await told()).map((r) => r.alertKey)).toEqual(["disk_high:root"]);
+    });
+
+    it("a channel whose comparison fails does not cost the other channels their pass, and is told at the next one", async () => {
+      await start();
+      await adminWebhook();
+      expect((await save(ADMIN_BASE, adminToken, "telegram", { enabled: true, groups: SERVER_GROUPS, botToken: BOT_TOKEN, chat: CHAT })).status).toBe(200);
+      seen.alerts = [disk()];
+      await tick(at(0));
+      // The comparison of the first channel of the pass fails; which one it is depends on the ids.
+      vi.spyOn(dbClient.db, "transaction").mockRejectedValueOnce(new Error("connection lost"));
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      await tick(at(2));
+      expect(outbound.calls).toHaveLength(1);
+      // Only that it happened: nothing of the channel or of the error.
+      expect(warn.mock.calls).toEqual([[JSON.stringify({ event: "notification_channel_failed" })]]);
+      await tick(at(4));
+      expect(outbound.calls.map((c) => c.url).sort()).toEqual([ADMIN_HOOK, TELEGRAM_URL].sort());
+      expect(eventsOf(outbound.to(ADMIN_HOOK)[0]!)).toEqual([["disk_high", "opened"]]);
+      expect(outbound.to(TELEGRAM_URL)[0]!.body["text"]).toContain("95");
     });
 
     it("tries a message again after two, ten and thirty minutes, then it is not delivered", async () => {
