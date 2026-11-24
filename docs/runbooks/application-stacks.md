@@ -211,8 +211,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 1. After `hp-restore-panel` (README, «Il server è perso»), the new server has no stack container, network, volume or
    route. The restore SQL (`infra/linux/hp-restore-panel.sql`) sets: open deployments `failed`
    (`OPERATION_INTERRUPTED`), components `missing`, volumes `missing`, domains back to `pending` without a certificate,
-   stacks `failed` (`delete_failed` if they were deleting). Drafts stay `draft`; revisions, parameters and secrets are
-   kept.
+   stacks `failed` (`delete_failed` if they were deleting). Addresses being removed (issue #112) are deleted, which
+   frees their names: no route file serves them on the new server. Drafts stay `draft`; revisions, parameters and
+   secrets are kept.
 2. Point each stack domain's DNS to the new server; the panel checks the domains again by itself.
 3. The customer presses **Reinstalla** on each stack: images are pulled again by digest (the server needs the
    registries), new **empty** volumes are created, the secret files are written from the stored values. The routes

@@ -93,6 +93,8 @@ const SEED = `
     ('slnk_removing','o','stk_del','stk_run','removing');
   INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname, status, cert_status,
     cert_expires_at, dns_next_check_at) VALUES ('dom_run','stk_run','o','app',8080,'app.example','active','active', now(), '2027-01-01');
+  INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname, status, cert_status,
+    removal_requested_at) VALUES ('dom_gone','stk_run','o','app',8080,'gone.example','active','active','2026-11-01T00:00:00Z');
 
   INSERT INTO app_stack_backups (id, stack_id, organization_id, kind, status, operation_id, volume_keys, size_bytes, problem,
     finished_at, restore_operation_id, restore_status, restore_problem, restored_at) VALUES
@@ -264,6 +266,9 @@ describe.each([
     ]);
     expect(byId("av", "data")).toMatchObject({ status: "missing" });
     expect(byId("am", "dom_run")).toMatchObject({ status: "pending", problem: "none", x: "t" });
+    // Issue #112: an address being removed holds its name only while a route file may serve it, and none is here.
+    expect(before.some((r) => r.t === "am" && r.id === "dom_gone")).toBe(true);
+    expect(await rows(pg, "SELECT hostname FROM app_stack_domains ORDER BY hostname")).toEqual([{ hostname: "app.example" }]);
     expect(
       await rows(pg, `SELECT id, updated_at = '2026-11-01T00:00:00Z' AS same FROM app_stacks WHERE deleted_at IS NOT NULL`),
     ).toEqual([{ id: "stk_gone", same: true }]);
