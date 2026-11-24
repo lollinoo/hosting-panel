@@ -13939,8 +13939,9 @@ components:
               type: object
               nullable: true
               description: >-
-                The way back: the newest earlier revision that ran (a deploy, an upgrade or a rollback of it succeeded)
-                and whose plan is not the current one; `null` if none
+                The way back: the newest earlier revision that ran (a deploy, an upgrade or a rollback of it succeeded,
+                or failed only at publishing its routes once its components were healthy) and whose plan is not the
+                current one; `null` if none
               required: [revisionId, revisionNumber, templateVersionNumber]
               properties:
                 revisionId:

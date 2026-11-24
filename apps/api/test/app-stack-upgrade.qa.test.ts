@@ -678,5 +678,24 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
         listed: { version: 3, installed: null },
       });
     });
+
+    it("version 1's routes were refused once its components were healthy, then version 2 ran: the way back offers version 1", async () => {
+      const { templateId, stackId } = await draftWithAddress(HTTP_CACHE);
+      // Only the route write fails: revision 1 runs and is the applied one, while its deploy is failed.
+      sim.appStacks.failNextAppStackStep("routes", "engine_unavailable");
+      expect((await reinstall(stackId)).status).toBe(202);
+      await drain(stackId);
+      const [rev1] = await revisions(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "degraded", appliedRevisionId: rev1!.id });
+      expect((await opsOf(stackId)).map((o) => [o.kind, o.status])).toEqual([["stack.deploy", "failed"]]);
+
+      // No route refresh succeeds in between: the upgrade is the next thing that runs.
+      const v2 = await addVersion(templateId, HTTP_CACHE.replace("          memory: 64M", "          memory: 96M"));
+      await upgradeTo(stackId, v2);
+      await drain(stackId);
+      const [, rev2] = await revisions(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev2!.id, desiredRevisionId: rev2!.id });
+      expect(await shown(stackId)).toMatchObject({ version: 2, rollback: { revisionId: rev1!.id, revisionNumber: 1, templateVersionNumber: 1 } });
+    });
   });
 });

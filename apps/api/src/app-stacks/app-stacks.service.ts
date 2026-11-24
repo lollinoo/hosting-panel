@@ -66,6 +66,8 @@ import {
   listAppStackVolumes,
   newAppEntityId,
   operations,
+  operationSteps,
+  or,
   setAppStackSecretTransactional,
   sql,
   type AppStackRevisionRow,
@@ -361,16 +363,18 @@ export class AppStacksService {
           ),
         )
         .limit(1),
-      // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded.
+      // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
+      // (only the routes were refused, and that revision was applied).
       db
         .selectDistinct({ revisionId: appStackDeployments.revisionId })
         .from(appStackDeployments)
         .innerJoin(operations, eq(operations.id, appStackDeployments.operationId))
+        .leftJoin(operationSteps, and(eq(operationSteps.operationId, operations.id), eq(operationSteps.key, "health")))
         .where(
           and(
             eq(appStackDeployments.organizationId, stack.organizationId),
             eq(appStackDeployments.stackId, stack.id),
-            eq(appStackDeployments.status, "succeeded"),
+            or(eq(appStackDeployments.status, "succeeded"), eq(operationSteps.status, "succeeded")),
             inArray(operations.kind, [...APP_STACK_REVISION_KINDS]),
           ),
         ),
