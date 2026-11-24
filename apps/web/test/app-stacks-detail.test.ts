@@ -138,6 +138,7 @@ const DOMAIN: AppStackDomainDto = {
   compression: false,
   protection: null,
   pathRoutes: [],
+  removing: false,
 };
 const BACKUPS: AppStackBackupsDto = {
   backups: [
@@ -719,6 +720,21 @@ describe("web addresses", () => {
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
+  it("an address being removed reads so, with no button, and leaves its place in the limit (issue #112)", () => {
+    const going: AppStackDomainDto = { ...SECOND, id: "sdom_9", hostname: "old.example.test", removing: true };
+    const { out } = callHooks(AppStackDomains, props({ initial: [DOMAIN, going] }));
+    const h = html(out);
+    expect(h).toContain("old.example.test");
+    expect(h).toContain(en.apps.domains.removing);
+    expect(h).toContain(en.apps.domains.removingHint);
+    expect(h).not.toContain(en.apps.domains.status.pending);
+    expect(buttons(out, en.apps.domains.remove).filter((b) => b.props.variant !== "destructive")).toHaveLength(1);
+    expect(buttons(out, en.apps.domains.options.open)).toHaveLength(1);
+    expect(html(callHooks(AppStackDomains, props()).out)).not.toContain(en.apps.domains.removing);
+    const seven = Array.from({ length: 7 }, (_, i) => ({ ...DOMAIN, id: `sdom_${i}`, hostname: `n${i}.example.test` }));
+    expect(html(callHooks(AppStackDomains, props({ initial: [...seven, going] })).out)).toContain("app-domain-hostname");
+  });
+
   it("remove asks first, then deletes the address and shows the answered list", async () => {
     const { out, sets } = callHooks(AppStackDomains, props(), en, { 5: "sdom_1" });
     const h = html(out);
@@ -1057,7 +1073,11 @@ describe("address options (ADR-0037)", () => {
     expect(destination).toContain(o.redirectIsTarget);
     const alone = html(callHooks(AppStackDomainOptions, dialogProps({ rows: [DOMAIN] })).out);
     expect(alone).not.toContain("app-domain-redirect");
-    expect(alone).toContain(o.redirectNoTarget);
+    expect(alone).toContain(o.redirectNoTarget);    // An address being removed is no destination (issue #112).
+    const going = { ...SECOND, removing: true };
+    const leaving = html(callHooks(AppStackDomainOptions, dialogProps({ rows: [DOMAIN, going] })).out);
+    expect(leaving).not.toContain("app-domain-redirect");
+    expect(leaving).toContain(o.redirectNoTarget);
   });
 
   it("while the address redirects, password, compression and paths are not offered", () => {

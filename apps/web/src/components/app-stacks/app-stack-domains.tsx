@@ -19,7 +19,8 @@ const tone = (s: string) => (s === "active" ? "success" : s === "failed" ? "dest
 
 /**
  * Web addresses: adding, removing and changing the options are synchronous, the answer is the whole list. `pending`
- * (ADR-0037): what is saved is not yet what the published routes hold, so no option is shown as active on its own.
+ * (ADR-0037): what is saved is not yet what the published routes hold, so no option is shown as active on its own. An
+ * address being removed (issue #112) stays listed, with no button, until it stops answering; it takes no place in the limit.
  */
 export function AppStackDomains({
   orgId,
@@ -122,47 +123,54 @@ export function AppStackDomains({
             <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 p-3">
               <div className="space-y-1">
                 <p className="font-medium">{d.hostname}</p>
+                {d.removing && <p className="text-muted-foreground">{t.removingHint}</p>}
                 {ingress.length > 1 && <p className="text-muted-foreground">{targetText(d.componentKey, d.port)}</p>}
                 {d.redirectToDomainId !== null && (
                   <p className="text-muted-foreground">
                     {format(t.options.summary.redirect, { hostname: rows.find((r) => r.id === d.redirectToDomainId)?.hostname ?? "" })}
                   </p>
                 )}
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={tone(d.status)}>{t.status[d.status]}</Badge>
-                  <Badge variant={tone(d.certificateStatus)}>{t.certificate[d.certificateStatus]}</Badge>
-                  {d.protection !== null && <Badge variant="secondary">{t.options.summary.protected}</Badge>}
-                  {d.pathRoutes.length > 0 && <Badge variant="secondary">{format(t.options.summary.paths, { n: d.pathRoutes.length })}</Badge>}
-                  {pending && (d.redirectToDomainId !== null || d.protection !== null || d.pathRoutes.length > 0) && (
-                    <Badge variant="outline">{t.options.summary.pending}</Badge>
-                  )}
-                  {d.certificateStatus === "active" && d.certificateExpiresAt && (
-                    <time dateTime={d.certificateExpiresAt} className="text-muted-foreground">
-                      {format(t.expires, { date: date.format(new Date(d.certificateExpiresAt)) })}
-                    </time>
-                  )}
+                {d.removing ? (
+                  <Badge variant="outline">{t.removing}</Badge>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={tone(d.status)}>{t.status[d.status]}</Badge>
+                    <Badge variant={tone(d.certificateStatus)}>{t.certificate[d.certificateStatus]}</Badge>
+                    {d.protection !== null && <Badge variant="secondary">{t.options.summary.protected}</Badge>}
+                    {d.pathRoutes.length > 0 && <Badge variant="secondary">{format(t.options.summary.paths, { n: d.pathRoutes.length })}</Badge>}
+                    {pending && (d.redirectToDomainId !== null || d.protection !== null || d.pathRoutes.length > 0) && (
+                      <Badge variant="outline">{t.options.summary.pending}</Badge>
+                    )}
+                    {d.certificateStatus === "active" && d.certificateExpiresAt && (
+                      <time dateTime={d.certificateExpiresAt} className="text-muted-foreground">
+                        {format(t.expires, { date: date.format(new Date(d.certificateExpiresAt)) })}
+                      </time>
+                    )}
+                  </div>
+                )}
+              </div>
+              {!d.removing && (
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={busy}
+                    aria-label={format(t.options.title, { hostname: d.hostname })}
+                    onClick={() => open(d.id)}
+                  >
+                    {t.options.open}
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setRemoving(d.id)}>
+                    {t.remove}
+                  </Button>
                 </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={busy}
-                  aria-label={format(t.options.title, { hostname: d.hostname })}
-                  onClick={() => open(d.id)}
-                >
-                  {t.options.open}
-                </Button>
-                <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setRemoving(d.id)}>
-                  {t.remove}
-                </Button>
-              </div>
+              )}
             </li>
           ))}
         </ul>
       )}
-      {ingress.length > 0 && rows.length < MAX_APP_STACK_DOMAINS && (
+      {ingress.length > 0 && rows.filter((d) => !d.removing).length < MAX_APP_STACK_DOMAINS && (
         <form onSubmit={add} className="flex flex-wrap items-end gap-2">
           <div className="min-w-64 flex-1 space-y-1">
             <Label htmlFor="app-domain-hostname">{m.apps.list.col.address}</Label>

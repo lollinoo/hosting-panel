@@ -3439,6 +3439,8 @@ x-hp-ingress:
       remove: "Rimuovi",
       removeTitle: "Rimuovere l'indirizzo?",
       removeBody: "{hostname} smetterà di rispondere.",
+      removing: "In rimozione",
+      removingHint: "Resta riservato a questa applicazione finché non smette di rispondere.",
       status: { pending: "In attesa", active: "Attivo", failed: "Non riuscito" },
       certificate: {
         none: "Nessun certificato",
@@ -3548,6 +3550,7 @@ x-hp-ingress:
       redirect_target: "Scegli come destinazione un altro indirizzo di questa applicazione.",
       redirect_chain: "L'indirizzo di destinazione reindirizza a sua volta, oppure un altro indirizzo reindirizza già qui.",
       password_required: "Scegli una password per proteggere questo indirizzo.",
+      address_removing: "Questo indirizzo è già in rimozione: attendi un momento, poi ricarica la pagina.",
       domain_target_removed: "Un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima l'indirizzo.",
       path_target_removed: "Un percorso di un indirizzo web punta a un componente che la nuova versione toglie: rimuovi prima il percorso.",
       value_too_long: "Il valore è troppo lungo: questa applicazione accetta al massimo {max} caratteri, meno se contiene lettere accentate o simboli.",

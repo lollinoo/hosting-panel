@@ -164,6 +164,13 @@ describe("application backup texts", () => {
     for (const p of [...BACKUP_PROBLEMS, "nope"]) expect(appStackBackupProblemText(m, p), p).not.toMatch(/\b(sito|siti|site|sites)\b/i);
   });
 
+  it.each(locales)("%s: an address being removed has its own state and refusal, in no proxy word (issue #112)", (_n, m) => {
+    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "address_removing");
+    expect(text).toBe(m.apps.reasons.address_removing);
+    expect(text).not.toBe(m.apps.codes.RESOURCE_LOCKED);
+    for (const t of [text, m.apps.domains.removing, m.apps.domains.removingHint]) expect(t).not.toMatch(/proxy|caddy|traefik|docker|route/i);
+  });
+
   it.each(locales)("%s: the refusals of a backup or a restore have their own sentences", (_n, m) => {
     const reasons: Record<string, string> = m.apps.reasons;
     for (const [code, reason] of [

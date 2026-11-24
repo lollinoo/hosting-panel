@@ -3410,6 +3410,8 @@ x-hp-ingress:
       remove: "Remove",
       removeTitle: "Remove the address?",
       removeBody: "{hostname} will stop answering.",
+      removing: "Being removed",
+      removingHint: "It stays reserved to this application until it stops answering.",
       status: { pending: "Pending", active: "Active", failed: "Failed" },
       certificate: {
         none: "No certificate",
@@ -3519,6 +3521,7 @@ x-hp-ingress:
       redirect_target: "Choose another address of this application as the destination.",
       redirect_chain: "The destination address redirects in turn, or another address already redirects here.",
       password_required: "Choose a password to protect this address.",
+      address_removing: "This address is already being removed: wait a moment, then reload the page.",
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
       path_target_removed: "A path of a web address points at a component the new version removes: remove the path first.",
       value_too_long: "This value is too long: this application accepts at most {max} characters, fewer if it contains accented letters or symbols.",
