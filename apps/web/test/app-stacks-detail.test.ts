@@ -97,6 +97,8 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"],
+  outcomeUnknown: false,
   revisionNumber: 3,
   installed: null,
   components: [
@@ -292,8 +294,41 @@ describe("detail page", () => {
   it("the delete button is offered only while a delete may be queued", async () => {
     const open = new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${en.apps.delete.open}<`);
     expect(await page()).not.toMatch(open);
-    answer({ [UP]: ok({ ...DETAIL, status: "deleting" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    answer({ [UP]: ok({ ...DETAIL, status: "deleting", allowedActions: [] }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     expect(await page()).toMatch(open);
+    // The list decides, not the status: a degraded application held by an operation offers no delete.
+    answer({ [UP]: ok({ ...DETAIL, allowedActions: [] }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    expect(await page()).toMatch(open);
+  });
+
+  it("issue #106: a crashed application reads «Non riuscita» and offers restart, never a start the API refuses", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      // What the API answers for a component that crashed: shown failed, the stored running's actions.
+      answer({ [UP]: ok({ ...DETAIL, status: "failed" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const h = await page();
+      expect(h).toContain(m.apps.status.failed);
+      expect(h).toMatch(disabled(m.apps.actions.start));
+      expect(h).toContain(`>${m.apps.actions.restart}<`);
+      expect(h).not.toMatch(disabled(m.apps.actions.restart));
+      expect(h).not.toContain(m.apps.detail.unknownBody);
+    }
+  });
+
+  it("issue #106: «to be verified» from a stale reading says the state could not be read, not that an outcome is unknown", async () => {
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const stale = await page();
+      expect(stale).toContain(m.apps.detail.staleBody);
+      expect(stale).not.toContain(m.apps.detail.unknownBody);
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const doubt = await page();
+      expect(doubt).toContain(m.apps.detail.unknownBody);
+      expect(doubt).not.toContain(m.apps.detail.staleBody);
+    }
+    expect(en.apps.detail.staleBody).not.toBe(en.apps.detail.unknownBody);
   });
 
   it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
@@ -329,7 +364,7 @@ describe("detail page", () => {
 
   it("unknown reads «Esito da verificare» and never «Non riuscita»; a draft explains what to do", async () => {
     loc.value = "it";
-    answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     const h = await page();
     expect(h).toContain("Esito da verificare");
     expect(h).toContain(itMsgs.apps.detail.unknownBody);

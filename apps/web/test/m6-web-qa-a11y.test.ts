@@ -220,6 +220,8 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"],
+  outcomeUnknown: false,
   revisionNumber: 3,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
@@ -458,7 +460,7 @@ interface Scenario {
   alerts?: number;
 }
 
-const actionProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", status: "running" as const, upgrade: DETAIL.upgrade, rollback: DETAIL.rollback };
+const actionProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", status: "running" as const, actions: DETAIL.allowedActions, upgrade: DETAIL.upgrade, rollback: DETAIL.rollback };
 const planDialog = (m: Messages, plan: "upgrade" | "rollback", diffState: Record<number, unknown>) => {
   const tree = callHooks(AppStackActions, actionProps, m, { 4: plan });
   const dialog = els(tree).find((e) => typeof e.type === "function" && (e.type as { name?: string }).name === "PlanDialog");
@@ -1086,13 +1088,14 @@ describe("words, not colours", () => {
 
   it.each(LOCALES)("%s · the draft and unknown states explain themselves in a status region", async (_l, m) => {
     loc.value = localeOf(m);
-    for (const [status, text] of [
-      ["unknown", m.apps.detail.unknownBody],
-      ["draft", m.apps.detail.draftBody],
+    for (const [status, outcomeUnknown, text] of [
+      ["unknown", true, m.apps.detail.unknownBody],
+      ["unknown", false, m.apps.detail.staleBody],
+      ["draft", false, m.apps.detail.draftBody],
     ] as const) {
       fetchUpstream.mockImplementation(async (p: string) =>
         p === UP
-          ? ok({ ...DETAIL, status, revisionNumber: null })
+          ? ok({ ...DETAIL, status, outcomeUnknown, revisionNumber: null })
           : ok(p.endsWith("/links") ? { ...LINKS, links: [] } : p.endsWith("/backups") ? { backups: [], unavailableReason: null, goBackTo: null } : []),
       );
       const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);

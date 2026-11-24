@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { appStackEnqueueTarget, type AppStackDetailDto, type AppStackPlanDiffDto, type AppStackStatus } from "@hosting-panel/contracts";
+import type { AppStackDetailDto, AppStackOperationKind, AppStackPlanDiffDto, AppStackStatus } from "@hosting-panel/contracts";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -19,8 +19,9 @@ type QueuedAction = StackAction | "upgrade" | "rollback";
 type Sent = Awaited<ReturnType<typeof keyedSend>>;
 type PlanTarget = { templateVersionId: string } | { revisionId: string };
 
-export function stackActionEnabled(action: QueuedAction, status: AppStackStatus): boolean {
-  return appStackEnqueueTarget(`stack.${action}`, status) !== null;
+/** From the detail's `allowedActions`, never from the status shown: a crash shows failed but leaves the stored status the API decides with. */
+export function stackActionEnabled(action: QueuedAction, actions: readonly AppStackOperationKind[]): boolean {
+  return actions.includes(`stack.${action}`);
 }
 
 export function AppStackActions({
@@ -28,6 +29,7 @@ export function AppStackActions({
   stackId,
   csrfToken,
   status,
+  actions,
   upgrade,
   rollback,
 }: {
@@ -35,6 +37,7 @@ export function AppStackActions({
   stackId: string;
   csrfToken: string;
   status: AppStackStatus;
+  actions: readonly AppStackOperationKind[];
   upgrade: AppStackDetailDto["upgrade"];
   rollback: AppStackDetailDto["rollback"];
 }) {
@@ -75,7 +78,7 @@ export function AppStackActions({
   }
 
   const button = (action: QueuedAction, label: string, onClick: () => unknown) => (
-    <Button type="button" variant="outline" disabled={busy !== null || !stackActionEnabled(action, status)} onClick={onClick}>
+    <Button type="button" variant="outline" disabled={busy !== null || !stackActionEnabled(action, actions)} onClick={onClick}>
       {label}
     </Button>
   );

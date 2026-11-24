@@ -3,8 +3,10 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_STACK_OPERATION_KINDS,
   APP_STACK_STATUSES,
   appStackEnqueueTarget,
+  type AppStackOperationKind,
   type AppStackPlanDiffDto,
   type AppStackStatus,
   type OperationDto,
@@ -105,11 +107,14 @@ const accepted = { ok: true, data: { data: { stackId: "stk_a1", operationId: "op
 
 const UPGRADE = { templateVersionId: "atv_notes_3", versionNumber: 3 };
 const ROLLBACK = { revisionId: "srev_a1", revisionNumber: 1, templateVersionNumber: 1 };
+/** What the API lists for an owner when nothing holds the application and its stored status is `status`. */
+const acceptedFrom = (status: AppStackStatus): AppStackOperationKind[] => APP_STACK_OPERATION_KINDS.filter((k) => appStackEnqueueTarget(k, status) !== null);
 const actionProps = (status: AppStackStatus, over: Record<string, unknown> = {}) => ({
   orgId: ORG,
   stackId: "stk_a1",
   csrfToken: "csrf",
   status,
+  actions: acceptedFrom(status),
   upgrade: UPGRADE,
   rollback: ROLLBACK,
   ...over,
@@ -148,10 +153,30 @@ afterEach(() => {
 describe("stackActionEnabled", () => {
   const actions = ["start", "stop", "restart", "deploy", "upgrade", "rollback"] as const;
 
-  it("follows appStackEnqueueTarget over all 14 statuses × 6 actions", () => {
-    expect(APP_STACK_STATUSES).toHaveLength(14);
-    for (const status of APP_STACK_STATUSES)
-      for (const a of actions) expect(stackActionEnabled(a, status), `${a} ${status}`).toBe(appStackEnqueueTarget(`stack.${a}`, status) !== null);
+  it("follows the list of actions the API accepts, whatever the status shown", () => {
+    for (const a of actions) {
+      expect(stackActionEnabled(a, [`stack.${a}`]), a).toBe(true);
+      expect(stackActionEnabled(a, APP_STACK_OPERATION_KINDS.filter((k) => k !== `stack.${a}`)), a).toBe(false);
+    }
+    expect(actions.map((a) => stackActionEnabled(a, []))).toEqual(actions.map(() => false));
+  });
+
+  it("issue #106: a crashed application reads failed while the API keeps its stored running: start is not offered, restart is", () => {
+    const { out } = callHooks(AppStackActions, actionProps("failed", { actions: acceptedFrom("running") }));
+    expect(button(out, en.apps.actions.start)!.props.disabled).toBe(true);
+    expect(button(out, en.apps.actions.restart)!.props.disabled).toBe(false);
+    expect(button(out, en.apps.actions.stop)!.props.disabled).toBe(false);
+    // A stale reading (shown «to be verified») offers what the stored status allows, not what «unknown» would.
+    const stale = callHooks(AppStackActions, actionProps("unknown", { actions: acceptedFrom("degraded") })).out;
+    expect(button(stale, en.apps.actions.start)!.props.disabled).toBe(true);
+    expect(button(stale, en.apps.actions.restart)!.props.disabled).toBe(false);
+  });
+
+  it("while an operation holds the application the API lists nothing and no button is enabled", () => {
+    for (const status of ["running", "stopping", "failed"] as const) {
+      const { out } = callHooks(AppStackActions, actionProps(status, { actions: [] }));
+      expect(els(out).filter((e) => e.type === Button).map((b) => b.props.disabled), status).toEqual([true, true, true, true, true, true]);
+    }
   });
 
   it("renders each of the six buttons enabled exactly when the action may be queued", () => {
@@ -215,12 +240,23 @@ describe("AppStackActions requests", () => {
   });
 
   it.each(locales)("a refusal reads as its sentence, a status refusal names the status, no refresh (%s)", async (_l, m) => {
-    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "stopped" });
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "running" });
     const { out, sets } = callHooks(AppStackActions, actionProps("running"), m);
     await click(button(out, m.apps.actions.restart));
-    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "stopped");
-    expect(text).toBe(format(m.apps.reasons.status, { status: m.apps.status.stopped }));
+    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "running", "running");
+    expect(text).toBe(format(m.apps.reasons.status, { status: m.apps.status.running }));
     expect(sets).toContainEqual([2, text]);
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each(locales)("issue #106: a refusal never names a status other than the one the page shows (%s)", async (_l, m) => {
+    // The page read «failed» (a crashed component), the API refused from its stored «running», or the list went stale.
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "running" });
+    const { out, sets } = callHooks(AppStackActions, actionProps("failed"), m);
+    await click(button(out, m.apps.actions.restart));
+    expect(sets).toContainEqual([2, m.apps.reasons.notNow]);
+    expect(m.apps.reasons.notNow).not.toContain(m.apps.status.running);
+    expect(m.apps.reasons.notNow).not.toContain(m.apps.status.failed);
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
@@ -416,7 +452,15 @@ describe("upgrade and rollback plan dialog", () => {
 });
 
 describe("AppStackDelete", () => {
-  const props = (hasData = true, status: AppStackStatus = "running") => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData, status });
+  const props = (hasData = true, status: AppStackStatus = "running", actions: readonly AppStackOperationKind[] = acceptedFrom(status)) => ({
+    orgId: ORG,
+    stackId: "stk_a1",
+    csrfToken: "csrf",
+    stackName: "team-notes",
+    hasData,
+    status,
+    actions,
+  });
   const submit = async (tree: unknown) => {
     const form = els(tree).find((e) => e.type === "form")!;
     await (form.props.onSubmit as (e: { preventDefault(): void }) => Promise<void>)({ preventDefault() {} });
@@ -436,12 +480,22 @@ describe("AppStackDelete", () => {
     expect(sets).toContainEqual([0, true]);
   });
 
-  it("the delete button is enabled exactly when appStackEnqueueTarget allows a delete", () => {
+  it("the delete button is enabled exactly when the API lists a delete", () => {
     for (const status of APP_STACK_STATUSES) {
       const open = button(callHooks(AppStackDelete, props(true, status)).out, en.apps.delete.open)!;
       expect(open.props.disabled, status).toBe(appStackEnqueueTarget("stack.delete", status) === null);
     }
     expect(button(callHooks(AppStackDelete, props(true, "deleting")).out, en.apps.delete.open)!.props.disabled).toBe(true);
+    // Held by an operation, or for a caller without app.delete: not offered, whatever the status.
+    expect(button(callHooks(AppStackDelete, props(true, "running", [])).out, en.apps.delete.open)!.props.disabled).toBe(true);
+    expect(button(callHooks(AppStackDelete, { ...props(), actions: undefined }).out, en.apps.delete.open)!.props.disabled).toBe(true);
+  });
+
+  it.each(locales)("a delete refused from another status than the one shown reads neutrally (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "deleting" });
+    const { out, sets } = callHooks(AppStackDelete, props(), m, { 0: true, 1: "team-notes" });
+    await submit(out);
+    expect(sets).toContainEqual([4, m.apps.reasons.notNow]);
   });
 
   it.each(locales)("asks the typed name and a separate, unticked data checkbox with its keep note (%s)", (_l, m) => {

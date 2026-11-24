@@ -3187,6 +3187,7 @@ x-hp-ingress:
       notInstalledLine: "Version {version} (release #{release}) was not installed.",
       draftBody: "The application is not installed yet: set the required private values and press Install.",
       unknownBody: "We do not know yet whether the last operation succeeded. Nothing is repeated automatically.",
+      staleBody: "The panel could not read the state of the application lately: what this page shows may be out of date.",
       platformWork: {
         backups_cleanup:
           "The panel is removing this application's expired backups: until it is done, no action on it can be started. It usually takes a few minutes.",
@@ -3467,6 +3468,7 @@ x-hp-ingress:
       STACK_PARAMETER_INVALID: "Check the highlighted settings.",
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
+      notNow: "This action is not available at the moment. Reload the page to see the actions you can use now.",
       stop_unfinished: "The application did not stop completely: press Stop again, or Restart, then try again.",
       confirmation_mismatch: "The typed name does not match.",
       no_data: "This application has no data to save.",

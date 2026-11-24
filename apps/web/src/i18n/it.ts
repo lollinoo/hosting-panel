@@ -3215,6 +3215,7 @@ x-hp-ingress:
       notInstalledLine: "La versione {version} (rilascio n. {release}) non è stata installata.",
       draftBody: "L'applicazione non è ancora installata: imposta i valori riservati obbligatori e premi Installa.",
       unknownBody: "Non sappiamo ancora se l'ultima operazione è riuscita. Nessuna azione viene ripetuta da sola.",
+      staleBody: "Il pannello non è riuscito a leggere di recente lo stato dell'applicazione: quello che questa pagina mostra potrebbe non essere aggiornato.",
       platformWork: {
         backups_cleanup:
           "Il pannello sta togliendo i backup scaduti di questa applicazione: finché non ha finito, nessuna azione su di lei si può avviare. Di solito bastano pochi minuti.",
@@ -3496,6 +3497,7 @@ x-hp-ingress:
       STACK_PARAMETER_INVALID: "Controlla le impostazioni evidenziate.",
       name_taken: "Hai già un'applicazione con questo nome.",
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
+      notNow: "Questa azione non è disponibile in questo momento. Ricarica la pagina per vedere le azioni che puoi usare ora.",
       stop_unfinished: "L'applicazione non si è arrestata del tutto: premi di nuovo Arresta, oppure Riavvia, poi riprova.",
       confirmation_mismatch: "Il nome scritto non corrisponde.",
       no_data: "Questa applicazione non ha dati da salvare.",

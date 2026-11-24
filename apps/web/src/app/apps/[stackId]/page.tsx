@@ -76,11 +76,18 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         {s.installed && s.activeOperationId === null && s.revisionNumber !== null && (
           <p className="text-sm">{format(d.notInstalledLine, { version: s.templateVersionNumber, release: s.revisionNumber })}</p>
         )}
-        {s.status === "unknown" && (
+        {/* «To be verified» is an operation in doubt only when the stored status says so; otherwise a reading went stale. */}
+        {s.outcomeUnknown ? (
           <Alert variant="warning" role="status">
             <AlertTitle>{m.apps.status.unknown}</AlertTitle>
             <AlertDescription>{d.unknownBody}</AlertDescription>
           </Alert>
+        ) : (
+          s.status === "unknown" && (
+            <Alert variant="warning" role="status">
+              <AlertDescription>{d.staleBody}</AlertDescription>
+            </Alert>
+          )
         )}
         {s.status === "draft" && (
           <Alert role="status">
@@ -93,7 +100,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
             <AlertDescription>{d.platformWork[s.platformWork]}</AlertDescription>
           </Alert>
         )}
-        <AppStackActions {...ids} status={s.status} upgrade={s.upgrade} rollback={s.rollback} />
+        <AppStackActions {...ids} status={s.status} actions={s.allowedActions} upgrade={s.upgrade} rollback={s.rollback} />
       </section>
       {s.activeOperationId !== null && <AppStackProgress orgId={orgId} operationId={s.activeOperationId} />}
       <Section id="components" title={d.section.components}>
@@ -125,7 +132,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         <AppStackHistory deployments={deployments} m={m} locale={locale} />
       </Section>
       <Section id="danger" title={d.section.danger}>
-        <AppStackDelete {...ids} stackName={s.name} hasData={s.volumes.length > 0} status={s.status} />
+        <AppStackDelete {...ids} stackName={s.name} hasData={s.volumes.length > 0} status={s.status} actions={s.allowedActions} />
       </Section>
     </div>
   );

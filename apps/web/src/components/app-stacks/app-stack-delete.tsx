@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { appStackEnqueueTarget, type AppStackStatus } from "@hosting-panel/contracts";
+import type { AppStackOperationKind, AppStackStatus } from "@hosting-panel/contracts";
 import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -25,13 +25,17 @@ export function AppStackDelete({
   stackName,
   hasData,
   status,
+  actions,
 }: {
   orgId: string;
   stackId: string;
   csrfToken: string;
   stackName: string;
   hasData: boolean;
+  /** The status shown, for the wording of a refusal. */
   status?: AppStackStatus;
+  /** The detail's `allowedActions`: the button follows them, not the status. */
+  actions?: readonly AppStackOperationKind[];
 }) {
   const m = useMessages();
   const t = m.apps.delete;
@@ -66,12 +70,12 @@ export function AppStackDelete({
       return;
     }
     setBusy(false);
-    setError(appStackRefusalText(m, sent.code, sent.reason));
+    setError(appStackRefusalText(m, sent.code, sent.reason, status));
   }
 
   return (
     <>
-      <Button type="button" variant="destructive" disabled={!status || appStackEnqueueTarget("stack.delete", status) === null} onClick={show}>
+      <Button type="button" variant="destructive" disabled={!actions?.includes("stack.delete")} onClick={show}>
         {t.open}
       </Button>
       <Dialog open={open} onOpenChange={(o) => !o && !busy && setOpen(false)}>
