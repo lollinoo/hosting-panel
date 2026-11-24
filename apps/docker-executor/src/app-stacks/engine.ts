@@ -50,7 +50,7 @@ import {
   decodeAppStackHealthLabel,
   type AppStackContainerCreatePayload,
 } from "./container-payload.js";
-import { AppStackExecutorError } from "./errors.js";
+import { AppStackExecutorError, markRefusedBeforeChange } from "./errors.js";
 import { probeAppStackHealth, type AppStackHealthProbe } from "./health-probe.js";
 import {
   APP_STACK_COMPONENT_ROLE,
@@ -401,7 +401,20 @@ export class AppStackEngine implements StackExecutorPort {
     });
   }
 
-  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+  public async createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+    // Up to the first removal everything this call does is a read or a check: a refusal raised until then says so (#111).
+    let changing = false;
+    try {
+      return await this.createComponents(req, () => {
+        changing = true;
+      });
+    } catch (err) {
+      if (!changing) markRefusedBeforeChange(err);
+      throw err;
+    }
+  }
+
+  private createComponents(req: AppStackCreateIpcRequest, beforeFirstChange: () => void): Promise<AppStackCreateIpcResult> {
     const checked = () => {
       const plan = this.check(req.plan);
       // Environment secrets (version 2) live only in this call and in the create bodies built from it.
@@ -452,6 +465,7 @@ export class AppStackEngine implements StackExecutorPort {
       }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents: string[] = [];
+      beforeFirstChange();
       for (const stale of listed.filter((c) => !keys.has(c.key)).sort(byKey)) {
         await this.removeContainer(stale.id);
         await purgeAppStackComponentSecrets(this.deps.secretsRootDir, plan.stackId, stale.key);

@@ -61,6 +61,12 @@ export const APP_STACK_EXECUTOR_REASON_CODES: Readonly<Record<AppStackExecutorRe
   STACK_UNSUPPORTED_FEATURE: "VALIDATION_ERROR", // route host with source "manual" or a redirectTo
 });
 
+/**
+ * The one more error detail of a refusal of the create call that raised it before its first removal or create: the
+ * executor changed nothing for this call (#111). Never a reason, never shown to a customer.
+ */
+export const APP_STACK_REFUSED_BEFORE_CHANGE = Object.freeze({ field: "stage", message: "before_change" } as const);
+
 /** C0 controls but tab and line breaks, and unpaired surrogates: 6 bytes each in JSON, so the start body stays < 1 MiB. */
 // eslint-disable-next-line no-control-regex
 const SECRET_FORBIDDEN_CHARACTER = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\p{Cs}]/u;

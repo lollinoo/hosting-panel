@@ -14970,6 +14970,10 @@ components:
                     nullable: true
             volumes:
               type: array
+              description: >-
+                A volume that was never created (`pending`) is listed only when the version that runs has it. A volume
+                that an upgrade created before it was taken back exists (`present`) and is listed, though the version
+                that runs does not use it: backups include it and a later attempt reuses it.
               items:
                 type: object
                 required: [key, status, retentionPolicy]

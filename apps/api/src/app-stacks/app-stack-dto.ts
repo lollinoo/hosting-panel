@@ -152,7 +152,11 @@ export function appStackDetailDto(input: {
         },
       ];
     }),
-    volumes: input.volumes.map((v) => ({ key: v.volumeKey, status: v.status, retentionPolicy: v.retentionPolicy })),
+    // A volume that was never created is not listed: its row is `pending` and the revision that runs does not have it (an
+    // upgrade that was taken back asked for it; the row stays for a later attempt, ADR-0035).
+    volumes: input.volumes
+      .filter((v) => v.status !== "pending" || (applied?.volumes.some((a) => a.key === v.volumeKey) ?? false))
+      .map((v) => ({ key: v.volumeKey, status: v.status, retentionPolicy: v.retentionPolicy })),
     ingress,
     // A path must point at an entry point of the plan that runs too (the API refuses any other).
     pathTargets: ingress.filter((i) => input.appliedPlan?.ingress.some((a) => a.componentKey === i.componentKey && a.port === i.port) ?? true),

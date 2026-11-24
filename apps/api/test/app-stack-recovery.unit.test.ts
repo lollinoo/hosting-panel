@@ -20,6 +20,7 @@ import {
   createAppTemplate,
   createDatabaseClient,
   enqueueAppStackOperationTransactional,
+  enqueueAppStackResumeTransactional,
   eq,
   hostAllocations,
   hosts,
@@ -34,6 +35,7 @@ import {
   transitionOperation,
   unlockOperationBreakGlassTransactional,
   updateAppTemplate,
+  updateOperationStepTransactional,
   type AppStackWriteResult,
   type DatabaseClient,
   type NewAppStackRevision,
@@ -591,6 +593,67 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect(trace()).toEqual(["getAppStackStatus"]);
     await expectInterrupted(upgrade);
     expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+  });
+
+  /** An application the customer stopped, with a start of it accepted and then in doubt before any step of it began. */
+  async function stoppedWithStartInDoubt(resume = false) {
+    const { stackId, rev } = await running();
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    expect((await stackOf(stackId)).status).toBe("stopped");
+    let start: AppStackWriteResult;
+    if (resume) {
+      // The start that follows a backup or a restore: the platform stopped the application, so no `replaced_status`.
+      const queued = await db().transaction((tx) =>
+        enqueueAppStackResumeTransactional(tx, { organizationId: ORG, stackId, requestedByUserId: null, sourceOperationId: `op_backup_${String(n)}` }),
+      );
+      expect(queued?.kind).toBe("stack.start");
+      start = { stack: await stackOf(stackId), revision: null, deployment: queued!.deployment, operation: queued!.operation, idempotentReplay: false };
+    } else {
+      start = await enqueue(stackId, "stack.start");
+    }
+    // The worker took it and its lease ran out: the operation is parked, its steps still as they were queued.
+    await transitionOperation(db(), start.operation!.id, "processing");
+    await transitionOperation(db(), start.operation!.id, "unknown");
+    fake.calls.length = 0;
+    return { stackId, rev, start };
+  }
+
+  it("(8f) a stopped application whose start is in doubt before its start step began settles stopped (#139)", async () => {
+    const { stackId, rev, start } = await stoppedWithStartInDoubt();
+    expect(await deploymentOf(start)).toMatchObject({ replacedStatus: "stopped" });
+    expect((await stepsOf(start)).start).toBe("pending");
+
+    expect(await recover(start)).toBe("settled");
+
+    // Nothing was started: the containers are stopped as the customer left them, and the operation still failed.
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(start);
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+    expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+  });
+
+  it("(8g) a stopped application whose start was in doubt once its start step began ends failed, as before (#139)", async () => {
+    const { stackId, start } = await stoppedWithStartInDoubt();
+    // The step began: links may have been rolled out and a container started, so nothing says it is as it was.
+    await updateOperationStepTransactional(db(), start.operation!.id, "start", "running", "running");
+
+    expect(await recover(start)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(start);
+    expect(await stackOf(stackId)).toMatchObject({ status: "failed" });
+  });
+
+  it("(8h) the start that resumes an application after a backup, in doubt before its start step began, ends failed, as before (#139)", async () => {
+    const { stackId, start } = await stoppedWithStartInDoubt(true);
+    expect(await deploymentOf(start)).toMatchObject({ replacedStatus: null });
+    expect((await stepsOf(start)).start).toBe("pending");
+
+    expect(await recover(start)).toBe("settled");
+
+    // The platform stopped it, not the customer: the page must show it did not come back.
+    await expectInterrupted(start);
+    expect(await stackOf(stackId)).toMatchObject({ status: "failed" });
   });
 
   it("(9) routes observed published keep the stored routes hash", async () => {

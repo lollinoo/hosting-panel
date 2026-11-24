@@ -52,6 +52,7 @@ import {
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
   decodeAppStackHealthLabel,
+  markRefusedBeforeChange,
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
@@ -323,7 +324,20 @@ export class SimulatedAppStacks implements StackExecutorPort {
     return { image: req.image, digest: `sha256:${createHash("sha256").update(req.image).digest("hex")}` };
   }
 
-  public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+  public async createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
+    // Like the engine: a refusal raised before the first removal says nothing was changed (#111).
+    let changing = false;
+    try {
+      return await this.createComponents(req, () => {
+        changing = true;
+      });
+    } catch (err) {
+      if (!changing) markRefusedBeforeChange(err);
+      throw err;
+    }
+  }
+
+  private createComponents(req: AppStackCreateIpcRequest, beforeFirstChange: () => void): Promise<AppStackCreateIpcResult> {
     return this.run("create", { method: "createAppStackComponents", stackId: req.plan.stackId }, true, async () => {
       const plan = this.checkPlan(req.plan);
       const secretContents = assertAppStackCreateSecretContents(plan, req.secretContents);
@@ -352,6 +366,7 @@ export class SimulatedAppStacks implements StackExecutorPort {
       }
       const keys = new Set(plan.components.map((c) => c.key));
       const removedComponents = [...stack.containers.keys()].filter((key) => !keys.has(key)).sort();
+      beforeFirstChange();
       for (const key of removedComponents) await this.removeComponent(stack, plan.stackId, key);
       const components = plan.components.map(({ key }) => {
         const existing = stack.containers.get(key);

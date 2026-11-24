@@ -167,7 +167,8 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    image declares at or under `/run` or `/tmp`, or at another path a volume may not use, cannot be covered: the panel
    cannot run that image, and the template needs another one.
 
-   An upgrade or a rollback that fails before its components are created (download, preparation) goes back to what its
+   An upgrade or a rollback that fails before its components are created (download, preparation, or a create the
+   executor refuses before it removes or creates anything) goes back to what its
    request replaced: the version, settings, components and quota asked for before that request (usually those of the
    version installed, but not after a change that failed past create, nor on an application never installed), the
    upgrade on offer again, and the failed attempt in the history. Not so when a web address or one of its paths was

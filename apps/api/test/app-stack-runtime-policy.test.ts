@@ -1,4 +1,5 @@
 import {
+  APP_STACK_REFUSED_BEFORE_CHANGE,
   APP_STACK_STEP_KEYS,
   AppStackRouteWireSchema,
   ERROR_CODES,
@@ -25,6 +26,7 @@ import {
   APP_STACK_START_INCOMPLETE_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
   appStackAggregate,
+  appStackCreateRefusedBeforeChange,
   appStackDisplayStatus,
   appStackEssentialKeys,
   appStackHealthRows,
@@ -187,10 +189,39 @@ describe("fixed texts, problems and codes", () => {
     ["a message with a secret", new ExecutorIpcClientError("password=hunter2", "DOCKER_ENGINE_UNAVAILABLE", 502, true), "DOCKER_ENGINE_UNAVAILABLE"],
     ["a plain error", new Error("STACK_SECRET_MISSING password=hunter2"), "DOCKER_ENGINE_UNAVAILABLE"],
     ["not an error", null, "DOCKER_ENGINE_UNAVAILABLE"],
+    // The executor's mark that nothing was changed (#111) is a detail like another: it never moves the problem.
+    [
+      "a reason followed by the mark",
+      new ExecutorIpcClientError("refused", "RESOURCE_LOCKED", 409, false, [{ field: "stack", message: "x", reason: "STACK_VOLUME_IN_USE" }, APP_STACK_REFUSED_BEFORE_CHANGE]),
+      "STACK_VOLUME_IN_USE",
+    ],
+    ["the mark alone on a policy refusal", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [APP_STACK_REFUSED_BEFORE_CHANGE]), "STACK_IMAGE_NOT_ALLOWED"],
+    ["the mark alone on an engine failure", new ExecutorIpcClientError("x", "DOCKER_ENGINE_UNAVAILABLE", 502, false, [APP_STACK_REFUSED_BEFORE_CHANGE]), "DOCKER_ENGINE_UNAVAILABLE"],
   ])("appStackProblemOf: %s", (_name, err, problem) => {
     const result = appStackProblemOf(err);
     expect(result).toBe(problem);
     expect(result).not.toContain("hunter2");
+  });
+
+  it.each([
+    ["the mark alone", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [APP_STACK_REFUSED_BEFORE_CHANGE]), true],
+    [
+      "the mark after a reason",
+      new ExecutorIpcClientError("refused", "NOT_FOUND", 404, false, [{ message: "x", reason: "STACK_IMAGE_MISSING" }, APP_STACK_REFUSED_BEFORE_CHANGE]),
+      true,
+    ],
+    ["a copy of the mark, as it travels", new ExecutorIpcClientError("refused", "RESOURCE_LOCKED", 409, false, [{ field: "stage", message: "before_change" }]), true],
+    ["a refusal that says nothing about it", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "image", message: "x", reason: "STACK_IMAGE_NOT_ALLOWED" }]), false],
+    ["no detail at all", new ExecutorIpcClientError("refused", "DOCKER_ENGINE_UNAVAILABLE", 502, false, []), false],
+    ["another stage", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "stage", message: "after_change" }]), false],
+    ["the same words under another field", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "note", message: "before_change" }]), false],
+    ["the words in a reason or a message", new ExecutorIpcClientError("before_change", "HOST_POLICY_DENIED", 403, false, [{ field: "stage", message: "x", reason: "before_change" }]), false],
+    ["details that are not a list", Object.assign(new Error("x"), { details: APP_STACK_REFUSED_BEFORE_CHANGE }), false],
+    ["a plain error", new Error("before_change"), false],
+    ["not an error", null, false],
+    ["nothing", undefined, false],
+  ])("appStackCreateRefusedBeforeChange: %s", (_name, err, marked) => {
+    expect(appStackCreateRefusedBeforeChange(err)).toBe(marked);
   });
 });
 
