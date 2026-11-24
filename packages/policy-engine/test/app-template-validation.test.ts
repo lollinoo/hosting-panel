@@ -69,7 +69,7 @@ describe("validateAppTemplateSource on the notes-demo fixture", () => {
 
 describe("issue positions", () => {
   const cases: readonly [code: string, from: string, to: string, path: string, line: number, column: number][] = [
-    ["HEADER_VERSION_UNSUPPORTED", "schemaVersion: 1", "schemaVersion: 2", "x-hp-stack.schemaVersion", 2, 18],
+    ["HEADER_VERSION_UNSUPPORTED", "schemaVersion: 1", "schemaVersion: 3", "x-hp-stack.schemaVersion", 2, 18],
     ["PARAM_DEFAULT_INVALID", "default: 2", "default: 9", "x-hp-parameters[0].default", 12, 14],
     ["KEY_FORBIDDEN_SECURITY", "  app:\n", "  app:\n    privileged: true\n", "services.app.privileged", 21, 5],
     ["ARGV_SHELL_REFUSED", '["serve",', '["sh",', "services.app.command[0]", 22, 15],

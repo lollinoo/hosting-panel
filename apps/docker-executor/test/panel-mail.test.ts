@@ -13,6 +13,7 @@ afterEach(() => {
 async function listener(refuse?: string) {
   const messages: string[] = [];
   const server = net.createServer((sock) => {
+    sock.on("error", () => undefined);
     sock.write("220 relay ESMTP\r\n");
     let data: string[] | null = null;
     let pending = "";

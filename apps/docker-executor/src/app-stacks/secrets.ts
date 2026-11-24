@@ -3,7 +3,9 @@ import path from "node:path";
 import { APP_STACK_KEY_PATTERN, APP_STACK_SECRET_CONTENT_MAX_CHARS } from "@hosting-panel/contracts";
 import type { ServiceLogLine } from "@hosting-panel/executor-contracts";
 import { purgeServiceSecrets, writeServiceSecrets } from "../docker-engine-adapter.js";
-import { appStackSecretDirKey } from "./names.js";
+import { ExecutorCodedError } from "../traefik-config.js";
+import { decodeAppStackSecretEnvLabel } from "./container-payload.js";
+import { APP_STACK_LABELS, appStackSecretDirKey } from "./names.js";
 
 export const APP_STACK_LOG_MASK = "[REDACTED]";
 export const APP_STACK_LOG_MASK_MIN_LENGTH = 6;
@@ -56,6 +58,69 @@ export async function readAppStackComponentSecretValues(
   } catch {
     return [];
   }
+}
+
+/** The secrets inside one environment value, by its pieces (template text, null = a secret): null when the value does
+ *  not hold that text, "ambiguous" when the text could split it more than one way (two secrets side by side, or the
+ *  text between two secrets also inside one of them). */
+function splitAppStackSecretValue(value: string, pieces: readonly (string | null)[]): string[] | "ambiguous" | null {
+  const first = pieces[0];
+  const last = pieces.at(-1);
+  const prefix = typeof first === "string" ? first : "";
+  const suffix = typeof last === "string" ? last : "";
+  if (prefix.length + suffix.length > value.length || !value.startsWith(prefix) || !value.endsWith(suffix)) return null;
+  const inner = pieces.slice(prefix === "" ? 0 : 1, suffix === "" ? pieces.length : -1);
+  const separators = inner.filter((piece): piece is string => piece !== null);
+  if (inner.length !== 2 * separators.length + 1) return "ambiguous";
+  const begin = prefix.length;
+  const end = value.length - suffix.length;
+  // Each separator at its first place, then at its last: the split is the value's only one when both agree.
+  const earliest: number[] = [];
+  for (let i = 0, cursor = begin; i < separators.length; i++) {
+    const separator = separators[i] ?? "";
+    const at = value.indexOf(separator, cursor);
+    if (at === -1 || at + separator.length > end) return null;
+    earliest.push(at);
+    cursor = at + separator.length;
+  }
+  const latest: number[] = [];
+  for (let i = separators.length - 1, cursor = end; i >= 0; i--) {
+    const separator = separators[i] ?? "";
+    const at = value.lastIndexOf(separator, cursor - separator.length);
+    if (at < begin) return null;
+    latest.unshift(at);
+    cursor = at;
+  }
+  if (earliest.some((at, i) => at !== latest[i])) return "ambiguous";
+  const starts = [begin, ...earliest.map((at, i) => at + (separators[i] ?? "").length)];
+  const ends = [...earliest, end];
+  return starts.map((start, i) => value.slice(start, ends[i]));
+}
+
+/** The values the log reader masks: the component's secret files (`fileValues`) and the environment secrets its
+ *  container holds, which its label names and its own Config.Env gives, so they outlive the tmpfs (a reboot). Throws,
+ *  before any log is read, when they cannot be established: a label that is not the executor's, a name that is not
+ *  once in the environment, a value without the label's text, or a value only the files can split and no file. */
+export function appStackLogMaskValues(
+  componentKey: string,
+  container: { readonly labels: Readonly<Record<string, string>> | null | undefined; readonly env: readonly string[] | null | undefined },
+  fileValues: readonly string[],
+): string[] {
+  const unmaskable = () => new ExecutorCodedError(`The logs of component ${componentKey} cannot be masked`, "DOCKER_ENGINE_UNAVAILABLE");
+  const label = container.labels?.[APP_STACK_LABELS.secretEnvironment];
+  if (label === undefined) return [...fileValues];
+  const entries = decodeAppStackSecretEnvLabel(label);
+  const env = container.env;
+  if (entries === null || !Array.isArray(env)) throw unmaskable();
+  const values = [...fileValues];
+  for (const { name, pieces } of entries) {
+    const found = env.filter((entry) => typeof entry === "string" && entry.startsWith(`${name}=`));
+    if (found.length !== 1) throw unmaskable();
+    const parts = splitAppStackSecretValue((found[0] ?? "").slice(name.length + 1), pieces);
+    if (parts === null || (parts === "ambiguous" && fileValues.length === 0)) throw unmaskable();
+    if (parts !== "ambiguous") values.push(...parts);
+  }
+  return values;
 }
 
 /** Aho-Corasick automaton: an edge is next.get(charCode).get(node); node 0 is the root. */

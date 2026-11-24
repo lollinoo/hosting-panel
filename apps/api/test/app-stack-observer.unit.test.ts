@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { AppStackStatus, AppStackStatusIpcResult, ApprovedStackPlan } from "@hosting-panel/contracts";
+import type { AppStackStatus, AppStackStatusIpcResult, ApprovedStackPlan, ApprovedStackPlanV1 } from "@hosting-panel/contracts";
 import {
   and,
   appStackComponents,
@@ -45,7 +45,7 @@ const ALLOC = "alloc_obs";
 const IPV4 = "10.0.0.71";
 const PLAN = JSON.parse(
   readFileSync(new URL("../../../packages/contracts/test/fixtures/app-stack-notes-demo/plan.json", import.meta.url), "utf8"),
-) as ApprovedStackPlan;
+) as ApprovedStackPlanV1;
 
 interface Seeded {
   readonly id: string;

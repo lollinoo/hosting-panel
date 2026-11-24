@@ -50,8 +50,8 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]{20,}/,
   /xox[abprs]-[A-Za-z0-9-]{10,}/,
   /sk-[A-Za-z0-9]{20,}/,
-  // Credentials inside a URL: scheme://user:password@host
-  /:\/\/[^/\s:@]+:[^/\s@]+@/,
+  // Credentials inside a URL: scheme://user:password@host, the user may be empty (redis://:password@host)
+  /:\/\/[^/\s:@]*:[^/\s@]+@/,
 ];
 
 /** Checks the literal text of a value, before any `${NAME}` is filled in. */

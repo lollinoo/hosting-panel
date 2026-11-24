@@ -60,6 +60,8 @@ import {
   SiteSftpUserCreatedDtoSchema,
   SiteSftpUserDtoSchema,
   UpsertEncryptedSecretInputSchema,
+  APP_FEATURES_OFF,
+  appFeaturesFor,
   canTransitionOperation,
   createErrorEnvelope,
   createPlatformCapabilities,
@@ -669,12 +671,34 @@ describe("@hosting-panel/contracts — Core DTOs & Validation", () => {
       manualTlsCertificatesAvailable: true,
       localBackupTargetsAvailable: true,
       encryptedBackupExportAvailable: false,
-      applicationTemplatesAvailable: false,
-      applicationStacksAvailable: false,
+      applicationTemplatesAvailable: true,
+      applicationStacksAvailable: true,
       stackPublicPortsAvailable: false,
       gitBuildsAvailable: false,
     });
     expect(Object.isFrozen(p2Caps)).toBe(true);
+    // The template catalog and the stacks ship on linux-systemd only; public ports and Git builds on no backend
+    for (const runtimeBackend of RUNTIME_BACKENDS) {
+      const on = runtimeBackend === "linux-systemd";
+      const features = appFeaturesFor(runtimeBackend);
+      expect(features, runtimeBackend).toEqual({
+        ...APP_FEATURES_OFF,
+        applicationTemplatesAvailable: on,
+        applicationStacksAvailable: on,
+      });
+      expect(Object.isFrozen(features)).toBe(true);
+      expect(createPlatformCapabilities({ runtimeBackend })).toMatchObject(features);
+    }
+    // A set that is passed stands in place of the backend's own (the seam of the API's tests)
+    expect(
+      createPlatformCapabilities({ runtimeBackend: "linux-systemd", appFeatures: APP_FEATURES_OFF }),
+    ).toMatchObject(APP_FEATURES_OFF);
+    expect(
+      createPlatformCapabilities({
+        runtimeBackend: "local-simulator",
+        appFeatures: { ...APP_FEATURES_OFF, applicationStacksAvailable: true },
+      }),
+    ).toMatchObject({ applicationTemplatesAvailable: false, applicationStacksAvailable: true });
     expect(
       OrganizationCapabilitiesDtoSchema.parse({
         hostingMode: "dedicated",

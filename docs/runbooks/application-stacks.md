@@ -15,12 +15,13 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## Scope and limits (read first)
 
-- **The four capability flags are `false` on every server in this release** (`applicationTemplatesAvailable`,
-  `applicationStacksAvailable`, `stackPublicPortsAvailable`, `gitBuildsAvailable`). They are fixed in code
-  (`apps/api/src/app-stacks/app-feature-gate.ts`); no environment variable or option turns them on. While they are
-  `false`, every admin template route and every stack route answers `NOT_SUPPORTED` (reason
-  `STACK_UNSUPPORTED_FEATURE`): nobody can create, start, stop or delete a stack from the panel. The procedures below
-  apply once the owner turns the flags on.
+- **Two of the four capability flags are on.** `applicationTemplatesAvailable` and `applicationStacksAvailable` are
+  `true` on a server (runtime backend `linux-systemd`) and `false` on the other backends; `stackPublicPortsAvailable`
+  and `gitBuildsAvailable` are `false` everywhere (`ADR-0036` §2.10). They follow the runtime backend in code
+  (`packages/contracts/src/resources.ts`, `apps/api/src/app-stacks/app-feature-gate.ts`); no environment variable or
+  option changes them. Where a flag is `false`, the routes behind it answer `NOT_SUPPORTED` (reason
+  `STACK_UNSUPPORTED_FEATURE`). Release `0.9.0` has all four `false`: there nobody can create, start, stop or delete
+  a stack from the panel, and the procedures below do not apply.
 - **First release scope:** images only (no build, no Git), Dedicated allocations only, HTTP ingress only, Let's Encrypt
   (ACME) certificates only for stack domains, no public TCP/UDP port, no stack backup.
 - **Who acts on a stack:** a customer owner or a hosting administrator of the organisation (permissions `app.read`,
@@ -34,8 +35,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
   not see the retained volumes of deleted stacks; after a forced downgrade the stack containers keep running without
   management; the panel console (`hp-web`, tcp 3000) is reachable from every Docker bridge, stack networks included, and
   is protected by its session only; a new image digest needs a new template version; after a host reboot the components
-  that use secrets stay broken until someone restarts them (procedure 8); volumes have no size limit; a server reboot,
-  the metadata drop on a real cloud VM and an ACME issuance on a real hostname were not proven on the build machine.
+  that read a secret file stay broken until someone restarts them (procedure 8); volumes have no size limit; a server
+  reboot, the metadata drop on a real cloud VM and an ACME issuance on a real hostname were not proven on the build
+  machine.
 
 ## 1. See a stack's real state
 
@@ -139,7 +141,17 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
 5. The automatic rollback of a failed update stays ungated: migrations `0025` and `0026` are additive.
-6. **Routing options (`ADR-0037`).** The same command also exits with **code 8** when the target release does not
+6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
+   knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
+   with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
+   written in it. Stacks of the first format do not block, and neither does a template of the extended format that no
+   stack uses (the built-in WordPress template is such a row on every panel). See what blocks:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and (exists (select 1 from app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1'))"
+   ```
+   To go back without forcing, delete those stacks only (step 2); `--allow-feature-loss` works as in step 3, and the
+   older release then fails to read those stacks until the panel is upgraded again.
+7. **Routing options (`ADR-0037`).** The same command also exits with **code 8** when the target release does not
    list the feature `app-routing-options` and an address redirects, is protected by a password or has a path rule.
    Compression alone does not count. See what blocks:
    ```bash
@@ -188,7 +200,19 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 ## 7. Turn the feature off again
 
-1. In this release the flags are already `false`: nothing is offered, and nothing needs turning off.
+1. **There is no runtime switch.** On a server (runtime backend `linux-systemd`) this release turns
+   `applicationTemplatesAvailable` and `applicationStacksAvailable` on in code (`appFeaturesFor`,
+   `packages/contracts/src/resources.ts`); no environment variable, option or setting turns them off. What an operator
+   can do instead:
+   - **Stop new installations.** In **Modelli**, switch off **Offerto ai clienti** on each application template and
+     archive the ones that are not built-in (procedure 6, step 2). The catalog then offers nothing to install;
+     installed stacks keep running.
+   - **Go back to an earlier release**, where both flags are `false` on every backend:
+     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases before this one, from `0.9.0`,
+     list `app-stacks` but not `app-format-v2` in `RELEASE.json`, so the gate exits with **code 8** while a stack that
+     is not deleted uses the extended format (procedure 4, step 6); stacks of the first format do not block. An older
+     release does not list `app-stacks` and refuses while any stack that is not deleted exists (procedure 4, step 1).
+   - **Change the code:** a release whose `appFeaturesFor` gives `false` for `linux-systemd`.
 2. If a release with the flags on is followed by one with them off (or by a downgrade), do this first: disable or
    archive the templates so nobody installs one, and ask the customers to stop or delete their stacks. Once the flags
    are off, nobody can do it from the panel (every stack route answers `NOT_SUPPORTED`).
@@ -199,13 +223,20 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. A stack's secret files live under `/run/hosting-panel/secrets`, a tmpfs that is empty after every boot. Docker
    starts the stack containers again (`unless-stopped`) before the executor runs, so a component that reads a secret
-   file finds none and fails or runs without it. Nothing repairs this by itself. Components without secrets are not
-   affected.
-2. The stacks that have secrets:
+   file finds none and fails or runs without it. Nothing repairs this by itself. A secret given in the environment
+   (extended format, `ADR-0036` §2.5) is kept by Docker in the container, so a component whose secrets are all in its
+   environment keeps working. Components without secrets are not affected.
+2. The component logs stay masked. The executor takes the values of the environment secrets from the container
+   itself (its label `io.hostingpanel.app_secret_env` names them, its environment holds them) and adds the values of
+   the secret files it finds. One case needs the files: a value in which the template's text does not separate two
+   secrets in one way only (two secrets side by side, or that text also inside a secret). Until **Riavvia** writes the
+   files again, the executor refuses that component's logs, and the panel says they are not available right now; it
+   never shows them unmasked.
+3. The stacks that have secrets:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and exists (select 1 from app_stack_secrets x where x.stack_id = s.id)"
    ```
-3. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
+4. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
    writes the secret files again, then restarts every component. **Avvia** does not rewrite the files of a component
    that is already running.
 
@@ -213,20 +244,43 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. The real-Docker checks are `infra/linux/accept-app-stack-engine.mjs` (the stack engine),
    `infra/linux/accept-app-stack-http-cache.mjs` and `infra/linux/accept-app-stack-worker-storage.mjs` (the two built-in
-   templates). They import the built packages: build first (`corepack pnpm run build`), then run one at a time, never
-   next to a test run (memory):
+   templates of the first format) and `infra/linux/accept-app-stack-wordpress.mjs` (the built-in WordPress and MariaDB
+   template of the extended format: it installs a real WordPress with two throw-away passwords, about 40 seconds when
+   the images are local). They import the built packages: build first (`corepack pnpm run build`), then run one at a
+   time, never next to a test run (memory):
    ```bash
    node infra/linux/accept-app-stack-engine.mjs
    ```
+   The WordPress script has a second run, for a template that comes from **Importa da Compose**: it imports the
+   WordPress and MariaDB Compose file of the importer's tests and makes the same checks on the draft (three generated
+   values: the database account too). The file names the versions the built-in template pins and the import is given
+   the digests recorded with them, so nothing new is downloaded. With `HP_ACCEPT_REGISTRY_CASES=1` it also asks the
+   public registry for the two tags through the product, a read that needs the network; without it that step is
+   skipped:
+   ```bash
+   node infra/linux/accept-app-stack-wordpress.mjs --imported
+   ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
-   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the two template scripts: their
+   prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
    throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`),
    never prune, and clean up at the end, also on Ctrl-C.
+   One exception (#52): the executor of the server's own panel attaches its proxy to every network whose role label
+   is `app_edge`, whoever created it, each time it checks its proxy. The WordPress script hides its edge network from
+   it (in Docker that label has another value, which the script's gate translates in both directions). The engine
+   script and the HTTP cache script do not yet: when such a check falls inside their run, the server's proxy joins
+   the run's edge network, the removal steps fail with "A stack network is still used by another container" and
+   `nothing-left` reports a network. The server's proxy keeps serving and is not restarted. Repair: find the
+   network the run left (its name contains `swarmtest_<hex>`), detach the server's proxy from it, remove it:
+   ```bash
+   sudo docker network ls --filter name=swarmtest_
+   sudo docker network disconnect <network> hp_ingress_proxy
+   sudo docker network rm <network>
+   ```
 3. Each step prints one line: `PASS <step>`, `FAIL <step>: <reason>` or `SKIP <step>: <why>`. A step that needs root is
    skipped unless the script runs as root with `HP_ACCEPT_ROOT_CASES=1`. `INFO` lines are measurements and notes,
    never a failure. When an image the script does not pull is missing (the engine script's test image, `traefik:v3.7`
-   for the HTTP-cache script), it prints `SKIP … nothing was created` and exits 1. Without a build the HTTP-cache
+   for the template scripts), it prints `SKIP … nothing was created` and exits 1. Without a build a template
    script prints `FAIL preflight: run corepack pnpm run build first`.
 4. The last line is `RESULT <n>/<m> passed`, followed by `, <k> skipped (not counted in n/m)` when steps were skipped,
    and the time. The exit code is 0 only when every counted step passed.
@@ -310,4 +364,4 @@ administrator's console has no such action, and nobody writes proxy configuratio
    entry point is refused (`path_target_removed`): remove the path first. The dialog offers only those entry points
    (`pathTargets` of the application's detail) and marks a target the application no longer offers as «Non più
    disponibile».
-7. **Downgrade:** procedure 4, step 6. **The real-Docker check:** procedure 9, step 6.
+7. **Downgrade:** procedure 4, step 7. **The real-Docker check:** procedure 9, step 6.

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createElement, type ReactElement } from "react";
+import * as React from "react";
+import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { AdminSiteTemplateDetailDto, AdminSiteTemplateSummaryDto } from "@hosting-panel/contracts";
-import { format, type Messages } from "@/i18n";
+import { errorMessage, format, type Messages } from "@/i18n";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 import { I18nProvider } from "@/i18n/provider";
@@ -11,6 +12,7 @@ const fetchUpstream = vi.fn();
 const getServerSession = vi.fn();
 const getRequestLocale = vi.fn();
 const notFound = vi.fn();
+const keyedSend = vi.fn();
 
 vi.mock("@/lib/upstream", async () => ({
   ...(await vi.importActual<object>("@/lib/upstream")),
@@ -20,6 +22,7 @@ vi.mock("@/lib/server-session", () => ({
   getServerSession: (...args: unknown[]) => getServerSession(...args),
 }));
 vi.mock("@/i18n/server", () => ({ getRequestLocale: (...args: unknown[]) => getRequestLocale(...args) }));
+vi.mock("@/lib/keyed-send", () => ({ keyedSend: (...a: unknown[]) => keyedSend(...a) }));
 vi.mock("next/navigation", () => ({
   redirect: (url: string) => {
     throw new Error(`REDIRECT:${url}`);
@@ -37,6 +40,8 @@ import AdminTemplatePage from "@/app/admin/templates/[templateId]/page";
 import { SidebarNav } from "@/components/layout/sidebar-nav";
 import { groupByModule, templateStatusKeys } from "@/components/admin/site-template-list";
 import { SiteTemplateDetail, canArchive } from "@/components/admin/site-template-detail";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter } from "@/components/ui/dialog";
 
 const NOW = "2026-11-21T10:00:00.000Z";
 
@@ -186,6 +191,85 @@ describe("SiteTemplateDetail", () => {
 
   it("a template that is switched off has an unticked switch", () => {
     expect(mount(detail(DISABLED))).not.toMatch(/role="switch"[^>]*checked/);
+  });
+});
+
+// Calls a client component once with stand-in hooks so its handlers can run without a DOM.
+const internals = (React as unknown as Record<string, { H: unknown }>).__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE!;
+function callHooks<P>(C: (p: P) => ReactNode, props: P, m: Messages, init: Record<number, unknown> = {}) {
+  let s = 0;
+  const sets: Array<[number, unknown]> = [];
+  const ctx = { locale: m === en ? "en" : "it", messages: m };
+  const prev = internals.H;
+  internals.H = {
+    useState: (v: unknown) => {
+      const k = s++;
+      return [k in init ? init[k] : v, (x: unknown) => void sets.push([k, x])];
+    },
+    useRef: (v: unknown) => ({ current: v }),
+    useEffect: () => {},
+    useContext: () => ctx,
+  };
+  try {
+    return { tree: C(props), sets };
+  } finally {
+    internals.H = prev;
+  }
+}
+type El = ReactElement<Record<string, unknown>>;
+const els = (node: unknown): El[] => {
+  if (Array.isArray(node)) return node.flatMap(els);
+  if (!isValidElement(node)) return [];
+  return [node as El, ...els((node.props as Record<string, unknown>).children)];
+};
+const textOf = (node: unknown): string =>
+  typeof node === "string" || typeof node === "number"
+    ? String(node)
+    : Array.isArray(node)
+      ? node.map(textOf).join("")
+      : isValidElement(node)
+        ? textOf((node.props as Record<string, unknown>).children)
+        : "";
+
+describe("SiteTemplateDetail details dialog", () => {
+  // useState order in the component: 0 busy, 1 notice, 2 editing, 3 name, 4 description, 5 archiving.
+  const props = () => ({ template: detail(CUSTOM), csrfToken: "csrf" });
+  const button = (tree: unknown, text: string) => els(tree).find((e) => e.type === Button && textOf(e) === text)!;
+  const detailsDialog = (tree: unknown) =>
+    els(tree).find((e) => e.type === DialogContent && els(e.props.children).some((c) => c.props.id === "template-name"))!;
+  beforeEach(() => keyedSend.mockReset());
+
+  it.each([
+    ["template_archived, en", en, { ok: false, code: "RESOURCE_LOCKED", reason: "template_archived" }, en.admin.templates.detail.archivedNotice],
+    ["template_archived, it", itMsgs, { ok: false, code: "RESOURCE_LOCKED", reason: "template_archived" }, itMsgs.admin.templates.detail.archivedNotice],
+    ["network failure, en", en, { ok: false, code: "" }, errorMessage(en, "")],
+  ] as const)("a refused save (%s) shows its alert inside the dialog, before the footer, and keeps it open", async (_l, m, refusal, text) => {
+    keyedSend.mockResolvedValue(refusal);
+    const { tree, sets } = callHooks(SiteTemplateDetail, props(), m);
+    await (button(tree, m.admin.templates.detail.save).props.onClick as () => Promise<void>)();
+    await vi.waitFor(() => expect(sets).toContainEqual([1, { ok: false, text }]));
+    expect(sets).not.toContainEqual([2, false]);
+    const open = callHooks(SiteTemplateDetail, props(), m, { 1: { ok: false, text }, 2: true });
+    const inside = els(detailsDialog(open.tree).props.children);
+    const alert = inside.findIndex((e) => e.props.role === "alert" && textOf(e) === text);
+    expect(alert).toBeGreaterThanOrEqual(0);
+    expect(alert).toBeLessThan(inside.findIndex((e) => e.type === DialogFooter));
+  });
+
+  it("no alert in the dialog without a refusal; closing or reopening clears an old one", () => {
+    const t = en.admin.templates.detail;
+    const ok = callHooks(SiteTemplateDetail, props(), en, { 1: { ok: true, text: t.saved }, 2: true });
+    expect(els(detailsDialog(ok.tree).props.children).some((e) => e.props.role === "alert")).toBe(false);
+    const refused = { 1: { ok: false, text: "No" }, 2: true };
+    const reopen = callHooks(SiteTemplateDetail, props(), en, refused);
+    (button(reopen.tree, t.editDetails).props.onClick as () => void)();
+    expect(reopen.sets).toEqual(expect.arrayContaining([[1, null], [2, true]]));
+    const cancel = callHooks(SiteTemplateDetail, props(), en, refused);
+    (button(detailsDialog(cancel.tree), t.cancel).props.onClick as () => void)();
+    expect(cancel.sets).toEqual(expect.arrayContaining([[2, false], [1, null]]));
+    const outside = callHooks(SiteTemplateDetail, props(), en, refused);
+    (els(outside.tree).find((e) => e.type === Dialog && e.props.open === true)!.props.onOpenChange as (o: boolean) => void)(false);
+    expect(outside.sets).toEqual(expect.arrayContaining([[2, false], [1, null]]));
   });
 });
 

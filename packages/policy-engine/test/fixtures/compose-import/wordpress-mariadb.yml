@@ -1,0 +1,49 @@
+# name: WordPress
+# category: cms
+#
+# Written for the importer tests of this repository: WordPress with a MariaDB database.
+# The SERVICE_* names ask the platform for generated secrets and for a public address.
+
+services:
+  wordpress:
+    image: wordpress:6.8-apache
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    environment:
+      WORDPRESS_DB_HOST: mariadb
+      WORDPRESS_DB_USER: ${SERVICE_USER_WORDPRESS}
+      WORDPRESS_DB_PASSWORD: ${SERVICE_PASSWORD_WORDPRESS}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME:-wordpress}
+      WORDPRESS_TABLE_PREFIX: wp_
+      # No variable of the image takes the address: this line only asks for the route.
+      SITE_ADDRESS: ${SERVICE_FQDN_WORDPRESS_80}
+    volumes:
+      - wordpress-data:/var/www/html
+    depends_on:
+      - mariadb
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/wp-login.php"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: ${WORDPRESS_DB_NAME:-wordpress}
+      MARIADB_USER: ${SERVICE_USER_WORDPRESS}
+      MARIADB_PASSWORD: ${SERVICE_PASSWORD_WORDPRESS}
+      MARIADB_ROOT_PASSWORD: ${SERVICE_PASSWORD_ROOT}
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  wordpress-data:
+  mariadb-data:

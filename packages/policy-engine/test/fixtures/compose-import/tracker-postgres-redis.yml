@@ -1,0 +1,67 @@
+# Written for the importer tests of this repository: an invented application with a database and a cache,
+# using the longer forms of Compose (mount as a mapping, depends_on with conditions, deploy limits).
+
+name: tracker
+
+services:
+  web:
+    image: registry.example.invalid/acme/tracker:2.4.1
+    command: ["tracker", "serve", "--port", "8000", "--workers", "${TRACKER_WORKERS:-2}"]
+    environment:
+      - SERVICE_URL_TRACKER_8000
+      - TRACKER_DATABASE_URL=postgres://tracker:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/tracker
+      - TRACKER_REDIS_URL=redis://redis:6379/0
+      - TRACKER_SESSION_SECRET=${SERVICE_BASE64_64_SESSION}
+      - TRACKER_LOG_LEVEL=${LOG_LEVEL:-info}
+      - TRACKER_PRICE_FORMAT=$$%.2f
+    volumes:
+      - type: volume
+        source: uploads
+        target: /srv/tracker/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/healthz || exit 1"]
+      interval: 1m30s
+      timeout: 45s
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1G
+        reservations:
+          memory: 256M
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      POSTGRES_DB: tracker
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tracker"]
+      interval: 5s
+    mem_limit: 768m
+    cpus: 0.75
+
+  redis:
+    image: redis:7.4@sha256:5c1d7e2f9a3b4c6d8e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+      - redis-conf:/usr/local/etc/redis:ro
+    expose:
+      - 6379
+
+volumes:
+  uploads:
+  pgdata:
+    driver: local
+  redis-data:
+  redis-conf:

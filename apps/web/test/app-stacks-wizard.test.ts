@@ -39,7 +39,7 @@ const ORG = "org_a1";
 const PLANTED = "S3cr3t-planted";
 const t = en.apps.wizard;
 
-const PARAMS: AppTemplateParameter[] = [
+const PARAMS: CustomerAppTemplateDto["parameters"] = [
   { key: "title", label: "Board title", type: "string", default: "My notes", customer: true },
   { key: "port", label: "Listen port", type: "integer", min: 1024, max: 65535, default: 8080, customer: true },
   { key: "mode", label: "Mode", type: "enum", options: ["small", "large"], default: "small", customer: true },

@@ -12,6 +12,7 @@ import {
   eq,
   hostAllocations,
   hosts,
+  insertGeneratedAppStackSecrets,
   listAppStackSecretMetadata,
   organizations,
   platformInstallations,
@@ -206,5 +207,113 @@ describe("@hosting-panel/database - app stack secrets repository", () => {
     const stackId = await newStack();
     const results = await Promise.all([set(stackId, "db_password", "a"), set(stackId, "db_password", "b")]);
     expect(results.map((r) => r.version).sort()).toEqual([1, 2]);
+  });
+
+  describe("values the platform generates (ADR-0036)", () => {
+    const generate = (stackId: string, values: { parameterKey: string; value: string }[], organizationId = "org_a") =>
+      insertGeneratedAppStackSecrets(db(), { organizationId, stackId, masterKey: KEY, values });
+    const stored = async (stackId: string) =>
+      (await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, stackId)))
+        .map((r) => `${r.parameterKey}:${String(r.version)}`)
+        .sort();
+
+    it("stores version 1 of each value, readable like any other secret, and returns metadata only", async () => {
+      const stackId = await newStack();
+      const made = await generate(stackId, [
+        { parameterKey: "db_password", value: `${SENTINEL}-db` },
+        { parameterKey: "admin_user", value: `${SENTINEL}-user` },
+      ]);
+      expect(made.map(({ parameterKey, version }) => ({ parameterKey, version }))).toEqual([
+        { parameterKey: "db_password", version: 1 },
+        { parameterKey: "admin_user", version: 1 },
+      ]);
+      expect(Object.keys(made[0] ?? {}).sort()).toEqual(["parameterKey", "rotatedAt", "version"]);
+      expect(await read(stackId, [{ parameterKey: "db_password", version: 1 }, { parameterKey: "admin_user", version: 1 }])).toEqual([
+        { parameterKey: "db_password", version: 1, content: `${SENTINEL}-db` },
+        { parameterKey: "admin_user", version: 1, content: `${SENTINEL}-user` },
+      ]);
+      const rows = await db().select().from(appStackSecrets).where(eq(appStackSecrets.stackId, stackId));
+      expect(rows.every((r) => /^ssec_[0-9a-f]{24}$/.test(r.id) && r.organizationId === "org_a")).toBe(true);
+      expect(JSON.stringify([made, rows])).not.toContain(SENTINEL);
+      // The customer's next value of the same key is version 2.
+      expect(await set(stackId, "db_password", "chosen")).toMatchObject({ parameterKey: "db_password", version: 2 });
+    });
+
+    it("never replaces a version that exists: the stored value stays and only the new keys come back", async () => {
+      const stackId = await newStack();
+      await set(stackId, "db_password", "typed-by-the-customer");
+      const made = await generate(stackId, [
+        { parameterKey: "db_password", value: "generated-later" },
+        { parameterKey: "session_key", value: "generated-now" },
+      ]);
+      expect(made.map((m) => m.parameterKey)).toEqual(["session_key"]);
+      expect(await stored(stackId)).toEqual(["db_password:1", "session_key:1"]);
+      expect(await read(stackId, [{ parameterKey: "db_password", version: 1 }])).toEqual([
+        { parameterKey: "db_password", version: 1, content: "typed-by-the-customer" },
+      ]);
+      // The same call again stores nothing and says so.
+      expect(await generate(stackId, [{ parameterKey: "session_key", value: "another" }])).toEqual([]);
+      expect(await read(stackId, [{ parameterKey: "session_key", version: 1 }])).toEqual([
+        { parameterKey: "session_key", version: 1, content: "generated-now" },
+      ]);
+    });
+
+    it("refuses the whole list for one bad entry with VALIDATION_ERROR and stores nothing", async () => {
+      const stackId = await newStack();
+      const good = { parameterKey: "db_password", value: "good-value" };
+      for (const bad of [
+        { parameterKey: "db_password", value: "twice" },
+        { parameterKey: "Bad-Key", value: "x" },
+        { parameterKey: "empty", value: "" },
+        { parameterKey: "long", value: "x".repeat(16_385) },
+        { parameterKey: "wide", value: "é".repeat(16_384) },
+      ]) {
+        expect(await codeOf(generate(stackId, [good, bad])), bad.parameterKey).toBe("VALIDATION_ERROR");
+      }
+      expect(await stored(stackId)).toEqual([]);
+    });
+
+    it("refuses another organization's stack, a deleted stack and an unknown stack with NOT_FOUND", async () => {
+      const stackId = await newStack();
+      const deleted = await newStack("org_a", true);
+      const values = [{ parameterKey: "db_password", value: "x" }];
+      expect(await codeOf(generate(stackId, values, "org_b"))).toBe("NOT_FOUND");
+      expect(await codeOf(generate(deleted, values))).toBe("NOT_FOUND");
+      expect(await codeOf(generate("stk_missing", values))).toBe("NOT_FOUND");
+      expect(await stored(stackId)).toEqual([]);
+      expect(await stored(deleted)).toEqual([]);
+    });
+
+    it("an empty list is nothing to do, whatever the stack", async () => {
+      expect(await generate("stk_missing", [])).toEqual([]);
+    });
+
+    it("is not held by the hourly limit of the customer's own values, and its rows count in it afterwards", async () => {
+      const full = await newStack();
+      for (let i = 1; i <= 10; i += 1) await set(full, "api_key", `v${String(i)}`);
+      expect(await codeOf(set(full, "api_key", "eleventh"))).toBe("RATE_LIMITED");
+      expect((await generate(full, [{ parameterKey: "session_key", value: "made" }])).map((m) => m.parameterKey)).toEqual(["session_key"]);
+
+      const fresh = await newStack();
+      await generate(
+        fresh,
+        Array.from({ length: 8 }, (_, i) => ({ parameterKey: `generated_${String(i)}`, value: `value-${String(i)}` })),
+      );
+      expect(await set(fresh, "typed", "ninth")).toMatchObject({ version: 1 });
+      expect(await set(fresh, "typed", "tenth")).toMatchObject({ version: 2 });
+      expect(await codeOf(set(fresh, "typed", "eleventh"))).toBe("RATE_LIMITED");
+    });
+
+    it("rolls back with the transaction it is part of", async () => {
+      const stackId = await newStack();
+      const failure = new Error("the caller failed after storing");
+      await expect(
+        db().transaction(async (tx) => {
+          await insertGeneratedAppStackSecrets(tx, { organizationId: "org_a", stackId, masterKey: KEY, values: [{ parameterKey: "db_password", value: "x" }] });
+          throw failure;
+        }),
+      ).rejects.toBe(failure);
+      expect(await stored(stackId)).toEqual([]);
+    });
   });
 });

@@ -5090,7 +5090,7 @@ paths:
       operationId: adminCreateAppTemplate
       summary: Create an application template with its first version, as a draft (server administrator only; audited as admin.app_template.create)
       description: >-
-        The source is an `HCP-STACK/v1` document; its `x-hp-stack` header gives the name, the description and the
+        The source is an `HCP-STACK/v1` or `HCP-STACK/v2` document; its `x-hp-stack` header gives the name, the description and the
         category, which PATCH may change later. A source with problems is refused with `VALIDATION_ERROR`
         ("The template is not valid.") and up to 20 `details` (`field` is the path in the document or `source`,
         `reason` the problem's reason, `message` its line and column). The audit row never carries the source.
@@ -5162,6 +5162,55 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Application templates are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/admin/app-templates/import-compose:
+    post:
+      tags: [App Templates]
+      operationId: adminImportComposeAppTemplate
+      summary: Read a Docker Compose file into a draft application template without saving it (server administrator only)
+      description: >-
+        Always answers 200 for a well-formed request. `report` says what the importer did with each part of the file:
+        kept with a remark (`info`), `changed`, `dropped` or `refused`. With no refusal, `source` is a draft
+        `HCP-STACK/v2` document and `validation` is the verdict `POST /v1/admin/app-templates/validate` gives for it;
+        with one, both are `null`. The administrator reviews the draft and saves it with
+        `POST /v1/admin/app-templates`, which validates again. Every image is pinned by digest: for an image the file
+        names by tag, the server asks its registry for the digest (a read-only lookup, up to 8 images, which can
+        take some tens of seconds); an image the registry does not know is refused in the report by name. Passwords and
+        keys written in the file become secrets the platform generates at installation, and are never returned.
+        Nothing is stored and nothing is audited. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while
+        the capability flag `applicationTemplatesAvailable` is false, or when the file names an image without a digest
+        on a server that cannot run applications.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportComposeInput"
+      responses:
+        "200":
+          description: The draft, when there is one, and the report
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ComposeImportDto"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Application templates are not available (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+        "503":
+          description: >-
+            The images could not be looked up right now (`DOCKER_ENGINE_UNAVAILABLE`, retryable,
+            "The server could not look up the images of the file right now. Try again in a few minutes.")
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/admin/app-templates/{templateId}:
@@ -6120,7 +6169,11 @@ paths:
         Write-only: the value is stored encrypted as a new version and is never returned, logged or audited; the
         answer says only that a value is set, its version and when. Nothing is queued: the next deploy uses it. A key
         that is not a secret of the application is refused (`VALIDATION_ERROR`, `details[0].field: parameterKey`,
-        `details[0].reason: STACK_PARAMETER_INVALID`). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
+        `details[0].reason: STACK_PARAMETER_INVALID`); a secret the template declares `customer: false` is answered
+        exactly like an unknown key, so the answer does not reveal that it exists. A secret the application reads from
+        a component's environment (`HCP-STACK/v2`) holds at most 4096 bytes of UTF-8; a longer value is refused
+        (`VALIDATION_ERROR`, `details[0].field: value`, `details[0].reason: value_too_long`) and nothing is stored. A
+        secret delivered as a file keeps the body's limit. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
         while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -9547,15 +9600,19 @@ components:
         applicationTemplatesAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (the server administrator can write, import and publish application templates); false otherwise
         applicationStacksAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a customer can install an application from a published template); false otherwise
         stackPublicPortsAvailable:
           type: boolean
           default: false
+          description: True once an application can publish a TCP or UDP port; false until that capability ships
         gitBuildsAvailable:
           type: boolean
           default: false
+          description: True once an application can be built from a Git repository; false until that capability ships
 
     OrganizationCapabilitiesDto:
       type: object
@@ -9616,15 +9673,19 @@ components:
         applicationTemplatesAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (the server administrator can write, import and publish application templates); false otherwise
         applicationStacksAvailable:
           type: boolean
           default: false
+          description: True when `runtimeBackend` is `linux-systemd` (a customer can install an application from a published template); false otherwise
         stackPublicPortsAvailable:
           type: boolean
           default: false
+          description: True once an application can publish a TCP or UDP port; false until that capability ships
         gitBuildsAvailable:
           type: boolean
           default: false
+          description: True once an application can be built from a Git repository; false until that capability ships
 
     DevPersonaDto:
       type: object
@@ -12747,8 +12808,8 @@ components:
           maxLength: 300
           description: Fixed English text; never echoes a value
 
-    AppTemplateParameter:
-      description: A typed parameter of a template, by `type`. A `secret` parameter has no default and is set by the customer, write-only.
+    AppTemplateValueParameter:
+      description: A typed parameter with a default, by `type`
       oneOf:
         - type: object
           required: [key, label, type, options, default, customer]
@@ -12797,6 +12858,14 @@ components:
             type: { type: string, enum: [size] }
             default: { type: string, pattern: "^[1-9][0-9]{0,4}[KMG]$" }
             customer: { type: boolean }
+
+    AppTemplateParameter:
+      description: >-
+        A parameter the customer may set, by `type`. A `secret` parameter has no default and is set by the customer,
+        write-only. A secret the platform generates (`HCP-STACK/v2`) is never listed here, whether or not the customer
+        may replace it.
+      oneOf:
+        - $ref: "#/components/schemas/AppTemplateValueParameter"
         - type: object
           required: [key, label, type, required, customer]
           properties:
@@ -12805,6 +12874,39 @@ components:
             type: { type: string, enum: [secret] }
             required: { type: boolean }
             customer: { type: boolean, enum: [true] }
+
+    AppSecretGenerate:
+      type: object
+      additionalProperties: false
+      required: [kind, length]
+      description: >-
+        How the platform makes a secret nobody types (`HCP-STACK/v2`). `length` counts characters, except for `base64`
+        where it counts the random bytes before encoding; the bounds are 16 to 128 for `password` and `hex`, 16 to 96
+        for `base64` and 8 to 32 for `user`. The value is made at installation and never returned.
+      properties:
+        kind: { type: string, enum: [password, hex, base64, user] }
+        length: { type: integer, minimum: 8, maximum: 128 }
+
+    AdminAppTemplateParameter:
+      description: >-
+        A parameter as the template declares it, by `type` (server administrator only). A `secret` parameter of an
+        `HCP-STACK/v1` template has no `generate` and is set by the customer. In `HCP-STACK/v2` it always has
+        `generate`: `null` when the customer sets it (`customer` is then `true`), otherwise how the platform makes it at
+        installation; a generated secret is always `required`, and `customer` says whether the customer may replace it.
+      oneOf:
+        - $ref: "#/components/schemas/AppTemplateValueParameter"
+        - type: object
+          required: [key, label, type, required, customer]
+          properties:
+            key: { $ref: "#/components/schemas/AppTemplateParameterKey" }
+            label: { type: string, minLength: 1, maxLength: 80 }
+            type: { type: string, enum: [secret] }
+            required: { type: boolean }
+            customer: { type: boolean }
+            generate:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/AppSecretGenerate"
 
     AppStackHealthcheck:
       description: A closed tcp or http check on the component's own address; `timeoutSeconds` never exceeds `intervalSeconds`
@@ -12877,6 +12979,43 @@ components:
             properties:
               envName: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
               parameterKey: { $ref: "#/components/schemas/AppTemplateParameterKey" }
+        profile:
+          type: string
+          enum: [strict, standard]
+          description: >-
+            The closed container body the component runs with; present only for an `HCP-STACK/v2` template (a v1
+            component always runs as `strict`). What a name allows is fixed by the platform: no template names a
+            capability, a user or a mount option.
+        secretEnvironment:
+          type: array
+          maxItems: 64
+          description: >-
+            The variables whose value holds a secret, present only for an `HCP-STACK/v2` template; sorted by unique
+            name. Each value is told as its pieces, in order: the template's own text, or the key of the secret
+            parameter that fills that place. Never a secret value.
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, pieces]
+            properties:
+              name: { type: string, pattern: "^[A-Z_][A-Z0-9_]{0,63}$" }
+              pieces:
+                type: array
+                minItems: 1
+                maxItems: 9
+                description: At most 4 of the pieces name a secret parameter, and two pieces of text never follow each other
+                items:
+                  oneOf:
+                    - type: object
+                      additionalProperties: false
+                      required: [literal]
+                      properties:
+                        literal: { type: string, minLength: 1, maxLength: 4096 }
+                    - type: object
+                      additionalProperties: false
+                      required: [parameterKey]
+                      properties:
+                        parameterKey: { $ref: "#/components/schemas/AppTemplateParameterKey" }
         resources:
           type: object
           required: [cpuMilli, memoryBytes]
@@ -12939,7 +13078,26 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes
+
+    ImportComposeInput:
+      type: object
+      additionalProperties: false
+      required: [compose]
+      properties:
+        compose:
+          type: string
+          minLength: 1
+          description: The Docker Compose file, at most 65536 UTF-8 bytes. Neither it nor the draft is stored or logged.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: The name of the draft; without it, the `# name:` comment at the head of the file, or a default
+        category:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,31}$"
+          description: The category of the draft; without it, the `# category:` comment at the head of the file, or `apps`
 
     CreateAppTemplateInput:
       type: object
@@ -12952,7 +13110,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes; its header gives the name, description and category
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes; its header gives the name, description and category
 
     AddAppTemplateVersionInput:
       type: object
@@ -12962,7 +13120,7 @@ components:
         source:
           type: string
           minLength: 1
-          description: The `HCP-STACK/v1` document, at most 65536 UTF-8 bytes
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, at most 65536 UTF-8 bytes
         makeDefault:
           type: boolean
           default: false
@@ -13011,12 +13169,55 @@ components:
           type: array
           description: Every parameter the source declares; empty when not valid
           items:
-            $ref: "#/components/schemas/AppTemplateParameter"
+            $ref: "#/components/schemas/AdminAppTemplateParameter"
         preview:
           nullable: true
           description: "`null` when the source is not valid"
           allOf:
             - $ref: "#/components/schemas/AppStackPreview"
+
+    ComposeImportNote:
+      type: object
+      required: [level, code, path, message]
+      description: What the importer did with one part of the Compose file
+      properties:
+        level:
+          type: string
+          enum: [info, changed, dropped, refused]
+          description: "`info` kept with a remark, `changed` kept in another form, `dropped` left out, `refused` no draft is made"
+        code:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{0,63}$"
+          description: A fixed code of the importer, such as `IMAGE_PINNED`, `PORTS_DROPPED` or `IMAGE_UNRESOLVED`
+        path:
+          type: string
+          maxLength: 512
+          description: Where in the file; empty for the whole file
+        message:
+          type: string
+          minLength: 1
+          maxLength: 600
+          description: Fixed English text; names keys, variables and images of the file, never a secret value
+
+    ComposeImportDto:
+      type: object
+      required: [source, report, validation]
+      properties:
+        source:
+          type: string
+          nullable: true
+          description: The draft `HCP-STACK/v2` document; `null` when the report holds a refusal
+        report:
+          type: array
+          maxItems: 200
+          description: When the importer has more than 200 things to say, refusals are kept first and the last note says how many are not shown
+          items:
+            $ref: "#/components/schemas/ComposeImportNote"
+        validation:
+          nullable: true
+          description: The validator's verdict on the draft; `null` without a draft
+          allOf:
+            - $ref: "#/components/schemas/AppTemplateValidationDto"
 
     AdminAppTemplateSummaryDto:
       type: object
@@ -13135,7 +13336,7 @@ components:
           format: date-time
         source:
           type: string
-          description: The `HCP-STACK/v1` document, as saved
+          description: The `HCP-STACK/v1` or `HCP-STACK/v2` document, as saved
         valid:
           type: boolean
           description: Whether the stored source passes today's checks
@@ -13146,7 +13347,7 @@ components:
         parameters:
           type: array
           items:
-            $ref: "#/components/schemas/AppTemplateParameter"
+            $ref: "#/components/schemas/AdminAppTemplateParameter"
         preview:
           nullable: true
           allOf:

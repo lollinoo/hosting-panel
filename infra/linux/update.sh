@@ -15,8 +15,9 @@ Usage: sudo hp-update [--version <v> | --archive <path>] [--allow-downgrade] [--
   --archive          Local hosting-panel-<v>-linux-x64.tar.gz (its .sha256 must sit next to it).
   --allow-downgrade  Allow installing a version older than the current one.
   --allow-feature-loss  With --allow-downgrade: install a release that lacks a feature still in use
-                     (manual-tls, backup-targets, site-templates, app-stacks, app-routing-options); that data stays unreachable
-                     until you upgrade again, and a password-protected application address answers without its password.
+                     (manual-tls, backup-targets, site-templates, app-stacks, app-format-v2, app-routing-options); that
+                     data stays unreachable until you upgrade again, and a password-protected application address
+                     answers without its password.
   --allow-other-linux  Pass through to bootstrap-dedicated.sh (lab hosts installed with it).
   --dry-run          Print the plan; changes nothing, needs neither root nor network.
 
@@ -155,7 +156,7 @@ main() {
     step 2 "Verify checksum"
     plan "would verify the archive against its .sha256 (exit 4 on mismatch) and that its VERSION is ${version} (exit 2)"
     step 3 "Version check"
-    plan "current: ${prev:-<none>}; same version exits 0, older needs --allow-downgrade and, when it lacks a feature in use (manual-tls, backup-targets, site-templates, app-stacks, app-routing-options), --allow-feature-loss (exit 8)"
+    plan "current: ${prev:-<none>}; same version exits 0, older needs --allow-downgrade and, when it lacks a feature in use (manual-tls, backup-targets, site-templates, app-stacks, app-format-v2, app-routing-options), --allow-feature-loss (exit 8)"
     step 4 "Install the release"
     plan "would extract into ${root}/releases/${version}"
     step 5 "Bootstrap (units, wrappers, tmpfiles) and daemon-reload"
@@ -234,7 +235,7 @@ main() {
       ((allow_feature_loss)) || die 8 "Cannot tell whether this panel uses a feature that ${version} lacks (the database check failed); refusing the downgrade. Pass --allow-feature-loss to install it anyway."
       printf '[WARN] could not check the features in use; continuing because of --allow-feature-loss\n' >&2
     elif [[ -n "${blockers}" ]]; then
-      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt, archive the non-legacy backup targets and delete or re-create on built-in WordPress version 1 the sites on a custom template or a newer built-in version (a site cannot be moved back), delete the application stacks (their data volumes are kept), clear the redirect, the password and the paths of the application addresses (${version} would serve a password-protected address to everyone), or keep ${prev}; --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
+      ((allow_feature_loss)) || die 8 "${version} does not know ${blockers}, which this panel uses. Switch manual-certificate domains back to Let's Encrypt, archive the non-legacy backup targets and delete or re-create on built-in WordPress version 1 the sites on a custom template or a newer built-in version (a site cannot be moved back), delete the application stacks (their data volumes are kept; when only the extended application format is missing, the stacks installed from a template of that format are enough), clear the redirect, the password and the paths of the application addresses (${version} would serve a password-protected address to everyone), or keep ${prev}; --allow-feature-loss installs ${version} anyway (that data stays unreachable until you upgrade again)."
       printf '[WARN] --allow-feature-loss: %s stays unreachable until you upgrade again\n' "${blockers}" >&2
     fi
   fi

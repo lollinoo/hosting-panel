@@ -78,6 +78,8 @@ async function fakeSmtp(endOfDataReply: string): Promise<FakeSmtp> {
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
+    // The shim may reset right after QUIT; the tests assert on what was received, so a reset is not a failure.
+    socket.on("error", () => undefined);
     let buffer = "";
     let inData = false;
     socket.write("220 fake\r\n");
