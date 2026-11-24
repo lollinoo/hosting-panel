@@ -4,23 +4,28 @@ import {
   APP_IMAGE_ALLOWLIST,
   AppStackLinksDtoSchema,
   appStackLinkAlias,
+  isTerminalOperationStatus,
 } from "@hosting-panel/contracts";
 import {
   and,
   appStackLinks,
   appStacks,
   auditEvents,
+  backupTargets,
   builtInAppTemplateItems,
   ensureBuiltInAppTemplates,
   eq,
+  getPolicy,
   inArray,
   operations,
   resourceQuotas,
   rolePermissions,
   roles,
+  setPolicyTargets,
 } from "@hosting-panel/database";
 import { appStackInternalNetworkName, type InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { AppStackLinksApplier } from "../src/app-stacks/app-stack-links-applier.js";
 import { AppStackObserverService } from "../src/app-stacks/app-stack-observer.service.js";
 import { OutboxWorkerService } from "../src/runtime/outbox-worker.service.js";
 import { DOCKER_EXECUTOR_TOKEN } from "../src/tokens.js";
@@ -578,4 +583,131 @@ describe("private links between a database and an application (ADR-0039)", () =>
     const taken = await upgrade();
     expect(taken.status, taken.raw).toBe(202);
   }, 60_000);
+});
+
+// ADR-0038 meets ADR-0039: a database is an application with a data volume, so a backup stops it, copies it and starts
+// it again. Its links are attachments of its container and outlive the stop; the start after the backup applies them
+// before the database runs again, and a link call made while it is stopped never starts it.
+describe("a linked database is backed up", () => {
+  const LOCAL = `bkt_${"9".repeat(32)}`;
+  let h: AppStackHarness;
+
+  beforeAll(async () => {
+    // The backend where backups exist, with one local destination for the sites' policy, which applications use.
+    h = await startAppStackHarness({ runtimeBackend: "linux-systemd", allowlist: [...APP_TEST_ALLOWLIST, ...APP_IMAGE_ALLOWLIST] });
+    await ensureBuiltInAppTemplates(h.dbClient.db, builtInAppTemplateItems());
+    for (const template of [WEB, VALKEY]) {
+      const enabled = await h.call(h.adminToken, "PATCH", `/v1/admin/app-templates/${template.templateId}`, { enabled: true });
+      expect(enabled.status, enabled.raw).toBe(200);
+    }
+    await h.dbClient.db
+      .update(resourceQuotas)
+      .set({ maxServices: 1000, maxCpuMilli: 1_000_000, maxMemoryBytes: String(2 ** 50) })
+      .where(eq(resourceQuotas.organizationId, h.a.orgId));
+    await h.dbClient.db.insert(backupTargets).values({ id: LOCAL, kind: "local", name: "Local" });
+    await setPolicyTargets(h.dbClient.db, (await getPolicy(h.dbClient.db, "default_site")).id, [LOCAL]);
+    // The DNS pass is not under test here.
+    vi.spyOn(h.app.nestApp.get(AppStackObserverService), "reconcileStack").mockResolvedValue(undefined);
+  }, 120_000);
+
+  afterAll(async () => {
+    vi.restoreAllMocks();
+    await h?.close();
+  }, 60_000);
+
+  it("is stopped, copied and started again, and its links are active again; a link call while it is stopped starts nothing", async () => {
+    const sim = h.sim;
+    const worker = h.app.nestApp.get(OutboxWorkerService);
+    const applier = h.app.nestApp.get(AppStackLinksApplier);
+    const path = (stackId = "", tail = "") => `/v1/organizations/${h.a.orgId}/app-stacks${stackId ? `/${stackId}` : ""}${tail}`;
+    const idem = () => ({ "Idempotency-Key": randomUUID() });
+    const opsOf = (stackId: string) => h.dbClient.db.select().from(operations).where(eq(operations.resourceId, stackId));
+    const links = async (stackId: string) => ((await h.call(h.a.token, "GET", path(stackId, "/links"))).body.data.links as Json[]).map((l) => l.state);
+    const states = (stackId: string) => Object.values(sim.appStacks.getAppStackSnapshot(stackId)?.containers ?? {}).map((c) => c.state);
+    const calls = (stackId: string, from: number) =>
+      sim.appStacks.appStackCalls.slice(from).filter((c) => c.stackId === stackId).map((c) => c.method);
+    /** Runs the worker until nothing of this application is open: a backup queues the start that follows it. */
+    async function settle(stackId: string): Promise<string> {
+      for (let round = 0; round < 12; round += 1) {
+        await worker.processPendingOnce();
+        if ((await opsOf(stackId)).every((op) => isTerminalOperationStatus(op.status))) break;
+      }
+      expect((await opsOf(stackId)).filter((op) => !isTerminalOperationStatus(op.status))).toEqual([]);
+      return (await h.dbClient.db.select().from(appStacks).where(eq(appStacks.id, stackId)))[0]!.status;
+    }
+    async function installed(versionId: string): Promise<string> {
+      const name = `bak-${randomUUID().slice(0, 8)}`;
+      const res = await h.call(h.a.token, "POST", path(), { templateVersionId: versionId, name, deploy: true }, idem());
+      expect(res.status, res.raw).toBe(202);
+      const stackId = res.body.data.stackId as string;
+      expect(await settle(stackId)).toBe("running");
+      return stackId;
+    }
+
+    const database = await installed(VALKEY.versionId);
+    const app = await installed(WEB.versionId);
+    const later = await installed(WEB.versionId);
+    const made = await h.call(h.a.token, "POST", path(app, "/links"), { databaseStackId: database });
+    expect(made.status, made.raw).toBe(201);
+    expect(await links(app)).toEqual(["active"]);
+    const from = sim.appStacks.appStackCalls.length;
+    const changesFrom = sim.appStacks.appStackMutations.length;
+
+    // Stopped for the copy, before its job starts: a second application is connected (the answer does not come, so
+    // its link waits) and the observer's pass applies it. Both attach the stopped container and start nothing, and
+    // the job's own check then finds the database at rest.
+    const during: { status?: string; connected?: string[]; retried?: string[]; states?: string[] } = {};
+    let callsDuring = 0;
+    const real = sim.backups;
+    sim.backups = (async (req: Parameters<typeof real>[0]) => {
+      if (req.action === "stackStart" && req.stackId === database) {
+        during.status = (await h.dbClient.db.select().from(appStacks).where(eq(appStacks.id, database)))[0]!.status;
+        sim.appStacks.failNextAppStackStep("links", "engine_unavailable");
+        const connected = await h.call(h.a.token, "POST", path(later, "/links"), { databaseStackId: database });
+        expect(connected.status, connected.raw).toBe(201);
+        during.connected = await links(later);
+        await applier.retry();
+        during.retried = await links(later);
+        during.states = states(database);
+        callsDuring = calls(database, from).length;
+      }
+      return real.call(sim, req);
+    }) as typeof real;
+    try {
+      const res = await h.call(h.a.token, "POST", path(database, "/backups"), {}, idem());
+      expect(res.status, res.raw).toBe(202);
+      expect(await settle(database)).toBe("running");
+    } finally {
+      sim.backups = real;
+    }
+
+    expect(during).toEqual({ status: "stopped", connected: ["pending"], retried: ["active"], states: ["exited"] });
+    const listed = await h.call(h.a.token, "GET", path(database, "/backups"));
+    expect((listed.body.data.backups as Json[]).map((b) => b.status)).toEqual(["succeeded"]);
+    expect(sim.backupState.appStackJobs().filter((job) => job.stackId === database)).toHaveLength(1);
+    // The backup and the start it queued, each once and both done.
+    expect((await opsOf(database)).map((o) => `${o.kind}:${o.status}`).sort()).toEqual([
+      "stack.backup:succeeded",
+      "stack.deploy:succeeded",
+      "stack.start:succeeded",
+    ]);
+    // The backup stopped the database before the link calls; the start that follows it asks for the database's links
+    // again before its container runs.
+    expect(calls(database, from).slice(0, callsDuring)).toEqual(["unpublishAppStackRoutes", "stopAppStack", "syncAppStackLinks", "syncAppStackLinks"]);
+    const resumed = calls(database, from).slice(callsDuring);
+    expect(resumed).toContain("syncAppStackLinks");
+    expect(resumed.indexOf("syncAppStackLinks")).toBeLessThan(resumed.indexOf("startAppStackComponent"));
+    expect(states(database)).toEqual(["running"]);
+    expect(await links(app)).toEqual(["active"]);
+    expect(await links(later)).toEqual(["active"]);
+    expect(await links(database)).toEqual(["active", "active"]);
+    expect(sim.appStacks.getAppStackLinkedApplications(database)).toEqual([app, later].sort());
+    // Neither application lost the database on the way: nothing was detached from its private network.
+    const changes = sim.appStacks.appStackMutations.slice(changesFrom);
+    for (const stackId of [app, later]) {
+      expect(changes.filter((m) => m.name === appStackInternalNetworkName(stackId)).map((m) => m.kind)).not.toContain("network_disconnect");
+    }
+    // The applications themselves were not touched by the backup of their database.
+    expect(calls(app, from).filter((m) => m !== "getAppStackStatus")).toEqual([]);
+  }, 90_000);
 });
