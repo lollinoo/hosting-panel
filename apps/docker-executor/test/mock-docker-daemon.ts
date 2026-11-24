@@ -90,6 +90,8 @@ export interface MockExecPlan {
   readonly forgotten?: boolean;
   /** The stream stays open and the exec stays running until `endExec`. */
   readonly stayOpen?: boolean;
+  /** The exec create answers 500: no exec exists. */
+  readonly failCreate?: boolean;
   /** The exec start answers 500 instead of the stream. */
   readonly failStart?: boolean;
   /** The stream is cut without an end once the frames are written. */
@@ -269,6 +271,11 @@ export async function startMockDockerDaemon(options?: {
         const createdExecId = `exec_${String(execCalls.length)}`;
         const created = JSON.parse(bodyStr) as { Cmd: string[]; Env?: string[] };
         const plan = options?.execScript?.({ execId: createdExecId, container, Cmd: created.Cmd, Env: created.Env ?? [] });
+        if (plan?.failCreate === true) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "exec create failed" }));
+          return;
+        }
         if (plan !== undefined) {
           const exitCode = plan.exitCode === undefined ? (options?.execExitCode ?? 0) : plan.exitCode;
           execPlans.set(createdExecId, { plan, ended: false, exitCode, socket: null });

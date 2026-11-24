@@ -1037,6 +1037,24 @@ describe("runAppStackTask on the Docker Engine", () => {
       expect(attemptsOf(mockDaemon, 1)).toBe(6);
       expect(warn).toHaveBeenCalledTimes(1);
     });
+
+    it("answers failed at once, with no clean-up and no hold, when the engine refuses to create the exec of the command", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: () => ({ failCreate: true }),
+        // Were a clean-up tried, it would fail: the answer must not wait for it, nor turn into unknown.
+        kill: kills(RUN(1), ["fail"], []),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "failed", problem: null, exitCode: null, output: "", outputTruncated: false });
+      expect(result.startedAt).not.toBeNull();
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      // Only the clean-up before the command ran: nothing of this run exists to be stopped.
+      expect(killRuns(mockDaemon)).toEqual([""]);
+      expect(warn).not.toHaveBeenCalled();
+      // The application is free at once.
+      await adapter.stopAppStack(REF);
+    });
   });
 });
 

@@ -10,7 +10,7 @@ import {
   type AppStackTaskRunIpcResult,
 } from "@hosting-panel/contracts";
 import type { StackTaskExecutorPort } from "@hosting-panel/executor-contracts";
-import { inspectExecState, runDockerExec, startDockerExec, type DockerExecTarget } from "../docker-exec.js";
+import { DockerExecCreateRefusedError, inspectExecState, runDockerExec, startDockerExec, type DockerExecTarget } from "../docker-exec.js";
 import { ExecutorCodedError } from "../traefik-config.js";
 import { ownComponentKey } from "./engine.js";
 import { AppStackExecutorError } from "./errors.js";
@@ -378,7 +378,10 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     } catch (err) {
       // The engine refused to create the exec: the container is gone or stopped, nothing started.
       if (codeOf(err) === "NOT_FOUND") return notRunning();
-      // Otherwise the command may be running (a failed create cannot be told from a failed start): it ended as failed
+      // The engine answered the create with a refusal: no exec exists, nothing of this run is there to stop, and the
+      // clean-up before the command has just emptied the component of any earlier mark. No try, no hold.
+      if (err instanceof DockerExecCreateRefusedError) return this.finished(req, container.inspected, "failed", null, startedAt, tail);
+      // Otherwise the command may be running (a create or a start whose answer could not be read): it ended as failed
       // only where the kill is confirmed, else nobody knows.
       const stopped = await this.cleanUp(containerId, req.runId);
       return this.finished(req, container.inspected, stopped ? "failed" : "unknown", null, startedAt, tail);
