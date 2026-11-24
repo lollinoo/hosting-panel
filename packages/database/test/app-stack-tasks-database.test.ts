@@ -970,6 +970,41 @@ describe("@hosting-panel/database — tasks of applications", () => {
     });
   });
 
+  describe("a time whose run is still running", () => {
+    const STACK = "stk_tk_ranbusy";
+    const REAL = at("2033-01-10T10:20:00.000Z");
+    const SLOT = at("2033-01-12T09:00:00.000Z");
+    const NEXT = at("2033-01-12T10:00:00.000Z");
+    const CHANGED_AHEAD = at("2033-01-12T08:30:00.000Z");
+
+    it("is served and not written as refused as busy: the application is held by that very run", async () => {
+      await stack(STACK);
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey: "cleanup",
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: CHANGED_AHEAD,
+      });
+      // The clock ran ahead: the time was queued, and its run goes on while the clock is set right and real time reaches the time.
+      const first = await scheduled(STACK, "cleanup", SLOT, CHANGED_AHEAD, new Date(SLOT.getTime() + 60_000));
+      if (first.outcome !== "queued") throw new Error(first.outcome);
+      expect(await startAppStackTaskRun(db(), { runId: first.run.id, startedAt: new Date(SLOT.getTime() + 61_000) })).toBe(true);
+      await repairAppStackTaskSchedulesAheadOfClock(db(), REAL);
+      const changedAt = (await scheduleOf(STACK, "cleanup"))!.changedAt;
+      expect(changedAt).toEqual(REAL);
+
+      expect(await scheduled(STACK, "cleanup", SLOT, changedAt)).toEqual({ outcome: "stale" });
+      expect(await scheduleOf(STACK, "cleanup")).toMatchObject({ servedSlotAt: SLOT, skippedSlotAt: null, skipReason: null });
+      expect(await runsOf(STACK)).toHaveLength(1);
+      expect(await db().select().from(operations).where(eq(operations.resourceId, STACK))).toHaveLength(1);
+      // The next time has no run: while that run goes on the application is busy, as before.
+      expect(await scheduled(STACK, "cleanup", NEXT, changedAt)).toMatchObject({ outcome: "refused", reason: "busy" });
+      await settle(STACK);
+    });
+  });
+
   describe("a time that already has a run", () => {
     const STACK = "stk_tk_ran";
     const scope = { organizationId: orgA, stackId: STACK, taskKey: "cleanup" };

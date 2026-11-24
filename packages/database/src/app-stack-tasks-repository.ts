@@ -114,7 +114,8 @@ export type EnqueueAppStackTaskRunResult =
 /**
  * One transaction: replay, the application's row and lock, the operation, the run row and (for a schedule) the served
  * time. Keeps the last runs of the task and drops the older ones. A time of a schedule that already has a run (it ran
- * while the clock was ahead, and its served time was reset since) is served again without a second run: `stale`.
+ * while the clock was ahead, and its served time was reset since) is served again without a second run: `stale`. That is
+ * read before the application is checked for being busy, and the unique index of the time is the backstop of a race.
  */
 export async function enqueueAppStackTaskRunTransactional(
   db: HostingPanelDatabase,
@@ -125,13 +126,18 @@ export async function enqueueAppStackTaskRunTransactional(
   } catch (err) {
     const request = input.request;
     if (request.trigger !== "schedule" || !isUniqueViolationOf(err, "uq_app_stack_task_runs_slot")) throw err;
-    // The transaction is rolled back: the operation it queued is gone too. Written as the queued run would have.
-    await db
-      .update(appStackTaskSchedules)
-      .set({ servedSlotAt: request.slot, skippedSlotAt: null, skipReason: null })
-      .where(ofSlot({ stackId: input.stackId, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot }));
+    // Another writer made the run between the check and the insert. The transaction is rolled back: the operation it queued is gone too.
+    await serveAppStackTaskSlot(db, { stackId: input.stackId, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot });
     return { outcome: "stale" };
   }
+}
+
+/** A time of a schedule written as a queued run would have left it: served, and the note of an earlier refusal gone. */
+async function serveAppStackTaskSlot(db: DatabaseExecutor, input: SlotScope): Promise<void> {
+  await db
+    .update(appStackTaskSchedules)
+    .set({ servedSlotAt: input.slot, skippedSlotAt: null, skipReason: null })
+    .where(ofSlot(input));
 }
 
 async function enqueueInOneTransaction(db: HostingPanelDatabase, input: EnqueueAppStackTaskRunInput): Promise<EnqueueAppStackTaskRunResult> {
@@ -167,6 +173,16 @@ async function enqueueInOneTransaction(db: HostingPanelDatabase, input: EnqueueA
         .where(ofSlot({ stackId: stack.id, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot }))
         .for("update");
       if (!owed) return { outcome: "stale" };
+      // A time that already has a run is served, whatever the application is doing now: a run that still goes on is that
+      // very run holding it, and the time must not read as busy, nor be written as skipped when its window ends.
+      const [ran] = await tx
+        .select({ id: appStackTaskRuns.id })
+        .from(appStackTaskRuns)
+        .where(and(eq(appStackTaskRuns.stackId, stack.id), eq(appStackTaskRuns.taskKey, input.taskKey), eq(appStackTaskRuns.slotAt, request.slot)));
+      if (ran) {
+        await serveAppStackTaskSlot(tx, { stackId: stack.id, taskKey: input.taskKey, changedAt: request.changedAt, slot: request.slot });
+        return { outcome: "stale" };
+      }
     }
 
     const lockKey = appStackTaskQueueKey(stack.id);
