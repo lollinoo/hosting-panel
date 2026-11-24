@@ -12,7 +12,7 @@ import {
 import { YAML_ERROR_CODES } from "../src/site-templates/yaml-subset.js";
 
 describe("APP_STACK_REASONS", () => {
-  it("holds the ten spec §16 names verbatim plus STACK_PARAMETER_INVALID", () => {
+  it("holds the ten spec §16 names verbatim, then STACK_PARAMETER_INVALID and STACK_IMAGE_VOLUME_UNCOVERED", () => {
     expect(APP_STACK_REASONS).toEqual([
       "STACK_TEMPLATE_INVALID",
       "STACK_TEMPLATE_UNPUBLISHED",
@@ -25,6 +25,7 @@ describe("APP_STACK_REASONS", () => {
       "STACK_VOLUME_IN_USE",
       "STACK_UNSUPPORTED_FEATURE",
       "STACK_PARAMETER_INVALID",
+      "STACK_IMAGE_VOLUME_UNCOVERED",
     ]);
   });
 });

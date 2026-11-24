@@ -168,9 +168,18 @@ describe("fixed texts, problems and codes", () => {
     }
   });
 
+  it("tells a customer the folder is the administrator's to cover, with no retry and no folder name (#98)", () => {
+    const { code, text } = APP_STACK_FAILURE.STACK_IMAGE_VOLUME_UNCOVERED;
+    expect(code).toBe("HOST_POLICY_DENIED");
+    expect(text).toMatch(/administrator/i);
+    expect(text).not.toMatch(/try again|retry/i);
+    expect(text).not.toContain("/");
+  });
+
   it.each([
     ["an executor reason", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "image", message: "x", reason: "STACK_IMAGE_NOT_ALLOWED" }]), "STACK_IMAGE_NOT_ALLOWED"],
     ["a control-plane reason", new ControlPlaneError("VALIDATION_ERROR", "x", { details: [{ field: "s", message: "x", reason: "STACK_SECRET_MISSING" }] }), "STACK_SECRET_MISSING"],
+    ["an image folder no volume covers wins over the code that would read as not allowed", new ExecutorIpcClientError("refused", "HOST_POLICY_DENIED", 403, false, [{ field: "image", message: "The image of component web declares the folder /data and no volume of the component is mounted at exactly that folder", reason: "STACK_IMAGE_VOLUME_UNCOVERED" }]), "STACK_IMAGE_VOLUME_UNCOVERED"],
     ["a reason that wins over the code", new ExecutorIpcClientError("busy", "RESOURCE_LOCKED", 409, false, [{ field: "v", message: "x", reason: "STACK_VOLUME_IN_USE" }]), "STACK_VOLUME_IN_USE"],
     ["an unknown reason falls back to the code", new ExecutorIpcClientError("x", "HOST_POLICY_DENIED", 403, false, [{ field: "t", message: "x", reason: "TLS_VERSION_MISSING" }]), "STACK_IMAGE_NOT_ALLOWED"],
     ["VALIDATION_ERROR", new ControlPlaneError("VALIDATION_ERROR", "x"), "STACK_TEMPLATE_INVALID"],

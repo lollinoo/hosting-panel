@@ -69,6 +69,7 @@ export const APP_STACK_UNCERTAIN_TEXT = "The result of this action is being chec
 export const APP_STACK_RUNTIME_PROBLEMS = [
   "STACK_TEMPLATE_INVALID",
   "STACK_IMAGE_NOT_ALLOWED",
+  "STACK_IMAGE_VOLUME_UNCOVERED",
   "STACK_SECRET_MISSING",
   "STACK_UNSUPPORTED_FEATURE",
   "STACK_HEALTH_TIMEOUT",
@@ -89,6 +90,11 @@ export const APP_STACK_FAILURE: Readonly<Record<AppStackRuntimeProblem, { readon
     STACK_IMAGE_NOT_ALLOWED: {
       code: "HOST_POLICY_DENIED",
       text: "The application uses software this server does not allow. Ask the administrator for help.",
+    },
+    // Not "try again": nothing changes until the administrator publishes a version that covers the folder (#98).
+    STACK_IMAGE_VOLUME_UNCOVERED: {
+      code: "HOST_POLICY_DENIED",
+      text: "The application's software keeps data in a folder the application does not declare. Ask the administrator to publish a version that gives that folder its own storage.",
     },
     STACK_SECRET_MISSING: { code: "VALIDATION_ERROR", text: "A required password or key is not set. Set it and try again." },
     STACK_UNSUPPORTED_FEATURE: { code: "NOT_SUPPORTED", text: "Applications are not available on this server." },

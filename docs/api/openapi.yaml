@@ -13751,7 +13751,7 @@ components:
           description: The validator's problem code
         reason:
           type: string
-          enum: [STACK_TEMPLATE_INVALID, STACK_TEMPLATE_UNPUBLISHED, STACK_IMAGE_NOT_ALLOWED, STACK_QUOTA_EXCEEDED, STACK_DEPENDENCY_CYCLE, STACK_HEALTH_TIMEOUT, STACK_PORT_UNAVAILABLE, STACK_SECRET_MISSING, STACK_VOLUME_IN_USE, STACK_UNSUPPORTED_FEATURE, STACK_PARAMETER_INVALID]
+          enum: [STACK_TEMPLATE_INVALID, STACK_TEMPLATE_UNPUBLISHED, STACK_IMAGE_NOT_ALLOWED, STACK_QUOTA_EXCEEDED, STACK_DEPENDENCY_CYCLE, STACK_HEALTH_TIMEOUT, STACK_PORT_UNAVAILABLE, STACK_SECRET_MISSING, STACK_VOLUME_IN_USE, STACK_UNSUPPORTED_FEATURE, STACK_PARAMETER_INVALID, STACK_IMAGE_VOLUME_UNCOVERED]
         message:
           type: string
           minLength: 1
@@ -15054,7 +15054,11 @@ components:
         problem:
           type: string
           nullable: true
-          description: An UPPER_SNAKE reason or error code, never free text
+          description: >-
+            An UPPER_SNAKE reason or error code, never free text. `STACK_IMAGE_VOLUME_UNCOVERED`: a deploy, upgrade or
+            rollback was refused before anything changed because the application's software keeps data in a folder the
+            application does not declare; the operation fails with `HOST_POLICY_DENIED` and only the server
+            administrator can fix it, by publishing a version that gives that folder a volume.
         startedAt:
           type: string
           format: date-time

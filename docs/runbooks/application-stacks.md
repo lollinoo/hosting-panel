@@ -145,8 +145,23 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    - `STACK_HEALTH_TIMEOUT`: read the component logs, fix the cause, then **Riavvia** or **Reinstalla**;
    - `STACK_IMAGE_NOT_ALLOWED`, `STACK_TEMPLATE_INVALID`: the template is at fault; the administrator publishes a fixed
      version and the customer upgrades;
+   - `STACK_IMAGE_VOLUME_UNCOVERED`: the template is at fault, see the paragraph below;
    - `DOCKER_ENGINE_UNAVAILABLE`, `OPERATION_INTERRUPTED`: the action was cut (Docker, the executor, an API restart or a
      restore); check procedure 2 step 3, then **Riavvia** or **Reinstalla**.
+
+   **`STACK_IMAGE_VOLUME_UNCOVERED` (issue #98).** A software image can declare a folder (`VOLUME` in its build file) that
+   Docker backs with a hidden volume nobody named, outside the volumes the panel lists, backs up and restores. The executor
+   refuses, at the download step and before anything is created, an image that declares a folder when some component
+   using it has no volume mounted at exactly that folder (a volume at a parent, inside it, a temporary area or a secret
+   file does not count). The customer sees that the software keeps data in a folder the application does not declare; the
+   operation fails with `HOST_POLICY_DENIED` and the status rules below apply. The folder is not named to the customer;
+   the administrator reads it on the server:
+   `docker image inspect --format '{{json .Config.Volumes}}' <image>` (the image of the component, as pinned by digest in
+   the template). The fix is a new template version that gives each folder listed a volume whose `containerPath` is
+   exactly that folder, which the customer then upgrades to. What an earlier container wrote to the hidden area is not
+   carried over to the new volume: the template author decides whether that data matters before publishing. A folder the
+   image declares at or under `/run` or `/tmp`, or at another path a volume may not use, cannot be covered: the panel
+   cannot run that image, and the template needs another one.
 
    An upgrade or a rollback that fails before its components are created (download, preparation) goes back to what its
    request replaced: the version, settings, components and quota asked for before that request (usually those of the
@@ -488,9 +503,9 @@ names only the key of a task, and the command is read from the template version 
    node infra/linux/accept-app-stack-wordpress.mjs --imported
    ```
    The built-in run is made for the newest version of the template (procedure 15); without root it ends with
-   `RESULT 25/25 passed, 1 skipped`. With `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where
+   `RESULT 26/26 passed, 1 skipped`. With `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where
    `address-follows-host`, `address-follows-https` and `uploads-limit` fail (`no-redirect-loop` is expected to fail
-   too, so `RESULT 21/25`): that run reproduces what version 2 fixes:
+   too, so `RESULT 22/26`): that run reproduces what version 2 fixes:
    ```bash
    HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs
    ```

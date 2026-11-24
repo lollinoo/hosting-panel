@@ -2,7 +2,8 @@ import { z } from "zod";
 import { YAML_ERROR_CODES } from "../site-templates/yaml-subset.js";
 import { APP_TEMPLATE_LIMITS } from "./limits.js";
 
-/** Spec §16 names verbatim + STACK_PARAMETER_INVALID for customer values. Used as details[].reason. */
+/** Spec §16 names verbatim + STACK_PARAMETER_INVALID for customer values + STACK_IMAGE_VOLUME_UNCOVERED (an image
+ *  declares a folder no volume covers, refused by the executor at the image step). Used as details[].reason. */
 export const APP_STACK_REASONS = [
   "STACK_TEMPLATE_INVALID",
   "STACK_TEMPLATE_UNPUBLISHED",
@@ -15,6 +16,7 @@ export const APP_STACK_REASONS = [
   "STACK_VOLUME_IN_USE",
   "STACK_UNSUPPORTED_FEATURE",
   "STACK_PARAMETER_INVALID",
+  "STACK_IMAGE_VOLUME_UNCOVERED",
 ] as const;
 export type AppStackReason = (typeof APP_STACK_REASONS)[number];
 export const AppStackReasonSchema = z.enum(APP_STACK_REASONS);

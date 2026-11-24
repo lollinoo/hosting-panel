@@ -2959,6 +2959,7 @@ x-hp-ingress:
         STACK_VOLUME_IN_USE: "Volume still in use.",
         STACK_UNSUPPORTED_FEATURE: "Feature not supported in this release.",
         STACK_PARAMETER_INVALID: "Invalid parameter value.",
+        STACK_IMAGE_VOLUME_UNCOVERED: "The image declares a folder with no volume of the component mounted at it: publish a version that gives that folder a volume.",
         slug_taken: "A template with this slug already exists.",
         template_archived: "The template is archived.",
         built_in: "Built-in templates cannot be archived.",
@@ -3654,6 +3655,8 @@ x-hp-ingress:
       STACK_VOLUME_IN_USE: "This application's data is still in use: try again shortly.",
       STACK_UNSUPPORTED_FEATURE: "This feature is not available on this server.",
       STACK_PARAMETER_INVALID: "Check the highlighted settings.",
+      STACK_IMAGE_VOLUME_UNCOVERED:
+        "This application's software keeps data in a folder the application does not declare. The server administrator must publish a version that gives that folder its own storage.",
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
       notNow: "This action is not available at the moment. Reload the page to see the actions you can use now.",

@@ -122,6 +122,15 @@ describe("application refusal texts", () => {
     for (const p of ["OPERATION_INTERRUPTED", "name_taken", "constructor"]) expect(appStackProblemText(m, p), p).toBe(m.apps.history.problemGeneric);
   });
 
+  it.each(locales)("%s: an image folder no volume covers is the server administrator's to fix, with no retry and no folder name (#98)", (_n, m) => {
+    const text = appStackProblemText(m, "STACK_IMAGE_VOLUME_UNCOVERED")!;
+    expect(text).toMatch(/administrator|amministratore/i);
+    expect(text).not.toMatch(/try again|riprova|riprov/i);
+    expect(text).not.toContain("/");
+    expect(appStackRefusalText(m, "HOST_POLICY_DENIED", "STACK_IMAGE_VOLUME_UNCOVERED")).toBe(text);
+    expect(text).not.toBe((m.apps.reasons as Record<string, string>).STACK_IMAGE_NOT_ALLOWED);
+  });
+
   it.each(locales)("%s: a setting only the application decides has its own sentence", (_n, m) => {
     const text = appStackRefusalText(m, "VALIDATION_ERROR", "PARAM_VALUE_NOT_CUSTOMER");
     expect(text).toBe(m.apps.reasons.PARAM_VALUE_NOT_CUSTOMER);

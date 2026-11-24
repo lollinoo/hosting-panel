@@ -2986,6 +2986,7 @@ x-hp-ingress:
         STACK_VOLUME_IN_USE: "Volume ancora in uso.",
         STACK_UNSUPPORTED_FEATURE: "Funzione non supportata in questa release.",
         STACK_PARAMETER_INVALID: "Valore di parametro non valido.",
+        STACK_IMAGE_VOLUME_UNCOVERED: "L'immagine dichiara una cartella su cui non è montato alcun volume del componente: pubblica una versione che dia un volume a quella cartella.",
         slug_taken: "Esiste già un modello con questo slug.",
         template_archived: "Il modello è archiviato.",
         built_in: "I modelli di sistema non si archiviano.",
@@ -3683,6 +3684,8 @@ x-hp-ingress:
       STACK_VOLUME_IN_USE: "I dati di questa applicazione sono ancora in uso: riprova tra poco.",
       STACK_UNSUPPORTED_FEATURE: "Questa funzione non è disponibile su questo server.",
       STACK_PARAMETER_INVALID: "Controlla le impostazioni evidenziate.",
+      STACK_IMAGE_VOLUME_UNCOVERED:
+        "Il software di questa applicazione conserva dati in una cartella che l'applicazione non dichiara. L'amministratore del server deve pubblicare una versione che dia a quella cartella un proprio spazio di archiviazione.",
       name_taken: "Hai già un'applicazione con questo nome.",
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
       notNow: "Questa azione non è disponibile in questo momento. Ricarica la pagina per vedere le azioni che puoi usare ora.",

@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   APP_IMAGE_ALLOWLIST,
   ApprovedStackPlanSchema,
@@ -121,4 +122,27 @@ export function appStackImageDigestMatches(planImage: string, repoDigests: reado
       return found !== null && found[0] === wanted[0] && found[1] === wanted[1];
     })
   );
+}
+
+/** #98: the first component of the plan that runs `image`, and the first of the folders the image declares
+ *  (`Config.Volumes`), that no volume of that component is mounted at exactly. The Engine gives a hidden, unlabelled,
+ *  unbounded anonymous volume to a declared folder with no mount at it, so the plan is refused instead. A folder is
+ *  cleaned like a path in `holdsAppStackSecretDir` (one trailing slash, repeated slashes and dot segments gone), so
+ *  `/data/` and `/data` are one folder. A mount at a parent folder or inside the folder does not cover it. A tmpfs
+ *  and a secret file do not count as a mount. The folder is returned cleaned, without its trailing slash. */
+export function appStackUncoveredImageFolder(
+  plan: ApprovedStackPlan,
+  image: string,
+  declared: readonly string[],
+): { readonly componentKey: string; readonly folder: string } | null {
+  const clean = (folder: string) => path.posix.normalize(`${folder}/`);
+  for (const component of plan.components) {
+    if (component.image !== image) continue;
+    const mounted = new Set(component.volumes.map((mount) => clean(mount.containerPath)));
+    for (const folder of declared) {
+      const seen = clean(folder);
+      if (!mounted.has(seen)) return { componentKey: component.key, folder: seen.length > 1 ? seen.slice(0, -1) : seen };
+    }
+  }
+  return null;
 }

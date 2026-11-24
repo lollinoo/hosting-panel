@@ -606,6 +606,35 @@ describe("AppStackEngine with a version 2 plan", () => {
     for (const value of VALUES) expect(shown(err)).not.toContain(value);
   });
 
+  it("the image step holds a standard and a strict component to the folders their image declares (#98)", async () => {
+    const h = await setup();
+    const uncovered = (component: string, folder: string) => ({
+      reason: "STACK_IMAGE_VOLUME_UNCOVERED",
+      code: "HOST_POLICY_DENIED",
+      message: `The image of component ${component} declares the folder ${folder} and no volume of the component is mounted at exactly that folder`,
+    });
+
+    // db mounts dbdata at /var/lib/sql: the folder its image declares is covered.
+    h.fake.declaredVolumes.set(V2_DB, { "/var/lib/sql": {} });
+    await expect(h.engine.pullAppStackImage({ plan, image: V2_DB })).resolves.toEqual({ image: V2_DB, pulled: false });
+    // ...and an image that declares nothing is not asked for anything.
+    await expect(h.engine.pullAppStackImage({ plan, image: V2_WEB })).resolves.toEqual({ image: V2_WEB, pulled: false });
+
+    // web (standard) has no volume; the bind of its secret file at /run/secrets/app_key is not one.
+    h.fake.declaredVolumes.set(V2_WEB, { "/var/www": {}, "/run/secrets/app_key": {} });
+    expect(await failure(h.engine.pullAppStackImage({ plan, image: V2_WEB }))).toMatchObject(uncovered("web", "/var/www"));
+    h.fake.declaredVolumes.set(V2_WEB, { "/run/secrets/app_key": {} });
+    expect(await failure(h.engine.pullAppStackImage({ plan, image: V2_WEB }))).toMatchObject(uncovered("web", "/run/secrets/app_key"));
+
+    // cache (strict) has no volume; the temporary area it holds at /tmp is not one either, so the plan must name a volume.
+    h.fake.declaredVolumes.set(IMAGE, { "/tmp": {} });
+    expect(await failure(h.engine.pullAppStackImage({ plan, image: IMAGE }))).toMatchObject(uncovered("cache", "/tmp"));
+    h.fake.declaredVolumes.set(IMAGE, { "/data": {} });
+    expect(await failure(h.engine.pullAppStackImage({ plan, image: IMAGE }))).toMatchObject(uncovered("cache", "/data"));
+
+    expect(mutations(h.fake.log)).toEqual([]);
+  });
+
   it("start writes every secret the component reads, mounts only the file ones and masks all of them in the logs", async () => {
     const h = await setup();
     await created(h);

@@ -282,6 +282,7 @@ export {
   appStackRouteFileName,
   appStackSecretDirKey,
   appStackTaskReadPath,
+  appStackUncoveredImageFolder,
   appStackVolumeLabels,
   appStackVolumeName,
   assertAppStackCreateSecretContents,
