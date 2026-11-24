@@ -375,6 +375,17 @@ export async function bootstrapDockerExecutorDaemon(
         }),
       );
     });
+    // What the tasks of a previous executor left running in application components ends too (ADR-0042).
+    await dockerAdapter.reapAppStackTasks().catch((err: unknown) => {
+      console.error(
+        JSON.stringify({
+          component: "hp-docker-executor",
+          event: "app_task_reap_failed",
+          code: (err as { code?: string } | null)?.code ?? "INTERNAL_ERROR",
+          timestamp: new Date().toISOString(),
+        }),
+      );
+    });
     await dockerAdapter.settleRestores().catch((err: unknown) => {
       console.error(
         JSON.stringify({

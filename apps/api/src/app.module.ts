@@ -15,6 +15,9 @@ import { AppStackLinksService } from "./app-stacks/app-stack-links.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
 import { AdminAppStacksService } from "./app-stacks/admin-app-stacks.service.js";
+import { AppStackTaskRuntime } from "./app-stacks/app-stack-task-runtime.js";
+import { AppStackTaskSchedulerService } from "./app-stacks/app-stack-task-scheduler.service.js";
+import { AppStackTasksService } from "./app-stacks/app-stack-tasks.service.js";
 import { AppStacksService } from "./app-stacks/app-stacks.service.js";
 import {
   APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN,
@@ -37,6 +40,7 @@ import { AppTemplatesController } from "./controllers/app-templates.controller.j
 import { AppStacksController } from "./controllers/app-stacks.controller.js";
 import { AppStackDomainsController } from "./controllers/app-stack-domains.controller.js";
 import { AppStackLinksController } from "./controllers/app-stack-links.controller.js";
+import { AppStackTasksController } from "./controllers/app-stack-tasks.controller.js";
 import { AdminUsersController } from "./controllers/admin-users.controller.js";
 import { AdminAuditController } from "./controllers/admin-audit.controller.js";
 import { AdminBackupPoliciesController } from "./controllers/admin-backup-policies.controller.js";
@@ -193,6 +197,7 @@ export class AppModule {
         AppStackLinksController,
         AdminNotificationsController,
         NotificationsController,
+        AppStackTasksController,
       ],
       providers: [
         {
@@ -282,6 +287,9 @@ export class AppModule {
         NotificationSenderService,
         NotificationDispatchService,
         NotificationSettingsService,
+        AppStackTasksService,
+        AppStackTaskRuntime,
+        AppStackTaskSchedulerService,
         // One per app: site and stack log reads share the panel-wide caps (ADR 0026 limit 27).
         { provide: LogReadGate, useValue: new LogReadGate() },
         {
@@ -308,6 +316,8 @@ export class AppModule {
         BackupSchedulerService,
         AppStackRuntime,
         AppStackObserverService,
+        AppStackTaskRuntime,
+        AppStackTaskSchedulerService,
         LogReadGate,
       ],
     };

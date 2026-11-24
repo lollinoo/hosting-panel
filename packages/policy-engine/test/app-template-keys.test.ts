@@ -17,9 +17,10 @@ const CODES: readonly AppTemplateRefusalCode[] = [
 ];
 
 describe("APP_TEMPLATE_KEY_LEVELS", () => {
-  it("has exactly the ten levels of an HCP-STACK/v1 source", () => {
+  it("has exactly the eleven levels of an HCP-STACK/v1 source", () => {
     expect(LEVELS).toEqual([
       "root", "header", "parameter", "service", "environmentEntry", "healthcheck", "deploy", "resources", "limits", "ingress",
+      "task",
     ]);
   });
 

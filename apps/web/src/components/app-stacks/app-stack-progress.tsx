@@ -69,8 +69,10 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
   // A backup and a restore have steps of their own beside the ones every stack operation has.
   const steps: Record<string, string> = { ...m.apps.steps, ...m.apps.backups.steps };
   const status = operation?.status;
+  // The run of a task (ADR-0042) has one step and its own words.
+  const isTask = operation?.kind === "stack.task";
   // They have no entry in the history: the reason of a failure is on the row of the backup.
-  const failed = kind === "backup" ? t.backupFailed : kind === "restore" ? t.restoreFailed : t.failed;
+  const failed = isTask ? t.taskFailed : kind === "backup" ? t.backupFailed : kind === "restore" ? t.restoreFailed : t.failed;
   const long = (kind === "backup" || kind === "restore") && outcome === "polling";
 
   return (
@@ -85,7 +87,7 @@ export function AppStackProgress({ orgId, operationId }: { orgId: string; operat
             return (
               <li key={s.id} className="flex items-center gap-2" aria-current={s.status === "running" ? "step" : undefined}>
                 <Icon aria-hidden className={`h-4 w-4 ${s.status === "running" ? "animate-spin" : ""}`} />
-                <span>{Object.hasOwn(steps, s.key) ? steps[s.key] : steps.settle}</span>
+                <span>{isTask ? m.apps.tasks.step : Object.hasOwn(steps, s.key) ? steps[s.key] : steps.settle}</span>
                 <span className="text-muted-foreground">{m.apps.stepStatus[s.status]}</span>
               </li>
             );
