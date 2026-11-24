@@ -1079,7 +1079,7 @@ export class OutboxWorkerService {
           // Backup, update, import and host job recovery never replay a change; each settles what it can.
           const outcome =
             op.kind === STACK_TASK_KIND
-              ? await this.#appStackTasks.recover(op) // a read: the command of a run is never started again
+              ? await this.#appStackTasks.recover(op, this.recoveryReads) // a read: the command of a run is never started again
               : APP_STACK_RUNTIME_KINDS.includes(op.kind)
               ? await this.#appStacks.recover(op, this.recoveryReads)
               : op.kind === HOST_JOB_KIND
