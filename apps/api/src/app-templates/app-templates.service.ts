@@ -135,9 +135,21 @@ export class AppTemplatesService {
     @Inject(APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN) private readonly validation: AppTemplateValidationOptions,
   ) {}
 
-  /** Pure: no database, no audit. A problem in the template is an answer, never an error. */
+  /**
+   * Pure: no database, no audit. A problem in the template is an answer, never an error. The administrator is writing
+   * this source now, so the rules for a new version apply (ADR-0036).
+   */
   public validate(input: ValidateAppTemplateInput): AppTemplateValidationDto {
-    const checked = previewAppTemplateSource(input.source, this.validation);
+    return this.#preview(input.source, this.#newVersion());
+  }
+
+  /** The rules a stored version predates apply only to a source written now; a stored version keeps its own. */
+  #newVersion(): AppTemplateValidationOptions {
+    return { ...this.validation, newVersion: true };
+  }
+
+  #preview(source: string, options: AppTemplateValidationOptions): AppTemplateValidationDto {
+    const checked = previewAppTemplateSource(source, options);
     return checked.ok
       ? { valid: true, issues: [], parameters: checked.spec.parameters, preview: checked.preview }
       : { valid: false, issues: checked.errors, parameters: [], preview: null };
@@ -200,7 +212,7 @@ export class AppTemplatesService {
   }
 
   public async create(input: CreateAppTemplateInput, actor: AppTemplateActor): Promise<AdminAppTemplateDetailDto> {
-    const checked = validateAppTemplateSource(input.source, this.validation);
+    const checked = validateAppTemplateSource(input.source, this.#newVersion());
     if (!checked.ok) throw adminTemplateInvalid(checked.errors);
     const { spec } = checked;
     const templateId = await guardedApp(mapAppTemplateError, () =>
@@ -226,7 +238,7 @@ export class AppTemplatesService {
   }
 
   public async addVersion(templateId: string, input: AddAppTemplateVersionInput, actor: AppTemplateActor): Promise<AdminAppTemplateVersionCreatedDto> {
-    const checked = validateAppTemplateSource(input.source, this.validation);
+    const checked = validateAppTemplateSource(input.source, this.#newVersion());
     if (!checked.ok) throw adminTemplateInvalid(checked.errors);
     const { spec } = checked;
     const written = await guardedApp(mapAppTemplateError, () =>
@@ -314,7 +326,7 @@ export class AppTemplatesService {
       specHash: version.specHash,
       createdAt: iso(version.createdAt),
       source: version.source,
-      ...this.validate({ source: version.source }),
+      ...this.#preview(version.source, this.validation),
     };
   }
 
