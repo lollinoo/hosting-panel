@@ -182,7 +182,7 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
   components: z.array(
     z.object({
       key: AppStackKeySchema,
-      health: AppStackComponentHealthSchema, // effective: stale → unknown
+      health: AppStackComponentHealthSchema, // effective: stale → unknown, but a stopped application keeps its `stopped` reading (#208)
       healthObservedAt: IsoDateTimeSchema.nullable(),
       dependsOn: z.array(AppStackKeySchema),
       ingress: z.boolean(),

@@ -514,6 +514,36 @@ describe("application stacks HTTP API (H5)", () => {
     }
   });
 
+  it("#208: the components of a stopped application keep their stopped reading however old, in the page and in the health route", async () => {
+    const db = h.dbClient.db;
+    const stackId = await deployed("stopped-long-ago");
+    await settle(stackId, "running");
+    const row = await stackRow(stackId);
+    const longAgo = new Date(Date.now() - 3 * 60 * 60_000);
+    await db.update(appStacks).set({ status: "stopped", appliedRevisionId: row.desiredRevisionId }).where(eq(appStacks.id, stackId));
+    await db.update(appStackComponents).set({ health: "stopped", healthObservedAt: longAgo }).where(eq(appStackComponents.stackId, stackId));
+
+    const page = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+    expect(page.status, page.raw).toBe(200);
+    expect(page.body.data.status).toBe("stopped");
+    expect(page.body.data.unhealthyCount).toBe(0);
+    for (const component of page.body.data.components as Json[]) {
+      expect(component.health, component.key).toBe("stopped");
+      expect(component.healthObservedAt, component.key).toBe(longAgo.toISOString());
+    }
+    // The route says the reading is old (`stale`, a fact of the stored time) and still what it was.
+    const health = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/app/health`);
+    expect(health.status, health.raw).toBe(200);
+    expect(health.body.data).toMatchObject({ componentKey: "app", health: "stopped", observedAt: longAgo.toISOString(), stale: true });
+
+    // The same readings of an application that runs are old: unknown, in the page and in the route.
+    await db.update(appStacks).set({ status: "running" }).where(eq(appStacks.id, stackId));
+    const running = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+    expect(running.body.data.status).toBe("unknown");
+    for (const component of running.body.data.components as Json[]) expect(component.health, component.key).toBe("unknown");
+    expect((await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/app/health`)).body.data.health).toBe("unknown");
+  });
+
   // Last: it leaves organisation B at its limit.
   it("B2: two creates at a limit of one: one is accepted, the other is QUOTA_EXCEEDED", async () => {
     const limit = await h.call(h.adminToken, "PATCH", `/v1/admin/organizations/${h.b.orgId}/app-stack-limit`, { maxAppStacks: 1 });

@@ -14,7 +14,6 @@ import {
   appStackTaskQueueKey,
   appTemplateHiddenSecretKeys,
   appTemplateInstallParameters,
-  effectiveComponentHealth,
   redactSensitiveString,
   resolveAppTemplateParameters,
   type AppStackComponentHealthDto,
@@ -115,6 +114,7 @@ import { diffAppStackPlans } from "./app-stack-diff.js";
 import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { addressRemovingInTheWay, customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
+import { shownComponentHealth } from "./app-stack-runtime-policy.js";
 
 export interface AppStackRequestContext {
   readonly organizationId: string;
@@ -627,7 +627,7 @@ export class AppStacksService {
     const observedAt = row?.healthObservedAt ?? null;
     return {
       componentKey,
-      health: effectiveComponentHealth(row?.health ?? "unknown", observedAt, now),
+      health: shownComponentHealth(stack.status, row?.health ?? "unknown", observedAt, now),
       observedAt: observedAt?.toISOString() ?? null,
       stale: observedAt === null || now.getTime() - observedAt.getTime() > APP_STACK_HEALTH_STALE_AFTER_MS,
       source: probe.healthcheck?.kind ?? "running_state",

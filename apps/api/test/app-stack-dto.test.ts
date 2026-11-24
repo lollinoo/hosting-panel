@@ -424,6 +424,49 @@ describe("issue #106: the outcome in doubt is the stored status, not the shown o
   });
 });
 
+describe("issue #208: the components of a stopped application", () => {
+  const LONG_AGO = new Date(NOW.getTime() - 3 * 60 * 60_000);
+  const withStatus = (status: AppStackRow["status"]) => stackRow({ status, desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+  const bothStopped = () => PLAN.components.map((c) => component(c.key, "stopped", LONG_AGO));
+  const shown = (status: AppStackRow["status"], components: AppStackComponentRow[]) => appStackDetailDto(deployed(components, { stack: withStatus(status) }));
+
+  it("a stopped application keeps the stopped reading it was stopped with, however old it is", () => {
+    const dto = shown("stopped", bothStopped());
+    expect(dto.components.map(({ health }) => health)).toEqual(["stopped", "stopped"]);
+    // The time of the last check is the stored one, not the time of the read.
+    expect(dto.components.map(({ healthObservedAt }) => healthObservedAt)).toEqual([LONG_AGO.toISOString(), LONG_AGO.toISOString()]);
+    // It is not counted as unhealthy, as before, and the status stays the stored one.
+    expect(dto).toMatchObject({ status: "stopped", unhealthyCount: 0, componentCount: 2 });
+    expect(appStackSummaryDto({ ...detailInput(), stack: withStatus("stopped"), appliedPlan: PLAN, components: bothStopped(), domains: [] })).toMatchObject({ status: "stopped", unhealthyCount: 0 });
+  });
+
+  it("a running application with the same old readings reads unknown, and so does its status", () => {
+    const dto = shown("running", bothStopped());
+    expect(dto.components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+    expect(dto.status).toBe("unknown");
+  });
+
+  it("only a stopped reading of a stopped application is kept: an old healthy or unhealthy one reads unknown, and so does one never stamped", () => {
+    const dto = shown("stopped", [component("cache", "healthy", LONG_AGO), component("app", "unhealthy", LONG_AGO)]);
+    expect(dto.components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+    expect(shown("stopped", [component("cache", "stopped", null), component("app", "unknown", null)]).components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+    // No row yet reads unknown too.
+    expect(shown("stopped", []).components.map(({ health }) => health)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("an application that is not stored as stopped keeps the five-minute rule for a stopped reading", () => {
+    for (const status of ["stopping", "starting", "failed", "degraded", "unknown", "updating"] as const) {
+      expect(shown(status, bothStopped()).components.map(({ health }) => health), status).toEqual(["unknown", "unknown"]);
+    }
+  });
+
+  it("a fresh reading of a stopped application reads as it is", () => {
+    const dto = shown("stopped", [component("cache", "stopped", FRESH), component("app", "unhealthy", FRESH)]);
+    expect(dto.components.map(({ health }) => health)).toEqual(["stopped", "unhealthy"]);
+    expect(dto.unhealthyCount).toBe(1);
+  });
+});
+
 describe("row mappers", () => {
   it("maps a domain row", () => {
     const expires = new Date("2027-01-01T00:00:00.000Z");

@@ -6356,8 +6356,10 @@ paths:
       operationId: getAppStackComponentHealth
       summary: Show the last observed health of one component of an application (app.read)
       description: >-
-        An observation older than five minutes reads as `unknown` with `stale: true`. Returns 422 NOT_SUPPORTED
-        (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
+        An observation older than five minutes reads as `unknown` with `stale: true`; the `stopped` reading of an
+        application stored as `stopped` is the exception and stays `stopped` however old (`stale` still says it is old,
+        issue #208). Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -15445,7 +15447,10 @@ components:
           nullable: true
         stale:
           type: boolean
-          description: The last observation is older than five minutes (health then reads `unknown`)
+          description: >-
+            The last observation is older than five minutes. Its health then reads `unknown`, except the `stopped`
+            reading of an application stored as `stopped`, which stays `stopped` (issue #208); `observedAt` is always the
+            stored time of the last check
         source:
           type: string
           enum: [tcp, http, running_state]

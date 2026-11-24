@@ -426,6 +426,23 @@ export function appStackAddressRemovable(
 /** The stored statuses whose shown status is computed from the health of the components; the others are shown as stored. */
 export const APP_STACK_STATUSES_SHOWN_FROM_HEALTH: readonly AppStackStatus[] = ["running", "degraded"];
 
+/**
+ * The health a component shows (ADR-0035, issue #208). An observation older than five minutes reads `unknown`
+ * (`effectiveComponentHealth`), except the `stopped` reading of an application stored as `stopped`: the observer stops
+ * reading a stopped application, so no newer reading will come and the old one is still true. Any other reading, and a
+ * `stopped` one of an application in any other stored status, keeps the five-minute rule. The time of the last check is
+ * not touched here: it stays the stored one.
+ */
+export function shownComponentHealth(
+  stackStatus: AppStackStatus,
+  health: AppStackComponentHealth,
+  observedAt: Date | null,
+  now: Date,
+): AppStackComponentHealth {
+  if (stackStatus === "stopped" && health === "stopped" && observedAt !== null) return "stopped";
+  return effectiveComponentHealth(health, observedAt, now);
+}
+
 /** R12 read-time view: a stale or unobserved component of a running|degraded stack reads "unknown". */
 export function appStackDisplayStatus(input: {
   readonly stack: Pick<AppStackRow, "status" | "appliedRoutesHash">;

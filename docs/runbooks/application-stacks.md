@@ -50,7 +50,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
 1. In the panel: the application page (`/apps/<stackId>`) shows the status (the list shows the same one), each component's health with the time of
    the last check, the domains, the history of every action with its reason, and each component's log (the last 1 to
-   500 lines, secret values masked). A health observation older than 5 minutes reads as `unknown`.
+   500 lines, secret values masked). A health observation older than 5 minutes reads as `unknown`, except the `stopped`
+   reading of an application stored as `stopped`: its components keep reading `stopped` however long ago it was stopped,
+   with the time of that last check beside it.
 2. The server administrator sees every live stack in **Applicazioni** (customer, template and version, status, web
    address; at most 200, read-only) and the stacks of one template in **Modelli** › the template › its usage list
    (organisation, name, version, status). The status of a row is the one the application page shows: for a `running` or

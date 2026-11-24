@@ -1,5 +1,4 @@
 import {
-  effectiveComponentHealth,
   sumAppStackPlanResources,
   type AppStackAcceptedEnvelope,
   type AppStackAllowedAction,
@@ -9,6 +8,7 @@ import {
   type AppStackDomainDto,
   type AppStackOperationKind,
   type AppStackPlatformWork,
+  type AppStackStatus,
   type AppStackSummaryDto,
   type AppTemplateSpec,
   type ApprovedStackPlan,
@@ -26,14 +26,14 @@ import type {
   AppStackVolumeRow,
   AppStackWriteResult,
 } from "@hosting-panel/database";
-import { appStackDisplayStatus, appStackRoutesPending } from "./app-stack-runtime-policy.js";
+import { appStackDisplayStatus, appStackRoutesPending, shownComponentHealth } from "./app-stack-runtime-policy.js";
 
 const iso = (at: Date | null): string | null => at?.toISOString() ?? null;
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
-function componentHealth(row: AppStackComponentRow | undefined, now: Date) {
+function componentHealth(row: AppStackComponentRow | undefined, stackStatus: AppStackStatus, now: Date) {
   return {
-    health: row ? effectiveComponentHealth(row.health, row.healthObservedAt, now) : ("unknown" as const),
+    health: row ? shownComponentHealth(stackStatus, row.health, row.healthObservedAt, now) : ("unknown" as const),
     healthObservedAt: iso(row?.healthObservedAt ?? null),
   };
 }
@@ -61,7 +61,7 @@ export function appStackSummaryDto(input: {
     templateVersionNumber: input.templateVersionNumber,
     installed: input.installed,
     componentCount: components.length,
-    unhealthyCount: components.filter((c) => ["unhealthy", "missing"].includes(componentHealth(c, now).health)).length,
+    unhealthyCount: components.filter((c) => ["unhealthy", "missing"].includes(componentHealth(c, stack.status, now).health)).length,
     primaryHostname: (domains.find((d) => d.status === "active") ?? domains[0])?.hostname ?? null,
     updatedAt: stack.updatedAt.toISOString(),
   };
@@ -125,7 +125,7 @@ export function appStackDetailDto(input: {
     revisionNumber: desired?.revision.revisionNumber ?? null,
     components: components.map((c) => ({
       key: c.key,
-      ...componentHealth(rows.get(c.key), now),
+      ...componentHealth(rows.get(c.key), stack.status, now),
       dependsOn: c.dependsOn,
       ingress: ingress.some((i) => i.componentKey === c.key),
       cpuMilli: c.resources.cpuMilli,
