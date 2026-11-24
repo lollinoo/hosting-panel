@@ -201,21 +201,25 @@ describe("install.sh public addresses", () => {
   };
   const SETUP = "would run hp-accounts setup --name panel.example.com --hostname panel.example.com";
 
-  it("a rerun without --ipv4 keeps the IPv4 the last run recorded and records it again", () => {
+  it("a rerun without --ipv4 keeps the IPv4 the last run recorded, and setup keeps the panel's", () => {
     const r = dry({ ...routeFrom("198.51.100.7"), ...savedState("203.0.113.7") });
     expect(r.code).toBe(0);
     expect(r.out).toContain("Panel IPv4: 203.0.113.7 (kept from the last run");
     expect(r.out).toContain("HP_PANEL_IPV4=203.0.113.7 ");
-    expect(r.out).toContain(`${SETUP} --ipv4 203.0.113.7`);
+    // A remembered IPv4 never replaces the one the panel records: only --ipv4 does.
+    expect(r.out).toContain(
+      `${SETUP} --ipv4-default 203.0.113.7 (the recorded IPv4, if any, stays as it is; the recorded IPv6 stays as it is)`,
+    );
+    expect(r.out).not.toContain("--ipv4 203.0.113.7");
     expect(r.out).toMatch(/skip.*administrator already created/i);
     expect(r.out).not.toContain("198.51.100.7");
   });
 
-  it("--ipv4 wins over the IPv4 the last run recorded", () => {
+  it("--ipv4 wins over the IPv4 the last run recorded, and setup records it", () => {
     const r = dry({ ...routeFrom("198.51.100.7"), ...savedState("203.0.113.7") }, ["--ipv4", "203.0.113.8"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("Panel IPv4: 203.0.113.8 (given with --ipv4)");
-    expect(r.out).toContain(`${SETUP} --ipv4 203.0.113.8`);
+    expect(r.out).toContain(`${SETUP} --ipv4 203.0.113.8 (the recorded IPv6 stays as it is)`);
     expect(r.out).not.toContain("203.0.113.7");
   });
 
@@ -223,6 +227,7 @@ describe("install.sh public addresses", () => {
     const r = dry(routeFrom("198.51.100.7"));
     expect(r.code).toBe(0);
     expect(r.out).toContain("Panel IPv4: 198.51.100.7 (source address of the default route;");
+    expect(r.out).toContain(`${SETUP} --ipv4-default 198.51.100.7 (the recorded IPv4, if any, stays as it is;`);
     // A recorded value that is not an IPv4 is not kept.
     const bad = dry({ ...routeFrom("198.51.100.7"), ...savedState("203.0.113.07") });
     expect(bad.code).toBe(0);
