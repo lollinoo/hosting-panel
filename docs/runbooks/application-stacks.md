@@ -337,8 +337,11 @@ names only the key of a task, and the command is read from the template version 
    `app_task_cleanup_failed` after a run (not only at start) means that the executor tried to stop the command six
    times, five seconds apart, and none was confirmed, or that the component's own environment carries the mark so
    the clean-up cannot work (it is then written at once, not retried). The attempts are part of the run: the
-   application stays held, and the run is answered after them, up to about a minute and a half after its time limit.
-   The run reads «esito non noto» (item 5), never «stopped».
+   application stays held, and the run is answered after them, about a minute and a half after its time limit when
+   the engine does not answer at all. A **slow** engine (each step answered just before its time-out) can take almost
+   six minutes past the limit (ADR-0042, A4), longer than the panel waits: the operation then reads
+   «Da verificare», the application stays refused as busy while the executor still tries, and the recovery pass
+   writes the run when the executor has answered. The run reads «esito non noto» (item 5), never «stopped».
    `app_task_mark_in_component` with a `count`: that many running components carry `HP_TASK_RUN=` in their own
    environment (their image, or a container created before the rule against it). The clean-up kills nothing there and
    no task of such a component can run (its runs end not started, `unavailable`). Find the variable in the
