@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Application buttons, log masking, WordPress address and uploads, image registries and five more fixes (2026-11-24)
+*hosting-panel v0.17.6*
+
+**Bug Fixes & Stability**
+- **apps**: Application buttons, log masking, WordPress address and uploads, image registries and five more fixes
+
+---
+
 ### A stopped application stays stopped when an operation is refused before create (2026-11-24)
 *hosting-panel v0.17.5*
 

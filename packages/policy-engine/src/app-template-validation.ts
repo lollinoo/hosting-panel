@@ -29,6 +29,7 @@ import {
   appStackArgvItemProblem,
   appStackContainerPathProblem,
   appStackHealthPathProblem,
+  appStackImageRegistryProblem,
   appStackSecretEnvNameProblem,
   appStackTextProblem,
   appTemplateValueProblem,
@@ -58,6 +59,12 @@ import { scanInterpolation, type InterpolationPiece } from "./site-template-inte
 
 export interface AppTemplateValidationOptions {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
+  /**
+   * true only where an administrator writes a source now (check, create, new version): it adds the rules a stored
+   * version predates, such as a public registry (ADR-0036). A stored version is never judged with it, so an
+   * application installed from one keeps deploying, starting and restarting.
+   */
+  readonly newVersion?: boolean;
 }
 
 export type AppTemplateValidationResult =
@@ -149,6 +156,7 @@ interface Context {
   readonly issues: Issues;
   readonly version: AppTemplateSpecVersion;
   readonly allowlist: readonly AppImageAllowlistEntry[];
+  readonly newVersion: boolean;
   readonly parameters: ReadonlyMap<string, ParameterInfo>;
   readonly volumes: ReadonlySet<string>;
   readonly mounted: Set<string>;
@@ -485,6 +493,13 @@ function validateImage(ctx: Context, raw: unknown, servicePath: TemplatePath): A
   const name = registry === null ? repository : `${registry}/${repository}`;
   if (digest === null) issues.add("IMAGE_DIGEST_REQUIRED", path, "Pin the image by digest: add '@sha256:<64 hex digits>'.");
   if (tag === "latest") issues.add("IMAGE_TAG_LATEST", path, "The tag 'latest' is refused: write the version tag or none.");
+  if (ctx.newVersion && appStackImageRegistryProblem(name) !== null) {
+    issues.add(
+      "IMAGE_REGISTRY_NOT_PUBLIC",
+      path,
+      "The registry of this image is this server, an IP address or a private network name: use an image of a public registry.",
+    );
+  }
   // v2 (ADR-0036): any repository, always pinned by digest; the allowlist only gives the user of the images it lists.
   if (ctx.version === APP_TEMPLATE_SPEC_VERSION && findAppImageAllowlistEntry(name, ctx.allowlist) === null) {
     issues.add("IMAGE_NOT_ALLOWLISTED", path, "This image repository is not on the platform's allowlist.");
@@ -997,6 +1012,7 @@ export function validateAppTemplate(
       issues,
       version,
       allowlist: options.allowlist ?? APP_IMAGE_ALLOWLIST,
+      newVersion: options.newVersion === true,
       parameters: infos,
       volumes: new Set(volumes),
       mounted: new Set(),

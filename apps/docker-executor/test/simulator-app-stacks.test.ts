@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import {
@@ -10,6 +10,8 @@ import { isStackExecutor } from "@hosting-panel/executor-contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  APP_STACK_CONTAINER_BODY_VERSION,
+  APP_STACK_LABELS,
   AppStackExecutorError,
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
@@ -58,6 +60,14 @@ async function failure(promise: Promise<unknown>): Promise<{ reason?: string; co
 }
 
 const kinds = (sim: InMemoryDockerSimulatorAdapter) => sim.appStacks.appStackMutations.map((m) => m.kind);
+
+/** Makes a container look built by a release before the body version label (#96). */
+function withoutBodyVersion(sim: InMemoryDockerSimulatorAdapter, key: string): void {
+  const stacks = (sim.appStacks as unknown as { stacks: Map<string, { containers: Map<string, { labels: Record<string, string> }> }> }).stacks;
+  const container = stacks.get(ID)?.containers.get(key);
+  if (container === undefined) throw new Error(`no container ${key}`);
+  container.labels = Object.fromEntries(Object.entries(container.labels).filter(([label]) => label !== APP_STACK_LABELS.bodyVersion));
+}
 
 describe("SimulatedAppStacks deploy flow", () => {
   it("pulls, prepares, creates, starts and reports a healthy stack", async () => {
@@ -373,6 +383,35 @@ describe("SimulatedAppStacks idempotency and removal", () => {
     expect(Object.keys(sim.appStacks.getAppStackSnapshot(ID)?.volumes ?? {})).toEqual(["data"]);
   });
 
+  it("a deploy replaces once a container with an equal hash and no body version label; start and restart leave it", async () => {
+    const sim = simulator();
+    await deploy(sim);
+    withoutBodyVersion(sim, "web");
+    const before = sim.appStacks.appStackMutations.length;
+    expect((await sim.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).outcome).toBe("already_running");
+    expect((await sim.restartAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).outcome).toBe("restarted");
+    await sim.stopAppStack(ref);
+    expect((await sim.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).outcome).toBe("started");
+    expect((await sim.startAppStackComponent({ plan, componentKey: "worker", secretFileContents: [SECRET] })).outcome).toBe("started");
+    const kept = sim.appStacks.appStackMutations.slice(before).map((m) => m.kind);
+    expect(kept).not.toContain("container_remove");
+    expect(kept).not.toContain("container_create");
+    expect(sim.appStacks.getAppStackSnapshot(ID)?.containers.web?.labels[APP_STACK_LABELS.bodyVersion]).toBeUndefined();
+
+    // The worker has the current body version and an equal hash: unchanged.
+    expect(await sim.createAppStackComponents({ plan })).toEqual({
+      components: [
+        { componentKey: "web", outcome: "replaced" },
+        { componentKey: "worker", outcome: "unchanged" },
+      ],
+      removedComponents: [],
+    });
+    const labels = sim.appStacks.getAppStackSnapshot(ID)?.containers.web?.labels;
+    expect(labels?.[APP_STACK_LABELS.bodyVersion]).toBe(String(APP_STACK_CONTAINER_BODY_VERSION));
+    expect(labels?.[APP_STACK_LABELS.componentHash]).toBe(computeAppStackComponentHash(plan, "web"));
+    expect((await sim.createAppStackComponents({ plan })).components.map((c) => c.outcome)).toEqual(["unchanged", "unchanged"]);
+  });
+
   it("removes components, then the stack, keeping volumes unless asked", async () => {
     const sim = simulator();
     await deploy(sim);
@@ -422,6 +461,75 @@ describe("SimulatedAppStacks on disk", () => {
     const virtual = simulator();
     await deploy(virtual);
     expect(existsSync(path.join("/run/hosting-panel/secrets", `app_${ID}__worker`))).toBe(false);
+  });
+
+  it("refuses, like the engine, a log read short of the secret files the container was given (BUG-43)", async () => {
+    const root = tempDir();
+    const sim = simulator({ secretsRootDir: root });
+    await deploy(sim);
+    sim.appStacks.setAppStackComponentLogs(ID, "worker", [{ at: null, stream: "stdout", text: "key=s3cr3t-content" }]);
+    sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: "GET / 200" }]);
+    const dir = path.join(root, `app_${ID}__worker`);
+    rmSync(dir, { recursive: true, force: true });
+    const refused = async () => {
+      const err = await failure(sim.getAppStackComponentLogs({ ...ref, componentKey: "worker", tail: 5 }));
+      expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component worker cannot be masked" });
+      expect(JSON.stringify([String(err), err])).not.toContain("s3cr3t-content");
+    };
+    await refused();
+    // What Docker does after a reboot: the missing bind source comes back as a directory.
+    mkdirSync(path.join(dir, "shared_key"), { recursive: true });
+    await refused();
+    // web was given no secret file: served, with or without a folder.
+    const web = () => sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5 });
+    expect(await web()).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
+    mkdirSync(path.join(root, `app_${ID}__web`));
+    expect(await web()).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
+  });
+
+  it("recognises a secret file by where the container sees it, like the engine: from another folder it is refused (BUG-43)", async () => {
+    for (const sim of [simulator({ secretsRootDir: tempDir() }), simulator()]) {
+      await deploy(sim);
+      const own = sim.appStacks.getAppStackSnapshot(ID)?.containers.worker?.payload.HostConfig.Binds ?? [];
+      expect(own).toEqual([expect.stringMatching(new RegExp(`/app_${ID}__worker/shared_key:/run/secrets/shared_key:ro$`))]);
+      const source = own[0]!.split(":")[0]!;
+      sim.appStacks.setAppStackComponentLogs(ID, "worker", [{ at: null, stream: "stdout", text: "key=s3cr3t-content" }]);
+      sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: "GET / 200" }]);
+      const read = (componentKey: string) => sim.getAppStackComponentLogs({ ...ref, componentKey, tail: 5 });
+      // The same file name under an earlier secrets root, or in another component's folder: refused, though the
+      // component's own folder holds the file.
+      for (const elsewhere of [`/var/lib/earlier-root/app_${ID}__worker/shared_key`, source.replace(`__worker/`, `__web/`)]) {
+        sim.appStacks.setAppStackComponentBinds(ID, "worker", [`${elsewhere}:/run/secrets/shared_key:ro`]);
+        const err = await failure(read("worker"));
+        expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component worker cannot be masked" });
+        expect(JSON.stringify([String(err), err])).not.toContain("s3cr3t-content");
+      }
+      // A bind to another target is not a secret file, wherever it comes from.
+      sim.appStacks.setAppStackComponentBinds(ID, "web", ["/var/lib/elsewhere/token:/etc/token:ro", `${source}:/srv/key:ro`]);
+      expect(await read("web")).toEqual([{ at: null, stream: "stdout", text: "GET / 200" }]);
+      // From the component's own folder: served, masked.
+      sim.appStacks.setAppStackComponentBinds(ID, "worker", own);
+      expect((await read("worker"))[0]?.text).toBe("key=[REDACTED]");
+    }
+  });
+
+  it("refuses in memory too when the container was given a file the simulator does not hold yet", async () => {
+    const sim = simulator();
+    await deploy(sim);
+    // An upgrade gives web its first secret file: its new container has the bind before its start writes the file.
+    const upgraded = rehash({
+      ...plan,
+      components: plan.components.map((c) =>
+        c.key === "web" ? { ...c, secretFiles: [{ envName: "WEB_TOKEN_FILE", parameterKey: "web_token", version: 1 }] } : c,
+      ),
+    });
+    await sim.createAppStackComponents({ plan: upgraded });
+    const token = "w3b-token-value";
+    sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: `token=${token}` }]);
+    const read = () => sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5 });
+    await expect(read()).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component web cannot be masked" });
+    await sim.startAppStackComponent({ plan: upgraded, componentKey: "web", secretFileContents: [{ parameterKey: "web_token", version: 1, content: token }] });
+    expect((await read())[0]?.text).toBe("token=[REDACTED]");
   });
 
   it("writes a real app_<stackId>.yml only when ingressRootDir is set", async () => {

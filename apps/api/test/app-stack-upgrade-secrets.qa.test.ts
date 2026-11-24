@@ -8,6 +8,7 @@ import {
   APP_BUILT_IN_TEMPLATES,
   APP_IMAGE_ALLOWLIST,
   APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
   ApprovedStackPlanSchema,
   appStackPlanSecretRefs,
 } from "@hosting-panel/contracts";
@@ -223,26 +224,32 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     expect(await stackRow(stackId)).toMatchObject({ status: "running" });
   }, 120_000);
 
-  it("refuses a value the upgrade does not need, a value too long for the environment and a repeated key, storing nothing", async () => {
+  it("refuses a value the upgrade does not need, one too short to mask or too long for the environment and a repeated key, storing nothing", async () => {
     const { stackId, v2 } = await installed("job-refusals");
     const diff = await plan(stackId, v2);
     const planHash = diff.body.data.planHash as string;
     const before = await h.counts();
     const withValues = (secrets: Json[]) => upgrade(stackId, { templateVersionId: v2, planHash, secrets });
     const mail = { parameterKey: "mail_password", value: MAIL_PASSWORD };
+    const other = "Another typed value 9c";
 
     // A key the version does not declare and a generated one the customer never sees: the same answer.
-    const unknown = await withValues([mail, { parameterKey: "no_such_key", value: "x" }]);
+    const unknown = await withValues([mail, { parameterKey: "no_such_key", value: other }]);
     expectRefusal(unknown, 400, { field: "secrets.no_such_key", reason: "STACK_PARAMETER_INVALID" });
-    const hidden = await withValues([mail, { parameterKey: "session_key", value: "x" }]);
+    const hidden = await withValues([mail, { parameterKey: "session_key", value: other }]);
     expectRefusal(hidden, 400, { field: "secrets.session_key", reason: "STACK_PARAMETER_INVALID" });
     const strip = (res: Reply) => (res.body.error.details as Json[]).map((d) => ({ ...d, field: String(d.field).replace(/^secrets\.\w+$/, "secrets.*") }));
     expect(strip(hidden)).toEqual(strip(unknown));
     // An optional value is set after the upgrade, among the private values.
-    expectRefusal(await withValues([mail, { parameterKey: "api_token", value: "x" }]), 400, {
+    expectRefusal(await withValues([mail, { parameterKey: "api_token", value: other }]), 400, {
       field: "secrets.api_token",
       reason: "secret_not_needed",
     });
+    // Shorter than the log reader masks (BUG-43): the private values route's refusal, next to that value, never echoed.
+    const short = await withValues([{ parameterKey: "mail_password", value: "Zq9ab" }]);
+    expectRefusal(short, 400, { field: "secrets.mail_password", reason: "value_too_short" });
+    expect(short.body.error.message).toBe(`This value is too short: at least ${String(APP_STACK_SECRET_MIN_LENGTH)} characters.`);
+    expect(short.raw).not.toContain("Zq9ab");
     // The environment limit of the extended format, with the reason the page explains and the bound it names.
     const long = await withValues([{ parameterKey: "mail_password", value: "x".repeat(APP_STACK_SECRET_ENV_LIMITS.secretBytes + 1) }]);
     expectRefusal(long, 400, { field: "secrets.mail_password", reason: "value_too_long", limit: "environment" });
@@ -349,7 +356,7 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     expect(stale.status, stale.raw).toBe(400);
     expect(stale.body.error.details).toEqual([expect.objectContaining({ field: "planHash", reason: "plan_changed" })]);
     // A generated value the application has keeps the answer of a key that does not exist.
-    const hidden = await upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "session_key", value: "x" }] });
+    const hidden = await upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "session_key", value: "typed by hand 4e" }] });
     expectRefusal(hidden, 400, { field: "secrets.session_key", reason: "STACK_PARAMETER_INVALID" });
     expect(await h.counts()).toEqual(before);
     expect(await valueOf(stackId, "mail_password")).toBe(MAIL_PASSWORD);

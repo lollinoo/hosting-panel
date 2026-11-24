@@ -220,6 +220,8 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
+  outcomeUnknown: false,
   revisionNumber: 3,
   components: [
     { key: "web", health: "healthy", healthObservedAt: NOW, dependsOn: ["cache"], ingress: true, cpuMilli: 500, memoryBytes: String(256 * MIB) },
@@ -459,7 +461,7 @@ interface Scenario {
   alerts?: number;
 }
 
-const actionProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", status: "running" as const, upgrade: DETAIL.upgrade, rollback: DETAIL.rollback };
+const actionProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", status: "running" as const, actions: DETAIL.allowedActions, upgrade: DETAIL.upgrade, rollback: DETAIL.rollback };
 const planDialog = (m: Messages, plan: "upgrade" | "rollback", diffState: Record<number, unknown>) => {
   const tree = callHooks(AppStackActions, actionProps, m, { 4: plan });
   const dialog = els(tree).find((e) => typeof e.type === "function" && (e.type as { name?: string }).name === "PlanDialog");
@@ -495,7 +497,17 @@ const LINKS: AppStackLinksDto = {
 };
 const DATABASE_LINKS: AppStackLinksDto = { stackId: "stk_db1", role: "database", connection: LINK.connection, links: [LINK], candidates: [], limit: 8 };
 const linksProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: LINKS as AppStackLinksDto | null };
-const backupsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", status: "running" as const, backups: BACKUPS as AppStackBackupsDto | null };
+const backupsProps = {
+  orgId: ORG,
+  stackId: "stk_a1",
+  csrfToken: "csrf",
+  stackName: "team-notes",
+  status: "running" as const,
+  stale: false,
+  actions: DETAIL.allowedActions,
+  busy: false,
+  backups: BACKUPS as AppStackBackupsDto | null,
+};
 const editor = (m: Messages, target: AppEditorTarget, state: Record<number, unknown> = {}) =>
   withState(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target }, m, state);
 const adminDetail = (m: Messages, tpl: AdminAppTemplateDetailDto, usage: AdminAppTemplateUsageDto | null, state: Record<number, unknown> = {}) =>
@@ -655,7 +667,7 @@ const SCENARIOS: Scenario[] = [
         m,
       ),
   },
-  { name: "backups · not possible in this status", render: (m) => withState(AppStackBackups, { ...backupsProps, status: "deploying" as const }, m) },
+  { name: "backups · not possible in this status", render: (m) => withState(AppStackBackups, { ...backupsProps, status: "deploying" as const, actions: [] }, m) },
   { name: "backups · kept from before, none can be made", render: (m) => withState(AppStackBackups, { ...backupsProps, backups: { ...BACKUPS, unavailableReason: "no_destination" } }, m) },
   ...(["not_available", "no_destination", "no_data"] as const).map((unavailableReason) => ({
     name: `backups · unavailable (${unavailableReason})`,
@@ -1124,13 +1136,14 @@ describe("words, not colours", () => {
 
   it.each(LOCALES)("%s · the draft and unknown states explain themselves in a status region", async (_l, m) => {
     loc.value = localeOf(m);
-    for (const [status, text] of [
-      ["unknown", m.apps.detail.unknownBody],
-      ["draft", m.apps.detail.draftBody],
+    for (const [status, outcomeUnknown, text] of [
+      ["unknown", true, m.apps.detail.unknownBody],
+      ["unknown", false, m.apps.detail.staleBody],
+      ["draft", false, m.apps.detail.draftBody],
     ] as const) {
       fetchUpstream.mockImplementation(async (p: string) =>
         p === UP
-          ? ok({ ...DETAIL, status, revisionNumber: null })
+          ? ok({ ...DETAIL, status, outcomeUnknown, revisionNumber: null })
           : ok(p.endsWith("/links") ? { ...LINKS, links: [] } : p.endsWith("/backups") ? { backups: [], unavailableReason: null, goBackTo: null } : []),
       );
       const h = html(await AppStackPage({ params: Promise.resolve({ stackId: "stk_a1" }) }), m);

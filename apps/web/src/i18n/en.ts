@@ -3303,6 +3303,8 @@ x-hp-ingress:
       notInstalledLine: "Version {version} (release #{release}) was not installed.",
       draftBody: "The application is not installed yet: set the required private values and press Install.",
       unknownBody: "We do not know yet whether the last operation succeeded. Nothing is repeated automatically.",
+      staleBody: "The panel could not read the state of the application lately: what this page shows may be out of date.",
+      staleBadge: "State not up to date",
       platformWork: {
         backups_cleanup:
           "The panel is removing this application's expired backups: until it is done, no action on it can be started. It usually takes a few minutes.",
@@ -3355,6 +3357,8 @@ x-hp-ingress:
     backups: {
       intro: "A backup is a copy of the application's data that you can go back to. It is not made automatically: you create it from here.",
       stopNote: "During the copy the application is stopped and its web addresses do not answer; at the end it starts again by itself.",
+      busy: "Not possible right now: the application is busy with another operation. Wait for it to end.",
+      notAllowed: "Your account cannot create or restore backups of this application at the moment.",
       keptNote:
         "The {kept} most recent backups made by hand and the {safety} most recent made before a restore are kept: older ones are removed during the night.",
       none: "No backups yet.",
@@ -3649,6 +3653,7 @@ x-hp-ingress:
       STACK_PARAMETER_INVALID: "Check the highlighted settings.",
       name_taken: "You already have an application with this name.",
       status: "Not possible right now: the application is «{status}».",
+      notNow: "This action is not available at the moment. Reload the page to see the actions you can use now.",
       stop_unfinished: "The application did not stop completely: press Stop again, or Restart, then try again.",
       task_running: "A task of the application is running: try again in a few minutes.",
       confirmation_mismatch: "The typed name does not match.",
@@ -3669,6 +3674,7 @@ x-hp-ingress:
       domain_target_removed: "A web address points at a component the new version removes: remove the address first.",
       path_target_removed: "A path of a web address points at a component the new version removes: remove the path first.",
       value_too_long: "This value is too long: this application accepts at most {max} characters, fewer if it contains accented letters or symbols.",
+      value_too_short: "This value is too short: it needs at least {min} characters.",
       value_too_long_store: "This value is too long to be stored: shorten it.",
       secret_not_needed: "The update does not need this value: set it among the application's private values.",
       database_as_application: "A database is not connected to another database.",

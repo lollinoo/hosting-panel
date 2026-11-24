@@ -105,6 +105,22 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
    then the customer acts again from the application page with the status it shows. A stack can also read `unknown`
    with no open operation (an interrupted stop, repaired at API start): then **Avvia**, **Arresta**, **Riavvia**,
    **Reinstalla** and delete are all allowed.
+
+   The page enables only the buttons that the stored status, the stack's lock and the reader's permissions allow at
+   that moment: `allowedActions` of `GET /v1/organizations/<orgId>/app-stacks/<stackId>`, never the status shown. It
+   covers the backup and the restore of the **Backup** section too. While an operation holds the stack the list is
+   empty. A run of a task that waits for its turn does not change the list (the page follows it and every action stays
+   offered); once it runs it holds the stack like any operation. An enabled button can still be refused for a reason of its own, and the page shows that refusal: a database
+   that applications still use, the hourly limit of backups and restores, a plan that no longer validates, or what the
+   **Backup** section already names (backups not available on this server, no destination, no data). Two cases read
+   differently on the page than in the database:
+   - **A component crashed.** The page reads «Non riuscita» (`failed`) while the stored status stays `running` or
+     `degraded`: **Avvia** stays disabled and **Riavvia** brings the application back (it restarts every component, and
+     a stopped or crashed one starts again).
+   - **«Esito da verificare» with no operation in doubt.** The panel has no fresh reading of the components (none in the
+     last 5 minutes, or the last one failed; `outcomeUnknown` is `false` in the detail): the page says the state could
+     not be read lately and offers the actions of the stored status. Check the executor (procedure 2 step 3); the next
+     good reading puts the status back.
 5. **A stack in `failed`.** The history on the application page names the reason (the stable code is the `problem` of
    `GET /v1/organizations/<orgId>/app-stacks/<stackId>/deployments`):
    - `STACK_SECRET_MISSING`: set the value in **Valori riservati**, then **Reinstalla**;
@@ -171,8 +187,9 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 ## 4. Downgrade while stacks exist
 
 1. `sudo hp-update --version <older> --allow-downgrade` exits with **code 8** when the target release's `RELEASE.json`
-   does not list the feature `app-stacks` and a stack that is not deleted exists (drafts included). A `psql` error also
-   counts as a refusal. `--dry-run` does not run this check. See what blocks:
+   does not list the feature `app-stacks` and a stack that is not deleted exists (drafts included), whatever its format.
+   A release below `0.10.0` counts as not listing it: every `0.9` release lists `app-stacks` but has the stacks switched
+   off on every backend. A `psql` error also counts as a refusal. `--dry-run` does not run this check. See what blocks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where deleted_at is null"
    ```
@@ -187,11 +204,12 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 4. The gate does not count the retained volumes of deleted stacks: they stay on disk and the older release ignores
    them. Remove them by hand (procedure 3) only if the data is not needed.
 5. The automatic rollback of a failed update stays ungated: migrations `0025`, `0026`, `0027`, `0028` and `0030` are additive.
-6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release that lists `app-stacks` but not `app-format-v2`
-   knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same command exits
-   with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a revision
-   written in it. Stacks of the first format do not block, and neither does a template of the extended format that no
-   stack uses (the built-in WordPress template is such a row on every panel). See what blocks:
+6. **Extended format (`app-format-v2`, `ADR-0036`).** A target release from `0.10.0` on that lists `app-stacks` but not
+   `app-format-v2` knows the stacks but cannot read a plan of the extended template format (`HCP-STACK/v2`): the same
+   command exits with **code 8** while a stack that is not deleted is on a template version of that format, or keeps a
+   revision written in it. Stacks of the first format do not block, and neither does a template of the extended format
+   that no stack uses (the built-in WordPress template is such a row on every panel). A `0.9` release also lists
+   `app-stacks` without `app-format-v2`, but step 1 applies to it: every stack blocks. See what blocks:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and (exists (select 1 from app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1'))"
    ```
@@ -357,10 +375,11 @@ names only the key of a task, and the command is read from the template version 
      archive the ones that are not built-in (procedure 6, step 2). The catalog then offers nothing to install;
      installed stacks keep running.
    - **Go back to an earlier release**, where both flags are `false` on every backend:
-     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases before this one, from `0.9.0`,
-     list `app-stacks` but not `app-format-v2` in `RELEASE.json`, so the gate exits with **code 8** while a stack that
-     is not deleted uses the extended format (procedure 4, step 6); stacks of the first format do not block. An older
-     release does not list `app-stacks` and refuses while any stack that is not deleted exists (procedure 4, step 1).
+     `sudo hp-update --version <older> --allow-downgrade` (procedure 4). The releases below `0.10.0`, from `0.9.0`,
+     list `app-stacks` in `RELEASE.json` but have both flags off, so the gate counts them as not listing it and exits
+     with **code 8** while any stack that is not deleted exists, whatever its format (procedure 4, step 1); an older
+     release does not list `app-stacks` and refuses the same way. From `0.10.0` on, only the features that the target
+     does not list block (procedure 4, from step 6).
    - **Change the code:** a release whose `appFeaturesFor` gives `false` for `linux-systemd`.
 2. If a release with the flags on is followed by one with them off (or by a downgrade), do this first: disable or
    archive the templates so nobody installs one, and ask the customers to stop or delete their stacks. Once the flags
@@ -375,12 +394,18 @@ names only the key of a task, and the command is read from the template version 
    file finds none and fails or runs without it. Nothing repairs this by itself. A secret given in the environment
    (extended format, `ADR-0036` §2.5) is kept by Docker in the container, so a component whose secrets are all in its
    environment keeps working. Components without secrets are not affected.
-2. The component logs stay masked. The executor takes the values of the environment secrets from the container
-   itself (its label `io.hostingpanel.app_secret_env` names them, its environment holds them) and adds the values of
-   the secret files it finds. One case needs the files: a value in which the template's text does not separate two
-   secrets in one way only (two secrets side by side, or that text also inside a secret). Until **Riavvia** writes the
-   files again, the executor refuses that component's logs, and the panel says they are not available right now; it
-   never shows them unmasked.
+2. The component logs are never shown unmasked. The executor takes the values of the environment secrets from the
+   container itself (its label `io.hostingpanel.app_secret_env` names them, its environment holds them) and adds the
+   values of the secret files it finds. The container itself says which secret files it was given (its binds to
+   `/run/secrets/<name>`, each of which must come, read-only, from that file of the component's secret folder); when
+   one of them comes from anywhere else, any other bind covers `/run/secrets`, or one of them is missing or is a
+   directory (Docker recreates a missing bind source as an empty directory when it restarts the container), the
+   executor refuses that component's logs, and the panel says they are not available right now (`ADR-0041` §4).
+   After a reboot that is every component that has a
+   secret file, until **Riavvia** writes the files again; a component whose secrets are all in its environment, or
+   that has none, is read as before. The same refusal comes from a value in which the template's text does not
+   separate two secrets in one way only (two secrets side by side, or that text also inside a secret) when its files
+   are missing.
 3. The stacks that have secrets:
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select s.id, s.organization_id, s.name, s.status from app_stacks s where s.deleted_at is null and exists (select 1 from app_stack_secrets x where x.stack_id = s.id)"
@@ -388,6 +413,27 @@ names only the key of a task, and the command is read from the template version 
 4. On each, the customer (or a hosting administrator of the organisation) presses **Riavvia** (`stack.restart`): it
    writes the secret files again, then restarts every component. **Avvia** does not rewrite the files of a component
    that is already running.
+
+## 8a. After an update that changes how application containers are built
+
+1. Every application container carries the label `io.hostingpanel.app_body_version`: the version of the code that
+   built it (`ADR-0035` §2.10). A release that changes how containers are built for the same application (a setting,
+   a label, a mount, where the secret files are) raises that version. The release that brought the label is such a
+   change: every container created before it has no label and counts as older.
+2. Nothing replaces a running container by itself. The update, a host reboot, **Avvia** and **Riavvia** leave every
+   container as it is, with its old settings. Only the next **Reinstalla** (deploy), upgrade or return to a previous
+   version of each application replaces its older containers, **once**: each one stops, is removed and is created
+   again, with the short interruption a replacement has. The application's volumes and the data in them stay; what a
+   container kept outside them is lost: the files it wrote in its own file system, and a folder its image declares
+   that the template does not mount (issue #98). A later deploy with nothing changed replaces nothing.
+3. The panel does not show which applications still run older containers. List the containers and their version
+   (an empty version is a container built before the label existed):
+   ```bash
+   sudo docker ps -a --filter label=io.hostingpanel.role=app_component --format '{{.Names}}\t{{.Label "io.hostingpanel.app_body_version"}}'
+   ```
+   To bring an application to the new settings at a time that suits its customer, the customer (or a hosting
+   administrator of the organisation) presses **Reinstalla** on its page. The server administrator cannot do it from
+   the console.
 
 ## 9. Read the acceptance scripts' output
 
@@ -414,24 +460,30 @@ names only the key of a task, and the command is read from the template version 
    ```bash
    node infra/linux/accept-app-stack-wordpress.mjs --imported
    ```
+   The built-in run is made for the newest version of the template (procedure 15); without root it ends with
+   `RESULT 25/25 passed, 1 skipped`. With `HP_ACCEPT_WORDPRESS_VERSION=1` it is made for version 1, where
+   `address-follows-host`, `address-follows-https` and `uploads-limit` fail (`no-redirect-loop` is expected to fail
+   too, so `RESULT 21/25`): that run reproduces what version 2 fixes:
+   ```bash
+   HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs
+   ```
 2. They are safe on a live server: they reach Docker only through their own default-deny gate socket, create and
    remove only objects whose name contains `swarmtest_<hex>` (a random value per run) or starts with the script's own
    prefix (`hp_swarmtest_<hex>` for the engine script, `hp_swarmtest_stk_<hex>` for the three template scripts: their
    throw-away proxy `<prefix>_proxy`, its network `<prefix>_ingress`, a temp folder and `/dev/shm/<prefix>-secrets`;
    the databases script uses the same prefix for a temp folder and `/dev/shm/<prefix>-secrets` only: it starts no
    proxy and creates no edge network), never prune, and clean up at the end, also on Ctrl-C.
-   One exception (#52): the executor of the server's own panel attaches its proxy to every network whose role label
-   is `app_edge`, whoever created it, each time it checks its proxy. The WordPress script hides its edge network from
-   it (in Docker that label has another value, which the script's gate translates in both directions). The engine
-   script and the HTTP cache script do not yet: when such a check falls inside their run, the server's proxy joins
-   the run's edge network, the removal steps fail with "A stack network is still used by another container" and
-   `nothing-left` reports a network. The server's proxy keeps serving and is not restarted. Repair: find the
-   network the run left (its name contains `swarmtest_<hex>`), detach the server's proxy from it, remove it:
+   The executor of the server's own panel attaches its proxy to every network whose role label is `app_edge`, whoever
+   created it, so every script that creates an edge network (the engine, HTTP cache and WordPress scripts) hides it:
+   in Docker that label has another value, which the script's gate translates in both directions, and the server's
+   proxy never joins a run's network.
+   An edge network a failed run left behind has the role `app_edge_under_test` in Docker and a name that contains
+   the run's `swarmtest_<hex>`. List it, then remove it by exact name (after the run's containers, item 5):
    ```bash
-   sudo docker network ls --filter name=swarmtest_
-   sudo docker network disconnect <network> hp_ingress_proxy
+   sudo docker network ls --filter label=io.hostingpanel.network_role=app_edge_under_test
    sudo docker network rm <network>
    ```
+   The panel's proxy never joins such a network, because it looks only for the role `app_edge`.
    The backups script uses `hp_swarmtest_<hex>` too; its job containers are named `hp_bk_op_<hex>…`, plus one
    `hp_bk_test_<16 hex>` for the destination test. It gives its application no address, so it creates no edge network.
    Its job containers carry the role of the panel's own jobs (`site_job`), and `hp-docker-executor` removes such
@@ -733,7 +785,28 @@ needed, and a support visit gives none of this.
    ```
 4. What the answers mean: `403` the caller is not a server administrator (also recorded); `422` applications are off
    on this server; `404` the application is unknown or deleted, or it has no component of that name; `503` the
-   executor is not running.
+   executor is not running, or the lines of that component cannot be masked (step 5).
+5. **`503` («not available right now») for one component, while other components read.** The panel refused lines
+   it could not mask; the customer sees the same answer on their own page, and the executor writes no line about
+   it. The answer does not say which of these it is, so try them in order:
+   1. A secret file the component's container was given is missing, or Docker recreated it as a directory: after a
+      host reboot (procedure 8), or after an installation or an update that stopped before the component started.
+      The customer (or a hosting administrator of the organisation) presses **Riavvia**, which writes the files
+      again; for a stopped installation, fix its cause and **Reinstalla**.
+   2. Still refused after **Riavvia**: a private value of the component is shorter than 6 characters. It was set
+      before this rule (a new one is refused, and a generated one has at least 8); the application still starts with
+      it. The customer replaces it in **Valori riservati** with one of at least 6 characters, then presses
+      **Reinstalla**. The panel does not say which value is the short one.
+   3. Still refused, and the executor's secret folder (`HP_SECRETS_ROOT_DIR`) was changed after the component's
+      container was created: that container still has its secret files from the old folder, so its lines cannot be
+      masked. **Riavvia** keeps the same container and its binds (it writes the files in the new folder, which that
+      container does not see), and so does **Reinstalla** while the component's plan is unchanged, except the first
+      **Reinstalla** of an older container (procedure 8a), which replaces it with its files from the current folder
+      and so ends the refusal. Either put the earlier folder back in the executor's configuration, or have the
+      customer give a new value, in **Valori riservati**, to one of the component's private values that is a secret
+      file, then press **Reinstalla**: the changed plan creates the container again, with its files from the current
+      folder. When every secret file of the component holds a generated value, the customer has no value to give:
+      only an upgrade that changes the component creates the container again; otherwise put the earlier folder back.
 
 ## 14. Administrator: a terminal in a component
 
@@ -805,3 +878,35 @@ terminal of the sites (`ADR-0027`) with a different place and a different user.
     refused after the update: the application's page answers an error and a start is refused. Applications were first
     switched on in release 0.10.0, so none is expected. If one exists, correct the value (the customer replaces a
     private value from the application's page), or stop the application or delete it (procedure 3).
+
+## 15. WordPress: upgrade installed applications to version 2
+
+Version 2 of the built-in «WordPress in contenitore» template (`atv_wordpress_mariadb_2`, `ADR-0036` §8.3) fixes two
+faults of version 1 (`atv_wordpress_mariadb_1`). WordPress keeps the address it was installed from, so another web
+address of the application answers with pages, styles and a login form that point to the first one. And uploads stop
+at 2 MB.
+
+1. **What changes.** Only the WordPress component. It takes the address from each request (`WP_HOME` and
+   `WP_SITEURL`, set in `wp-config.php` through `WORDPRESS_CONFIG_EXTRA`), and its web server accepts uploads and forms
+   of up to 64 MB. The database component, the data areas, the web addresses and the generated passwords stay as they
+   are. Version 1 itself is not changed.
+2. **When it arrives.** The first start of `hp-api` after the update adds version 2 and makes it the template's default,
+   unless an administrator had made a version of their own the default: that choice stays, until an administrator
+   presses **Rendi predefinita** on version 2 in **Modelli**. When an administrator had already added a version 2 of
+   their own, the built-in one is number 3. The template's description changes only if nobody edited it. Check:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select t.default_version_id, v.id, v.version_number from app_templates t join app_template_versions v on v.template_id = t.id where t.id = 'atpl_wordpress_mariadb' order by v.version_number"
+   ```
+3. **Installed applications need the upgrade.** An application installed with version 1 keeps it until a customer
+   owner or a hosting administrator of its organisation presses **Aggiorna alla versione 2** (or the number above) on
+   the application's page and confirms. Nothing upgrades it automatically, and that button is the only notice the customer gets. The review
+   shows the WordPress component modified and restarted, nothing else changed and no value to enter; the application
+   does not answer for a few moments while WordPress restarts. Unless a **Reinstalla** already did it, the upgrade
+   also replaces the database container once (procedure 8a); its data stay. **Torna alla versione 1** brings the old
+   behaviour back.
+   The applications still on version 1:
+   ```bash
+   cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, organization_id, name, status from app_stacks where template_version_id = 'atv_wordpress_mariadb_1' and status <> 'deleted' order by id"
+   ```
+4. **What it does not change.** Addresses written inside posts and pages (links, images) keep the old name: WordPress
+   stores them in the content. The customer changes them in WordPress.

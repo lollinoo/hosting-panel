@@ -123,6 +123,21 @@ describe("image", () => {
     expect(listComposeImages(compose)).toEqual([]);
     expectRefused(run(compose), "refused IMAGE_INVALID services.web.image");
   });
+
+  it.each([
+    "127.0.0.1:5000/acme/web:1.0",
+    "localhost:5000/acme/web",
+    "10.0.0.5/acme/web:1.0",
+    "registry.internal/acme/web:1.0",
+    `127.0.0.1:5000/acme/web:1.0@${digest(9)}`,
+    `registry.local/acme/web@${digest(9)}`,
+  ])("refuses the image %s of this server or a private network and does not look it up", (image) => {
+    const compose = one(image);
+    expect(listComposeImages(compose)).toEqual([]);
+    const result = importComposeToAppTemplate({ compose, digests: new Map([[image, digest(1)]]) });
+    expectRefused(result, "refused IMAGE_REGISTRY_REFUSED services.web.image");
+    expect(result.report.find((note) => note.code === "IMAGE_REGISTRY_REFUSED")?.message).not.toContain("acme");
+  });
 });
 
 describe("environment", () => {

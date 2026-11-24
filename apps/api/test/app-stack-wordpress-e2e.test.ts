@@ -45,6 +45,9 @@ interface Payload {
 }
 
 const WORDPRESS = APP_BUILT_IN_TEMPLATES.find((t) => t.slug === "wordpress-mariadb")!;
+/** The one PHP line version 2 gives the image (ADR-0036): the site's address follows the name it is asked by. */
+const CONFIG_EXTRA =
+  "WORDPRESS_CONFIG_EXTRA=$hcp_host = isset($_SERVER['HTTP_HOST']) ? strtolower($_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$/D', $hcp_host)) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $hcp_host); define('WP_SITEURL', WP_HOME); } unset($hcp_host);";
 const json = (value: unknown): string => JSON.stringify(value, (_key, v: unknown) => (typeof v === "bigint" ? v.toString() : v));
 const spellings = (value: string): string[] => [value, Buffer.from(value).toString("base64"), Buffer.from(value).toString("hex")];
 
@@ -187,7 +190,7 @@ describe("WordPress from the catalogue, end to end on the simulator (ADR-0036)",
 
   it("WordPress and its database receive the same password, each under the name its software reads", () => {
     expect([...payloadOf("wordpress").Env].sort()).toEqual(
-      ["WORDPRESS_DB_HOST=db", "WORDPRESS_DB_NAME=wordpress", "WORDPRESS_DB_USER=wordpress", `WORDPRESS_DB_PASSWORD=${dbPassword}`].sort(),
+      [CONFIG_EXTRA, "WORDPRESS_DB_HOST=db", "WORDPRESS_DB_NAME=wordpress", "WORDPRESS_DB_USER=wordpress", `WORDPRESS_DB_PASSWORD=${dbPassword}`].sort(),
     );
     expect([...payloadOf("db").Env].sort()).toEqual(
       ["MARIADB_DATABASE=wordpress", "MARIADB_USER=wordpress", `MARIADB_PASSWORD=${dbPassword}`, `MARIADB_ROOT_PASSWORD=${rootPassword}`].sort(),
@@ -196,10 +199,13 @@ describe("WordPress from the catalogue, end to end on the simulator (ADR-0036)",
   });
 
   it("both run with the standard profile and nothing more: six fixed capabilities, no privilege, no host path, no socket", () => {
+    // The image's own start program, told the uploads limit; never an entrypoint.
+    expect(payloadOf("wordpress").Cmd).toEqual(["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"]);
+    expect(payloadOf("db").Cmd).toBeUndefined();
     for (const component of ["wordpress", "db"]) {
       const payload = payloadOf(component);
       expect(payload.User, component).toBeUndefined();
-      expect(payload.Cmd, component).toBeUndefined();
+      expect((payload as unknown as Json)["Entrypoint"], component).toBeUndefined();
       expect(payload.HostConfig, component).toMatchObject({
         Privileged: false,
         CapDrop: ["ALL"],

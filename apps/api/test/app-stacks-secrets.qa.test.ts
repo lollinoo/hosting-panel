@@ -312,4 +312,20 @@ describe("application stacks: secrets never leave through HTTP (QA M4, A8)", () 
     }
     expect(await h.counts()).toEqual(before);
   });
+
+  it("a new value shorter than six characters is refused by its own reason and not echoed; six are enough (BUG-43)", async () => {
+    const stackId = await draft(h.a, notes);
+    const before = await h.counts();
+    const message = "This value is too short: at least 6 characters.";
+    for (const value of ["Zq9ab", "Zq9", ""]) {
+      const res = await setSecret(h.a, stackId, value);
+      expect([res.status, res.body.error?.code], res.raw).toEqual([400, "VALIDATION_ERROR"]);
+      // Its own reason, so the page can say why and state the minimum.
+      expect(res.body.error.details).toEqual([{ field: "value", message, reason: "value_too_short" }]);
+      if (value !== "") expect(res.raw).not.toContain(value);
+    }
+    expect(await h.counts()).toEqual(before);
+    const six = await setSecret(h.a, stackId, "Zq9abc");
+    expect(six.status, six.raw).toBe(200);
+  });
 });
