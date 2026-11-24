@@ -26,6 +26,10 @@ export const APP_STACK_TASK_END_SETTLE_MS = 2_000;
 export const APP_STACK_TASK_OUTPUT_TAIL_BYTES = 65_536;
 /** Finished runs remembered by id, so that a second call with the same id never starts the command again. */
 export const APP_STACK_TASK_RUNS_REMEMBERED = 200;
+/**
+ * Tries of the kill after a run, the first one included, and the pause between two of them. They are part of the run:
+ * the application stays held, and nothing is answered, until a kill is confirmed or the last one failed.
+ */
 export const APP_STACK_TASK_CLEANUP_RETRIES = 6;
 export const APP_STACK_TASK_CLEANUP_RETRY_MS = 5_000;
 /** Components the start-up clean-up works in at once. */
@@ -82,7 +86,7 @@ export interface AppStackTaskRunnerDeps {
   readonly target: DockerExecTarget;
   readonly secretsRootDir: string;
   readonly now?: () => Date;
-  /** The clean-up after a run did not finish, also when tried again. It is told nothing: no name and no output. */
+  /** The clean-up after a run did not finish, the last try included. It is told nothing: no name and no output. */
   readonly onCleanupFailed?: () => void;
   /** A run printed something and none of it was kept: the private values of the component could not be established, so
    *  it could not be masked. It is told nothing: no name, no output, no value. */
@@ -238,6 +242,7 @@ class TaskOutputTail {
  * printed is logged here, and no Docker id leaves this class.
  */
 export class AppStackTaskRunner implements StackTaskExecutorPort {
+  /** Applications with a run going: it lasts until a kill is confirmed or the last try of it failed. */
   private readonly busy = new Set<string>();
   /** Applications with a start-up clean-up still going, and how many. */
   private readonly held = new Map<string, number>();
@@ -373,9 +378,10 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     } catch (err) {
       // The engine refused to create the exec: the container is gone or stopped, nothing started.
       if (codeOf(err) === "NOT_FOUND") return notRunning();
-      // Otherwise the command may be running (a failed create cannot be told from a failed start).
-      await this.cleanUp(containerId, req.runId);
-      return this.finished(req, container.inspected, "failed", null, startedAt, tail);
+      // Otherwise the command may be running (a failed create cannot be told from a failed start): it ended as failed
+      // only where the kill is confirmed, else nobody knows.
+      const stopped = await this.cleanUp(containerId, req.runId);
+      return this.finished(req, container.inspected, stopped ? "failed" : "unknown", null, startedAt, tail);
     }
 
     // A late error of the stream must never be an unhandled one.
@@ -383,12 +389,13 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     try {
       return await this.followToTheEnd(req, container, exec, startedAt, tail);
     } catch {
-      // Not expected. The command did start, so the run is remembered as failed and is never started again.
+      // Not expected. The command did start, so the run is remembered and is never started again: as failed where the
+      // kill is confirmed, else as not known.
       exec.socket.destroy();
-      await this.cleanUp(containerId, req.runId);
+      const stopped = await this.cleanUp(containerId, req.runId);
       return {
         runId: req.runId,
-        outcome: "failed",
+        outcome: stopped ? "failed" : "unknown",
         problem: null,
         exitCode: null,
         startedAt: startedAt.toISOString(),
@@ -409,14 +416,17 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     const containerId = container.id;
     const how = await this.follow(exec.socket, tail, req.timeoutSeconds * this.secondMs);
     if (how === "limit") {
-      await this.cleanUp(containerId, req.runId);
+      // Stopped at its time limit only where a kill is confirmed (or the container is gone): else the command may still
+      // be going, and the run is not known to have ended.
+      const stopped = await this.cleanUp(containerId, req.runId);
       await this.waitForEnd(exec.socket);
       exec.socket.destroy();
-      return this.finished(req, container.inspected, "timed_out", null, startedAt, tail);
+      return this.finished(req, container.inspected, stopped ? "timed_out" : "unknown", null, startedAt, tail);
     }
     exec.socket.destroy();
-    // What the command left behind ends before the answer; then the engine tells how the command itself ended.
-    await this.cleanUp(containerId, req.runId);
+    // What the command left behind ends before the answer (every try of the kill is part of the run); then the engine
+    // tells how the command itself ended.
+    const stopped = await this.cleanUp(containerId, req.runId);
     const state = await inspectExecState(this.target, exec.execId).catch(() => undefined);
     const raw = state?.exitCode ?? null;
     const exitCode = raw !== null && Number.isInteger(raw) && raw >= 0 && raw <= 255 ? raw : null;
@@ -425,6 +435,12 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     // container stops, but it also forgets every exec when it restarts: a command that did run then loses its output
     // and its exit code (ADR-0042 §7).
     const started = state !== null && state?.pid !== 0;
+    // A command that ended by itself keeps its outcome and exit code, whatever the kill of what it left behind. An end
+    // of the output that comes with no exit code (a connection that broke ends it the same way) does not say that the
+    // command ended: with no confirmed kill either, it may still be going.
+    if (!stopped && exitCode === null && started) {
+      return this.finished(req, container.inspected, "unknown", null, startedAt, tail);
+    }
     return this.finished(req, container.inspected, exitCode === 0 ? "succeeded" : "failed", exitCode, startedAt, tail, started);
   }
 
@@ -464,34 +480,29 @@ export class AppStackTaskRunner implements StackTaskExecutorPort {
     });
   }
 
-  /** Kills what a run started. A failure is tried again in the background; the next run's first step is another net. */
-  private async cleanUp(containerId: string, runId: string): Promise<void> {
-    const first = await killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs);
-    if (first === "done" || first === "gone") return;
-    // The component's own environment carries the mark: the script would kill nothing again, so it is not retried.
-    if (first === "own_mark") {
-      this.deps.onCleanupFailed?.();
-      return;
+  /**
+   * Kills what a run started, and tries again after a failure, up to `APP_STACK_TASK_CLEANUP_RETRIES` tries in all, each
+   * one awaited: the run, and so the hold on the application, lasts until a kill is confirmed or the last one failed.
+   * True when a kill is confirmed (also when the container is gone, so nothing is left to stop); false when it is not,
+   * which is logged once. The component's own environment carrying the mark is not tried again: the script would kill
+   * nothing again. The next run's first step is another net.
+   */
+  private async cleanUp(containerId: string, runId: string): Promise<boolean> {
+    for (let attempt = 1; ; attempt += 1) {
+      const outcome = await killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs);
+      if (outcome === "done" || outcome === "gone") return true;
+      if (outcome === "own_mark" || attempt >= APP_STACK_TASK_CLEANUP_RETRIES) {
+        this.deps.onCleanupFailed?.();
+        return false;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, this.retryDelayMs));
     }
-    let attempt = 1;
-    const again = (): void => {
-      const timer = setTimeout(() => {
-        void killMarkedProcesses(this.target, containerId, runId, this.killTimeoutMs).then((outcome) => {
-          if (outcome === "done" || outcome === "gone") return;
-          attempt += 1;
-          if (outcome !== "own_mark" && attempt < APP_STACK_TASK_CLEANUP_RETRIES) again();
-          else this.deps.onCleanupFailed?.();
-        });
-      }, this.retryDelayMs);
-      timer.unref();
-    };
-    again();
   }
 
   private async finished(
     req: AppStackTaskRunIpcRequest,
     inspected: AppStackInspectedContainer,
-    outcome: "succeeded" | "failed" | "timed_out",
+    outcome: "succeeded" | "failed" | "timed_out" | "unknown",
     exitCode: number | null,
     startedAt: Date,
     tail: TaskOutputTail,

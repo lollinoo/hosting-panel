@@ -756,7 +756,7 @@ describe("runAppStackTask on the Docker Engine", () => {
     expect(mockDaemon.requestedPaths).toEqual([]);
   });
 
-  it("tries the clean-up again when it fails after a run, and logs a code only when it gives up", async () => {
+  it("tries the clean-up again when it fails after a run, before the answer, and logs a code only when it gives up", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     let failing = 3;
     const retried = await setup({
@@ -768,18 +768,240 @@ describe("runAppStackTask on the Docker Engine", () => {
     });
     expect((await retried.adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
     const kills = (d: MockDockerDaemon) => killRuns(d).filter((runId) => runId === RUN(1)).length;
-    await until(() => kills(retried.mockDaemon) === 4);
+    // The retries are part of the run (#158): all of them are done when the answer comes, none is left to a timer.
+    expect(kills(retried.mockDaemon)).toBe(4);
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(kills(retried.mockDaemon)).toBe(4);
     expect(warn).not.toHaveBeenCalled();
 
     const never = await setup({ kill: (call) => (killOf(call) === RUN(1) ? { exitCode: 1 } : undefined) });
+    // The command ended by itself: its outcome stays, whatever the kill of what it left behind.
     expect((await never.adapter.runAppStackTask(request(1))).outcome).toBe("succeeded");
-    await until(() => warn.mock.calls.length === 1);
     expect(kills(never.mockDaemon)).toBe(6);
+    expect(warn).toHaveBeenCalledTimes(1);
     const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
     expect(Object.keys(logged).sort()).toEqual(["code", "component", "event", "timestamp"]);
     expect([logged.component, logged.event, logged.code]).toEqual(["hp-docker-executor", "app_task_cleanup_failed", "INTERNAL_ERROR"]);
+  });
+
+  describe("a kill that is not confirmed holds the run and the application (#158)", () => {
+    type Step = "fail" | "hold" | "ok";
+    /**
+     * The kills of one run answer as the steps tell, one per attempt (the last step repeats): `fail` ends with a code
+     * of failure, `hold` keeps the kill open until the test ends it (its exec id is added to `held`), `ok` ends well.
+     * `onKill` runs on every attempt: it is what the kill does to the command.
+     */
+    const kills = (runId: string, steps: readonly Step[], held: string[], onKill?: (daemon: MockDockerDaemon) => void): NonNullable<Script["kill"]> => {
+      let attempt = 0;
+      return (call, daemon) => {
+        if (killOf(call) !== runId) return undefined;
+        const step = steps[Math.min(attempt, steps.length - 1)]!;
+        attempt += 1;
+        onKill?.(daemon);
+        if (step === "fail") return { exitCode: 1 };
+        if (step === "hold") {
+          held.push(call.execId);
+          return { stayOpen: true };
+        }
+        return undefined;
+      };
+    };
+    const attemptsOf = (d: MockDockerDaemon, n: number) => killRuns(d).filter((runId) => runId === RUN(n)).length;
+    const REF = { stackId: STACK, organizationId: ORG };
+    /** What the engine's exclusion says while a task of the application goes: its changes are refused. */
+    const refusedWhileHeld = async (adapter: DockerEngineSocketAdapter): Promise<unknown[]> => {
+      const err = await refusal(adapter.stopAppStack(REF));
+      return [err.reason, err.code, err.message];
+    };
+    const HELD = ["STACK_BUSY", "RESOURCE_LOCKED", "A task of this application stack is running"];
+    /** The answer of a run, and whether it has come. */
+    const asked = (adapter: DockerEngineSocketAdapter, n: number) => {
+      const state: { answered: boolean } = { answered: false };
+      const answer = adapter.runAppStackTask(request(n)).then((result) => {
+        state.answered = true;
+        return result;
+      });
+      return { state, answer };
+    };
+    // A long enough pause between the tries: a run that answers at once is out well before the second try.
+    const slowRetry = { retryDelayMs: 100, killTimeoutMs: 5_000 };
+
+    it("gives no answer at the time limit until the kill that failed once is tried again: then timed_out", async () => {
+      const held: string[] = [];
+      let command = "";
+      const { adapter, mockDaemon } = await setup(
+        {
+          command: (call) => {
+            command = call.execId;
+            return { stayOpen: true, frames: [[1, "going\n"]] };
+          },
+          // The first kill fails after it killed the command: its output ends, only the answer of the script is a failure.
+          kill: kills(RUN(1), ["fail", "hold"], held, (daemon) => daemon.endExec(command, 137)),
+        },
+        slowRetry,
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect(attemptsOf(mockDaemon, 1)).toBe(2);
+      // The second kill is going: the run is not over, so the application is held and nothing is answered.
+      expect(state.answered).toBe(false);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+      expect(await adapter.getAppStackTaskRun({ ...REF, runId: RUN(1) })).toEqual({ state: "running" });
+
+      mockDaemon.endExec(held[0]!, 0);
+      const result = await answer;
+      expect(result).toMatchObject({ outcome: "timed_out", problem: null, exitCode: null, output: "going" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(2);
+      // The run is over: the application is free again.
+      await adapter.stopAppStack(REF);
+    });
+
+    it("answers unknown, not timed_out, when every kill fails, and holds the application until the last one", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const held: string[] = [];
+      let command = "";
+      const { adapter, mockDaemon } = await setup(
+        {
+          command: (call) => {
+            command = call.execId;
+            return { stayOpen: true, frames: [[1, "going\n"]] };
+          },
+          // Five kills fail, the sixth (the last of APP_STACK_TASK_CLEANUP_RETRIES) is held open by the test.
+          kill: kills(RUN(1), ["fail", "fail", "fail", "fail", "fail", "hold"], held, (daemon) => daemon.endExec(command, 137)),
+        },
+        { retryDelayMs: 20, killTimeoutMs: 5_000 },
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      // Still held at the last attempt, and nothing is logged before it ended.
+      expect(state.answered).toBe(false);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+      expect(warn).not.toHaveBeenCalled();
+
+      mockDaemon.endExec(held[0]!, 1);
+      const result = await answer;
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "going", outputTruncated: false });
+      expect(result.startedAt).not.toBeNull();
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(String(warn.mock.calls[0]?.[0])) as Record<string, unknown>;
+      expect(Object.keys(logged).sort()).toEqual(["code", "component", "event", "timestamp"]);
+      expect([logged.component, logged.event, logged.code]).toEqual(["hp-docker-executor", "app_task_cleanup_failed", "INTERNAL_ERROR"]);
+      await adapter.stopAppStack(REF);
+      // The run is remembered as it was answered: a second call with its id starts nothing.
+      expect(await adapter.getAppStackTaskRun({ ...REF, runId: RUN(1) })).toEqual({ state: "finished", result });
+    });
+
+    it("answers unknown at once, with no second try, where the clean-up cannot work in the component", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: () => ({ stayOpen: true, frames: [[1, "going\n"]] }),
+        kill: (call) => (killOf(call) === RUN(1) ? { exitCode: APP_STACK_TASK_KILL_OWN_MARK_EXIT } : undefined),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "going" });
+      expect(attemptsOf(mockDaemon, 1)).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("says timed_out when the container is gone: nothing is left to stop", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: (_call, daemon) => {
+          // The component is removed while the command goes: the next exec of a kill is refused as "no such container".
+          daemon.containers.delete(`${WEB}_id`);
+          return { stayOpen: true, frames: [[1, "going\n"]] };
+        },
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "timed_out", exitCode: null, output: "going" });
+      expect(killRuns(mockDaemon)).toEqual([""]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("keeps the outcome and the exit code of a command that ended by itself, held until the kill that failed once is tried again", async () => {
+      const held: string[] = [];
+      const { adapter, mockDaemon } = await setup(
+        { command: () => ({ frames: [[1, "done\n"]], exitCode: 3 }), kill: kills(RUN(1), ["fail", "hold"], held) },
+        slowRetry,
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect(state.answered).toBe(false);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+
+      mockDaemon.endExec(held[0]!, 0);
+      const result = await answer;
+      expect(result).toMatchObject({ outcome: "failed", exitCode: 3, output: "done" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      await adapter.stopAppStack(REF);
+    });
+
+    it("keeps the outcome of a command that ended by itself when no kill is confirmed, and holds until the last one", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const held: string[] = [];
+      const { adapter, mockDaemon } = await setup(
+        { command: () => ({ frames: [[1, "done\n"]], exitCode: 0 }), kill: kills(RUN(1), ["fail", "fail", "fail", "fail", "fail", "hold"], held) },
+        { retryDelayMs: 20, killTimeoutMs: 5_000 },
+      );
+      const { state, answer } = asked(adapter, 1);
+      await until(() => held.length === 1);
+      expect([state.answered, warn.mock.calls.length]).toEqual([false, 0]);
+      expect(await refusedWhileHeld(adapter)).toEqual(HELD);
+
+      mockDaemon.endExec(held[0]!, 1);
+      expect(await answer).toMatchObject({ outcome: "succeeded", exitCode: 0, output: "done" });
+      expect(warn).toHaveBeenCalledTimes(1);
+      await adapter.stopAppStack(REF);
+    });
+
+    it("answers unknown for an output that ends by a cut connection when no kill is confirmed and the engine does not tell how the command ended", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter, mockDaemon } = await setup({
+        command: (call) => {
+          command = call.execId;
+          return { cut: true, frames: [[1, "half\n"]] };
+        },
+        // The exec is over for the engine, with no exit code; the kill itself fails.
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, null)),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "half" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the exit code of an output cut by a broken connection when the engine tells how the command ended, whatever the kill", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      let command = "";
+      const { adapter } = await setup({
+        command: (call) => {
+          command = call.execId;
+          return { cut: true, frames: [[1, "half\n"]] };
+        },
+        kill: kills(RUN(1), ["fail"], [], (daemon) => daemon.endExec(command, 137)),
+      });
+      expect(await adapter.runAppStackTask(request(1))).toMatchObject({ outcome: "failed", exitCode: 137, output: "half" });
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it("answers unknown for a command whose start failed when no kill is confirmed", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { adapter, mockDaemon } = await setup({
+        command: () => ({ failStart: true }),
+        kill: kills(RUN(1), ["fail"], []),
+      });
+      const result = await adapter.runAppStackTask(request(1));
+      expect(result).toMatchObject({ outcome: "unknown", problem: null, exitCode: null, output: "" });
+      expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+      expect(attemptsOf(mockDaemon, 1)).toBe(6);
+      expect(warn).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
