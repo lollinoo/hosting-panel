@@ -11,6 +11,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackRevisions,
   appStacks,
   appStackVolumes,
   auditEvents,
@@ -27,6 +28,7 @@ import {
   organizations,
   platformInstallations,
   resourceQuotas,
+  sql,
   transitionOperation,
   updateAppTemplate,
   type AppStackWriteResult,
@@ -561,6 +563,25 @@ describe("recoverAppStackOperation (RT4)", () => {
     expect(await stepsOf(upgrade)).toMatchObject({ pull: "failed", create: "failed" });
     // Not taken back: the address points at a part only the new version has.
     expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null, desiredRevisionId: v2.revisionId });
+  });
+
+  it("(8e) a stopped application whose applied revision no longer reads still settles stopped: one was applied (#129)", async () => {
+    const { stackId, rev } = await running();
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    const v2 = revision(stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    fake.failNext("prepareAppStack", "ambiguous");
+    await parked(upgrade);
+    // Revisions are immutable: only this test can make the applied one's plan unreadable.
+    await db().execute(sql`ALTER TABLE app_stack_revisions DISABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+    await db().update(appStackRevisions).set({ plan: { ...rev.plan, schemaVersion: 99 } }).where(eq(appStackRevisions.id, rev.revisionId));
+    await db().execute(sql`ALTER TABLE app_stack_revisions ENABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
   });
 
   it("(9) routes observed published keep the stored routes hash", async () => {

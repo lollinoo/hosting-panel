@@ -719,6 +719,21 @@ describe("AppStackRuntime (RT3)", () => {
       expect((await stepsOf(deploy))["validate"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
     });
 
+    it("one whose applied revision no longer checks stays stopped: a revision of it was applied all the same", async () => {
+      const { stackId, rev } = await stopped();
+      // Revisions are immutable: only this test can give one a hash its plan does not have.
+      await db().execute(sql`ALTER TABLE app_stack_revisions DISABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+      await db().update(appStackRevisions).set({ planHash: hex("not the plan") }).where(eq(appStackRevisions.id, rev.revisionId));
+      await db().execute(sql`ALTER TABLE app_stack_revisions ENABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+
+      const deploy = await enqueue(stackId, "stack.deploy");
+      expectFailure(await run(deploy), "STACK_TEMPLATE_INVALID");
+
+      expect(trace()).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId });
+      expect(await deploymentOf(deploy)).toMatchObject({ status: "failed", problem: "STACK_TEMPLATE_INVALID" });
+    });
+
     it("a failure at create still ends failed: the executor may have replaced a component", async () => {
       const { stackId, rev } = await stopped();
       const v2 = revision(stackId, [CACHE, WEB_V2]);
