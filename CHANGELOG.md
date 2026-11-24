@@ -4,6 +4,22 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Email, webhook and Telegram for the administrator and the customer (2026-11-24)
+*hosting-panel v0.14.0*
+
+**New Features**
+- **notifications**: Email, webhook and Telegram for the administrator and the customer
+
+---
+
+### Standalone databases with a private link to applications (2026-11-24)
+*hosting-panel v0.13.0*
+
+**New Features**
+- **apps**: Standalone databases with a private link to applications
+
+---
+
 ### A failed upgrade keeps the application on the version that runs (2026-11-24)
 *hosting-panel v0.12.1*
 
