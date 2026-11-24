@@ -404,7 +404,11 @@ describe("syncAppStackLinks repairs an attachment the server can no longer honou
 
   it("a database attached to a network that is gone cannot start until the attachment is removed", async () => {
     const h = await orphaned();
-    expect(await failure(start(h))).toMatchObject({ reason: "STACK_COMPONENT_NOT_READY" });
+    // The container is there: the refusal names the missing network, never a missing container, a network or an id.
+    expect(await failure(start(h))).toMatchObject({
+      reason: "STACK_COMPONENT_NOT_READY",
+      message: "Component db is attached to a network that is missing",
+    });
     h.clear();
     await expect(h.engine.syncAppStackLinks(link([]))).resolves.toEqual({ container: true, links: [], disconnected: [APP_A] });
     expect(mutations(h.fake.log)).toEqual([disconnectLine(APP_A)]);

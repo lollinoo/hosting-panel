@@ -749,6 +749,31 @@ describe("start and restart (5.11)", () => {
     });
   });
 
+  it("refuses a component that is removed between the read and the start as not created", async () => {
+    const h = await setup();
+    await prepared(h);
+    const held = h.fake.hold(/^POST \/containers\/[^/]+\/start$/);
+    const starting = h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+    const refused = expect(starting).rejects.toMatchObject({ reason: "STACK_COMPONENT_NOT_READY", message: "Component web is not created" });
+    await vi.waitFor(() => expect(h.fake.log).toContain(`POST /containers/${idOf(h, WEB)}/start`));
+    h.fake.containers.delete(WEB);
+    held.release();
+    await refused;
+  });
+
+  it("refuses a start that is answered 404 for a missing network, with no network or id in the text", async () => {
+    const h = await setup();
+    await prepared(h);
+    h.fake.networks.delete(NET);
+    const error = await h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] }).catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      reason: "STACK_COMPONENT_NOT_READY",
+      code: "RESOURCE_LOCKED",
+      message: "Component web is attached to a network that is missing",
+    });
+    expect(mutations(h.fake.log)).toEqual([`POST /containers/${idOf(h, WEB)}/start`]);
+  });
+
   it("refuses a foreign container under the derived name", async () => {
     const h = await setup();
     await foreignContainer(h, WEB);

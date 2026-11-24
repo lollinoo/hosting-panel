@@ -975,7 +975,14 @@ export class AppStackEngine implements StackExecutorPort {
         "POST",
         action === "start" ? `/containers/${enc(target.Id)}/start` : `/containers/${enc(target.Id)}/restart?t=10`,
       );
-      if (res.statusCode === 404) refuse("STACK_COMPONENT_NOT_READY", `Component ${key} is not created`);
+      if (res.statusCode === 404) {
+        // The engine answers 404 both for the container and for a network its stored attachment names: read it again.
+        const again = await this.get<ContainerInspect>(
+          `/containers/${enc(appStackContainerName(plan.stackId, key))}/json`,
+          "inspect an application container",
+        );
+        refuse("STACK_COMPONENT_NOT_READY", again === null ? `Component ${key} is not created` : `Component ${key} is attached to a network that is missing`);
+      }
       if (res.statusCode === 204 || (action === "start" && res.statusCode === 304)) {
         return { componentKey: key, outcome: action === "start" ? "started" : "restarted" };
       }
