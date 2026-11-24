@@ -161,12 +161,18 @@ const deployed = (components: AppStackComponentRow[], change: Partial<Parameters
   });
 
 describe("appStackSummaryDto", () => {
-  const summary = (components: AppStackComponentRow[], domains: AppStackDomainRow[] = []) =>
+  const summary = (
+    components: AppStackComponentRow[],
+    domains: AppStackDomainRow[] = [],
+    appliedPlan: ApprovedStackPlan | null = null,
+    stack: AppStackRow = stackRow({ status: "running" }),
+  ) =>
     appStackSummaryDto({
-      stack: stackRow({ status: "running" }),
+      stack,
       templateName: "Notes Demo",
       templateVersionNumber: 2,
       installed: { revisionNumber: 4, templateVersionNumber: 1 },
+      appliedPlan,
       components,
       domains,
       now: NOW,
@@ -182,6 +188,41 @@ describe("appStackSummaryDto", () => {
     ]);
     expect(dto).toMatchObject({ componentCount: 5, unhealthyCount: 2, status: "running", templateVersionNumber: 2, installed: { revisionNumber: 4, templateVersionNumber: 1 } });
     expect(AppStackSummaryDtoSchema.strict().parse(dto)).toEqual(dto);
+  });
+
+  it("shows the status the page shows: a crashed essential component of a running stack reads failed, a stale one unknown (#130)", () => {
+    const running = stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+    const shown = (components: AppStackComponentRow[], plan: ApprovedStackPlan | null = PLAN) => summary(components, [], plan, running).status;
+    expect(shown([component("app", "healthy", FRESH), component("cache", "healthy", FRESH)])).toBe("running");
+    expect(shown([component("app", "stopped", FRESH), component("cache", "healthy", FRESH)])).toBe("failed");
+    expect(shown([component("app", "healthy", STALE), component("cache", "healthy", FRESH)])).toBe("unknown");
+    expect(shown([component("app", "healthy", FRESH)])).toBe("unknown");
+    // No readable plan of what runs: the stored status, as the page shows it.
+    expect(shown([component("app", "stopped", FRESH)], null)).toBe("running");
+    // Another status than running or degraded is shown as stored.
+    const stopped = stackRow({ status: "stopped", desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+    expect(summary([component("app", "stopped", FRESH), component("cache", "stopped", FRESH)], [], PLAN, stopped).status).toBe("stopped");
+  });
+
+  it("the list and the page show the same status for every stored status and every set of readings (#130)", () => {
+    const sets: Record<string, AppStackComponentRow[]> = {
+      healthy: [component("app", "healthy", FRESH), component("cache", "healthy", FRESH)],
+      "essential crashed": [component("app", "stopped", FRESH), component("cache", "healthy", FRESH)],
+      "dependency unhealthy": [component("app", "healthy", FRESH), component("cache", "unhealthy", FRESH)],
+      stale: [component("app", "healthy", STALE), component("cache", "healthy", STALE)],
+      "never read": [component("app", "unknown", null), component("cache", "unknown", null)],
+      "one row missing": [component("app", "healthy", FRESH)],
+    };
+    const statuses = ["running", "degraded", "failed", "unknown", "stopped", "updating", "stopping"] as const;
+    for (const status of statuses) {
+      for (const [label, components] of Object.entries(sets)) {
+        const stack = stackRow({ status, desiredRevisionId: REVISION, appliedRevisionId: REVISION });
+        const page = appStackDetailDto(deployed(components, { stack }));
+        const list = summary(components, [], PLAN, stack);
+        expect(list.status, `${status} with ${label}`).toBe(page.status);
+        expect(list.unhealthyCount, `${status} with ${label}`).toBe(page.unhealthyCount);
+      }
+    }
   });
 
   it("primary hostname: the first active one by name, else the first one, else none", () => {

@@ -43,6 +43,8 @@ export function appStackSummaryDto(input: {
   templateName: string;
   templateVersionNumber: number;
   installed: { revisionNumber: number; templateVersionNumber: number } | null;
+  /** The plan of the revision that runs; null when none was applied or it cannot be read: the stored status is shown. */
+  appliedPlan: ApprovedStackPlan | null;
   components: readonly AppStackComponentRow[];
   domains: readonly AppStackDomainRow[];
   now: Date;
@@ -52,7 +54,8 @@ export function appStackSummaryDto(input: {
   return {
     id: stack.id,
     name: stack.name,
-    status: stack.status,
+    // The status of the list and of the page is this one: computed at read from what runs (ADR-0035).
+    status: appStackDisplayStatus({ stack, plan: input.appliedPlan, components, domainCount: domains.length, now }),
     templateId: stack.templateId,
     templateName: input.templateName,
     templateVersionNumber: input.templateVersionNumber,
@@ -111,8 +114,7 @@ export function appStackDetailDto(input: {
   // The status follows what runs: the applied revision's plan, also while the desired one differs.
   const applied = desired !== null && desired.revision.id === stack.appliedRevisionId ? desired.plan : input.appliedPlan;
   return {
-    ...appStackSummaryDto(input),
-    status: appStackDisplayStatus({ stack, plan: applied, components: input.components, domainCount: input.domains.length, now }),
+    ...appStackSummaryDto({ ...input, appliedPlan: applied }),
     templateVersionId: stack.templateVersionId,
     createdAt: stack.createdAt.toISOString(),
     activeOperationId: input.activeOperationId,

@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { APP_BUILT_IN_TEMPLATES, APP_IMAGE_ALLOWLIST } from "@hosting-panel/contracts";
 import {
   and,
+  appStackComponents,
   appStackDeployments,
   appStackParameters,
   appStackRevisions,
@@ -472,6 +473,45 @@ describe("application stacks HTTP API (H5)", () => {
     const cache = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/cache/health`);
     expect(cache.body.data).toMatchObject({ componentKey: "cache", source: "running_state" });
     expectRefusal(await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}/components/nope/health`), 404, "NOT_FOUND");
+  });
+
+  it("#130: the list shows the status the page shows, from the readings of the components of the revision that runs", async () => {
+    const db = h.dbClient.db;
+    const live = async (name: string, readings: Record<string, [string, number]>) => {
+      const stackId = await deployed(name);
+      await settle(stackId, "running");
+      const row = await stackRow(stackId);
+      await db.update(appStacks).set({ appliedRevisionId: row.desiredRevisionId }).where(eq(appStacks.id, stackId));
+      const now = Date.now();
+      for (const [componentKey, [health, ageMs]] of Object.entries(readings)) {
+        await db
+          .update(appStackComponents)
+          .set({ health: health as "healthy", healthObservedAt: new Date(now - ageMs) })
+          .where(and(eq(appStackComponents.stackId, stackId), eq(appStackComponents.componentKey, componentKey)));
+      }
+      return stackId;
+    };
+    const fresh = 30_000;
+    const stale = 10 * 60_000;
+    const stacks = {
+      well: await live("shown-well", { app: ["healthy", fresh], cache: ["healthy", fresh] }),
+      crashed: await live("shown-crashed", { app: ["stopped", fresh], cache: ["healthy", fresh] }),
+      old: await live("shown-old", { app: ["healthy", stale], cache: ["healthy", fresh] }),
+    };
+
+    const list = await h.call(h.a.token, "GET", `${base(h.a)}?limit=100`);
+    expect(list.status, list.raw).toBe(200);
+    const shown = new Map<string, Json>((list.body.data as Json[]).map((s) => [s.id as string, s]));
+    const expected = { well: "running", crashed: "failed", old: "unknown" } as const;
+    for (const [key, stackId] of Object.entries(stacks) as [keyof typeof stacks, string][]) {
+      const page = await h.call(h.a.token, "GET", `${base(h.a)}/${stackId}`);
+      expect(page.status, page.raw).toBe(200);
+      expect(page.body.data.status, key).toBe(expected[key]);
+      expect(shown.get(stackId)?.status, key).toBe(page.body.data.status);
+      expect(shown.get(stackId)?.unhealthyCount, key).toBe(page.body.data.unhealthyCount);
+      // The buttons follow the stored status, not the shown one.
+      expect(page.body.data.allowedActions, key).toEqual(expect.arrayContaining(["stack.stop"]));
+    }
   });
 
   // Last: it leaves organisation B at its limit.
