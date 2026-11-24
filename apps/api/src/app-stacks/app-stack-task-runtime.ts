@@ -24,6 +24,7 @@ import {
 } from "@hosting-panel/database";
 import type { DockerExecutorPort } from "@hosting-panel/executor-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
+import { ZodError } from "zod";
 import { APP_TEMPLATE_VALIDATION_OPTIONS_TOKEN } from "../app-templates/app-template-validation-options.js";
 import { isAmbiguousFailure } from "../runtime/site-provisioner.js";
 import { CONTROL_PLANE_CONFIG_TOKEN, DATABASE_CLIENT_TOKEN, DOCKER_EXECUTOR_TOKEN, type ControlPlaneRuntimeConfig } from "../tokens.js";
@@ -178,7 +179,12 @@ export class AppStackTaskRuntime {
     let seen: Awaited<ReturnType<typeof port.getAppStackTaskRun>>;
     try {
       seen = await port.getAppStackTaskRun({ stackId: run.stackId, organizationId: run.organizationId, runId: run.id });
-    } catch {
+    } catch (err) {
+      // An answer that fails the schema the panel holds will fail it on the next pass too: nobody can tell how it went.
+      if (err instanceof ZodError) {
+        await this.#settle(op, run, this.#lost(run));
+        return "settled";
+      }
       return "pending";
     }
     if (seen.state === "running") return "pending";
