@@ -294,9 +294,8 @@ describe("the shared rule and the last guard", () => {
 });
 
 // ADR-0042 §7: the clean-up finds what a run started by "HP_TASK_RUN=" as text anywhere in a process's environment, so
-// no value of a component may hold that text, whoever wrote it. The rule is PR #74's (the closed list of the platform's
-// process marks, which names HP_TASK_RUN); the cases marked skip pass once main, with PR #74, is merged into this branch:
-// the coder of that merge switches them on.
+// no value of a component may hold that text, whoever wrote it. The rule is the closed list of the platform's process
+// marks (ADR-0041, which names HP_TASK_RUN); this branch adds no rule of its own.
 describe("the mark of a task run is never in the environment of a component", () => {
   const ids = {
     stackId: "stk_0123456789abcdef0123456789abcdef",
@@ -325,7 +324,7 @@ describe("the mark of a task run is never in the environment of a component", ()
     expect(result.plan.components.find((c) => c.key === "app")?.environment).toContainEqual({ name: "TITLE", value: "My notes" });
   });
 
-  it.skip("refuses a customer's text that holds the mark of a task run [switch on once PR #74 is merged]", () => {
+  it("refuses a customer's text that holds the mark of a task run", () => {
     for (const title of ["HP_TASK_RUN=srun_", "x HP_TASK_RUN=srun_0123456789abcdef01234567"]) {
       const result = compile(titled, title);
       expect(result.ok, title).toBe(false);
@@ -333,7 +332,7 @@ describe("the mark of a task run is never in the environment of a component", ()
     }
   });
 
-  it.skip("refuses a template whose own environment value holds the mark of a task run [switch on once PR #74 is merged]", () => {
+  it("refuses a template whose own environment value holds the mark of a task run", () => {
     const source = edit(SOURCE, "        value: cache\n", "        value: cache\n      - name: MODE\n        value: x HP_TASK_RUN=srun_1\n");
     const result = validateAppTemplateSource(source, options);
     expect(result.ok).toBe(false);

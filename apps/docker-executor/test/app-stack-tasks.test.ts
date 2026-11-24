@@ -42,7 +42,7 @@ import {
   type IngressCapableDockerExecutor,
 } from "../src/index.js";
 import { type MockDockerContainerRecord, type MockDockerDaemon, type MockExecPlan, startMockDockerDaemon } from "./mock-docker-daemon.js";
-import { TEST_ALLOWLIST, appStackTestPlan } from "./support/app-stack-plans.js";
+import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
 
 // ADR-0042: a task of an application. The command runs in the existing container of one component, started directly
 // with no user, no folder, no terminal and no input; it ends at its time limit and what it started is killed.
@@ -193,11 +193,12 @@ describe("the clean-up script of tasks", () => {
 
 describe("the mark of a run in the environment of a component", () => {
   // ADR-0042 §7: the clean-up finds what a run started by "HP_TASK_RUN=" as text anywhere in an environment, so no value
-  // of a component may hold it; the executor re-checks every plan. The rule is PR #74's (the platform's process marks);
-  // switch this on once main, with PR #74, is merged into this branch.
-  it.skip("is refused in a plan before anything reaches Docker [switch on once PR #74 is merged]", () => {
-    const [web, worker] = appStackTestPlan().components;
-    const marked = appStackTestPlan({ components: [{ ...web!, environment: [{ name: "APP_MODE", value: `x ${APP_STACK_TASK_MARK}=srun_` }] }, worker!] });
+  // of a component may hold it; the executor re-checks every plan. The rule is the platform's process marks (ADR-0041).
+  it("is refused in a plan before anything reaches Docker", () => {
+    const plan = appStackTestPlan();
+    const [web, worker] = plan.components;
+    // Not through the plan schema of the test helper, which refuses the mark already: the executor's own check is under test.
+    const marked = rehash({ ...plan, components: [{ ...web!, environment: [{ name: "APP_MODE", value: `x ${APP_STACK_TASK_MARK}=srun_` }] }, worker!] });
     let refused: unknown = null;
     try {
       assertExecutableAppStackPlan(marked, { allowlist: TEST_ALLOWLIST });
