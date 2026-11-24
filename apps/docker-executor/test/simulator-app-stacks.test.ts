@@ -424,6 +424,25 @@ describe("SimulatedAppStacks on disk", () => {
     expect(existsSync(path.join("/run/hosting-panel/secrets", `app_${ID}__worker`))).toBe(false);
   });
 
+  it("refuses, like the engine, a log read short of the secret files the plan gives the component (BUG-43)", async () => {
+    const root = tempDir();
+    const sim = simulator({ secretsRootDir: root });
+    await deploy(sim);
+    sim.appStacks.setAppStackComponentLogs(ID, "worker", [{ at: null, stream: "stdout", text: "key=s3cr3t-content" }]);
+    sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: "GET / 200" }]);
+    rmSync(path.join(root, `app_${ID}__worker`), { recursive: true, force: true });
+    for (const secretFileCount of [1, undefined]) {
+      const err = await failure(sim.getAppStackComponentLogs({ ...ref, componentKey: "worker", tail: 5, ...(secretFileCount === undefined ? {} : { secretFileCount }) }));
+      expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component worker cannot be masked" });
+      expect(JSON.stringify([String(err), err])).not.toContain("s3cr3t-content");
+    }
+    // web is given no secret: with the count its read is served, without one (an API one release older) its missing dir refuses it.
+    expect(await sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5, secretFileCount: 0 })).toEqual([
+      { at: null, stream: "stdout", text: "GET / 200" },
+    ]);
+    await expect(sim.getAppStackComponentLogs({ ...ref, componentKey: "web", tail: 5 })).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+  });
+
   it("writes a real app_<stackId>.yml only when ingressRootDir is set", async () => {
     const ingressRootDir = tempDir();
     const sim = simulator({ ingressRootDir });

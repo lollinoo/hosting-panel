@@ -14,6 +14,7 @@ import {
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
   expandAppStackSecretEnvironment,
+  writeAppStackComponentSecrets,
   type AppStackContainerCreatePayload,
 } from "../src/app-stacks/index.js";
 import { InMemoryDockerSimulatorAdapter } from "../src/index.js";
@@ -694,8 +695,12 @@ describe("the log reader of a version 2 component whose secret files are gone", 
   const AT = "2026-11-22T03:00:00.000000000Z";
   const print = (h: Harness, name: string, text: string) =>
     h.fake.containers.get(name)?.logs.push({ stream: "stdout", payload: `${AT} ${text}\n` });
+  /** The API sends how many secret files the plan gives the component: web has one (app_key), db and cache none. */
+  const files = (componentKey: string) => plan.components.find((c) => c.key === componentKey)?.secretFiles.length ?? 0;
   const texts = async (h: Harness, componentKey: string) =>
-    (await h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 10 })).map((line) => line.text);
+    (await h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 10, secretFileCount: files(componentKey) })).map((line) => line.text);
+  /** web's own file back (a reboot took it): what its log read needs before the label masks the rest. */
+  const appKeyBack = (h: Harness) => writeAppStackComponentSecrets(h.root, ID, "web", { app_key: APP_KEY });
   /** What a host reboot does to the tmpfs: every secret dir is gone while Docker runs the containers again. */
   async function reboot(h: Harness) {
     for (const entry of await readdir(h.root)) await rm(path.join(h.root, entry), { recursive: true, force: true });
@@ -709,19 +714,26 @@ describe("the log reader of a version 2 component whose secret files are gone", 
     await reboot(h);
     print(h, DB, `login with ${DB_PASSWORD} and ${DB_ROOT_PASSWORD}`);
     print(h, WEB, `connect sql://blog:${DB_PASSWORD}@db:3306/blog`);
-    await expect(h.engine.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 10 })).resolves.toEqual([
+    await expect(h.engine.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 10, secretFileCount: 0 })).resolves.toEqual([
       { at: AT, stream: "stdout", text: "login with [REDACTED] and [REDACTED]" },
     ]);
-    expect(await texts(h, "web")).toEqual(["connect sql://blog:[REDACTED]@db:3306/blog"]);
     // Reading writes nothing and changes nothing.
     expect(await readdir(h.root)).toEqual([]);
     expect(mutations(h.fake.log)).toEqual([]);
+    h.fake.log.length = 0;
+    // web's app_key is only in its file: gone, nothing could mask it, and so is a read without the count (older API).
+    await expect(texts(h, "web")).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component web cannot be masked" });
+    await expect(h.engine.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 10 })).rejects.toMatchObject(unmaskable);
+    expect(h.fake.log.some((line) => line.includes("/logs"))).toBe(false);
+    await appKeyBack(h);
+    expect(await texts(h, "web")).toEqual(["connect sql://blog:[REDACTED]@db:3306/blog"]);
   });
 
   it("masks a secret the template writes only inside a longer value, alone and in that value", async () => {
     const h = await setup();
     await deployed(h, withEmbeddedOnly());
     await reboot(h);
+    await appKeyBack(h);
     print(h, WEB, `password ${DB_PASSWORD}`);
     print(h, WEB, `url sql://blog:${DB_PASSWORD}@db:3306/blog`);
     expect(await texts(h, "web")).toEqual(["password [REDACTED]", "url sql://blog:[REDACTED]@db:3306/blog"]);
@@ -921,13 +933,22 @@ describe("the simulator with a version 2 plan", () => {
     reboot();
     sim.appStacks.setAppStackComponentLogs(ID, "web", [{ at: null, stream: "stdout", text: `url sql://blog:${DB_PASSWORD}@db:3306/blog` }]);
     sim.appStacks.setAppStackComponentLogs(ID, "db", [{ at: null, stream: "stdout", text: `root ${DB_ROOT_PASSWORD}` }]);
-    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "web", tail: 5 }))[0]?.text).toBe("url sql://blog:[REDACTED]@db:3306/blog");
-    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 }))[0]?.text).toBe("root [REDACTED]");
+    await expect(sim.getAppStackComponentLogs({ ...REF, componentKey: "web", tail: 5, secretFileCount: 1 })).rejects.toMatchObject({
+      message: "The logs of component web cannot be masked",
+    });
+    await expect(sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 })).rejects.toMatchObject({
+      message: "The logs of component db cannot be masked",
+    });
+    await writeAppStackComponentSecrets(root, ID, "web", { app_key: APP_KEY });
+    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "web", tail: 5, secretFileCount: 1 }))[0]?.text).toBe(
+      "url sql://blog:[REDACTED]@db:3306/blog",
+    );
+    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5, secretFileCount: 0 }))[0]?.text).toBe("root [REDACTED]");
 
     await deploy(withPair("-"));
-    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 }))[0]?.text).toBe("root [REDACTED]");
+    expect((await sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5, secretFileCount: 0 }))[0]?.text).toBe("root [REDACTED]");
     reboot();
-    const err = await failure(sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5 }));
+    const err = await failure(sim.getAppStackComponentLogs({ ...REF, componentKey: "db", tail: 5, secretFileCount: 0 }));
     expect(err).toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE", message: "The logs of component db cannot be masked" });
     for (const value of VALUES) expect(shown(err)).not.toContain(value);
   });

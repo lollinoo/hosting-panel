@@ -1091,6 +1091,66 @@ describe("getAppStackComponentLogs (5.17)", () => {
     });
   });
 
+  describe("a value it could not mask (BUG-43)", () => {
+    const unmaskable = (key: string) => ({ code: "DOCKER_ENGINE_UNAVAILABLE", message: `The logs of component ${key} cannot be masked` });
+    const counted = (h: Harness, componentKey: string, secretFileCount?: number) =>
+      h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 50, ...(secretFileCount === undefined ? {} : { secretFileCount }) });
+    const readLogs = (h: Harness) => h.fake.log.some((line) => line.includes("/logs?"));
+
+    it("refuses, before any log read, when the plan gives the component secret files and they are gone", async () => {
+      const h = await setup();
+      await deployed(h);
+      logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET}\n` });
+      await rm(secretDir(h, "worker"), { recursive: true, force: true });
+      await expect(counted(h, "worker", 1)).rejects.toMatchObject(unmaskable("worker"));
+      // Without the number (an API one release older) a folder that cannot be read refuses too.
+      await expect(counted(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("refuses when the folder holds fewer files than the plan gives", async () => {
+      const h = await setup();
+      await deployed(h);
+      await expect(counted(h, "worker", 2)).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+      await expect(counted(h, "worker", 1)).resolves.toEqual([]);
+    });
+
+    it("reads a component the plan gives no secret file, whose folder does not exist", async () => {
+      const h = await setup();
+      await deployed(h);
+      h.fake.containers.get(WEB)?.logs.push({ stream: "stdout", payload: `${AT} GET / 200\n` });
+      await expect(exists(secretDir(h, "web"))).resolves.toBe(false);
+      await expect(counted(h, "web", 0)).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+    });
+
+    it("refuses a stored value shorter than six characters, which it would show as it is", async () => {
+      const h = await setup();
+      await deployed(h);
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: "abcde" });
+      logs(h).push({ stream: "stdout", payload: `${AT} key=abcde\n` });
+      await expect(counted(h, "worker", 1)).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("masks the value as a URL or a form writes it", async () => {
+      const h = await setup();
+      await deployed(h);
+      const value = "Pa ss&wd+42/x";
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: value });
+      logs(h).push(
+        { stream: "stdout", payload: `${AT} GET /login?p=${encodeURIComponent(value)}&next=/\n` },
+        { stream: "stdout", payload: `${AT} body p=${encodeURIComponent(value).replace(/%20/g, "+")}&ok=1\n` },
+        { stream: "stdout", payload: `${AT} plain ${value} end\n` },
+      );
+      expect((await counted(h, "worker", 1)).map((line) => line.text)).toEqual([
+        "GET /login?p=[REDACTED]&next=/",
+        "body p=[REDACTED]&ok=1",
+        "plain [REDACTED] end",
+      ]);
+    });
+  });
+
   it.each([
     [404, { code: "NOT_FOUND", message: "Component not found" }],
     [500, { code: "DOCKER_ENGINE_UNAVAILABLE", message: "Failed to read service logs (HTTP 500)" }],

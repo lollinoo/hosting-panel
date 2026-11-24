@@ -73,7 +73,7 @@ import {
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
-  readAppStackComponentSecretValues,
+  readAppStackComponentSecretFiles,
   writeAppStackComponentSecrets,
 } from "./secrets.js";
 
@@ -621,7 +621,8 @@ export class AppStackEngine implements StackExecutorPort {
     const values = appStackLogMaskValues(
       req.componentKey,
       { labels: target.Config?.Labels, env: target.Config?.Env },
-      await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey),
+      await readAppStackComponentSecretFiles(this.deps.secretsRootDir, req.stackId, req.componentKey),
+      req.secretFileCount,
     );
     const tail = Math.min(APP_STACK_LOG_TAIL_MAX, Math.max(1, Math.trunc(req.tail) || 1));
     const res = await this.deps.request(

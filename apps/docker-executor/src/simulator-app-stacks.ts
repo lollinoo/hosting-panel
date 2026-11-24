@@ -51,6 +51,7 @@ import {
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
+  readAppStackComponentSecretFiles,
   readAppStackComponentSecretValues,
   writeAppStackComponentSecrets,
   type AppStackContainerCreatePayload,
@@ -516,10 +517,11 @@ export class SimulatedAppStacks implements StackExecutorPort {
       const stack = this.own(req.stackId, req.organizationId);
       const container = stack?.containers.get(req.componentKey);
       if (container === undefined) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
+      // The engine's rule: a component started without secrets has no dir, and no entry here.
       const files = this.options.secretsRootDir !== null
-        ? await readAppStackComponentSecretValues(this.options.secretsRootDir, req.stackId, req.componentKey)
-        : (stack?.secrets.get(req.componentKey) ?? []);
-      const values = appStackLogMaskValues(req.componentKey, { labels: container.labels, env: container.payload.Env }, files);
+        ? await readAppStackComponentSecretFiles(this.options.secretsRootDir, req.stackId, req.componentKey)
+        : (stack?.secrets.get(req.componentKey) ?? null);
+      const values = appStackLogMaskValues(req.componentKey, { labels: container.labels, env: container.payload.Env }, files, req.secretFileCount);
       return maskAppStackLogLines((this.logs.get(container.name) ?? []).slice(-req.tail), values);
     });
   }
