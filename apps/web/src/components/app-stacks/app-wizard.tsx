@@ -103,7 +103,8 @@ async function post(
       body: JSON.stringify(body),
     });
     const data = (await res.json().catch(() => null)) as Envelope;
-    const known = res.ok || renewKeyAfter(res.status);
+    // A success whose body is lost names nothing the page can go on with: the key stays so a retry replays it.
+    const known = (res.ok && data !== null) || renewKeyAfter(res.status);
     if (known) delete keys[name];
     return { ok: res.ok, known, data };
   } catch {

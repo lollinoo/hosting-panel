@@ -129,7 +129,8 @@ const wizard = (state: Record<number, unknown> = {}, refs: Record<number, unknow
 const secretsRef = (values: Record<string, string>) => ({ current: new Map(Object.entries(values)) });
 
 const BASE = `/api/bff/orgs/${ORG}/app-stacks`;
-type Answer = { status: number; body: unknown } | "network";
+/** `text`: a body that is not JSON; `cut`: the connection drops after the status line, so reading the body fails. */
+type Answer = { status: number; body: unknown } | { status: number; text: string } | { status: number; cut: true } | "network";
 const fetchMock = vi.fn();
 /** Each URL answers with the next of its queue. */
 function answer(byUrl: Record<string, Answer[]>) {
@@ -137,9 +138,13 @@ function answer(byUrl: Record<string, Answer[]>) {
     const a = byUrl[url]?.shift();
     if (!a) throw new Error(`unexpected ${url}`);
     if (a === "network") throw new TypeError("fetch failed");
+    if ("text" in a) return new Response(a.text, { status: a.status, headers: { "Content-Type": "text/html" } });
+    if ("cut" in a) return new Response(new ReadableStream({ start: (c) => c.error(new TypeError("terminated")) }), { status: a.status });
     return new Response(JSON.stringify(a.body), { status: a.status, headers: { "Content-Type": "application/json" } });
   });
 }
+const notJson = (status: number): Answer => ({ status, text: "<html><body>Created</body></html>" });
+const cut = (status: number): Answer => ({ status, cut: true });
 const calls = () =>
   fetchMock.mock.calls.map((c) => {
     const init = c[1] as RequestInit;
@@ -690,6 +695,8 @@ describe("AppWizard when the create's outcome is unknown", () => {
     ["the panel's own timeout (504)", refusal(504, "INTERNAL_ERROR")],
     ["a reply that never came back (502)", refusal(502, "OPERATION_AMBIGUOUS")],
     ["a server error (500)", refusal(500, "INTERNAL")],
+    ["a 201 whose body is not JSON", notJson(201)],
+    ["a 201 whose body read breaks off", cut(201)],
   ])("%s closes every step: only Retry, with the text that says the panel does not know yet", async (_what, lost) => {
     const keys = { current: {} as Record<string, string> };
     const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
@@ -745,6 +752,36 @@ describe("AppWizard when the create's outcome is unknown", () => {
     expect(retry.sets).toContainEqual([10, null]);
     expect(retry.sets).toContainEqual([8, "stk_a1"]);
     expect(values.current.size).toBe(0);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it.each<[string, Answer]>([
+    ["is not JSON", notJson(201)],
+    ["breaks off while it is read", cut(201)],
+  ])("a 201 whose body %s is no known outcome: Retry sends the same key and the very text kept, and the replay goes on", async (_what, lost) => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    answer({
+      [BASE]: [lost, accepted(201)],
+      [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")],
+      [`${AT}/deploy`]: [accepted(202)],
+    });
+    const first = wizard(ready, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)?.[1];
+    expect(kept).toEqual(calls()[0]!.body);
+    expect(first.sets).toContainEqual([6, t.createUnknown]);
+    expect(first.sets.filter(([k]) => k === 8)).toEqual([]);
+    expect(keys.current.create).toBe(keyOf(0));
+    expect(router.push).not.toHaveBeenCalled();
+
+    const retry = wizard({ ...ready, 0: "install", 1: "other-notes", 6: t.createUnknown, 10: kept }, { 0: values, 1: keys });
+    expect(editable(retry.tree)).toEqual([]);
+    await click(retry.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([BASE, BASE, `${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(raw()[1]).toBe(raw()[0]);
+    expect(retry.sets).toContainEqual([8, "stk_a1"]);
     expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
   });
 
