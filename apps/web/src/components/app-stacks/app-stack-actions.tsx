@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
+  APP_STACK_PROCESS_MARK_PATTERN,
   SetAppStackSecretInputSchema,
   appStackEnqueueTarget,
   type AppStackDetailDto,
@@ -204,8 +205,15 @@ function PlanDialog({
   async function confirm() {
     if (!diff) return;
     const secrets = asked.map((wanted) => ({ parameterKey: wanted.key, value: inputs.current.get(wanted.key)?.value ?? "" }));
-    const empty = secrets.filter((typed) => !typed.value).map((typed) => typed.parameterKey);
-    if (empty.length > 0) return setFieldErrors(Object.fromEntries(empty.map((key) => [key, m.apps.wizard.required])));
+    // The server refuses a value holding a text the panel keeps with no reason a page can show: say it here (ADR-0041).
+    const problems = secrets.flatMap((typed): [string, string][] =>
+      !typed.value
+        ? [[typed.parameterKey, m.apps.wizard.required]]
+        : APP_STACK_PROCESS_MARK_PATTERN.test(typed.value)
+          ? [[typed.parameterKey, m.apps.wizard.valueReserved]]
+          : [],
+    );
+    if (problems.length > 0) return setFieldErrors(Object.fromEntries(problems));
     setFieldErrors({});
     const sent = await onSend(diff.planHash, secrets);
     for (const input of inputs.current.values()) input.value = "";

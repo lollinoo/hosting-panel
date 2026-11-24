@@ -3,6 +3,7 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_STACK_PROCESS_MARKS,
   APP_STACK_STATUSES,
   appStackEnqueueTarget,
   type AppStackPlanDiffDto,
@@ -436,6 +437,25 @@ describe("upgrade and rollback plan dialog", () => {
       await click(button(out, en.apps.upgrade.confirm));
       expect(sets).toContainEqual([3, { mail_password: en.apps.wizard.required }]);
       expect(keyedSend).not.toHaveBeenCalled();
+    });
+
+    it.each(locales)("a value holding a text the panel keeps is marked at its field, kept there, and nothing is sent (%s)", async (_l, m) => {
+      for (const mark of APP_STACK_PROCESS_MARKS) {
+        keyedSend.mockReset();
+        keyedSend.mockResolvedValue(accepted);
+        const typed = `pw ${mark}=x1`;
+        const { d, parentSets } = openDialog("upgrade", m);
+        const { input, refs } = fields(typed);
+        const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING }, refs);
+        await click(button(out, m.apps.upgrade.confirm));
+        expect(keyedSend).not.toHaveBeenCalled();
+        expect(sets).toContainEqual([3, { mail_password: m.apps.wizard.valueReserved }]);
+        expect(input.value).toBe(typed); // kept, so the customer can correct it
+        expect(JSON.stringify([sets, parentSets])).not.toContain(typed);
+        const markup = html(callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING, 3: { mail_password: m.apps.wizard.valueReserved } }).out);
+        expect(markup).toMatch(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*aria-invalid="true"/);
+        expect(markup).toContain(m.apps.wizard.valueReserved);
+      }
     });
 
     it("confirm sends the typed values with the plan hash, empties the fields and keeps no value in state", async () => {
