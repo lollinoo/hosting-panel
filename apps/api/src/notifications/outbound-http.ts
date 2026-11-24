@@ -33,6 +33,7 @@ export interface OutboundHttpTestOptions {
   readonly timeoutMs?: number;
 }
 
+/** One attempt in all: the resolution of the name and the exchange. */
 export const OUTBOUND_TIMEOUT_MS = 5_000;
 // Headers this module writes itself: a caller's header of the same name is dropped.
 const OWN_HEADERS = new Set(["host", "content-type", "content-length", "transfer-encoding", "user-agent", "connection"]);
@@ -77,6 +78,19 @@ interface Target {
 
 const failed = (problem: OutboundProblem, httpStatus: number | null = null): OutboundResult => ({ problem, httpStatus });
 
+/** What `work` gives, or null when `endsAt` comes first: a resolver that never answers does not hold the attempt. */
+async function beforeEnd<T>(work: Promise<T>, endsAt: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  const end = new Promise<null>((done) => {
+    timer = setTimeout(() => done(null), Math.max(0, endsAt - Date.now()));
+  });
+  try {
+    return await Promise.race([work, end]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function resultOf(status: number): OutboundResult {
   if (status >= 200 && status <= 299) return { problem: null, httpStatus: status };
   if (status >= 300 && status <= 399) return failed("redirect", status);
@@ -85,7 +99,9 @@ function resultOf(status: number): OutboundResult {
 }
 
 export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions = {}): OutboundHttpPort {
-  async function target(raw: string): Promise<Target | OutboundProblem> {
+  const timeoutMs = test.timeoutMs ?? OUTBOUND_TIMEOUT_MS;
+
+  async function target(raw: string, endsAt: number): Promise<Target | OutboundProblem> {
     let url: URL;
     try {
       url = new URL(raw);
@@ -96,12 +112,13 @@ export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions
     const name = url.hostname;
     // A DNS name only: the URL parser has already turned every spelling of an IPv4 into dotted digits.
     if (name.startsWith("[") || isIP(name) !== 0 || !name.includes(".")) return "address_not_allowed";
-    let found: { a: string[]; aaaa: string[] };
+    let found: { a: string[]; aaaa: string[] } | null;
     try {
-      found = await dns.lookup(name);
+      found = await beforeEnd(dns.lookup(name), endsAt);
     } catch {
       return "unreachable";
     }
+    if (found === null) return "unreachable";
     const addresses = [...found.a, ...found.aaaa];
     if (addresses.length === 0) return "unreachable";
     const own = new BlockList();
@@ -120,7 +137,7 @@ export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions
     return { url, name, address: addresses[0]! };
   }
 
-  function send(to: Target, body: string, headers: Readonly<Record<string, string>>): Promise<OutboundResult> {
+  function send(to: Target, body: string, headers: Readonly<Record<string, string>>, endsAt: number): Promise<OutboundResult> {
     return new Promise((resolve) => {
       let settled = false;
       const finish = (result: OutboundResult): void => {
@@ -147,11 +164,11 @@ export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions
         },
         ...(test.ca !== undefined ? { ca: test.ca } : {}),
       });
-      // One bound for the whole exchange, also for a side that connects and then says nothing.
+      // What the resolution left of the one bound, also for a side that connects and then says nothing.
       const deadline = setTimeout(() => {
         req.destroy();
         finish(failed("unreachable"));
-      }, test.timeoutMs ?? OUTBOUND_TIMEOUT_MS);
+      }, Math.max(0, endsAt - Date.now()));
       req.on("response", (res) => {
         const status = res.statusCode ?? 0;
         // Only the class of the status counts: the body is never read.
@@ -165,13 +182,15 @@ export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions
 
   return {
     async check(url) {
-      const to = await target(url);
+      const to = await target(url, Date.now() + timeoutMs);
       return typeof to === "string" ? to : null;
     },
     async postJson(url, body, headers = {}) {
+      // One bound for the attempt, started before the name is resolved.
+      const endsAt = Date.now() + timeoutMs;
       try {
-        const to = await target(url);
-        return typeof to === "string" ? failed(to) : await send(to, body, headers);
+        const to = await target(url, endsAt);
+        return typeof to === "string" ? failed(to) : await send(to, body, headers, endsAt);
       } catch {
         return failed("unreachable");
       }

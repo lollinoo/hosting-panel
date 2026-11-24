@@ -121,6 +121,15 @@ describe("the address check", () => {
     expect(await out.check("https://down.example.test/")).toBe("unreachable");
     expect(await out.postJson("https://down.example.test/", "{}")).toEqual({ problem: "unreachable", httpStatus: null });
   });
+
+  it("gives up after its time on a resolver that never answers", async () => {
+    const silent: DnsLookup = { lookup: () => new Promise(() => undefined) };
+    const out = createOutboundHttp(silent, { ...none, timeoutMs: 300 });
+    const started = Date.now();
+    expect(await out.postJson(`https://${NAME}/`, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
+    expect(await out.check(`https://${NAME}/`)).toBe("unreachable");
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
 });
 
 describe("the request", () => {
@@ -221,6 +230,31 @@ describe("the request", () => {
     const started = Date.now();
     expect(await outbound({ timeoutMs: 300 }).postJson(`https://${NAME}:${String(port)}/`, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
     expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  /** Answers the loopback address after `ms`. */
+  const slowResolver = (ms: number): DnsLookup => ({
+    lookup: () => new Promise((done) => setTimeout(() => done({ a: ["127.0.0.1"], aaaa: [] }), ms)),
+  });
+  const slow = (ms: number, timeoutMs: number) =>
+    createOutboundHttp(slowResolver(ms), { treatAsPublic: () => true, localAddresses: () => [], ca: pki.root.pem, timeoutMs });
+
+  it("counts the resolution in its time: a slow resolver leaves only the rest to a side that says nothing", async () => {
+    const port = await listen(200, { silent: true });
+    const started = Date.now();
+    expect(await slow(800, 1_000).postJson(`https://${NAME}:${String(port)}/`, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
+    // One time for both: not the resolution and then the whole time again.
+    expect(Date.now() - started).toBeLessThan(1_400);
+  });
+
+  it("connects to nothing once its time ran out during the resolution", async () => {
+    const port = await listen(200);
+    const started = Date.now();
+    expect(await slow(600, 300).postJson(`https://${NAME}:${String(port)}/`, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
+    expect(Date.now() - started).toBeLessThan(600);
+    // The answer that comes late leads nowhere.
+    await new Promise((done) => setTimeout(done, 600));
+    expect(seen).toEqual([]);
   });
 
   it("calls unreachable a port nobody listens on and a port that does not speak TLS", async () => {
