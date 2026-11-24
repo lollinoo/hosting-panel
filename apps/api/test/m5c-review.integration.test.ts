@@ -10,7 +10,7 @@ import {
   sql,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import { ExecutorCodedError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorCodedError, ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { totpCodeAt } from "../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
@@ -69,6 +69,9 @@ const opOf = async (id: string) => (await dbClient.db.select().from(operations).
 const svcOf = async (id: string) => (await dbClient.db.select().from(serviceInstances).where(eq(serviceInstances.id, id)))[0]!;
 const running = (svcId: string) => sim.getSimulatedContainerInspect(svcId)?.State?.Running ?? false;
 const engineDown = () => new ExecutorCodedError("engine unreachable", "DOCKER_ENGINE_UNAVAILABLE");
+/** The client's answer when the executor's answer to a change it sent cannot be read (#182). */
+const unreadable = () =>
+  new ExecutorIpcClientError("Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON", "OPERATION_AMBIGUOUS", 502, true);
 
 /** Admin list, customer list and site detail of one site, as `org` sees them. */
 async function shown(siteId: string, org: string = PLATFORM_OPS_ORG_ID, as: string = token): Promise<string[]> {
@@ -140,26 +143,34 @@ describe("1.1 a Stop that failed", () => {
     expect((await svcOf(svcId)).desiredStatus).toBe("stopped");
   });
 
-  /** A Stop left in doubt, then `act` on the container, then the recovery pass (R196 1.1). */
-  async function stopInDoubtThenRecover(act: (svcId: string) => Promise<unknown>) {
+  /** The client's answers to a Stop it sent: its wait ended, or the answer cannot be read (#182). */
+  const LOST: readonly (readonly [string, () => Error])[] = [
+    ["timed out", () => new ExecutorCodedError("timed out", "OPERATION_AMBIGUOUS")],
+    ["answered unreadably", unreadable],
+  ];
+
+  /** A Stop left in doubt, then `act` on the container, then the recovery pass (R196 1.1), which reads and never stops again. */
+  async function stopInDoubtThenRecover(act: (svcId: string) => Promise<unknown>, lost: () => Error = LOST[0]![1]) {
     const { siteId, svcId } = await start();
-    vi.spyOn(sim, "stopService").mockRejectedValueOnce(new ExecutorCodedError("timed out", "OPERATION_AMBIGUOUS"));
+    const stops = vi.spyOn(sim, "stopService").mockRejectedValueOnce(lost());
     const opId = await stopSite(siteId);
     expect((await opOf(opId)).status).toBe("unknown");
     await act(svcId);
+    const sent = stops.mock.calls.length;
     await app.outboxWorker.recoverUnknownOperations();
+    expect(stops.mock.calls.length).toBe(sent);
     return { siteId, svcId, op: await opOf(opId) };
   }
 
-  it("in doubt, recovery sees it running: failed, the wanted state goes back to running", async () => {
-    const { siteId, svcId, op } = await stopInDoubtThenRecover(async () => undefined);
+  it.each(LOST)("%s, recovery sees it running: failed, the wanted state goes back to running", async (_, lost) => {
+    const { siteId, svcId, op } = await stopInDoubtThenRecover(async () => undefined, lost);
     expect(op).toMatchObject({ status: "failed", errorCode: "OPERATION_INTERRUPTED" });
     expect([running(svcId), (await svcOf(svcId)).desiredStatus]).toEqual([true, "running"]);
     expect(await shown(siteId)).toEqual(["ready", "ready", "ready"]);
   });
 
-  it("in doubt, recovery sees it stopped: succeeded, the wanted state stays stopped", async () => {
-    const { svcId, op } = await stopInDoubtThenRecover((id) => sim.stopService(id));
+  it.each(LOST)("%s, recovery sees it stopped: succeeded, the wanted state stays stopped", async (_, lost) => {
+    const { svcId, op } = await stopInDoubtThenRecover((id) => sim.stopService(id), lost);
     expect(op.status).toBe("succeeded");
     expect([running(svcId), (await svcOf(svcId)).desiredStatus]).toEqual([false, "stopped"]);
   });
@@ -226,6 +237,53 @@ describe("1.3 owner change of a stopped site whose stop after the redeploy fails
     expect((await opOf(retry.body.data.operationId as string)).status).toBe("succeeded");
     expect([running(svcId), (await svcOf(svcId)).desiredStatus]).toEqual([true, "running"]);
     expect(await shown(siteId, orgId, customer)).toEqual(["ready", "ready", "ready"]);
+  });
+});
+
+describe("an answer the client cannot read to the site's own changes (#182)", () => {
+  const adminStatus = async (siteId: string) =>
+    (await call("GET", "/v1/admin/sites")).body.data.sites.find((s: Json) => s.id === siteId)?.status as string | undefined;
+  async function moveToNewOwner(siteId: string): Promise<string> {
+    const created = await call("POST", "/v1/admin/customer-account", {
+      organizationName: "Customer B",
+      ownerEmail: "owner-b@example.test",
+      ownerName: "Owner B",
+    });
+    expect(created.status).toBe(201);
+    const move = await call("POST", `/v1/admin/sites/${siteId}/owner`, { ownerOrganizationId: created.body.data.organizationId as string });
+    expect(move.status).toBe(202);
+    await run();
+    return move.body.data.operationId as string;
+  }
+
+  it("to a delete: the operation failed and the site degraded, as before", async () => {
+    const { siteId } = await start();
+    vi.spyOn(sim, "deleteService").mockRejectedValueOnce(unreadable());
+    const del = await call("DELETE", `/v1/admin/sites/${siteId}`, { confirmName: SITE.name });
+    expect(del.status).toBe(202);
+    await run();
+    expect((await opOf(del.body.data.operationId as string)).status).toBe("failed");
+    expect(await adminStatus(siteId)).toBe("degraded");
+  });
+
+  it("to the redeploy of an owner change: the operation failed and the site degraded, as before", async () => {
+    const { siteId } = await start();
+    vi.spyOn(sim, "deployService").mockRejectedValueOnce(unreadable());
+    expect((await opOf(await moveToNewOwner(siteId))).status).toBe("failed");
+    expect(await adminStatus(siteId)).toBe("degraded");
+  });
+
+  it("to the stop after the redeploy of a stopped site: the wanted state stays stopped, as after a lost answer", async () => {
+    const { siteId, svcId } = await start();
+    await stopSite(siteId);
+    const stop = sim.stopService.bind(sim);
+    vi.spyOn(sim, "stopService").mockImplementationOnce(async (id) => {
+      await stop(id);
+      throw unreadable();
+    });
+    expect((await opOf(await moveToNewOwner(siteId))).status).toBe("failed");
+    expect([running(svcId), (await svcOf(svcId)).desiredStatus]).toEqual([false, "stopped"]);
+    expect(await adminStatus(siteId)).toBe("degraded");
   });
 });
 

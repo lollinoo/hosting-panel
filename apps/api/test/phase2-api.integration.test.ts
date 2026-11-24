@@ -1288,7 +1288,8 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
     }
   });
 
-  it("10. In-flight IPC timeout (F-03 / TH-08): post-dispatch socket timeout marks operation 'unknown', preserves lockKey, prevents blind replay, and converges via read-only recovery", async () => {
+  // The same case for an answer the real client cannot read after the deploy was sent (#182).
+  it.each(["socket timeout", "unreadable answer"] as const)("10. In-flight IPC timeout (F-03 / TH-08): post-dispatch %s marks operation 'unknown', preserves lockKey, prevents blind replay, and converges via read-only recovery", async (lostBy) => {
     const netMod = await import("node:net");
     const httpMod = await import("node:http");
     const slowTmpDir = await mkdtemp(path.join(os.tmpdir(), "hp-f03-timeout-"));
@@ -1317,6 +1318,12 @@ describe("Control-Plane /v1 API Phase 2 Runtime, Outbox, Signed UDS IPC, Secrets
               spec: Parameters<InMemoryDockerSimulatorAdapter["deployService"]>[0];
             };
             const result = await innerSim.deployService(parsed.spec);
+            if (shouldHangDeployResponse && lostBy === "unreadable answer") {
+              // A body that is not JSON after the deploy ran, as a proxy's error page would be.
+              res.writeHead(200, { "Content-Type": "text/html" });
+              res.end("<html>bad gateway</html>");
+              return;
+            }
             if (shouldHangDeployResponse) {
               // Intentionally withhold response past client timeoutMs to simulate post-execution socket stall
               return;
