@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
 import {
   APP_STACK_LOG_TAIL_DEFAULT,
+  APP_STACK_SECRET_MIN_LENGTH,
   AppStackActionInputSchema,
   AppStackListQuerySchema,
   AppStackLogsQuerySchema,
@@ -32,6 +33,7 @@ import { APP_FEATURE_GATE_TOKEN, requireAppFeature, type AppFeatureGate } from "
 import { AppStackBackupsService, type AppStackBackupRequester } from "../app-stacks/app-stack-backups.service.js";
 import { appStackAcceptedEnvelope } from "../app-stacks/app-stack-dto.js";
 import { AppStacksService, type AppStackRequestContext } from "../app-stacks/app-stacks.service.js";
+import { appRefusal } from "../app-templates/app-template-errors.js";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
 import { parsePaginationQuery, requireIdempotencyKey, resolveRequestId, type PaginationParams } from "../common/control-plane.error.js";
 import { peekBody } from "../common/deferred-body-error.js";
@@ -222,8 +224,16 @@ export class AppStacksController {
   ): Promise<{ data: AppStackSecretStateDto }> {
     const auth = await this.#guard(req, orgId, "app.update", stackId);
     const stack = await this.stacks.require(orgId, stackId);
-    const input = SetAppStackSecretInputSchema.parse(raw ?? {});
-    return { data: await this.stacks.setSecret(this.#context(auth, req, orgId, ""), stack, input) };
+    const parsed = SetAppStackSecretInputSchema.safeParse(raw ?? {});
+    if (!parsed.success) {
+      // A page shows this one by its reason: a shorter value is one the log reader could not mask (BUG-43).
+      if (parsed.error.issues.some((issue) => issue.path[0] === "value" && issue.code === "too_small")) {
+        const message = `This value is too short: at least ${String(APP_STACK_SECRET_MIN_LENGTH)} characters.`;
+        throw appRefusal("VALIDATION_ERROR", message, { field: "value", message, reason: "value_too_short" });
+      }
+      throw parsed.error;
+    }
+    return { data: await this.stacks.setSecret(this.#context(auth, req, orgId, ""), stack, parsed.data) };
   }
 
   /** Backups of the application, newest first (ADR-0038): whether each copy is good, never where it is. */

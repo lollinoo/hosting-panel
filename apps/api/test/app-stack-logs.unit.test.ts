@@ -1,16 +1,20 @@
 import { randomBytes } from "node:crypto";
+import { ApprovedStackPlanSchema, type AppStackPlanComponent } from "@hosting-panel/contracts";
 import {
   appStackComponents,
+  appStackRevisions,
   appStacks,
   builtInAppTemplateItems,
   createDatabaseClient,
   DEMO_IDS,
   ensureBuiltInAppTemplates,
+  eq,
   newAppEntityId,
   seedPhase1Dataset,
   type DatabaseClient,
 } from "@hosting-panel/database";
 import { Phase1DisabledDockerExecutor, type ServiceLogLine } from "@hosting-panel/executor-contracts";
+import { computeAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readAppStackComponentLogs, type AppStackLogsDeps } from "../src/app-stacks/app-stack-logs.js";
 import { ControlPlaneError } from "../src/common/control-plane.error.js";
@@ -49,6 +53,42 @@ describe("readAppStackComponentLogs (RT8)", () => {
   });
   const read = (input: { organizationId?: string; stackId?: string; componentKey?: string; tail?: number } = {}, d = deps()) =>
     readAppStackComponentLogs(d, { organizationId: ACME, stackId: acmeStack, componentKey: "web", ...input });
+  const [template] = builtInAppTemplateItems();
+  const files = (...keys: string[]) => keys.map((parameterKey) => ({ envName: `${parameterKey.toUpperCase()}_FILE`, parameterKey, version: 1 }));
+  const component = (key: string, secretFiles: AppStackPlanComponent["secretFiles"] = []): AppStackPlanComponent => ({
+    key,
+    image: `nginxinc/nginx-unprivileged@sha256:${"a".repeat(64)}`,
+    runAsUser: null,
+    argv: null,
+    environment: [],
+    secretFiles,
+    resources: { cpuMilli: 250, memoryBytes: "134217728" },
+    expose: [8080],
+    dependsOn: [],
+    volumes: [],
+    healthcheck: null,
+  });
+  /** A revision of the stack whose plan holds `components`; returns its id. */
+  async function revision(stackId: string, organizationId: string, revisionNumber: number, components: AppStackPlanComponent[]): Promise<string> {
+    const revisionId = newAppEntityId("srev");
+    const hostAllocationId = organizationId === ACME ? DEMO_IDS.allocations.acme : DEMO_IDS.allocations.beta;
+    const base = { schemaVersion: 1 as const, stackId, organizationId, hostAllocationId, templateVersionId: template!.versionId, revisionId, components, volumes: [], ingress: [] };
+    const plan = { ...base, planHash: computeAppStackPlanHash(base) };
+    expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
+    await dbClient.db.insert(appStackRevisions).values({
+      id: revisionId,
+      stackId,
+      organizationId,
+      revisionNumber,
+      templateVersionId: template!.versionId,
+      plan,
+      planHash: plan.planHash,
+      componentCount: components.length,
+      cpuMilli: 250 * components.length,
+      memoryBytes: 134217728 * components.length,
+    });
+    return revisionId;
+  }
   const refusal = async (pending: Promise<unknown>): Promise<ControlPlaneError> => {
     const err = await pending.then(
       () => null,
@@ -63,7 +103,6 @@ describe("readAppStackComponentLogs (RT8)", () => {
     await dbClient.migrate();
     await seedPhase1Dataset(dbClient.db, config.secretsMasterKey);
     await ensureBuiltInAppTemplates(dbClient.db, builtInAppTemplateItems());
-    const [template] = builtInAppTemplateItems();
     for (const [id, organizationId, hostAllocationId] of [
       [acmeStack, ACME, DEMO_IDS.allocations.acme],
       [betaStack, BETA, DEMO_IDS.allocations.beta],
@@ -77,7 +116,10 @@ describe("readAppStackComponentLogs (RT8)", () => {
         name: id,
         status: "running",
       });
-      await dbClient.db.insert(appStackComponents).values({ stackId: id, organizationId, componentKey: "web" });
+      // The installed plan gives web two secret files, one of them under two names: two values.
+      const applied = await revision(id, organizationId, 1, [component("web", [...files("app_key", "db_password"), { envName: "DB_PASS_FILE", parameterKey: "db_password", version: 1 }])]);
+      await dbClient.db.update(appStacks).set({ desiredRevisionId: applied, appliedRevisionId: applied }).where(eq(appStacks.id, id));
+      await dbClient.db.insert(appStackComponents).values({ stackId: id, organizationId, componentKey: "web", appliedRevisionId: applied });
     }
   });
 
@@ -107,8 +149,80 @@ describe("readAppStackComponentLogs (RT8)", () => {
     await read({ tail: 42.9 });
     await read();
     expect(fake.calls.map((c) => c.request)).toEqual(
-      [1, 500, 42, 200].map((tail) => ({ stackId: acmeStack, organizationId: ACME, componentKey: "web", tail })),
+      [1, 500, 42, 200].map((tail) => ({ stackId: acmeStack, organizationId: ACME, componentKey: "web", tail, secretFileCount: 2 })),
     );
+  });
+
+  it("sends how many secret files the plan the component runs from gives it: a number, never a key or a value (BUG-43)", async () => {
+    const stackId = newAppEntityId("stk");
+    await dbClient.db.insert(appStacks).values({
+      id: stackId,
+      organizationId: ACME,
+      hostAllocationId: DEMO_IDS.allocations.acme,
+      templateId: template!.templateId,
+      templateVersionId: template!.versionId,
+      name: stackId,
+      status: "deploying",
+    });
+    await dbClient.db.insert(appStackComponents).values({ stackId, organizationId: ACME, componentKey: "web" });
+    await dbClient.db.insert(appStackComponents).values({ stackId, organizationId: ACME, componentKey: "worker" });
+    const sent = () => fake.calls.map((c) => (c.request as { secretFileCount?: number }).secretFileCount);
+
+    // Nothing installed yet: the desired plan counts, and a component with no secret file is sent 0.
+    const first = await revision(stackId, ACME, 1, [component("web", files("app_key")), component("worker")]);
+    await dbClient.db.update(appStacks).set({ desiredRevisionId: first }).where(eq(appStacks.id, stackId));
+    await read({ stackId });
+    await read({ stackId, componentKey: "worker" });
+    expect(sent()).toEqual([1, 0]);
+
+    // Installed, then a new desired plan with more files: the installed one counts until it is installed in turn.
+    const second = await revision(stackId, ACME, 2, [component("web", files("app_key", "mail_password", "smtp_token")), component("worker")]);
+    await dbClient.db.update(appStacks).set({ appliedRevisionId: first, desiredRevisionId: second }).where(eq(appStacks.id, stackId));
+    await dbClient.db.update(appStackComponents).set({ appliedRevisionId: first }).where(eq(appStackComponents.stackId, stackId));
+    await read({ stackId });
+    expect(sent()).toEqual([1, 0, 1]);
+    expect(JSON.stringify(fake.calls)).not.toMatch(/app_key|mail_password|smtp_token|_FILE/);
+  });
+
+  it("refuses, with no executor call, a read no stored plan can count the secret files of", async () => {
+    const stackId = newAppEntityId("stk");
+    await dbClient.db.insert(appStacks).values({
+      id: stackId,
+      organizationId: ACME,
+      hostAllocationId: DEMO_IDS.allocations.acme,
+      templateId: template!.templateId,
+      templateVersionId: template!.versionId,
+      name: stackId,
+      status: "running",
+    });
+    await dbClient.db.insert(appStackComponents).values({ stackId, organizationId: ACME, componentKey: "web" });
+    // No revision at all.
+    let err = await refusal(read({ stackId }));
+    expect([err.code, err.message]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", UNAVAILABLE]);
+    // A plan that does not name the component.
+    const other = await revision(stackId, ACME, 1, [component("api", files("app_key"))]);
+    await dbClient.db.update(appStacks).set({ desiredRevisionId: other, appliedRevisionId: other }).where(eq(appStacks.id, stackId));
+    err = await refusal(read({ stackId }));
+    expect([err.code, err.message]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", UNAVAILABLE]);
+    // An installed plan that no longer parses, over a desired one that would count.
+    const broken = newAppEntityId("srev");
+    await dbClient.db.insert(appStackRevisions).values({
+      id: broken,
+      stackId,
+      organizationId: ACME,
+      revisionNumber: 2,
+      templateVersionId: template!.versionId,
+      plan: { schemaVersion: 1, components: [{ key: "web" }] },
+      planHash: "0".repeat(64),
+      componentCount: 1,
+      cpuMilli: 250,
+      memoryBytes: 134217728,
+    });
+    const counted = await revision(stackId, ACME, 3, [component("web")]);
+    await dbClient.db.update(appStacks).set({ desiredRevisionId: counted, appliedRevisionId: broken }).where(eq(appStacks.id, stackId));
+    err = await refusal(read({ stackId }));
+    expect([err.code, err.message]).toEqual(["DOCKER_ENGINE_UNAVAILABLE", UNAVAILABLE]);
+    expect(fake.calls).toEqual([]);
   });
 
   it("returns the executor's lines and replaces any executor error with the fixed DOCKER_ENGINE_UNAVAILABLE sentence", async () => {
