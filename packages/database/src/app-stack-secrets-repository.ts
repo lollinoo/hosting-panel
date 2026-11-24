@@ -119,10 +119,10 @@ export async function setAppStackSecretTransactional(
 }
 
 /**
- * Version 1 of secrets the platform generated (ADR-0036), in the caller's transaction: the one that creates the stack
- * or queues the revision that first needs them. A key that already has a version 1 keeps it. No hourly limit applies
- * (a key gets one such row in its life), but the rows count in the customer's rolling hour like any other version.
- * Returns the metadata of the rows it inserted.
+ * Version 1 of secrets the platform generated (ADR-0036), or of the values an upgrade request carries (issue #89), in
+ * the caller's transaction: the one that creates the stack or queues the revision that first needs them. A key that
+ * already has a version 1 keeps it. No hourly limit applies (a key gets one such row in its life), but the rows count
+ * in the customer's rolling hour like any other version. Returns the metadata of the rows it inserted.
  */
 export async function insertGeneratedAppStackSecrets(
   tx: DatabaseExecutor,
