@@ -5,6 +5,7 @@ import { AppStackStatusIpcResultSchema, type AppStackRouteWire, type ApprovedSta
 import type { ServiceLogLine } from "@hosting-panel/executor-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_STACK_CONTAINER_BODY_VERSION,
   APP_STACK_LABELS,
   APP_STACK_PULL_ENGINE_TIMEOUT_MS,
   AppStackEngine,
@@ -16,7 +17,7 @@ import {
 } from "../src/app-stacks/index.js";
 import { LOG_READ_MAX_BYTES } from "../src/docker-logs.js";
 import type { AppStackRouteEntry } from "../src/traefik-config.js";
-import { createAppStackFakeEngine } from "./support/app-stack-fake-engine.js";
+import { createAppStackFakeEngine, type FakeHostConfig } from "./support/app-stack-fake-engine.js";
 import { TEST_ALLOWLIST, appStackTestPlan, rehash } from "./support/app-stack-plans.js";
 
 const ID = "stk_0123456789abcdef";
@@ -111,6 +112,14 @@ const exists = (file: string) => stat(file).then(() => true, () => false);
 async function foreignContainer(h: Harness, name: string, labels: Record<string, string> = {}, extra: object = {}) {
   await h.fake.request("POST", `/containers/create?name=${name}`, { Image: "traefik:test", Labels: labels, ...extra });
   h.fake.log.length = 0;
+}
+
+/** Makes a container look built by an older release: no body version label, or another value (#96). */
+function olderBody(h: Harness, name: string, version?: string) {
+  const container = h.fake.containers.get(name);
+  if (container === undefined) throw new Error(`no container ${name}`);
+  const labels = Object.entries(container.Labels).filter(([key]) => key !== APP_STACK_LABELS.bodyVersion);
+  container.Labels = Object.fromEntries(version === undefined ? labels : [...labels, [APP_STACK_LABELS.bodyVersion, version]]);
 }
 
 function withWorkerEnv(value: string): ApprovedStackPlan {
@@ -381,8 +390,10 @@ describe("createAppStackComponents (5.10)", () => {
       buildAppStackContainerCreatePayload(plan, "web", { secretsRootDir: h.root }),
     ]);
     expect(h.fake.containers.get(WORKER)?.State.Status).toBe("created");
+    expect(h.fake.containers.get(WORKER)?.Labels[APP_STACK_LABELS.bodyVersion]).toBe(String(APP_STACK_CONTAINER_BODY_VERSION));
     expect(h.fake.log.some((line) => /\/(start|restart)/.test(line))).toBe(false);
     h.fake.log.length = 0;
+    // The current body version and an equal hash: unchanged.
     const again = await h.engine.createAppStackComponents({ plan });
     expect(again.components.map((c) => c.outcome)).toEqual(["unchanged", "unchanged"]);
     expect(mutations(h.fake.log)).toEqual([]);
@@ -407,6 +418,36 @@ describe("createAppStackComponents (5.10)", () => {
     expect(h.fake.containers.get(WEB)?.State.Running).toBe(true);
     expect(h.fake.volumes.has(VOL)).toBe(true);
     expect(await exists(secretDir(h, "worker"))).toBe(true);
+  });
+
+  it.each([
+    ["no body version label", undefined],
+    ["another body version", "0"],
+  ])("replaces a component with an equal hash and %s, once and in place", async (_name, version) => {
+    const h = await setup();
+    await deployed(h);
+    const oldWeb = idOf(h, WEB);
+    const oldWorker = idOf(h, WORKER);
+    olderBody(h, WEB, version);
+    await expect(h.engine.createAppStackComponents({ plan })).resolves.toEqual({
+      components: [
+        { componentKey: "web", outcome: "replaced" },
+        { componentKey: "worker", outcome: "unchanged" },
+      ],
+      removedComponents: [],
+    });
+    expect(mutations(h.fake.log)).toEqual([
+      `POST /containers/${oldWeb}/stop?t=10`,
+      `DELETE /containers/${oldWeb}?force=true&v=true`,
+      `POST /containers/create?name=${WEB}`,
+    ]);
+    expect(h.fake.containers.get(WEB)?.Labels[APP_STACK_LABELS.bodyVersion]).toBe(String(APP_STACK_CONTAINER_BODY_VERSION));
+    expect(idOf(h, WORKER)).toBe(oldWorker);
+    expect(h.fake.volumes.has(VOL)).toBe(true);
+    h.fake.log.length = 0;
+    const again = await h.engine.createAppStackComponents({ plan });
+    expect(again.components.map((c) => c.outcome)).toEqual(["unchanged", "unchanged"]);
+    expect(mutations(h.fake.log)).toEqual([]);
   });
 
   it("removes a stale component and purges its secret dir", async () => {
@@ -614,6 +655,32 @@ describe("start and restart (5.11)", () => {
     held.release();
     await expect(pending).resolves.toEqual({ componentKey: "worker", outcome: "restarted" });
     expect(h.fake.containers.get(WORKER)?.State.Running).toBe(true);
+  });
+
+  it("start and restart leave alone a container built before the body version label", async () => {
+    const h = await setup();
+    await deployed(h);
+    olderBody(h, WEB);
+    olderBody(h, WORKER);
+    const ids = [idOf(h, WEB), idOf(h, WORKER)];
+    await expect(h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).resolves.toEqual({
+      componentKey: "web",
+      outcome: "already_running",
+    });
+    await expect(
+      h.engine.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: SECRETS }),
+    ).resolves.toEqual({ componentKey: "worker", outcome: "restarted" });
+    await h.engine.stopAppStack(REF);
+    await expect(h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] })).resolves.toEqual({
+      componentKey: "web",
+      outcome: "started",
+    });
+    await expect(
+      h.engine.restartAppStackComponent({ plan, componentKey: "worker", secretFileContents: SECRETS }),
+    ).resolves.toEqual({ componentKey: "worker", outcome: "restarted" });
+    expect(h.fake.log.filter((line) => line.startsWith("DELETE ") || line.startsWith("POST /containers/create"))).toEqual([]);
+    expect([idOf(h, WEB), idOf(h, WORKER)]).toEqual(ids);
+    expect(h.fake.containers.get(WEB)?.Labels[APP_STACK_LABELS.bodyVersion]).toBeUndefined();
   });
 
   it("a secret write failure names no value", async () => {
@@ -1052,7 +1119,8 @@ describe("getAppStackComponentLogs (5.17)", () => {
     async function stack() {
       const h = await setup();
       await deployed(h);
-      await writeAppStackComponentSecrets(h.root, ID, "worker", { ascii: ASCII, wide: WIDE });
+      // The folder is written whole: the file the worker's container was given stays, or the read is refused (BUG-43).
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: SECRET, ascii: ASCII, wide: WIDE });
       return h;
     }
 
@@ -1088,6 +1156,208 @@ describe("getAppStackComponentLogs (5.17)", () => {
         serve(h, body);
         expect(leaks(await read(h), value), `run ${String(run)}, cut ${String(cut)}`).toEqual([]);
       }
+    });
+  });
+
+  describe("a value it could not mask (BUG-43)", () => {
+    const unmaskable = (key: string) => ({ code: "DOCKER_ENGINE_UNAVAILABLE", message: `The logs of component ${key} cannot be masked` });
+    const readOf = (h: Harness, componentKey: string) => h.engine.getAppStackComponentLogs({ ...REF, componentKey, tail: 50 });
+    const readLogs = (h: Harness) => h.fake.log.some((line) => line.includes("/logs?"));
+    const TOKEN = "t0ken-value-77";
+    /** worker is given two secret files. */
+    const twoFiles = () => {
+      const plan = appStackTestPlan();
+      return rehash({
+        ...plan,
+        components: plan.components.map((c) =>
+          c.key === "worker" ? { ...c, secretFiles: [{ envName: "API_TOKEN_FILE", parameterKey: "api_token", version: 1 }, ...c.secretFiles] } : c,
+        ),
+      });
+    };
+    async function twoFilesDeployed(h: Harness) {
+      const plan = twoFiles();
+      await prepared(h, plan);
+      await h.engine.startAppStackComponent({ plan, componentKey: "web", secretFileContents: [] });
+      await h.engine.startAppStackComponent({
+        plan,
+        componentKey: "worker",
+        secretFileContents: [...SECRETS, { parameterKey: "api_token", version: 1, content: TOKEN }],
+      });
+      logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET} token=${TOKEN}\n` });
+      h.fake.log.length = 0;
+    }
+    /** What Docker does after a host reboot emptied the tmpfs: it makes each missing bind source a directory. */
+    async function recreatedByDocker(h: Harness) {
+      for (const entry of await readdir(h.root)) await rm(path.join(h.root, entry), { recursive: true, force: true });
+      for (const container of h.fake.containers.values()) {
+        for (const bind of container.HostConfig?.Binds ?? []) await mkdir(bind.split(":")[0] ?? "", { recursive: true });
+      }
+    }
+
+    it("masks every file of a container given two secret files, when the folder holds both", async () => {
+      const h = await setup();
+      await twoFilesDeployed(h);
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual(["key=[REDACTED] token=[REDACTED]"]);
+    });
+
+    it("refuses, before any log read, when one file the container was given is missing", async () => {
+      const h = await setup();
+      await twoFilesDeployed(h);
+      await rm(path.join(secretDir(h, "worker"), "api_token"));
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("refuses when the folder is gone, and when Docker recreated each bind source as a directory", async () => {
+      const h = await setup();
+      await twoFilesDeployed(h);
+      await rm(secretDir(h, "worker"), { recursive: true, force: true });
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      await recreatedByDocker(h);
+      expect((await readdir(secretDir(h, "worker"))).sort()).toEqual(["api_token", "shared_key"]);
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("reads a container given no secret file, with its folder and without", async () => {
+      const h = await setup();
+      await deployed(h);
+      const web = h.fake.containers.get(WEB)!;
+      web.logs.push({ stream: "stdout", payload: `${AT} GET / 200\n` });
+      expect(web.HostConfig).toEqual({ Binds: [] });
+      await expect(exists(secretDir(h, "web"))).resolves.toBe(false);
+      await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      await mkdir(secretDir(h, "web"));
+      await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      // Docker's answer for a container created without binds: no list, or null.
+      for (const host of [{ Binds: null }, {}]) {
+        web.HostConfig = host as FakeHostConfig;
+        await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: "GET / 200" }]);
+      }
+    });
+
+    it("never counts or reads a bind to another target, wherever its source is", async () => {
+      const h = await setup();
+      await deployed(h);
+      const elsewhere = path.join(h.root, "elsewhere");
+      await mkdir(elsewhere);
+      await writeFile(path.join(elsewhere, "token"), TOKEN);
+      const web = h.fake.containers.get(WEB)!;
+      web.HostConfig = {
+        Binds: [
+          `${path.join(elsewhere, "token")}:/etc/token:ro`,
+          `${path.join(secretDir(h, "worker"), "shared_key")}:/srv/shared_key:ro`,
+          `${path.join(secretDir(h, "web"), "sub", "x")}:/run/secrets-old/x:ro`,
+          `${path.join(elsewhere, "missing")}:/run/secretsx`,
+          "app_data:/var/lib/data",
+        ],
+      };
+      web.logs.push({ stream: "stdout", payload: `${AT} token=${TOKEN}\n` });
+      await expect(readOf(h, "web")).resolves.toEqual([{ at: AT, stream: "stdout", text: `token=${TOKEN}` }]);
+    });
+
+    it("refuses, before any log read, a secret file bound from anywhere but that file of the component's folder", async () => {
+      // The container reads /run/secrets/<key> whatever its source: one made before the secrets root moved, or given
+      // another folder's file, is refused, though the component's own folder holds the file.
+      const h = await setup();
+      await deployed(h);
+      logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET}\n` });
+      const worker = h.fake.containers.get(WORKER)!;
+      const own = worker.HostConfig?.Binds ?? [];
+      const file = path.join(secretDir(h, "worker"), "shared_key");
+      expect(own).toEqual([`${file}:/run/secrets/shared_key:ro`]);
+      const earlier = path.join(h.root, "earlier-root", `app_${ID}__worker`);
+      await mkdir(earlier, { recursive: true });
+      await writeFile(path.join(earlier, "shared_key"), SECRET);
+      for (const bind of [
+        `${path.join(earlier, "shared_key")}:/run/secrets/shared_key:ro`, // an earlier secrets root
+        `${path.join(secretDir(h, "web"), "shared_key")}:/run/secrets/shared_key:ro`, // another component's folder
+        `${path.join(h.root, "elsewhere", "token")}:/run/secrets/token:ro`,
+        `${path.join(secretDir(h, "worker"), "sub", "x")}:/run/secrets/x:ro`, // a nested path of its folder
+        `${secretDir(h, "worker")}:/run/secrets:ro`, // the folder itself
+        `${file}:/run/secrets/shared_key`, // writable
+        `${file}:/run/secrets/shared_key:rw`,
+        `${file}:/run//secrets/shared_key:ro`, // the same target spelled otherwise
+        `${path.join(h.root, "elsewhere")}:/run:ro`, // a folder that holds /run/secrets
+      ]) {
+        worker.HostConfig = { Binds: [bind] };
+        await expect(readOf(h, "worker"), bind).rejects.toMatchObject(unmaskable("worker"));
+      }
+      expect(readLogs(h)).toBe(false);
+      worker.HostConfig = { Binds: own };
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual(["key=[REDACTED]"]);
+    });
+
+    it("refuses an inspect whose binds cannot be read", async () => {
+      const h = await setup();
+      await deployed(h);
+      logs(h).push({ stream: "stdout", payload: `${AT} key=${SECRET}\n` });
+      const worker = h.fake.containers.get(WORKER)!;
+      const own = worker.HostConfig?.Binds ?? [];
+      for (const host of [
+        { Binds: [...own, "no-target"] },
+        { Binds: [...own, `${path.join(secretDir(h, "worker"), "shared_key")}:`] },
+        { Binds: [...own, 42] },
+        { Binds: own.join(",") },
+        null,
+      ]) {
+        worker.HostConfig = host as FakeHostConfig;
+        await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      }
+      expect(readLogs(h)).toBe(false);
+      worker.HostConfig = { Binds: own };
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual(["key=[REDACTED]"]);
+    });
+
+    it("refuses a container built with a secret file the plan it was first installed from did not have", async () => {
+      // The reviewer's case: an upgrade gives web its first secret file, then a reboot; the API's stored "applied" plan
+      // may still be the older one, and the executor asks it nothing.
+      const h = await setup();
+      await deployed(h);
+      const plan = appStackTestPlan();
+      const upgraded = rehash({
+        ...plan,
+        components: plan.components.map((c) =>
+          c.key === "web" ? { ...c, secretFiles: [{ envName: "WEB_TOKEN_FILE", parameterKey: "web_token", version: 1 }] } : c,
+        ),
+      });
+      await h.engine.createAppStackComponents({ plan: upgraded });
+      await h.engine.startAppStackComponent({ plan: upgraded, componentKey: "web", secretFileContents: [{ parameterKey: "web_token", version: 1, content: TOKEN }] });
+      h.fake.containers.get(WEB)?.logs.push({ stream: "stdout", payload: `${AT} token=${TOKEN}\n` });
+      expect((await readOf(h, "web")).map((line) => line.text)).toEqual(["token=[REDACTED]"]);
+      await rm(secretDir(h, "web"), { recursive: true, force: true });
+      const gone = await readOf(h, "web").then(() => null, (err: unknown) => err);
+      expect(gone).toMatchObject(unmaskable("web"));
+      await recreatedByDocker(h);
+      const recreated = await readOf(h, "web").then(() => null, (err: unknown) => err);
+      expect(recreated).toMatchObject(unmaskable("web"));
+      expect(JSON.stringify([String(gone), String(recreated)])).not.toContain(TOKEN);
+    });
+
+    it("refuses a stored value shorter than six characters, which it would show as it is", async () => {
+      const h = await setup();
+      await deployed(h);
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: "abcde" });
+      logs(h).push({ stream: "stdout", payload: `${AT} key=abcde\n` });
+      await expect(readOf(h, "worker")).rejects.toMatchObject(unmaskable("worker"));
+      expect(readLogs(h)).toBe(false);
+    });
+
+    it("masks the value as a URL or a form writes it", async () => {
+      const h = await setup();
+      await deployed(h);
+      const value = "Pa ss&wd+42/x";
+      await writeAppStackComponentSecrets(h.root, ID, "worker", { shared_key: value });
+      logs(h).push(
+        { stream: "stdout", payload: `${AT} GET /login?p=${encodeURIComponent(value)}&next=/\n` },
+        { stream: "stdout", payload: `${AT} body p=${encodeURIComponent(value).replace(/%20/g, "+")}&ok=1\n` },
+        { stream: "stdout", payload: `${AT} plain ${value} end\n` },
+      );
+      expect((await readOf(h, "worker")).map((line) => line.text)).toEqual([
+        "GET /login?p=[REDACTED]&next=/",
+        "body p=[REDACTED]&ok=1",
+        "plain [REDACTED] end",
+      ]);
     });
   });
 

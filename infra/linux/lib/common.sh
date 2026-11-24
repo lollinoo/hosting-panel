@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Helpers shared by install.sh and update.sh. Source this file; functions return non-zero, never exit.
+# Helpers shared by install.sh, update.sh and restore-panel.sh. Source this file; functions return non-zero, never exit.
+
+# Four numbers from 0 to 255 without leading zeros: the only IPv4 form hp-accounts setup records.
+_hp_ipv4_re='^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
 
 env_value() { # env_value <file> <KEY>: prints the value (for internal use only, never echoed)
   local line
@@ -30,7 +33,7 @@ panel_features_in_use() { # <api.env>: prints the in-use gated feature names, on
   local pw applied out
   [[ "$(env_value "$1" DATABASE_URL)" =~ ^postgresql://hosting_panel:([A-Za-z0-9._~-]+)@127\.0\.0\.1:5432/hosting_panel$ ]] || return 1
   pw="${BASH_REMATCH[1]}"
-  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql', '0024_site_templates.sql', '0025_app_stacks.sql', '0026_app_routing_options.sql', '0027_app_stack_backups.sql', '0028_app_stack_links.sql', '0029_notifications.sql')")" || return 1
+  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql', '0024_site_templates.sql', '0025_app_stacks.sql', '0026_app_routing_options.sql', '0027_app_stack_backups.sql', '0028_app_stack_links.sql', '0029_notifications.sql', '0031_app_stack_tasks.sql')")" || return 1
   if grep -qx '0021_manual_tls_certificates.sql' <<<"${applied}"; then
     out="$(_hp_features_psql "${pw}" "select 'manual-tls' where exists (select 1 from public.domains where cert_mode = 'manual')")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
@@ -73,6 +76,11 @@ panel_features_in_use() { # <api.env>: prints the in-use gated feature names, on
   if grep -qx '0029_notifications.sql' <<<"${applied}"; then
     # a channel, on or off: an older release sends nothing, and nobody would be told that the alerts went silent
     out="$(_hp_features_psql "${pw}" "select 'notifications' where exists (select 1 from public.notification_channels)")" || return 1
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
+  fi
+  if grep -qx '0031_app_stack_tasks.sql' <<<"${applied}"; then
+    # a template version that declares tasks (ADR-0042): an older release refuses its source and cannot show it
+    out="$(_hp_features_psql "${pw}" "select 'app-tasks' where exists (select 1 from public.app_template_versions where jsonb_typeof(compiled_schema -> 'tasks') = 'array' and jsonb_array_length(compiled_schema -> 'tasks') > 0)")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
   fi
   return 0

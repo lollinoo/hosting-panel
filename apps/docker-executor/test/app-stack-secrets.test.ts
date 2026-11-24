@@ -1,6 +1,7 @@
 import { chmod, mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { APP_STACK_SECRET_MIN_LENGTH } from "@hosting-panel/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   APP_STACK_LOG_MASK,
@@ -148,6 +149,8 @@ describe("maskAppStackLogLines", () => {
   it("masks values of six characters or more, longest first", () => {
     expect(APP_STACK_LOG_MASK).toBe("[REDACTED]");
     expect(APP_STACK_LOG_MASK_MIN_LENGTH).toBe(6);
+    // The panel refuses a new value shorter than the log reader masks (BUG-43): the two numbers are one.
+    expect(APP_STACK_LOG_MASK_MIN_LENGTH).toBe(APP_STACK_SECRET_MIN_LENGTH);
     const lines = [line("key=abcdefgh and abcdef twice abcdef"), line("short=short"), { at: null, stream: "stderr" as const, text: "none here" }];
     const masked = maskAppStackLogLines(lines, ["abcdef", "short", "abcdefgh"]);
     expect(masked).toEqual([
@@ -174,6 +177,19 @@ describe("maskAppStackLogLines", () => {
       maskAppStackLogLines([line(`url=redis://default:${value.slice(0, 18)}`), line(`${value.slice(18)}@cache`), line("ok Sup3r"), line("23456789 seen")], [value]),
     ).toEqual([line("url=redis://default:[REDACTED]"), line("[REDACTED]@cache"), line("ok Sup3r"), line("23456789 seen")]);
     expect(maskAppStackLogLines([line(`${value.slice(-6)} and ${value.slice(0, 6)}`)], [value])).toEqual([line("[REDACTED] and [REDACTED]")]);
+  });
+
+  it("masks the percent-encoded form of a value, and the form with + for a space, whole", () => {
+    const value = "Pa ss&wd+42/x";
+    const encoded = encodeURIComponent(value);
+    expect(encoded).toBe("Pa%20ss%26wd%2B42%2Fx");
+    const lines = [line(`q=${encoded}&a=1`), line(`f=${encoded.replace(/%20/g, "+")}`), line(`v=${value};`), line("Pa%20ss%26 is no value")];
+    expect(maskAppStackLogLines(lines, [value])).toEqual([line("q=[REDACTED]&a=1"), line("f=[REDACTED]"), line("v=[REDACTED];"), line("Pa%20ss%26 is no value")]);
+  });
+
+  it("leaves a value that encoding does not change, or cannot encode, as before", () => {
+    expect(maskAppStackLogLines([line("k=s3cret-value-42.")], ["s3cret-value-42"])).toEqual([line("k=[REDACTED].")]);
+    expect(maskAppStackLogLines([line("k=abc\ud800defg.")], ["abc\ud800defg"])).toEqual([line("k=[REDACTED].")]);
   });
 
   it("returns the lines unchanged without values", () => {

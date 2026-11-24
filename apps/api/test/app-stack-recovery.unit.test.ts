@@ -11,6 +11,7 @@ import {
   appStackComponents,
   appStackDeployments,
   appStackDomains,
+  appStackRevisions,
   appStacks,
   appStackVolumes,
   auditEvents,
@@ -27,6 +28,7 @@ import {
   organizations,
   platformInstallations,
   resourceQuotas,
+  sql,
   transitionOperation,
   updateAppTemplate,
   type AppStackWriteResult,
@@ -129,10 +131,10 @@ describe("recoverAppStackOperation (RT4)", () => {
     }) as DockerExecutorPort;
   }
 
-  function revision(stackId: string, components: AppStackPlanComponent[]): NewAppStackRevision {
+  function revision(stackId: string, components: AppStackPlanComponent[], ingress = INGRESS): NewAppStackRevision {
     const revisionId = newAppEntityId("srev");
     const volumes = [...new Set(components.flatMap((c) => c.volumes.map((v) => v.volumeKey)))].sort().map((key) => ({ key }));
-    const base = { schemaVersion: 1 as const, stackId, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: versionId, revisionId, components, volumes, ingress: INGRESS };
+    const base = { schemaVersion: 1 as const, stackId, organizationId: ORG, hostAllocationId: ALLOC, templateVersionId: versionId, revisionId, components, volumes, ingress };
     const plan: ApprovedStackPlan = { ...base, planHash: computeAppStackPlanHash(base) };
     expect(ApprovedStackPlanSchema.safeParse(plan).success).toBe(true);
     return {
@@ -507,6 +509,79 @@ describe("recoverAppStackOperation (RT4)", () => {
 
     expect(await stepsOf(upgrade)).toMatchObject({ pull: "succeeded", prepare: "succeeded", create: "failed" });
     expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: v2.revisionId });
+  });
+
+  it("(8c) a stopped application whose upgrade or redeploy is in doubt before create settles stopped (#129)", async () => {
+    const { stackId, rev } = await running();
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    expect((await stackOf(stackId)).status).toBe("stopped");
+    const v2 = revision(stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    fake.failNext("prepareAppStack", "ambiguous");
+    await parked(upgrade);
+    expect((await stackOf(stackId)).status).toBe("unknown");
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stepsOf(upgrade)).toMatchObject({ pull: "succeeded", prepare: "failed", create: "failed" });
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId, appliedRoutesHash: null });
+    expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+
+    // A deploy is not taken back, and its application stays stopped all the same.
+    const redeploy = await enqueue(stackId, "stack.deploy");
+    fake.failNext("pullAppStackImage", "ambiguous");
+    await parked(redeploy);
+    expect(await recover(redeploy)).toBe("settled");
+    await expectInterrupted(redeploy);
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId });
+  });
+
+  it("(8d) a stopped application that never ran, whose upgrade is in doubt before create, ends failed as before (#129)", async () => {
+    // A first install refused at create leaves no applied revision.
+    const { stackId, write } = await create();
+    fake.failNext("createAppStackComponents", "definite");
+    expect(await apply(write)).toBe(APP_STACK_FAILURE.DOCKER_ENGINE_UNAVAILABLE.code);
+    expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null });
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    expect((await stackOf(stackId)).status).toBe("stopped");
+    const v2 = revision(stackId, [CACHE, WEB, component("extra")], [{ componentKey: "extra", port: 8080 }, ...INGRESS]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    await addAppStackDomainsTransactional(db(), {
+      organizationId: ORG,
+      stackId,
+      entries: [{ hostname: `extra${String(n)}.example.test`, componentKey: "extra", internalPort: 8080 }],
+    });
+    fake.failNext("pullAppStackImage", "ambiguous");
+    await parked(upgrade);
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stepsOf(upgrade)).toMatchObject({ pull: "failed", create: "failed" });
+    // Not taken back: the address points at a part only the new version has.
+    expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null, desiredRevisionId: v2.revisionId });
+  });
+
+  it("(8e) a stopped application whose applied revision no longer reads still settles stopped: one was applied (#129)", async () => {
+    const { stackId, rev } = await running();
+    expect(await apply(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+    const v2 = revision(stackId, [CACHE, { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] }]);
+    const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+    fake.failNext("prepareAppStack", "ambiguous");
+    await parked(upgrade);
+    // Revisions are immutable: only this test can make the applied one's plan unreadable.
+    await db().execute(sql`ALTER TABLE app_stack_revisions DISABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+    await db().update(appStackRevisions).set({ plan: { ...rev.plan, schemaVersion: 99 } }).where(eq(appStackRevisions.id, rev.revisionId));
+    await db().execute(sql`ALTER TABLE app_stack_revisions ENABLE TRIGGER trg_prevent_app_stack_revisions_mutation`);
+
+    expect(await recover(upgrade)).toBe("settled");
+
+    expect(trace()).toEqual(["getAppStackStatus"]);
+    await expectInterrupted(upgrade);
+    expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
   });
 
   it("(9) routes observed published keep the stored routes hash", async () => {

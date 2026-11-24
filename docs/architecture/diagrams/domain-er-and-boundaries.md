@@ -508,6 +508,8 @@ erDiagram
     app_stacks ||--o{ app_stack_domains : "(stack_id, organization_id) CASCADE"
     app_stack_components ||--o{ app_stack_domains : "(stack_id, component_key)"
     app_stacks ||--o{ app_stack_deployments : "(stack_id, organization_id) CASCADE"
+    app_stacks ||--o{ app_stack_task_schedules : "(stack_id, organization_id) CASCADE (0031)"
+    app_stacks ||--o{ app_stack_task_runs : "(stack_id, organization_id) CASCADE (0031)"
     app_stack_revisions |o--o{ app_stack_deployments : "(revision_id, stack_id)"
     app_stack_revisions |o--o{ app_stack_deployments : "(replaced_revision_id, stack_id) (0032)"
 
@@ -605,6 +607,32 @@ erDiagram
         text problem "codice stabile o NULL"
         text replaced_revision_id FK "revisione desiderata che la richiesta ha sostituito, o NULL (0032)"
         text replaced_status "stato dello stack che la richiesta ha sostituito, o NULL (0032)"
+    }
+
+    app_stack_task_schedules {
+        text stack_id PK "con task_key; FK con organization_id"
+        text task_key PK "chiave dell'attività nel modello"
+        text frequency "hourly, daily, weekly (nessuna riga = mai)"
+        integer hour_utc "0-23, NULL per hourly"
+        integer weekday "1 (lunedì) - 7, solo weekly"
+        timestamptz changed_at "prima di questo istante nulla è dovuto"
+        timestamptz served_slot_at "ultimo orario già trattato"
+        timestamptz skipped_slot_at "ultimo orario non eseguito"
+        text skip_reason "busy, not_running, missed"
+    }
+
+    app_stack_task_runs {
+        text id PK "srun_<24 hex>"
+        text stack_id FK "con organization_id"
+        text task_key "chiave dell'attività"
+        text component_key "componente in cui gira"
+        text run_trigger "manual, schedule"
+        timestamptz slot_at "orario programmato, UNIQUE per attività"
+        text operation_id UK "una riga per operazione (senza FK)"
+        text status "queued, running, succeeded, failed, timed_out, not_started, unknown"
+        text problem "perché non è partita, o outcome_lost"
+        integer exit_code "0-255 o NULL; non esposto al cliente"
+        text output "ultime righe, mascherate, al più 16 KiB"
     }
 ```
 
@@ -858,6 +886,11 @@ I vincoli composti di chiave e di foreign key (`0001_phase1_docker_native.sql`) 
 - **Versione 0030 (`0030_app_terminal_sessions.sql`, `ADR-0041`, additiva)**:
   - `admin_terminal_sessions.site_id` diventa facoltativa; due colonne nulle, `stack_id` e `component_key`; il vincolo `admin_terminal_sessions_target_check`.
   - Nessuna tabella nuova, nessun backfill e nessun cancello del downgrade: la release precedente, dopo un rollback automatico, continua a scrivere righe con `site_id` e chiude come `executor_gone` una riga di applicazione rimasta aperta.
+- **Versione 0031 (`0031_app_stack_tasks.sql`, `ADR-0042`, additiva)**:
+  - Due tabelle: `app_stack_task_schedules` (quando un'attività parte da sola; nessuna riga vuol dire «mai») e `app_stack_task_runs` (una riga per esecuzione, con ciò che ha stampato: mascherato e limitato dall'esecutore, non sta in nessun'altra tabella). Il comando di un'attività non è in nessuna delle due: si legge dalla versione del modello quando l'esecuzione comincia.
+  - Un indice unico parziale `uq_app_stack_task_runs_slot (stack_id, task_key, slot_at)`: un orario programmato ha al più un'esecuzione alla volta. Un'esecuzione programmata che non è potuta partire viene cancellata e il suo orario torna in coda: un orario **parte** al più una volta.
+  - Un trigger su `app_stacks` (`trg_app_stacks_forget_tasks`): quando un'applicazione viene cancellata (`deleted_at` passa da `NULL` a un istante) le sue righe nelle due tabelle spariscono; la riga di `app_stacks` resta, quindi la cascata della chiave esterna da sola non basterebbe.
+  - Nessun backfill; la release precedente, dopo un rollback automatico, ignora le due tabelle e il trigger continua a togliere ciò che le attività hanno lasciato. I numeri da `0026` a `0030` sono di altre modifiche in corso.
 - **Versione 0032 (`0032_app_stack_deployment_replaced.sql`, `ADR-0035` §2.10, additiva)**:
   - Colonna nulla `app_stack_deployments.replaced_revision_id` con chiave esterna composita `(replaced_revision_id, stack_id)` verso `app_stack_revisions`: la revisione desiderata che la richiesta di un upgrade, di una rollback o di un deploy con impostazioni nuove ha sostituito; un upgrade o una rollback che fallisce prima di `create` torna esattamente a quella.
   - Colonna nulla `app_stack_deployments.replaced_status` (`CHECK` sugli stati di `app_stacks`): lo stato dello stack che la richiesta ha sostituito (`NULL` per il primo deploy e per l'avvio che segue un backup o un ripristino, `ADR-0038`); un avvio di uno stack `stopped` rifiutato prima di toccare qualunque cosa lo lascia `stopped`.

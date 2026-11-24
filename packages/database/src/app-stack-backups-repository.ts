@@ -4,6 +4,7 @@ import {
   APP_STACK_BACKUP_ACTION_WINDOW_MS,
   APP_STACK_BACKUP_ACTIONS_PER_HOUR,
   APP_STACK_RESOURCE_TYPE,
+  appStackBackupEnqueueRefusal,
   appStackBackupEnqueueTarget,
   appStackBackupOperationSteps,
   appStackLockKey,
@@ -16,10 +17,10 @@ import {
 } from "@hosting-panel/contracts";
 import { and, asc, desc, eq, exists, gt, inArray, isNull, ne, notExists, notInArray, or, sql } from "drizzle-orm";
 import { deleteRemovedAppStackDomains } from "./app-stack-domains-repository.js";
-import { AppStackRepositoryError, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
+import { AppStackRepositoryError, getAppStackLockHolder, newAppEntityId, type AppStackRow } from "./app-stacks-repository.js";
 import { resolveAppStackBackupTargets } from "./backup-targets-repository.js";
 import type { DatabaseExecutor, HostingPanelDatabase } from "./client.js";
-import { ACTIVE_OPERATION_LOCK_STATUSES, enqueueOperationTransactional } from "./operations-repository.js";
+import { enqueueOperationTransactional } from "./operations-repository.js";
 import {
   appStackBackupCopies,
   appStackBackups,
@@ -153,16 +154,14 @@ export async function enqueueAppStackBackupTransactional(
       .for("update");
     if (!stack) throw new AppStackRepositoryError("NOT_FOUND", "Application not found.");
     const lockKey = appStackLockKey(stack.id);
-    const [active] = await tx
-      .select({ id: operations.id })
-      .from(operations)
-      .where(and(eq(operations.lockKey, lockKey), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
-      .limit(1);
-    if (active) {
-      throw codedError(`Resource lock '${lockKey}' is currently held by active operation '${active.id}'`, "RESOURCE_LOCKED");
+    const active = await getAppStackLockHolder(tx, stack.id);
+    // The decision the detail's allowedActions reads too (ADR-0035 §2.10), so the page never offers what this refuses.
+    const refused = appStackBackupEnqueueRefusal(stack.status, active !== null);
+    if (refused === "locked") {
+      throw codedError(`Resource lock '${lockKey}' is currently held by active operation '${active?.id}'`, "RESOURCE_LOCKED");
     }
     const target = appStackBackupEnqueueTarget(stack.status);
-    if (target === null) {
+    if (refused === "status" || target === null) {
       throw new AppStackRepositoryError(
         "INVALID_TRANSITION",
         `This action is not available while the application is ${stack.status}.`,
@@ -463,9 +462,9 @@ export async function settleAppStackRestore(
  * that restore is the newest operation of the application that decides, and its safety backup says it left them so.
  * A restore decides unless it was cancelled (it never ran), also when it failed: its safety backup says whether it left
  * them so. Any other action, a start above all, decides once it succeeded: it took the data as they are. One under way
- * or one that failed (a start the executor refuses) leaves them as they were; backups and clean-ups never decide. Null
- * while the data are whole. The one test of "the data are half written now": the mark on a new safety backup, the
- * retention rule and the page all ask it.
+ * or one that failed (a start the executor refuses) leaves them as they were; backups, clean-ups and the runs of tasks
+ * (ADR-0042: a run neither starts nor stops anything) never decide. Null while the data are whole. The one test of "the
+ * data are half written now": the mark on a new safety backup, the retention rule and the page all ask it.
  */
 export async function getAppStackIncompleteDataMark(db: DatabaseExecutor, stackId: string): Promise<AppStackBackupRow | null> {
   const [last] = await db
@@ -474,7 +473,7 @@ export async function getAppStackIncompleteDataMark(db: DatabaseExecutor, stackI
     .where(
       and(
         eq(operations.lockKey, appStackLockKey(stackId)),
-        notInArray(operations.kind, ["stack.backup", "stack.prune"]),
+        notInArray(operations.kind, ["stack.backup", "stack.prune", "stack.task"]),
         or(and(eq(operations.kind, "stack.restore"), ne(operations.status, "cancelled")), eq(operations.status, "succeeded")),
       ),
     )

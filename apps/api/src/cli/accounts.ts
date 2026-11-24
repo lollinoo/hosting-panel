@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { statfs } from "node:fs/promises";
+import { BlockList, isIP } from "node:net";
 import os from "node:os";
 import { createInterface } from "node:readline";
 import { redactSensitiveString } from "@hosting-panel/contracts";
@@ -54,24 +55,74 @@ function encryptTotp(secret: string, userId: string, key: Buffer) {
   };
 }
 
+// None of these can be the server's public IPv6.
+const NOT_A_PUBLIC_IPV6 = new BlockList();
+NOT_A_PUBLIC_IPV6.addAddress("::", "ipv6");
+NOT_A_PUBLIC_IPV6.addAddress("::1", "ipv6");
+NOT_A_PUBLIC_IPV6.addSubnet("fe80::", 10, "ipv6");
+NOT_A_PUBLIC_IPV6.addSubnet("::ffff:0:0", 96, "ipv6");
+
+// The webhook check and the executor read these addresses back with Node and refuse what it does not parse.
+function parseHostIpv4(value: string): string {
+  if (isIP(value) !== 4) {
+    throw new Error("Invalid --ipv4: give the server's public IPv4 as four numbers from 0 to 255, without leading zeros.");
+  }
+  return value;
+}
+
+function parseHostIpv6(value: string): string {
+  // isIP accepts a zone (fe80::1%eth0), which no other host can reach.
+  if (isIP(value) !== 6 || value.includes("%")) {
+    throw new Error("Invalid --ipv6: give the server's public IPv6 without brackets, zone or prefix length, or none.");
+  }
+  if (NOT_A_PUBLIC_IPV6.check(value, "ipv6")) {
+    throw new Error("Invalid --ipv6: a loopback, link-local, unspecified or IPv4-mapped address is not the server's public IPv6.");
+  }
+  // The WHATWG URL parser prints an IPv6 compressed and in lower case, so one address is stored one way.
+  return new URL(`http://[${value}]/`).hostname.slice(1, -1);
+}
+
+/**
+ * `hostIpv4Kind`: "given" (typed by the administrator, the default) records the IPv4; "default" (what the installer
+ * kept or detected) records it only when there is no host row yet.
+ * `hostIpv6`: an address records it, null removes it, undefined leaves the recorded one as it is.
+ * `recordedIpv4` is the IPv4 the host row holds afterwards.
+ */
 export async function setupInstallation(
   db: HostingPanelDatabase,
-  input: { installationName: string; hostHostname: string; hostIpv4: string },
-): Promise<{ installationId: string; hostId: string }> {
+  input: {
+    installationName: string;
+    hostHostname: string;
+    hostIpv4: string;
+    hostIpv4Kind?: "given" | "default";
+    hostIpv6?: string | null;
+  },
+): Promise<{ installationId: string; hostId: string; recordedIpv4: string }> {
+  const inputIpv4 = parseHostIpv4(input.hostIpv4);
+  const ipv6 = input.hostIpv6 === undefined || input.hostIpv6 === null ? input.hostIpv6 : parseHostIpv6(input.hostIpv6);
   await ensurePresetRolesAndPermissions(db);
   await ensureWordpressTemplate(db);
   const [inst] = await db.select().from(platformInstallations).limit(1);
   const [host] = await db.select().from(hosts).limit(1);
   if (inst && host) {
-    // A rerun with a new --ipv4/--hostname (for example behind NAT) must reach the row sites read.
+    // Webhooks may not name the recorded IPv4: behind NAT a detected one is private, so it never replaces it.
+    const ipv4 = input.hostIpv4Kind === "default" ? host.ipv4Address : inputIpv4;
+    const ipv6Changed = ipv6 !== undefined && host.ipv6Address !== ipv6;
+    // A rerun with a new --ipv4/--ipv6/--hostname (for example behind NAT) must reach the row sites read.
     if (
-      host.ipv4Address !== input.hostIpv4 ||
+      host.ipv4Address !== ipv4 ||
+      ipv6Changed ||
       host.hostname !== input.hostHostname ||
       host.name !== input.hostHostname
     ) {
       await db
         .update(hosts)
-        .set({ ipv4Address: input.hostIpv4, hostname: input.hostHostname, name: input.hostHostname })
+        .set({
+          ipv4Address: ipv4,
+          ...(ipv6 === undefined ? {} : { ipv6Address: ipv6 }),
+          hostname: input.hostHostname,
+          name: input.hostHostname,
+        })
         .where(eq(hosts.id, host.id));
       await appendAuditEvent(db, {
         actorId: null,
@@ -80,10 +131,14 @@ export async function setupInstallation(
         action: "host.address.change",
         targetType: "host",
         targetId: host.id,
-        details: { from: host.ipv4Address, to: input.hostIpv4 },
+        details: {
+          from: host.ipv4Address,
+          to: ipv4,
+          ...(ipv6Changed ? { ipv6From: host.ipv6Address, ipv6To: ipv6 } : {}),
+        },
       });
     }
-    return { installationId: inst.id, hostId: host.id };
+    return { installationId: inst.id, hostId: host.id, recordedIpv4: ipv4 };
   }
 
   const fs = await statfs("/");
@@ -97,14 +152,15 @@ export async function setupInstallation(
     platformInstallationId: installationId,
     name: input.hostHostname,
     hostname: input.hostHostname,
-    ipv4Address: input.hostIpv4,
+    ipv4Address: inputIpv4,
+    ipv6Address: ipv6 ?? null,
     hostingMode: "dedicated",
     totalCpuMilli: os.cpus().length * 1000,
     totalMemoryBytes: String(os.totalmem()),
     totalStorageBytes: String(fs.blocks * fs.bsize),
   });
   await audit(db, "accounts.setup", "platform_installation", installationId);
-  return { installationId, hostId };
+  return { installationId, hostId, recordedIpv4: inputIpv4 };
 }
 
 export async function createServerAdmin(
@@ -237,13 +293,20 @@ export async function runCli(argv: readonly string[], dbClient = databaseClientF
     const db = dbClient.db;
     const key = () => resolveSecretsMasterKey("linux-systemd");
     if (command === "setup") {
-      out(
-        await setupInstallation(db, {
-          installationName: required(argv, "--name"),
-          hostHostname: required(argv, "--hostname"),
-          hostIpv4: required(argv, "--ipv4"),
-        }),
-      );
+      // --ipv4 is typed by the administrator; --ipv4-default is what the installer kept or detected.
+      const ipv4Default = argv.includes("--ipv4-default");
+      if (ipv4Default && argv.includes("--ipv4")) throw new Error("Give --ipv4 or --ipv4-default, not both.");
+      const ipv6 = argv.includes("--ipv6") ? required(argv, "--ipv6") : undefined;
+      const { recordedIpv4, ...ids } = await setupInstallation(db, {
+        installationName: required(argv, "--name"),
+        hostHostname: required(argv, "--hostname"),
+        hostIpv4: required(argv, ipv4Default ? "--ipv4-default" : "--ipv4"),
+        hostIpv4Kind: ipv4Default ? "default" : "given",
+        hostIpv6: ipv6 === "none" ? null : ipv6,
+      });
+      out(ids);
+      // A line of its own: install.sh compares it with the IPv4 it uses, and warns when they differ.
+      out({ recordedIpv4 });
     } else if (command === "create-admin") {
       const password = process.env["HP_NEW_PASSWORD"] ?? (await promptHidden("Password: "));
       out(
@@ -262,7 +325,7 @@ export async function runCli(argv: readonly string[], dbClient = databaseClientF
       out({ ok: true });
     } else {
       throw new Error(
-        "Usage: accounts <setup --name N --hostname H --ipv4 IP | create-admin --email E --name N | reset-password --email E | reset-totp --email E | unlock --email E>",
+        "Usage: accounts <setup --name N --hostname H --ipv4 IP|--ipv4-default IP [--ipv6 IP|none] | create-admin --email E --name N | reset-password --email E | reset-totp --email E | unlock --email E>",
       );
     }
   } finally {

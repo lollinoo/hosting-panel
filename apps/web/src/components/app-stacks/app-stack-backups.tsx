@@ -6,6 +6,7 @@ import {
   APP_STACK_PRE_RESTORE_BACKUPS_KEPT,
   MANUAL_BACKUPS_KEPT,
   appStackBackupEnqueueTarget,
+  type AppStackAllowedAction,
   type AppStackBackupDto,
   type AppStackBackupsDto,
   type AppStackStatus,
@@ -35,10 +36,37 @@ export function canConfirmRestore(typed: string, name: string, busy: boolean): b
   return typed === name && !busy;
 }
 
-/** Why a backup or a restore cannot be asked now: the server's reason first, then the application's status. Null = it can. */
-export function appStackBackupBlock(m: Messages, backups: AppStackBackupsDto, status: AppStackStatus): string | null {
+/** What the detail says of the application now: its list (`allowedActions`), an operation holding it, its status. */
+export type AppStackBackupOffer = {
+  actions?: readonly AppStackAllowedAction[];
+  /** An operation holds the application: the customer's own or work of the platform. */
+  busy: boolean;
+  /** The status shown. */
+  status: AppStackStatus;
+  /** It reads `unknown` only because the components could not be read lately; the stored status is another. */
+  stale: boolean;
+};
+
+/**
+ * Why a backup or a restore cannot be asked now, or null when it can: the backups' own reason first, then the
+ * detail's list, never the status shown (issue #106). The line says only what is true: an operation holds the
+ * application, or its status refuses (the one shown is the stored one unless the reading is stale), else the caller
+ * may not. A refusal only the request knows (the hourly limit) is said when the request answers.
+ */
+export function appStackBackupBlock(
+  m: Messages,
+  backups: AppStackBackupsDto,
+  kind: "stack.backup" | "stack.restore",
+  offer: AppStackBackupOffer,
+): string | null {
   if (backups.unavailableReason !== null) return m.apps.backups.unavailable[backups.unavailableReason];
-  return appStackBackupEnqueueTarget(status) === null ? format(m.apps.reasons.status, { status: m.apps.status[status] }) : null;
+  // No list (an API older than the page): nothing is offered.
+  if ((offer.actions ?? []).includes(kind)) return null;
+  if (offer.busy) return m.apps.backups.busy;
+  if (!offer.stale && appStackBackupEnqueueTarget(offer.status) === null) {
+    return format(m.apps.reasons.status, { status: m.apps.status[offer.status] });
+  }
+  return m.apps.backups.notAllowed;
 }
 
 /**
@@ -52,6 +80,9 @@ export function AppStackBackups({
   csrfToken,
   stackName,
   status,
+  stale,
+  actions,
+  busy: held,
   backups,
 }: {
   orgId: string;
@@ -59,6 +90,10 @@ export function AppStackBackups({
   csrfToken: string;
   stackName: string;
   status: AppStackStatus;
+  stale: boolean;
+  /** `allowedActions` of the detail: the buttons follow it, never the status shown. */
+  actions?: readonly AppStackAllowedAction[];
+  busy: boolean;
   backups: AppStackBackupsDto | null;
 }) {
   const m = useMessages();
@@ -78,7 +113,10 @@ export function AppStackBackups({
 
   const date = new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" });
   const when = (iso: string) => <time dateTime={iso}>{date.format(new Date(iso))}</time>;
-  const block = appStackBackupBlock(m, backups, status);
+  const offer = { actions, busy: held, status, stale };
+  const block = appStackBackupBlock(m, backups, "stack.backup", offer);
+  const restoreBlock = appStackBackupBlock(m, backups, "stack.restore", offer);
+  const line = block ?? restoreBlock;
   const base = `/api/bff/orgs/${orgId}/app-stacks/${stackId}/backups`;
   const source = backups.backups.find((b) => b.id === restoring);
   // A restore left the data half written: the server names the safety backup that holds them whole.
@@ -138,9 +176,9 @@ export function AppStackBackups({
         <Button type="button" disabled={block !== null} aria-describedby={block !== null ? "app-backup-block" : undefined} onClick={() => show(null)}>
           {t.create}
         </Button>
-        {block !== null && (
+        {line !== null && (
           <p id="app-backup-block" className={muted}>
-            {block}
+            {line}
           </p>
         )}
       </div>
@@ -169,7 +207,8 @@ export function AppStackBackups({
                       size="sm"
                       variant="outline"
                       className="ml-auto"
-                      disabled={block !== null}
+                      disabled={restoreBlock !== null}
+                      aria-describedby={restoreBlock !== null ? "app-backup-block" : undefined}
                       aria-label={format(t.restoreNamed, { date: date.format(new Date(b.startedAt)) })}
                       onClick={() => show(b.id)}
                     >

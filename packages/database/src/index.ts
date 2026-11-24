@@ -31,6 +31,7 @@ export * from "./app-stack-domains-repository.js";
 export * from "./app-stack-links-repository.js";
 export * from "./app-stack-limit.js";
 export * from "./app-stack-backups-repository.js";
+export * from "./app-stack-tasks-repository.js";
 export * from "./domains-repository.js";
 export * from "./mail-relay-repository.js";
 export * from "./notifications-repository.js";

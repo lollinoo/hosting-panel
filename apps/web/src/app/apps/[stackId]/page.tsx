@@ -9,6 +9,7 @@ import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
 import { AppStackComponents, AppStackData, AppStackHistory, AppStackResources, AppStackSettings } from "@/components/app-stacks/app-stack-sections";
 import { StackStatusBadge } from "@/components/app-stacks/app-stack-status";
+import { AppStackTasks } from "@/components/app-stacks/app-stack-tasks";
 import { AppsUnavailable, appsGate } from "@/components/app-stacks/apps-unavailable";
 import { LoadError } from "@/components/shared/load-error";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -20,6 +21,7 @@ import {
   fetchServerOrgAppStackDeployments,
   fetchServerOrgAppStackDomains,
   fetchServerOrgAppStackLinks,
+  fetchServerOrgAppStackTasks,
 } from "@/lib/server-api";
 import { getCustomerContext } from "@/app/sites/data";
 
@@ -50,17 +52,20 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
     return r.code === "NOT_SUPPORTED" ? <AppsUnavailable m={m} reason="off" /> : <LoadError m={m} />;
   }
   const s = r.data;
-  const [deployments, domains, backups, links] = await Promise.all([
+  const [deployments, domains, backups, links, tasks] = await Promise.all([
     fetchServerOrgAppStackDeployments(orgId, stackId),
     fetchServerOrgAppStackDomains(orgId, stackId),
     fetchServerOrgAppStackBackups(orgId, stackId),
     fetchServerOrgAppStackLinks(orgId, stackId),
+    fetchServerOrgAppStackTasks(orgId, stackId),
   ]);
   const d = m.apps.detail;
   const csrfToken = ctx.session.csrfToken;
   const ids = { orgId, stackId, csrfToken };
   // The version that runs: after a change that failed once its components were being created, not the one asked for.
   const shown = s.installed ?? { templateVersionNumber: s.templateVersionNumber, revisionNumber: s.revisionNumber };
+  // `unknown` only because the components could not be read lately: the stored status is another (issue #106).
+  const stale = s.status === "unknown" && !s.outcomeUnknown;
 
   return (
     <div className="space-y-8">
@@ -69,18 +74,25 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
           <h1 id="app-title" className="text-2xl font-bold tracking-tight">
             {s.name}
           </h1>
-          <StackStatusBadge status={s.status} m={m} />
+          <StackStatusBadge status={s.status} stale={stale} m={m} />
         </div>
         <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: shown.templateVersionNumber })}</p>
         {shown.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: shown.revisionNumber })}</p>}
         {s.installed && s.activeOperationId === null && s.revisionNumber !== null && (
           <p className="text-sm">{format(d.notInstalledLine, { version: s.templateVersionNumber, release: s.revisionNumber })}</p>
         )}
-        {s.status === "unknown" && (
+        {/* «To be verified» is an operation in doubt only when the stored status says so; otherwise a reading went stale. */}
+        {s.outcomeUnknown ? (
           <Alert variant="warning" role="status">
             <AlertTitle>{m.apps.status.unknown}</AlertTitle>
             <AlertDescription>{d.unknownBody}</AlertDescription>
           </Alert>
+        ) : (
+          stale && (
+            <Alert variant="warning" role="status">
+              <AlertDescription>{d.staleBody}</AlertDescription>
+            </Alert>
+          )
         )}
         {s.status === "draft" && (
           <Alert role="status">
@@ -93,7 +105,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
             <AlertDescription>{d.platformWork[s.platformWork]}</AlertDescription>
           </Alert>
         )}
-        <AppStackActions {...ids} status={s.status} upgrade={s.upgrade} rollback={s.rollback} />
+        <AppStackActions {...ids} status={s.status} actions={s.allowedActions} upgrade={s.upgrade} rollback={s.rollback} />
       </section>
       {s.activeOperationId !== null && <AppStackProgress orgId={orgId} operationId={s.activeOperationId} />}
       <Section id="components" title={d.section.components}>
@@ -102,6 +114,11 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
       <Section id="logs" title={d.section.logs}>
         <AppStackLogs orgId={orgId} stackId={stackId} componentKeys={s.components.map((c) => c.key)} />
       </Section>
+      {tasks !== null && tasks.length > 0 && (
+        <Section id="tasks" title={d.section.tasks}>
+          <AppStackTasks {...ids} initial={tasks} />
+        </Section>
+      )}
       <Section id="settings" title={d.section.settings}>
         <AppStackSettings parameters={s.parameters} m={m} />
         <AppStackSecrets {...ids} secrets={s.secretParameters} />
@@ -116,7 +133,15 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         <AppStackData volumes={s.volumes} m={m} />
       </Section>
       <Section id="backups" title={d.section.backups}>
-        <AppStackBackups {...ids} stackName={s.name} status={s.status} backups={backups} />
+        <AppStackBackups
+          {...ids}
+          stackName={s.name}
+          status={s.status}
+          stale={stale}
+          actions={s.allowedActions}
+          busy={s.activeOperationId !== null || s.platformWork !== null}
+          backups={backups}
+        />
       </Section>
       <Section id="resources" title={d.section.resources}>
         <AppStackResources cpuMilli={s.cpuMilli} memoryBytes={s.memoryBytes} components={s.components} m={m} />
@@ -125,7 +150,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
         <AppStackHistory deployments={deployments} m={m} locale={locale} />
       </Section>
       <Section id="danger" title={d.section.danger}>
-        <AppStackDelete {...ids} stackName={s.name} hasData={s.volumes.length > 0} status={s.status} />
+        <AppStackDelete {...ids} stackName={s.name} hasData={s.volumes.length > 0} status={s.status} actions={s.allowedActions} />
       </Section>
     </div>
   );

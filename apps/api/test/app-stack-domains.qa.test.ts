@@ -1202,4 +1202,102 @@ describe("B3: application web addresses touch only the application's own route f
       }
     });
   });
+
+  // ADR-0042: a run of a task holds the application while it executes, at most its time limit.
+  describe("a new address while the application is held waits for what holds it, and is published after it", () => {
+    const TASKS = `${APP_BUILT_IN_TEMPLATES[0]!.source.trimEnd()}
+x-hp-tasks:
+  - key: tidy
+    label: Riordina
+    service: web
+    command: ["nginx", "-s", "reload"]
+`;
+    let versionId: string;
+
+    const appPath = (appId: string, verb = "") => `/v1/organizations/${orgId}/app-stacks/${appId}${verb === "" ? "" : `/${verb}`}`;
+    const opRow = async (id: string) => (await dbClient.db.select().from(operations).where(eq(operations.id, id)))[0]!;
+    const domainRowsOf = (appId: string) => dbClient.db.select().from(appStackDomains).where(eq(appStackDomains.stackId, appId));
+    const refreshesOf = async (appId: string) =>
+      (await dbClient.db.select().from(operations).where(eq(operations.resourceId, appId))).filter(
+        (o) => o.kind === "stack.deploy" && (o.idempotencyKey ?? "").startsWith("sys_routes_") && o.requestedByUserId === null,
+      ).length;
+    const pending = async (appId: string) => {
+      const res = await owner("GET", appPath(appId));
+      expect(res.status, res.raw).toBe(200);
+      return (res.body.data as Json).routesPending as boolean;
+    };
+    const fileOf = async (appId: string) => (await files()).get(`app_${appId}.yml`) ?? "";
+
+    beforeAll(async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `task-${randomUUID().slice(0, 8)}`, source: TASKS }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      versionId = tpl.body.data.defaultVersionId as string;
+    });
+
+    /** A running application of organisation A with `hostname` published; DNS elsewhere, so no certificate moves its file. */
+    async function published(hostname: string, minutes: number): Promise<string> {
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: versionId, name: `task-${randomUUID().slice(0, 8)}`, deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      const appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!.status).toBe("running");
+      lookup.set(hostname, []);
+      const added = await addHost(hostname, appId);
+      expect(added.status, added.raw).toBe(201);
+      await pass(minutes);
+      expect(await fileOf(appId)).toContain(hostname);
+      expect(await pending(appId)).toBe(false);
+      return appId;
+    }
+
+    it("added while a run of a task executes: saved, nothing queued, pending; the first pass after the run publishes it", async () => {
+      const appId = await published("task-a.example.test", 720);
+      // Its answer lost, the run goes on: it holds the application until the executor tells how it went.
+      sim.appStackTasks.failNextAppStackTaskStep("run", "ambiguous_running");
+      const started = await owner("POST", `${appPath(appId)}/tasks/tidy/runs`, {});
+      expect(started.status, started.raw).toBe(202);
+      const { runId, operationId } = started.body.data as { runId: string; operationId: string };
+      await drain();
+      expect((await opRow(operationId)).status).toBe("unknown");
+
+      const name = "task-b.example.test";
+      lookup.set(name, []);
+      const before = await refreshesOf(appId);
+      const added = await owner("POST", base(appId), { hostname: name, ...WEB });
+      expect(added.status, added.raw).toBe(201);
+      expect((added.body.data as Json[]).find((d) => d.hostname === name)).toMatchObject({ status: "pending" });
+      expect((await domainRowsOf(appId)).map((r) => r.hostname).sort()).toEqual(["task-a.example.test", name]);
+      expect(await refreshesOf(appId)).toBe(before);
+      expect(await pending(appId)).toBe(true);
+      // A pass while the run goes queues nothing either.
+      await pass(721);
+      expect(await refreshesOf(appId)).toBe(before);
+      expect(await fileOf(appId)).not.toContain(name);
+
+      sim.appStackTasks.settleAppStackTaskRun(runId);
+      await app.outboxWorker.recoverUnknownOperations();
+      expect((await opRow(operationId)).status).toBe("succeeded");
+      await pass(722);
+      expect(await refreshesOf(appId)).toBe(before + 1);
+      expect(await fileOf(appId)).toContain(name);
+      expect(await pending(appId)).toBe(false);
+    });
+
+    it("added while a deploy the customer asked for runs: saved and nothing queued, and the deploy publishes it", async () => {
+      const appId = await published("deploy-a.example.test", 724);
+      const deploy = await owner("POST", appPath(appId, "deploy"), {});
+      expect(deploy.status, deploy.raw).toBe(202);
+      const name = "deploy-b.example.test";
+      lookup.set(name, []);
+      const before = await refreshesOf(appId);
+      const added = await owner("POST", base(appId), { hostname: name, ...WEB });
+      expect(added.status, added.raw).toBe(201);
+      expect(await refreshesOf(appId)).toBe(before);
+      await drain();
+      expect(await refreshesOf(appId)).toBe(before);
+      expect(await fileOf(appId)).toContain(name);
+      expect(await pending(appId)).toBe(false);
+    });
+  });
 });

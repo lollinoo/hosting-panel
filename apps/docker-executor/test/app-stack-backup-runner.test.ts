@@ -1011,8 +1011,10 @@ describe("the stack engine and a job of the same application (ADR-0038 K4)", () 
     for (const call of s.guarded) await expect(call()).resolves.toBeDefined();
   }
 
+  /** Bounded by time, not by turns of the event loop: what it waits for may follow file work, slow on a loaded runner. */
   async function until(done: () => boolean): Promise<void> {
-    for (let i = 0; i < 1_000 && !done(); i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    const deadline = performance.now() + 5_000;
+    while (!done() && performance.now() < deadline) await new Promise<void>((resolve) => setImmediate(resolve));
     expect(done()).toBe(true);
   }
 

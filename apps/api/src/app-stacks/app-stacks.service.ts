@@ -8,9 +8,12 @@ import {
   AppTemplateSpecSchema,
   PLATFORM_OPS_ORG_ID,
   ApprovedStackPlanSchema,
+  appStackAllowedActions,
   appStackLockKey,
   appStackPlanImageProblems,
+  appStackTaskQueueKey,
   appTemplateHiddenSecretKeys,
+  appTemplateInstallParameters,
   effectiveComponentHealth,
   redactSensitiveString,
   resolveAppTemplateParameters,
@@ -29,6 +32,7 @@ import {
   type CursorPage,
   type DeleteAppStackInput,
   type DeployAppStackInput,
+  type PermissionKey,
   type PlanAppStackInput,
   type RollbackAppStackInput,
   type SetAppStackSecretInput,
@@ -36,8 +40,10 @@ import {
 } from "@hosting-panel/contracts";
 import {
   ACTIVE_OPERATION_LOCK_STATUSES,
+  APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES,
   addAppStackDomainsTransactional,
   and,
+  asc,
   appStackComponents,
   appStackDeployments,
   appStackDomains,
@@ -52,6 +58,7 @@ import {
   findAppStackAllocation,
   getAppStack,
   getAppStackDeployment,
+  getAppStackLockHolder,
   getAppStackRevision,
   getAppTemplateVersion,
   getPublishedAppTemplateVersion,
@@ -73,6 +80,7 @@ import {
   setAppStackSecretTransactional,
   sql,
   type AppStackRevisionRow,
+  type AppStackSecretMetadata,
   type AppStackRow,
   type AppStackWriteResult,
   type AppTemplateVersionRow,
@@ -134,7 +142,14 @@ type Candidate = {
   readonly newRevision: boolean;
   /** Generated secrets this revision is the first to need (ADR-0036): its plan pins their version 1, stored when it is queued. */
   readonly generate?: readonly AppSecretToGenerate[];
+  /** Required private values the customer types that this upgrade is the first to need: the plan pins their version 1,
+   *  and the upgrade request must carry them (issue #89). */
+  readonly ask?: readonly { readonly key: string; readonly label: string }[];
+  /** Upgrade: the keys the stack had a stored value of when the candidate was read. */
+  readonly stored?: ReadonlySet<string>;
 };
+/** A private value given with an upgrade; it reaches only app_stack_secrets. */
+type TypedSecret = { readonly parameterKey: string; readonly value: string };
 const EMPTY_PAGE: CursorPage = { nextCursor: null, hasMore: false };
 const ACTIONS: Readonly<Record<AppStackOperationKind, string>> = {
   "stack.deploy": APP_AUDIT_ACTIONS.stackDeploy,
@@ -150,10 +165,9 @@ const damaged = (message: string) => new ControlPlaneError("INTERNAL_ERROR", mes
 function refusal(field: string, reason: string, message: string): ControlPlaneError {
   return appRefusal("VALIDATION_ERROR", message, { field, message, reason });
 }
+const planChanged = () => refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
 function assertReviewed(candidate: Candidate, planHash: string): void {
-  if (candidate.plan.planHash !== planHash) {
-    throw refusal("planHash", "plan_changed", "The changes are not the ones you reviewed. Review them again.");
-  }
+  if (candidate.plan.planHash !== planHash) throw planChanged();
 }
 /** A draft (no revision yet) is never upgraded: it reaches the current version by being installed again. */
 const draftOutdated = () =>
@@ -162,6 +176,26 @@ const draftOutdated = () =>
     "STACK_TEMPLATE_UNPUBLISHED",
     "This version can no longer be installed. Remove this draft and install the application again: a draft has no data, so nothing is lost.",
   );
+/** The checks of a private value the customer types: on the private values route and in an upgrade. */
+function assertCustomerSecret(spec: AppTemplateSpec, entry: TypedSecret, fields: { readonly key: string; readonly value: string }): void {
+  // A secret the customer may not replace (generated, `customer: false`) answers like a key that does not exist.
+  if (!spec.parameters.some((p) => p.key === entry.parameterKey && p.type === "secret" && p.customer)) {
+    throw refusal(fields.key, "STACK_PARAMETER_INVALID", "This setting is not a secret of this application.");
+  }
+  // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit;
+  // any other value by what the store keeps, checked here so the refusal names the field instead of failing the write.
+  // The detail names the bound, so a page states a number of characters only for the first.
+  const limit = appTemplateEnvironmentSecretKeys(spec).has(entry.parameterKey) ? "environment" : "store";
+  const maxBytes = limit === "environment" ? APP_STACK_SECRET_ENV_LIMITS.secretBytes : APP_STACK_SECRET_VALUE_MAX_UTF8_BYTES;
+  if (Buffer.byteLength(entry.value, "utf8") > maxBytes) {
+    const message = `This value is too long for this application: at most ${String(maxBytes)} bytes.`;
+    throw appRefusal("VALIDATION_ERROR", message, { field: fields.value, message, reason: "value_too_long", limit });
+  }
+}
+/** The private values a review of an upgrade asks for when the application has none: required, typed by the customer. */
+function requiredCustomerSecrets(spec: AppTemplateSpec): { readonly key: string; readonly label: string }[] {
+  return appTemplateInstallParameters(spec.parameters).flatMap((p) => (p.type === "secret" && p.required ? [{ key: p.key, label: p.label }] : []));
+}
 function statusLocked(status: string): ControlPlaneError {
   const message = `This action is not possible while the application is ${status}.`;
   return appRefusal("RESOURCE_LOCKED", message, { field: "status", message, reason: status }, false);
@@ -352,13 +386,14 @@ export class AppStacksService {
     return { data, total, page: { nextCursor: hasMore ? kept[kept.length - 1]!.id : null, hasMore } };
   }
 
-  public async detail(stack: AppStackRow): Promise<AppStackDetailDto> {
+  /** `may`: whether the caller holds a permission, as the routes' guard decides; the actions on offer are the caller's. */
+  public async detail(stack: AppStackRow, may: (permission: PermissionKey) => boolean): Promise<AppStackDetailDto> {
     const db = this.dbClient.db;
     const scope = { organizationId: stack.organizationId, stackId: stack.id };
     const version = await this.#version(stack);
     const [template] = await db.select().from(appTemplates).where(eq(appTemplates.id, stack.templateId));
     if (!template) throw damaged("The stored application is damaged.");
-    const [desired, components, volumes, domains, parameters, secrets, revisions, [active], ran] = await Promise.all([
+    const [desired, components, volumes, domains, parameters, secrets, revisions, [active], holder, ran] = await Promise.all([
       this.#desired(stack),
       listAppStackComponents(db, scope),
       listAppStackVolumes(db, scope),
@@ -366,12 +401,22 @@ export class AppStacksService {
       listAppStackParameters(db, scope),
       listAppStackSecretMetadata(db, scope),
       listAppStackRevisions(db, scope),
-      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7).
+      // Whoever holds the lock: the nightly clean-up of its backups runs for the platform (ADR-0038 K7). A run of a task
+      // that waits for its lane holds a lock of its own; an operation under the application's lock ("stack:<id>" sorts
+      // first) is the one shown.
       db
         .select({ id: operations.id, organizationId: operations.organizationId, kind: operations.kind })
         .from(operations)
-        .where(and(eq(operations.lockKey, appStackLockKey(stack.id)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
+        .where(
+          and(
+            inArray(operations.lockKey, [appStackLockKey(stack.id), appStackTaskQueueKey(stack.id)]),
+            inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES]),
+          ),
+        )
+        .orderBy(asc(operations.lockKey))
         .limit(1),
+      // What the enqueue reads: only an operation under "stack:<id>" refuses an action; a task run waiting in its lane does not.
+      getAppStackLockHolder(db, stack.id),
       // Revisions that ran: a deploy, an upgrade or a rollback of them succeeded, or failed after its health step succeeded
       // (only the routes were refused, and that revision was applied).
       db
@@ -426,6 +471,8 @@ export class AppStacksService {
       parameters,
       secrets,
       activeOperationId: own?.id ?? null,
+      // Read with the lock as it is now: a second later it may be taken, and the request then answers 409.
+      allowedActions: appStackAllowedActions(stack.status, holder !== null, may),
       installed,
       platformWork,
       upgrade:
@@ -468,6 +515,7 @@ export class AppStacksService {
         toParameters: candidate.entries,
         hidden,
       }),
+      newSecrets: (candidate.ask ?? []).map(({ key, label }) => ({ key, label })),
     };
   }
 
@@ -485,12 +533,15 @@ export class AppStacksService {
 
   /** To the newer default version of the same template, as reviewed: `planHash` is the one the plan route returned. */
   public async upgrade(ctx: AppStackRequestContext, stack: AppStackRow, input: UpgradeAppStackInput): Promise<AppStackWriteResult> {
+    // The request hash covers the keys of the private values, never a value: the same key with other values replays.
+    const hashed = { ...input, secrets: input.secrets?.map((s) => s.parameterKey).sort() };
     // The upgrade a retry replays has already moved the stack to that version, so the preflight would refuse it as not newer.
-    if (await this.#keyUsed(ctx)) return this.#enqueue(ctx, stack, "stack.upgrade", input, null);
+    if (await this.#keyUsed(ctx)) return this.#enqueue(ctx, stack, "stack.upgrade", hashed, null);
     const candidate = await this.#upgradeCandidate(stack, input.templateVersionId, input.parameters);
     assertReviewed(candidate, input.planHash);
+    const typed = this.#askedValues(candidate, input.secrets ?? []);
     await this.#assertDomainTargets(stack, candidate.plan);
-    return this.#enqueue(ctx, stack, "stack.upgrade", input, candidate.revision, false, candidate.generate);
+    return this.#enqueue(ctx, stack, "stack.upgrade", hashed, candidate.revision, false, candidate.generate, typed);
   }
 
   /** A new revision with the plan and public parameters of an earlier one; volumes and their data are left as they are. */
@@ -574,15 +625,7 @@ export class AppStacksService {
   public async setSecret(ctx: AppStackRequestContext, stack: AppStackRow, input: SetAppStackSecretInput): Promise<AppStackSecretStateDto> {
     if (stack.status === "deleting" || stack.status === "delete_failed") throw statusLocked(stack.status);
     const spec = validatedSpec((await this.#version(stack)).source, this.validation);
-    // A secret the customer may not replace (generated, `customer: false`) answers like a key that does not exist.
-    if (!spec.parameters.some((p) => p.key === input.parameterKey && p.type === "secret" && p.customer)) {
-      throw refusal("parameterKey", "STACK_PARAMETER_INVALID", "This setting is not a secret of this application.");
-    }
-    // A value the application reads from its environment is bounded, so no expanded variable outgrows the executor's limit.
-    const { secretBytes } = APP_STACK_SECRET_ENV_LIMITS;
-    if (appTemplateEnvironmentSecretKeys(spec).has(input.parameterKey) && Buffer.byteLength(input.value, "utf8") > secretBytes) {
-      throw refusal("value", "value_too_long", `This value is too long for this application: at most ${String(secretBytes)} bytes.`);
-    }
+    assertCustomerSecret(spec, input, { key: "parameterKey", value: "value" });
     const meta = await this.#write(async (tx) => {
       const stored = await setAppStackSecretTransactional(tx, {
         organizationId: stack.organizationId,
@@ -610,6 +653,7 @@ export class AppStacksService {
     revision: NewAppStackRevision | null,
     destroyData = false,
     generate: readonly AppSecretToGenerate[] = [],
+    typed: readonly TypedSecret[] = [],
   ): Promise<AppStackWriteResult> {
     const action = ACTIONS[kind];
     const requestHash = canonicalRequestHash({ route: action, organizationId: ctx.organizationId, stackId: stack.id, body });
@@ -626,7 +670,16 @@ export class AppStacksService {
       });
       if (!r.idempotentReplay) {
         // After the queue accepted the request: a locked or replayed one stores nothing.
-        const generated = await this.#storeGenerated(tx, { organizationId: ctx.organizationId, stackId: stack.id }, generate);
+        const scope = { organizationId: ctx.organizationId, stackId: stack.id };
+        for (const set of await this.#storeTyped(tx, scope, typed)) {
+          await ctx.audit(tx, {
+            action: APP_AUDIT_ACTIONS.secretRotate,
+            targetType: "app_stack",
+            targetId: stack.id,
+            details: { parameterKey: set.parameterKey, version: set.version },
+          });
+        }
+        const generated = await this.#storeGenerated(tx, scope, generate);
         await ctx.audit(tx, {
           action,
           targetType: "app_stack",
@@ -688,10 +741,16 @@ export class AppStacksService {
     }
     if (stack.desiredRevisionId === null) throw draftOutdated();
     const spec = validatedSpec(version.source, this.validation);
-    // A generated secret this version brings and the stack never had: version 1, stored when the upgrade is queued.
     const secretVersions = secretVersionsOf(await listAppStackSecretMetadata(db, scope));
+    // Taken before the map below gains what this upgrade adds.
+    const stored = new Set(secretVersions.keys());
+    // A generated secret this version brings and the stack never had: version 1, stored when the upgrade is queued.
     const generate = appSecretsToGenerate(spec, secretVersions);
+    // A required private value the customer types and the stack never had: version 1, carried by the upgrade request.
+    // An optional one is set after the upgrade, among the private values, so that the reviewed plan stays the same.
+    const ask = requiredCustomerSecrets(spec).filter((s) => !secretVersions.has(s.key));
     for (const { parameterKey } of generate) secretVersions.set(parameterKey, 1);
+    for (const { key } of ask) secretVersions.set(key, 1);
     const c = compileRevision(
       {
         source: version.source,
@@ -701,7 +760,35 @@ export class AppStacksService {
       },
       this.validation,
     );
-    return { version, ...c, newRevision: true, generate };
+    return { version, ...c, newRevision: true, generate, ask, stored };
+  }
+
+  /** What an upgrade request carries must be exactly the private values its plan asks for, each under the route's rules. */
+  #askedValues(candidate: Candidate, given: readonly TypedSecret[]): TypedSecret[] {
+    const ask = candidate.ask ?? [];
+    if (given.length === 0 && ask.length === 0) return [];
+    const spec = validatedSpec(candidate.version.source, this.validation);
+    const required = new Set(requiredCustomerSecrets(spec).map((s) => s.key));
+    for (const entry of given) {
+      const field = `secrets.${entry.parameterKey}`;
+      assertCustomerSecret(spec, entry, { key: field, value: field });
+      // A required value the application has now was asked for by an older review (an upgrade taken back keeps its
+      // value): the plan hash is the same, but the review the caller confirmed is stale and is reviewed again. No
+      // review asks for any other value, so a new review would not change the answer below.
+      if (required.has(entry.parameterKey) && candidate.stored?.has(entry.parameterKey)) throw planChanged();
+      // An optional value is set among the private values of the application instead.
+      if (!ask.some((s) => s.key === entry.parameterKey)) {
+        throw refusal(field, "secret_not_needed", "This update does not need this value: set it among the private values of the application.");
+      }
+    }
+    const missing = ask.filter((s) => !given.some((entry) => entry.parameterKey === s.key));
+    if (missing.length > 0) {
+      const message = "Type every private value this version needs.";
+      throw new ControlPlaneError("VALIDATION_ERROR", message, {
+        details: missing.map((s) => ({ field: `secrets.${s.key}`, message, reason: "STACK_SECRET_MISSING" })),
+      });
+    }
+    return [...given];
   }
 
   /** Today's checks must still accept the earlier revision (spec §10.3); its plan is reused under a new revision id. */
@@ -767,6 +854,23 @@ export class AppStacksService {
       values: generateAppSecretValues(wanted),
     });
     return stored.map((row) => row.parameterKey).sort();
+  }
+
+  /**
+   * The private values an upgrade carries, as version 1 in the caller's transaction (issue #89). Like generated values
+   * they are exempt from the hourly limit when stored (one such row per key in the stack's life) and count in the
+   * customer's rolling hour afterwards, like every value the customer sets.
+   */
+  async #storeTyped(
+    tx: DatabaseExecutor,
+    scope: { readonly organizationId: string; readonly stackId: string },
+    typed: readonly TypedSecret[],
+  ): Promise<AppStackSecretMetadata[]> {
+    if (typed.length === 0) return [];
+    const stored = await insertGeneratedAppStackSecrets(tx, { ...scope, masterKey: this.config.secretsMasterKey, values: typed });
+    // A value stored meanwhile (by an upgrade taken back since the review): the review no longer asks for it.
+    if (stored.length !== typed.length) throw planChanged();
+    return stored;
   }
 
   #write<T>(work: (tx: HostingPanelDatabase) => Promise<T>): Promise<T> {

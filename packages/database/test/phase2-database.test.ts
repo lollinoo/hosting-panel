@@ -81,6 +81,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0028_app_stack_links.sql",
       "0029_notifications.sql",
       "0030_app_terminal_sessions.sql",
+      "0031_app_stack_tasks.sql",
       "0032_app_stack_deployment_replaced.sql",
       "0033_app_stack_domain_removal.sql",
     ]);
@@ -124,6 +125,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0028_app_stack_links.sql",
       "0029_notifications.sql",
       "0030_app_terminal_sessions.sql",
+      "0031_app_stack_tasks.sql",
       "0032_app_stack_deployment_replaced.sql",
       "0033_app_stack_domain_removal.sql",
     ]);
@@ -163,6 +165,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0028_app_stack_links.sql",
       "0029_notifications.sql",
       "0030_app_terminal_sessions.sql",
+      "0031_app_stack_tasks.sql",
       "0032_app_stack_deployment_replaced.sql",
       "0033_app_stack_domain_removal.sql",
     ]);

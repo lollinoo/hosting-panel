@@ -1,6 +1,7 @@
 import {
   APP_STACK_REASONS,
   APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
   APP_STACK_STATUSES,
   type AppStackComponentHealth,
   type AppStackStatus,
@@ -39,12 +40,19 @@ export const COMPONENT_HEALTH_TONE: Readonly<Record<AppStackComponentHealth, Ton
 
 const isStatus = (s: string | undefined): s is AppStackStatus => (APP_STACK_STATUSES as readonly (string | undefined)[]).includes(s);
 
-/** A known reason has its own sentence, a status refusal names the status, then the application codes, then the generic errors. A draft on a version no longer offered is told to start again. */
+/**
+ * A known reason has its own sentence, a status refusal names the status, then the application codes, then the generic
+ * errors. A draft on a version no longer offered is told to start again. `status` is the one the page shows: a refusal
+ * from another one (the stored status, which a crash does not change, or one reached since the page was read) never
+ * names it.
+ */
 export function appStackRefusalText(m: Messages, code: string, reason?: string, status?: AppStackStatus): string {
   const { reasons, codes } = m.apps;
   if (reason === "STACK_TEMPLATE_UNPUBLISHED" && status === "draft") return reasons.draftUnpublished;
   if (reason === "value_too_long") return format(reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
+  if (reason === "value_too_short") return format(reasons.value_too_short, { min: APP_STACK_SECRET_MIN_LENGTH });
   if (reason !== undefined && Object.hasOwn(reasons, reason)) return (reasons as Record<string, string>)[reason]!;
+  if (isStatus(reason) && status !== undefined && reason !== status) return reasons.notNow;
   if (isStatus(reason)) return format(reasons.status, { status: m.apps.status[reason] });
   if (Object.hasOwn(codes, code)) return (codes as Record<string, string>)[code]!;
   return errorMessage(m, code);
@@ -53,6 +61,13 @@ export function appStackRefusalText(m: Messages, code: string, reason?: string, 
 /** An install, upgrade or rollback: an address being removed holds it until the routes are refreshed, which a failed application needs a restart for, unlike a change of that address (issue #112). */
 export function appStackChangeRefusalText(m: Messages, code: string, reason?: string, status?: AppStackStatus): string {
   return reason === "address_removing" ? m.apps.reasons.versionAddressRemoving : appStackRefusalText(m, code, reason, status);
+}
+
+/** A refused private value: too long names a number of characters only for a value the application reads from its
+ *  environment (`limit: "environment"`); for any other bound, or none named, the sentence names no number. */
+export function appStackSecretRefusalText(m: Messages, sent: { readonly code: string; readonly reason?: string; readonly limit?: string }): string {
+  if (sent.reason === "value_too_long" && sent.limit !== "environment") return m.apps.reasons.value_too_long_store;
+  return appStackRefusalText(m, sent.code, sent.reason);
 }
 
 /** Deployment `problem`: a STACK_* reason or an application code says why; any other value reads as a generic failure. */

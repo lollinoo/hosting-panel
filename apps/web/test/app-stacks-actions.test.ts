@@ -3,8 +3,13 @@ import { createElement, isValidElement, type ReactElement, type ReactNode } from
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_STACK_OPERATION_KINDS,
+  APP_STACK_PROCESS_MARKS,
+  APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
   APP_STACK_STATUSES,
   appStackEnqueueTarget,
+  type AppStackOperationKind,
   type AppStackPlanDiffDto,
   type AppStackStatus,
   type OperationDto,
@@ -34,7 +39,7 @@ import { format, type Messages } from "@/i18n";
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
 import { I18nProvider } from "@/i18n/provider";
-import { appStackRefusalText } from "@/components/app-stacks/app-stack-view";
+import { appStackRefusalText, appStackSecretRefusalText } from "@/components/app-stacks/app-stack-view";
 import {
   APP_STACK_POLL_LIMIT,
   APP_STACK_POLL_MS,
@@ -105,11 +110,14 @@ const accepted = { ok: true, data: { data: { stackId: "stk_a1", operationId: "op
 
 const UPGRADE = { templateVersionId: "atv_notes_3", versionNumber: 3 };
 const ROLLBACK = { revisionId: "srev_a1", revisionNumber: 1, templateVersionNumber: 1 };
+/** What the API lists for an owner when nothing holds the application and its stored status is `status`. */
+const acceptedFrom = (status: AppStackStatus): AppStackOperationKind[] => APP_STACK_OPERATION_KINDS.filter((k) => appStackEnqueueTarget(k, status) !== null);
 const actionProps = (status: AppStackStatus, over: Record<string, unknown> = {}) => ({
   orgId: ORG,
   stackId: "stk_a1",
   csrfToken: "csrf",
   status,
+  actions: acceptedFrom(status),
   upgrade: UPGRADE,
   rollback: ROLLBACK,
   ...over,
@@ -130,6 +138,7 @@ const DIFF: AppStackPlanDiffDto = {
     { key: "uploads", change: "removed" },
   ],
   parameters: [{ key: "title", change: "updated" }],
+  newSecrets: [],
   ingress: [{ componentKey: "web", port: 8080, change: "unchanged" }],
   downtime: true,
   dataRisk: true,
@@ -148,10 +157,30 @@ afterEach(() => {
 describe("stackActionEnabled", () => {
   const actions = ["start", "stop", "restart", "deploy", "upgrade", "rollback"] as const;
 
-  it("follows appStackEnqueueTarget over all 14 statuses × 6 actions", () => {
-    expect(APP_STACK_STATUSES).toHaveLength(14);
-    for (const status of APP_STACK_STATUSES)
-      for (const a of actions) expect(stackActionEnabled(a, status), `${a} ${status}`).toBe(appStackEnqueueTarget(`stack.${a}`, status) !== null);
+  it("follows the list of actions the API accepts, whatever the status shown", () => {
+    for (const a of actions) {
+      expect(stackActionEnabled(a, [`stack.${a}`]), a).toBe(true);
+      expect(stackActionEnabled(a, APP_STACK_OPERATION_KINDS.filter((k) => k !== `stack.${a}`)), a).toBe(false);
+    }
+    expect(actions.map((a) => stackActionEnabled(a, []))).toEqual(actions.map(() => false));
+  });
+
+  it("issue #106: a crashed application reads failed while the API keeps its stored running: start is not offered, restart is", () => {
+    const { out } = callHooks(AppStackActions, actionProps("failed", { actions: acceptedFrom("running") }));
+    expect(button(out, en.apps.actions.start)!.props.disabled).toBe(true);
+    expect(button(out, en.apps.actions.restart)!.props.disabled).toBe(false);
+    expect(button(out, en.apps.actions.stop)!.props.disabled).toBe(false);
+    // A stale reading (shown «to be verified») offers what the stored status allows, not what «unknown» would.
+    const stale = callHooks(AppStackActions, actionProps("unknown", { actions: acceptedFrom("degraded") })).out;
+    expect(button(stale, en.apps.actions.start)!.props.disabled).toBe(true);
+    expect(button(stale, en.apps.actions.restart)!.props.disabled).toBe(false);
+  });
+
+  it("while an operation holds the application the API lists nothing and no button is enabled", () => {
+    for (const status of ["running", "stopping", "failed"] as const) {
+      const { out } = callHooks(AppStackActions, actionProps(status, { actions: [] }));
+      expect(els(out).filter((e) => e.type === Button).map((b) => b.props.disabled), status).toEqual([true, true, true, true, true, true]);
+    }
   });
 
   it("renders each of the six buttons enabled exactly when the action may be queued", () => {
@@ -215,12 +244,23 @@ describe("AppStackActions requests", () => {
   });
 
   it.each(locales)("a refusal reads as its sentence, a status refusal names the status, no refresh (%s)", async (_l, m) => {
-    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "stopped" });
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "running" });
     const { out, sets } = callHooks(AppStackActions, actionProps("running"), m);
     await click(button(out, m.apps.actions.restart));
-    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "stopped");
-    expect(text).toBe(format(m.apps.reasons.status, { status: m.apps.status.stopped }));
+    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "running", "running");
+    expect(text).toBe(format(m.apps.reasons.status, { status: m.apps.status.running }));
     expect(sets).toContainEqual([2, text]);
+    expect(router.refresh).not.toHaveBeenCalled();
+  });
+
+  it.each(locales)("issue #106: a refusal never names a status other than the one the page shows (%s)", async (_l, m) => {
+    // The page read «failed» (a crashed component), the API refused from its stored «running», or the list went stale.
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "running" });
+    const { out, sets } = callHooks(AppStackActions, actionProps("failed"), m);
+    await click(button(out, m.apps.actions.restart));
+    expect(sets).toContainEqual([2, m.apps.reasons.notNow]);
+    expect(m.apps.reasons.notNow).not.toContain(m.apps.status.running);
+    expect(m.apps.reasons.notNow).not.toContain(m.apps.status.failed);
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
@@ -416,6 +456,173 @@ describe("upgrade and rollback plan dialog", () => {
     expect(router.refresh).not.toHaveBeenCalled();
   });
 
+  describe("private values the new version needs (issue #89)", () => {
+    const ASKING: AppStackPlanDiffDto = { ...DIFF, dataRisk: false, newSecrets: [{ key: "mail_password", label: "Mail password" }] };
+    const TYPED = "typed-mail-password-9c1";
+    /** The dialog's only ref holds its fields: stand-ins with a value, as the browser's inputs. */
+    const fields = (value: string) => {
+      const input = { value };
+      return { input, refs: [{ current: new Map([["mail_password", input]]) }] };
+    };
+    const dialog = (d: El, state: Record<number, unknown>, refs: Array<{ current: unknown }> = []) =>
+      callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, state, refs);
+
+    it.each(locales)("an upgrade shows a field for each, with its label, the required mark and the private-value note (%s)", (_l, m) => {
+      const markup = html(run(openDialog("upgrade", m).d, m, { 0: ASKING }).out);
+      for (const text of [m.apps.upgrade.secretsTitle, m.apps.upgrade.secretsHint, "Mail password", m.apps.secrets.required, m.apps.wizard.secretHint])
+        expect(markup).toContain(text);
+      const input = markup.match(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*>/)?.[0] ?? "";
+      expect(input).toContain('type="password"');
+      expect(input).toContain('autoComplete="new-password"');
+      expect(input).toContain('aria-describedby="app-upgrade-secret-mail_password-note"');
+      expect(input).toMatch(/\brequired\b/);
+      expect(input).not.toMatch(/\bvalue=/);
+      expect(markup).toContain('for="app-upgrade-secret-mail_password"');
+    });
+
+    it("a rollback and a plan that needs nothing show no field", () => {
+      expect(html(run(openDialog("rollback").d, en, { 0: ASKING }).out)).not.toContain("app-upgrade-secret-");
+      expect(html(run(openDialog("upgrade").d, en, { 0: DIFF }).out)).not.toContain(en.apps.upgrade.secretsTitle);
+    });
+
+    it("an empty field is marked as required and nothing is sent", async () => {
+      const { d } = openDialog("upgrade");
+      const { out, sets } = dialog(d, { 0: ASKING }, fields("").refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(sets).toContainEqual([3, { mail_password: en.apps.wizard.required }]);
+      expect(keyedSend).not.toHaveBeenCalled();
+    });
+
+    it.each(locales)("a value holding a text the panel keeps is marked at its field, kept there, and nothing is sent (%s)", async (_l, m) => {
+      for (const mark of APP_STACK_PROCESS_MARKS) {
+        keyedSend.mockReset();
+        keyedSend.mockResolvedValue(accepted);
+        const typed = `pw ${mark}=x1`;
+        const { d, parentSets } = openDialog("upgrade", m);
+        const { input, refs } = fields(typed);
+        const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING }, refs);
+        await click(button(out, m.apps.upgrade.confirm));
+        expect(keyedSend).not.toHaveBeenCalled();
+        expect(sets).toContainEqual([3, { mail_password: m.apps.wizard.valueReserved }]);
+        expect(input.value).toBe(typed); // kept, so the customer can correct it
+        expect(JSON.stringify([sets, parentSets])).not.toContain(typed);
+        const markup = html(callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING, 3: { mail_password: m.apps.wizard.valueReserved } }).out);
+        expect(markup).toMatch(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*aria-invalid="true"/);
+        expect(markup).toContain(m.apps.wizard.valueReserved);
+      }
+    });
+
+    it.each(locales)("a value shorter than the log reader masks is marked at its field, kept there, and nothing is sent (%s)", async (_l, m) => {
+      const text = appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short");
+      expect(text).toContain(String(APP_STACK_SECRET_MIN_LENGTH));
+      const typed = "Zq9ab";
+      expect(typed).toHaveLength(APP_STACK_SECRET_MIN_LENGTH - 1);
+      const { d, parentSets } = openDialog("upgrade", m);
+      const { input, refs } = fields(typed);
+      const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING }, refs);
+      await click(button(out, m.apps.upgrade.confirm));
+      expect(keyedSend).not.toHaveBeenCalled();
+      expect(sets).toContainEqual([3, { mail_password: text }]);
+      expect(input.value).toBe(typed);
+      expect(JSON.stringify([sets, parentSets])).not.toContain(typed);
+    });
+
+    it("confirm sends the typed values with the plan hash, empties the fields and keeps no value in state", async () => {
+      keyedSend.mockResolvedValue(accepted);
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "upgrade:running", "POST", `${BASE}/upgrade`, {
+        templateVersionId: "atv_notes_3",
+        planHash: ASKING.planHash,
+        secrets: [{ parameterKey: "mail_password", value: TYPED }],
+      });
+      expect(input.value).toBe("");
+      expect(JSON.stringify([sets, parentSets])).not.toContain(TYPED);
+      expect(parentSets).toContainEqual([4, null]);
+    });
+
+    it.each([
+      ["value_too_long", "VALIDATION_ERROR"],
+      ["value_too_short", "VALIDATION_ERROR"],
+      ["STACK_SECRET_MISSING", "VALIDATION_ERROR"],
+      ["secret_not_needed", "VALIDATION_ERROR"],
+    ])("a refusal of a value (%s) is shown next to its field, in the open dialog, with the field emptied", async (reason, code) => {
+      keyedSend.mockResolvedValue({ ok: false, code, reason, field: "secrets.mail_password" });
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      const text = appStackSecretRefusalText(en, { code, reason });
+      expect(sets).toContainEqual([3, { mail_password: text }]);
+      expect(input.value).toBe("");
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(parentSets.filter(([k]) => k === 2)).toEqual([[2, null]]);
+      const markup = html(dialog(d, { 0: ASKING, 3: { mail_password: text } }).out);
+      expect(markup).toMatch(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*aria-invalid="true"/);
+      expect(markup).toContain(text);
+    });
+
+    it.each(locales)("a value too long states a number of characters only for a value given in the environment (%s)", async (_l, m) => {
+      const environment = format(m.apps.reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
+      const stored = m.apps.reasons.value_too_long_store;
+      for (const [limit, text] of [
+        ["environment", environment],
+        ["store", stored],
+        [undefined, stored], // no bound named: the sentence true for both
+      ] as const) {
+        keyedSend.mockReset();
+        keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "secrets.mail_password", limit });
+        const { d } = openDialog("upgrade", m);
+        const { refs } = fields(TYPED);
+        const { out, sets } = callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING }, refs);
+        await click(button(out, m.apps.upgrade.confirm));
+        expect(sets, String(limit)).toContainEqual([3, { mail_password: text }]);
+        const markup = html(callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, m, { 0: ASKING, 3: { mail_password: text } }).out);
+        expect(markup).toMatch(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*aria-invalid="true"/);
+        expect(markup).toContain(text);
+      }
+      expect(environment).toContain(String(APP_STACK_SECRET_ENV_LIMITS.secretBytes));
+      expect(stored).not.toMatch(/\d/);
+      expect(stored).not.toMatch(/byte|file|ambiente|environment|variab|secret|segret/i);
+      expect(stored).not.toBe(environment);
+    });
+
+    it("a stale review (the value is stored now) loads the review again, which shows no field for it", async () => {
+      // An upgrade taken back in another tab kept the value: the same plan no longer asks for it.
+      const FRESH: AppStackPlanDiffDto = { ...ASKING, newSecrets: [] };
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "plan_changed", field: "planHash" });
+      const fetchMock = vi.fn(async () => respond(200, { data: FRESH }));
+      vi.stubGlobal("fetch", fetchMock);
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(input.value).toBe("");
+      expect(sets).toContainEqual([1, en.apps.reasons.plan_changed]);
+      expect(sets).toContainEqual([3, {}]);
+      await vi.waitFor(() => expect(sets).toContainEqual([0, FRESH]));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // Not a refusal of the value: nothing is shown next to the field the fresh review drops.
+      expect(sets.filter(([k]) => k === 3)).toEqual([[3, {}], [3, {}]]);
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(JSON.stringify([sets, parentSets])).not.toContain(TYPED);
+
+      const reviewed = dialog(d, { 0: FRESH, 1: en.apps.reasons.plan_changed }).out;
+      const markup = html(reviewed);
+      expect(markup).toContain(en.apps.reasons.plan_changed);
+      expect(markup).not.toContain("app-upgrade-secret-");
+      expect(markup).not.toContain(en.apps.upgrade.secretsTitle);
+      expect(button(reviewed, en.apps.upgrade.confirm)!.props.disabled).toBe(false);
+    });
+
+    it.each(locales)("a value the update does not need has its own sentence (%s)", (_l, m) => {
+      expect(appStackRefusalText(m, "VALIDATION_ERROR", "secret_not_needed")).toBe(m.apps.reasons.secret_not_needed);
+      expect(m.apps.reasons.secret_not_needed).not.toBe(m.apps.reasons.STACK_PARAMETER_INVALID);
+    });
+  });
+
   it("plan_changed keeps the dialog open, says so and asks the plan again", async () => {
     keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "plan_changed" });
     const fetchMock = vi.fn(async () => respond(200, { data: DIFF }));
@@ -432,7 +639,15 @@ describe("upgrade and rollback plan dialog", () => {
 });
 
 describe("AppStackDelete", () => {
-  const props = (hasData = true, status: AppStackStatus = "running") => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData, status });
+  const props = (hasData = true, status: AppStackStatus = "running", actions: readonly AppStackOperationKind[] = acceptedFrom(status)) => ({
+    orgId: ORG,
+    stackId: "stk_a1",
+    csrfToken: "csrf",
+    stackName: "team-notes",
+    hasData,
+    status,
+    actions,
+  });
   const submit = async (tree: unknown) => {
     const form = els(tree).find((e) => e.type === "form")!;
     await (form.props.onSubmit as (e: { preventDefault(): void }) => Promise<void>)({ preventDefault() {} });
@@ -452,12 +667,30 @@ describe("AppStackDelete", () => {
     expect(sets).toContainEqual([0, true]);
   });
 
-  it("the delete button is enabled exactly when appStackEnqueueTarget allows a delete", () => {
+  it("the delete button is enabled exactly when the API lists a delete", () => {
     for (const status of APP_STACK_STATUSES) {
       const open = button(callHooks(AppStackDelete, props(true, status)).out, en.apps.delete.open)!;
       expect(open.props.disabled, status).toBe(appStackEnqueueTarget("stack.delete", status) === null);
     }
     expect(button(callHooks(AppStackDelete, props(true, "deleting")).out, en.apps.delete.open)!.props.disabled).toBe(true);
+    // Held by an operation, or for a caller without app.delete: not offered, whatever the status.
+    expect(button(callHooks(AppStackDelete, props(true, "running", [])).out, en.apps.delete.open)!.props.disabled).toBe(true);
+    expect(button(callHooks(AppStackDelete, { ...props(), actions: undefined }).out, en.apps.delete.open)!.props.disabled).toBe(true);
+  });
+
+  it.each(locales)("a delete refused from another status than the one shown reads neutrally (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "deleting" });
+    const { out, sets } = callHooks(AppStackDelete, props(), m, { 0: true, 1: "team-notes" });
+    await submit(out);
+    expect(sets).toContainEqual([4, m.apps.reasons.notNow]);
+  });
+
+  it.each(locales)("issue #106: a listed delete can still be refused for its own reason, and the dialog says it: a database in use (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "database_in_use" });
+    const { out, sets } = callHooks(AppStackDelete, props(), m, { 0: true, 1: "team-notes" });
+    expect(button(out, m.apps.delete.open)!.props.disabled).toBe(false);
+    await submit(out);
+    expect(sets).toContainEqual([4, m.apps.reasons.database_in_use]);
   });
 
   it.each(locales)("asks the typed name and a separate, unticked data checkbox with its keep note (%s)", (_l, m) => {

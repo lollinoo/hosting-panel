@@ -4,6 +4,70 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Application buttons, log masking, WordPress address and uploads, image registries and five more fixes (2026-11-24)
+*hosting-panel v0.17.6*
+
+**Bug Fixes & Stability**
+- **apps**: Application buttons, log masking, WordPress address and uploads, image registries and five more fixes
+
+---
+
+### A stopped application stays stopped when an operation is refused before create (2026-11-24)
+*hosting-panel v0.17.5*
+
+**Bug Fixes & Stability**
+- **apps**: A stopped application stays stopped when an operation is refused before create
+
+---
+
+### A webhook cannot name the server's own public address behind address translation (2026-11-24)
+*hosting-panel v0.17.4*
+
+**Bug Fixes & Stability**
+- **notifications**: A webhook cannot name the server's own public address behind address translation
+
+---
+
+### An application call whose answer cannot be read has an unknown outcome (2026-11-24)
+*hosting-panel v0.17.3*
+
+**Bug Fixes & Stability**
+- **executor**: An application call whose answer cannot be read has an unknown outcome
+
+---
+
+### The wizard closes its earlier steps once the application is created (2026-11-24)
+*hosting-panel v0.17.2*
+
+**Bug Fixes & Stability**
+- **web**: The wizard closes its earlier steps once the application is created
+
+---
+
+### An upgrade asks for the private values the new version adds (2026-11-24)
+*hosting-panel v0.17.1*
+
+**Bug Fixes & Stability**
+- **apps**: An upgrade asks for the private values the new version adds
+
+---
+
+### One-image template form for the administrator (2026-11-24)
+*hosting-panel v0.17.0*
+
+**New Features**
+- **apps**: One-image template form for the administrator
+
+---
+
+### Scheduled tasks in the components of an application (2026-11-24)
+*hosting-panel v0.16.0*
+
+**New Features**
+- **apps**: Scheduled tasks in the components of an application
+
+---
+
 ### Terminal and logs of an application for the server administrator (2026-11-24)
 *hosting-panel v0.15.0*
 

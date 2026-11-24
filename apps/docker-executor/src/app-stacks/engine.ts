@@ -8,6 +8,7 @@ import {
   APP_STACK_LOG_TAIL_MAX,
   APP_STACK_NETWORK_ROLES,
   appStackImageLookupProblem,
+  appStackImageRegistryProblem,
   appStackLinkAlias,
   type AppImageAllowlistEntry,
   type AppStackComponentActionIpcResult,
@@ -43,6 +44,7 @@ import { appStackBackupJobAwake } from "../app-stack-backup-jobs.js";
 import { LOG_READ_MAX_BYTES } from "../docker-logs.js";
 import { ExecutorCodedError, type AppStackRouteEntry } from "../traefik-config.js";
 import {
+  appStackContainerIsCurrent,
   assertAppStackPayloadHardening,
   buildAppStackContainerCreatePayload,
   decodeAppStackHealthLabel,
@@ -69,11 +71,10 @@ import {
 } from "./plan-check.js";
 import { assertAppStackRoutesInPlan } from "./routes-check.js";
 import {
-  appStackLogMaskValues,
+  appStackContainerMaskValues,
   maskAppStackLogLines,
   purgeAppStackComponentSecrets,
   purgeAppStackSecrets,
-  readAppStackComponentSecretValues,
   writeAppStackComponentSecrets,
 } from "./secrets.js";
 
@@ -107,6 +108,8 @@ export interface AppStackEngineDeps {
    * job of that application holds it.
    */
   readonly backupLanes?: { holdAppStackLane(stackId: string): (() => void) | null };
+  /** A task of the application runs in this executor (ADR-0042): its containers are not created, started or removed. */
+  readonly taskRunning?: (stackId: string) => boolean;
 }
 
 export const APP_STACK_PULL_ENGINE_TIMEOUT_MS = 240_000;
@@ -125,6 +128,8 @@ interface ContainerInspect {
   readonly Name?: string;
   /** Env is read only to mask the logs; no inspect result leaves the executor. */
   readonly Config?: { readonly Labels?: Labels | null; readonly Env?: readonly string[] | null };
+  /** Binds is read only to know which secret files the container was given (log masking). */
+  readonly HostConfig?: { readonly Binds?: readonly string[] | null } | null;
   readonly State?: {
     readonly Status?: string;
     readonly Running?: boolean;
@@ -257,7 +262,11 @@ const done = (res: EngineResponse) => res.statusCode === 200 || res.statusCode =
 const says = (res: EngineResponse, text: string) => res.body.toString("utf8").toLowerCase().includes(text);
 
 /** The component key of an own container (Docker names carry a leading "/"), else null. */
-function ownComponentKey(labels: Labels | null | undefined, name: string | undefined, ids: Ids): string | null {
+export function ownComponentKey(
+  labels: Readonly<Record<string, string>> | null | undefined,
+  name: string | undefined,
+  ids: { readonly stackId: string; readonly organizationId: string },
+): string | null {
   const key = labels?.[APP_STACK_LABELS.component];
   return isOwnAppStackResource(labels ?? undefined, ids.stackId, ids.organizationId) &&
     labels?.[APP_STACK_LABELS.role] === APP_STACK_COMPONENT_ROLE &&
@@ -322,6 +331,13 @@ export class AppStackEngine implements StackExecutorPort {
       const pulled = found === null;
       if (found === null) {
         if (!this.deps.pullMissingImages) refuse("STACK_IMAGE_MISSING", "The image is not available on this server");
+        // Never ask the Engine to reach this server or a private network (ADR-0036); an image already here still runs.
+        // A permanent refusal, worded like the plan check's for an image it does not accept: trying again cannot help.
+        const registry = appStackImageRegistryProblem(image);
+        if (registry !== null) {
+          const owner = plan.components.find((c) => c.image === image)?.key ?? "";
+          refuse("STACK_IMAGE_NOT_ALLOWED", `The image of component ${owner} is not allowed (${registry})`);
+        }
         const res = await this.deps.request("POST", `/images/create?fromImage=${enc(image)}`, undefined, {
           timeoutMs: APP_STACK_PULL_ENGINE_TIMEOUT_MS,
         });
@@ -411,7 +427,8 @@ export class AppStackEngine implements StackExecutorPort {
       const bodies = new Map<string, AppStackContainerCreatePayload>();
       for (const { key } of plan.components) {
         const existing = listed.find((c) => c.key === key);
-        if (existing?.labels[APP_STACK_LABELS.componentHash] === computeAppStackComponentHash(plan, key)) continue;
+        // An equal hash with an older body version (or none) is replaced, in place, like a changed hash (#96).
+        if (existing !== undefined && appStackContainerIsCurrent(existing.labels, plan, key)) continue;
         const name = appStackContainerName(plan.stackId, key);
         if (existing === undefined && (await this.get(`/containers/${enc(name)}/json`, "inspect an application container")) !== null) {
           throw conflict();
@@ -452,7 +469,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
-    return this.locked(req.stackId, async () => {
+    return this.lockedWithoutTask(req.stackId, async () => {
       const components: AppStackStopIpcResult["components"] = [];
       for (const c of reverseStartOrder(await this.listContainers(req))) {
         if (STOPPED_STATES.has(c.state)) {
@@ -611,12 +628,13 @@ export class AppStackEngine implements StackExecutorPort {
 
   public async getAppStackComponentLogs(req: AppStackLogsIpcRequest): Promise<readonly ServiceLogLine[]> {
     const target = await this.inspectAppStackComponentContainer(req);
-    // Established before any line is read; the environment secrets come from this container, which outlives the tmpfs.
-    const values = appStackLogMaskValues(
-      req.componentKey,
-      { labels: target.Config?.Labels, env: target.Config?.Env },
-      await readAppStackComponentSecretValues(this.deps.secretsRootDir, req.stackId, req.componentKey),
-    );
+    // Established before any line is read, from this container alone: its binds name the secret files it was given,
+    // and its environment secrets come from it, which outlives the tmpfs.
+    const values = await appStackContainerMaskValues(this.deps.secretsRootDir, req, {
+      labels: target.Config?.Labels,
+      env: target.Config?.Env,
+      hostConfig: target.HostConfig,
+    });
     const tail = Math.min(APP_STACK_LOG_TAIL_MAX, Math.max(1, Math.trunc(req.tail) || 1));
     const res = await this.deps.request(
       "GET",
@@ -646,6 +664,17 @@ export class AppStackEngine implements StackExecutorPort {
     if (target === null) throw new ExecutorCodedError("Component not found", "NOT_FOUND");
     if (ownComponentKey(target.Config?.Labels, target.Name, req) !== req.componentKey) throw conflict();
     return target;
+  }
+
+  /** A call of this executor is changing the application (the task runner asks before it starts a task). */
+  public isChanging(stackId: string): boolean {
+    return this.busy.has(stackId);
+  }
+
+  /** The changes of the containers of an application: never while a task of it runs (the executor does not trust the API). */
+  private async lockedWithoutTask<T>(stackId: string, fn: () => Promise<T>): Promise<T> {
+    if (this.deps.taskRunning?.(stackId) === true) refuse("STACK_BUSY", "A task of this application stack is running");
+    return this.locked(stackId, fn);
   }
 
   private async locked<T>(stackId: string, fn: () => Promise<T>): Promise<T> {
@@ -767,13 +796,13 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   /**
-   * locked(), outside every backup job of the application: none of its data is being copied or written back meanwhile
-   * (ADR-0038 K4). `check` runs first, so a refused plan reaches no Engine request. Then the application's backup lane
-   * is held for the whole change, and the change is refused while a job container of its backups is awake: one whose
-   * job ended without its kill or its removal, which the lane no longer shows.
+   * lockedWithoutTask(), outside every backup job of the application: none of its data is being copied or written back
+   * meanwhile (ADR-0038 K4), and no task of it runs (ADR-0042). `check` runs first, so a refused plan reaches no Engine
+   * request. Then the application's backup lane is held for the whole change, and the change is refused while a job
+   * container of its backups is awake: one whose job ended without its kill or its removal, which the lane no longer shows.
    */
   private lockedOutsideBackups<C, T>(stackId: string, check: () => C, fn: (checked: C) => Promise<T>): Promise<T> {
-    return this.locked(stackId, async () => {
+    return this.lockedWithoutTask(stackId, async () => {
       const checked = check();
       const release = this.deps.backupLanes === undefined ? () => undefined : this.deps.backupLanes.holdAppStackLane(stackId);
       if (release === null) refuse("STACK_BUSY", "A backup or a restore of this application is running");

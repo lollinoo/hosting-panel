@@ -1,9 +1,12 @@
 import { Body, Controller, Delete, Get, HttpCode, HttpStatus, Inject, Param, Post, Query, Req, Res } from "@nestjs/common";
 import {
+  APP_STACK_KIND_PERMISSIONS,
   APP_STACK_LOG_TAIL_DEFAULT,
+  APP_STACK_SECRET_MIN_LENGTH,
   AppStackActionInputSchema,
   AppStackListQuerySchema,
   AppStackLogsQuerySchema,
+  AppTemplateParameterKeySchema,
   CreateAppStackBackupInputSchema,
   CreateAppStackInputSchema,
   DeleteAppStackInputSchema,
@@ -25,6 +28,7 @@ import {
   type CursorPage,
   type PermissionKey,
   type ReadMeta,
+  type UpgradeAppStackInput,
 } from "@hosting-panel/contracts";
 import type { AppStackRow, AppStackWriteResult } from "@hosting-panel/database";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -32,6 +36,7 @@ import { APP_FEATURE_GATE_TOKEN, requireAppFeature, type AppFeatureGate } from "
 import { AppStackBackupsService, type AppStackBackupRequester } from "../app-stacks/app-stack-backups.service.js";
 import { appStackAcceptedEnvelope } from "../app-stacks/app-stack-dto.js";
 import { AppStacksService, type AppStackRequestContext } from "../app-stacks/app-stacks.service.js";
+import { appRefusal } from "../app-templates/app-template-errors.js";
 import { AuthzContextService, type AuthenticatedRequestContext } from "../auth/authz-context.service.js";
 import { parsePaginationQuery, requireIdempotencyKey, resolveRequestId, type PaginationParams } from "../common/control-plane.error.js";
 import { peekBody } from "../common/deferred-body-error.js";
@@ -40,6 +45,26 @@ import { OutboxWorkerService } from "../runtime/outbox-worker.service.js";
 type RawQuery = Record<string, unknown> | undefined;
 type Listed<T> = { data: T[]; meta: ReadMeta; page: CursorPage };
 const headersOf = (req: FastifyRequest) => req.headers as Record<string, string | string[] | undefined>;
+
+/** A page shows this one by its reason: a shorter value is one the log reader could not mask (BUG-43). */
+function valueTooShort(field: string) {
+  const message = `This value is too short: at least ${String(APP_STACK_SECRET_MIN_LENGTH)} characters.`;
+  return appRefusal("VALIDATION_ERROR", message, { field, message, reason: "value_too_short" });
+}
+
+/** The upgrade body; a private value too short to mask is refused at its key (`secrets.<key>`), never echoed. */
+function parseUpgrade(raw: unknown): UpgradeAppStackInput {
+  const parsed = UpgradeAppStackInputSchema.safeParse(raw ?? {});
+  if (parsed.success) return parsed.data;
+  for (const issue of parsed.error.issues) {
+    const [list, index, name] = issue.path;
+    if (list !== "secrets" || typeof index !== "number" || name !== "value" || issue.code !== "too_small") continue;
+    const entry = (raw as { readonly secrets?: readonly { readonly parameterKey?: unknown }[] } | null | undefined)?.secrets?.[index];
+    const key = AppTemplateParameterKeySchema.safeParse(entry?.parameterKey);
+    if (key.success) throw valueTooShort(`secrets.${key.data}`);
+  }
+  throw parsed.error;
+}
 
 /**
  * Customer application stacks (ADR-0035). Order on every route: authentication → organisation permission (a non-member
@@ -82,8 +107,10 @@ export class AppStacksController {
     @Param("orgId") orgId: string,
     @Param("stackId") stackId: string,
   ): Promise<{ data: AppStackDetailDto }> {
-    const stack = await this.#read(req, orgId, stackId, "app.read");
-    return { data: await this.stacks.detail(stack) };
+    const auth = await this.#guard(req, orgId, "app.read", stackId);
+    const stack = await this.stacks.require(orgId, stackId);
+    // The actions on offer are this caller's: the permission each route asks, decided as its guard decides.
+    return { data: await this.stacks.detail(stack, (permission) => this.authz.allowsOrgPermission(auth, orgId, permission)) };
   }
 
   /** Writes nothing: the diff whose `planHash` an upgrade or rollback must send back; secrets appear by name only. */
@@ -113,7 +140,8 @@ export class AppStacksController {
   ): Promise<AppStackAcceptedEnvelope> {
     const body = peekBody(raw);
     const settings = typeof body === "object" && body !== null && "parameters" in body;
-    return this.#queue(req, orgId, stackId, settings ? ["app.control", "app.update"] : "app.control", (ctx, stack) =>
+    const permission = APP_STACK_KIND_PERMISSIONS["stack.deploy"];
+    return this.#queue(req, orgId, stackId, settings ? [permission, "app.update"] : permission, (ctx, stack) =>
       this.stacks.deploy(ctx, stack, DeployAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -144,8 +172,8 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.update", (ctx, stack) =>
-      this.stacks.upgrade(ctx, stack, UpgradeAppStackInputSchema.parse(raw ?? {})),
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS["stack.upgrade"], (ctx, stack) =>
+      this.stacks.upgrade(ctx, stack, parseUpgrade(raw)),
     );
   }
 
@@ -157,7 +185,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.update", (ctx, stack) =>
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS["stack.rollback"], (ctx, stack) =>
       this.stacks.rollback(ctx, stack, RollbackAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -171,7 +199,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queue(req, orgId, stackId, "app.delete", (ctx, stack) =>
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS["stack.delete"], (ctx, stack) =>
       this.stacks.remove(ctx, stack, DeleteAppStackInputSchema.parse(raw ?? {})),
     );
   }
@@ -222,8 +250,12 @@ export class AppStacksController {
   ): Promise<{ data: AppStackSecretStateDto }> {
     const auth = await this.#guard(req, orgId, "app.update", stackId);
     const stack = await this.stacks.require(orgId, stackId);
-    const input = SetAppStackSecretInputSchema.parse(raw ?? {});
-    return { data: await this.stacks.setSecret(this.#context(auth, req, orgId, ""), stack, input) };
+    const parsed = SetAppStackSecretInputSchema.safeParse(raw ?? {});
+    if (!parsed.success) {
+      if (parsed.error.issues.some((issue) => issue.path[0] === "value" && issue.code === "too_small")) throw valueTooShort("value");
+      throw parsed.error;
+    }
+    return { data: await this.stacks.setSecret(this.#context(auth, req, orgId, ""), stack, parsed.data) };
   }
 
   /** Backups of the application, newest first (ADR-0038): whether each copy is good, never where it is. */
@@ -246,7 +278,7 @@ export class AppStacksController {
     @Param("stackId") stackId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queueBackup(req, orgId, stackId, (ctx, stack, requester) => {
+    return this.#queueBackup(req, orgId, stackId, "stack.backup", (ctx, stack, requester) => {
       CreateAppStackBackupInputSchema.parse(raw ?? {});
       return this.backups.create(ctx, stack, requester);
     });
@@ -262,13 +294,13 @@ export class AppStacksController {
     @Param("backupId") backupId: string,
     @Body() raw: unknown,
   ): Promise<AppStackAcceptedEnvelope> {
-    return this.#queueBackup(req, orgId, stackId, (ctx, stack, requester) =>
+    return this.#queueBackup(req, orgId, stackId, "stack.restore", (ctx, stack, requester) =>
       this.backups.restore(ctx, stack, backupId, RestoreAppStackBackupInputSchema.parse(raw ?? {}), requester),
     );
   }
 
   #act(req: FastifyRequest, orgId: string, stackId: string, raw: unknown, kind: "stack.start" | "stack.stop" | "stack.restart") {
-    return this.#queue(req, orgId, stackId, "app.control", (ctx, stack) => {
+    return this.#queue(req, orgId, stackId, APP_STACK_KIND_PERMISSIONS[kind], (ctx, stack) => {
       AppStackActionInputSchema.parse(raw ?? {});
       return this.stacks.act(ctx, stack, kind);
     });
@@ -291,9 +323,10 @@ export class AppStacksController {
     req: FastifyRequest,
     orgId: string,
     stackId: string,
+    kind: "stack.backup" | "stack.restore",
     run: (ctx: AppStackRequestContext, stack: AppStackRow, requester: AppStackBackupRequester) => Promise<AppStackWriteResult>,
   ): Promise<AppStackAcceptedEnvelope> {
-    const auth = await this.#guard(req, orgId, "app.control", stackId);
+    const auth = await this.#guard(req, orgId, APP_STACK_KIND_PERMISSIONS[kind], stackId);
     const ctx = this.#context(auth, req, orgId, requireIdempotencyKey(headersOf(req)));
     const stack = await this.stacks.require(orgId, stackId);
     const limited = !(auth.principal.globalRoles ?? []).includes("infrastructure_admin");

@@ -20,6 +20,7 @@ export const COMPOSE_IMPORT_CODES = Object.freeze([
   // image
   "IMAGE_MISSING", // refused
   "IMAGE_INVALID", // refused
+  "IMAGE_REGISTRY_REFUSED", // refused: this server or a private network
   "IMAGE_UNRESOLVED", // refused
   "IMAGE_PINNED", // changed
   "IMAGE_TAG_DROPPED", // changed

@@ -10,6 +10,7 @@ import {
   APP_STACK_REVISION_KINDS,
   APP_STACK_TERMINAL_DEPLOYMENT_STATUSES,
   APP_TEMPLATE_LIMITS,
+  appStackEnqueueRefusal,
   appStackEnqueueTarget,
   appStackLockKey,
   appStackOperationSteps,
@@ -505,6 +506,19 @@ export async function createAppStackTransactional(db: HostingPanelDatabase, inpu
   });
 }
 
+/** The active operation that holds the stack's lock, whoever queued it (the platform's backup clean-up too); else null. */
+export async function getAppStackLockHolder(
+  db: DatabaseExecutor,
+  stackId: string,
+): Promise<{ readonly id: string; readonly organizationId: string; readonly kind: string } | null> {
+  const [active] = await db
+    .select({ id: operations.id, organizationId: operations.organizationId, kind: operations.kind })
+    .from(operations)
+    .where(and(eq(operations.lockKey, appStackLockKey(stackId)), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])))
+    .limit(1);
+  return active ?? null;
+}
+
 /** One transaction: the request side of every stack operation (status, revision, components, volumes, quota, deployment). */
 export async function enqueueAppStackOperationTransactional(
   db: HostingPanelDatabase,
@@ -548,14 +562,14 @@ export async function enqueueAppStackOperationTransactional(
       .where(and(eq(appStacks.id, input.stackId), eq(appStacks.organizationId, input.organizationId), isNull(appStacks.deletedAt)))
       .for("update");
     if (!stack) throw new AppStackRepositoryError("NOT_FOUND", "Application not found.");
-    const lockKey = appStackLockKey(stack.id);
-    const [active] = await tx
-      .select({ id: operations.id })
-      .from(operations)
-      .where(and(eq(operations.lockKey, lockKey), inArray(operations.status, [...ACTIVE_OPERATION_LOCK_STATUSES])));
-    if (active) throw codedError(`Resource lock '${lockKey}' is currently held by active operation '${active.id}'`, "RESOURCE_LOCKED");
+    const active = await getAppStackLockHolder(tx, stack.id);
+    // The decision the detail's allowedActions reads too (ADR-0035 §2.10), so the page never offers what this refuses.
+    const refused = appStackEnqueueRefusal(input.kind, stack.status, active !== null);
+    if (refused === "locked") {
+      throw codedError(`Resource lock '${appStackLockKey(stack.id)}' is currently held by active operation '${active!.id}'`, "RESOURCE_LOCKED");
+    }
     const target = appStackEnqueueTarget(input.kind, stack.status);
-    if (target === null) {
+    if (refused === "status" || target === null) {
       throw new AppStackRepositoryError("INVALID_TRANSITION", `This action is not available while the application is ${stack.status}.`, stack.status);
     }
     const redeployed = input.kind === "stack.deploy" && input.routesOnly === true ? stack.appliedRevisionId : stack.desiredRevisionId;

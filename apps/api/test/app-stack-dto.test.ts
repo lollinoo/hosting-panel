@@ -143,6 +143,7 @@ const detailInput = (change: Partial<Parameters<typeof appStackDetailDto>[0]> = 
   parameters: [],
   secrets: [],
   activeOperationId: null,
+  allowedActions: [],
   installed: null,
   platformWork: null,
   upgrade: null,
@@ -352,6 +353,7 @@ describe("appStackDetailDto", () => {
       deployed([], {
         volumes: [{ stackId: STACK, organizationId: ORG, volumeKey: "data", retentionPolicy: "retain", status: "present", createdAt: NOW, updatedAt: NOW }],
         activeOperationId: "op_1",
+        allowedActions: ["stack.stop", "stack.restart"],
         installed: { revisionNumber: 2, templateVersionNumber: 1 },
         platformWork: "backups_cleanup",
         upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
@@ -361,12 +363,23 @@ describe("appStackDetailDto", () => {
     expect(dto).toMatchObject({
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       activeOperationId: "op_1",
+      allowedActions: ["stack.stop", "stack.restart"],
+      outcomeUnknown: false,
       installed: { revisionNumber: 2, templateVersionNumber: 1 },
       platformWork: "backups_cleanup",
       upgrade: { templateVersionId: "atv_2", versionNumber: 2 },
       rollback: { revisionId: "srev_2", revisionNumber: 2, templateVersionNumber: 1 },
     });
     expect(AppStackDetailDtoSchema.strict().parse(dto)).toEqual(dto);
+  });
+});
+
+describe("issue #106: the outcome in doubt is the stored status, not the shown one", () => {
+  it("a stale reading of a running application shows unknown with no outcome in doubt; a stored unknown is one", () => {
+    const stale = appStackDetailDto(deployed(PLAN.components.map((c) => component(c.key, "healthy", STALE))));
+    expect([stale.status, stale.outcomeUnknown]).toEqual(["unknown", false]);
+    const doubt = appStackDetailDto(deployed([], { stack: stackRow({ status: "unknown", desiredRevisionId: REVISION, appliedRevisionId: REVISION }) }));
+    expect([doubt.status, doubt.outcomeUnknown]).toEqual(["unknown", true]);
   });
 });
 

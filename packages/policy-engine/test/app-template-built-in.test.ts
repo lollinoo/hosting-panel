@@ -21,7 +21,7 @@ import {
   type AppTemplateParameterEntry,
   type ApprovedStackPlan,
 } from "@hosting-panel/contracts";
-import { verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
+import { computeAppTemplateSpecHash, verifyAppStackPlanHash } from "@hosting-panel/hosting-domain";
 import { compileAppStackPlan } from "../src/app-template-compile.js";
 import { validateAppTemplateSource } from "../src/app-template-validation.js";
 
@@ -58,6 +58,11 @@ const WORDPRESS_SECRETS = new Map([
   ["db_password", 1],
   ["db_root_password", 1],
 ]);
+/** WORDPRESS_CONFIG_EXTRA as PHP reads it (one line): the site's address is the name it is asked by, lower-cased, when
+ *  that is a host name with a letter or digit at both ends and an optional port; its variable does not outlive it. */
+const CONFIG_EXTRA =
+  "$hcp_host = isset($_SERVER['HTTP_HOST']) ? strtolower($_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$/D', $hcp_host)) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $hcp_host); define('WP_SITEURL', WP_HOME); } unset($hcp_host);";
+const UPLOADS_ARGV = ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"];
 
 describe("the built-in application templates", () => {
   it.each(FIRST_FORMAT.map((t) => [t.slug, t] as const))("%s validates with the default allowlist only", (_slug, t) => {
@@ -176,24 +181,53 @@ describe("the built-in application templates", () => {
 
   describe("wordpress-mariadb (extended format)", () => {
     const t = seed("wordpress-mariadb");
-    const wordpress = (secretVersions: ReadonlyMap<string, number> = WORDPRESS_SECRETS) =>
+    const earlier = () => t.previousVersions![0]!;
+    const wordpress = (secretVersions: ReadonlyMap<string, number> = WORDPRESS_SECRETS, version: { source: string; versionId: string } = t) =>
       compileAppStackPlan({
-        source: t.source,
+        source: version.source,
         parameters: [],
         secretVersions,
         ids: {
           stackId: "stk_0123456789abcdef0123456789abcdef",
           organizationId: "org_acme",
           hostAllocationId: "alloc_0123456789abcdef0123456789abcdef",
-          templateVersionId: t.versionId,
+          templateVersionId: version.versionId,
           revisionId: "srev_0123456789abcdef0123456789abcdef",
         },
       });
-    const plan = (): ApprovedStackPlan => {
-      const result = wordpress();
+    const plan = (version: { source: string; versionId: string } = t): ApprovedStackPlan => {
+      const result = wordpress(WORDPRESS_SECRETS, version);
       if (!result.ok) throw new Error(`expected a plan, got ${JSON.stringify(result.issues)}`);
       return result.plan;
     };
+
+    it("version 1 still validates to the same spec, and compiles without a command or a config line", () => {
+      const first = earlier();
+      const result = validateAppTemplateSource(first.source);
+      if (!result.ok) throw new Error(JSON.stringify(result.errors));
+      expect(first.versionId).toBe("atv_wordpress_mariadb_1");
+      expect(computeAppTemplateSpecHash(result.spec)).toBe("78625e4ec918338d8c20b88ce42f1ec366f065412d0b1a190ee211a886bf42eb");
+      const p = plan(first);
+      expect(p.templateVersionId).toBe("atv_wordpress_mariadb_1");
+      expect(p.components.map((c) => [c.key, c.argv])).toEqual([
+        ["db", null],
+        ["wordpress", null],
+      ]);
+      expect(component(p, "wordpress")?.environment.map((e) => e.name)).toEqual(["WORDPRESS_DB_HOST", "WORDPRESS_DB_NAME", "WORDPRESS_DB_USER"]);
+    });
+
+    it("version 2 differs from version 1 only in the wordpress component: same parameters, volumes, address and database", () => {
+      const first = earlier();
+      const [before, after] = [plan(first), plan()];
+      const [specBefore, specAfter] = [validateAppTemplateSource(first.source), validateAppTemplateSource(t.source)];
+      if (!specBefore.ok || !specAfter.ok) throw new Error("expected both versions to validate");
+      expect(specAfter.spec.parameters).toEqual(specBefore.spec.parameters);
+      expect(after.volumes).toEqual(before.volumes);
+      expect(after.ingress).toEqual(before.ingress);
+      expect(component(after, "db")).toEqual(component(before, "db"));
+      expect(component(after, "wordpress")).not.toEqual(component(before, "wordpress"));
+      expect({ ...component(after, "wordpress")!, argv: null, environment: component(before, "wordpress")!.environment }).toEqual(component(before, "wordpress"));
+    });
 
     it("validates with any allowlist: its images are pinned by digest and need no row", () => {
       for (const options of [undefined, { allowlist: [] }]) {
@@ -226,7 +260,8 @@ describe("the built-in application templates", () => {
       expect(p.schemaVersion).toBe(2);
       expect(p.components.map((c) => [c.key, appStackComponentProfile(c), c.runAsUser, c.argv])).toEqual([
         ["db", "standard", null, null],
-        ["wordpress", "standard", null, null],
+        // The uploads limit is set on the command line of the image's own start program: no file to write, no shell.
+        ["wordpress", "standard", null, UPLOADS_ARGV],
       ]);
       expect(p.components.map((c) => c.image)).toEqual([
         "mariadb@sha256:4aaf88b3106382c8c18e49f0cec60267be618fc22f858c4503afb2a2555afed3",
@@ -252,10 +287,21 @@ describe("the built-in application templates", () => {
         { name: "MARIADB_USER", value: "wordpress" },
       ]);
       expect(component(p, "wordpress")?.environment).toEqual([
+        { name: "WORDPRESS_CONFIG_EXTRA", value: CONFIG_EXTRA },
         { name: "WORDPRESS_DB_HOST", value: "db" },
         { name: "WORDPRESS_DB_NAME", value: "wordpress" },
         { name: "WORDPRESS_DB_USER", value: "wordpress" },
       ]);
+      // One line, no other constant, nothing the customer typed.
+      expect(CONFIG_EXTRA).not.toContain("\n");
+      expect([...CONFIG_EXTRA.matchAll(/define\('([A-Z_]+)'/g)].map((m) => m[1])).toEqual(["WP_HOME", "WP_SITEURL"]);
+      expect(CONFIG_EXTRA).not.toMatch(/eval|\$\{|\$\$/);
+      // The line runs in the global scope of every request: what it assigns, it unsets at the end.
+      const assigned = [...CONFIG_EXTRA.matchAll(/(\$[a-z_]+) = /g)].map((m) => m[1]);
+      expect(assigned).toEqual(["$hcp_host"]);
+      expect(CONFIG_EXTRA.endsWith(` unset(${assigned.join(", ")});`)).toBe(true);
+      // Its variable is not named like a platform object, which a real-Docker acceptance gate refuses in a request.
+      expect(CONFIG_EXTRA).not.toMatch(/(?<![A-Za-z0-9])hp_/);
       expect(appStackComponentSecretEnvironment(component(p, "db")!)).toEqual([
         { name: "MARIADB_PASSWORD", pieces: [{ parameterKey: "db_password", version: 1 }] },
         { name: "MARIADB_ROOT_PASSWORD", pieces: [{ parameterKey: "db_root_password", version: 1 }] },
@@ -268,6 +314,19 @@ describe("the built-in application templates", () => {
         { parameterKey: "db_root_password", version: 1 },
       ]);
       expect(appStackComponentSecretRefs(component(p, "wordpress")!)).toEqual([{ parameterKey: "db_password", version: 1 }]);
+    });
+
+    it("takes the site's address from a Host that is a host name with an optional port, lower-cased, and from nothing else", () => {
+      // The pattern of the line as PHP's preg_match reads it ("D": "$" is the very end), after PHP's ASCII strtolower.
+      const pattern = new RegExp(/preg_match\('\/(.+?)\/D'/.exec(CONFIG_EXTRA)![1]!);
+      const takes = (host: string): boolean => pattern.test(host.replace(/[A-Z]/g, (c) => c.toLowerCase()));
+      for (const host of ["wp.example.test", "WP.Example.TEST", "wp.example.test:8443", "a", "10.0.0.1:80", "x--y.test"]) {
+        expect(takes(host), host).toBe(true);
+      }
+      for (const host of ["wp.example.test.", ".wp.example.test", "-wp.example.test", "wp.example.test-", "wp.example.test:",
+        "wp.example.test:123456", "wp.example.test\n", "wp.example.test/x", "wp_x.test", "user@wp.example.test", "[::1]:80", ""]) {
+        expect(takes(host), JSON.stringify(host)).toBe(false);
+      }
     });
 
     it("compiles byte-identically 20 times, and a new secret version changes the plan", () => {

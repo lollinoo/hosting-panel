@@ -4,7 +4,14 @@ import * as React from "react";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppStackBackupsDto, AppStackDetailDto, AppStackPlanDiffDto, CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import {
+  APP_STACK_OPERATION_KINDS,
+  appStackEnqueueTarget,
+  type AppStackBackupsDto,
+  type AppStackDetailDto,
+  type AppStackPlanDiffDto,
+  type CustomerAppTemplateDto,
+} from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
@@ -134,6 +141,8 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
+  outcomeUnknown: false,
   revisionNumber: 1,
   installed: null,
   components: [
@@ -157,6 +166,9 @@ const workerStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto =
   id: "stk_wrk",
   name: "night-jobs",
   status: "unknown",
+  // The last operation's outcome is in doubt: the stored status is unknown, and so are its actions.
+  outcomeUnknown: true,
+  allowedActions: ["stack.deploy", "stack.start", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete"],
   templateId: WORKER_APP.id,
   templateName: WORKER_APP.name,
   templateVersionNumber: 3,
@@ -463,8 +475,9 @@ describe("application page", () => {
     expect(web.split(m.apps.backups.unavailable.no_data)).toHaveLength(2);
     expect(web).not.toContain(`>${m.apps.backups.create}<`);
     expect(web).not.toMatch(/<(button|a|input)[^>]*(backup|restore)/i);
-    // worker + storage keeps data: the button and the empty list
-    const worker = await page(workerStack({ status: "running" }), m, { backups: [], unavailableReason: null, goBackTo: null });
+    // worker + storage keeps data: the button and the empty list (a settled running application: the detail offers it)
+    const running = { status: "running", outcomeUnknown: false, allowedActions: webStack().allowedActions } as const;
+    const worker = await page(workerStack(running), m, { backups: [], unavailableReason: null, goBackTo: null });
     expect(worker.split(`>${m.apps.backups.create}</button>`)).toHaveLength(2);
     expect(worker).toContain(m.apps.backups.none);
     expect(worker).not.toMatch(/<button[^>]*\sdisabled=""[^>]*>[^<]*backup/i);
@@ -544,11 +557,20 @@ describe("A19: upgrade and rollback", () => {
     ],
     volumes: [{ key: "data", change: "unchanged" }],
     parameters: [],
+    newSecrets: [],
     ingress: [{ componentKey: "web", port: 8080, change: "unchanged" }],
     downtime: true,
     dataRisk: true,
   };
-  const actionProps = (status: AppStackDetailDto["status"]) => ({ orgId: ORG, stackId: "stk_web", csrfToken: "csrf", status, upgrade: UPGRADE, rollback: ROLLBACK });
+  const actionProps = (status: AppStackDetailDto["status"]) => ({
+    orgId: ORG,
+    stackId: "stk_web",
+    csrfToken: "csrf",
+    status,
+    actions: APP_STACK_OPERATION_KINDS.filter((k) => appStackEnqueueTarget(k, status) !== null),
+    upgrade: UPGRADE,
+    rollback: ROLLBACK,
+  });
   const planDialog = (tree: unknown) => els(tree).find((e) => typeof e.type === "function" && e.type.name === "PlanDialog")!;
   const open = (mode: "upgrade" | "rollback", m: Messages) => {
     const parent = callHooks(AppStackActions, actionProps("running"), { 4: mode }, {}, m);

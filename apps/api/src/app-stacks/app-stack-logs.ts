@@ -29,6 +29,7 @@ export async function readAppStackComponentLogs(
     throw new ControlPlaneError("NOT_SUPPORTED", message, { details: [{ message, reason: "STACK_UNSUPPORTED_FEATURE" }] });
   }
   const tail = Math.min(APP_STACK_LOG_TAIL_MAX, Math.max(1, Math.trunc(input.tail ?? APP_STACK_LOG_TAIL_DEFAULT)));
+  // The executor learns from the component's container which secret files it must find: no stored plan is read here.
   return deps.gate.run(organizationId, () =>
     executor.getAppStackComponentLogs({ stackId, organizationId, componentKey, tail }).catch(() => {
       // What the executor said never reaches the caller (ADR 0026 2.3).

@@ -81,7 +81,7 @@ message is **Non consegnato** for good. A pass sends at most 20 messages; the re
 | `mail_not_configured` | Outbound mail is not set up on this server. | Procedure 4. |
 | `mail_refused` | The mail relay did not accept the message. | **Amministrazione › Email** and the log of `hp_mail_relay` in **Amministrazione › Log**. |
 | `address_not_allowed` | The name of the webhook now leads to an address the panel does not call: private, loopback, link-local, reserved, or one of this server's own addresses. | The DNS record of the receiver changed. Point it to a public address of another machine, or save a new address. |
-| `unreachable` | The name does not resolve, resolving the name and getting an answer take more than five seconds together, the port is closed, or the certificate is not valid for the name. | Check the receiver from another machine: `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://<host>/`. If every webhook and Telegram fails: procedure 4. |
+| `unreachable` | The name does not resolve, resolving the name and getting an answer take more than five seconds together, the port is closed, the certificate is not valid for the name, or the panel could not read the addresses it records for this server, or one of them is not an address. | Check the receiver from another machine: `curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://<host>/`. If every webhook and Telegram fails: procedure 4. |
 | `redirect` | The receiver answered with a redirect (3xx). The panel follows none. | Save the final address. |
 | `rejected` | The receiver answered 4xx. | Webhook: the path or its key is wrong, or the receiver refuses the signature. Telegram: `401` or `404` is a wrong or revoked token, `400` or `403` a wrong chat or a bot that is not a member of it. |
 | `server_error` | The receiver answered 5xx. | The fault is on the receiver's side; the panel tries again by itself. |
@@ -156,8 +156,24 @@ next messages go unsigned.
   A number means the server goes out. An error means a firewall or the provider blocks it: mail still works, and
   every webhook and Telegram message ends as `unreachable`.
 - **A receiver on this server or on a private network cannot be used.** The panel refuses an address that resolves to
-  one of this server's own addresses or to a private one, at save and at every send. Put the receiver on another
-  machine with a public address.
+  one of this server's own addresses or to a private one, at save and at every send. This server's own addresses are
+  those of its network interfaces and the public addresses the panel records for it. Every run of the installer
+  hands them to the panel, and they are read at every check, so a change counts at the next send:
+  - **IPv4**: once the panel has recorded an IPv4, only `--ipv4` changes it; an IPv4 the installer kept or detected is
+    recorded only on a first install. To correct a wrong recorded IPv4, or after the server's public IPv4 changes, run
+    the installer again with `--ipv4 <address>`. Without the flag the installer keeps the IPv4 its last run used
+    (`HP_PANEL_IPV4` in `/etc/hosting-panel/executor.env`), else takes the source address of the default route; its
+    `Panel IPv4:` line says which. When the panel has another IPv4 recorded than the one the run uses, the installer
+    prints a `WARNING:` line with both and changes nothing: run it again with `--ipv4 <address>` to record the right one.
+  - **IPv6**: never detected. `--ipv6 <address>` records it (written without brackets, zone or prefix length),
+    `--ipv6 none` removes it, and a run without the flag leaves the recorded one as it is. A loopback, link-local,
+    unspecified or IPv4-mapped IPv6 is refused.
+  - **Behind address translation** (NAT) no interface has the public address: give it once with
+    `--ipv4 <public address>`, and `--ipv6 <public address>` if the server has one; later reruns keep them.
+
+  If the recorded addresses cannot be read, or one of them is not an address (an older installer took `203.0.113.05`,
+  with a leading zero), nothing is sent and the attempt is `unreachable`: run the installer again with `--ipv4` and
+  the address written without leading zeros. Put the receiver on another machine with a public address.
 
 ## 5. A channel went quiet
 

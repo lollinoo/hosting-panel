@@ -94,8 +94,24 @@ describe("application refusal texts", () => {
     expect(text).not.toBe(m.apps.codes.RESOURCE_LOCKED);
   });
 
+  it.each(locales)("%s: a run of a task that holds the application says to try again in a few minutes", (_n, m) => {
+    const text = appStackRefusalText(m, "RESOURCE_LOCKED", "task_running");
+    expect(text).toBe((m.apps.reasons as Record<string, string>).task_running);
+    expect(text).not.toBe(m.apps.codes.RESOURCE_LOCKED);
+  });
+
   it("the Italian status refusal reads as the detail page expects", () => {
     expect(appStackRefusalText(itMsgs, "RESOURCE_LOCKED", "stopped")).toBe("Non è possibile ora: l'applicazione è nello stato «Ferma».");
+  });
+
+  it.each(locales)("%s: issue #106, a status refusal names a status only when it is the one the page shows", (_n, m) => {
+    expect(appStackRefusalText(m, "RESOURCE_LOCKED", "running", "running")).toBe(m.apps.reasons.status.replace("{status}", m.apps.status.running));
+    // A crashed component: the page shows failed, the API refused from its stored running.
+    expect(appStackRefusalText(m, "RESOURCE_LOCKED", "running", "failed")).toBe(m.apps.reasons.notNow);
+    expect(appStackRefusalText(m, "RESOURCE_LOCKED", "degraded", "unknown")).toBe(m.apps.reasons.notNow);
+    for (const status of APP_STACK_STATUSES) expect(m.apps.reasons.notNow, status).not.toContain(m.apps.status[status]);
+    // The lock answers without a status: its own sentence.
+    expect(appStackRefusalText(m, "RESOURCE_LOCKED", undefined, "failed")).toBe(m.apps.codes.RESOURCE_LOCKED);
   });
 
   it.each(locales)("%s: appStackProblemText says why for a STACK_* reason or a code with its own sentence, a generic line otherwise", (_n, m) => {

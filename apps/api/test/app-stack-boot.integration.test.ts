@@ -64,7 +64,7 @@ describe("application stack boot tasks (RT8)", () => {
       ["atpl_mariadb", true, false, "atv_mariadb_1"],
       ["atpl_postgresql", true, false, "atv_postgresql_1"],
       ["atpl_valkey", true, false, "atv_valkey_1"],
-      ["atpl_wordpress_mariadb", true, false, "atv_wordpress_mariadb_1"],
+      ["atpl_wordpress_mariadb", true, false, "atv_wordpress_mariadb_2"],
       ["atpl_worker_storage", true, false, "atv_worker_storage_1"],
     ]);
     expect(versions.map((v) => v.id)).toEqual([
@@ -73,6 +73,7 @@ describe("application stack boot tasks (RT8)", () => {
       "atv_postgresql_1",
       "atv_valkey_1",
       "atv_wordpress_mariadb_1",
+      "atv_wordpress_mariadb_2",
       "atv_worker_storage_1",
     ]);
 

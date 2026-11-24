@@ -8,7 +8,8 @@ import {
   APP_STACK_PRE_RESTORE_BACKUPS_KEPT,
   APP_STACK_STATUSES,
   MANUAL_BACKUPS_KEPT,
-  appStackBackupEnqueueTarget,
+  appStackAllowedActions,
+  type AppStackAllowedAction,
   type AppStackBackupDto,
   type AppStackBackupsDto,
   type AppStackStatus,
@@ -104,12 +105,17 @@ const FAILED = backup({
   restorable: false,
 });
 const list = (...backups: AppStackBackupDto[]): AppStackBackupsDto => ({ backups, unavailableReason: null, goBackTo: null });
+/** What the detail lists for the owner of a settled running application (ADR-0035 §2.10). */
+const OFFERED: AppStackAllowedAction[] = ["stack.deploy", "stack.stop", "stack.restart", "stack.delete", "stack.backup", "stack.restore"];
 const props = (over: Partial<Parameters<typeof AppStackBackups>[0]> = {}): Parameters<typeof AppStackBackups>[0] => ({
   orgId: "org_a1",
   stackId: "stk_a1",
   csrfToken: "csrf",
   stackName: NAME,
   status: "running",
+  stale: false,
+  actions: OFFERED,
+  busy: false,
   backups: list(GOOD),
   ...over,
 });
@@ -342,13 +348,13 @@ describe("backups of an application: when one cannot be asked", () => {
     expect(markup).toMatch(/<button[^>]*disabled[^>]*aria-describedby="app-backup-block"|<button[^>]*aria-describedby="app-backup-block"[^>]*disabled/);
   });
 
-  it.each(locales)("%s: while the application is busy the buttons are off and the status is said in words", (_n, m) => {
+  it.each(locales)("%s: the buttons follow what the detail lists for the stored status, and a refusing status is said in words", (_n, m) => {
     const t = m.apps.backups;
     const free: AppStackStatus[] = [];
     for (const status of APP_STACK_STATUSES) {
-      const { out } = run({ status }, m);
+      const { out } = run({ status, actions: appStackAllowedActions(status, false, () => true) }, m);
       const create = buttons(out, t.create)[0]!;
-      if (appStackBackupEnqueueTarget(status) === null) {
+      if (!appStackAllowedActions(status, false, () => true).includes("stack.backup")) {
         expect(create.props.disabled, status).toBe(true);
         expect(create.props["aria-describedby"], status).toBe("app-backup-block");
         expect(textOf(byId(out, "app-backup-block")), status).toBe(format(m.apps.reasons.status, { status: m.apps.status[status] }));
@@ -364,11 +370,49 @@ describe("backups of an application: when one cannot be asked", () => {
     expect([...free].sort()).toEqual(["degraded", "failed", "running", "stopped"]);
   });
 
-  it.each(locales)("%s: the server's reason is said before the status", (_n, m) => {
-    expect(appStackBackupBlock(m, { backups: [GOOD], unavailableReason: "no_data", goBackTo: null }, "deploying")).toBe(m.apps.backups.unavailable.no_data);
-    expect(appStackBackupBlock(m, list(GOOD), "deploying")).toBe(format(m.apps.reasons.status, { status: m.apps.status.deploying }));
-    expect(appStackBackupBlock(m, list(GOOD), "running")).toBeNull();
-    expect(appStackBackupBlock(m, list(), "stopped")).toBeNull();
+  it.each(locales)("%s: issue #106: a stale reading shows unknown while the stored status takes a backup: both are offered", (_n, m) => {
+    const t = m.apps.backups;
+    const { out } = run({ status: "unknown", stale: true, actions: OFFERED }, m);
+    expect(buttons(out, t.create)[0]!.props.disabled).toBe(false);
+    expect(byId(out, "app-backup-block")).toBeUndefined();
+    expect(buttons(out, t.restore)[0]!.props.disabled).toBe(false);
+  });
+
+  it.each(locales)("%s: issue #106: while an operation holds a running application neither is offered, and the line says it is busy", (_n, m) => {
+    const t = m.apps.backups;
+    const { out, markup } = run({ status: "running", busy: true, actions: [] }, m);
+    const create = buttons(out, t.create)[0]!;
+    expect(create.props.disabled).toBe(true);
+    expect(create.props["aria-describedby"]).toBe("app-backup-block");
+    expect(textOf(byId(out, "app-backup-block"))).toBe(t.busy);
+    expect(buttons(out, t.restore)[0]!.props.disabled).toBe(true);
+    // Never a status the application is not in.
+    expect(markup).not.toContain(format(m.apps.reasons.status, { status: m.apps.status.running }));
+  });
+
+  it.each(locales)("%s: the line names only what is true: the busy application, the stored status, else the caller's access", (_n, m) => {
+    const t = m.apps.backups;
+    const offer = (over: Partial<Parameters<typeof appStackBackupBlock>[3]> = {}) => ({ actions: OFFERED, busy: false, status: "running" as AppStackStatus, stale: false, ...over });
+    const said = (status: AppStackStatus) => format(m.apps.reasons.status, { status: m.apps.status[status] });
+    // The server's reason comes first: the backups list knows it.
+    const noData: AppStackBackupsDto = { backups: [GOOD], unavailableReason: "no_data", goBackTo: null };
+    expect(appStackBackupBlock(m, noData, "stack.backup", offer({ actions: [], status: "deploying" }))).toBe(t.unavailable.no_data);
+    expect(appStackBackupBlock(m, list(GOOD), "stack.backup", offer())).toBeNull();
+    expect(appStackBackupBlock(m, list(), "stack.restore", offer({ status: "stopped" }))).toBeNull();
+    // Each kind follows its own entry of the list.
+    expect(appStackBackupBlock(m, list(GOOD), "stack.backup", offer({ actions: ["stack.restore"] }))).not.toBeNull();
+    expect(appStackBackupBlock(m, list(GOOD), "stack.restore", offer({ actions: ["stack.backup"] }))).not.toBeNull();
+    // An operation in flight: busy, whatever the status shown.
+    for (const status of ["running", "stopped", "failed", "unknown"] as const) {
+      expect(appStackBackupBlock(m, list(GOOD), "stack.backup", offer({ actions: [], busy: true, status })), status).toBe(t.busy);
+    }
+    // A status that refuses is the stored one, unless the shown unknown is a stale reading.
+    expect(appStackBackupBlock(m, list(GOOD), "stack.backup", offer({ actions: [], status: "deploying" }))).toBe(said("deploying"));
+    expect(appStackBackupBlock(m, list(GOOD), "stack.backup", offer({ actions: [], status: "unknown" }))).toBe(said("unknown"));
+    // Else the caller may not: a reader, an editor without app.control, a suspended organisation.
+    for (const [status, stale] of [["running", false], ["stopped", false], ["failed", false], ["unknown", true]] as const) {
+      expect(appStackBackupBlock(m, list(GOOD), "stack.backup", offer({ actions: [], status, stale })), status).toBe(t.notAllowed);
+    }
   });
 });
 

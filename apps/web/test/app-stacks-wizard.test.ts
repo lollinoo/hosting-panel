@@ -4,7 +4,13 @@ import * as React from "react";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { APP_STACK_PROCESS_MARKS, type AppTemplateParameter, type CustomerAppTemplateDto } from "@hosting-panel/contracts";
+import {
+  APP_STACK_PROCESS_MARKS,
+  APP_STACK_SECRET_ENV_LIMITS,
+  APP_STACK_SECRET_MIN_LENGTH,
+  type AppTemplateParameter,
+  type CustomerAppTemplateDto,
+} from "@hosting-panel/contracts";
 
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
 const fetchUpstream = vi.hoisted(() => vi.fn());
@@ -28,7 +34,7 @@ vi.mock("next/navigation", () => ({
 
 import { en } from "@/i18n/en";
 import { it as itMsgs } from "@/i18n/it";
-import type { Messages } from "@/i18n";
+import { format, type Messages } from "@/i18n";
 import { I18nProvider } from "@/i18n/provider";
 import AppWizardPage from "@/app/apps/new/[templateId]/page";
 import { appStackRefusalText } from "@/components/app-stacks/app-stack-view";
@@ -129,7 +135,8 @@ const wizard = (state: Record<number, unknown> = {}, refs: Record<number, unknow
 const secretsRef = (values: Record<string, string>) => ({ current: new Map(Object.entries(values)) });
 
 const BASE = `/api/bff/orgs/${ORG}/app-stacks`;
-type Answer = { status: number; body: unknown } | "network";
+/** `text`: a body that is not JSON; `cut`: the connection drops after the status line, so reading the body fails. */
+type Answer = { status: number; body: unknown } | { status: number; text: string } | { status: number; cut: true } | "network";
 const fetchMock = vi.fn();
 /** Each URL answers with the next of its queue. */
 function answer(byUrl: Record<string, Answer[]>) {
@@ -137,9 +144,13 @@ function answer(byUrl: Record<string, Answer[]>) {
     const a = byUrl[url]?.shift();
     if (!a) throw new Error(`unexpected ${url}`);
     if (a === "network") throw new TypeError("fetch failed");
+    if ("text" in a) return new Response(a.text, { status: a.status, headers: { "Content-Type": "text/html" } });
+    if ("cut" in a) return new Response(new ReadableStream({ start: (c) => c.error(new TypeError("terminated")) }), { status: a.status });
     return new Response(JSON.stringify(a.body), { status: a.status, headers: { "Content-Type": "application/json" } });
   });
 }
+const notJson = (status: number): Answer => ({ status, text: "<html><body>Created</body></html>" });
+const cut = (status: number): Answer => ({ status, cut: true });
 const calls = () =>
   fetchMock.mock.calls.map((c) => {
     const init = c[1] as RequestInit;
@@ -336,6 +347,17 @@ describe("AppWizard markup", () => {
     }
   });
 
+  it("Next refuses a private value shorter than the log reader masks and says so at its field (BUG-43)", () => {
+    const short = "Zq9ab";
+    expect(short).toHaveLength(APP_STACK_SECRET_MIN_LENGTH - 1);
+    const values = secretsRef({ admin_password: short, api_token: `${short}c` });
+    const refused = wizard({ 1: "team-notes", 3: ["admin_password", "api_token"] }, { 0: values });
+    click(refused.tree, t.next);
+    for (const m of [en, itMsgs]) expect(appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")).toContain(String(APP_STACK_SECRET_MIN_LENGTH));
+    expect(refused.sets).toEqual([[5, { "param:admin_password": appStackRefusalText(en, "VALIDATION_ERROR", "value_too_short") }]]);
+    expect(JSON.stringify(refused.sets)).not.toContain(short);
+  });
+
   it("Next accepts text that only looks like a mark: PHP settings, other HP_ text", () => {
     const values = secretsRef({ admin_password: "APP_ENV=production\nPHP_CLI_SERVER_WORKERS=4\n", api_token: "SHP_X=1 HP_HOME=/x" });
     for (const title of ["Corso PHP_8", "-d PHP_INI_SCAN_DIR=/x", "ends with HP_TERMINAL_"]) {
@@ -484,7 +506,7 @@ describe("AppWizard install", () => {
       await click(tree, t.retry);
       return sets;
     };
-    expect(await run()).toContainEqual([6, en.errors.generic]);
+    expect(await run()).toContainEqual([6, t.createUnknown]);
     await run();
     expect(await run()).toContainEqual([5, { name: en.apps.reasons.name_taken }]);
     await run();
@@ -530,6 +552,440 @@ describe("AppWizard install", () => {
     const { tree, sets } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1" });
     await click(tree, t.retry);
     expect(sets).toContainEqual([6, en.apps.reasons.draftUnpublished]);
+  });
+});
+
+/** What the customer can press or follow, in page order. */
+const actions = (tree: ReactNode) => els(tree).filter((e) => typeof e.props.onClick === "function" || typeof e.props.href === "string").map(textOf);
+const editable = (tree: ReactNode) => els(tree).filter((e) => typeof e.props.onChange === "function").map((e) => e.props.id);
+
+describe("AppWizard after the application is created", () => {
+  const ready = { 0: "review", 1: " team-notes ", 2: { port: "9000" }, 3: ["admin_password", "api_token"], 4: [{ hostname: "Notes.Example.test", target: 0 }] };
+  const AT = `${BASE}/stk_a1`;
+  const hrefOf = (tree: ReactNode, label: string) => els(tree).find((e) => typeof e.props.href === "string" && textOf(e) === label)?.props.href;
+
+  it("a private value lost to a server error: no way back to the earlier steps, the screen shows what was sent, Retry sends only what is left", async () => {
+    answer({ [BASE]: [accepted(201)], [`${AT}/secrets`]: [refusal(503, "UPSTREAM_UNAVAILABLE")] });
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    const first = wizard(ready, { 0: values });
+    await click(first.tree, t.install);
+    expect(calls().map((c) => c.url)).toEqual([BASE, `${AT}/secrets`]);
+    expect(calls()[0]!.body.name).toBe("team-notes");
+    const lost = appStackRefusalText(en, "UPSTREAM_UNAVAILABLE");
+    expect(first.sets).toContainEqual([8, "stk_a1"]);
+    expect(first.sets).toContainEqual([6, t.secretFailed]);
+    expect(first.sets.filter(([k]) => k === 0)).toEqual([[0, "install"]]);
+
+    // An open earlier step would take a changed name into the summary and never send it: whatever step the state names, none opens.
+    const failed = { ...ready, 0: "install", 5: { "param:admin_password": lost }, 6: t.secretFailed, 8: "stk_a1" };
+    for (const step of ["install", "review", "domains", "configure"]) {
+      const { tree } = wizard({ ...failed, 0: step }, { 0: values });
+      expect(actions(tree), step).toEqual([t.openApp, t.retry]);
+      expect(hrefOf(tree, t.openApp), step).toBe("/apps/stk_a1");
+      expect(editable(tree), step).toEqual(["app-param-admin_password", "app-param-api_token"]);
+      const out = html(tree);
+      expect(out, step).toMatch(/aria-current="step"[^>]*>Install/);
+      expect(out, step).toContain(t.created);
+      expect(out, step).toMatch(/Application name<\/dt><dd[^>]*>team-notes</);
+      expect(out, step).toMatch(/Listen port<\/dt><dd[^>]*>9000</);
+      expect(out, step).toMatch(/<li>notes\.example\.test · web on port 8080<\/li>/);
+      expect(out, step).toMatch(new RegExp(`Admin password</dt><dd[^>]*>${t.secretPending}<`));
+      expect(out, step).toMatch(/id="app-param-admin_password"[^>]*aria-invalid="true"/);
+      expect(out, step).toMatch(new RegExp(`id="app-param-admin_password-note"[^>]*>${lost}<`));
+      expect(out, step).toMatch(new RegExp(`id="app-param-api_token-note"[^>]*>${t.secretHint} ${t.secretKept}<`));
+      expect(out, step).not.toContain(PLANTED);
+    }
+    expect(first.sets).toContainEqual([5, { "param:admin_password": lost }]);
+
+    fetchMock.mockReset();
+    answer({ [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    const retry = wizard(failed, { 0: values });
+    await click(retry.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([`${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect(calls().map((c) => c.body)).toEqual([{ parameterKey: "admin_password", value: PLANTED }, { parameterKey: "api_token", value: `${PLANTED}-2` }, {}]);
+    expect(retry.sets).toContainEqual([9, ["admin_password", "api_token"]]);
+    expect(values.current.size).toBe(0);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it("a private value refused as too long: its field states the limit, the saved one reads «Saved» and is not sent again, Retry sends the value typed again", async () => {
+    const tooLong = refusal(400, "VALIDATION_ERROR", [{ field: "value", reason: "value_too_long" }]);
+    answer({ [BASE]: [accepted(201)], [`${AT}/secrets`]: [secretSaved("admin_password"), tooLong] });
+    const values = secretsRef({ admin_password: PLANTED, api_token: "x".repeat(5000) });
+    const first = wizard(ready, { 0: values });
+    await click(first.tree, t.install);
+    const limit = format(en.apps.reasons.value_too_long, { max: APP_STACK_SECRET_ENV_LIMITS.secretBytes });
+    expect(first.sets).toContainEqual([5, { "param:api_token": limit }]);
+    expect(first.sets).toContainEqual([6, t.secretFailed]);
+    expect(first.sets).toContainEqual([3, ["api_token"]]);
+    expect(first.sets).toContainEqual([9, ["admin_password"]]);
+    expect([...values.current.keys()]).toEqual(["api_token"]);
+
+    const failed = { ...ready, 0: "install", 3: ["api_token"], 6: t.secretFailed, 8: "stk_a1", 9: ["admin_password"] };
+    for (const m of [en, itMsgs]) {
+      const text = appStackRefusalText(m, "VALIDATION_ERROR", "value_too_long");
+      expect(text).toContain(String(APP_STACK_SECRET_ENV_LIMITS.secretBytes));
+      const { tree } = wizard({ ...failed, 5: { "param:api_token": text }, 6: m.apps.wizard.secretFailed }, { 0: values }, ENTRY, m);
+      expect(editable(tree)).toEqual(["app-param-api_token"]);
+      const out = html(tree, m);
+      expect(out).toMatch(new RegExp(`Admin password</dt><dd[^>]*>${m.apps.wizard.secretSaved}<`));
+      expect(out).not.toContain(m.apps.wizard.required);
+      expect(out).toMatch(/id="app-param-api_token"[^>]*aria-invalid="true"/);
+      expect(out).toContain(`id="app-param-api_token-note" class="text-xs text-destructive">${text}<`);
+    }
+
+    const retyped = { current: new Map<string, string>() };
+    const again = wizard(failed, { 0: values, 2: retyped });
+    const input = els(again.tree).find((e) => e.props.id === "app-param-api_token")!;
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "a shorter one" } });
+    expect(again.sets).toEqual([]);
+    expect(retyped.current.get("api_token")).toBe("a shorter one");
+    fetchMock.mockReset();
+    answer({ [`${AT}/secrets`]: [secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(again.tree, t.retry);
+    expect(calls().map((c) => c.body)).toEqual([{ parameterKey: "api_token", value: "a shorter one" }, {}]);
+    expect(values.current.size).toBe(0);
+    expect(retyped.current.size).toBe(0);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it("a field left empty keeps the value typed before; typing then clearing it goes back to that value", async () => {
+    const values = secretsRef({ api_token: "kept" });
+    const retyped = { current: new Map<string, string>() };
+    const { tree } = wizard({ ...ready, 0: "install", 3: ["api_token"], 6: t.secretFailed, 8: "stk_a1", 9: ["admin_password"] }, { 0: values, 2: retyped });
+    const input = els(tree).find((e) => e.props.id === "app-param-api_token")!;
+    for (const value of ["k", "ke", "k", ""]) (input.props.onChange as (e: unknown) => void)({ target: { value } });
+    answer({ [`${AT}/secrets`]: [secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(tree, t.retry);
+    expect(calls()[0]!.body).toEqual({ parameterKey: "api_token", value: "kept" });
+  });
+
+  it("a refused install after every value is saved: nothing is sent again but the install, the page says the application exists", async () => {
+    answer({ [`${AT}/deploy`]: [refusal(409, "RESOURCE_LOCKED")] });
+    const { tree, sets } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1", 9: ["admin_password", "api_token"] });
+    expect(editable(tree)).toEqual([]);
+    const out = html(tree);
+    expect(out).toMatch(new RegExp(`Admin password</dt><dd[^>]*>${t.secretSaved}<`));
+    expect(out).toMatch(new RegExp(`API token</dt><dd[^>]*>${t.secretSaved}<`));
+    expect(out).toContain(t.created);
+    await click(tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([`${AT}/deploy`]);
+    expect(sets).toContainEqual([6, en.apps.codes.RESOURCE_LOCKED]);
+  });
+
+  it("the install request keeps its key after a lost reply or a 5xx and gets a new one after a refusal", async () => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [`${AT}/deploy`]: ["network", refusal(503, "UPSTREAM_UNAVAILABLE"), refusal(409, "RESOURCE_LOCKED"), accepted(202)] });
+    for (let i = 0; i < 4; i++) {
+      const { tree } = wizard({ ...ready, 0: "install", 3: [], 6: "x", 8: "stk_a1", 9: ["admin_password", "api_token"] }, { 1: keys });
+      await click(tree, t.retry);
+    }
+    expect(calls().map((c) => c.url)).toEqual(Array(4).fill(`${AT}/deploy`));
+    const used = calls().map((c) => c.headers["Idempotency-Key"]);
+    expect(used[1]).toBe(used[0]);
+    expect(used[2]).toBe(used[0]);
+    expect(used[3]).not.toBe(used[0]);
+    expect(router.push).toHaveBeenCalledTimes(1);
+  });
+
+  it("a private value typed again with a text the panel keeps for itself is not sent: its field says why, as on the first step (ADR-0041)", async () => {
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    const retyped = { current: new Map<string, string>() };
+    const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
+    const { tree, sets } = wizard(state, { 0: values, 2: retyped });
+    const input = els(tree).find((e) => e.props.id === "app-param-api_token")!;
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "pw HP_TERMINAL_SESSION=term_" } });
+    // What the web server answers for it: a refusal with no reason a page can show.
+    answer({ [`${AT}/secrets`]: [secretSaved("admin_password"), refusal(400, "VALIDATION_ERROR")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(tree, t.retry);
+    expect(calls()).toEqual([]);
+    expect(sets).toContainEqual([5, { "param:api_token": t.valueReserved }]);
+    expect(sets).toContainEqual([6, t.secretFailed]);
+    expect(sets).toContainEqual([7, false]);
+    expect(JSON.stringify(sets)).not.toContain("term_");
+    expect(router.push).not.toHaveBeenCalled();
+    const out = html(wizard({ ...state, 5: { "param:api_token": t.valueReserved } }, { 0: values, 2: retyped }).tree);
+    expect(out).toContain(`id="app-param-api_token-note" class="text-xs text-destructive">${t.valueReserved}<`);
+    expect(actions(wizard(state, { 0: values, 2: retyped }).tree)).toEqual([t.openApp, t.retry]);
+  });
+
+  it("a private value typed again shorter than the log reader masks is not sent: its field says why, as on the first step (BUG-43)", async () => {
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    const retyped = { current: new Map<string, string>() };
+    const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
+    const { tree, sets } = wizard(state, { 0: values, 2: retyped });
+    const input = els(tree).find((e) => e.props.id === "app-param-api_token")!;
+    (input.props.onChange as (e: unknown) => void)({ target: { value: "Zq9ab" } });
+    answer({ [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")], [`${AT}/deploy`]: [accepted(202)] });
+    await click(tree, t.retry);
+    expect(calls()).toEqual([]);
+    expect(sets).toContainEqual([5, { "param:api_token": appStackRefusalText(en, "VALIDATION_ERROR", "value_too_short") }]);
+    expect(sets).toContainEqual([6, t.secretFailed]);
+    expect(sets).toContainEqual([7, false]);
+    expect(JSON.stringify(sets)).not.toContain("Zq9ab");
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it("while a request runs the private values left cannot be typed into: a value typed meanwhile would be sent half-typed", () => {
+    const state = { ...ready, 0: "install", 6: t.secretFailed, 8: "stk_a1" };
+    const tag = (out: string, key: string) => out.match(new RegExp(`<input[^>]*id="app-param-${key}"[^>]*>`))![0];
+    const running = html(wizard({ ...state, 6: null, 7: true }).tree);
+    const idle = html(wizard(state).tree);
+    for (const key of ["admin_password", "api_token"]) {
+      expect(tag(running, key)).toMatch(/\sdisabled=""/);
+      expect(tag(idle, key)).not.toMatch(/\sdisabled=""/);
+    }
+  });
+});
+
+describe("AppWizard when the create's outcome is unknown", () => {
+  const ready = { 0: "review", 1: " team-notes ", 2: { port: "9000" }, 3: ["admin_password", "api_token"], 4: [{ hostname: "Notes.Example.test", target: 0 }] };
+  const AT = `${BASE}/stk_a1`;
+  /** The exact text each request carried. */
+  const raw = () => fetchMock.mock.calls.map((c) => (c[1] as RequestInit).body);
+  const keyOf = (i: number) => calls()[i]!.headers["Idempotency-Key"];
+
+  it.each<[string, Answer]>([
+    ["a lost reply", "network"],
+    ["the panel's own timeout (504)", refusal(504, "INTERNAL_ERROR")],
+    ["a reply that never came back (502)", refusal(502, "OPERATION_AMBIGUOUS")],
+    ["a server error (500)", refusal(500, "INTERNAL")],
+    ["a 201 whose body is not JSON", notJson(201)],
+    ["a 201 whose body read breaks off", cut(201)],
+  ])("%s closes every step: only Retry, with the text that says the panel does not know yet", async (_what, lost) => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    answer({ [BASE]: [lost] });
+    const first = wizard(ready, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const sent = calls()[0]!;
+    expect(first.sets).toContainEqual([10, sent.body]);
+    expect(first.sets).toContainEqual([6, t.createUnknown]);
+    expect(first.sets).toContainEqual([7, false]);
+    expect(first.sets.filter(([k]) => k === 0)).toEqual([[0, "install"]]);
+    expect(first.sets.filter(([k]) => k === 5)).toEqual([[5, {}]]);
+    expect(keys.current.create).toBe(sent.headers["Idempotency-Key"]);
+    expect(JSON.stringify(first.sets)).not.toContain(PLANTED);
+
+    // Whatever step the state names, none opens: a change there would go out under the same key.
+    const unsure = { ...ready, 0: "install", 6: t.createUnknown, 10: sent.body };
+    for (const step of ["install", "review", "domains", "configure"]) {
+      for (const m of [en, itMsgs]) {
+        const { tree } = wizard({ ...unsure, 0: step, 6: m.apps.wizard.createUnknown }, { 0: values }, ENTRY, m);
+        // The list is where a create that did happen shows: the only way out the sentence points at.
+        expect(actions(tree), step).toEqual([m.apps.wizard.appsLink, m.apps.wizard.retry]);
+        expect(els(tree).find((e) => textOf(e) === m.apps.wizard.appsLink && typeof e.props.href === "string")?.props.href, step).toBe("/apps");
+        expect(editable(tree), step).toEqual([]);
+        const out = html(tree, m);
+        expect(out, step).toMatch(new RegExp(`aria-current="step"[^>]*>${m.apps.wizard.step.install}`));
+        expect(out, step).toMatch(new RegExp(`role="alert"[^>]*><p>${m.apps.wizard.createUnknown}</p>`));
+        expect(out, step).toMatch(new RegExp(`${m.apps.wizard.name}</dt><dd[^>]*>team-notes<`));
+        expect(out, step).not.toContain(`>${m.apps.wizard.back}<`);
+        expect(out, step).not.toContain(m.apps.wizard.created);
+        expect(out, step).not.toContain(PLANTED);
+      }
+    }
+  });
+
+  it("Retry sends the same key with the very text of the first attempt, whatever the fields hold; the replay goes on to the private values and the install", async () => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    answer({
+      [BASE]: [refusal(504, "INTERNAL_ERROR"), accepted(201)],
+      [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")],
+      [`${AT}/deploy`]: [accepted(202)],
+    });
+    const first = wizard(ready, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    const changed = { 1: "other-notes", 2: { port: "9100" }, 4: [{ hostname: "other.example.test", target: 1 }] };
+    const retry = wizard({ ...ready, ...changed, 0: "install", 6: t.createUnknown, 10: kept }, { 0: values, 1: keys });
+    await click(retry.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([BASE, BASE, `${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(raw()[1]).toBe(raw()[0]);
+    expect(calls()[1]!.body).toMatchObject({ name: "team-notes", parameters: [{ key: "port", value: 9000 }], deploy: false });
+    expect(calls().slice(2).map((c) => c.body)).toEqual([{ parameterKey: "admin_password", value: PLANTED }, { parameterKey: "api_token", value: `${PLANTED}-2` }, {}]);
+    expect(retry.sets).toContainEqual([10, null]);
+    expect(retry.sets).toContainEqual([8, "stk_a1"]);
+    expect(values.current.size).toBe(0);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it.each<[string, Answer]>([
+    ["is not JSON", notJson(201)],
+    ["breaks off while it is read", cut(201)],
+  ])("a 201 whose body %s is no known outcome: Retry sends the same key and the very text kept, and the replay goes on", async (_what, lost) => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    answer({
+      [BASE]: [lost, accepted(201)],
+      [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")],
+      [`${AT}/deploy`]: [accepted(202)],
+    });
+    const first = wizard(ready, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)?.[1];
+    expect(kept).toEqual(calls()[0]!.body);
+    expect(first.sets).toContainEqual([6, t.createUnknown]);
+    expect(first.sets.filter(([k]) => k === 8)).toEqual([]);
+    expect(keys.current.create).toBe(keyOf(0));
+    expect(router.push).not.toHaveBeenCalled();
+
+    const retry = wizard({ ...ready, 0: "install", 1: "other-notes", 6: t.createUnknown, 10: kept }, { 0: values, 1: keys });
+    expect(editable(retry.tree)).toEqual([]);
+    await click(retry.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([BASE, BASE, `${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(raw()[1]).toBe(raw()[0]);
+    expect(retry.sets).toContainEqual([8, "stk_a1"]);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it.each<[string, Answer, string]>([
+    // A new sign-in in another tab leaves this page with a token of no use: the same answer, it cannot be told apart.
+    ["a role taken away (403)", refusal(403, "PERMISSION_DENIED"), en.errors.PERMISSION_DENIED],
+    // Signed out, every Retry here is refused: the sentence says to sign in again and look at the list.
+    ["the session ended (401)", refusal(401, "UNAUTHENTICATED"), t.createSignedOut],
+    ["a 401 whose body is not JSON", notJson(401), t.createSignedOut],
+    // No sentence of their own here, only the generic one: the unknown one stays, it says more.
+    ["a suspended account (403)", refusal(403, "ORGANIZATION_SUSPENDED"), t.createUnknown],
+    // «Application not found» would say the create did not happen, which nobody knows.
+    ["a membership removed (404)", refusal(404, "NOT_FOUND"), t.createUnknown],
+    ["too many requests (429)", refusal(429, "RATE_LIMITED"), en.apps.codes.RATE_LIMITED],
+    ["a 403 whose body is not JSON", notJson(403), t.createUnknown],
+    // Only an application that holds the key answers this on a create: it may well exist, the list is where to look.
+    ["a key already used for another request (409)", refusal(409, "IDEMPOTENCY_CONFLICT"), t.createUnknown],
+  ])("a Retry answered by %s does not settle the create: the state, the key and the body stay, the answer's sentence shows, the next Retry sends the same", async (_what, said, text) => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED, api_token: `${PLANTED}-2` });
+    answer({
+      [BASE]: ["network", said, accepted(201)],
+      [`${AT}/secrets`]: [secretSaved("admin_password"), secretSaved("api_token")],
+      [`${AT}/deploy`]: [accepted(202)],
+    });
+    const first = wizard(ready, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    const unsure = { ...ready, 0: "install", 6: t.createUnknown, 10: kept };
+
+    const again = wizard(unsure, { 0: values, 1: keys });
+    await click(again.tree, t.retry);
+    expect(again.sets.filter(([k]) => k === 10)).toEqual([[10, kept]]);
+    expect(again.sets).toContainEqual([6, text]);
+    expect(again.sets.filter(([k]) => k === 0 || k === 5 || k === 8)).toEqual([[5, {}]]);
+    expect(keys.current.create).toBe(keyOf(0));
+
+    // What that state offers: the list and Retry, no field, whatever step the state names.
+    for (const step of ["install", "review", "configure"]) {
+      const shown = wizard({ ...unsure, 0: step, 6: text }, { 0: values, 1: keys });
+      expect(actions(shown.tree), step).toEqual([t.appsLink, t.retry]);
+      expect(editable(shown.tree), step).toEqual([]);
+      expect(html(shown.tree), step).toMatch(new RegExp(`role="alert"[^>]*><p>${text}</p>`));
+    }
+
+    const last = wizard({ ...unsure, 6: text }, { 0: values, 1: keys });
+    await click(last.tree, t.retry);
+    expect(calls().map((c) => c.url)).toEqual([BASE, BASE, BASE, `${AT}/secrets`, `${AT}/secrets`, `${AT}/deploy`]);
+    expect([keyOf(1), keyOf(2)]).toEqual([keyOf(0), keyOf(0)]);
+    expect([raw()[1], raw()[2]]).toEqual([raw()[0], raw()[0]]);
+    expect(last.sets).toContainEqual([8, "stk_a1"]);
+    expect(router.push).toHaveBeenCalledTimes(1);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it.each<[string, Answer, string]>([
+    ["a refused setting (400)", refusal(400, "VALIDATION_ERROR", [{ field: "parameters.port", reason: "STACK_PARAMETER_INVALID" }]), "configure"],
+    ["a version no longer offered (400)", refusal(400, "VALIDATION_ERROR", [{ field: "templateVersionId", reason: "STACK_TEMPLATE_UNPUBLISHED" }]), ""],
+    ["an address in use (409)", refusal(409, "DOMAIN_CONFLICT"), "domains"],
+    ["applications not offered on this server (422)", refusal(422, "NOT_SUPPORTED"), ""],
+  ])("a Retry refused for %s settles the create: the state ends and the key is dropped", async (_what, said, step) => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [BASE]: ["network", said] });
+    const first = wizard(ready, { 0: secretsRef({ admin_password: PLANTED }), 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    const again = wizard({ ...ready, 0: "install", 6: t.createUnknown, 10: kept }, { 1: keys });
+    await click(again.tree, t.retry);
+    expect(again.sets).toContainEqual([10, null]);
+    expect(again.sets.filter(([k]) => k === 0)).toEqual(step ? [[0, step]] : []);
+    expect(keys.current.create).toBeUndefined();
+  });
+
+  it("a first Install answered «key already used» (409) is settled like any other refusal: the key is dropped, no unknown state", async () => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [BASE]: [refusal(409, "IDEMPOTENCY_CONFLICT")] });
+    const first = wizard(ready, { 0: secretsRef({ admin_password: PLANTED }), 1: keys });
+    await click(first.tree, t.install);
+    expect(first.sets.filter(([k]) => k === 10)).toEqual([[10, null]]);
+    expect(first.sets).toContainEqual([6, en.apps.codes.IDEMPOTENCY_CONFLICT]);
+    expect(keys.current.create).toBeUndefined();
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("signed out while the outcome is unknown, the sentence says to sign in again and open the list, whose link stays (%s)", (_l, m) => {
+    const w = m.apps.wizard;
+    expect(w.createSignedOut).toContain(`«${w.appsLink}»`);
+    const { tree } = wizard({ ...ready, 0: "install", 6: w.createSignedOut, 10: { name: "team-notes" } }, {}, ENTRY, m);
+    expect(actions(tree)).toEqual([w.appsLink, w.retry]);
+    expect(html(tree, m)).toMatch(new RegExp(`role="alert"[^>]*><p>${w.createSignedOut}</p>`));
+  });
+
+  it("without private values the replay of a create sent to install opens the application page", async () => {
+    const keys = { current: {} as Record<string, string> };
+    answer({ [BASE]: ["network", accepted(202)] });
+    const first = wizard({ ...ready, 3: [] }, { 1: keys }, NO_SECRETS);
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    expect(kept).toMatchObject({ deploy: true });
+    await click(wizard({ ...ready, 0: "install", 1: "other-notes", 3: [], 6: t.createUnknown, 10: kept }, { 1: keys }, NO_SECRETS).tree, t.retry);
+    expect(calls()).toHaveLength(2);
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(raw()[1]).toBe(raw()[0]);
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
+  });
+
+  it("a Retry that ends unknown again stays closed under the same key; a refusal opens the steps with its reason and the next Install uses a new key", async () => {
+    const keys = { current: {} as Record<string, string> };
+    const values = secretsRef({ admin_password: PLANTED });
+    answer({
+      [BASE]: ["network", refusal(503, "UPSTREAM_UNAVAILABLE"), refusal(409, "ALREADY_EXISTS", [{ field: "name", reason: "name_taken" }]), accepted(201)],
+      [`${AT}/secrets`]: [secretSaved("admin_password")],
+      [`${AT}/deploy`]: [accepted(202)],
+    });
+    const first = wizard({ ...ready, 3: ["admin_password"] }, { 0: values, 1: keys });
+    await click(first.tree, t.install);
+    const kept = first.sets.find(([k]) => k === 10)![1];
+    const unsure = { ...ready, 0: "install", 3: ["admin_password"], 6: t.createUnknown, 10: kept };
+
+    const again = wizard(unsure, { 0: values, 1: keys });
+    await click(again.tree, t.retry);
+    expect(again.sets).toContainEqual([10, kept]);
+    expect(again.sets).toContainEqual([6, t.createUnknown]);
+    expect(again.sets.filter(([k]) => k === 10)).toEqual([[10, kept]]);
+
+    const refused = wizard(unsure, { 0: values, 1: keys });
+    await click(refused.tree, t.retry);
+    expect(refused.sets).toContainEqual([10, null]);
+    expect(refused.sets).toContainEqual([5, { name: en.apps.reasons.name_taken }]);
+    expect(refused.sets).toContainEqual([6, en.apps.reasons.name_taken]);
+    expect(refused.sets).toContainEqual([0, "configure"]);
+    expect(keys.current.create).toBeUndefined();
+    const open = wizard({ ...unsure, 0: "configure", 5: { name: en.apps.reasons.name_taken }, 6: en.apps.reasons.name_taken, 10: null }, { 0: values, 1: keys });
+    expect(editable(open.tree)).toContain("app-name");
+    expect(actions(open.tree)).toEqual([t.back, t.next]);
+
+    const renamed = wizard({ ...ready, 1: "team-notes-2", 3: ["admin_password"] }, { 0: values, 1: keys });
+    await click(renamed.tree, t.install);
+    expect(calls().map((c) => c.url)).toEqual([BASE, BASE, BASE, BASE, `${AT}/secrets`, `${AT}/deploy`]);
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(keyOf(2)).toBe(keyOf(0));
+    expect(keyOf(3)).not.toBe(keyOf(0));
+    expect(raw()[2]).toBe(raw()[0]);
+    expect(calls()[3]!.body.name).toBe("team-notes-2");
+    expect(router.push).toHaveBeenCalledWith("/apps/stk_a1");
   });
 });
 

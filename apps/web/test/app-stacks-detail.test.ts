@@ -10,6 +10,8 @@ import {
   type AppStackDomainDto,
   type AppStackLinkDto,
   type AppStackLinksDto,
+  type AppStackTaskDto,
+  type AppStackTaskRunDto,
 } from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
@@ -61,10 +63,13 @@ import {
   AppStackSettings,
 } from "@/components/app-stacks/app-stack-sections";
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
+import { appStackRefusalText } from "@/components/app-stacks/app-stack-view";
 import { APP_STACK_LOG_TAIL, AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
 import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
 import { AppStackLinks } from "@/components/app-stacks/app-stack-links";
+import { AppStackProgress } from "@/components/app-stacks/app-stack-progress";
+import { AppStackTasks, appStackTaskScheduleOf, appStackTaskScheduleText } from "@/components/app-stacks/app-stack-tasks";
 
 const NOW = "2026-11-22T10:00:00.000Z";
 const ORG = "org_a1";
@@ -97,6 +102,8 @@ const DETAIL: AppStackDetailDto = {
   createdAt: NOW,
   activeOperationId: null,
   platformWork: null,
+  allowedActions: ["stack.deploy", "stack.stop", "stack.restart", "stack.upgrade", "stack.rollback", "stack.delete", "stack.backup", "stack.restore"],
+  outcomeUnknown: false,
   revisionNumber: 3,
   installed: null,
   components: [
@@ -293,13 +300,105 @@ describe("detail page", () => {
   it("the delete button is offered only while a delete may be queued", async () => {
     const open = new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${en.apps.delete.open}<`);
     expect(await page()).not.toMatch(open);
-    answer({ [UP]: ok({ ...DETAIL, status: "deleting" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    answer({ [UP]: ok({ ...DETAIL, status: "deleting", allowedActions: [] }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     expect(await page()).toMatch(open);
+    // The list decides, not the status: a degraded application held by an operation offers no delete.
+    answer({ [UP]: ok({ ...DETAIL, allowedActions: [] }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    expect(await page()).toMatch(open);
+  });
+
+  it("issue #106: a crashed application reads «Non riuscita» and offers restart, never a start the API refuses", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      // What the API answers for a component that crashed: shown failed, the stored running's actions.
+      answer({ [UP]: ok({ ...DETAIL, status: "failed" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const h = await page();
+      expect(h).toContain(m.apps.status.failed);
+      expect(h).toMatch(disabled(m.apps.actions.start));
+      expect(h).toContain(`>${m.apps.actions.restart}<`);
+      expect(h).not.toMatch(disabled(m.apps.actions.restart));
+      expect(h).not.toContain(m.apps.detail.unknownBody);
+    }
+  });
+
+  it("issue #106: «to be verified» from a stale reading says the state could not be read, not that an outcome is unknown", async () => {
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const stale = await page();
+      expect(stale).toContain(m.apps.detail.staleBody);
+      expect(stale).not.toContain(m.apps.detail.unknownBody);
+      // The badge too: no recent reading, never «outcome to be verified».
+      expect(stale).toContain(`>${m.apps.detail.staleBadge}<`);
+      expect(stale).not.toContain(m.apps.status.unknown);
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+      const doubt = await page();
+      expect(doubt).toContain(m.apps.detail.unknownBody);
+      expect(doubt).not.toContain(m.apps.detail.staleBody);
+      expect(doubt).toContain(`>${m.apps.status.unknown}<`);
+      expect(doubt).not.toContain(m.apps.detail.staleBadge);
+    }
+    for (const m of [en, itMsgs]) {
+      expect(m.apps.detail.staleBody).not.toBe(m.apps.detail.unknownBody);
+      expect(m.apps.detail.staleBadge).not.toBe(m.apps.status.unknown);
+    }
+  });
+
+  it("issue #106: the backups section follows the list, not the status shown", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const routes = { [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      const t = m.apps.backups;
+      // A stale reading shows unknown while the stored running takes a backup and a restore.
+      answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), ...routes });
+      const stale = await page();
+      expect(stale).toContain(`>${t.create}<`);
+      expect(stale).not.toMatch(disabled(t.create));
+      expect(stale).not.toMatch(disabled(t.restore));
+      // An operation of the customer holds the application: the list is empty, and the line says it is busy.
+      answer({ [UP]: ok({ ...DETAIL, status: "running", activeOperationId: "op_1", allowedActions: [] }), ...routes });
+      const held = await page();
+      expect(held).toMatch(disabled(t.create));
+      expect(held).toMatch(disabled(t.restore));
+      expect(held).toContain(t.busy);
+    }
+  });
+
+  it("issue #106: a task run that waits is followed while every listed action stays offered, with no busy line", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const routes = { [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) };
+    for (const m of [en, itMsgs]) {
+      loc.value = m === en ? "en" : "it";
+      // The run waits under a lock of its own (ADR-0042): the detail names it and lists what the stored running allows.
+      answer({ [UP]: ok({ ...DETAIL, status: "running", activeOperationId: "op_9" }), ...routes });
+      const h = await page();
+      expect(h).toContain(m.apps.progress.title.deploy);
+      for (const label of [m.apps.actions.stop, m.apps.actions.restart, m.apps.actions.reinstall, m.apps.backups.create, m.apps.backups.restore, m.apps.delete.open]) {
+        expect(h, label).toContain(`>${label}<`);
+        expect(h, label).not.toMatch(disabled(label));
+      }
+      expect(h).not.toContain(m.apps.backups.busy);
+      expect(h).not.toContain(m.apps.backups.notAllowed);
+    }
+  });
+
+  it("issue #106: a detail without the list (an API older than the page) renders with every action off", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const { allowedActions: _, ...older } = DETAIL;
+    answer({ [UP]: ok(older), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) });
+    const h = await page();
+    expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
+    for (const label of [en.apps.actions.start, en.apps.actions.stop, en.apps.actions.restart, en.apps.actions.reinstall, en.apps.backups.create, en.apps.backups.restore, en.apps.delete.open]) {
+      expect(h, label).toMatch(disabled(label));
+    }
+    expect(h).toContain(en.apps.backups.notAllowed);
   });
 
   it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
     const h = await page();
-    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`, `${UP}/links`]);
+    expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`, `${UP}/links`, `${UP}/tasks`]);
     expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
     expect(h).toContain(en.apps.status.degraded);
     expect(h).toContain(format(en.apps.detail.versionLine, { name: "Notes", n: 2 }));
@@ -330,7 +429,7 @@ describe("detail page", () => {
 
   it("unknown reads «Esito da verificare» and never «Non riuscita»; a draft explains what to do", async () => {
     loc.value = "it";
-    answer({ [UP]: ok({ ...DETAIL, status: "unknown" }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
+    answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
     const h = await page();
     expect(h).toContain("Esito da verificare");
     expect(h).toContain(itMsgs.apps.detail.unknownBody);
@@ -578,13 +677,58 @@ describe("private values", () => {
   ] as const)("%s: a value too long for the application is an error on the field that states the limit", async (_n, m) => {
     const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
     (byId(out, "app-secret-value")!.props.ref as { current: unknown }).current = { value: "x".repeat(5_000) };
-    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long" });
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "value", limit: "environment" });
     await submit(out);
     const text = format(m.apps.reasons.value_too_long, { max: 4096 });
     expect(text).toContain("4096");
     expect(text).not.toMatch(/byte|ambiente|environment|variab/i);
     expect(sets).toContainEqual([2, text]);
     expect(sets.filter(([k, v]) => k === 3 && v !== null)).toEqual([]);
+    const shown = html(callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD", 2: text }).out);
+    expect(shown).toMatch(/<input[^>]*aria-invalid="true"/);
+    expect(shown).toContain(text);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: a value shorter than six characters is an error on the field that states the minimum, and sends nothing (BUG-43)", async (_n, m) => {
+    const text = format(m.apps.reasons.value_too_short, { min: 6 });
+    expect(text).toContain("6");
+    expect(text).not.toContain("{");
+    expect(appStackRefusalText(m, "VALIDATION_ERROR", "value_too_short")).toBe(text);
+    const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
+    const ref = byId(out, "app-secret-value")!.props.ref as { current: { value: string } | null };
+    ref.current = { value: "Zq9ab" };
+    await submit(out);
+    expect(keyedSend).not.toHaveBeenCalled();
+    expect(sets).toContainEqual([2, text]);
+    expect(ref.current.value).toBe("Zq9ab"); // kept, so the customer can lengthen it
+    // Six are enough; a refusal by the same reason (from an older page) is still a field error.
+    ref.current = { value: "Zq9abc" };
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_short" });
+    await submit(out);
+    expect(keyedSend).toHaveBeenCalledTimes(1);
+    expect(sets.filter(([k, v]) => k === 2 && v === text)).toHaveLength(2);
+    expect(sets.filter(([k, v]) => k === 3 && v !== null)).toEqual([]);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: a value too long for what the panel keeps is an error on the field that names no number", async (_n, m) => {
+    const text = m.apps.reasons.value_too_long_store;
+    for (const limit of ["store", undefined]) {
+      const { out, sets } = callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD" });
+      (byId(out, "app-secret-value")!.props.ref as { current: unknown }).current = { value: "é".repeat(12_289) };
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "value_too_long", field: "value", limit });
+      await submit(out);
+      expect(sets, String(limit)).toContainEqual([2, text]);
+      expect(sets.filter(([k, v]) => k === 3 && v !== null)).toEqual([]);
+    }
+    expect(text).not.toMatch(/\d/);
+    expect(text).not.toMatch(/byte|file|ambiente|environment|variab|secret|segret/i);
+    expect(text).not.toBe(format(m.apps.reasons.value_too_long, { max: 4096 }));
     const shown = html(callHooks(AppStackSecrets, props, m, { 0: "ADMIN_PASSWORD", 2: text }).out);
     expect(shown).toMatch(/<input[^>]*aria-invalid="true"/);
     expect(shown).toContain(text);
@@ -1249,5 +1393,215 @@ describe("address options (ADR-0037)", () => {
     for (const jargon of [/middleware/i, /router/i, /traefik/i, /proxy/i, /basic ?auth/i, /gzip/i, /htpasswd/i, /apr1/i]) expect(words).not.toMatch(jargon);
     const h = html(callHooks(AppStackDomainOptions, dialogProps({ domain: { ...DOMAIN, protection: { username: "guest" } } }), itMsgs).out, itMsgs);
     for (const text of ["Reindirizza a", "Proteggi con password", "Comprimi le risposte", "Percorsi"]) expect(h).toContain(text);
+  });
+});
+
+// ADR-0042: the card «Scheduled tasks». The customer sees a name, when it runs by itself and how the last runs went;
+// nothing shows or sends what the task executes.
+describe("scheduled tasks", () => {
+  const RUN_ID = "srun_0123456789abcdef01234567";
+  const TASKS: AppStackTaskDto[] = [
+    {
+      key: "save",
+      label: "Save now",
+      description: "Writes the data to disk.",
+      componentKey: "cache",
+      schedule: { frequency: "weekly", weekday: 7, hourUtc: 3 },
+      nextRunAt: "2026-11-29T03:00:00.000Z",
+      skipped: { at: "2026-11-22T03:00:00.000Z", reason: "not_running", pending: false },
+      lastRun: { id: RUN_ID, taskKey: "save", trigger: "schedule", status: "failed", problem: null, requestedAt: NOW, startedAt: NOW, endedAt: NOW },
+    },
+    { key: "count", label: "Count the notes", description: "", componentKey: "web", schedule: { frequency: "never" }, nextRunAt: null, skipped: null, lastRun: null },
+  ];
+  const RUNS: AppStackTaskRunDto[] = [
+    { ...TASKS[0]!.lastRun!, output: "saving <b>now</b>\nERR disk full", outputTruncated: true },
+    {
+      id: "srun_aaaaaaaaaaaaaaaaaaaaaaaa",
+      taskKey: "save",
+      trigger: "manual",
+      status: "not_started",
+      problem: "component_not_running",
+      requestedAt: NOW,
+      startedAt: null,
+      endedAt: NOW,
+      output: "",
+      outputTruncated: false,
+    },
+  ];
+  const props = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: TASKS };
+  const local = (hour: number, locale: string) => {
+    const d = new Date();
+    d.setUTCHours(hour, 0, 0, 0);
+    return new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(d);
+  };
+
+  it("the page shows the section after the logs only when the installed version has tasks", async () => {
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/tasks`]: ok({ tasks: TASKS }) });
+    const h = await page();
+    const s = en.apps.detail.section;
+    expect(h2s(h)).toEqual([s.components, s.logs, s.tasks, s.settings, s.links, s.domains, s.data, s.backups, s.resources, s.history, s.danger]);
+    expect(h).toContain("Save now");
+    expect(h).toContain("Writes the data to disk.");
+    expect(h).toContain(en.apps.tasks.runNow);
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/tasks`]: ok({ tasks: [] }) });
+    expect(h2s(await page())).not.toContain(s.tasks);
+  });
+
+  it.each([
+    ["en", en],
+    ["it", itMsgs],
+  ] as const)("%s: no word of the card names what runs underneath", (_n, m) => {
+    const words = JSON.stringify([m.apps.tasks, m.apps.detail.section.tasks, m.apps.progress.title.task, m.apps.progress.taskFailed]);
+    expect(words).not.toMatch(/container|docker|comand|command|codice di uscita|exit code|argv|argoment|argument|cron|shell/i);
+    expect(m.apps.detail.section.tasks).toBe(m === en ? "Scheduled tasks" : "Attività programmate");
+    expect(m.apps.tasks.runNow).toBe(m === en ? "Run now" : "Esegui ora");
+  });
+
+  it("says when a task runs by itself in whole UTC hours with the reader's local time", () => {
+    const t = en.apps.tasks.schedule;
+    expect(appStackTaskScheduleText(en, { frequency: "never" }, "en")).toBe(t.never);
+    expect(appStackTaskScheduleText(en, { frequency: "hourly" }, "en")).toBe(t.hourly);
+    expect(appStackTaskScheduleText(en, { frequency: "daily", hourUtc: 23 }, "en")).toBe(format(t.daily, { utc: "23:00", local: local(23, "en") }));
+    expect(appStackTaskScheduleText(itMsgs, { frequency: "weekly", weekday: 7, hourUtc: 3 }, "it")).toBe(
+      format(itMsgs.apps.tasks.schedule.weekly, { day: "domenica", utc: "03:00", local: local(3, "it") }),
+    );
+    expect(appStackTaskScheduleText(en, { frequency: "weekly", weekday: 1, hourUtc: 0 }, "en")).toContain("Monday");
+    // The form's choice is sent with the fields its frequency uses, and no other.
+    expect(appStackTaskScheduleOf("never", 5, 2)).toEqual({ frequency: "never" });
+    expect(appStackTaskScheduleOf("hourly", 5, 2)).toEqual({ frequency: "hourly" });
+    expect(appStackTaskScheduleOf("daily", 5, 2)).toEqual({ frequency: "daily", hourUtc: 5 });
+    expect(appStackTaskScheduleOf("weekly", 5, 2)).toEqual({ frequency: "weekly", weekday: 2, hourUtc: 5 });
+  });
+
+  it("each task shows its name, its schedule, the skipped time and how the last run went", () => {
+    const h = html(callHooks(AppStackTasks, props).out);
+    expect(h).toContain(en.apps.tasks.intro);
+    expect(h).toMatch(/<h3[^>]*>Save now<\/h3>/);
+    expect(h).toContain(format(en.apps.tasks.schedule.weekly, { day: "Sunday", utc: "03:00", local: local(3, "en") }));
+    expect(h).toContain(en.apps.tasks.schedule.never);
+    expect(h).toContain(en.apps.tasks.status.failed);
+    expect(h).toContain(en.apps.tasks.trigger.schedule);
+    expect(h).toContain(en.apps.tasks.never);
+    expect(h).toContain(en.apps.tasks.skipped.not_running.split("{date}")[1]!);
+    expect(h).toContain(en.apps.tasks.next.split("{date}")[0]!);
+    expect(buttons(callHooks(AppStackTasks, props).out, en.apps.tasks.runNow)).toHaveLength(2);
+    // The component the task belongs to is not named to the customer.
+    expect(h).not.toMatch(/cache|exit|srun_/);
+  });
+
+  it("tells a scheduled time still tried from one given up, in both languages", () => {
+    const at = "2026-11-22T03:00:00.000Z";
+    const shown = (skipped: AppStackTaskDto["skipped"], m: Messages = en) =>
+      html(callHooks(AppStackTasks, { ...props, initial: [{ ...TASKS[0]!, skipped }] }, m).out);
+    const tail = (text: string) => text.split("{date}")[1]!;
+    // A time given up after its 30 minutes is not "waiting" any more.
+    expect(shown({ at, reason: "busy", pending: false })).not.toMatch(/is waiting/);
+    expect(shown({ at, reason: "busy", pending: false }, itMsgs)).not.toMatch(/è in attesa/);
+    for (const m of [en, itMsgs]) {
+      const t = m.apps.tasks;
+      for (const reason of ["busy", "not_running"] as const) {
+        expect(t.waiting[reason]).not.toBe(t.skipped[reason]);
+        const waiting = shown({ at, reason, pending: true }, m);
+        expect(waiting).toContain(tail(t.waiting[reason]));
+        expect(waiting).not.toContain(tail(t.skipped[reason]));
+        const over = shown({ at, reason, pending: false }, m);
+        expect(over).toContain(tail(t.skipped[reason]));
+        expect(over).not.toContain(tail(t.waiting[reason]));
+      }
+      expect(shown({ at, reason: "missed", pending: false }, m)).toContain(tail(t.skipped.missed));
+    }
+  });
+
+  it("«Run now» sends an empty body to the run route of that task and says it started", async () => {
+    keyedSend.mockResolvedValue({ ok: true, data: { data: { runId: RUN_ID, operationId: "op_1", status: "queued" } } });
+    const { out, sets } = callHooks(AppStackTasks, props);
+    await (buttons(out, en.apps.tasks.runNow)[1]!.props.onClick as () => Promise<void>)();
+    expect(keyedSend).toHaveBeenCalledTimes(1);
+    expect(keyedSend.mock.calls[0]!.slice(1)).toEqual(["csrf", "run:count", "POST", `${BASE}/tasks/count/runs`, {}]);
+    expect(sets).toContainEqual([3, en.apps.tasks.accepted]);
+    expect(router.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("a refused run reads as a sentence, and nothing is sent while another request is going", async () => {
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "stopped" });
+    const { out, sets } = callHooks(AppStackTasks, props);
+    await (buttons(out, en.apps.tasks.runNow)[0]!.props.onClick as () => Promise<void>)();
+    expect(sets).toContainEqual([2, format(en.apps.reasons.status, { status: en.apps.status.stopped })]);
+    expect(router.refresh).not.toHaveBeenCalled();
+    keyedSend.mockClear();
+    const going = callHooks(AppStackTasks, props, en, { 1: true });
+    await (buttons(going.out, en.apps.tasks.runNow)[0]!.props.onClick as () => Promise<void>)();
+    expect(keyedSend).not.toHaveBeenCalled();
+  });
+
+  it("the schedule form has labelled choices and saves exactly what was chosen; the answered list replaces the rows", async () => {
+    const editing = { 4: "save", 5: { frequency: "weekly", hourUtc: 5, weekday: 2 } };
+    const h = html(callHooks(AppStackTasks, props, en, editing).out);
+    for (const field of ["frequency", "weekday", "hour"]) {
+      expect(h).toMatch(new RegExp(`<label[^>]*for="app-task-save-${field}"`));
+      expect(h).toMatch(new RegExp(`<select[^>]*id="app-task-save-${field}"`));
+    }
+    expect(h).toContain(format(en.apps.tasks.schedule.hourOption, { utc: "05:00", local: local(5, "en") }));
+    // "Every hour" needs neither a day nor an hour.
+    const hourly = html(callHooks(AppStackTasks, props, en, { 4: "save", 5: { frequency: "hourly", hourUtc: 5, weekday: 2 } }).out);
+    expect(hourly).not.toMatch(/app-task-save-(weekday|hour)"/);
+
+    const answered = [{ ...TASKS[0]!, schedule: { frequency: "weekly", weekday: 2, hourUtc: 5 } }, TASKS[1]!];
+    keyedSend.mockResolvedValue({ ok: true, data: { data: { tasks: answered } } });
+    const { out, sets } = callHooks(AppStackTasks, props, en, editing);
+    await submit(out);
+    expect(keyedSend.mock.calls[0]!.slice(1)).toEqual([
+      "csrf",
+      "schedule:save",
+      "PUT",
+      `${BASE}/tasks/save/schedule`,
+      { frequency: "weekly", weekday: 2, hourUtc: 5 },
+    ]);
+    expect(sets).toContainEqual([0, answered]);
+    expect(sets).toContainEqual([4, null]);
+    expect(sets).toContainEqual([3, en.apps.tasks.saved]);
+
+    keyedSend.mockClear();
+    keyedSend.mockResolvedValue({ ok: true, data: { data: { tasks: TASKS } } });
+    await submit(callHooks(AppStackTasks, props, en, { 4: "save", 5: { frequency: "never", hourUtc: 5, weekday: 2 } }).out);
+    expect(keyedSend.mock.calls[0]![5]).toEqual({ frequency: "never" });
+  });
+
+  it("the last runs are read on request and shown with what each printed, as text", async () => {
+    const fetchMock = vi.fn(async () => respond(200, { data: { runs: RUNS } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { out, sets } = callHooks(AppStackTasks, props);
+    await (buttons(out, en.apps.tasks.runs.show)[0]!.props.onClick as () => Promise<void>)();
+    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/tasks/save/runs`, { cache: "no-store" });
+    expect(sets).toContainEqual([6, "save"]);
+    expect(sets).toContainEqual([7, RUNS]);
+
+    const h = html(callHooks(AppStackTasks, props, en, { 6: "save", 7: RUNS }).out);
+    expect(h).toContain("saving &lt;b&gt;now&lt;/b&gt;");
+    expect(h).not.toContain("<b>now</b>");
+    expect(h).toMatch(/<pre[^>]*>saving/);
+    expect(h).toContain(en.apps.tasks.runs.truncated);
+    expect(h).toContain(en.apps.tasks.status.not_started);
+    expect(h).toContain(en.apps.tasks.problem.component_not_running);
+    expect(h).toContain(en.apps.tasks.trigger.manual);
+    expect(h).toContain(en.apps.tasks.runs.hide);
+    expect(h).not.toMatch(/exit/i);
+    expect(html(callHooks(AppStackTasks, props, en, { 6: "save", 7: [] }).out)).toContain(en.apps.tasks.runs.empty);
+    expect(html(callHooks(AppStackTasks, props, en, { 6: "save" }).out)).toContain(en.apps.tasks.runs.loading);
+
+    vi.stubGlobal("fetch", vi.fn(async () => respond(500, { error: { code: "INTERNAL_ERROR" } })));
+    const failed = callHooks(AppStackTasks, props);
+    await (buttons(failed.out, en.apps.tasks.runs.show)[0]!.props.onClick as () => Promise<void>)();
+    expect(failed.sets).toContainEqual([8, en.apps.tasks.runs.error]);
+  });
+
+  it("a task that is running is followed on the page with its own words", () => {
+    const operation = { id: "op_9", kind: "stack.task", status: "failed", steps: [{ id: "st_1", key: "run", status: "failed" }] };
+    const h = html(callHooks(AppStackProgress, { orgId: ORG, operationId: "op_9" }, en, { 0: operation, 1: "done" }).out);
+    expect(h).toContain(en.apps.progress.title.task);
+    expect(h).toContain(en.apps.tasks.step);
+    expect(h).toContain(en.apps.progress.taskFailed);
+    expect(h).not.toContain(en.apps.progress.failed);
+    expect(h).not.toContain(en.apps.progress.title.deploy);
   });
 });

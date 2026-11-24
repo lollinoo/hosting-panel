@@ -17,6 +17,12 @@
  * are the digests recorded with them, so the run is repeatable and downloads nothing new. With
  * HP_ACCEPT_REGISTRY_CASES=1 it also asks the registry for those tags through the product (read-only, needs the network).
  *
+ * The built-in run is made for the newest version of the template; HP_ACCEPT_WORDPRESS_VERSION=1 makes it for version 1,
+ * where address-follows-host, address-follows-https and uploads-limit fail: the reproduction of what version 2 fixes (a
+ * site that answers only as the name it was installed on, uploads of up to 2 MB). no-redirect-loop is expected to fail
+ * there too, the login of version 1 being on that first name. Version 2 without root: RESULT 25/25 passed, 1 skipped;
+ * version 1: 21/25.
+ *
  * Machine safety (this machine may run a live panel):
  *  - Every object is named after this run: stack id stk_swarmtest_<hex>_a, so every container, network and volume name
  *    the engine derives contains swarmtest_<hex>; the script's own names and paths use hp_swarmtest_stk_<hex>.
@@ -25,8 +31,8 @@
  *    an id the gate saw created), the create bodies keep the profile, a pull names a digest of the plan and a registry
  *    lookup a tag of the imported file (only with HP_ACCEPT_REGISTRY_CASES=1); list answers are filtered to this run's
  *    objects. A secret of the run may travel in one place only, the Env of a container of the application: anywhere
- *    else the gate denies the request. The gate-self-test step proves these denials. The script's own changes (proxy
- *    removal, cleanup) go through the same gate.
+ *    else the gate denies the request. The gate-self-test step proves these denials, and that hp_ inside a word
+ *    (php_value) is no name. The script's own changes (proxy removal, cleanup) go through the same gate.
  *  - Every adapter directory and name option points into the temp dir, /dev/shm/hp_swarmtest_stk_<hex>-secrets or a
  *    nonexistent own *_unused name. The only proxy is a throwaway one created through the ingressProxyContainerName /
  *    ingressNetworkName seams, published on 127.0.0.1:16780/16743 only; the gate denies a connect or disconnect of a
@@ -38,6 +44,9 @@
  *  - The docker CLI (an independent observer) is called with an argv array only and refuses any argument naming an hp_
  *    object of another run; inspect/logs and the commands run inside a container only ever name this run's objects.
  *    The secrets are random values of this run that die with it; the login checks pass them as arguments.
+ *  - uploads-limit writes one page of this run into this run's site volume (docker exec of php in this run's wordpress
+ *    container) and removes it in the same step. address-follows-host and address-follows-https send requests from
+ *    inside that container to its own web server on 127.0.0.1.
  *  - Images: the digest-pinned refs of the wordpress-mariadb seed in APP_BUILT_IN_TEMPLATES (the imported draft pins
  *    the same two), pulled by the product through the gate when missing (offline run: docker pull each
  *    <repository>@sha256:<digest> first). traefik:v3.7 must be local.
@@ -45,9 +54,12 @@
  *    exact own names through the gate, gate closed, temp dirs removed.
  *
  * Run: corepack pnpm run build, then node infra/linux/accept-app-stack-wordpress.mjs [--imported]
+ *  (version 1: HP_ACCEPT_WORDPRESS_VERSION=1 node infra/linux/accept-app-stack-wordpress.mjs)
  * Steps: gate-self-test, preflight, snapshot-before, plan-compiles-from-seed, refused-before-docker,
  * deploy-creates-exact-set, container-standard-profile, secrets-reach-only-their-component, network-shape,
- * no-control-plane-reach, route-published-after-health, wordpress-installs, logs-mask-environment-secrets,
+ * no-control-plane-reach, route-published-after-health, wordpress-installs, address-follows-host, address-follows-https,
+ * no-redirect-loop, uploads-limit (these four skipped with --imported: the administrator's draft sets neither the address
+ * nor the uploads limit), logs-mask-environment-secrets,
  * data-survives-stop-and-start, idempotent-reapply, upgrade-keeps-data, recovery-reads-only, remove-keeps-volumes,
  * destroy-data-removes-volume, host-nft-metadata-drop-on-stack-net (root only: HP_ACCEPT_ROOT_CASES=1 as root),
  * gate-clean, nothing-left. With --imported: compose-imports-to-draft first, plan-compiles-from-draft in place of
@@ -114,6 +126,10 @@ const ingressNet = `${runPrefix}_ingress`;
 const ORG = `org_swarmtest_${hex}`;
 const A = `stk_swarmtest_${hex}_a`;
 const HOST1 = `wp-${hex}.hp-stk.test`;
+/** A second name of this run on the same route: the site must answer it as itself (address-follows-host). */
+const HOST2 = `wp2-${hex}.hp-stk.test`;
+/** The command version 2 gives WordPress: the image's own start program with the uploads limit (ADR-0036). */
+const UPLOADS_ARGV = ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"];
 const TITLE = `Acceptance ${hex}`;
 const HEALTH_MS = 180_000;
 const rootCasesEnabled = process.env.HP_ACCEPT_ROOT_CASES === "1" && process.getuid() === 0;
@@ -180,6 +196,20 @@ const leaks = (text) => SECRET_CONTENTS.some((e) => leakedWindows(text, e.conten
 
 // ---- plans (the extended format: no allowlist row, generated secrets) ----
 const seed = APP_BUILT_IN_TEMPLATES.find((t) => t.slug === "wordpress-mariadb");
+/** Every version of the seed, oldest first; the run is made for the newest unless HP_ACCEPT_WORDPRESS_VERSION names one. */
+const SEED_VERSIONS = [...(seed.previousVersions ?? []), { versionId: seed.versionId, source: seed.source }];
+const wantedVersion = process.env.HP_ACCEPT_WORDPRESS_VERSION;
+const VERSION = wantedVersion === undefined ? SEED_VERSIONS.length : /^[1-9][0-9]*$/.test(wantedVersion) ? Number(wantedVersion) : 0;
+if (VERSION < 1 || VERSION > SEED_VERSIONS.length || (IMPORTED && wantedVersion !== undefined)) {
+  console.log(
+    `FAIL preflight: HP_ACCEPT_WORDPRESS_VERSION=${String(wantedVersion)} (the built-in template has versions 1 to ${String(SEED_VERSIONS.length)}; not with --imported)`,
+  );
+  console.log("RESULT 0/1 passed in 0.0s");
+  process.exit(1);
+}
+const built = SEED_VERSIONS[VERSION - 1];
+/** Version 2 and later: the address line and the uploads limit. */
+const FIXED = !IMPORTED && VERSION >= 2;
 /** The tag and the digest the seed pins for a repository. */
 const pinned = (repository) => {
   const m = seed.source.match(new RegExp(`image: (${repository}:[\\w.-]+)@(sha256:[0-9a-f]{64})`));
@@ -198,14 +228,14 @@ if (IMPORTED) {
   imported = importComposeToAppTemplate({ compose, digests: new Map([...LOOKUPS].map((image) => [image, pinned(image.split(":")[0]).digest])) });
 }
 const first = compileAppStackPlan({
-  source: IMPORTED ? (imported.source ?? "") : seed.source,
+  source: IMPORTED ? (imported.source ?? "") : built.source,
   parameters: [],
   secretVersions: new Map(SECRET_CONTENTS.map((e) => [e.parameterKey, e.version])),
   ids: {
     stackId: A,
     organizationId: ORG,
     hostAllocationId: `alloc_swarmtest_${hex}`,
-    templateVersionId: IMPORTED ? `atv_swarmtest_${hex}` : seed.versionId,
+    templateVersionId: IMPORTED ? `atv_swarmtest_${hex}` : built.versionId,
     revisionId: `srev_swarmtest_${hex}_1`,
   },
 });
@@ -360,7 +390,8 @@ function judge(method, rawUrl, bodyText) {
   const u = new URL(rawUrl, "http://docker");
   const p = decodeURIComponent(u.pathname).replace(/^\/v\d+(\.\d+)?(?=\/)/, "");
   const query = decodeURIComponent(u.search);
-  const foreign = [...`${p}?${query}\n${bodyText}`.matchAll(/hp_[A-Za-z0-9_.-]*/g)].map((t) => t[0]).filter((t) => !isOwn(t));
+  // A name begins with hp_: "php_value" in the WordPress command line of version 2 holds none.
+  const foreign = [...`${p}?${query}\n${bodyText}`.matchAll(/(?<![A-Za-z0-9])hp_[A-Za-z0-9_.-]*/g)].map((t) => t[0]).filter((t) => !isOwn(t));
   if (foreign.length > 0) return deny(`names ${foreign[0]}`);
   if (leaks(`${p}?${query}`)) return deny("secret in the address");
   const body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
@@ -527,6 +558,27 @@ const served = (hostname, urlPath, status, check = () => true, ms = 60_000) =>
     if (r.status === status && check(r)) return r;
     throw new Error(`${String(r.status)} ${r.location} ${r.body.replace(/\s+/g, " ").slice(0, 160)}`);
   });
+/** PHP that sends one HTTP/1.0 request to the web server of its own container: path, Host, X-Forwarded-Proto ("": none). */
+const HTTP_GET =
+  '$s = @fsockopen("127.0.0.1", 80, $e, $m, 5); if (!$s) exit(1); stream_set_timeout($s, 20); ' +
+  'fwrite($s, "GET $argv[1] HTTP/1.0\\r\\nHost: $argv[2]\\r\\n" . ($argv[3] === "" ? "" : "X-Forwarded-Proto: $argv[3]\\r\\n") . "\\r\\n"); ' +
+  "echo stream_get_contents($s);";
+/** A request from inside an own container, with a Host or X-Forwarded-Proto the throwaway proxy would not pass on. */
+async function fromInside(container, hostHeader, urlPath, proto = "") {
+  const raw = await docker(["exec", container, "php", "-r", HTTP_GET, "--", urlPath, hostHeader, proto], 30_000);
+  const cut = raw.indexOf("\r\n\r\n");
+  const head = cut < 0 ? raw : raw.slice(0, cut);
+  return {
+    status: Number(/^HTTP\/\S+ (\d{3})/.exec(head)?.[1] ?? 0),
+    location: /^location:\s*(.*)$/im.exec(head)?.[1]?.trim() ?? "",
+    body: cut < 0 ? "" : raw.slice(cut + 4),
+  };
+}
+/** The style and script addresses of a page. */
+const assetsOf = (body) => [...body.matchAll(/<(?:link|script)\b[^>]*\b(?:href|src)=["']([^"']+)["']/gi)].map((x) => x[1]);
+/** Where the login form of wp-login.php posts to ("" when there is none). */
+const loginActionOf = (body) =>
+  ((body.match(/<form\b[^>]*\bloginform\b[^>]*>/i)?.[0] ?? "").match(/\baction=["']([^"']+)["']/i)?.[1] ?? "").replaceAll("&amp;", "&");
 
 // ---- cleanup ----
 let adapter = null;
@@ -736,6 +788,8 @@ async function main() {
         ["POST", `/v1.45/containers/create?name=${wp}`, createWith({ NetworkMode: "host" })],
         ["POST", `/v1.45/containers/create?name=${wp}`, createWith({ PortBindings: { "80/tcp": [{ HostPort: "8080" }] } })],
         ["POST", `/v1.45/containers/create?name=${wp}`, createWith({}, { Image: TRAEFIK_IMAGE })],
+        // The body profile does not read VolumesFrom: only the hp_ name rule stops this one.
+        ["POST", `/v1.45/containers/create?name=${wp}`, createWith({ VolumesFrom: [foreignName] })],
         ["POST", `/v1.45/containers/create?name=${proxyName}`, proxyBody({ Binds: ["/:/host"] })],
         ["POST", `/v1.45/containers/create?name=${proxyName}`, proxyBody({ PortBindings: { "80/tcp": [{ HostPort: "80" }] } })],
         ["POST", "/v1.45/networks/create", net(ownNet, "app_internal", { Options: { "com.docker.network.bridge.name": "x" } })],
@@ -757,7 +811,13 @@ async function main() {
       // Controls: the denials above are about what each case adds, not about the body they all share.
       const plain = judge("POST", `/v1.45/containers/create?name=${wp}`, createWith({}));
       const withSecret = judge("POST", `/v1.45/containers/create?name=${wp}`, createWith({}, { Env: [`WORDPRESS_DB_PASSWORD=${DB_PASSWORD}`] }));
-      assert(plain.kind === "forward" && withSecret.kind === "forward", "judge() forwards the standard body, with a secret in Env too", `${plain.kind} ${withSecret.kind}`);
+      // A name begins with hp_: inside a word ("php_value" of version 2, or a foreign name glued to a letter) it is none.
+      const inWord = judge("POST", `/v1.45/containers/create?name=${wp}`, createWith({}, { Cmd: ["php_value x", `p${foreignName}`] }));
+      assert(
+        plain.kind === "forward" && withSecret.kind === "forward" && inWord.kind === "forward",
+        "judge() forwards the standard body, with a secret in Env, and with hp_ inside a word of Cmd too",
+        `${plain.kind} ${withSecret.kind} ${inWord.kind} ${inWord.why ?? ""}`,
+      );
       // Through the socket: read-only requests only, harmless even if the gate let them through.
       const denied = await viaGate("GET", `/v1.45/containers/hp_selftest_${hex}/json`);
       assert(denied.status === 403 && gateDenied.length === 1, "the socket answers 403 for a foreign name and records the denial", `${denied.status} ${gateDenied.length}`);
@@ -776,7 +836,7 @@ async function main() {
       const stale = (await lines(["ps", "-a", "--format", "{{.Names}}"])).filter(ours);
       assert(stale.length === 0, "no object name contains the run marker", stale.join(","));
       assert(CAP_MASK === "00000000000004cb", "the capability list of the standard profile is the one this script knows", `${CAP_MASK} ${APP_STACK_STANDARD_CAP_ADD.join(",")}`);
-      info(`engine ${engineVersion}, marker ${marker}, template: ${T.what}, images ${[...IMAGES].join(" ")}`);
+      info(`engine ${engineVersion}, marker ${marker}, template: ${T.what}${IMPORTED ? "" : ` version ${String(VERSION)}`}, images ${[...IMAGES].join(" ")}`);
     });
 
     await step("snapshot-before", async () => {
@@ -794,7 +854,15 @@ async function main() {
       assert(same(planA.ingress, [{ componentKey: WORDPRESS, port: 80 }]), "ingress wordpress:80", JSON.stringify(planA.ingress));
       assert(same(planA.volumes.map((v) => v.key), [T.volumes.database, T.volumes.site]), `volumes [${T.volumes.database}, ${T.volumes.site}]`, JSON.stringify(planA.volumes));
       assert(planA.components.every((c) => /^[a-z0-9./-]+@sha256:[0-9a-f]{64}$/.test(c.image)), "every image is a digest reference", planA.components.map((c) => c.image).join(" "));
-      assert(planA.components.every((c) => c.profile === "standard" && c.runAsUser === null && c.argv === null), "both on the standard profile, image user and command", "other");
+      // Version 2 starts WordPress with the uploads limit; version 1 and the imported draft keep the image's command.
+      const argvOf = (key) => (FIXED && key === WORDPRESS ? UPLOADS_ARGV : null);
+      assert(
+        planA.components.every((c) => c.profile === "standard" && c.runAsUser === null && same(c.argv, argvOf(c.key))),
+        "both on the standard profile and the image user, with the command of the version",
+        planA.components.map((c) => `${c.key}:${JSON.stringify(c.argv)}`).join(" "),
+      );
+      const addressLine = componentOf(planA, WORDPRESS).environment.filter((e) => e.name === "WORDPRESS_CONFIG_EXTRA").length;
+      assert(addressLine === (FIXED ? 1 : 0), `the address line ${FIXED ? "is" : "is not"} in the environment of wordpress`, String(addressLine));
       assert(planA.components.every((c) => c.secretFiles.length === 0), "no secretFiles", "some");
       const reads = (key) => componentOf(planA, key).secretEnvironment.map((e) => `${e.name}<-${e.pieces.map((x) => x.parameterKey ?? "literal").join("+")}`);
       assert(same(reads(T.db), READS.db), "the database reads its account and the root password", reads(T.db).join(","));
@@ -907,7 +975,7 @@ async function main() {
           NoHostNamespaces: ["PidMode", "IpcMode", "UsernsMode", "UTSMode"].every((k) => !String(h[k] ?? "").startsWith("host")) && (h.Devices ?? []).length === 0,
           Privileged: h.Privileged === false,
           Image: c.Config.Image === comp.image && c.Image === img.Id,
-          Entrypoint: same(c.Config.Entrypoint ?? null, img.Config.Entrypoint ?? null) && same(c.Config.Cmd ?? null, img.Config.Cmd ?? null),
+          Entrypoint: same(c.Config.Entrypoint ?? null, img.Config.Entrypoint ?? null) && same(c.Config.Cmd ?? null, comp.argv ?? img.Config.Cmd ?? null),
           User: (c.Config.User ?? "") === (img.Config.User ?? ""),
           Labels: labels["io.hostingpanel.managed"] === "true" && labels["io.hostingpanel.role"] === "app_component" && labels["io.hostingpanel.stack_id"] === A,
           NoSiteLabels: labels["io.hostingpanel.site_id"] === undefined && labels["io.hostingpanel.service_instance_id"] === undefined,
@@ -1039,6 +1107,107 @@ async function main() {
       const setup = await viaProxy(HOST1, "/wp-admin/install.php");
       assert(setup.status === 200 && !setup.body.includes("admin_password2"), "the setup is closed once the site exists", String(setup.status));
     });
+
+    if (IMPORTED) {
+      for (const name of ["address-follows-host", "address-follows-https", "no-redirect-loop", "uploads-limit"]) {
+        skip(name, "the imported draft is the administrator's file: it sets neither the address line nor the uploads limit of the built-in template");
+      }
+    } else {
+      await step("address-follows-host", async () => {
+        // The application gets a second name: the site answers it as itself, not as the name it was installed on.
+        const r = await adapter.publishAppStackRoutes(route(planA, [HOST1, HOST2]));
+        assert(r.changed === true && same([...r.hostnames].sort(), [HOST1, HOST2].sort()), "the publish adds the second host", JSON.stringify(r));
+        const home = await until(`${HOST2} is routed by the proxy`, 30_000, async () => {
+          const res = await viaProxy(HOST2, "/");
+          return res.status !== 0 && res.status !== 404 ? res : null;
+        });
+        assert(home.status === 200 && home.body.includes(TITLE), `${HOST2}/ answers the home page with 200, not a redirect to ${HOST1}`, `${String(home.status)} ${home.location}`);
+        const assets = assetsOf(home.body);
+        assert(assets.some((a) => a.includes(`//${HOST2}/`)), `the page's style and script addresses name ${HOST2}`, assets.slice(0, 5).join(" "));
+        assert(!home.body.includes(HOST1), `the page names ${HOST1} nowhere`, assets.filter((a) => a.includes(HOST1)).slice(0, 3).join(" ") || "in its text");
+        const login = await viaProxy(HOST2, "/wp-login.php");
+        const action = loginActionOf(login.body);
+        assert(login.status === 200 && action !== "" && new URL(action, `http://${HOST2}/`).host === HOST2, `the login form of ${HOST2} posts to ${HOST2}`, `${String(login.status)} ${action}`);
+        const first = await viaProxy(HOST1, "/");
+        assert(first.status === 200 && first.body.includes(`//${HOST1}/`) && !first.body.includes(HOST2), `${HOST1} still answers as itself`, String(first.status));
+        // The Host the site takes is lower-cased, and one that does not end with a letter or digit is not taken: the
+        // stored address is. Sent from inside the wordpress container, so that no proxy rewrites the Host.
+        const upper = await fromInside(WP, HOST2.toUpperCase(), "/");
+        const upperAssets = assetsOf(upper.body);
+        assert(
+          upper.status === 200 && upperAssets.some((a) => a.includes(`//${HOST2}/`)) && !upper.body.includes(HOST2.toUpperCase()),
+          `a Host in capitals gets the addresses of ${HOST2}, in lower case`,
+          `${String(upper.status)} ${upper.location} ${upperAssets.slice(0, 3).join(" ")}`,
+        );
+        const dotted = await fromInside(WP, `${HOST2}.`, "/wp-login.php");
+        const dottedAction = loginActionOf(dotted.body);
+        assert(
+          dotted.status === 200 && dottedAction !== "" && new URL(dottedAction, `http://${HOST1}/`).host === HOST1,
+          `a Host with a trailing dot gets the stored address: the login form posts to ${HOST1}`,
+          `${String(dotted.status)} ${dotted.location} ${dottedAction}`,
+        );
+      });
+
+      await step("address-follows-https", async () => {
+        // Behind a proxy that ends https, X-Forwarded-Proto says so and the image sets HTTPS=on before it runs the
+        // address line. Sent from inside the wordpress container: the throwaway proxy is plain http and sets that
+        // header itself.
+        const page = await fromInside(WP, HOST2, "/", "https");
+        const own = assetsOf(page.body).filter((a) => a.includes(`//${HOST2}/`));
+        assert(
+          page.status === 200 && own.length > 0 && own.every((a) => a.startsWith(`https://${HOST2}/`)),
+          `the page's style and script addresses begin https://${HOST2}/`,
+          `${String(page.status)} ${page.location} ${own.slice(0, 3).join(" ")}`,
+        );
+        assert(!page.body.includes(`http://${HOST2}`) && !page.body.includes(HOST1), `the page names neither http://${HOST2} nor ${HOST1}`, "found");
+        const login = await fromInside(WP, HOST2, "/wp-login.php", "https");
+        const action = loginActionOf(login.body);
+        assert(login.status === 200 && action.startsWith(`https://${HOST2}/`), `the login form posts to https://${HOST2}/`, `${String(login.status)} ${login.location} ${action}`);
+      });
+
+      await step("no-redirect-loop", async () => {
+        // Where a visitor of the second name is sent: never to the first name, and to a page within five redirects.
+        for (const start of ["/", "/wp-admin/", "/wp-login.php"]) {
+          let host = HOST2;
+          let target = start;
+          const hops = [];
+          for (;;) {
+            const res = await viaProxy(host, target);
+            if (res.status < 300 || res.status >= 400) {
+              assert(res.status === 200, `${HOST2}${start} ends on a page`, `${String(res.status)} after ${hops.join(" -> ") || "no redirect"}`);
+              break;
+            }
+            const next = new URL(res.location, `http://${host}${target}`);
+            hops.push(next.href);
+            assert(next.host !== HOST1, `${HOST2}${start} never sends the visitor to ${HOST1}`, hops.join(" -> "));
+            assert(next.protocol === "http:" && next.host === HOST2, `${HOST2}${start} stays on ${HOST2}, over http`, hops.join(" -> "));
+            assert(hops.length <= 5, `${HOST2}${start} reaches a page within five redirects`, hops.join(" -> "));
+            host = next.host;
+            target = `${next.pathname}${next.search}`;
+          }
+        }
+      });
+
+      await step("uploads-limit", async () => {
+        // The limits of the web server's PHP, read by a page of this run written into the site's volume and removed in
+        // this step. The PHP command line reads php.ini only: what it says proves nothing about the site.
+        const file = `/var/www/html/hp-limits-${hex}.php`;
+        const page = '<?php echo ini_get("upload_max_filesize"), " ", ini_get("post_max_size");';
+        assert(await phpIn(WP, "exit(file_put_contents($argv[1], $argv[2]) === false ? 1 : 0);", [file, page]), "the page is written into the site", "refused");
+        let answer;
+        try {
+          answer = await served(HOST1, `/${path.basename(file)}`, 200, () => true, 30_000);
+        } finally {
+          const removed = await phpIn(WP, "exit(unlink($argv[1]) ? 0 : 1);", [file]);
+          if (!removed) info(`${path.basename(file)} could not be removed from the site volume (it goes with the volume)`);
+        }
+        const cli = (await docker(["exec", WP, "php", "-r", 'echo ini_get("upload_max_filesize"), " ", ini_get("post_max_size");'], 30_000)).trim();
+        info(`the PHP command line reads ${cli} (php.ini only), the web server ${answer.body.trim().slice(0, 40)}`);
+        assert(answer.body.trim() === "64M 64M", "the web server's PHP takes uploads of up to 64 MB (upload_max_filesize post_max_size)", answer.body.trim().slice(0, 80));
+        const gone = await viaProxy(HOST1, `/${path.basename(file)}`);
+        assert(gone.status === 404, "the page is gone from the site", String(gone.status));
+      });
+    }
 
     await step("logs-mask-environment-secrets", async () => {
       // The value of a secret ends up in the application's own log: the web server writes every address it is asked

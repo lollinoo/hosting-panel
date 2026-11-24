@@ -29,6 +29,7 @@ import {
   appStackArgvItemProblem,
   appStackContainerPathProblem,
   appStackHealthPathProblem,
+  appStackImageRegistryProblem,
   appStackSecretEnvNameProblem,
   appStackTextProblem,
   appTemplateValueProblem,
@@ -46,6 +47,7 @@ import {
   type AppTemplateService,
   type AppTemplateSpec,
   type AppTemplateSpecVersion,
+  type AppTemplateTask,
   type TemplateLocator,
   type TemplatePath,
 } from "@hosting-panel/contracts";
@@ -57,6 +59,12 @@ import { scanInterpolation, type InterpolationPiece } from "./site-template-inte
 
 export interface AppTemplateValidationOptions {
   readonly allowlist?: readonly AppImageAllowlistEntry[];
+  /**
+   * true only where an administrator writes a source now (check, create, new version): it adds the rules a stored
+   * version predates, such as a public registry (ADR-0036). A stored version is never judged with it, so an
+   * application installed from one keeps deploying, starting and restarting.
+   */
+  readonly newVersion?: boolean;
 }
 
 export type AppTemplateValidationResult =
@@ -148,6 +156,7 @@ interface Context {
   readonly issues: Issues;
   readonly version: AppTemplateSpecVersion;
   readonly allowlist: readonly AppImageAllowlistEntry[];
+  readonly newVersion: boolean;
   readonly parameters: ReadonlyMap<string, ParameterInfo>;
   readonly volumes: ReadonlySet<string>;
   readonly mounted: Set<string>;
@@ -484,6 +493,13 @@ function validateImage(ctx: Context, raw: unknown, servicePath: TemplatePath): A
   const name = registry === null ? repository : `${registry}/${repository}`;
   if (digest === null) issues.add("IMAGE_DIGEST_REQUIRED", path, "Pin the image by digest: add '@sha256:<64 hex digits>'.");
   if (tag === "latest") issues.add("IMAGE_TAG_LATEST", path, "The tag 'latest' is refused: write the version tag or none.");
+  if (ctx.newVersion && appStackImageRegistryProblem(name) !== null) {
+    issues.add(
+      "IMAGE_REGISTRY_NOT_PUBLIC",
+      path,
+      "The registry of this image is this server, an IP address or a private network name: use an image of a public registry.",
+    );
+  }
   // v2 (ADR-0036): any repository, always pinned by digest; the allowlist only gives the user of the images it lists.
   if (ctx.version === APP_TEMPLATE_SPEC_VERSION && findAppImageAllowlistEntry(name, ctx.allowlist) === null) {
     issues.add("IMAGE_NOT_ALLOWLISTED", path, "This image repository is not on the platform's allowlist.");
@@ -510,14 +526,21 @@ function checkVariable(ctx: Context, name: string, path: TemplatePath): Paramete
 /** "HP_TERMINAL_SESSION=, HP_TASK_RUN=": the marks a value may not hold, as a message names them. */
 const PROCESS_MARKS_TEXT = APP_STACK_PROCESS_MARKS.map((mark) => `${mark}=`).join(", ");
 
-function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string[] | null {
+/**
+ * The command of a component, or of a task when `fixed`: a task takes no placeholder, and what comes back is then the
+ * arguments as they are run (a "$$" already "$"), not the raw items.
+ */
+function validateCommand(ctx: Context, raw: unknown, path: TemplatePath, fixed = false): string[] | null {
   const { issues } = ctx;
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) {
     issues.mismatch(path, "a list of strings (there is no shell form)");
     return null;
   }
-  if (raw.length === 0) issues.add("ARGV_EMPTY", path, "Remove 'command' to use the image's own, or give at least one item.");
+  if (raw.length === 0) {
+    issues.add("ARGV_EMPTY", path, fixed ? "A task needs at least one command item." : "Remove 'command' to use the image's own, or give at least one item.");
+  }
+  const literals: string[] = [];
   if (raw.length > LIMITS.argvItems) issues.add("ARGV_TOO_MANY", path, `At most ${LIMITS.argvItems} command items are allowed.`);
   raw.forEach((item: unknown, index) => {
     const itemPath = [...path, index];
@@ -528,10 +551,14 @@ function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string
     const scan = scanInterpolation(item);
     if (!scan.ok) return issues.add(scan.code, itemPath, scan.message);
     const variables = scan.pieces.flatMap((piece) => ("variable" in piece ? [piece.variable] : []));
+    if (fixed && variables.length > 0) {
+      return issues.add("TASK_COMMAND_PLACEHOLDER", itemPath, "A task command takes no placeholder: the template fixes every argument (write '$$' for a dollar sign).");
+    }
     if (variables.length > 0 && scan.pieces.length !== 1) {
       issues.add("ARGV_PLACEHOLDER_NOT_WHOLE", itemPath, "A placeholder must be a whole command item, alone: split the item.");
     }
     const literal = scan.pieces.map((piece) => ("literal" in piece ? piece.literal : "")).join("");
+    literals.push(literal);
     if (index === 0) {
       if (variables.length > 0) issues.add("ARGV_EXECUTABLE_PLACEHOLDER", itemPath, "The executable (first item) cannot be a placeholder.");
       else {
@@ -544,7 +571,7 @@ function validateCommand(ctx: Context, raw: unknown, path: TemplatePath): string
     }
     for (const variable of variables) checkVariable(ctx, variable, itemPath);
   });
-  return raw.filter((item): item is string => typeof item === "string");
+  return fixed ? literals : raw.filter((item): item is string => typeof item === "string");
 }
 
 const NAME_PROBLEM_MESSAGES = {
@@ -878,6 +905,71 @@ function validateIngress(issues: Issues, root: Mapping, services: ReadonlyMap<st
   return ingress;
 }
 
+/**
+ * `x-hp-tasks` (ADR-0042): commands of the template that a customer may run, or schedule, in one of its components.
+ * A task names a declared service, so a service with a problem of its own does not add a second issue here.
+ */
+function validateTasks(ctx: Context, root: Mapping): AppTemplateTask[] {
+  const { issues } = ctx;
+  const path: TemplatePath = ["x-hp-tasks"];
+  const items = listAt(issues, own(root, "x-hp-tasks"), path) ?? [];
+  if (items.length > LIMITS.tasks) issues.add("TASK_TOO_MANY", path, `At most ${LIMITS.tasks} tasks are allowed.`);
+  const tasks: AppTemplateTask[] = [];
+  const seen = new Set<string>();
+  items.forEach((item: unknown, index) => {
+    const itemPath = [...path, index];
+    if (!isMapping(item)) return issues.mismatch(itemPath, "a mapping");
+    const before = issues.list.length;
+    checkKeys(issues, item, itemPath, "task");
+    const at = (key: string): TemplatePath => [...itemPath, key];
+    for (const key of ["key", "label", "service", "command"]) {
+      if (own(item, key) === undefined) issues.add("TASK_FIELD_MISSING", itemPath, `A task needs '${key}'.`);
+    }
+    const key = own(item, "key");
+    if (key !== undefined && (typeof key !== "string" || !APP_STACK_KEY_PATTERN.test(key) || key.length > APP_STACK_COMPONENT_KEY_MAX)) {
+      issues.add(
+        "TASK_KEY_INVALID",
+        at("key"),
+        `A task key starts with a lower-case letter, uses lower-case letters, digits and '-' (at most ${APP_STACK_COMPONENT_KEY_MAX}) and does not end with '-'.`,
+      );
+    } else if (typeof key === "string") {
+      if (seen.has(key)) issues.add("TASK_KEY_DUPLICATE", at("key"), `The task key '${clip(key)}' is used twice.`);
+      seen.add(key);
+    }
+    const label = own(item, "label");
+    if (label !== undefined && !isText(label, LIMITS.taskLabel, 1)) {
+      issues.add("TASK_LABEL_INVALID", at("label"), `A label is 1 to ${LIMITS.taskLabel} characters of plain text.`);
+    }
+    const description = ownOr(item, "description", "");
+    if (!isText(description, LIMITS.taskDescription)) {
+      issues.add("TASK_DESCRIPTION_INVALID", at("description"), `A description is at most ${LIMITS.taskDescription} characters of plain text.`);
+    }
+    const service = own(item, "service");
+    if (service !== undefined && (typeof service !== "string" || !ctx.serviceKeys.includes(service))) {
+      issues.add("TASK_SERVICE_UNKNOWN", at("service"), "service must name a service of this template.");
+    }
+    const command = validateCommand(ctx, own(item, "command"), at("command"), true);
+    const timeout = ownOr(item, "timeoutSeconds", LIMITS.taskTimeoutDefault);
+    if (!isSafeInt(timeout) || timeout < LIMITS.taskTimeoutMin || timeout > LIMITS.taskTimeoutMax) {
+      issues.add(
+        "TASK_TIMEOUT_INVALID",
+        at("timeoutSeconds"),
+        `timeoutSeconds is a whole number from ${LIMITS.taskTimeoutMin} to ${LIMITS.taskTimeoutMax}.`,
+      );
+    }
+    if (issues.list.length > before || command === null) return;
+    tasks.push({
+      key: key as string,
+      label: label as string,
+      description: description as string,
+      service: service as string,
+      command,
+      timeoutSeconds: timeout as number,
+    });
+  });
+  return tasks;
+}
+
 function fail(issues: readonly AppTemplateIssue[]): AppTemplateValidationResult {
   return { ok: false, errors: sortAppTemplateIssues(issues) };
 }
@@ -920,6 +1012,7 @@ export function validateAppTemplate(
       issues,
       version,
       allowlist: options.allowlist ?? APP_IMAGE_ALLOWLIST,
+      newVersion: options.newVersion === true,
       parameters: infos,
       volumes: new Set(volumes),
       mounted: new Set(),
@@ -945,6 +1038,7 @@ export function validateAppTemplate(
       if (!ctx.mounted.has(name)) issues.add("VOLUME_UNUSED", ["volumes", name], "The volume is mounted by no service: remove it.", "key");
     }
     const ingress = validateIngress(issues, value, results);
+    const tasks = validateTasks(ctx, value);
     if (issues.list.length > 0) return fail(issues.list);
 
     const parsed = AppTemplateSpecSchema.safeParse({
@@ -954,6 +1048,7 @@ export function validateAppTemplate(
       services: [...results.values()].flatMap((result) => (result.service ? [result.service] : [])).sort((a, b) => compare(a.key, b.key)),
       volumes: [...volumes].sort(compare).map((key) => ({ key })),
       ingress,
+      ...(tasks.length > 0 ? { tasks } : {}),
     });
     return parsed.success ? { ok: true, spec: parsed.data } : internal();
   } catch {

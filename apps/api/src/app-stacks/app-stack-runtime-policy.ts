@@ -498,7 +498,8 @@ export function appStackRecoveryVerdict(input: {
   if (!matches(plan)) {
     const { previous } = input;
     if (!previous || !matches(previous)) return { outcome: "failed", stackStatus: "failed", applied: false, health, problem: "OPERATION_INTERRUPTED" };
-    // Nothing of the new revision replaced the applied one, which still serves: settled like a pre-flight failure.
+    // No component whose hash changed replaced the applied one: settled like a pre-flight failure. A container
+    // replaced only for its body version carries the applied hash too and counts as the applied one's, running or not.
     const before = appStackHealthRows(previous, observed, "observer");
     const stackStatus = appStackAggregate({
       plan: previous,

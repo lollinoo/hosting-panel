@@ -16,7 +16,8 @@ const M26 = "0026_app_routing_options.sql";
 const M27 = "0027_app_stack_backups.sql";
 const M28 = "0028_app_stack_links.sql";
 const M29 = "0029_notifications.sql";
-const ALL = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options", "app-stack-backups", "app-stack-links", "notifications"];
+const M31 = "0031_app_stack_tasks.sql";
+const ALL = ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options", "app-stack-backups", "app-stack-links", "notifications", "app-tasks"];
 const dirs: string[] = [];
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -49,7 +50,7 @@ exit 0
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
       D: d,
-      APPLIED: (opts.applied ?? [M21, M22, M24, M25, M26, M27, M28, M29]).join("\n"),
+      APPLIED: (opts.applied ?? [M21, M22, M24, M25, M26, M27, M28, M29, M31]).join("\n"),
       IN_USE: (opts.inUse ?? []).join(" "),
       FAIL_ON: opts.failOn ?? ""
     }
@@ -62,8 +63,8 @@ describe("panel_features_in_use", () => {
   it("prints the in-use features; the password only in PGPASSWORD and ON_ERROR_STOP set", () => {
     const r = run({ inUse: ALL });
     expect(r.code, r.err).toBe(0);
-    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\nnotifications\n");
-    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(10);
+    expect(r.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\nnotifications\napp-tasks\n");
+    expect(r.calls.split("\n").filter(Boolean)).toHaveLength(11);
     for (const c of r.calls.split("\n").filter(Boolean)) {
       expect(c).toMatch(/^-X -qtA -v ON_ERROR_STOP=1 -h 127\.0\.0\.1 -U hosting_panel -d hosting_panel -c /);
     }
@@ -82,6 +83,7 @@ describe("panel_features_in_use", () => {
     expect(run({ inUse: ["app-stack-backups"] }).out).toBe("app-stack-backups\n");
     expect(run({ inUse: ["app-stack-links"] }).out).toBe("app-stack-links\n");
     expect(run({ inUse: ["notifications"] }).out).toBe("notifications\n");
+    expect(run({ inUse: ["app-tasks"] }).out).toBe("app-tasks\n");
     expect(run({ inUse: [] }).out).toBe("");
   });
 
@@ -100,6 +102,10 @@ describe("panel_features_in_use", () => {
     expect(calls).toContain("select 'app-stack-backups' where exists (select 1 from public.app_stack_backups)");
     expect(calls).toContain("select 'app-stack-links' where exists (select 1 from public.app_stack_links)");
     expect(calls).toContain("select 'notifications' where exists (select 1 from public.notification_channels)");
+    // ADR-0042: a template version that declares at least one task.
+    expect(calls).toContain(
+      "app_template_versions where jsonb_typeof(compiled_schema -> 'tasks') = 'array' and jsonb_array_length(compiled_schema -> 'tasks') > 0",
+    );
   });
 
   it("asks the extended application format of the stacks that are not deleted: their template version, then their revisions", () => {
@@ -156,6 +162,14 @@ describe("panel_features_in_use", () => {
     const before29 = run({ applied: [M21, M22, M24, M25, M26, M27, M28], inUse: all, failOn: "public.notification_channels" });
     expect(before29.code, before29.err).toBe(0);
     expect(before29.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\n");
+    // The previous release's database has no 0031: tasks are neither asked nor in use.
+    const before31 = run({ applied: [M21, M22, M24, M25, M26, M27, M28, M29], inUse: all });
+    expect(before31.out).toBe("manual-tls\nbackup-targets\nsite-templates\napp-stacks\napp-format-v2\napp-routing-options\napp-stack-backups\napp-stack-links\nnotifications\n");
+    expect(before31.calls).not.toContain("'app-tasks'");
+    expect(before31.calls.split("\n").filter(Boolean)).toHaveLength(10);
+    const only31 = run({ applied: [M31], inUse: all });
+    expect(only31.out).toBe("app-tasks\n");
+    expect(only31.calls.split("\n").filter(Boolean)).toHaveLength(2);
   });
 
   it("fails closed: a psql error or a URL that is not the local panel database is non-zero", () => {
@@ -169,6 +183,7 @@ describe("panel_features_in_use", () => {
     expect(run({ failOn: "app_stack_backups", inUse: ["app-stack-backups"] }).code).not.toBe(0);
     expect(run({ failOn: "public.app_stack_links", inUse: ["app-stack-links"] }).code).not.toBe(0);
     expect(run({ failOn: "public.notification_channels", inUse: ["notifications"] }).code).not.toBe(0);
+    expect(run({ failOn: "jsonb_array_length", inUse: ["app-tasks"] }).code).not.toBe(0);
     const bad = run({ url: `postgresql://hosting_panel:${PW}@db.example.com:5432/hosting_panel` });
     expect(bad.code).not.toBe(0);
     expect(bad.calls).toBe("");
@@ -182,7 +197,7 @@ describe("release_features", () => {
   };
   it("reads the features line build-release.mjs writes", () => {
     const json = JSON.stringify({ version: "1.0.0", node: "26.13.1", features: RELEASE_FEATURES.join(" ") }, null, 2);
-    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links notifications");
+    expect(parse(`${json}\n`).trim()).toBe("manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups app-stack-links notifications app-tasks");
   });
   it("is empty when the key is absent or empty", () => {
     expect(parse(`${JSON.stringify({ version: "1.0.0" }, null, 2)}\n`)).toBe("");

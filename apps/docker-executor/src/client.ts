@@ -13,6 +13,8 @@ import {
   AppStackRoutesIpcResultSchema,
   AppStackStatusIpcResultSchema,
   AppStackStopIpcResultSchema,
+  AppStackTaskReadIpcResultSchema,
+  AppStackTaskRunIpcResultSchema,
   type AppStackComponentActionIpcResult,
   type AppStackComponentIpcRequest,
   type AppStackComponentsRemoveIpcRequest,
@@ -36,6 +38,10 @@ import {
   type AppStackRoutesIpcResult,
   type AppStackStatusIpcResult,
   type AppStackStopIpcResult,
+  type AppStackTaskReadIpcRequest,
+  type AppStackTaskReadIpcResult,
+  type AppStackTaskRunIpcRequest,
+  type AppStackTaskRunIpcResult,
   type ErrorDetail,
   BACKUPS_RESULT_SCHEMAS,
   ErrorCodeSchema,
@@ -105,6 +111,7 @@ import type {
   SiteRoutesRequest,
   AppStackTerminalPort,
   StackExecutorPort,
+  StackTaskExecutorPort,
   TerminalEnded,
   TerminalOpenRequest,
   TerminalOpenResult,
@@ -112,6 +119,12 @@ import type {
   TerminalSessionRecord,
 } from "@hosting-panel/executor-contracts";
 import { z } from "zod";
+import {
+  APP_STACK_TASK_READ_TIMEOUT_MS,
+  APP_STACK_TASK_RUN_MARGIN_MS,
+  APP_STACK_TASK_RUN_PATH,
+  appStackTaskReadPath,
+} from "./app-stacks/task-ipc.js";
 import {
   DEFAULT_EXECUTOR_SOCKET_PATH,
   type IpcTransportMode,
@@ -251,6 +264,22 @@ export class ExecutorIpcClientError extends Error {
   }
 }
 
+/** The backup actions of an application that start or end a job on the server (ADR-0038): see `sendChange`. */
+const BACKUPS_CHANGE_ACTIONS: ReadonlySet<BackupsRequest["action"]> = new Set(["stackStart", "stackRestore", "stackForget"]);
+
+/**
+ * An answer the client could not read after a change was sent: the executor may have made the change, so it is a lost
+ * answer, not a refusal. The words are fixed: never the body, never a schema message that could quote it.
+ */
+function unreadableChangeAnswer(what: string): ExecutorIpcClientError {
+  return new ExecutorIpcClientError(
+    `Unreadable docker-executor IPC answer after mutating command dispatch: ${what}`,
+    "OPERATION_AMBIGUOUS",
+    502,
+    true,
+  );
+}
+
 export interface SignedDockerExecutorIpcClientOptions {
   readonly signingKey: IpcSigningKey;
   readonly transport?: IpcTransportMode;
@@ -263,7 +292,7 @@ export interface SignedDockerExecutorIpcClientOptions {
 
 const handledIpcSockets = new WeakSet<object>();
 
-export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort, AppStackTerminalPort {
+export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackExecutorPort, AppStackTerminalPort, StackTaskExecutorPort {
   public readonly isRuntimeAvailable: boolean;
   private readonly signingKey: IpcSigningKey;
   private readonly transport: IpcTransportMode;
@@ -537,8 +566,11 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
       req.action === "test" || req.action === "localInit"
         ? BACKUPS_TEST_TIMEOUT_MS
         : BACKUPS_TIMEOUT_MS;
-    const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
     const schema = BACKUPS_RESULT_SCHEMAS[req.action] as z.ZodTypeAny;
+    if (BACKUPS_CHANGE_ACTIONS.has(req.action)) {
+      return (await this.sendChange("/v1/backups", req, timeoutMs, schema)) as BackupsResult<R["action"]>;
+    }
+    const json = await this.sendSignedJsonRequest("POST", "/v1/backups", req, timeoutMs);
     return z.object({ data: schema }).parse(json).data as BackupsResult<R["action"]>;
   }
 
@@ -647,54 +679,44 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
   }
 
   public async pullAppStackImage(req: AppStackPullIpcRequest): Promise<AppStackPullIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/pull", req, APP_STACK_PULL_TIMEOUT_MS);
-    return z.object({ data: AppStackPullIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/pull", req, APP_STACK_PULL_TIMEOUT_MS, AppStackPullIpcResultSchema);
   }
 
   public async prepareAppStack(req: AppStackPlanIpcRequest): Promise<AppStackPrepareIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/prepare", req, APP_STACK_PREPARE_TIMEOUT_MS);
-    return z.object({ data: AppStackPrepareIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/prepare", req, APP_STACK_PREPARE_TIMEOUT_MS, AppStackPrepareIpcResultSchema);
   }
 
   public async createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/create", req, APP_STACK_CREATE_TIMEOUT_MS);
-    return z.object({ data: AppStackCreateIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/create", req, APP_STACK_CREATE_TIMEOUT_MS, AppStackCreateIpcResultSchema);
   }
 
   public async startAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/start", req, APP_STACK_COMPONENT_TIMEOUT_MS);
-    return z.object({ data: AppStackComponentActionIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/start", req, APP_STACK_COMPONENT_TIMEOUT_MS, AppStackComponentActionIpcResultSchema);
   }
 
   public async restartAppStackComponent(req: AppStackComponentIpcRequest): Promise<AppStackComponentActionIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/restart", req, APP_STACK_COMPONENT_TIMEOUT_MS);
-    return z.object({ data: AppStackComponentActionIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/restart", req, APP_STACK_COMPONENT_TIMEOUT_MS, AppStackComponentActionIpcResultSchema);
   }
 
   public async stopAppStack(req: AppStackRefIpcRequest): Promise<AppStackStopIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/stop", req, APP_STACK_STOP_TIMEOUT_MS);
-    return z.object({ data: AppStackStopIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/stop", req, APP_STACK_STOP_TIMEOUT_MS, AppStackStopIpcResultSchema);
   }
 
   public async publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/routes", req, APP_STACK_ROUTES_TIMEOUT_MS);
-    return z.object({ data: AppStackRoutesIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/routes", req, APP_STACK_ROUTES_TIMEOUT_MS, AppStackRoutesIpcResultSchema);
   }
 
   /** Waits in the same route-file line as publish, so it shares its budget. */
   public async unpublishAppStackRoutes(req: AppStackRefIpcRequest): Promise<AppStackRoutesIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/unpublish", req, APP_STACK_ROUTES_TIMEOUT_MS);
-    return z.object({ data: AppStackRoutesIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/unpublish", req, APP_STACK_ROUTES_TIMEOUT_MS, AppStackRoutesIpcResultSchema);
   }
 
   public async removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/remove", req, APP_STACK_REMOVE_TIMEOUT_MS);
-    return z.object({ data: AppStackRemoveIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/remove", req, APP_STACK_REMOVE_TIMEOUT_MS, AppStackRemoveIpcResultSchema);
   }
 
   public async removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
-    const json = await this.sendSignedJsonRequest("POST", "/v1/app-stacks/remove-components", req, APP_STACK_REMOVE_TIMEOUT_MS);
-    return z.object({ data: AppStackComponentsRemoveIpcResultSchema }).parse(json).data;
+    return this.sendChange("/v1/app-stacks/remove-components", req, APP_STACK_REMOVE_TIMEOUT_MS, AppStackComponentsRemoveIpcResultSchema);
   }
 
   public async syncAppStackLinks(req: AppStackLinksIpcRequest): Promise<AppStackLinksIpcResult> {
@@ -722,6 +744,20 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return z.object({ data: AppStackImageResolveIpcResultSchema }).parse(json).data;
   }
 
+  /**
+   * A task of an application (ADR-0042). The answer comes when the command ended, so the wait is the run's own time
+   * limit plus a margin; an answer that does not come is a lost one (`ambiguousOutcome`): ask with getAppStackTaskRun.
+   */
+  public async runAppStackTask(req: AppStackTaskRunIpcRequest): Promise<AppStackTaskRunIpcResult> {
+    const waitMs = req.timeoutSeconds * 1000 + APP_STACK_TASK_RUN_MARGIN_MS;
+    return this.sendChange(APP_STACK_TASK_RUN_PATH, req, waitMs, AppStackTaskRunIpcResultSchema);
+  }
+
+  public async getAppStackTaskRun(req: AppStackTaskReadIpcRequest): Promise<AppStackTaskReadIpcResult> {
+    const json = await this.sendSignedJsonRequest("GET", appStackTaskReadPath(req), undefined, APP_STACK_TASK_READ_TIMEOUT_MS);
+    return z.object({ data: AppStackTaskReadIpcResultSchema }).parse(json).data;
+  }
+
   private async sendServiceAction(
     serviceInstanceId: string,
     action: "restart" | "stop" | "delete",
@@ -737,11 +773,26 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
     return ExecutionResultDataEnvelopeSchema.parse(json).data;
   }
 
+  /**
+   * A call of the closed list of changes of an application (ADR-0035, ADR-0038, ADR-0042), whose request may have
+   * changed the server once sent. An answer that cannot be read is a lost one (`ambiguousOutcome`), so the caller
+   * settles from a read and never sends the change again: a 2xx that fails the schema (an empty body included), a body
+   * that is not JSON, a 5xx without the executor's error envelope. A refusal with the envelope, whatever its status,
+   * and a 4xx stay refusals.
+   */
+  private async sendChange<S extends z.ZodTypeAny>(path: string, body: unknown, timeoutMs: number, schema: S): Promise<z.output<S>> {
+    const json = await this.sendSignedJsonRequest("POST", path, body, timeoutMs, { unreadableChangeIsLost: true });
+    const parsed = z.object({ data: schema as z.ZodTypeAny }).safeParse(json);
+    if (!parsed.success) throw unreadableChangeAnswer("the result does not have the expected shape");
+    return parsed.data.data as z.output<S>;
+  }
+
   private async sendSignedJsonRequest(
     method: "GET" | "POST",
     pathWithQuery: string,
     bodyObject?: unknown,
     perCallTimeoutMs?: number,
+    options: { readonly unreadableChangeIsLost?: boolean } = {},
   ): Promise<unknown> {
     const bodyBuffer =
       bodyObject !== undefined ? Buffer.from(JSON.stringify(bodyObject), "utf8") : undefined;
@@ -912,6 +963,9 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
       try {
         parsedJson = JSON.parse(rawText) as unknown;
       } catch {
+        if (options.unreadableChangeIsLost === true && (response.statusCode < 400 || response.statusCode >= 500)) {
+          throw unreadableChangeAnswer("the body is not JSON");
+        }
         throw new ExecutorIpcClientError(
           "Received non-JSON payload from docker-executor daemon",
           "INTERNAL_ERROR",
@@ -930,6 +984,9 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
           false,
           parsedError.data.error.details,
         );
+      }
+      if (options.unreadableChangeIsLost === true && response.statusCode >= 500) {
+        throw unreadableChangeAnswer(`HTTP ${String(response.statusCode)} without an error envelope`);
       }
       const fallbackCode: ErrorCode =
         response.statusCode === 401

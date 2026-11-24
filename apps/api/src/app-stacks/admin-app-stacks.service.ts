@@ -33,7 +33,8 @@ export class AdminAppStacksService {
   /** The page of one application: who it belongs to and its components; no parameter, secret, volume or plan. */
   public async detail(stackId: string): Promise<AdminAppStackDto> {
     const { stack, organizationName } = await this.require(stackId);
-    const detail = await this.stacks.detail(stack);
+    // The administrator's page offers none of the customer's actions: no permission, so no action on offer.
+    const detail = await this.stacks.detail(stack, () => false);
     return {
       id: detail.id,
       name: detail.name,
