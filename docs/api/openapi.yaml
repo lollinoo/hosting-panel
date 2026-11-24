@@ -5921,7 +5921,7 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "409":
-          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or after a restart of the application when it is still refused
+          description: Only web addresses being removed still point at what the new revision drops (`RESOURCE_LOCKED`, `details[0].field: domains`, `details[0].reason: address_removing`); try again in a few minutes, or, when it is still refused, after a restart of the application (or a stop, if it does not start)
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
