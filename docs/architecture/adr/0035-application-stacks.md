@@ -80,6 +80,8 @@ Il validatore è `packages/policy-engine/src/app-template-validation.ts`; il com
 
 Le route sono cinque famiglie: il catalogo dell'amministratore `/v1/admin/app-templates` e il limite di stack per cliente `PATCH /v1/admin/organizations/:orgId/app-stack-limit` (entrambi solo `requireServerAdmin`), il catalogo del cliente `/v1/organizations/:orgId/app-templates`, gli stack `/v1/organizations/:orgId/app-stacks` e i loro domini `/v1/organizations/:orgId/app-stacks/:stackId/domains`. Le route del cliente passano per `requireOrgPermission` con i cinque permessi nuovi `app.read`, `app.create`, `app.update`, `app.control`, `app.delete` (da 39 a 44 chiavi; concessi a `customer_owner` e `hosting_admin`, non al collaboratore, non nell'accesso di supporto), poi per il flag; uno stack di un'altra organizzazione dà `404`, uno proprio senza il permesso `403`.
 
+Le operazioni di un'applicazione (`resource_type` `stack`) seguono la stessa regola: per chi non ha `app.read` l'elenco `GET /v1/organizations/:orgId/operations` le omette, anche dal totale e come cursore, e il dettaglio risponde `404` come per un'operazione che non esiste.
+
 | Confine | Fra | Che cosa lo protegge |
 |---|---|---|
 | TB-A | browser ↔ BFF | sessione, CSRF e Origin come le altre route BFF; i valori segreti solo nella richiesta di scrittura |

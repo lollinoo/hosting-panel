@@ -2086,7 +2086,9 @@ paths:
       description: >-
         Newest first: by `submittedAt` descending, then by `id` descending. `meta.total` counts every
         operation of the organization, not the page. The cursor is the `id` of the last operation of
-        the previous page; an unknown cursor gives an empty page.
+        the previous page; an unknown cursor gives an empty page. For a caller who may not read
+        applications (`app.read`), the operations of applications (`resourceType` `stack`) are left
+        out of the page and of `meta.total`, and a cursor naming one is an unknown cursor.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/CursorQuery"
@@ -2121,6 +2123,9 @@ paths:
       tags: [Operations]
       operationId: getOperation
       summary: Retrieve specific operation timeline and progress (operation.read)
+      description: >-
+        For a caller who may not read applications (`app.read`), an operation of an application
+        (`resourceType` `stack`) answers `404 NOT_FOUND` with the body of an unknown operation.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - in: path
