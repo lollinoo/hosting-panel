@@ -425,7 +425,7 @@ and the tests their rows cite did not exist in the tree of the runs.
 
 The lead ran these on a fresh Ubuntu 24.04.5 VPS (4 CPU, 7.7 GB, Docker 29.10.0, nftables 1.0.9),
 on the tree of pull request #13, with `infra/linux/install.sh --acme-staging` and the server's public
-name `45-138-202-116.sslip.io`. The findings below are not in the counts above.
+name under a wildcard DNS service. The findings below are not in the counts above.
 
 - **The twelve real-Docker scripts:** ten at exit 0 at once. `accept-m3-panel.mjs` and
   `accept-m4-wordpress.mjs` failed on assumptions of the scripts, not of the product: the first
