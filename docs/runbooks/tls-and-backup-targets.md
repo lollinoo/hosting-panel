@@ -215,10 +215,14 @@ The proxy keeps serving with the API and the database down, and `hp-update` neve
    world-writable.
 5. Exit codes: `0` restored, `1` a step failed (safe to run again), `2` refused (bad arguments, not root, `backup.key` missing,
    sites already present, applications already present, copy from a newer panel, question not answered `y`), `7` local
-   destination not mounted, `8` local folder unsafe (only with `--local-repo`).
+   destination not mounted, `8` local folder unsafe (only with `--local-repo`). An `HP_PANEL_IPV4` in
+   `/etc/hosting-panel/executor.env` the panel cannot record (a leading zero, a carriage return) stops it with `1` before
+   anything changes: run `install.sh` again with `--ipv4 <address>`, then the restore.
 6. Then sign in with the old administrator account, point the domains to the new server, and use **Ripristina** on each site.
    The panel copy is the one of the last night: later changes are lost. If the disk was lost together with the server, a
-   local-only copy is lost too, which is why an off-server copy is required.
+   local-only copy is lost too, which is why an off-server copy is required. `hp-restore-panel` points the recorded IPv4 at
+   the one this server's installer used, but the recorded IPv6 is the old server's: run `install.sh` again with the
+   release now installed and `--ipv6 <this server's IPv6>`, or `--ipv6 none` if it has none.
 
 ## 7. Restore a `partial` copy using only the destination that succeeded
 

@@ -8,13 +8,17 @@
 usage() {
   cat <<'EOF'
 Usage: sudo bash install.sh --hostname <fqdn> --admin-email <email> --admin-name "<name>"
-                            [--acme-email <email>] [--ipv4 <addr>]
+                            [--acme-email <email>] [--ipv4 <addr>] [--ipv6 <addr> | --ipv6 none]
                             [--version <v> | --archive <path>] [--acme-staging]
                             [--skip-firewall] [--dry-run] [--allow-other-linux]
 
   --acme-email   Let's Encrypt contact email (default: --admin-email). Must be a real address:
                  Let's Encrypt rejects example.com, *.test and similar reserved domains.
-  --ipv4         Public IPv4 of this server (default: source address of the default route).
+  --ipv4         Public IPv4 of this server; once the panel has recorded one, only this flag
+                 changes it (default: the one the last run used, else the source address of the
+                 default route, recorded only if the panel has none yet).
+  --ipv6         Public IPv6 of this server, never detected; none removes the recorded one
+                 (default: the recorded IPv6, if any, stays as it is).
   --version      Release to install (default: latest GitHub release).
   --archive      Local hosting-panel-<v>-linux-x64.tar.gz (its .sha256 must sit next to it).
   --skip-firewall  Do not install the panel nftables ruleset (you manage the firewall yourself).
@@ -65,6 +69,14 @@ is_private_ipv4() { # is_private_ipv4 <addr>: RFC1918, CGNAT, loopback, link-loc
     172.1[6-9] | 172.2[0-9] | 172.3[01]) return 0 ;;
   esac
   return 1
+}
+# recorded_ipv4_warning <hp-accounts setup output> <IPv4 of this run>: a rerun of an older installer could leave
+# executor.env and the panel with different addresses. Only --ipv4 changes the recorded one, so this only tells.
+recorded_ipv4_warning() {
+  local recorded
+  recorded="$(sed -n 's/^{"recordedIpv4":"\([0-9.]*\)"}$/\1/p' <<<"$1")"
+  [[ -n "${recorded}" && "${recorded}" != "$2" ]] || return 0
+  info "WARNING: the panel has ${recorded} recorded as this server's public IPv4, but this run uses $2. Run the installer again with --ipv4 <address> to record the right one."
 }
 
 # Rewrites KEY=VALUE lines in an env file atomically (0400 root:root); other lines are kept
@@ -193,11 +205,11 @@ main() {
   umask 027
   ORIG_ARGS=("$@")
 
-  local hostname="" admin_email="" admin_name="" acme_email="" ipv4="" version="" archive=""
-  local acme_staging=false dry_run=0 allow_other=0 skip_firewall=0
+  local hostname="" admin_email="" admin_name="" acme_email="" ipv4="" ipv6="" version="" archive=""
+  local acme_staging=false dry_run=0 allow_other=0 skip_firewall=0 ipv6_given=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --hostname | --admin-email | --admin-name | --acme-email | --ipv4 | --version | --archive)
+      --hostname | --admin-email | --admin-name | --acme-email | --ipv4 | --ipv6 | --version | --archive)
         [[ $# -ge 2 ]] || { usage >&2; die 2 "$1 needs a value"; }
         case "$1" in
           --hostname) hostname="${2,,}" ;;
@@ -205,6 +217,7 @@ main() {
           --admin-name) admin_name="$2" ;;
           --acme-email) acme_email="$2" ;;
           --ipv4) ipv4="$2" ;;
+          --ipv6) ipv6="$2"; ipv6_given=1 ;;
           --version) version="$2" ;;
           --archive) archive="$2" ;;
         esac
@@ -222,7 +235,7 @@ main() {
   # Validation at the trust boundary: these values end up in env files and DB rows.
   local fqdn_re='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
   local email_re='^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
-  local ipv4_re='^((25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
+  local ipv6_re='^[0-9A-Fa-f.:]+$'
   [[ -n "${hostname}" ]] || { usage >&2; die 2 "--hostname is required"; }
   [[ "${hostname}" =~ ${fqdn_re} ]] || die 2 "Invalid --hostname: ${hostname}"
   [[ "${admin_email}" =~ ${email_re} ]] || die 2 "Missing or invalid --admin-email"
@@ -234,7 +247,11 @@ main() {
     example.com | example.net | example.org | *.example | *.test | *.invalid | *.localhost)
       die 2 "Use a real --acme-email: Let's Encrypt rejects ${acme_domain}" ;;
   esac
-  [[ -z "${ipv4}" || "${ipv4}" =~ ${ipv4_re} ]] || die 2 "Invalid --ipv4: ${ipv4}"
+  [[ -z "${ipv4}" || "${ipv4}" =~ ${_hp_ipv4_re} ]] || die 2 "Invalid --ipv4: ${ipv4}"
+  # Only the shape: hp-accounts setup parses the address, and refuses one that cannot be public, before storing it.
+  if ((ipv6_given)) && [[ "${ipv6}" != none ]] && ! [[ "${ipv6}" =~ ${ipv6_re} && "${ipv6}" == *:*:* ]]; then
+    die 2 "Invalid --ipv6: ${ipv6} (an IPv6 address without brackets, zone or prefix length, or none)"
+  fi
   [[ -z "${version}" || -z "${archive}" ]] || die 2 "--version and --archive are mutually exclusive"
   [[ -z "${version}" || "${version}" == latest || "${version}" =~ ${_hp_semver_re} ]] || die 2 "Invalid --version: ${version}"
   version="${version:-latest}"
@@ -355,13 +372,30 @@ main() {
     apt-get install -y -q --no-install-recommends "${HP_OS_PACKAGES[@]}"
     install -d -m 0755 /etc/apt/keyrings
   fi
-  if [[ -z "${ipv4}" ]]; then
+  local ipv4_from="given with --ipv4" ipv4_flag=--ipv4 saved_ipv4
+  # Behind NAT the default route leaves from a private address: a rerun keeps what the last run recorded.
+  saved_ipv4="$(env_value "${STATE_DIR}/executor.env" HP_PANEL_IPV4)"
+  [[ -n "${ipv4}" ]] || ipv4_flag=--ipv4-default
+  if [[ -z "${ipv4}" && "${saved_ipv4}" =~ ${_hp_ipv4_re} ]]; then
+    ipv4="${saved_ipv4}"
+    ipv4_from="kept from the last run, HP_PANEL_IPV4 in ${STATE_DIR}/executor.env; pass --ipv4 to change it"
+  elif [[ -z "${ipv4}" ]]; then
+    ipv4_from="source address of the default route; pass --ipv4 to choose another"
+    [[ -z "${saved_ipv4}" ]] ||
+      ipv4_from="source address of the default route, since HP_PANEL_IPV4 in ${STATE_DIR}/executor.env is not a valid IPv4; pass --ipv4 to choose another"
     ipv4="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") {print $(i + 1); exit}}')" || ipv4=""
     if [[ -z "${ipv4}" ]]; then
       ((dry_run)) && ipv4="<default-route-ipv4>" || die 2 "Cannot detect the server IPv4; pass --ipv4."
     fi
   fi
-  info "Panel IPv4: ${ipv4}"
+  info "Panel IPv4: ${ipv4} (${ipv4_from})"
+  if ((ipv6_given == 0)); then
+    info "Panel IPv6: not changed (pass --ipv6 <address> to record the server's public IPv6, --ipv6 none to remove it)"
+  elif [[ "${ipv6}" == none ]]; then
+    info "Panel IPv6: none (given with --ipv6: the recorded IPv6 is removed)"
+  else
+    info "Panel IPv6: ${ipv6} (given with --ipv6)"
+  fi
   if is_private_ipv4 "${ipv4}"; then
     info "WARNING: ${ipv4} is a private address. Customers' A records must point to this server's public IPv4; if the server is behind NAT, rerun with --ipv4 <public address>."
   fi
@@ -569,16 +603,31 @@ SQL
   fi
 
   # ---------------------------------------------------------------- 11
-  step 11 "First administrator"
+  step 11 "Server addresses and first administrator"
   local totp_secret="" totp_uri=""
+  local setup_args=(--name "${hostname}" --hostname "${hostname}" "${ipv4_flag}" "${ipv4}")
+  if ((ipv6_given)); then setup_args+=(--ipv6 "${ipv6}"); fi
   if ((dry_run)); then
+    local setup_note=""
+    [[ "${ipv4_flag}" == --ipv4 ]] || setup_note="the recorded IPv4, if any, stays as it is; "
+    if ((ipv6_given == 0)); then
+      setup_note+="the recorded IPv6 stays as it is"
+    elif [[ "${ipv6}" == none ]]; then
+      setup_note+="removes the recorded IPv6"
+    fi
+    setup_note="${setup_note%; }"
+    plan "would run hp-accounts setup ${setup_args[*]}${setup_note:+ (${setup_note})}"
     if ((admin_done)); then
       plan "skip: administrator already created (${STATE_DIR}/admin-created)"
     else
-      plan "would run hp-accounts setup --name ${hostname} --hostname ${hostname} --ipv4 ${ipv4}"
       plan "would create the first administrator ${admin_email} (password via env, not shown) and print the TOTP enrolment once"
     fi
   else
+    # Every run, so --ipv4 and --ipv6 given on a rerun reach the panel. An IPv4 the installer kept or detected
+    # (--ipv4-default) is recorded only if the panel has none: behind NAT it would replace the public one.
+    local setup_out
+    setup_out="$(/usr/local/sbin/hp-accounts setup "${setup_args[@]}")"
+    recorded_ipv4_warning "${setup_out}" "${ipv4}"
     if ((admin_done == 0)); then
       local has_admin
       has_admin="$(panel_has_admin "${api_env}")"
@@ -587,7 +636,6 @@ SQL
     if ((admin_done)); then
       info "skip: administrator already created"
     else
-      /usr/local/sbin/hp-accounts setup --name "${hostname}" --hostname "${hostname}" --ipv4 "${ipv4}" >/dev/null
       local out
       out="$(HP_NEW_PASSWORD="${admin_password}" /usr/local/sbin/hp-accounts create-admin --email "${admin_email}" --name "${admin_name}")"
       totp_secret="$(sed -n 's/.*"totpSecretBase32":"\([^"]*\)".*/\1/p' <<<"${out}")"

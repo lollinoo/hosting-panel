@@ -133,6 +133,10 @@ trap 'rm -f -- "${DUMP}" "${KEY}"' EXIT
 hostname="$(env_value "${ETC}/executor.env" HP_PANEL_HOSTNAME)"
 ipv4="$(env_value "${ETC}/executor.env" HP_PANEL_IPV4)"
 [[ -n "${hostname}" && -n "${ipv4}" ]] || die 1 "Run install.sh on this server first: ${ETC}/executor.env has no panel hostname or address. ${SAFE}"
+# hp-accounts setup refuses any other form, and it runs only after the database was replaced. Never printed: a
+# value edited by hand may hold a carriage return.
+[[ "${ipv4}" =~ ${_hp_ipv4_re} ]] ||
+  die 1 "HP_PANEL_IPV4 in ${ETC}/executor.env is not an IPv4 the panel can record (four numbers from 0 to 255, without leading zeros). Run install.sh again with --ipv4 <address>, then run this again. ${SAFE}"
 # The copy is loaded as the panel's own user, never as a superuser: a copy runs what its maker put in it.
 [[ -r "${ETC}/api.env" ]] || die 1 "Run install.sh on this server first: ${ETC}/api.env is missing. ${SAFE}"
 db_url="$(env_value "${ETC}/api.env" DATABASE_URL)"

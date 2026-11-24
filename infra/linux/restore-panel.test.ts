@@ -141,6 +141,31 @@ describe("restore-panel.sh refusals", () => {
     expect(r.calls).toEqual([]);
   });
 
+  // hp-accounts setup refuses these, and it runs only after the database was replaced.
+  for (const [label, value] of [["a leading zero", "203.0.113.05"], ["a carriage return", "203.0.113.10\r"]]) {
+    it(`(t) a saved IPv4 with ${label} is refused before anything changes`, () => {
+      const f = fixture();
+      writeFileSync(join(f.root, "etc/hosting-panel/executor.env"), `HP_PANEL_HOSTNAME=panel.example.test\nHP_PANEL_IPV4=${value}\n`);
+      const r = f.run();
+      expect(r.code).toBe(1);
+      expect(r.out).toContain("Run install.sh again with --ipv4 <address>, then run this again.");
+      expect(r.out).toContain("Nothing on this server was changed");
+      expect(r.out).not.toContain("\r");
+      expect(r.calls).toEqual([]);
+      expect(f.leftovers()).toEqual([]);
+    });
+  }
+
+  it("(t) a saved IPv4 the panel can record goes on to setup as before", () => {
+    const f = fixture();
+    writeFileSync(join(f.root, "etc/hosting-panel/executor.env"), "HP_PANEL_HOSTNAME=panel.example.test\nHP_PANEL_IPV4=203.0.113.10\n");
+    const r = f.run();
+    expect(r.code, r.out).toBe(0);
+    expect(named(r.calls, "hp-accounts")).toEqual([
+      "root hp-accounts setup --name panel.example.test --hostname panel.example.test --ipv4 203.0.113.10 [M]",
+    ]);
+  });
+
   it("(d) a panel with sites is refused before the fetch", () => {
     const f = fixture();
     const r = f.run(ARGS, { STUB_SITES: "3" });
