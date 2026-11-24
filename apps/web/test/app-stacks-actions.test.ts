@@ -130,6 +130,7 @@ const DIFF: AppStackPlanDiffDto = {
     { key: "uploads", change: "removed" },
   ],
   parameters: [{ key: "title", change: "updated" }],
+  newSecrets: [],
   ingress: [{ componentKey: "web", port: 8080, change: "unchanged" }],
   downtime: true,
   dataRisk: true,
@@ -398,6 +399,85 @@ describe("upgrade and rollback plan dialog", () => {
     const { out } = run(d, en, { 1: en.apps.reasons.STACK_IMAGE_NOT_ALLOWED });
     expect(html(out)).toContain(en.apps.reasons.STACK_IMAGE_NOT_ALLOWED);
     expect(button(out, en.apps.upgrade.confirm)!.props.disabled).toBe(true);
+  });
+
+  describe("private values the new version needs (issue #89)", () => {
+    const ASKING: AppStackPlanDiffDto = { ...DIFF, dataRisk: false, newSecrets: [{ key: "mail_password", label: "Mail password" }] };
+    const TYPED = "typed-mail-password-9c1";
+    /** The dialog's only ref holds its fields: stand-ins with a value, as the browser's inputs. */
+    const fields = (value: string) => {
+      const input = { value };
+      return { input, refs: [{ current: new Map([["mail_password", input]]) }] };
+    };
+    const dialog = (d: El, state: Record<number, unknown>, refs: Array<{ current: unknown }> = []) =>
+      callHooks(d.type as (p: Record<string, unknown>) => ReactNode, d.props, en, state, refs);
+
+    it.each(locales)("an upgrade shows a field for each, with its label, the required mark and the private-value note (%s)", (_l, m) => {
+      const markup = html(run(openDialog("upgrade", m).d, m, { 0: ASKING }).out);
+      for (const text of [m.apps.upgrade.secretsTitle, m.apps.upgrade.secretsHint, "Mail password", m.apps.secrets.required, m.apps.wizard.secretHint])
+        expect(markup).toContain(text);
+      const input = markup.match(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*>/)?.[0] ?? "";
+      expect(input).toContain('type="password"');
+      expect(input).toContain('autoComplete="new-password"');
+      expect(input).toContain('aria-describedby="app-upgrade-secret-mail_password-note"');
+      expect(input).toMatch(/\brequired\b/);
+      expect(input).not.toMatch(/\bvalue=/);
+      expect(markup).toContain('for="app-upgrade-secret-mail_password"');
+    });
+
+    it("a rollback and a plan that needs nothing show no field", () => {
+      expect(html(run(openDialog("rollback").d, en, { 0: ASKING }).out)).not.toContain("app-upgrade-secret-");
+      expect(html(run(openDialog("upgrade").d, en, { 0: DIFF }).out)).not.toContain(en.apps.upgrade.secretsTitle);
+    });
+
+    it("an empty field is marked as required and nothing is sent", async () => {
+      const { d } = openDialog("upgrade");
+      const { out, sets } = dialog(d, { 0: ASKING }, fields("").refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(sets).toContainEqual([3, { mail_password: en.apps.wizard.required }]);
+      expect(keyedSend).not.toHaveBeenCalled();
+    });
+
+    it("confirm sends the typed values with the plan hash, empties the fields and keeps no value in state", async () => {
+      keyedSend.mockResolvedValue(accepted);
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "upgrade:running", "POST", `${BASE}/upgrade`, {
+        templateVersionId: "atv_notes_3",
+        planHash: ASKING.planHash,
+        secrets: [{ parameterKey: "mail_password", value: TYPED }],
+      });
+      expect(input.value).toBe("");
+      expect(JSON.stringify([sets, parentSets])).not.toContain(TYPED);
+      expect(parentSets).toContainEqual([4, null]);
+    });
+
+    it.each([
+      ["value_too_long", "VALIDATION_ERROR"],
+      ["STACK_SECRET_MISSING", "VALIDATION_ERROR"],
+      ["secret_not_needed", "VALIDATION_ERROR"],
+    ])("a refusal of a value (%s) is shown next to its field, in the open dialog, with the field emptied", async (reason, code) => {
+      keyedSend.mockResolvedValue({ ok: false, code, reason, field: "secrets.mail_password" });
+      const { d, parentSets } = openDialog("upgrade");
+      const { input, refs } = fields(TYPED);
+      const { out, sets } = dialog(d, { 0: ASKING }, refs);
+      await click(button(out, en.apps.upgrade.confirm));
+      const text = appStackRefusalText(en, code, reason);
+      expect(sets).toContainEqual([3, { mail_password: text }]);
+      expect(input.value).toBe("");
+      expect(parentSets).not.toContainEqual([4, null]);
+      expect(parentSets.filter(([k]) => k === 2)).toEqual([[2, null]]);
+      const markup = html(dialog(d, { 0: ASKING, 3: { mail_password: text } }).out);
+      expect(markup).toMatch(/<input[^>]*id="app-upgrade-secret-mail_password"[^>]*aria-invalid="true"/);
+      expect(markup).toContain(text);
+    });
+
+    it.each(locales)("a value the update does not need has its own sentence (%s)", (_l, m) => {
+      expect(appStackRefusalText(m, "VALIDATION_ERROR", "secret_not_needed")).toBe(m.apps.reasons.secret_not_needed);
+      expect(m.apps.reasons.secret_not_needed).not.toBe(m.apps.reasons.STACK_PARAMETER_INVALID);
+    });
   });
 
   it("plan_changed keeps the dialog open, says so and asks the plan again", async () => {

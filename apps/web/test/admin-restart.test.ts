@@ -129,14 +129,15 @@ describe("keyedSend", () => {
     }
   });
 
-  it("a refusal gives back the reason of its first detail, and none without details", async () => {
+  it("a refusal gives back the reason and the field of its first detail, and none without details", async () => {
     const refusal = { error: { code: "VALIDATION_ERROR", details: [{ field: "address", reason: "overlaps" }, { field: "note", reason: "note_invalid" }] } };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(refusal), { status: 400 })));
-    expect(await keyedSend({}, "csrf", "n", "POST", "/x", {})).toEqual({ ok: false, code: "VALIDATION_ERROR", reason: "overlaps" });
+    expect(await keyedSend({}, "csrf", "n", "POST", "/x", {})).toEqual({ ok: false, code: "VALIDATION_ERROR", reason: "overlaps", field: "address" });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { code: "RESOURCE_LOCKED" } }), { status: 409 })));
     const bare = await keyedSend({}, "csrf", "n", "POST", "/x", {});
     expect(bare).toEqual({ ok: false, code: "RESOURCE_LOCKED" });
     expect(bare.ok === false && bare.reason).toBeUndefined();
+    expect(bare.ok === false && bare.field).toBeUndefined();
   });
 });
 
