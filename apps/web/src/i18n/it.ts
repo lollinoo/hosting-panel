@@ -3216,6 +3216,7 @@ x-hp-ingress:
       draftBody: "L'applicazione non è ancora installata: imposta i valori riservati obbligatori e premi Installa.",
       unknownBody: "Non sappiamo ancora se l'ultima operazione è riuscita. Nessuna azione viene ripetuta da sola.",
       staleBody: "Il pannello non è riuscito a leggere di recente lo stato dell'applicazione: quello che questa pagina mostra potrebbe non essere aggiornato.",
+      staleBadge: "Stato non aggiornato",
       platformWork: {
         backups_cleanup:
           "Il pannello sta togliendo i backup scaduti di questa applicazione: finché non ha finito, nessuna azione su di lei si può avviare. Di solito bastano pochi minuti.",

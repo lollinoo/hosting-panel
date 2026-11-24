@@ -3188,6 +3188,7 @@ x-hp-ingress:
       draftBody: "The application is not installed yet: set the required private values and press Install.",
       unknownBody: "We do not know yet whether the last operation succeeded. Nothing is repeated automatically.",
       staleBody: "The panel could not read the state of the application lately: what this page shows may be out of date.",
+      staleBadge: "State not up to date",
       platformWork: {
         backups_cleanup:
           "The panel is removing this application's expired backups: until it is done, no action on it can be started. It usually takes a few minutes.",

@@ -71,7 +71,7 @@ export default async function AppStackPage({ params }: { params: Promise<{ stack
           <h1 id="app-title" className="text-2xl font-bold tracking-tight">
             {s.name}
           </h1>
-          <StackStatusBadge status={s.status} m={m} />
+          <StackStatusBadge status={s.status} stale={stale} m={m} />
         </div>
         <p className="text-sm text-muted-foreground">{format(d.versionLine, { name: s.templateName, n: shown.templateVersionNumber })}</p>
         {shown.revisionNumber !== null && <p className="text-sm text-muted-foreground">{format(d.releaseLine, { n: shown.revisionNumber })}</p>}

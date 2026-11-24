@@ -323,12 +323,20 @@ describe("detail page", () => {
       const stale = await page();
       expect(stale).toContain(m.apps.detail.staleBody);
       expect(stale).not.toContain(m.apps.detail.unknownBody);
+      // The badge too: no recent reading, never «outcome to be verified».
+      expect(stale).toContain(`>${m.apps.detail.staleBadge}<`);
+      expect(stale).not.toContain(m.apps.status.unknown);
       answer({ [UP]: ok({ ...DETAIL, status: "unknown", outcomeUnknown: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]) });
       const doubt = await page();
       expect(doubt).toContain(m.apps.detail.unknownBody);
       expect(doubt).not.toContain(m.apps.detail.staleBody);
+      expect(doubt).toContain(`>${m.apps.status.unknown}<`);
+      expect(doubt).not.toContain(m.apps.detail.staleBadge);
     }
-    expect(en.apps.detail.staleBody).not.toBe(en.apps.detail.unknownBody);
+    for (const m of [en, itMsgs]) {
+      expect(m.apps.detail.staleBody).not.toBe(m.apps.detail.unknownBody);
+      expect(m.apps.detail.staleBadge).not.toBe(m.apps.status.unknown);
+    }
   });
 
   it("issue #106: the backups section follows the list, not the status shown", async () => {
