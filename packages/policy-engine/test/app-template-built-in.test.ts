@@ -58,10 +58,10 @@ const WORDPRESS_SECRETS = new Map([
   ["db_password", 1],
   ["db_root_password", 1],
 ]);
-/** WORDPRESS_CONFIG_EXTRA as PHP reads it (one line): the site's address is the one it is asked by, when it is a plain
- *  host name with an optional port. */
+/** WORDPRESS_CONFIG_EXTRA as PHP reads it (one line): the site's address is the name it is asked by, lower-cased, when
+ *  that is a host name with a letter or digit at both ends and an optional port. */
 const CONFIG_EXTRA =
-  "if (isset($_SERVER['HTTP_HOST']) && preg_match('/^[A-Za-z0-9.-]+(:[0-9]{1,5})?$/D', $_SERVER['HTTP_HOST'])) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST']); define('WP_SITEURL', WP_HOME); }";
+  "$hcp_host = isset($_SERVER['HTTP_HOST']) ? strtolower($_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$/D', $hcp_host)) { define('WP_HOME', ((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $hcp_host); define('WP_SITEURL', WP_HOME); }";
 const UPLOADS_ARGV = ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"];
 
 describe("the built-in application templates", () => {
@@ -296,6 +296,8 @@ describe("the built-in application templates", () => {
       expect(CONFIG_EXTRA).not.toContain("\n");
       expect([...CONFIG_EXTRA.matchAll(/define\('([A-Z_]+)'/g)].map((m) => m[1])).toEqual(["WP_HOME", "WP_SITEURL"]);
       expect(CONFIG_EXTRA).not.toMatch(/eval|\$\{|\$\$/);
+      // Its variable is not named like a platform object, which a real-Docker acceptance gate refuses in a request.
+      expect(CONFIG_EXTRA).not.toMatch(/(?<![A-Za-z0-9])hp_/);
       expect(appStackComponentSecretEnvironment(component(p, "db")!)).toEqual([
         { name: "MARIADB_PASSWORD", pieces: [{ parameterKey: "db_password", version: 1 }] },
         { name: "MARIADB_ROOT_PASSWORD", pieces: [{ parameterKey: "db_root_password", version: 1 }] },
@@ -308,6 +310,19 @@ describe("the built-in application templates", () => {
         { parameterKey: "db_root_password", version: 1 },
       ]);
       expect(appStackComponentSecretRefs(component(p, "wordpress")!)).toEqual([{ parameterKey: "db_password", version: 1 }]);
+    });
+
+    it("takes the site's address from a Host that is a host name with an optional port, lower-cased, and from nothing else", () => {
+      // The pattern of the line as PHP's preg_match reads it ("D": "$" is the very end), after PHP's ASCII strtolower.
+      const pattern = new RegExp(/preg_match\('\/(.+?)\/D'/.exec(CONFIG_EXTRA)![1]!);
+      const takes = (host: string): boolean => pattern.test(host.replace(/[A-Z]/g, (c) => c.toLowerCase()));
+      for (const host of ["wp.example.test", "WP.Example.TEST", "wp.example.test:8443", "a", "10.0.0.1:80", "x--y.test"]) {
+        expect(takes(host), host).toBe(true);
+      }
+      for (const host of ["wp.example.test.", ".wp.example.test", "-wp.example.test", "wp.example.test-", "wp.example.test:",
+        "wp.example.test:123456", "wp.example.test\n", "wp.example.test/x", "wp_x.test", "user@wp.example.test", "[::1]:80", ""]) {
+        expect(takes(host), JSON.stringify(host)).toBe(false);
+      }
     });
 
     it("compiles byte-identically 20 times, and a new secret version changes the plan", () => {

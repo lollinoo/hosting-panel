@@ -272,12 +272,14 @@ const wordpressMariadb: AppBuiltInTemplate = Object.freeze({
     // default is 2 MB, too small for the themes and plugins WordPress uploads. No shell, no file written.
     command: ['    command: ["apache2-foreground", "-c", "php_value upload_max_filesize 64M", "-c", "php_value post_max_size 64M"]'],
     // The image runs this one line of PHP in wp-config.php, at every request: the site's address is the host name it
-    // is asked by, when it is a plain name with an optional port, so it answers on every address of the application
-    // instead of sending visitors back to the first one. The proxy forwards only the application's own addresses. A
-    // "$$" is one "$" for PHP.
+    // is asked by, lower-cased, when that begins and ends with a letter or digit, with an optional port (the proxy's
+    // ports are configurable, so the browser may send one); otherwise WordPress keeps its stored address. So it answers
+    // on every address of the application instead of sending visitors back to the first one. The proxy forwards only
+    // the application's own addresses. Neither WordPress nor the image's wp-config.php uses $hcp_host, and it is no
+    // hp_ name, which the real-Docker acceptance gate refuses in a request. A "$$" is one "$" for PHP.
     environment: [
       "      - name: WORDPRESS_CONFIG_EXTRA",
-      `        value: "if (isset($$_SERVER['HTTP_HOST']) && preg_match('/^[A-Za-z0-9.-]+(:[0-9]{1,5})?$$/D', $$_SERVER['HTTP_HOST'])) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$_SERVER['HTTP_HOST']); define('WP_SITEURL', WP_HOME); }"`,
+      `        value: "$$hcp_host = isset($$_SERVER['HTTP_HOST']) ? strtolower($$_SERVER['HTTP_HOST']) : ''; if (preg_match('/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$$/D', $$hcp_host)) { define('WP_HOME', ((isset($$_SERVER['HTTPS']) && $$_SERVER['HTTPS'] === 'on') ? 'https' : 'http') . '://' . $$hcp_host); define('WP_SITEURL', WP_HOME); }"`,
     ],
   }),
   // Version 1 as it shipped: the stacks installed on it are offered version 2.
