@@ -6,6 +6,7 @@ import { type DockerExecutorPort, isAppStackTerminalExecutor } from "@hosting-pa
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { APP_STACK_COMPONENT_ROLE, APP_STACK_LABELS, appStackContainerName } from "../src/app-stacks/index.js";
 import {
+  APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT,
   APP_STACK_TERMINAL_KILL_SCRIPT,
   type DockerExecTarget,
   DockerEngineSocketAdapter,
@@ -281,12 +282,13 @@ describe("a component whose image has no /bin/sh (ADR-0041 T4)", () => {
 describe("the clean-up script of a component", () => {
   // The text is pinned: a change here must be tried again in real containers (infra/linux/accept-app-terminal.mjs).
   const PINNED =
-    'm="HP_TERMINAL_SESSION=${1:-term_}"; s=" "; ' +
+    'm="HP_TERMINAL_SESSION=${1:-term_}"; ' +
     'marked() { while IFS= read -r x || [ -n "$x" ]; do case "$x" in *"$m"*) return 0;; esac; done 2>/dev/null <"$1/environ"; return 1; }; ' +
+    'marked /proc/1 && exit 3; s=" "; ' +
     'sid() { l=""; while IFS= read -r x || [ -n "$x" ]; do l=$x; done 2>/dev/null <"$1/stat"; l=${l##*) }; set -- $l; i=${4:-0}; }; ' +
     'for p in /proc/[0-9]*; do marked "$p" || continue; sid "$p"; [ "$i" -gt 1 ] 2>/dev/null && s="$s$i "; ' +
-    '[ "${p#/proc/}" -gt 1 ] && kill -KILL "${p#/proc/}" 2>/dev/null; done; ' +
-    'for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] || continue; sid "$p"; ' +
+    '[ "${p#/proc/}" -gt 1 ] && [ "${p#/proc/}" != "$$" ] && kill -KILL "${p#/proc/}" 2>/dev/null; done; ' +
+    'for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] && [ "${p#/proc/}" != "$$" ] || continue; sid "$p"; ' +
     'case "$s" in *" $i "*) kill -KILL "${p#/proc/}" 2>/dev/null;; esac; done; exit 0';
 
   it("is the text that was tried in real containers", () => {
@@ -312,14 +314,96 @@ describe("the clean-up script of a component", () => {
     expect(APP_STACK_TERMINAL_KILL_SCRIPT).not.toMatch(/\bps\b/);
   });
 
-  it("never signals pid 1 and never collects session 0 or 1", () => {
+  it("never signals pid 1 or itself and never collects session 0 or 1", () => {
     const kills = APP_STACK_TERMINAL_KILL_SCRIPT.split("kill -KILL").length - 1;
     expect(kills).toBe(2);
-    // Each kill is behind a test that the pid is above 1; a session id is kept only when above 1.
-    expect(APP_STACK_TERMINAL_KILL_SCRIPT).toContain('[ "${p#/proc/}" -gt 1 ] && kill -KILL "${p#/proc/}"');
-    expect(APP_STACK_TERMINAL_KILL_SCRIPT).toContain('for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] || continue; sid "$p"; case');
+    // Each kill is behind a test that the pid is above 1 and is not the script's own; a session id is kept only when above 1.
+    expect(APP_STACK_TERMINAL_KILL_SCRIPT).toContain('[ "${p#/proc/}" -gt 1 ] && [ "${p#/proc/}" != "$$" ] && kill -KILL "${p#/proc/}"');
+    expect(APP_STACK_TERMINAL_KILL_SCRIPT).toContain('for p in /proc/[0-9]*; do [ "${p#/proc/}" -gt 1 ] && [ "${p#/proc/}" != "$$" ] || continue; sid "$p"; case');
     expect(APP_STACK_TERMINAL_KILL_SCRIPT).toContain('[ "$i" -gt 1 ] 2>/dev/null && s="$s$i "');
     expect(APP_STACK_TERMINAL_KILL_SCRIPT.endsWith("exit 0")).toBe(true);
+  });
+
+  it("reads pid 1 first: when it carries the mark, it kills nothing and exits with its own code", () => {
+    const gate = `marked /proc/1 && exit ${String(APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT)};`;
+    expect(APP_STACK_TERMINAL_KILL_SCRIPT).toContain(gate);
+    expect(APP_STACK_TERMINAL_KILL_SCRIPT.indexOf(gate)).toBeLessThan(APP_STACK_TERMINAL_KILL_SCRIPT.indexOf("for p in"));
+    expect(APP_STACK_TERMINAL_KILL_SCRIPT.indexOf(gate)).toBeLessThan(APP_STACK_TERMINAL_KILL_SCRIPT.indexOf("kill -KILL"));
+  });
+});
+
+describe("a component whose own environment carries the mark (ADR-0041 §4)", () => {
+  // pid 1 carries the mark when the component's own environment spells it (two entries read without their separator):
+  // every process of the component would match, so the script kills nothing and exits with its own code.
+  const OWN_MARK = { frames: [] as Array<[1 | 2, string]>, exitCode: APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT };
+  const logged = () => {
+    const lines: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => void lines.push(a.map(String).join(" ")));
+    return lines;
+  };
+  const events = (lines: readonly string[]) =>
+    lines.map((l) => {
+      const { timestamp, ...rest } = JSON.parse(l) as Record<string, unknown>;
+      return [typeof timestamp, rest];
+    });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("has an exit code no other path of the script or of the engine gives", () => {
+    // 0 done, 1 and 2 the shell's own errors, 126 and 127 the engine without /bin/sh, 128 and above a signal.
+    expect([0, 1, 2, 126, 127]).not.toContain(APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT);
+    expect(APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT).toBeGreaterThan(2);
+    expect(APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT).toBeLessThan(126);
+  });
+
+  it("a close counts the clean-up as done and logs it once, with no name or id", async () => {
+    const { adapter, mockDaemon } = await setup();
+    await adapter.openAppStackTerminal(REQ);
+    const lines = logged();
+    mockDaemon.execReplies.push(OWN_MARK);
+    await expect(adapter.closeTerminal({ sessionId: SID })).resolves.toMatchObject({ reason: "closed" });
+    await expect(adapter.listTerminals()).resolves.toEqual([]);
+    expect(appKills(mockDaemon)).toHaveLength(1);
+    expect(events(lines)).toEqual([["string", { component: "hp-docker-executor", event: "terminal_own_mark", count: 1 }]]);
+    expect(lines.join("\n")).not.toContain(WEB);
+  });
+
+  it("the start-up pass goes on, counts those components as nothing to clean and logs them in one line", async () => {
+    const { adapter, mockDaemon } = await setup();
+    const target = (adapter as unknown as { execTarget: DockerExecTarget }).execTarget;
+    add(mockDaemon, component("web", { execIds: ["e1"] }));
+    add(mockDaemon, component("worker", { execIds: ["e2"] }));
+    add(mockDaemon, component("cache", { execIds: ["e3"] }));
+    const lines = logged();
+    mockDaemon.execReplies.push(OWN_MARK, { frames: [], exitCode: 0 }, OWN_MARK);
+    await expect(reapAppStackTerminalShells(target)).resolves.toBeUndefined();
+    expect(appKills(mockDaemon)).toHaveLength(3);
+    expect(events(lines)).toEqual([["string", { component: "hp-docker-executor", event: "terminal_own_mark", count: 2 }]]);
+    // A failure elsewhere in the same pass is still one: the components with the mark do not hide it.
+    mockDaemon.execReplies.push(OWN_MARK, { frames: [], exitCode: 1 }, { frames: [], exitCode: 0 });
+    await expect(reapAppStackTerminalShells(target)).rejects.toMatchObject({ code: "INTERNAL_ERROR", message: "The terminal clean-up did not finish" });
+    expect(events(lines).slice(1)).toEqual([["string", { component: "hp-docker-executor", event: "terminal_own_mark", count: 1 }]]);
+  });
+
+  it("the start-up pass logs nothing when no component carries the mark", async () => {
+    const { adapter, mockDaemon } = await setup();
+    const target = (adapter as unknown as { execTarget: DockerExecTarget }).execTarget;
+    add(mockDaemon, component("web", { execIds: ["e1"] }));
+    const lines = logged();
+    await expect(reapAppStackTerminalShells(target)).resolves.toBeUndefined();
+    expect(lines).toEqual([]);
+  });
+
+  it("the terminal of a site is unchanged: that exit code from its clean-up is a failure", async () => {
+    const mockDaemon = await startMockDockerDaemon({ execUpgrade: true });
+    cleanup.push(() => mockDaemon.close());
+    const siteLabels = { [MANAGED_DOCKER_LABELS.siteId]: "site_a", [MANAGED_DOCKER_LABELS.serviceInstanceId]: "svc_site_a" };
+    add(mockDaemon, { ...component("site", { execIds: ["e0"] }), id: "hp_site_a_id", name: "hp_site_a", labels: siteLabels });
+    const adapter = new DockerEngineSocketAdapter({ dockerSocketPath: mockDaemon.socketPath });
+    mockDaemon.execReplies.push(OWN_MARK);
+    await expect(adapter.reapTerminalShells()).rejects.toMatchObject({ code: "INTERNAL_ERROR", message: "The terminal clean-up did not finish" });
+    expect(siteKills(mockDaemon)).toHaveLength(1);
   });
 });
 

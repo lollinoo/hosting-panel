@@ -289,6 +289,7 @@ export { resolveSimulatorSiteType, type SimulatorSiteType, type SimulatorSiteOps
 export type { TerminalLimits } from "./terminal-sessions.js";
 
 export {
+  APP_STACK_TERMINAL_KILL_OWN_MARK_EXIT,
   APP_STACK_TERMINAL_KILL_SCRIPT,
   TERMINAL_CONSOLE_SIZE,
   TERMINAL_END_SETTLE_MS,

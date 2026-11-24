@@ -452,7 +452,10 @@ terminal of the sites (`ADR-0027`) with a different place and a different user.
 8. **After the executor was restarted.** Nothing to do. The open sessions end as `executor_gone`, and at its start the
    executor kills what a session left in every running component that still has a command open, without restarting
    any component. If that pass fails, the executor logs one line with `"event":"terminal_reap_failed"` and a code
-   (`journalctl -u hp-docker-executor`); it tries again at its next start.
+   (`journalctl -u hp-docker-executor`); it tries again at its next start. In a component whose own environment
+   spells the session's mark (step 10), that pass kills nothing: the executor logs one line with
+   `"event":"terminal_own_mark"` and the number of such components, and what a session left there stays until the
+   customer's **Riavvia**.
 9. **Known limits.** A process that deliberately leaves the session and removes the session's mark from its own
    environment survives the end of the session; a background program can also survive when the executor dies within
    one second after a shell ended by itself. Either stays inside the component's limits, and nobody is connected to
