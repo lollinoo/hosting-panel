@@ -18,7 +18,7 @@ import {
   users,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashPassword } from "../src/auth/password.js";
@@ -359,6 +359,33 @@ describe("WordPress import: the customer's routes", () => {
       expect([path, refused.status, said]).toEqual([path, status, why]);
     }
     expect(await audits("site.wordpress.import.file_picked")).toHaveLength(1);
+  });
+
+  // The take moves the file, so it is never asked again; a lost or unreadable answer is not a pick (#182).
+  it.each(["timed out", "answered unreadably"] as const)("a pick whose take %s answers OPERATION_AMBIGUOUS, is sent once and is not audited", async (why) => {
+    sim.files.seed(svc, [{ path: "exports/site.sql", kind: "file", data: DUMP }]);
+    const real = sim.siteFiles.bind(sim);
+    let takes = 0;
+    sim.siteFiles = (async (req: Parameters<typeof real>[0]) => {
+      if (req.op === "import.take") takes += 1;
+      const out = await real(req);
+      if (req.op === "import.take" && why === "answered unreadably") {
+        throw new ExecutorIpcClientError(
+          "Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON",
+          "OPERATION_AMBIGUOUS",
+          502,
+          true,
+        );
+      }
+      return out;
+    }) as typeof sim.siteFiles;
+    if (why === "timed out") sim.files.failNextImport("import.take", "timeout");
+
+    const lost = await call("POST", `${base()}/files/dump/pick`, a.token, { path: "exports/site.sql" });
+    expect([lost.status, lost.body.error.code]).toEqual([502, "OPERATION_AMBIGUOUS"]);
+    expect(lost.body.error.message).not.toMatch(/IPC|executor|dispatch|JSON/i);
+    expect(takes).toBe(1);
+    expect(await audits("site.wordpress.import.file_picked")).toEqual([]);
   });
 
   it("discard empties both slots and is audited", async () => {

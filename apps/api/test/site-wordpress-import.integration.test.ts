@@ -25,7 +25,7 @@ import {
   users,
   type DatabaseClient,
 } from "@hosting-panel/database";
-import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { ExecutorIpcClientError, InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
 import type { SiteFilesRequest, SiteJobRequest } from "@hosting-panel/executor-contracts";
 import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -274,6 +274,9 @@ const DUMP = Buffer.from("-- MariaDB dump\nCREATE TABLE `wp_options` (id int);\n
 /** R151: never sent a second time once started. */
 const NEVER_TWICE = ["import.unpack", "db.import:prepare", "db.import-load", "import.switch", "db.import:switch", "wordpress.import-finalize"];
 const ambiguous = () => Object.assign(new Error("timeout"), { code: "OPERATION_AMBIGUOUS", ambiguousOutcome: true });
+/** The client's answer when the executor's answer to a sent change cannot be read (#182). */
+const unreadable = () =>
+  new ExecutorIpcClientError("Unreadable docker-executor IPC answer after mutating command dispatch: the body is not JSON", "OPERATION_AMBIGUOUS", 502, true);
 
 type Customer = { orgId: string; token: string; siteId: string; userId: string };
 
@@ -558,15 +561,19 @@ describe("qa-api: the import routes across tenants and roles, and an operation l
     unpack: () => sim.files.failNextImport("import.unpack", "timeout"),
     database: () => faults.set("db.import-load", { when: "after", error: ambiguous }),
     switch: () => sim.files.failNextImport("import.switch", "timeout"),
+    "unpack, answered unreadably": () => faults.set("import.unpack", { when: "after", error: unreadable }),
+    "switch, answered unreadably": () => faults.set("import.switch", { when: "after", error: unreadable }),
   };
 
   it.each([
-    ["unpack", "nothing_changed"],
-    ["database", "nothing_changed"],
-    ["switch", "site_restored"],
-  ])("unknown during %s: the undo pair, %s, reason interrupted, the slots kept, the lock released", async (at, outcome) => {
+    ["unpack", "nothing_changed", "unpack"],
+    ["database", "nothing_changed", "database"],
+    ["switch", "site_restored", "switch"],
+    ["unpack, answered unreadably", "nothing_changed", "unpack"],
+    ["switch, answered unreadably", "site_restored", "switch"],
+  ])("unknown during %s: the undo pair, %s, reason interrupted, the slots kept, the lock released", async (at, outcome, step) => {
     const opId = await crash(a, arms[at]!);
-    expect(await stepsOf(opId)).toMatchObject({ [at]: "unknown" });
+    expect(await stepsOf(opId)).toMatchObject({ [step]: "unknown" });
     const status = await siteStatus(a);
 
     const { result, calls } = await pass();
