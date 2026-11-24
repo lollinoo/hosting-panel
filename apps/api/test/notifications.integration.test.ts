@@ -17,6 +17,7 @@ import {
   notificationChannels,
   notificationDeliveries,
   observedStates,
+  operations,
   organizations,
   platformInstallations,
   recordObservedStateReconciliationTransactional,
@@ -708,6 +709,28 @@ describe("notifications (ADR-0040)", () => {
       expect(customer).toHaveLength(1);
       expect((customer[0]!.body["events"] as NotificationEvent[]).map((e) => [e.kind, e.state, e.site])).toEqual([["site_container_down", "opened", "Sito Mario"]]);
       expect(customer[0]!.raw).not.toContain(siteId);
+    });
+
+    it("with the real look: a stuck backup of an application reaches the server's channel by its operation, not the customer's", async () => {
+      await start({ stub: false });
+      const mario = await createCustomer("Hotel Mario", "mario@hotel.example.test");
+      await adminWebhook();
+      expect((await save(mario.base, mario.token, "webhook", { enabled: true, groups: CUSTOMER_GROUPS, url: CUSTOMER_HOOK })).status).toBe(200);
+      // ADR-0038 adds no alert kind: an application's backup is an operation, told by the operation alerts.
+      const past = new Date(Date.now() - 10 * MIN);
+      await dbClient.db.insert(operations).values({
+        id: `op_${randomUUID()}`, organizationId: mario.orgId, kind: "stack.backup", status: "processing",
+        resourceType: "stack", resourceId: "stk_mario", leaseExpiresAt: past, startedAt: past, updatedAt: past,
+      });
+
+      await app.notifications.tick();
+      await app.notifications.tick();
+      const server = outbound.to(ADMIN_HOOK);
+      expect(server).toHaveLength(1);
+      const body = NotificationWebhookBodySchema.parse(server[0]!.body);
+      expect(body.events.filter((e) => e.kind === "operation_stuck").map((e) => [e.state, e.operation, e.site])).toEqual([["opened", "stack.backup", null]]);
+      expect(body.text).toContain("stack.backup");
+      expect(outbound.to(CUSTOMER_HOOK)).toEqual([]);
     });
   });
 
