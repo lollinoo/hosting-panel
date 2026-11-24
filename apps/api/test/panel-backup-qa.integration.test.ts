@@ -46,7 +46,7 @@ import { totpCodeAt } from "../src/auth/totp.js";
 import { BackupSchedulerService } from "../src/backups/backup-scheduler.service.js";
 import { BackupSettingsService } from "../src/backups/backup-settings.service.js";
 import { PG_DUMP_PATH, runPanelDump, type PanelDumpCommand } from "../src/backups/panel-dump.js";
-import { SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
+import { BACKUP_BUSY_RETRY_MS, BACKUP_BUSY_WAIT_MS, SiteBackupsApplier } from "../src/backups/site-backups-applier.js";
 import { createServerAdmin, setupInstallation } from "../src/cli/accounts.js";
 import { createControlPlaneApp, type ControlPlaneAppHandle } from "../src/index.js";
 import { skipPasswordChange } from "./fixtures/password-change.js";
@@ -444,6 +444,8 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
     };
     applier.pollMs = 0;
     applier.pollGiveUpMs = 120_000;
+    applier.busyRetryMs = BACKUP_BUSY_RETRY_MS;
+    applier.busyWaitMs = BACKUP_BUSY_WAIT_MS;
     useRunner();
     await dbClient.db.delete(siteBackups);
     await dbClient.db.delete(outboxEvents);
@@ -748,6 +750,8 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
 
   it("Two destinations: a start refused for the second copy settles it failed and fails the op, the first stays", async () => {
     await addSecondPanelTarget();
+    // No wait for a free job slot: the refusal stands at once (the wait is in panel-backup.integration.test.ts).
+    applier.busyWaitMs = 0;
     const opId = await queuePanel();
     hook = (req) =>
       req.action === "panelStart" && req.jobId !== opId
@@ -959,6 +963,155 @@ describe("QA: nightly panel copy and the administrator's restore (M3c)", () => {
       token: ownerAToken,
     });
     expect([403, 404]).toContain(platformList.status);
+  });
+
+  // ---------------------------------------------------------------- Sites while the executor's job slots are full
+
+  /** Two jobs of other backups take the executor's two job slots; the function returned reads them to their end. */
+  async function takeBothJobSlots(): Promise<() => Promise<void>> {
+    const jobIds = ["other-0", "other-1"].map((other) => ({ other, jobId: `op_${randomUUID().replace(/-/g, "")}` }));
+    for (const { other, jobId } of jobIds) {
+      await origBackups({ action: "start", jobId, siteId: other, serviceInstanceId: other, target: TARGET } as BackupsIpcRequest);
+    }
+    return async () => {
+      for (const { jobId } of jobIds) await origBackups({ action: "status", jobId } as BackupsIpcRequest);
+    };
+  }
+  const startsFor = (siteId: string) => calls.filter((c) => c.action === "start" && c.siteId === siteId).length;
+  const siteBackupOps = async () =>
+    (await dbClient.db.select().from(operations))
+      .filter((o) => o.kind === "site.backups.create")
+      .sort((a, b) => a.submittedAt.getTime() - b.submittedAt.getTime());
+  /** The starts of the sites refused as busy are counted; the `freeAt`-th one frees the slots. */
+  const countRefusals = (free: () => Promise<void>, freeAt: number) => {
+    let refusals = 0;
+    hook = (req) => {
+      if (req.action !== "start" || req.siteId.startsWith("other-")) return undefined;
+      return origBackups(req).catch(async (err: unknown) => {
+        refusals += 1;
+        if (refusals === freeAt) await free();
+        throw err;
+      });
+    };
+  };
+
+  it("Busy: a nightly site backup refused while two other jobs fill the executor is asked again under the same operation", async () => {
+    applier.busyRetryMs = 1;
+    const free = await takeBothJobSlots();
+    try {
+      countRefusals(free, 2);
+      await scheduler.tick(new Date(NIGHT.getTime() + 20 * DAY_MS));
+      await app.outboxWorker.processPendingOnce();
+
+      const [op, ...others] = await siteBackupOps();
+      expect(others).toEqual([]);
+      expect(op!.status).toBe("succeeded");
+      expect(startsFor(op!.resourceId)).toBe(3);
+      const rows = (await dbClient.db.select().from(siteBackups)).filter((r) => r.operationId === op!.id);
+      expect(rows).toEqual([expect.objectContaining({ kind: "nightly", status: "succeeded", problem: null })]);
+    } finally {
+      await free();
+    }
+  });
+
+  it("Busy: the nightly site backups of a run share one wait; once it is over, the next site refused fails at once", async () => {
+    applier.busyRetryMs = 1;
+    applier.busyWaitMs = 30;
+    const free = await takeBothJobSlots();
+    try {
+      const night = new Date(NIGHT.getTime() + 21 * DAY_MS);
+      for (let i = 0; i < 2; i += 1) {
+        await scheduler.tick(night);
+        await app.outboxWorker.processPendingOnce();
+      }
+
+      const ops = await siteBackupOps();
+      expect(ops.map((o) => o.status)).toEqual(["failed", "failed"]);
+      // The first site asked again until the run's wait was over; the second one, refused after it, is not asked again.
+      expect(startsFor(ops[0]!.resourceId)).toBeGreaterThan(1);
+      expect(startsFor(ops[1]!.resourceId)).toBe(1);
+      const rows = (await dbClient.db.select().from(siteBackups)).filter((r) => r.kind === "nightly");
+      expect(rows.map((r) => [r.status, r.problem])).toEqual([
+        ["failed", "site_busy"],
+        ["failed", "site_busy"],
+      ]);
+    } finally {
+      await free();
+    }
+  });
+
+  it("Busy: the night has one wait of 15 minutes, the panel copy's too: refused after its end, the copy fails at once", async () => {
+    applier.busyRetryMs = 1;
+    applier.busyWaitMs = 30;
+    const free = await takeBothJobSlots();
+    try {
+      // Both sites wait out the night's wait and fail; the panel copy is then queued in the same run.
+      const opId = await queuePanel(new Date(NIGHT.getTime() + 22 * DAY_MS));
+      expect((await siteBackupOps()).map((o) => o.status)).toEqual(["failed", "failed"]);
+      await app.outboxWorker.processPendingOnce();
+
+      // No wait of its own: refused once, it is not asked again.
+      expect(calls.filter((c) => c.action === "panelStart").map((c) => c.jobId)).toEqual([opId]);
+      expect((await panelOps()).find((o) => o.id === opId)?.status).toBe("failed");
+    } finally {
+      await free();
+    }
+    expect(BACKUP_BUSY_WAIT_MS).toBe(15 * 60_000);
+  });
+
+  it("Busy: a backup a customer asks for during the night's wait is taken up when the wait ends, then refused at once", async () => {
+    applier.busyRetryMs = 1;
+    applier.busyWaitMs = 30;
+    const free = await takeBothJobSlots();
+    try {
+      await scheduler.tick(new Date(NIGHT.getTime() + 23 * DAY_MS));
+      const [nightly] = await siteBackupOps();
+      // Asked for the other site while the nightly backup is queued in the same worker lane.
+      const other = nightly!.resourceId === siteA ? siteB : siteA;
+      const res = await request(app.baseUrl!, "POST", `/v1/organizations/${orgA}/managed-sites/${other}/backups`, {
+        token: ownerAToken,
+        body: {},
+        headers: { "Idempotency-Key": randomUUID() },
+      });
+      expect(res.status).toBe(202);
+      await app.outboxWorker.processPendingOnce();
+
+      expect((await siteBackupOps()).map((o) => [o.resourceId, o.status])).toEqual([
+        [nightly!.resourceId, "failed"],
+        [other, "failed"],
+      ]);
+      // Every start of the nightly backup, the night's wait, came before the customer's one start.
+      const starts = calls.flatMap((c) => (c.action === "start" ? [c.siteId] : []));
+      expect(starts.filter((s) => s === nightly!.resourceId).length).toBeGreaterThan(1);
+      expect(starts.filter((s) => s === other)).toHaveLength(1);
+      expect(starts.at(-1)).toBe(other);
+      const rows = (await dbClient.db.select().from(siteBackups)).filter((r) => r.siteId === other);
+      expect(rows.map((r) => [r.kind, r.status, r.problem])).toEqual([["manual", "failed", "site_busy"]]);
+    } finally {
+      await free();
+    }
+  });
+
+  it("Busy: a backup a customer asks for is refused at once while two other jobs fill the executor", async () => {
+    applier.busyRetryMs = 1;
+    const free = await takeBothJobSlots();
+    try {
+      countRefusals(free, 2);
+      const res = await request(app.baseUrl!, "POST", `/v1/organizations/${orgA}/managed-sites/${siteA}/backups`, {
+        token: ownerAToken,
+        body: {},
+        headers: { "Idempotency-Key": randomUUID() },
+      });
+      expect(res.status).toBe(202);
+      await app.outboxWorker.processPendingOnce();
+
+      expect((await siteBackupOps()).map((o) => o.status)).toEqual(["failed"]);
+      expect(startsFor(siteA)).toBe(1);
+      const rows = await dbClient.db.select().from(siteBackups);
+      expect(rows.map((r) => [r.kind, r.status, r.problem])).toEqual([["manual", "failed", "site_busy"]]);
+    } finally {
+      await free();
+    }
   });
 
   // ---------------------------------------------------------------- Admin restore: access

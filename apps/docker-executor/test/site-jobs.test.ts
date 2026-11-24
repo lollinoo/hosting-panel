@@ -1139,6 +1139,26 @@ describe("DockerEngineSocketAdapter.runSiteJob", () => {
     expect((await readdir(secretsRootDir)).sort()).toEqual(["svc_keep"]);
   });
 
+  it("cleanupOrphanJobs goes on after a removal that fails, then reports it", async () => {
+    const { adapter, mockDaemon, secretsRootDir, jobContainers, addRunningMariadb } = await setup();
+    addRunningMariadb();
+    const { writeServiceSecrets } = await import("../src/index.js");
+    await writeServiceSecrets(secretsRootDir, "job_old", { HP_DB_PASSWORD: DB_PW });
+    for (const name of ["job_stuck", "job_old"]) {
+      mockDaemon.containers.set(name, {
+        ...mockDaemon.containers.get("mariadb-id")!,
+        id: name,
+        name,
+        labels: { "io.hostingpanel.role": "site_job" },
+      });
+    }
+    mockDaemon.failDeletes.remaining = 1;
+    await expect(adapter.cleanupOrphanJobs()).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+    // Only the container whose removal failed is left; the rest of the clean-up ran.
+    expect(jobContainers().map((c) => c.name)).toEqual(["job_stuck"]);
+    expect(await readdir(secretsRootDir)).toEqual([]);
+  });
+
   describe("WordPress tools kinds", () => {
     const stateLine = JSON.stringify({
       coreVersion: "6.8.1",

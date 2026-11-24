@@ -165,7 +165,9 @@ These are written in `docs/architecture/adr/0035-application-stacks.md` §4 or i
 and they do not change a verdict.
 
 - Stack hostnames are ACME only; no manual certificate on a stack hostname.
-- No stack backup, no public TCP or UDP port, no Git build.
+- No public TCP or UDP port, no Git build. No stack backup at the commit of this report: the backup and restore of an
+  application came later (`docs/architecture/adr/0038-application-backups.md`) and are outside this report; row B4 is
+  today the answer of a server where backups cannot run.
 - The downgrade gate ignores the retained volumes of deleted stacks; a never-deployed draft holds it.
 - After a host reboot, components with secrets need a restart from the panel; nothing repairs them
   automatically.

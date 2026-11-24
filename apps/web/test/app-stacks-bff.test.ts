@@ -19,11 +19,14 @@ import * as secretsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/s
 import * as domainsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/route";
 import * as domainRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/domains/[domainId]/route";
 import * as logsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/components/[componentKey]/logs/route";
+import * as backupsRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/route";
+import * as restoreRoute from "@/app/api/bff/orgs/[orgId]/app-stacks/[stackId]/backups/[backupId]/restore/route";
 
 type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
 
 const ORG = "org_1";
 const STACK = "stk_a1";
+const BACKUP = "sbak_0123456789abcdef01234567";
 const BASE = `v1/organizations/${ORG}/app-stacks`;
 const HASH = "a".repeat(64);
 const SECRET = "S3cr3t-planted";
@@ -251,6 +254,31 @@ const cases: Case[] = [
     timeoutMs: 8_000,
     okBodies: [{}],
     badBodies: [{ x: 1 }, [], null],
+  },
+  {
+    name: "backup create",
+    handler: backupsRoute.POST as unknown as Handler,
+    method: "POST",
+    params: { orgId: ORG, stackId: STACK },
+    path: `${BASE}/${STACK}/backups`,
+    body: {},
+    idempotency: true,
+    status: 202,
+    timeoutMs: 8_000,
+    badBodies: EMPTY_ONLY,
+  },
+  {
+    name: "backup restore",
+    handler: restoreRoute.POST as unknown as Handler,
+    method: "POST",
+    params: { orgId: ORG, stackId: STACK, backupId: BACKUP },
+    path: `${BASE}/${STACK}/backups/${BACKUP}/restore`,
+    body: { confirmName: "Notes" },
+    idempotency: true,
+    status: 202,
+    timeoutMs: 8_000,
+    okBodies: [{ confirmName: "a".repeat(64) }],
+    badBodies: [{}, { confirmName: 1 }, { confirmName: "Notes", extra: 1 }, { confirmName: "a".repeat(65) }, { confirmName: "Notes", backupId: BACKUP }, [], null],
   },
   {
     name: "component logs",
