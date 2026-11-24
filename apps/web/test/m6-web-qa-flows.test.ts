@@ -143,6 +143,8 @@ const webStack = (over: Partial<AppStackDetailDto> = {}): AppStackDetailDto => (
   secretParameters: [{ key: "admin_password", label: "Admin password", required: true, isSet: true, version: 1, setAt: NOW }],
   volumes: [],
   ingress: [{ componentKey: "web", port: 8080 }],
+  pathTargets: [{ componentKey: "web", port: 8080 }],
+  routesPending: false,
   cpuMilli: 500,
   memoryBytes: String(256 * MIB),
   upgrade: null,

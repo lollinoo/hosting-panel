@@ -2,7 +2,7 @@ import * as React from "react";
 import { createElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AppStackDeploymentDto, AppStackDetailDto, AppStackDomainDto } from "@hosting-panel/contracts";
+import { UpdateAppStackDomainInputSchema, type AppStackDeploymentDto, type AppStackDetailDto, type AppStackDomainDto } from "@hosting-panel/contracts";
 
 const loc = vi.hoisted(() => ({ value: "en" as "en" | "it" }));
 const mockData = vi.hoisted(() => ({ getCustomerContext: vi.fn() }));
@@ -55,6 +55,7 @@ import {
 import { AppStackSecrets } from "@/components/app-stacks/app-stack-secrets";
 import { APP_STACK_LOG_TAIL, AppStackLogs } from "@/components/app-stacks/app-stack-logs";
 import { AppStackDomains } from "@/components/app-stacks/app-stack-domains";
+import { AppStackDomainOptions, buildDomainOptions } from "@/components/app-stacks/app-stack-domain-options";
 
 const NOW = "2026-11-22T10:00:00.000Z";
 const ORG = "org_a1";
@@ -102,6 +103,8 @@ const DETAIL: AppStackDetailDto = {
   ],
   volumes: [{ key: "notes", status: "present", retentionPolicy: "retain" }],
   ingress: [{ componentKey: "web", port: 8080 }],
+  pathTargets: [{ componentKey: "web", port: 8080 }],
+  routesPending: false,
   cpuMilli: 750,
   memoryBytes: String(384 * MIB),
   upgrade: null,
@@ -121,6 +124,10 @@ const DOMAIN: AppStackDomainDto = {
   certificateProblem: null,
   certificateExpiresAt: "2027-02-20T10:00:00.000Z",
   checkedAt: NOW,
+  redirectToDomainId: null,
+  compression: false,
+  protection: null,
+  pathRoutes: [],
 };
 
 const decode = (s: string) => s.replace(/&#x27;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
@@ -277,6 +284,16 @@ describe("detail page", () => {
     const h = await page();
     expect(h.split(en.apps.detail.sectionError)).toHaveLength(3);
     expect(h).toContain(en.apps.detail.section.danger);
+  });
+
+  it("an address whose saved options are not published yet says so on the page", async () => {
+    const shown = [{ ...DOMAIN, protection: { username: "guest" } }];
+    answer({ [UP]: ok({ ...DETAIL, routesPending: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok(shown) });
+    expect(await page()).toContain(en.apps.domains.options.summary.pending);
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok(shown) });
+    const published = await page();
+    expect(published).toContain(en.apps.domains.options.summary.protected);
+    expect(published).not.toContain(en.apps.domains.options.summary.pending);
   });
 
   it("a change that failed once its components were created: the page names the version installed and the one that was not", async () => {
@@ -526,7 +543,16 @@ describe("web addresses", () => {
     { componentKey: "web", port: 8080 },
     { componentKey: "admin", port: 9000 },
   ];
-  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN], ingress: INGRESS, ...over });
+  const props = (over: Record<string, unknown> = {}) => ({
+    orgId: ORG,
+    stackId: "stk_a1",
+    csrfToken: "csrf",
+    initial: [DOMAIN],
+    ingress: INGRESS,
+    pathTargets: INGRESS,
+    pending: false,
+    ...over,
+  });
   const SECOND: AppStackDomainDto = { ...DOMAIN, id: "sdom_2", hostname: "notes2.example.test", componentKey: "admin", port: 9000, status: "pending", certificateStatus: "requested", certificateExpiresAt: null };
 
   it("rows show the address, its target, its status and certificate in words; the add form has its labels and hint", () => {
@@ -556,7 +582,7 @@ describe("web addresses", () => {
     expect(html(callHooks(AppStackDomains, props({ initial: eight })).out)).not.toContain("app-domain-hostname");
   });
 
-  it("add sends the trimmed lower-cased address and its target; the answered list replaces the rows", async () => {
+  it("add sends the trimmed lower-cased address, its target and compression on; the answered list replaces the rows", async () => {
     const { out, sets } = callHooks(AppStackDomains, props(), en, { 1: "  Notes2.Example.TEST ", 2: 1 });
     keyedSend.mockResolvedValue({ ok: true, data: { data: [DOMAIN, SECOND] } });
     await submit(out);
@@ -564,6 +590,7 @@ describe("web addresses", () => {
       hostname: "notes2.example.test",
       componentKey: "admin",
       port: 9000,
+      compression: true,
     });
     expect(sets).toContainEqual([0, [DOMAIN, SECOND]]);
     expect(sets).toContainEqual([1, ""]);
@@ -599,5 +626,351 @@ describe("web addresses", () => {
     expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "remove:sdom_1", "DELETE", `${BASE}/domains/sdom_1`, {});
     expect(sets).toContainEqual([0, []]);
     expect(sets).toContainEqual([5, null]);
+  });
+});
+
+describe("address options (ADR-0037)", () => {
+  const INGRESS = [
+    { componentKey: "web", port: 8080 },
+    { componentKey: "admin", port: 9000 },
+  ];
+  const SECOND: AppStackDomainDto = { ...DOMAIN, id: "sdom_2", hostname: "notes2.example.test", status: "pending", certificateStatus: "requested", certificateExpiresAt: null };
+  const THIRD: AppStackDomainDto = { ...SECOND, id: "sdom_3", hostname: "old.example.test", redirectToDomainId: "sdom_2" };
+  const PASSWORD = "correct horse battery";
+  const PLAIN = { redirectTo: "", compression: false, protect: false, username: "", password: "", paths: [] };
+  const API_PATH = { pathPrefix: "/api", target: "admin:9000", stripPrefix: true };
+  const o = en.apps.domains.options;
+  const props = (over: Record<string, unknown> = {}) => ({
+    orgId: ORG,
+    stackId: "stk_a1",
+    csrfToken: "csrf",
+    initial: [DOMAIN, SECOND],
+    ingress: INGRESS,
+    pathTargets: INGRESS,
+    pending: false,
+    ...over,
+  });
+  const dialogProps = (over: Record<string, unknown> = {}) => ({
+    domain: DOMAIN,
+    rows: [DOMAIN, SECOND],
+    ingress: INGRESS,
+    busy: false,
+    error: null,
+    onSave: vi.fn(),
+    onClose: vi.fn(),
+    ...over,
+  });
+  const dialogOf = (tree: unknown) => els(tree).find((e) => e.type === AppStackDomainOptions);
+  const save = (tree: unknown, body: unknown) => (dialogOf(tree)!.props.onSave as (b: unknown) => Promise<void>)(body);
+  const alerts = (h: string) => h.match(/role="alert"/g) ?? [];
+  /** The opening tag of the field with that id, whatever the order of its attributes. */
+  const tag = (h: string, id: string) => h.match(new RegExp(`<(?:input|select)\\b[^>]*\\sid="${id}"[^>]*>`))?.[0] ?? "";
+
+  it("the form builds the four options together, and every body it builds is one the API accepts", () => {
+    const built = [
+      buildDomainOptions(PLAIN, false),
+      buildDomainOptions({ ...PLAIN, compression: true, protect: true, username: " guest ", password: PASSWORD }, false),
+      buildDomainOptions({ ...PLAIN, protect: true, username: "guest" }, true),
+      buildDomainOptions({ ...PLAIN, paths: [{ ...API_PATH, pathPrefix: " /api " }, { pathPrefix: "/docs/v2", target: "web:8080", stripPrefix: false }] }, false),
+      buildDomainOptions({ ...PLAIN, redirectTo: "sdom_2", compression: true, protect: true, username: "-bad", password: "x", paths: [{ ...API_PATH, pathPrefix: "api" }] }, false),
+    ];
+    const bodies = built.map((b) => (b.ok ? b.body : null));
+    expect(bodies).toEqual([
+      { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] },
+      { redirectToDomainId: null, compression: true, protection: { username: "guest", password: PASSWORD }, pathRoutes: [] },
+      // an empty password field keeps the one already stored: the key is left out, not sent empty
+      { redirectToDomainId: null, compression: false, protection: { username: "guest" }, pathRoutes: [] },
+      {
+        redirectToDomainId: null,
+        compression: false,
+        protection: null,
+        pathRoutes: [
+          { pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true },
+          { pathPrefix: "/docs/v2", componentKey: "web", port: 8080, stripPrefix: false },
+        ],
+      },
+      // a redirecting address sends no password and no path, whatever its hidden fields hold; compression is kept
+      { redirectToDomainId: "sdom_2", compression: true, protection: null, pathRoutes: [] },
+    ]);
+    for (const body of bodies) expect(UpdateAppStackDomainInputSchema.safeParse(body).success, JSON.stringify(body)).toBe(true);
+    expect(Object.keys(bodies[2]!.protection!)).toEqual(["username"]);
+  });
+
+  it("names the field to correct instead of sending a body the API would refuse without saying which", () => {
+    const problems = (form: Partial<Parameters<typeof buildDomainOptions>[0]>, hasPassword = false) => {
+      const built = buildDomainOptions({ ...PLAIN, ...form }, hasPassword);
+      return built.ok ? null : built.problems;
+    };
+    expect(problems({ protect: true, username: "guest" })).toEqual({ password: "passwordRequired" });
+    expect(problems({ protect: true, username: "guest", password: "short" })).toEqual({ password: "password" });
+    expect(problems({ protect: true, username: "guest", password: "pässword-with-accent" })).toEqual({ password: "password" });
+    expect(problems({ protect: true, username: "guest", password: "x".repeat(129) })).toEqual({ password: "password" });
+    expect(problems({ protect: true, username: "-guest", password: PASSWORD })).toEqual({ username: "username" });
+    expect(problems({ protect: true, username: "a".repeat(33), password: PASSWORD })).toEqual({ username: "username" });
+    expect(problems({ protect: true }, true)).toEqual({ username: "username" });
+    for (const pathPrefix of ["", "api", "/", "/.well-known", "/api/", "/a b", `/${"a".repeat(33)}`, "/a/b/c/d/e", `/${"a".repeat(32)}/${"b".repeat(32)}`])
+      expect(problems({ paths: [{ ...API_PATH, pathPrefix }] }), pathPrefix).toEqual({ "path:0": "path" });
+    expect(problems({ paths: [API_PATH, { pathPrefix: "/api", target: "web:8080", stripPrefix: false }] })).toEqual({ "path:1": "pathTwice" });
+    expect(problems({ protect: true, username: "?", paths: [{ ...API_PATH, pathPrefix: "x" }] })).toEqual({
+      username: "username",
+      password: "passwordRequired",
+      "path:0": "path",
+    });
+    // protection not asked for: what its fields hold is not judged
+    expect(problems({ protect: false, username: "-bad", password: "x" })).toBeNull();
+    // what the form refuses is what the API's schema refuses
+    for (const pathPrefix of ["api", "/", "/.well-known", "/api/", `/${"a".repeat(32)}/${"b".repeat(32)}`]) {
+      const body = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [{ pathPrefix, componentKey: "web", port: 8080, stripPrefix: false }] };
+      expect(UpdateAppStackDomainInputSchema.safeParse(body).success, pathPrefix).toBe(false);
+    }
+  });
+
+  it("each row has its Options button, named after its address, and says in words what is set", () => {
+    const rows = [
+      { ...DOMAIN, protection: { username: "guest" }, pathRoutes: [{ pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true }] },
+      { ...SECOND, redirectToDomainId: "sdom_1" },
+    ];
+    const { out, sets } = callHooks(AppStackDomains, props({ initial: rows }));
+    const h = html(out);
+    for (const text of [o.summary.protected, format(o.summary.paths, { n: 1 }), format(o.summary.redirect, { hostname: "notes.example.test" })]) expect(h).toContain(text);
+    for (const d of rows) expect(h).toContain(`aria-label="${format(o.title, { hostname: d.hostname })}"`);
+    const plain = html(callHooks(AppStackDomains, props()).out);
+    for (const text of [o.summary.protected, format(o.summary.paths, { n: 0 }), format(o.summary.redirect, { hostname: "" }).trim()]) expect(plain).not.toContain(text);
+
+    const open = buttons(out, o.open);
+    expect(open).toHaveLength(2);
+    expect(dialogOf(out)).toBeUndefined();
+    (open[1]!.props.onClick as () => void)();
+    expect(sets).toEqual([
+      [4, null],
+      [7, null],
+      [6, "sdom_2"],
+    ]);
+  });
+
+  it("while the saved options are not published yet, every address that shows one says they are not active yet", () => {
+    const rows = [
+      { ...DOMAIN, protection: { username: "guest" } },
+      { ...SECOND, redirectToDomainId: "sdom_1" },
+      { ...DOMAIN, id: "sdom_3", hostname: "paths.example.test", pathRoutes: [{ pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true }] },
+      { ...DOMAIN, id: "sdom_4", hostname: "plain.example.test", compression: true },
+    ];
+    const pending = html(callHooks(AppStackDomains, props({ initial: rows, pending: true })).out);
+    expect(pending.split(o.summary.pending)).toHaveLength(4);
+    expect(html(callHooks(AppStackDomains, props({ initial: rows })).out)).not.toContain(o.summary.pending);
+    expect(itMsgs.apps.domains.options.summary.pending).not.toBe(o.summary.pending);
+  });
+
+  it("the dialog is for the chosen address; a refusal is shown once, inside it", () => {
+    const { out } = callHooks(AppStackDomains, props(), en, { 3: true, 4: "refused in words", 6: "sdom_2" });
+    const dialog = dialogOf(out)!;
+    expect(dialog.key).toBe("sdom_2");
+    expect(dialog.props).toMatchObject({ domain: SECOND, rows: [DOMAIN, SECOND], ingress: INGRESS, busy: true, error: "refused in words" });
+    const h = html(out);
+    expect(h).toContain(`<h2>${format(o.title, { hostname: "notes2.example.test" })}</h2>`);
+    expect(alerts(h)).toHaveLength(1);
+    expect(h.indexOf("refused in words")).toBeGreaterThan(h.indexOf("<h2>"));
+    // an address that left the list has no dialog, and the refusal is back on the page
+    const gone = html(callHooks(AppStackDomains, props(), en, { 4: "refused in words", 6: "sdom_9" }).out);
+    expect(gone).not.toContain("<h2>");
+    expect(alerts(gone)).toHaveLength(1);
+    (dialog.props.onClose as () => void)();
+  });
+
+  it("offers as path targets only those the application takes now, not every entry point of the version asked for", () => {
+    const withPath = { ...DOMAIN, pathRoutes: [{ pathPrefix: "/w", componentKey: "web", port: 8080, stripPrefix: false }] };
+    const { out } = callHooks(AppStackDomains, props({ initial: [withPath, SECOND], pathTargets: INGRESS.slice(0, 1) }), en, { 6: "sdom_1" });
+    expect(dialogOf(out)!.props.ingress).toEqual(INGRESS.slice(0, 1));
+    const h = html(out);
+    expect(h).toMatch(/<option[^>]*value="web:8080"/);
+    expect(h).not.toMatch(/<option[^>]*value="admin:9000"/);
+    // the new address form still offers every entry point of the version asked for
+    expect(byId(out, "app-domain-target")).toBeDefined();
+  });
+
+  it("offers as destinations only the other addresses that show the application; a destination cannot redirect in turn", () => {
+    const rows = [DOMAIN, SECOND, THIRD];
+    const h = html(callHooks(AppStackDomainOptions, dialogProps({ rows })).out);
+    const select = h.match(/<select[^>]*id="app-domain-redirect"[\s\S]*?<\/select>/)![0];
+    expect([...select.matchAll(/<option[^>]*>([^<]*)<\/option>/g)].map((x) => x[1])).toEqual([o.redirectNone, "notes2.example.test"]);
+    expect(h).toContain(o.redirectHint);
+
+    const destination = html(callHooks(AppStackDomainOptions, dialogProps({ domain: SECOND, rows })).out);
+    expect(destination).not.toContain("app-domain-redirect");
+    expect(destination).toContain(o.redirectIsTarget);
+    const alone = html(callHooks(AppStackDomainOptions, dialogProps({ rows: [DOMAIN] })).out);
+    expect(alone).not.toContain("app-domain-redirect");
+    expect(alone).toContain(o.redirectNoTarget);
+  });
+
+  it("while the address redirects, password, compression and paths are not offered", () => {
+    const stored = { ...THIRD, compression: true };
+    const h = html(callHooks(AppStackDomainOptions, dialogProps({ domain: stored, rows: [DOMAIN, SECOND, stored] })).out);
+    expect(h).toContain(o.redirectOn);
+    expect(h).toMatch(/<option[^>]*value="sdom_2"[^>]*selected=""/);
+    for (const id of ["app-domain-protect", "app-domain-username", "app-domain-password", "app-domain-compression", "app-domain-path-0"]) expect(h).not.toContain(`id="${id}"`);
+    expect(h).not.toContain(o.pathsAdvanced);
+    const off = html(callHooks(AppStackDomainOptions, dialogProps({ domain: stored, rows: [DOMAIN, SECOND, stored] }), en, { 0: "" }).out);
+    for (const id of ["app-domain-protect", "app-domain-compression"]) expect(off).toContain(`id="${id}"`);
+    expect(tag(off, "app-domain-compression")).toContain('checked=""');
+  });
+
+  it("the password field is write-only: no value in the markup, and nothing but the user name of a stored protection", () => {
+    const stored = { ...DOMAIN, protection: { username: "guest", passwordHash: "$apr1$planted" } } as unknown as AppStackDomainDto;
+    const h = html(callHooks(AppStackDomainOptions, dialogProps({ domain: stored })).out);
+    const input = tag(h, "app-domain-password");
+    for (const a of [/type="password"/, /autocomplete="new-password"/i, /spellcheck="false"/i, /aria-describedby="app-domain-password-note"/]) expect(input).toMatch(a);
+    expect(input).not.toMatch(/\svalue=/);
+    expect(tag(h, "app-domain-username")).toContain('value="guest"');
+    expect(h).toContain(o.passwordKeep);
+    expect(h).not.toContain(o.passwordNew);
+    expect(h).not.toContain("apr1");
+    // a certificate in use: the note about an unprotected connection is not shown
+    expect(h).not.toContain(o.insecure);
+
+    const fresh = html(callHooks(AppStackDomainOptions, dialogProps({ domain: SECOND }), en, { 2: true }).out);
+    expect(fresh).toContain(o.passwordNew);
+    expect(fresh).toContain(o.insecure);
+    expect(html(callHooks(AppStackDomainOptions, dialogProps({ domain: SECOND })).out)).not.toContain("app-domain-password");
+  });
+
+  it("paths stay under their advanced section: each has its own labelled fields, up to four", () => {
+    const stored = { ...DOMAIN, pathRoutes: [{ pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true }] };
+    const { out, sets } = callHooks(AppStackDomainOptions, dialogProps({ domain: stored }));
+    const h = html(out);
+    expect(h).toMatch(/<details[^>]*open=""/);
+    expect(tag(h, "app-domain-path-0")).toContain('value="/api"');
+    expect(tag(h, "app-domain-path-0-strip")).toContain('checked=""');
+    expect(h).toMatch(/<option[^>]*value="admin:9000"[^>]*selected=""/);
+    for (const text of [format(o.path, { n: 1 }), format(o.pathTarget, { n: 1 }), format(o.pathStrip, { n: 1 }), o.pathsHint]) expect(h).toContain(text);
+    expect(h).toContain(`aria-label="${format(o.pathRemove, { n: 1 })}"`);
+
+    (buttons(out, o.pathAdd)[0]!.props.onClick as () => void)();
+    expect(sets).toContainEqual([4, [API_PATH, { pathPrefix: "", target: "web:8080", stripPrefix: false }]]);
+    (els(out).find((e) => e.props["aria-label"] === format(o.pathRemove, { n: 1 }))!.props.onClick as () => void)();
+    expect(sets).toContainEqual([4, []]);
+
+    const closed = html(callHooks(AppStackDomainOptions, dialogProps()).out);
+    expect(closed).toContain(o.pathsAdvanced);
+    expect(closed).not.toMatch(/<details[^>]*open/);
+    const four = Array.from({ length: 4 }, (_, i) => ({ ...API_PATH, pathPrefix: `/p${i}` }));
+    expect(html(callHooks(AppStackDomainOptions, dialogProps(), en, { 4: four }).out)).not.toContain(o.pathAdd);
+    // a target the application no longer offers stays visible, as itself
+    const gone = html(callHooks(AppStackDomainOptions, dialogProps(), en, { 4: [{ ...API_PATH, target: "old:7000" }] }).out);
+    expect(gone).toMatch(new RegExp(`<option[^>]*value="old:7000"[^>]*>${o.pathTargetGone}</option>`));
+    // an application with nothing to show on the web has no paths to offer
+    expect(html(callHooks(AppStackDomainOptions, dialogProps({ ingress: [] })).out)).not.toContain(o.pathsAdvanced);
+  });
+
+  it("save hands over the options built from the form and empties the password field", async () => {
+    const onSave = vi.fn();
+    const { out, sets } = callHooks(AppStackDomainOptions, dialogProps({ onSave }), en, { 1: true, 2: true, 3: "guest", 4: [API_PATH] });
+    const ref = byId(out, "app-domain-password")!.props.ref as { current: { value: string } | null };
+    ref.current = { value: PASSWORD };
+    await submit(out);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledWith({
+      redirectToDomainId: null,
+      compression: true,
+      protection: { username: "guest", password: PASSWORD },
+      pathRoutes: [{ pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true }],
+    });
+    expect(ref.current.value).toBe("");
+    expect(sets).toEqual([[5, {}]]);
+    // while a save is running, a second one is not sent
+    const busy = callHooks(AppStackDomainOptions, dialogProps({ onSave, busy: true }));
+    await submit(busy.out);
+    expect(onSave).toHaveBeenCalledTimes(1);
+  });
+
+  it("a form with something to correct sends nothing and says where, each message tied to its field", async () => {
+    const onSave = vi.fn();
+    const { out, sets } = callHooks(AppStackDomainOptions, dialogProps({ onSave }), en, { 2: true, 3: "guest" });
+    await submit(out);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(sets).toEqual([[5, { password: "passwordRequired" }]]);
+
+    const wrong = { username: "username", password: "passwordRequired", "path:0": "pathTwice" };
+    const h = html(callHooks(AppStackDomainOptions, dialogProps(), en, { 2: true, 3: "-x", 4: [API_PATH], 5: wrong }).out);
+    expect(alerts(h)).toHaveLength(3);
+    for (const text of [o.problems.username, o.problems.passwordRequired, o.problems.pathTwice]) expect(h).toContain(text);
+    for (const [id, describedBy] of [
+      ["app-domain-username", "app-domain-username-problem"],
+      ["app-domain-password", "app-domain-password-note app-domain-password-problem"],
+      ["app-domain-path-0", "app-domain-paths-note app-domain-path-0-problem"],
+    ] as const) {
+      expect(tag(h, id), id).toContain('aria-invalid="true"');
+      expect(tag(h, id), id).toContain(`aria-describedby="${describedBy}"`);
+    }
+    for (const id of ["app-domain-username-problem", "app-domain-password-problem", "app-domain-path-0-problem"]) expect(h).toContain(`id="${id}"`);
+  });
+
+  it("saving is one PATCH for that address: the answered list replaces the rows, the dialog closes and the page says so", async () => {
+    const body = { redirectToDomainId: null, compression: true, protection: { username: "guest", password: PASSWORD }, pathRoutes: [] };
+    const answered = [{ ...DOMAIN, compression: true, protection: { username: "guest" } }, SECOND];
+    const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+    keyedSend.mockResolvedValue({ ok: true, data: { data: answered } });
+    await save(out, body);
+    expect(keyedSend).toHaveBeenCalledTimes(1);
+    expect(keyedSend).toHaveBeenCalledWith(expect.any(Object), "csrf", "options:sdom_1", "PATCH", `${BASE}/domains/sdom_1`, body);
+    for (const set of [
+      [0, answered],
+      [6, null],
+      [7, o.saved],
+    ])
+      expect(sets).toContainEqual(set);
+    expect(router.refresh).toHaveBeenCalledOnce();
+    const h = html(callHooks(AppStackDomains, props(), en, { 7: o.saved }).out);
+    expect(h).toMatch(new RegExp(`<p role="status"[^>]*>${o.saved}</p>`));
+    expect(alerts(h)).toHaveLength(0);
+  });
+
+  it("the page says when the saved options take effect, as the answer says: in a few moments, or when the application starts", async () => {
+    const body = { redirectToDomainId: null, compression: true, protection: null, pathRoutes: [] };
+    for (const [applies, text] of [
+      ["shortly", o.saved],
+      ["at_start", o.savedAtStart],
+    ] as const) {
+      const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+      keyedSend.mockResolvedValue({ ok: true, data: { data: [DOMAIN, SECOND], applies } });
+      await save(out, body);
+      expect(sets.filter(([slot]) => slot === 7), applies).toEqual([[7, null], [7, text]]);
+    }
+    expect(o.savedAtStart).not.toBe(o.saved);
+    expect(itMsgs.apps.domains.options.savedAtStart).not.toBe(itMsgs.apps.domains.options.saved);
+  });
+
+  it("an application whose web address cannot be rewritten now refuses the change, and the dialog says why", async () => {
+    const body = { redirectToDomainId: null, compression: true, protection: null, pathRoutes: [] };
+    const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+    keyedSend.mockResolvedValue({ ok: false, code: "RESOURCE_LOCKED", reason: "failed" });
+    await save(out, body);
+    expect(sets).toContainEqual([4, format(en.apps.reasons.status, { status: en.apps.status.failed })]);
+    expect(sets.filter(([slot]) => slot === 6 || slot === 7)).toEqual([[7, null]]);
+  });
+
+  it("a refusal keeps the dialog open and reads in words; while a request runs no second one is sent", async () => {
+    const body = { redirectToDomainId: "sdom_2", compression: false, protection: null, pathRoutes: [] };
+    for (const reason of ["redirect_target", "redirect_chain", "password_required", "unknown_ingress"] as const) {
+      const { out, sets } = callHooks(AppStackDomains, props(), en, { 6: "sdom_1" });
+      keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason });
+      await save(out, body);
+      expect(sets, reason).toContainEqual([4, en.apps.reasons[reason]]);
+      expect(sets.filter(([slot]) => slot === 6 || slot === 7), reason).toEqual([[7, null]]);
+    }
+    // each reason has its own sentence, not the generic one of its code
+    for (const reason of ["redirect_target", "redirect_chain", "password_required"] as const) expect(en.apps.reasons[reason]).not.toBe(en.errors.VALIDATION_ERROR);
+    expect(router.refresh).not.toHaveBeenCalled();
+
+    keyedSend.mockClear();
+    await save(callHooks(AppStackDomains, props(), en, { 3: true, 6: "sdom_1" }).out, body);
+    expect(keyedSend).not.toHaveBeenCalled();
+  });
+
+  it("Italian has its own words for every option, none of them the proxy's", () => {
+    const words = JSON.stringify([itMsgs.apps.domains.options, en.apps.domains.options, itMsgs.apps.reasons, en.apps.reasons]);
+    for (const jargon of [/middleware/i, /router/i, /traefik/i, /proxy/i, /basic ?auth/i, /gzip/i, /htpasswd/i, /apr1/i]) expect(words).not.toMatch(jargon);
+    const h = html(callHooks(AppStackDomainOptions, dialogProps({ domain: { ...DOMAIN, protection: { username: "guest" } } }), itMsgs).out, itMsgs);
+    for (const text of ["Reindirizza a", "Proteggi con password", "Comprimi le risposte", "Percorsi"]) expect(h).toContain(text);
   });
 });

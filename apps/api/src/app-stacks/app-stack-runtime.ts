@@ -52,6 +52,7 @@ import {
   APP_STACK_STEP_NOT_NEEDED_TEXT,
   APP_STACK_STEP_RUNNING_TEXT,
   APP_STACK_UNCERTAIN_TEXT,
+  appStackAddressesHash,
   appStackAggregate,
   appStackComponentReady,
   appStackEssentialKeys,
@@ -422,6 +423,8 @@ export class AppStackRuntime {
         stackStatus: status,
         ...(deploy ? { appliedRevisionId: plan.revisionId } : {}),
         appliedRoutesHash: routesHash,
+        // What the routes were made from, read before they were written (with no address too: an address added next differs).
+        appliedAddressesHash: appStackAddressesHash(domains, routesHash),
         health: { observedAt: this.#now(), components: health },
       });
     };
@@ -510,8 +513,9 @@ export class AppStackRuntime {
       await (entries.length > 0 ? port.publishAppStackRoutes({ plan, routes: entries }) : port.unpublishAppStackRoutes(ctx.ref));
     }
     // An address goes live (and gets its certificate) only once its route is written.
+    const written = new Set(entries.flatMap((e) => e.hosts.map((h) => h.hostname)));
     for (const row of domains) {
-      if (row.status === "pending" && ready.has(row.componentKey)) {
+      if (row.status === "pending" && written.has(row.hostname)) {
         await updateAppStackDomainState(this.#deps.db, { domainId: row.id, set: { status: "active" } });
       }
     }
@@ -547,6 +551,7 @@ export class AppStackRuntime {
         problem: null,
         stackStatus: status === "running" ? "running" : "degraded",
         appliedRoutesHash: routesHash,
+        appliedAddressesHash: appStackAddressesHash(domains, routesHash),
       });
     };
     // The previous route file stays in place on a definite failure.

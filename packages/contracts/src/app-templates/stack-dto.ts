@@ -9,6 +9,7 @@ import { AppTemplateParameterSchema } from "./spec.js";
 import { AppEntityIdSchema } from "./stack-ids.js";
 import { APP_STACK_LOG_TAIL_MAX, AppStackSecretFileContentSchema } from "./stack-ipc.js";
 import { APP_STACK_OPERATION_KINDS, MAX_APP_STACK_DOMAINS } from "./stack-operations.js";
+import { AppStackDomainRoutingDtoShape } from "./stack-routing.js";
 import {
   APP_STACK_RETENTION_POLICIES,
   APP_STACK_VOLUME_STATUSES,
@@ -53,8 +54,9 @@ export type CustomerAppTemplateDto = z.infer<typeof CustomerAppTemplateDtoSchema
 
 // ---- inputs ----
 export const AppStackNameSchema = z.string().trim().min(1).max(64).refine(noControl); // = 0025 CHECK 1..64
+/** `compression: true` creates the address with compression on (ADR-0037 R4); left out, it is off. */
 export const AppStackDomainEntrySchema = z
-  .object({ hostname: SiteDomainSchema, componentKey: AppStackKeySchema, port: AppStackPortSchema })
+  .object({ hostname: SiteDomainSchema, componentKey: AppStackKeySchema, port: AppStackPortSchema, compression: z.boolean().optional() })
   .strict();
 export type AppStackDomainEntry = z.infer<typeof AppStackDomainEntrySchema>;
 export const CreateAppStackInputSchema = z
@@ -176,6 +178,8 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
     z.object({ key: AppStackKeySchema, status: z.enum(APP_STACK_VOLUME_STATUSES), retentionPolicy: z.enum(APP_STACK_RETENTION_POLICIES) }),
   ),
   ingress: z.array(AppStackPlanIngressSchema),
+  pathTargets: z.array(AppStackPlanIngressSchema), // ADR-0037: what a path rule may point at now (the plan that runs and the desired one)
+  routesPending: z.boolean(), // ADR-0037: the saved addresses/options are not what the last published route file holds
   cpuMilli: z.number().int().nonnegative(),
   memoryBytes: MemoryBytesText,
   upgrade: z.object({ templateVersionId: AppEntityIdSchema, versionNumber: z.number().int().positive() }).nullable(),
@@ -212,6 +216,7 @@ export const AppStackDomainDtoSchema = z.object({
   certificateProblem: z.string().nullable(),
   certificateExpiresAt: IsoDateTimeSchema.nullable(),
   checkedAt: IsoDateTimeSchema.nullable(), // dns_checked_at
+  ...AppStackDomainRoutingDtoShape, // ADR-0037
 });
 export type AppStackDomainDto = z.infer<typeof AppStackDomainDtoSchema>;
 export const APP_STACK_DIFF_CHANGES = ["added", "updated", "removed", "unchanged"] as const;

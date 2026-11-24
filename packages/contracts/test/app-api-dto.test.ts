@@ -152,6 +152,8 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
       secretParameters: [{ key: "app_secret", label: "App secret", required: true, isSet: true, version: 1, setAt: AT }],
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       ingress: [{ componentKey: "app", port: 8080 }],
+      pathTargets: [{ componentKey: "app", port: 8080 }],
+      routesPending: false,
       cpuMilli: 1500, memoryBytes: "805306368",
       upgrade: { templateVersionId: "atv_demo_2", versionNumber: 2 },
       rollback: { revisionId: "astr_1", revisionNumber: 1, templateVersionNumber: 1 },
@@ -168,7 +170,8 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
     AppStackDomainDtoSchema,
     {
       id: "asd_1", hostname: "notes.example.com", componentKey: "app", port: 8080, status: "active", certificateStatus: "active",
-      certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT,
+      certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT, redirectToDomainId: null, compression: true,
+      protection: { username: "team" }, pathRoutes: [{ pathPrefix: "/api", componentKey: "api", port: 3000, stripPrefix: true }],
     },
   ],
   [
@@ -232,6 +235,26 @@ const INPUTS: [string, z.ZodType, Record<string, unknown>, boolean][] = [
   ["stack list query", AppStackListQuerySchema, { limit: "10" }, false],
   ["logs query", AppStackLogsQuerySchema, { tail: "10" }, false],
 ];
+
+describe("a new web address and compression (ADR-0037)", () => {
+  const entry = { hostname: "notes.example.com", componentKey: "app", port: 8080 };
+
+  it("takes true or false, and an entry without it parses to the same keys as before", () => {
+    expect(AddAppStackDomainInputSchema.parse(entry)).toEqual(entry);
+    for (const compression of [true, false]) expect(AddAppStackDomainInputSchema.parse({ ...entry, compression })).toEqual({ ...entry, compression });
+    for (const compression of ["true", 1, null]) expect(AddAppStackDomainInputSchema.safeParse({ ...entry, compression }).success, String(compression)).toBe(false);
+  });
+
+  it("is taken per address when an application is created", () => {
+    const made = CreateAppStackInputSchema.parse({
+      templateVersionId: "atv_demo_1",
+      name: "My notes",
+      deploy: false,
+      domains: [{ ...entry, compression: true }, { ...entry, hostname: "wiki.example.com" }],
+    });
+    expect(made.domains).toEqual([{ ...entry, compression: true }, { ...entry, hostname: "wiki.example.com" }]);
+  });
+});
 
 describe("app API input schemas", () => {
   it.each(INPUTS)("%s: strict, and {} refused when a field is required", (_name, schema, valid, hasRequired) => {

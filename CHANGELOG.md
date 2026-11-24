@@ -4,6 +4,14 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Routing options for application addresses (2026-11-24)
+*hosting-panel v0.11.0*
+
+**New Features**
+- **apps**: Routing options for application addresses
+
+---
+
 ### Extended application format, Compose importer and WordPress from the catalog (2026-11-24)
 *hosting-panel v0.10.0*
 

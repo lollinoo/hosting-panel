@@ -93,13 +93,14 @@ import {
   domainTargetsMissing,
   entriesOf,
   parameterValuesOf,
+  pathTargetsMissing,
   revisionFromPlan,
   sameEntries,
   secretVersionsOf,
   validatedSpec,
 } from "./app-stack-compile.js";
 import { diffAppStackPlans } from "./app-stack-diff.js";
-import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto } from "./app-stack-dto.js";
+import { appStackDeploymentDto, appStackDetailDto, appStackSummaryDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { customerIssuesError, mapAppStackError } from "./app-stack-errors.js";
 import { readAppStackComponentLogs } from "./app-stack-logs.js";
 
@@ -248,13 +249,18 @@ export class AppStacksService {
       if (r.idempotentReplay) return r;
       const generated = await this.#storeGenerated(tx, { organizationId, stackId }, generate);
       if (input.domains.length > 0) {
-        const entries = input.domains.map((d) => ({ hostname: d.hostname, componentKey: d.componentKey, internalPort: d.port }));
+        const entries = input.domains.map((d) => ({
+          hostname: d.hostname,
+          componentKey: d.componentKey,
+          internalPort: d.port,
+          compression: d.compression,
+        }));
         for (const row of await addAppStackDomainsTransactional(tx, { organizationId, stackId, entries })) {
           await ctx.audit(tx, {
             action: APP_AUDIT_ACTIONS.domainAssign,
             targetType: "app_stack",
             targetId: stackId,
-            details: { domainId: row.id, hostname: row.hostname, componentKey: row.componentKey, internalPort: row.internalPort },
+            details: assignedAddressDetails(row),
           });
         }
       }
@@ -391,13 +397,13 @@ export class AppStacksService {
     const installed = applied
       ? { revisionNumber: applied.revisionNumber, templateVersionNumber: (await this.#version(stack, applied.templateVersionId)).versionNumber }
       : null;
-    const appliedPlan = applied ? ApprovedStackPlanSchema.safeParse(applied.plan) : null;
     return appStackDetailDto({
       stack,
       templateName: template.name,
       templateVersionNumber: version.versionNumber,
       spec: this.#displaySpec(version),
       desired,
+      appliedPlan: await this.#appliedPlan(stack, desired),
       components,
       volumes,
       domains,
@@ -405,7 +411,6 @@ export class AppStacksService {
       secrets,
       activeOperationId: active?.id ?? null,
       installed,
-      appliedPlan: appliedPlan?.success ? appliedPlan.data : null,
       upgrade:
         latest && latest.versionNumber > version.versionNumber ? { templateVersionId: latest.id, versionNumber: latest.versionNumber } : null,
       rollback:
@@ -703,6 +708,10 @@ export class AppStacksService {
     if (domainTargetsMissing(domains, plan.ingress).length > 0) {
       throw refusal("domains", "domain_target_removed", "A web address still points at a part this version removes. Remove the address first.");
     }
+    // A path rule to a removed part would stop routing unseen, and every later save of its options would be refused.
+    if (pathTargetsMissing(domains, plan.ingress).length > 0) {
+      throw refusal("domains", "path_target_removed", "A path of a web address still points at a part this version removes. Remove the path first.");
+    }
   }
 
   async #keyUsed(ctx: AppStackRequestContext): Promise<boolean> {
@@ -766,5 +775,19 @@ export class AppStacksService {
     const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
     if (!revision || !plan?.success) throw damaged("The stored revision is damaged.");
     return { revision, plan: plan.data };
+  }
+
+  /** The plan of the revision that runs, whose routes are published (ADR-0037); null when none was applied. */
+  async #appliedPlan(stack: AppStackRow, desired: { revision: AppStackRevisionRow; plan: ApprovedStackPlan } | null): Promise<ApprovedStackPlan | null> {
+    if (stack.appliedRevisionId === null) return null;
+    if (desired?.revision.id === stack.appliedRevisionId) return desired.plan;
+    const revision = await getAppStackRevision(this.dbClient.db, {
+      organizationId: stack.organizationId,
+      stackId: stack.id,
+      revisionId: stack.appliedRevisionId,
+    });
+    const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
+    if (!plan?.success) throw damaged("The stored revision is damaged.");
+    return plan.data;
   }
 }

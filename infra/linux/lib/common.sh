@@ -30,7 +30,7 @@ panel_features_in_use() { # <api.env>: prints the in-use gated feature names, on
   local pw applied out
   [[ "$(env_value "$1" DATABASE_URL)" =~ ^postgresql://hosting_panel:([A-Za-z0-9._~-]+)@127\.0\.0\.1:5432/hosting_panel$ ]] || return 1
   pw="${BASH_REMATCH[1]}"
-  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql', '0024_site_templates.sql', '0025_app_stacks.sql')")" || return 1
+  applied="$(_hp_features_psql "${pw}" "select filename from public.schema_migrations where filename in ('0021_manual_tls_certificates.sql', '0022_backup_targets_and_copies.sql', '0024_site_templates.sql', '0025_app_stacks.sql', '0026_app_routing_options.sql')")" || return 1
   if grep -qx '0021_manual_tls_certificates.sql' <<<"${applied}"; then
     out="$(_hp_features_psql "${pw}" "select 'manual-tls' where exists (select 1 from public.domains where cert_mode = 'manual')")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
@@ -51,6 +51,13 @@ panel_features_in_use() { # <api.env>: prints the in-use gated feature names, on
     # a stack that is not deleted and is on a template version of the extended format (HCP-STACK/v2), or keeps a
     # revision written in it: a release that knows only the first format cannot read that plan (ADR-0036)
     out="$(_hp_features_psql "${pw}" "select 'app-format-v2' where exists (select 1 from public.app_stacks s where s.deleted_at is null and (exists (select 1 from public.app_template_versions v where v.id = s.template_version_id and v.spec_version >= 2) or exists (select 1 from public.app_stack_revisions r where r.stack_id = s.id and r.plan->>'schemaVersion' <> '1')))")" || return 1
+    [[ -z "${out}" ]] || printf '%s\n' "${out}"
+  fi
+  if grep -qx '0026_app_routing_options.sql' <<<"${applied}"; then
+    # an address that redirects, asks for a password or has paths: an older release writes its route without them,
+    # so a protected address would answer everyone (ADR-0037). Compression alone is not counted. A deleted stack
+    # keeps no address.
+    out="$(_hp_features_psql "${pw}" "select 'app-routing-options' where exists (select 1 from public.app_stack_domains where redirect_to_domain_id is not null or access_username is not null or path_routes <> '[]'::jsonb)")" || return 1
     [[ -z "${out}" ]] || printf '%s\n' "${out}"
   fi
   return 0

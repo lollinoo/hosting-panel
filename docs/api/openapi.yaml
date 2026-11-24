@@ -5945,7 +5945,8 @@ paths:
         `details[0].reason: plan_changed`). Without `parameters` the stored settings the new version still declares
         are carried over. Other refusals on `templateVersionId` are `unknown_version`, `not_newer`,
         `STACK_TEMPLATE_UNPUBLISHED` and `STACK_TEMPLATE_INVALID`; a web address whose entry point the new version
-        drops is refused with `domain_target_removed`. Volumes are never removed by an upgrade. Returns 422
+        drops is refused with `domain_target_removed`, and a path of a web address whose entry point it drops with
+        `path_target_removed` (`details[0].field: domains`). Volumes are never removed by an upgrade. Returns 422
         NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is
         false.
       parameters:
@@ -5994,7 +5995,8 @@ paths:
         refused (`details[0].reason: plan_changed`). Other refusals on `revisionId` are `unknown_revision`,
         `already_current`, `STACK_IMAGE_NOT_ALLOWED` (software no longer allowed) and `STACK_TEMPLATE_INVALID` (its
         template version no longer passes today's checks); a web address whose entry point that revision lacks is
-        refused with `domain_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
+        refused with `domain_target_removed`, and a path of a web address whose entry point it lacks with
+        `path_target_removed`. Volume data is never touched. Returns 422 NOT_SUPPORTED (reason
         STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
@@ -6311,13 +6313,87 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-stacks/{stackId}/domains/{domainId}:
+    patch:
+      tags: [App Stacks]
+      operationId: updateAppStackDomain
+      summary: Set the routing options of a web address of an application (app.update; audited as app.stack.domain.update)
+      description: >-
+        Replaces the four options of the address together (ADR-0037): the redirect to another address of the same
+        application, the password protection, compression and the paths. An option sent empty is cleared. The password
+        is write-only: send `protection.username` alone to keep the one already set (`VALIDATION_ERROR`,
+        `details[0].reason: password_required` when none is set). A redirect goes to another address of this
+        application that does not redirect itself and that no address redirects to (`redirect_target`,
+        `redirect_chain`), and an address that redirects takes no password and no path. Each path points at an entry
+        point of both the revision that runs and the desired one (`unknown_ingress`, `details[0].field:
+        pathRoutes.<n>.componentKey`). A change either reaches every route file of the application that may be
+        published or is refused: on a running application the route refresh is queued in the same request; while a
+        route file may be in place that the panel cannot rewrite now (an action in progress other than the panel's own
+        route refresh, a failed or unknown application, or a stop the customer asked for that did not finish) the
+        answer is 409 `RESOURCE_LOCKED` with `details[0].field: status` and `details[0].reason` the status
+        (`stop_unfinished` after a stop that did not finish, whose status reads running or degraded), and nothing is
+        written. The audit row holds the user name and whether a password was sent, never the password. No
+        Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - $ref: "#/components/parameters/DomainIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAppStackDomainInput"
+      responses:
+        "200":
+          description: The web addresses of the application, and when the saved options reach the published address
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, applies]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AppStackDomainDto"
+                  applies:
+                    type: string
+                    enum: [shortly, at_start]
+                    description: >-
+                      `shortly`: the panel rewrites the application's route file in a few moments, without a restart.
+                      `at_start`: nothing of the application is published now (not installed yet, or stopped); the
+                      options are used when it is next started.
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            The application is being deleted, or a route file of it may be in place that the panel cannot rewrite now
+            (`RESOURCE_LOCKED`, `details[0].reason` is the status)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
     delete:
       tags: [App Stacks]
       operationId: removeAppStackDomain
       summary: Remove a web address from an application (app.update; audited as app.stack.domain.remove)
       description: >-
-        Its route is withdrawn. No Idempotency-Key. Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE)
-        while the capability flag `applicationStacksAvailable` is false.
+        Its route is withdrawn: on a running application the route refresh is queued in the same request (ADR-0037).
+        Removing frees the hostname, so it is accepted only when that refresh withdraws it now, or when nothing of the
+        application is published and no action is open (never installed, or stopped). Otherwise (any action in
+        progress, the panel's own route refresh and a first install included, a failed or unknown application, or a
+        stop the customer asked for that did not finish) the answer is 409 `RESOURCE_LOCKED` with `details[0].field:
+        status` and `details[0].reason` the status (`stop_unfinished` after a stop that did not finish), and the
+        address is kept. No Idempotency-Key.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) while the capability flag
+        `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
@@ -6348,6 +6424,11 @@ paths:
         "403":
           $ref: "#/components/responses/ErrorResponse"
         "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: >-
+            A route file of the application may be in place that the panel cannot rewrite now (`RESOURCE_LOCKED`,
+            `details[0].reason` is the status); the address is kept
           $ref: "#/components/responses/ErrorResponse"
         "422":
           description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
@@ -13475,6 +13556,9 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        compression:
+          type: boolean
+          description: "true creates the address with compression on (ADR-0037); left out, it is off"
 
     CreateAppStackInput:
       type: object
@@ -13581,6 +13665,61 @@ components:
     AddAppStackDomainInput:
       $ref: "#/components/schemas/AppStackDomainEntry"
 
+    AppStackDomainPathRoute:
+      type: object
+      additionalProperties: false
+      required: [pathPrefix, componentKey, port, stripPrefix]
+      properties:
+        pathPrefix:
+          type: string
+          maxLength: 64
+          pattern: "^(?:/[A-Za-z0-9][A-Za-z0-9._~-]{0,31}){1,4}$"
+          description: One to four segments, no trailing slash. The rule takes this path and everything below it
+        componentKey:
+          $ref: "#/components/schemas/AppStackKey"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        stripPrefix:
+          type: boolean
+          description: Whether the path is taken off the request before it reaches the application
+
+    UpdateAppStackDomainInput:
+      type: object
+      additionalProperties: false
+      required: [redirectToDomainId, compression, protection, pathRoutes]
+      description: The four routing options of a web address (ADR-0037), always sent together
+      properties:
+        redirectToDomainId:
+          nullable: true
+          description: Another web address of the same application; visitors are sent there, path and query kept
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        compression:
+          type: boolean
+        protection:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [username]
+          properties:
+            username:
+              type: string
+              pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+            password:
+              type: string
+              writeOnly: true
+              minLength: 12
+              maxLength: 128
+              description: Printable ASCII characters. Leave it out to keep the password already set
+        pathRoutes:
+          type: array
+          maxItems: 4
+          description: Each path once
+          items:
+            $ref: "#/components/schemas/AppStackDomainPathRoute"
+
     AppStackAcceptedDto:
       type: object
       required: [stackId, operationId, deploymentId, status]
@@ -13670,7 +13809,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -13766,6 +13905,19 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/AppStackPlanIngress"
+            pathTargets:
+              type: array
+              description: >-
+                ADR-0037: the entry points a path of an address may point at now, those of both the revision that runs
+                and the desired one (the routing options refuse any other with `unknown_ingress`)
+              items:
+                $ref: "#/components/schemas/AppStackPlanIngress"
+            routesPending:
+              type: boolean
+              description: >-
+                ADR-0037: the saved web addresses and their routing options differ from those the last successful route
+                publication was made from, whatever the health of the targets then or now. While true the page shows no
+                option of an address as active.
             cpuMilli:
               type: integer
               minimum: 0
@@ -13847,7 +13999,7 @@ components:
 
     AppStackDomainDto:
       type: object
-      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt]
+      required: [id, hostname, componentKey, port, status, certificateStatus, certificateProblem, certificateExpiresAt, checkedAt, redirectToDomainId, compression, protection, pathRoutes]
       properties:
         id:
           $ref: "#/components/schemas/AppEntityId"
@@ -13875,6 +14027,25 @@ components:
           format: date-time
           nullable: true
           description: When the DNS was last checked
+        redirectToDomainId:
+          nullable: true
+          description: The web address of the same application this one sends its visitors to
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+        compression:
+          type: boolean
+        protection:
+          type: object
+          nullable: true
+          required: [username]
+          description: Set when the address asks for a user name and a password. The password is never returned
+          properties:
+            username:
+              type: string
+        pathRoutes:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppStackDomainPathRoute"
 
     AppStackPlanDiffDto:
       type: object

@@ -40,6 +40,7 @@ import {
   appStackVolumeName,
   assertAppStackCreateSecretContents,
   assertAppStackPayloadHardening,
+  assertAppStackRoutesInPlan,
   assertAppStackSecretContents,
   assertExecutableAppStackPlan,
   buildAppStackContainerCreatePayload,
@@ -301,21 +302,11 @@ export class SimulatedAppStacks implements StackExecutorPort {
   public publishAppStackRoutes(req: AppStackRoutesIpcRequest): Promise<AppStackRoutesIpcResult> {
     return this.run("routes", { method: "publishAppStackRoutes", stackId: req.plan.stackId }, true, async () => {
       const plan = this.checkPlan(req.plan);
-      for (const route of req.routes) {
-        if (!plan.ingress.some((i) => i.componentKey === route.componentKey && i.port === route.internalPort)) {
-          throw new AppStackExecutorError("STACK_PLAN_INVALID", "The route is not an ingress of the plan");
-        }
-        if (route.hosts.some((host) => host.source !== undefined || host.redirectTo !== null)) {
-          throw new AppStackExecutorError(
-            "STACK_UNSUPPORTED_FEATURE",
-            "Only automatic certificates and plain host routes are supported for applications",
-          );
-        }
-      }
+      const receiving = assertAppStackRoutesInPlan(plan, req.routes);
       const stack = this.own(plan.stackId, plan.organizationId);
       if (req.routes.length > 0) {
         if (stack?.networks.has("app_edge") !== true) throw notReady("The stack network is not prepared");
-        for (const { componentKey } of req.routes) this.readyContainer(stack, plan, componentKey, true);
+        for (const componentKey of receiving) this.readyContainer(stack, plan, componentKey, true);
       }
       const yaml = buildAppStackDynamicTraefikYaml(plan.stackId, req.routes, siteRouteOptions(null));
       const written = this.options.ingress

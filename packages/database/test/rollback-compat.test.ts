@@ -479,3 +479,97 @@ describe("0025 app stacks", () => {
     expect(await rows(pg, "SELECT hostname FROM domains ORDER BY hostname")).toEqual([{ hostname: "old.example" }]);
   });
 });
+
+describe("0026 app routing options", () => {
+  // ADR-0037: after 0026 the previous release (0025-era code) keeps running on the migrated schema.
+  const M0026 = "0026_app_routing_options.sql";
+  const HASH = "a".repeat(64);
+  const VERIFIER = "$apr1$r31.....$HqJZimcKQFAMYayBlzkrA/";
+  let pg: PGlite;
+  // A 0025-era install: one application with three web addresses.
+  const SEED_0025 = `
+    INSERT INTO platform_installations (id, name) VALUES ('pi','pi');
+    INSERT INTO hosts (id, platform_installation_id, name, hostname, ipv4_address, total_cpu_milli, total_memory_bytes, total_storage_bytes)
+      VALUES ('h','pi','h','h.example','192.0.2.1',1000,'1','1');
+    INSERT INTO organizations (id, platform_installation_id, name, slug) VALUES ('o','pi','o','o');
+    INSERT INTO host_allocations (id, host_id, organization_id) VALUES ('a','h','o');
+    INSERT INTO app_templates (id, slug, name, category) VALUES ('atpl_a','alpha','Alpha','web');
+    INSERT INTO app_template_versions (id, template_id, version_number, source, spec_version, compiled_schema, spec_hash)
+      VALUES ('atv_a1','atpl_a',1,'x',1,'{}','${HASH}');
+    INSERT INTO app_stacks (id, organization_id, host_allocation_id, template_id, template_version_id, name, status)
+      VALUES ('stk_a','o','a','atpl_a','atv_a1','Stack A','running'), ('stk_b','o','a','atpl_a','atv_a1','Stack B','running');
+    INSERT INTO app_stack_components (stack_id, organization_id, component_key) VALUES ('stk_a','o','web'), ('stk_b','o','web');
+    INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname, status, cert_status)
+      VALUES ('sdom_main','stk_a','o','web',8080,'main.example','active','active'),
+             ('sdom_www','stk_a','o','web',8080,'www.main.example','active','active'),
+             ('sdom_old','stk_a','o','web',8080,'old.example','pending','none'),
+             ('sdom_b','stk_b','o','web',8080,'b.example','active','active');`;
+  // Options written by the new release before the rollback.
+  const NEW_RELEASE_OPTIONS = `
+    UPDATE app_stack_domains SET compression = TRUE, access_username = 'team', access_password_hash = '${VERIFIER}',
+      path_routes = '[{"pathPrefix":"/api","componentKey":"web","port":8080,"stripPrefix":true}]'::jsonb WHERE id = 'sdom_main';
+    UPDATE app_stack_domains SET redirect_to_domain_id = 'sdom_main' WHERE id IN ('sdom_www','sdom_old');
+    UPDATE app_stack_domains SET redirect_to_domain_id = NULL, compression = TRUE WHERE id = 'sdom_b';`;
+  // The statements the previous release runs on addresses: none names a column or a constraint added by 0026.
+  const OLD_RELEASE_WRITES = `
+    INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname)
+      VALUES ('sdom_rb','stk_a','o','web',8080,'rb.example');
+    UPDATE app_stack_domains SET status = 'active', dns_status = 'ok', dns_checked_at = NOW(), cert_status = 'active', updated_at = NOW()
+      WHERE id = 'sdom_rb';
+    UPDATE app_stack_domains SET cert_status = 'requested', cert_requested_at = NOW() WHERE id = 'sdom_main';
+    DELETE FROM app_stack_domains WHERE id = 'sdom_rb';`;
+  const OPTIONS = "SELECT id, redirect_to_domain_id, compression, access_username, access_password_hash, path_routes FROM app_stack_domains ORDER BY id";
+
+  beforeAll(async () => {
+    pg = new PGlite();
+    await migrateTo(pg, M0026);
+    await pg.exec(SEED_0025);
+    await pg.exec(read(M0026));
+  }, 120_000);
+
+  afterAll(async () => {
+    await pg.close();
+  });
+
+  it("gives every address that existed before the migration no option", async () => {
+    const none = { redirect_to_domain_id: null, compression: false, access_username: null, access_password_hash: null, path_routes: [] };
+    expect(await rows(pg, OPTIONS)).toEqual(["sdom_b", "sdom_main", "sdom_old", "sdom_www"].map((id) => ({ id, ...none })));
+  });
+
+  it("runs the previous release's writes on addresses that carry options, and leaves the options alone", async () => {
+    await pg.exec(NEW_RELEASE_OPTIONS);
+    const before = await rows(pg, OPTIONS);
+    await pg.exec(OLD_RELEASE_WRITES);
+    expect(await rows(pg, OPTIONS)).toEqual(before);
+    expect(await rows(pg, "SELECT cert_status FROM app_stack_domains WHERE id = 'sdom_main'")).toEqual([{ cert_status: "requested" }]);
+  });
+
+  it("runs 0026 again on a database with options without harm", async () => {
+    const before = await rows(pg, OPTIONS);
+    await pg.exec(read(M0026));
+    expect(await rows(pg, OPTIONS)).toEqual(before);
+    await expect(pg.exec("UPDATE app_stack_domains SET redirect_to_domain_id = 'sdom_main' WHERE id = 'sdom_b'")).rejects.toMatchObject({ code: "23503" });
+    await expect(pg.exec("UPDATE app_stack_domains SET access_username = 'solo' WHERE id = 'sdom_b'")).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("lets the previous release remove the destination of a redirect: the other addresses stay, without redirect", async () => {
+    await pg.exec("DELETE FROM app_stack_domains WHERE id = 'sdom_main'");
+    expect(await rows(pg, "SELECT id, redirect_to_domain_id, stack_id, hostname FROM app_stack_domains WHERE stack_id = 'stk_a' ORDER BY id")).toEqual([
+      { id: "sdom_old", redirect_to_domain_id: null, stack_id: "stk_a", hostname: "old.example" },
+      { id: "sdom_www", redirect_to_domain_id: null, stack_id: "stk_a", hostname: "www.main.example" },
+    ]);
+  });
+
+  it("lets the previous release delete an application whose addresses redirect to each other", async () => {
+    await pg.exec("UPDATE app_stack_domains SET redirect_to_domain_id = 'sdom_www' WHERE id = 'sdom_old'");
+    // 0025-era deletion removes the addresses of the stack in one statement.
+    await pg.exec("DELETE FROM app_stack_domains WHERE stack_id = 'stk_a'");
+    expect(await rows(pg, "SELECT id FROM app_stack_domains ORDER BY id")).toEqual([{ id: "sdom_b" }]);
+    // The cascade from the stack row removes a redirecting pair as well.
+    await pg.exec(`INSERT INTO app_stack_domains (id, stack_id, organization_id, component_key, internal_port, hostname)
+      VALUES ('sdom_b2','stk_b','o','web',8080,'b2.example');
+      UPDATE app_stack_domains SET redirect_to_domain_id = 'sdom_b' WHERE id = 'sdom_b2';
+      DELETE FROM app_stacks WHERE id = 'stk_b';`);
+    expect(await rows(pg, "SELECT id FROM app_stack_domains")).toEqual([]);
+  });
+});

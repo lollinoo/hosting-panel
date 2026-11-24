@@ -21,7 +21,7 @@ import type {
   AppStackVolumeRow,
   AppStackWriteResult,
 } from "@hosting-panel/database";
-import { appStackDisplayStatus } from "./app-stack-runtime-policy.js";
+import { appStackDisplayStatus, appStackRoutesPending } from "./app-stack-runtime-policy.js";
 
 const iso = (at: Date | null): string | null => at?.toISOString() ?? null;
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -65,6 +65,8 @@ export function appStackDetailDto(input: {
   templateVersionNumber: number;
   spec: AppTemplateSpec;
   desired: { revision: AppStackRevisionRow; plan: ApprovedStackPlan } | null;
+  /** The plan of the revision that runs, whose routes are published; null when none was applied. */
+  appliedPlan: ApprovedStackPlan | null;
   components: readonly AppStackComponentRow[];
   volumes: readonly AppStackVolumeRow[];
   domains: readonly AppStackDomainRow[];
@@ -72,8 +74,6 @@ export function appStackDetailDto(input: {
   secrets: readonly AppStackSecretMetadata[];
   activeOperationId: string | null;
   installed: { revisionNumber: number; templateVersionNumber: number } | null;
-  /** The applied revision's plan when it is not the desired one; null when none is applied or it does not parse. */
-  appliedPlan: ApprovedStackPlan | null;
   upgrade: { templateVersionId: string; versionNumber: number } | null;
   rollback: { revisionId: string; revisionNumber: number; templateVersionNumber: number } | null;
   now: Date;
@@ -140,6 +140,13 @@ export function appStackDetailDto(input: {
     }),
     volumes: input.volumes.map((v) => ({ key: v.volumeKey, status: v.status, retentionPolicy: v.retentionPolicy })),
     ingress,
+    // A path must point at an entry point of the plan that runs too (the API refuses any other).
+    pathTargets: ingress.filter((i) => input.appliedPlan?.ingress.some((a) => a.componentKey === i.componentKey && a.port === i.port) ?? true),
+    routesPending: appStackRoutesPending({
+      domains: input.domains,
+      appliedRoutesHash: stack.appliedRoutesHash,
+      appliedAddressesHash: stack.appliedAddressesHash,
+    }),
     cpuMilli: totals.cpuMilli,
     memoryBytes: totals.memoryBytes,
     upgrade: input.upgrade,
@@ -158,6 +165,16 @@ export function appStackDomainDto(row: AppStackDomainRow): AppStackDomainDto {
     certificateProblem: row.certProblem,
     certificateExpiresAt: iso(row.certExpiresAt),
     checkedAt: iso(row.dnsCheckedAt),
+    redirectToDomainId: row.redirectToDomainId,
+    compression: row.compression,
+    // The user name only: the verifier of the password stays in the row.
+    protection: row.accessUsername === null ? null : { username: row.accessUsername },
+    pathRoutes: row.pathRoutes.map((path) => ({
+      pathPrefix: path.pathPrefix,
+      componentKey: path.componentKey,
+      port: path.port,
+      stripPrefix: path.stripPrefix,
+    })),
   };
 }
 
@@ -186,5 +203,16 @@ export function appStackAcceptedEnvelope(organizationId: string, r: AppStackWrit
       stack: `/v1/organizations/${organizationId}/app-stacks/${r.stack.id}`,
       operation: operationId === null ? null : `/v1/organizations/${organizationId}/operations/${operationId}`,
     },
+  };
+}
+
+/** Audit details of a new address; `compression` is named only when the address is created with it on (ADR-0037). */
+export function assignedAddressDetails(row: AppStackDomainRow): Record<string, unknown> {
+  return {
+    domainId: row.id,
+    hostname: row.hostname,
+    componentKey: row.componentKey,
+    internalPort: row.internalPort,
+    ...(row.compression ? { compression: true } : {}),
   };
 }

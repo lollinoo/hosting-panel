@@ -279,7 +279,8 @@ describe("0025 app_stacks migration", () => {
       appStackDomains,
       appStackDeployments,
     ];
-    // schema.ts follows the newest migration: the later ones (0032) are applied on top before comparing.
+    // schema.ts follows the newest migration: the later ones are applied on top before comparing; each checks what it adds
+    // in its own test (0026: app-routing-options-database.test.ts, 0032: below).
     let colsLatest: Column[] = [];
     let consLatest: Named[] = [];
     beforeAll(async () => {
@@ -307,7 +308,7 @@ describe("0025 app_stacks migration", () => {
           ...config.foreignKeys.map((f) => f.getName()).filter((name) => name.startsWith("fk_")),
         ].map((name) => `${config.name}.${name}`);
       });
-      expect(declared.length).toBe(25);
+      expect(declared.length).toBe(27);
       expect(declared.filter((name) => !present.has(name))).toEqual([]);
     });
   });
