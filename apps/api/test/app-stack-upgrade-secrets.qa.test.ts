@@ -13,6 +13,7 @@ import {
 } from "@hosting-panel/contracts";
 import {
   and,
+  appStackDeployments,
   appStackRevisions,
   appStackSecrets,
   appStacks,
@@ -20,6 +21,7 @@ import {
   auditEvents,
   desc,
   eq,
+  insertGeneratedAppStackSecrets,
   operationSteps,
   operations,
   outboxEvents,
@@ -299,7 +301,9 @@ describe("an upgrade to a version that adds a required private value (issue #89)
       ["outbox_events", await db.select().from(outboxEvents)],
       ["audit_events", await db.select().from(auditEvents)],
       ["app_stack_revisions", await db.select().from(appStackRevisions).where(eq(appStackRevisions.stackId, stackId))],
+      ["app_stack_deployments", await db.select().from(appStackDeployments).where(eq(appStackDeployments.stackId, stackId))],
     ] as const) {
+      expect(rows.length, `${what} has rows to search`).toBeGreaterThan(0);
       expectNoValue(json(rows), MAIL_PASSWORD, what);
     }
     for (const res of [diff, queued, replay, retyped, detail]) expectNoValue(res.raw, MAIL_PASSWORD, "an answer");
@@ -350,6 +354,50 @@ describe("an upgrade to a version that adds a required private value (issue #89)
     await runUntilSettled(stackId);
     expect(await upgradeOps(stackId)).toEqual(["failed", "succeeded"]);
     expect(envOf(stackId, "worker")).toContain(`MAIL_PASSWORD=${MAIL_PASSWORD}`);
+  }, 120_000);
+
+  it("a value stored after the review is refused inside the transaction: nothing is written, and the same key works once reviewed again", async () => {
+    const { stackId, v2 } = await installed("job-race");
+    const diff = await plan(stackId, v2);
+    const planHash = diff.body.data.planHash as string;
+    const key = randomUUID();
+    const db = h.dbClient.db;
+    const transaction = db.transaction.bind(db);
+    let inside: unknown;
+    // Another request stores the value after this one read the stack and before its transaction.
+    vi.spyOn(db, "transaction").mockImplementationOnce(async (work, config) => {
+      await insertGeneratedAppStackSecrets(db, {
+        organizationId: h.a.orgId,
+        stackId,
+        masterKey: APP_TEST_MASTER_KEY,
+        values: [{ parameterKey: "mail_password", value: "stored meanwhile" }],
+      });
+      return transaction(work, config).catch((error: unknown) => {
+        inside = error;
+        throw error;
+      });
+    });
+    const refused = await upgrade(stackId, { templateVersionId: v2, planHash, secrets: [{ parameterKey: "mail_password", value: MAIL_PASSWORD }] }, key);
+    expect(refused.status, refused.raw).toBe(400);
+    expect(refused.body.error.details).toEqual([expect.objectContaining({ field: "planHash", reason: "plan_changed" })]);
+    expect(inside).toBeDefined();
+    // Only the other request's row: no generated key, no operation, no audit row.
+    expect(await versionsOf(stackId)).toEqual(["mail_password:1"]);
+    expect(await valueOf(stackId, "mail_password")).toBe("stored meanwhile");
+    expect(await upgradeOps(stackId)).toEqual([]);
+    expect(await audits("app.stack.upgrade", stackId)).toHaveLength(0);
+    expect(await audits("app.stack.secret.rotate", stackId)).toHaveLength(0);
+    expectNoValue(refused.raw, MAIL_PASSWORD, "the refusal");
+
+    // The page reviews again, which asks for nothing now, and sends the same Idempotency-Key.
+    const again = await plan(stackId, v2);
+    expect(again.body.data.newSecrets).toEqual([]);
+    const retried = await upgrade(stackId, { templateVersionId: v2, planHash: again.body.data.planHash as string }, key);
+    expect(retried.status, retried.raw).toBe(202);
+    expect(await versionsOf(stackId)).toEqual(["mail_password:1", "session_key:1"]);
+    await runUntilSettled(stackId);
+    expect(await upgradeOps(stackId)).toEqual(["succeeded"]);
+    expect(envOf(stackId, "worker")).toContain("MAIL_PASSWORD=stored meanwhile");
   }, 120_000);
 
   it("a rollback and a redeploy take no private value", async () => {
