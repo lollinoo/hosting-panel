@@ -224,6 +224,7 @@ Le scelte qui sotto sono state prese dall'agente durante la costruzione, dentro 
 - **Su un pannello installato.** I flag delle applicazioni sono `false` su `main`: le rotte e la sezione rispondono solo nei test, che li accendono.
 - **Le pagine in un browser.** Sono coperte dai test delle pagine, non viste da una persona.
 - **Un componente senza `/bin/sh` su Docker reale.** Ogni immagine ammessa in questo ramo ha una shell: il passo è saltato. Il comportamento atteso (codice 126 o 127 dalla pulizia, con il messaggio del motore «OCI runtime exec failed» → l'attività non parte; lo stesso codice senza quel messaggio è una pulizia non riuscita, non «senza shell») è provato solo contro il motore finto.
+- **Le correzioni della revisione su Docker reale.** La prova del 2026-11-23 è stata eseguita prima: lo script di pulizia che ripete i suoi giri, la pulizia all'avvio in ogni componente (il suo passo della prova è stato riscritto) e l'esclusione fra motore e attività sono provati solo contro il motore finto; lo script è stato controllato solo come testo e con `sh -n`.
 - **Lo script di pulizia in una shell diversa da quella di busybox** (dash, bash): usa solo comandi interni e `/proc`, ma su Docker reale è stato eseguito solo nell'immagine Alpine.
 - **Il mascheramento dei segreti su Docker reale**: il modello usato non ha segreti. È provato contro il motore finto e nel simulatore.
 - **La programmazione attraverso un'ora vera** e il limite di 600 secondi: i test muovono l'orologio.
