@@ -91,7 +91,14 @@ describe("application backups: operations", () => {
   });
 
   it("no new permission; two audit actions; two id prefixes", () => {
-    expect(PERMISSION_KEYS).toHaveLength(44);
+    // Backups of applications use the application permissions that exist: the list of those is unchanged.
+    expect(PERMISSION_KEYS.filter((key) => key.startsWith("app."))).toEqual([
+      "app.read",
+      "app.create",
+      "app.update",
+      "app.control",
+      "app.delete",
+    ]);
     expect(APP_AUDIT_ACTIONS.backupCreate).toBe("app.stack.backup.create");
     expect(APP_AUDIT_ACTIONS.backupRestore).toBe("app.stack.backup.restore");
     expect(APP_ID_PREFIXES.backup).toBe("sbak");
