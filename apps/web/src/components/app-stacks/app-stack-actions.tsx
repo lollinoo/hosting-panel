@@ -20,8 +20,9 @@ type Sent = Awaited<ReturnType<typeof keyedSend>>;
 type PlanTarget = { templateVersionId: string } | { revisionId: string };
 
 /** From the detail's `allowedActions`, never from the status shown: a crash shows failed but leaves the stored status the API decides with. */
-export function stackActionEnabled(action: QueuedAction, actions: readonly AppStackAllowedAction[]): boolean {
-  return actions.includes(`stack.${action}`);
+export function stackActionEnabled(action: QueuedAction, actions: readonly AppStackAllowedAction[] | undefined): boolean {
+  // No list (an API older than the page): nothing is offered.
+  return (actions ?? []).includes(`stack.${action}`);
 }
 
 export function AppStackActions({
@@ -37,7 +38,7 @@ export function AppStackActions({
   stackId: string;
   csrfToken: string;
   status: AppStackStatus;
-  actions: readonly AppStackAllowedAction[];
+  actions?: readonly AppStackAllowedAction[];
   upgrade: AppStackDetailDto["upgrade"];
   rollback: AppStackDetailDto["rollback"];
 }) {

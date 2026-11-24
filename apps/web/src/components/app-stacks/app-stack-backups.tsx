@@ -38,7 +38,7 @@ export function canConfirmRestore(typed: string, name: string, busy: boolean): b
 
 /** What the detail says of the application now: its list (`allowedActions`), an operation holding it, its status. */
 export type AppStackBackupOffer = {
-  actions: readonly AppStackAllowedAction[];
+  actions?: readonly AppStackAllowedAction[];
   /** An operation holds the application: the customer's own or work of the platform. */
   busy: boolean;
   /** The status shown. */
@@ -60,7 +60,8 @@ export function appStackBackupBlock(
   offer: AppStackBackupOffer,
 ): string | null {
   if (backups.unavailableReason !== null) return m.apps.backups.unavailable[backups.unavailableReason];
-  if (offer.actions.includes(kind)) return null;
+  // No list (an API older than the page): nothing is offered.
+  if ((offer.actions ?? []).includes(kind)) return null;
   if (offer.busy) return m.apps.backups.busy;
   if (!offer.stale && appStackBackupEnqueueTarget(offer.status) === null) {
     return format(m.apps.reasons.status, { status: m.apps.status[offer.status] });
@@ -91,7 +92,7 @@ export function AppStackBackups({
   status: AppStackStatus;
   stale: boolean;
   /** `allowedActions` of the detail: the buttons follow it, never the status shown. */
-  actions: readonly AppStackAllowedAction[];
+  actions?: readonly AppStackAllowedAction[];
   busy: boolean;
   backups: AppStackBackupsDto | null;
 }) {

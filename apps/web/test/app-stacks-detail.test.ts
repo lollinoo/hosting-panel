@@ -382,6 +382,18 @@ describe("detail page", () => {
     }
   });
 
+  it("issue #106: a detail without the list (an API older than the page) renders with every action off", async () => {
+    const disabled = (label: string) => new RegExp(`<button[^>]*\\sdisabled=""[^>]*>${label}<`);
+    const { allowedActions: _, ...older } = DETAIL;
+    answer({ [UP]: ok(older), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok([]), [`${UP}/backups`]: ok(BACKUPS), [`${UP}/links`]: ok(LINKS) });
+    const h = await page();
+    expect(h).toMatch(/<h1[^>]*>team-notes<\/h1>/);
+    for (const label of [en.apps.actions.start, en.apps.actions.stop, en.apps.actions.restart, en.apps.actions.reinstall, en.apps.backups.create, en.apps.backups.restore, en.apps.delete.open]) {
+      expect(h, label).toMatch(disabled(label));
+    }
+    expect(h).toContain(en.apps.backups.notAllowed);
+  });
+
   it("reads the application, its history, its addresses, its backups and its databases and renders every section in order", async () => {
     const h = await page();
     expect(reads()).toEqual([UP, `${UP}/deployments?limit=20`, `${UP}/domains`, `${UP}/backups`, `${UP}/links`, `${UP}/tasks`]);
