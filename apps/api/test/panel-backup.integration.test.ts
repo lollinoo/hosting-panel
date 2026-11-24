@@ -693,6 +693,30 @@ describe("nightly panel copy (panel.backups.create)", () => {
     }
   });
 
+  it("Busy: with two destinations the copy has one wait, not one per destination", async () => {
+    const { id: localId } = await insertLocalTarget(dbClient.db, { name: "Server", customerSelectable: false, actorId: null });
+    await setPanelTargets([LEGACY_BACKUP_TARGET_ID, localId]);
+    applier.panel.busyRetryMs = 1;
+    applier.panel.busyWaitMs = 30;
+    const restore = refuseAsBusy(Number.MAX_SAFE_INTEGER);
+    try {
+      const opId = await queuePanel();
+      await app.outboxWorker.processPendingOnce();
+
+      const starts = calls.flatMap((c) => (c.action === "panelStart" ? [c.jobId] : []));
+      // The first destination waited until the end of the wait; the second one, refused after it, fails at once.
+      expect(starts.filter((id) => id === opId).length).toBeGreaterThan(1);
+      expect(starts.filter((id) => id === `${opId}-t2`)).toHaveLength(1);
+      expect((await panelCopies(opId)).map((c) => [c.status, c.problem])).toEqual([
+        ["failed", "other"],
+        ["failed", "other"],
+      ]);
+      expect((await panelOps()).map((o) => o.status)).toEqual(["failed"]);
+    } finally {
+      restore();
+    }
+  });
+
   /** Runs the copy until the poll gives up, leaving the operation unknown and the job held. */
   async function runUntilAmbiguous(): Promise<string> {
     sim.backupState.holdJobs();

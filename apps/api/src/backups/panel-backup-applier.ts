@@ -57,8 +57,16 @@ export const PANEL_BACKUP_STEPS = [
  * operation, so the date keeps its one panel copy (ADR-0038)...
  */
 export const PANEL_BUSY_RETRY_MS = 60_000;
-/** ...for at most this long after its first refusal; then it fails like any other refusal. */
+/**
+ * ...for at most this long after its first refusal, one wait for every destination of the copy together; then it fails
+ * like any other refusal.
+ */
 export const PANEL_BUSY_WAIT_MS = 2 * 3_600_000;
+
+/** A wait for a free job slot: its end is set by its first refusal. */
+interface BusyWait {
+  until: number | null;
+}
 
 const DUMP_FILE = /^(op_[0-9a-f]{32})\.dump$/;
 const FAILED_MSG = "Panel copy did not finish.";
@@ -122,6 +130,8 @@ export class PanelBackupApplier {
       await this.parent.safeUpdateStep(op.id, "upload", "running", "Sending the copy to the backup storage");
 
       const retentionDays = (await getPolicy(db, "panel")).retentionDays ?? DEFAULT_BACKUP_RETENTION_DAYS;
+      // One wait for a free job slot for the whole copy: a second destination does not get one of its own.
+      const busyWait: BusyWait = { until: null };
       // One dump, one copy per target (at most two), in priority order and one after the other: the panel lane runs a single
       // job at a time. The second job (`<op>-t2`) reads the first one's dump, so the file stays until every copy settled.
       // A copy that fails does not stop the next one; an unknown outcome stops the run and keeps the file for recovery.
@@ -133,14 +143,18 @@ export class PanelBackupApplier {
             await this.#settleCopy(copy, "failed", "other");
             continue;
           }
-          const startRes = await this.#startWhenFree(op.id, {
-            action: "panelStart",
-            jobId,
-            ...(jobId === op.id ? {} : { dumpId: op.id }),
-            target,
-            masterKey: this.config.secretsMasterKey.toString("hex"),
-            retentionDays,
-          });
+          const startRes = await this.#startWhenFree(
+            op.id,
+            {
+              action: "panelStart",
+              jobId,
+              ...(jobId === op.id ? {} : { dumpId: op.id }),
+              target,
+              masterKey: this.config.secretsMasterKey.toString("hex"),
+              retentionDays,
+            },
+            busyWait,
+          );
           await this.#settleCopyFromStatus(copy, await this.parent.pollJobStatus(op.id, jobId, startRes));
         } catch (err) {
           if (isAmbiguousError(err)) throw err;
@@ -228,14 +242,19 @@ export class PanelBackupApplier {
     }
   }
 
-  /** panelStart, asked again under a renewed lease while the executor refuses it as busy, up to busyWaitMs. */
-  async #startWhenFree(operationId: string, req: Extract<BackupsIpcRequest, { action: "panelStart" }>): Promise<BackupJobStatus> {
-    const until = Date.now() + this.busyWaitMs;
+  /** panelStart, asked again under a renewed lease while the executor refuses it as busy, until the wait is over. */
+  async #startWhenFree(
+    operationId: string,
+    req: Extract<BackupsIpcRequest, { action: "panelStart" }>,
+    wait: BusyWait,
+  ): Promise<BackupJobStatus> {
     for (;;) {
       try {
         return await this.dockerExecutor.backups(req);
       } catch (err) {
-        if (extractKnownErrorCode(err) !== "RESOURCE_LOCKED" || Date.now() >= until) throw err;
+        if (extractKnownErrorCode(err) !== "RESOURCE_LOCKED") throw err;
+        wait.until ??= Date.now() + this.busyWaitMs;
+        if (Date.now() >= wait.until) throw err;
       }
       await renewOperationLease(this.dbClient.db, operationId, this.parent.leaseMs);
       await sleep(this.busyRetryMs);
