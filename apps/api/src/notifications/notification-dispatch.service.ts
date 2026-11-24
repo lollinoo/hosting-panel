@@ -30,6 +30,7 @@ import {
   putNotificationChannelAlert,
   recordNotificationDelivery,
   sites,
+  tlsCertificates,
   type DatabaseClient,
   type DatabaseExecutor,
   type NotificationChannelRecord,
@@ -115,7 +116,7 @@ export class NotificationDispatchService {
       console.warn(JSON.stringify({ event: "notification_observe_failed" }));
     }
     if (seen !== null) {
-      const owners = await this.#siteOwners(seen.alerts);
+      const owners = await this.#owners(seen.alerts);
       for (const channel of channels) {
         // One channel that cannot be compared costs the others neither their messages nor the sends below.
         await this.#compare(channel.id, seen, owners, now).catch(() => {
@@ -160,16 +161,36 @@ export class NotificationDispatchService {
     await pruneNotificationDeliveries(db, new Date(now.getTime() - NOTIFICATION_KEEP_DELIVERIES_MS));
   }
 
-  /** The customer of every site an alert names. */
-  async #siteOwners(alerts: readonly AdminAlertDto[]): Promise<Map<string, string>> {
-    const ids = [...new Set(alerts.map(siteOf).filter((id): id is string => id !== null))];
-    if (ids.length === 0) return new Map();
-    const rows = await this.dbClient.db.select({ id: sites.id, organizationId: sites.organizationId }).from(sites).where(inArray(sites.id, ids));
-    return new Map(rows.map((row) => [row.id, row.organizationId]));
+  /** The customer of every alert that names a site, or a certificate the panel keeps. */
+  async #owners(alerts: readonly AdminAlertDto[]): Promise<Map<AdminAlertDto, string>> {
+    const db = this.dbClient.db;
+    const ids = (of: (alert: AdminAlertDto) => string | null) => [...new Set(alerts.map(of).filter((id): id is string => id !== null))];
+    const siteIds = ids(siteOf);
+    const certificateIds = ids(certificateOf);
+    const siteRows =
+      siteIds.length === 0 ? [] : await db.select({ id: sites.id, organizationId: sites.organizationId }).from(sites).where(inArray(sites.id, siteIds));
+    const certificateRows =
+      certificateIds.length === 0
+        ? []
+        : await db
+            .select({ id: tlsCertificates.id, organizationId: tlsCertificates.organizationId })
+            .from(tlsCertificates)
+            .where(inArray(tlsCertificates.id, certificateIds));
+    const ofSite = new Map(siteRows.map((row) => [row.id, row.organizationId]));
+    const ofCertificate = new Map(certificateRows.map((row) => [row.id, row.organizationId]));
+    const owners = new Map<AdminAlertDto, string>();
+    for (const alert of alerts) {
+      const site = siteOf(alert);
+      const certificate = certificateOf(alert);
+      // A certificate shared by several sites names none of them, but it is of one customer, and so is every site it is on.
+      const owner = site !== null ? ofSite.get(site) : certificate !== null ? ofCertificate.get(certificate) : undefined;
+      if (owner !== undefined) owners.set(alert, owner);
+    }
+    return owners;
   }
 
   /** What one channel is told by this pass, written together with the message that tells it. */
-  async #compare(channelId: string, seen: AlertObservation, owners: ReadonlyMap<string, string>, now: Date): Promise<void> {
+  async #compare(channelId: string, seen: AlertObservation, owners: ReadonlyMap<AdminAlertDto, string>, now: Date): Promise<void> {
     await this.dbClient.db.transaction(async (tx) => {
       // Read again and held: the look took time, and a save or a removal of the channel waits for what this writes.
       const channel = await lockNotificationChannel(tx, channelId);
@@ -180,8 +201,8 @@ export class NotificationDispatchService {
       const open = new Map<string, AdminAlertDto>();
       for (const alert of seen.alerts) {
         if (!hears(alert.kind)) continue;
-        // A customer hears of their own sites only.
-        if (channel.organizationId !== null && owners.get(siteOf(alert) ?? "") !== channel.organizationId) continue;
+        // A customer hears of their own sites and certificates only.
+        if (channel.organizationId !== null && owners.get(alert) !== channel.organizationId) continue;
         open.set(notificationAlertKey(alert), alert);
       }
 
@@ -239,4 +260,10 @@ export class NotificationDispatchService {
 function siteOf(alert: AdminAlertDto): string | null {
   const details = alert.details as { siteId?: unknown };
   return typeof details.siteId === "string" ? details.siteId : null;
+}
+
+/** Only the alert of an imported certificate names a row of `tls_certificates`. */
+function certificateOf(alert: AdminAlertDto): string | null {
+  const details = alert.details as { certificateId?: unknown };
+  return alert.kind === "manual_certificate_expiring" && typeof details.certificateId === "string" ? details.certificateId : null;
 }
