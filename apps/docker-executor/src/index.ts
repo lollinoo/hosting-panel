@@ -352,7 +352,12 @@ export {
 
 export { SimulatedSiteDatabases } from "./simulator-databases.js";
 
-export { SimulatedBackups } from "./simulator-backups.js";
+export {
+  SimulatedBackups,
+  type SimulatedAppStackBackupJob,
+  type SimulatedAppStackReadiness,
+  type SimulatedBackupsOptions,
+} from "./simulator-backups.js";
 
 export {
   BackupRunner,
@@ -481,6 +486,20 @@ export {
   type BackupResticRepoKind,
   type BackupSnapshotSummary,
 } from "./backup-jobs.js";
+
+export {
+  APP_STACK_BACKUP_COPY_CAPABILITIES,
+  APP_STACK_BACKUP_OF_LABEL,
+  APP_STACK_JOB_USER,
+  APP_STACK_RESTORE_CAPABILITIES,
+  appStackBackupDataPath,
+  buildAppStackBackupCopyContainerPayload,
+  buildAppStackForgetContainerPayload,
+  buildAppStackJobLabels,
+  buildAppStackPartialSnapshotDropContainerPayload,
+  buildAppStackRepoContainerPayload,
+  buildAppStackRestoreContainerPayload,
+} from "./app-stack-backup-jobs.js";
 
 export {
   DEFAULT_PHPMYADMIN_CONFIG_DIR,

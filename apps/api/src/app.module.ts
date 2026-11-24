@@ -8,6 +8,7 @@ import type { HostAgentPort } from "@hosting-panel/host-agent-contracts";
 import { Phase1DisabledHostAgent } from "@hosting-panel/host-agent-contracts";
 import type { AppTemplateValidationOptions } from "@hosting-panel/policy-engine";
 import { APP_FEATURE_GATE_TOKEN, resolveAppFeatureGate } from "./app-stacks/app-feature-gate.js";
+import { AppStackBackupsService } from "./app-stacks/app-stack-backups.service.js";
 import { AppStackDomainsService } from "./app-stacks/app-stack-domains.service.js";
 import { AppStackObserverService } from "./app-stacks/app-stack-observer.service.js";
 import { AppStackRuntime } from "./app-stacks/app-stack-runtime.js";
@@ -251,6 +252,7 @@ export class AppModule {
         AppTemplatesService,
         ComposeImportService,
         AppStacksService,
+        AppStackBackupsService,
         AdminAppStacksService,
         AppStackDomainsService,
         AppStackRuntime,

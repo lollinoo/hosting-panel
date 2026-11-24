@@ -3033,6 +3033,7 @@ x-hp-ingress:
       removeDomain: "Rimuovi l'indirizzo {n}",
       versionLine: "{name}, versione {n}",
       dataNote: "I dati dell'applicazione restano sul tuo server dedicato e sono conservati se la elimini, salvo tua scelta.",
+      backupNote: "I dati di un'applicazione non vengono salvati da soli: se vuoi una copia, crea un backup dalla pagina dell'applicazione.",
       next: "Avanti",
       back: "Indietro",
       install: "Installa",
@@ -3099,9 +3100,16 @@ x-hp-ingress:
         upgrade: "Aggiornamento",
         rollback: "Ritorno alla versione precedente",
         delete: "Eliminazione",
+        backup: "Backup",
+        restore: "Ripristino",
+        prune: "Pulizia dei backup",
       },
       succeeded: "Completato.",
       failed: "Non riuscito. Il motivo è nello storico qui sotto; i dati sono conservati.",
+      backupFailed: "Il backup non è riuscito: il motivo è nell'elenco dei backup. I dati dell'applicazione non sono cambiati.",
+      restoreFailed:
+        "Il ripristino non è riuscito: il motivo è nell'elenco dei backup. Se i dati sono rimasti incompleti, l'elenco dice quale backup ripristinare per tornare a com'erano.",
+      longNote: "Con molti dati può durare a lungo. Puoi lasciare questa pagina: l'operazione continua.",
       unknown: "Esito da verificare: il pannello sta controllando lo stato reale, ricarica la pagina tra poco.",
       slow: "Sta richiedendo più del previsto. Ricarica la pagina più tardi.",
       pollError: "Non riesco a leggere l'avanzamento, ritento…",
@@ -3112,14 +3120,18 @@ x-hp-ingress:
       releaseLine: "Rilascio n. {n}",
       draftBody: "L'applicazione non è ancora installata: imposta i valori riservati obbligatori e premi Installa.",
       unknownBody: "Non sappiamo ancora se l'ultima operazione è riuscita. Nessuna azione viene ripetuta da sola.",
+      platformWork: {
+        backups_cleanup:
+          "Il pannello sta togliendo i backup scaduti di questa applicazione: finché non ha finito, nessuna azione su di lei si può avviare. Di solito bastano pochi minuti.",
+      },
       sectionError: "Questa parte non è stata caricata. Ricarica la pagina.",
-      backupUnavailable: "Il backup delle applicazioni non è ancora disponibile.",
       section: {
         components: "Componenti",
         logs: "Registri",
         settings: "Impostazioni",
         domains: "Indirizzi web",
         data: "Dati",
+        backups: "Backup",
         resources: "Risorse",
         history: "Storico",
         danger: "Zona pericolosa",
@@ -3153,6 +3165,59 @@ x-hp-ingress:
       none: "Questa applicazione non conserva dati.",
       status: { pending: "In preparazione", present: "Presenti", retained: "Conservati", removed: "Eliminati", missing: "Non trovati" },
       keptNote: "Quando elimini l'applicazione i dati sono conservati, a meno che tu non chieda di eliminarli.",
+    },
+    backups: {
+      intro: "Un backup è una copia dei dati dell'applicazione a cui puoi tornare. Non viene fatto da solo: lo crei tu da qui.",
+      stopNote: "Durante la copia l'applicazione viene fermata e i suoi indirizzi web non rispondono; alla fine riparte da sola.",
+      keptNote:
+        "Restano i {kept} backup fatti a mano più recenti e i {safety} più recenti fatti prima di un ripristino: quelli più vecchi vengono tolti durante la notte.",
+      none: "Nessun backup finora.",
+      create: "Crea backup",
+      createTitle: "Creare un backup adesso?",
+      createBody:
+        "L'applicazione viene fermata per la durata della copia e i suoi indirizzi web non rispondono. Alla fine riparte da sola; se è già ferma, resta ferma.",
+      createConfirm: "Crea il backup",
+      starting: "Avvio…",
+      unavailable: {
+        not_available: "Su questo server i backup non sono disponibili. Se ti servono, contatta il tuo fornitore di hosting.",
+        no_destination:
+          "I backup non sono ancora attivi su questo server: l'amministratore deve prima indicare dove salvarli. Contatta il tuo fornitore di hosting.",
+        no_data: "Questa applicazione non ha dati da salvare.",
+      },
+      kind: { manual: "Fatto a mano", pre_restore: "Prima di un ripristino" },
+      status: { running: "In corso", succeeded: "Completato", partial: "Parziale", failed: "Non riuscito" },
+      copies: "{good} di {total} copie riuscite",
+      partialNote: "Una copia non è riuscita: puoi comunque ripristinare da quella riuscita.",
+      restore: "Ripristina",
+      restoreNamed: "Ripristina il backup del {date}",
+      restoreTitle: "Ripristinare questo backup?",
+      restoreBody:
+        "I dati dell'applicazione tornano com'erano il {date}: quello che è cambiato dopo viene sostituito. L'applicazione viene fermata, facciamo un backup dei dati di adesso, rimettiamo quelli di questo backup e la facciamo ripartire; se è già ferma, resta ferma. La versione del software non cambia.",
+      restoreFailNote:
+        "Se il ripristino si interrompe a metà, l'applicazione resta ferma: il backup fatto prima del ripristino è in questo elenco per tornare indietro.",
+      typeName: "Scrivi {name} per confermare",
+      restoreConfirm: "Ripristina i dati",
+      lastRestore: {
+        running: "Ripristino da questo backup in corso",
+        succeeded: "Ripristinato da questo backup",
+        failed: "Ripristino da questo backup non riuscito",
+      },
+      restoreFailedNote:
+        "I dati dell'applicazione possono essere incompleti: un ripristino non è finito. Per tornare a com'erano prima, ripristina il backup «Prima di un ripristino» del {date}.",
+      incompleteNote: "Questa copia è stata fatta dopo un ripristino non finito: i dati che contiene possono essere incompleti.",
+      steps: { copy: "Copia dei dati", restore: "Ripristino dei dati", expire: "Rimozione dei backup scaduti" },
+      problem: {
+        tool_unavailable:
+          "Il server non è riuscito ad avviare l'operazione. Riprova tra qualche minuto; se continua, contatta il tuo fornitore di hosting.",
+        no_space: "Sul server non c'è abbastanza spazio libero. Contatta il tuo fornitore di hosting.",
+        files_unreadable: "Alcuni dati dell'applicazione non si possono leggere. Contatta il tuo fornitore di hosting.",
+        repository_locked: "Era già in corso un'altra operazione sui backup di questa applicazione. Riprova tra qualche minuto.",
+        timeout:
+          "L'operazione ha impiegato troppo tempo ed è stata fermata. Riprova più tardi; se succede di nuovo, contatta il tuo fornitore di hosting.",
+        interrupted: "L'operazione si è interrotta perché il server si è riavviato. Riprova.",
+        site_busy: "Sul server erano in corso altri backup. Riprova tra qualche minuto.",
+        other: "L'operazione non è riuscita. Riprova; se succede di nuovo, contatta il tuo fornitore di hosting.",
+      },
     },
     resources: { total: "Totale: CPU {cpu} · Memoria {memory}" },
     history: {
@@ -3311,6 +3376,11 @@ x-hp-ingress:
       status: "Non è possibile ora: l'applicazione è nello stato «{status}».",
       stop_unfinished: "L'applicazione non si è arrestata del tutto: premi di nuovo Arresta, oppure Riavvia, poi riprova.",
       confirmation_mismatch: "Il nome scritto non corrisponde.",
+      no_data: "Questa applicazione non ha dati da salvare.",
+      no_destination:
+        "I backup non sono ancora attivi su questo server: l'amministratore deve prima indicare dove salvarli. Contatta il tuo fornitore di hosting.",
+      not_restorable: "Questo backup non si può ripristinare.",
+      too_many_requests: "Hai avviato troppi backup o ripristini di questa applicazione nell'ultima ora: riprova più tardi.",
       plan_changed: "Qualcosa è cambiato nel frattempo: controlla di nuovo le differenze.",
       unknown_version: "Questa versione non esiste più.",
       not_newer: "Questa versione non è più recente di quella installata.",

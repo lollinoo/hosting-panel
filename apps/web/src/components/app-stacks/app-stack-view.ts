@@ -57,6 +57,33 @@ export function appStackProblemText(m: Messages, problem: string | null): string
   return Object.hasOwn(m.apps.codes, problem) ? (m.apps.codes as Record<string, string>)[problem]! : m.apps.history.problemGeneric;
 }
 
+/** Problem classes about the place the copies are kept: the sites' sentences name no site, so they are shared. */
+export const APP_STACK_BACKUP_SHARED_PROBLEMS = [
+  "unreachable",
+  "tls_failed",
+  "wrong_region",
+  "auth_failed",
+  "bucket_missing",
+  "write_denied",
+  "wrong_key",
+  "key_file_missing",
+  "local_target_unmounted",
+  "local_target_readonly",
+  "local_target_unsafe",
+  "backup_copy_missing",
+] as const;
+
+/** Why a backup, a copy or a restore of an application failed: its own sentence, a shared one, or the generic one. Never the raw class. */
+export function appStackBackupProblemText(m: Messages, problem: string | null): string {
+  const own: Record<string, string> = m.apps.backups.problem;
+  if (problem !== null && Object.hasOwn(own, problem)) return own[problem]!;
+  const shared: Record<string, string> = m.site.backups.problem;
+  if (problem !== null && (APP_STACK_BACKUP_SHARED_PROBLEMS as readonly string[]).includes(problem) && Object.hasOwn(shared, problem)) {
+    return shared[problem]!;
+  }
+  return m.apps.backups.problem.other;
+}
+
 export function formatCpu(cpuMilli: number): string {
   return `${Number((cpuMilli / 1000).toFixed(2))} vCPU`;
 }

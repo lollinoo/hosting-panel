@@ -43,7 +43,7 @@ what the code does.
 | critical | 2 | 2 | 0 | 0 |
 | high | 9 | 9 | 0 | 0 |
 | medium | 24 | 23 | 1 | 0 |
-| low | 82 | 13 | 2 | 67 |
+| low | 82 | 14 | 2 | 66 |
 
 How the rows are counted:
 
@@ -203,7 +203,7 @@ last cycle unless a repair item names them.
 | L43 | `createService` (`initialDomain`) | The generic service's first domain is not normalised or checked against hosts. | `aud-runtime` | **open.** With addendum 4 A built, nobody reaches the route on an installed server. |
 | L44 | `#refuseManagedSite` (E9) | An unknown `site_type` is handled as a generic service. | `aud-runtime` | **written as a limit**: ADR 0029 §2 says it is the rule ("Un sito senza tipo noto non è gestito"). |
 | L45 | `apps/web/next.config.mjs` | No HSTS, `nosniff` or `Referrer-Policy` headers. | `aud-web` | **open.** R207 §5 names it. |
-| L46 | the web server's sign-in route | No Origin check; `text/plain` is accepted. | `aud-web` | **open.** R207 §5 names it. |
+| L46 | the web server's sign-in route | No Origin check; `text/plain` is accepted. | `aud-web` | **repaired** (#114). The routes without a session (sign-in with its second step, sign-out, password reset request and confirmation) refuse a missing or foreign `Origin` with `403 PERMISSION_DENIED` (`validateOrigin` in `apps/web/src/lib/bff-guard.ts`, the check the CSRF guard uses), and `readBoundedJsonBody` refuses a body not sent as `application/json` with `415` before it reads it. Tests: `apps/web/test/bff.integration.test.ts`, "17. sign-in and sign-out refuse a foreign Origin, a missing Origin and a body not sent as JSON before the upstream (L46)"; `apps/web/test/password-reset.test.ts`, "request: …" and "confirm: a foreign Origin, a missing Origin and a body not sent as JSON are refused before the upstream (L46)"; `apps/web/test/bff-body-bounds.test.ts`, "web.6: a JSON body is read only when it comes as application/json (L46)"; `apps/web/test/bff-guard.test.ts`, "validateOrigin". |
 | L47 | `bff-guard.ts` (R172.1) | The CSRF and Origin refusals share `PERMISSION_DENIED`. | `aud-web` | **open.** |
 | L48 | `packages/contracts/src/resources.ts`, the redaction patterns | `secretAccessKey`, `newPassword`, `currentPassword`, `smtpPassword` and `totpSecret` are not matched. | `aud-web` | **open.** R207 §5: no path was found that stores one; a wider pattern can make a shipped answer throw. |
 | L49 | `apps/web/src/components/customer/site-tabs.tsx` | Tabs on a site without a type. | `aud-web` | **open.** |
@@ -241,9 +241,9 @@ last cycle unless a repair item names them.
 | L81 | `install.test.ts` | Port 3000 is asserted in the install case only. | `aud-host` | **open.** |
 | L82 | E4 install and update dry-run tests | They skip without cgroups v2 or Docker. | `aud-host` | **open.** |
 
-Low rows: 82. Repaired 13 (in the code with a test: L1, L5, L18, L30, L41, L51; in the documents:
-L11, L12, L13, L14, L17, L19, L31). Written as a limit: 2 (L36, L44). Open: 67 (L2 to L53 less the
-fourteen others above, and L54 to L82).
+Low rows: 82. Repaired 14 (in the code with a test: L1, L5, L18, L30, L41, L46, L51; in the documents:
+L11, L12, L13, L14, L17, L19, L31). Written as a limit: 2 (L36, L44). Open: 66 (L2 to L53 less the
+fifteen others above, and L54 to L82).
 
 ## Findings the lead judged not a defect
 
@@ -425,7 +425,7 @@ and the tests their rows cite did not exist in the tree of the runs.
 
 The lead ran these on a fresh Ubuntu 24.04.5 VPS (4 CPU, 7.7 GB, Docker 29.10.0, nftables 1.0.9),
 on the tree of pull request #13, with `infra/linux/install.sh --acme-staging` and the server's public
-name `45-138-202-116.sslip.io`. The findings below are not in the counts above.
+name under a wildcard DNS service. The findings below are not in the counts above.
 
 - **The twelve real-Docker scripts:** ten at exit 0 at once. `accept-m3-panel.mjs` and
   `accept-m4-wordpress.mjs` failed on assumptions of the scripts, not of the product: the first

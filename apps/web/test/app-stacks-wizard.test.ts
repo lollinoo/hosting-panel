@@ -397,7 +397,7 @@ describe("AppWizard markup", () => {
     expect(out).toContain("notes.example.test");
     expect(out).toContain("CPU 0.5 vCPU · Memory 256 MiB");
     expect(out).toContain(t.dataNote);
-    expect(out).toContain(en.apps.detail.backupUnavailable);
+    expect(out).toContain(en.apps.wizard.backupNote);
     for (const step of ["configure", "domains", "review", "install"]) {
       for (const m of [en, itMsgs]) expect(html(wizard({ ...state, 0: step }, { 0: values }, ENTRY, m).tree, m)).not.toContain(PLANTED);
     }

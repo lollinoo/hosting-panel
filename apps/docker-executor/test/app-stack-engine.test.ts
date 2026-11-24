@@ -34,6 +34,8 @@ const SECRETS = [{ parameterKey: "shared_key", version: 1, content: SECRET }];
 const REF = { stackId: ID, organizationId: ORG };
 const HOST = { hostname: "shop.example.org", tls: true, httpsRedirect: true, redirectTo: null };
 const ROUTES: AppStackRouteWire[] = [{ componentKey: "web", internalPort: 8080, hosts: [HOST] }];
+/** The list of the application's backup job containers that start, restart, create and remove read first (ADR-0038 K4). */
+const JOB_LIST = `GET /containers/json?all=true&filters=${enc(JSON.stringify({ label: [`io.hostingpanel.app_backup_of=${ID}`] }))}`;
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -498,7 +500,7 @@ describe("createAppStackComponents (5.10)", () => {
       reason: "STACK_PLAN_INVALID",
       message: "The application needs more processors than this server has",
     });
-    expect(h.fake.log[0]).toBe("GET /info");
+    expect(h.fake.log.slice(0, 2)).toEqual([JOB_LIST, "GET /info"]);
     expect(mutations(h.fake.log)).toEqual([]);
     expect(idOf(h, WORKER)).toBe(oldWorker);
     await expect(h.engine.createAppStackComponents({ plan: cpus(1_000) })).resolves.toMatchObject({
@@ -1144,6 +1146,119 @@ describe("busy lock", () => {
     h.fake.failNext(/^GET \/networks/, 500);
     await expect(h.engine.prepareAppStack({ plan: appStackTestPlan() })).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
     await expect(h.engine.prepareAppStack({ plan: appStackTestPlan() })).resolves.toBeDefined();
+  });
+});
+
+describe("the backup lane of the application (ADR-0038 K4)", () => {
+  /** The runner's side of the lane: a copy, restore or removal job of the application holds it while `job` is true. */
+  function backupLanes() {
+    const held = new Set<string>();
+    const state = { job: false, asked: [] as string[] };
+    const holdAppStackLane = (stackId: string): (() => void) | null => {
+      state.asked.push(stackId);
+      if (state.job || held.has(stackId)) return null;
+      held.add(stackId);
+      return () => void held.delete(stackId);
+    };
+    return { held, state, holdAppStackLane };
+  }
+  const withLanes = (h: Harness, lanes: ReturnType<typeof backupLanes>) =>
+    new AppStackEngine({ ...h, request: h.fake.request, secretsRootDir: h.root, pullMissingImages: true, allowlist: TEST_ALLOWLIST, backupLanes: lanes });
+  const plan = appStackTestPlan();
+  const web = { plan, componentKey: "web", secretFileContents: [] };
+
+  it("refuses start, restart, create and remove with no Engine request while a job holds it; the other calls do not ask", async () => {
+    const h = await setup();
+    await prepared(h);
+    const lanes = backupLanes();
+    const engine = withLanes(h, lanes);
+    lanes.state.job = true;
+    for (const call of [
+      () => engine.startAppStackComponent(web),
+      () => engine.restartAppStackComponent(web),
+      () => engine.createAppStackComponents({ plan }),
+      () => engine.removeAppStack({ ...REF, removeVolumes: false }),
+      () => engine.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
+    ]) {
+      await expect(call()).rejects.toMatchObject({
+        reason: "STACK_BUSY",
+        code: "RESOURCE_LOCKED",
+        message: "A backup or a restore of this application is running",
+      });
+    }
+    expect(h.fake.log).toEqual([]);
+    expect(lanes.state.asked).toEqual([ID, ID, ID, ID, ID]);
+    expect(h.fake.containers.has(WORKER)).toBe(true);
+    // Stopping, reading and preparing never make the application write to its volumes.
+    await engine.stopAppStack(REF);
+    await engine.unpublishAppStackRoutes(REF);
+    await engine.pullAppStackImage({ plan, image: IMAGE });
+    await engine.prepareAppStack({ plan });
+    await engine.getAppStackStatus(REF);
+    expect(lanes.state.asked).toHaveLength(5);
+  });
+
+  it("is held for the whole change and given back after it, also after a refusal or a failure", async () => {
+    const h = await setup();
+    await prepared(h);
+    const lanes = backupLanes();
+    const engine = withLanes(h, lanes);
+    const held = h.fake.hold(/^POST \/containers\/[^/]+\/start$/);
+    const starting = engine.startAppStackComponent(web);
+    await vi.waitFor(() => expect(h.fake.log.some((line) => line.endsWith("/start"))).toBe(true));
+    expect([...lanes.held]).toEqual([ID]);
+    held.release();
+    await expect(starting).resolves.toMatchObject({ outcome: "started" });
+    expect(lanes.held.size).toBe(0);
+    await expect(engine.startAppStackComponent({ ...web, componentKey: "other" })).rejects.toMatchObject({ reason: "STACK_PLAN_INVALID" });
+    expect(lanes.held.size).toBe(0);
+    h.fake.failNext(/^POST \/containers\/[^/]+\/restart/, 500);
+    await expect(engine.restartAppStackComponent(web)).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+    expect(lanes.held.size).toBe(0);
+    await expect(engine.removeAppStack({ ...REF, removeVolumes: true })).resolves.toBeDefined();
+    expect(lanes.held.size).toBe(0);
+  });
+
+  /** A job container of the application's backups that outlived its job (its kill or its removal failed). */
+  const JOB = `hp_bk_op_${"7".repeat(32)}-apply_rs_data`;
+
+  it("refuses start, restart, create and remove while a job container of its backups runs, whether a job holds the lane or not", async () => {
+    const h = await setup();
+    await prepared(h);
+    await foreignContainer(h, JOB, { "io.hostingpanel.role": "site_job", "io.hostingpanel.app_backup_of": ID });
+    await h.fake.request("POST", `/containers/${JOB}/start`);
+    h.fake.log.length = 0;
+    const lanes = backupLanes();
+    for (const engine of [h.engine, withLanes(h, lanes)]) {
+      for (const call of [
+        () => engine.startAppStackComponent(web),
+        () => engine.restartAppStackComponent(web),
+        () => engine.createAppStackComponents({ plan }),
+        () => engine.removeAppStack({ ...REF, removeVolumes: false }),
+        () => engine.removeAppStackComponents({ plan, componentKeys: ["worker"] }),
+      ]) {
+        await expect(call()).rejects.toMatchObject({ reason: "STACK_BUSY", code: "RESOURCE_LOCKED" });
+      }
+      // One list of the job containers per call, all states, and nothing else reaches Docker.
+      expect(h.fake.log).toEqual([JOB_LIST, JOB_LIST, JOB_LIST, JOB_LIST, JOB_LIST]);
+      h.fake.log.length = 0;
+    }
+    expect(lanes.held.size).toBe(0);
+
+    // A stopped job container writes nothing.
+    await h.fake.request("POST", `/containers/${JOB}/stop`);
+    h.fake.log.length = 0;
+    await expect(h.engine.startAppStackComponent(web)).resolves.toMatchObject({ outcome: "started" });
+    expect(h.fake.log[0]).toBe(JOB_LIST);
+    expect(h.fake.containers.get(WEB)?.State.Running).toBe(true);
+  });
+
+  it("refuses with no change when Docker cannot list the job containers of its backups", async () => {
+    const h = await setup();
+    await prepared(h);
+    h.fake.failNext(/app_backup_of/, 500);
+    await expect(h.engine.startAppStackComponent(web)).rejects.toMatchObject({ code: "DOCKER_ENGINE_UNAVAILABLE" });
+    expect(h.fake.log).toEqual([JOB_LIST]);
   });
 });
 

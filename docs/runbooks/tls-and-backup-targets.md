@@ -291,7 +291,8 @@ Every refusal leaves the previous state intact: a failed backup never deletes ol
    ```bash
    sudo hp-update --version <older> --allow-downgrade --allow-feature-loss
    ```
-   Application stacks add the features `app-stacks` and `app-format-v2`; see `docs/runbooks/application-stacks.md` §4.
+   Application stacks add the features `app-stacks`, `app-format-v2` and `app-stack-backups` (the backups of
+   applications); see `docs/runbooks/application-stacks.md` §4.
 4. What the older release cannot do after a forced downgrade: it keeps running sites that use a custom site type with their
    stored configuration but does not know the site types (no template list, no version change, and a PHP change builds the
    built-in image); it still serves imported certificates (the files and the manifest

@@ -55,6 +55,7 @@ import type {
   AppStackDetailDto,
   AppStackDeploymentDto,
   AppStackDomainDto,
+  AppStackBackupsDto,
 } from "@hosting-panel/contracts";
 
 export interface HostTelemetryOverviewDto {
@@ -366,4 +367,10 @@ export async function fetchServerOrgAppStackDeployments(orgId: string, stackId: 
 export async function fetchServerOrgAppStackDomains(orgId: string, stackId: string): Promise<AppStackDomainDto[] | null> {
   if (!segments(stackId)) return null;
   return orNull(await serverGet<AppStackDomainDto[]>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/domains`));
+}
+
+/** The backups and why a new one cannot be made; null = could not be loaded. */
+export async function fetchServerOrgAppStackBackups(orgId: string, stackId: string): Promise<AppStackBackupsDto | null> {
+  if (!segments(stackId)) return null;
+  return orNull(await serverGet<AppStackBackupsDto>(`v1/organizations/${enc(orgId)}/app-stacks/${enc(stackId)}/backups`));
 }

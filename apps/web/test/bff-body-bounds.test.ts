@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { encryptSession, SESSION_COOKIE_NAME } from "@/lib/session";
-import { MAX_BFF_BODY_BYTES } from "@/lib/bff-proxy";
+import { MAX_BFF_BODY_BYTES, readBoundedJsonBody } from "@/lib/bff-proxy";
 import { POST as postLogin } from "@/app/api/session/login/route";
 import { POST as postOrgSites } from "@/app/api/bff/orgs/[orgId]/sites/route";
 import { PUT as putFileContent } from "@/app/api/bff/orgs/[orgId]/managed-sites/[siteId]/files/content/route";
@@ -119,9 +119,9 @@ describe("web.3 (b): a body that never ends is refused and its read stops at the
   });
 
   function request(url: string, method: string, stream: ReadableStream<Uint8Array>, withSession: boolean) {
-    const headers: Record<string, string> = { Host: "localhost:3000", "Content-Type": "application/json" };
+    const headers: Record<string, string> = { Host: "localhost:3000", Origin: "http://localhost:3000", "Content-Type": "application/json" };
     if (withSession) {
-      Object.assign(headers, { Origin: "http://localhost:3000", Cookie: cookie, "X-CSRF-Token": csrf, "Idempotency-Key": "idem-sentinel-1" });
+      Object.assign(headers, { Cookie: cookie, "X-CSRF-Token": csrf, "Idempotency-Key": "idem-sentinel-1" });
     }
     return new Request(`http://localhost:3000${url}`, { method, headers, body: stream, duplex: "half" } as RequestInit);
   }
@@ -196,4 +196,54 @@ describe("web.3 (b): a body that never ends is refused and its read stops at the
       expect(fetchSpy).not.toHaveBeenCalled();
     });
   }
+});
+
+// A cross-site form posts text/plain (or a form type) without a preflight; only fetch with JSON is the panel.
+describe("web.6: a JSON body is read only when it comes as application/json (L46)", () => {
+  const post = (contentType: string | null, body: BodyInit | ReadableStream<Uint8Array> | null) => {
+    const headers: Record<string, string> = { Host: "localhost:3000" };
+    if (contentType !== null) headers["Content-Type"] = contentType;
+    return new Request("http://localhost:3000/x", { method: "POST", headers, body, duplex: "half" } as RequestInit);
+  };
+  const refused = async (read: Awaited<ReturnType<typeof readBoundedJsonBody>>) => {
+    expect(read.ok).toBe(false);
+    const res = (read as { ok: false; response: Response }).response;
+    return { status: res.status, code: (await res.json()).error.code as string };
+  };
+  const UNSUPPORTED = { status: 415, code: "VALIDATION_ERROR" };
+
+  it("refuses text/plain, a form type, another type and an empty type with 415 before it reads the body", async () => {
+    for (const type of [
+      "text/plain",
+      "text/plain;charset=UTF-8",
+      "application/x-www-form-urlencoded",
+      "multipart/form-data; boundary=x",
+      "application/jsonx",
+      "application/json-patch+json",
+      "application/json; charset=iso-8859-1",
+      "",
+    ]) {
+      for (const requireJsonBody of [true, false]) {
+        const { stream, state } = endlessBody();
+        expect(await refused(await readBoundedJsonBody(post(type, stream), { requireJsonBody })), type).toEqual(UNSUPPORTED);
+        expect(state.pulled, type).toBe(0);
+      }
+    }
+  });
+
+  it("reads application/json with or without a UTF-8 charset, in any case", async () => {
+    for (const type of ["application/json", "Application/JSON", "application/json; charset=utf-8", "application/json;charset=UTF-8", 'application/json; charset="utf-8"']) {
+      expect(await readBoundedJsonBody(post(type, '{"a":1}'), { requireJsonBody: true }), type).toEqual({ ok: true, body: { a: 1 } });
+    }
+  });
+
+  it("without a Content-Type: a required body is refused with 415, a body is refused with 415, no body reads as none", async () => {
+    // A Blob without a type is the one body fetch sends with no Content-Type at all.
+    const untyped = post(null, new Blob(['{"a":1}']));
+    expect(untyped.headers.get("content-type")).toBeNull();
+    expect(await refused(await readBoundedJsonBody(untyped))).toEqual(UNSUPPORTED);
+    expect(await refused(await readBoundedJsonBody(post(null, new Blob(['{"a":1}'])), { requireJsonBody: true }))).toEqual(UNSUPPORTED);
+    expect(await refused(await readBoundedJsonBody(post(null, null), { requireJsonBody: true }))).toEqual(UNSUPPORTED);
+    expect(await readBoundedJsonBody(post(null, null))).toEqual({ ok: true, body: undefined });
+  });
 });

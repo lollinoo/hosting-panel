@@ -35,6 +35,7 @@ import {
 } from "@hosting-panel/contracts";
 import { computeAppStackComponentHash } from "@hosting-panel/hosting-domain";
 import type { ServiceLogLine, StackExecutorPort } from "@hosting-panel/executor-contracts";
+import { appStackBackupJobAwake } from "../app-stack-backup-jobs.js";
 import { LOG_READ_MAX_BYTES } from "../docker-logs.js";
 import { ExecutorCodedError, type AppStackRouteEntry } from "../traefik-config.js";
 import {
@@ -96,6 +97,12 @@ export interface AppStackEngineDeps {
   readonly readLogs: (containerRef: string, tail: number) => Promise<ServiceLogLine[]>;
   readonly probe?: AppStackHealthProbe;
   readonly now?: () => Date;
+  /**
+   * The job lanes of the backup runner (ADR-0038 K4). Start, restart, create and remove (of the application or of some
+   * of its components) hold the application's lane while they run, and are refused while a copy, restore or removal
+   * job of that application holds it.
+   */
+  readonly backupLanes?: { holdAppStackLane(stackId: string): (() => void) | null };
 }
 
 export const APP_STACK_PULL_ENGINE_TIMEOUT_MS = 240_000;
@@ -341,10 +348,12 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public createAppStackComponents(req: AppStackCreateIpcRequest): Promise<AppStackCreateIpcResult> {
-    return this.locked(req.plan.stackId, async () => {
+    const checked = () => {
       const plan = this.check(req.plan);
       // Environment secrets (version 2) live only in this call and in the create bodies built from it.
-      const secretContents = assertAppStackCreateSecretContents(plan, req.secretContents);
+      return { plan, secretContents: assertAppStackCreateSecretContents(plan, req.secretContents) };
+    };
+    return this.lockedOutsideBackups(req.plan.stackId, checked, async ({ plan, secretContents }) => {
       // The Engine refuses a CPU limit above its processor count only at create, after a replaced container is gone.
       const { NCPU } = await this.list<{ NCPU?: unknown }>("/info", "read the server information");
       if (typeof NCPU !== "number") throw malformed();
@@ -473,7 +482,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public removeAppStack(req: AppStackRemoveIpcRequest): Promise<AppStackRemoveIpcResult> {
-    return this.locked(req.stackId, async () => {
+    return this.lockedOutsideBackups(req.stackId, () => undefined, async () => {
       const listed = await this.listAll(req);
       await this.deps.routes.remove(req.stackId);
       const removedComponents: string[] = [];
@@ -512,8 +521,7 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   public removeAppStackComponents(req: AppStackComponentsRemoveIpcRequest): Promise<AppStackComponentsRemoveIpcResult> {
-    return this.locked(req.plan.stackId, async () => {
-      const plan = this.check(req.plan);
+    return this.lockedOutsideBackups(req.plan.stackId, () => this.check(req.plan), async (plan) => {
       const listed = await this.listContainers(plan);
       const removedComponents: string[] = [];
       for (const key of [...req.componentKeys].sort()) {
@@ -593,6 +601,28 @@ export class AppStackEngine implements StackExecutorPort {
     } finally {
       this.busy.delete(stackId);
     }
+  }
+
+  /**
+   * locked(), outside every backup job of the application: none of its data is being copied or written back meanwhile
+   * (ADR-0038 K4). `check` runs first, so a refused plan reaches no Engine request. Then the application's backup lane
+   * is held for the whole change, and the change is refused while a job container of its backups is awake: one whose
+   * job ended without its kill or its removal, which the lane no longer shows.
+   */
+  private lockedOutsideBackups<C, T>(stackId: string, check: () => C, fn: (checked: C) => Promise<T>): Promise<T> {
+    return this.locked(stackId, async () => {
+      const checked = check();
+      const release = this.deps.backupLanes === undefined ? () => undefined : this.deps.backupLanes.holdAppStackLane(stackId);
+      if (release === null) refuse("STACK_BUSY", "A backup or a restore of this application is running");
+      try {
+        if (await appStackBackupJobAwake(this.deps.request, stackId)) {
+          refuse("STACK_BUSY", "A backup job of this application is still running");
+        }
+        return await fn(checked);
+      } finally {
+        release();
+      }
+    });
   }
 
   private check(plan: unknown): ApprovedStackPlan {
@@ -701,12 +731,14 @@ export class AppStackEngine implements StackExecutorPort {
   }
 
   private runComponent(req: AppStackComponentIpcRequest, action: "start" | "restart"): Promise<AppStackComponentActionIpcResult> {
-    return this.locked(req.plan.stackId, async () => {
+    const checked = () => {
       const plan = this.check(req.plan);
       const component =
         plan.components.find((c) => c.key === req.componentKey) ?? refuse("STACK_PLAN_INVALID", "The component is not part of the plan");
+      return { plan, component, contents: assertAppStackSecretContents(plan, component.key, req.secretFileContents) };
+    };
+    return this.lockedOutsideBackups(req.plan.stackId, checked, async ({ plan, component, contents }) => {
       const { key } = component;
-      const contents = assertAppStackSecretContents(plan, key, req.secretFileContents);
       for (const dependency of component.dependsOn) {
         const found = await this.get<ContainerInspect>(
           `/containers/${enc(appStackContainerName(plan.stackId, dependency))}/json`,

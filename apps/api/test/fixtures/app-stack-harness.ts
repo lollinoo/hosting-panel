@@ -1,7 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { AppFeatureFlags, AppImageAllowlistEntry } from "@hosting-panel/contracts";
 import {
+  appStackBackupCopies,
+  appStackBackups,
   appStackComponents,
   appStackDeployments,
   appStackDomains,
@@ -27,6 +29,7 @@ import {
   type DatabaseClient,
 } from "@hosting-panel/database";
 import { InMemoryDockerSimulatorAdapter } from "@hosting-panel/docker-executor";
+import { InMemoryHostSimulatorAdapter } from "@hosting-panel/host-agent";
 import { hashPassword } from "../../src/auth/password.js";
 import { totpCodeAt } from "../../src/auth/totp.js";
 import { createServerAdmin, setupInstallation } from "../../src/cli/accounts.js";
@@ -55,6 +58,8 @@ const TABLES = {
   app_stack_volumes: appStackVolumes,
   app_stack_domains: appStackDomains,
   app_stack_deployments: appStackDeployments,
+  app_stack_backups: appStackBackups,
+  app_stack_backup_copies: appStackBackupCopies,
   operations,
   outbox_events: outboxEvents,
   audit_events: auditEvents,
@@ -71,6 +76,8 @@ export interface HarnessCustomer {
 export interface AppStackHarness {
   readonly app: ControlPlaneAppHandle;
   readonly dbClient: DatabaseClient;
+  /** The executor behind the API: its `backupState` scripts the backup jobs. */
+  readonly sim: InMemoryDockerSimulatorAdapter;
   readonly adminToken: string;
   /** The server administrator: their user id and the secret of their authenticator, to make a six-digit code. */
   readonly admin: { readonly userId: string; readonly totpSecret: string };
@@ -88,7 +95,7 @@ export interface AppStackHarness {
   /** Admin creates the template from `source`, enables it; returns ids. */
   publish(source?: string, slug?: string): Promise<{ templateId: string; versionId: string }>;
   addMember(orgId: string, role: "role_customer_collaborator" | "role_customer_owner"): Promise<HarnessCustomer>;
-  /** Row counts of the ten app_* tables + operations + outbox_events + audit_events. */
+  /** Row counts of the twelve app_* tables + operations + outbox_events + audit_events. */
   counts(): Promise<Record<string, number>>;
   close(): Promise<void>;
 }
@@ -100,19 +107,35 @@ export async function startAppStackHarness(options?: {
   readonly dockerExecutor?: InMemoryDockerSimulatorAdapter;
   /** null starts no terminal pass, so a test runs it by hand; left out, the app keeps its own interval. */
   readonly terminalSweepIntervalMs?: number | null;
+  /** `linux-systemd` is the backend where backups exist (ADR-0038); the default has none. */
+  readonly runtimeBackend?: "local-simulator" | "linux-systemd";
 }): Promise<AppStackHarness> {
   const dbClient = createDatabaseClient({ mode: "pglite" });
   await dbClient.migrate();
   await setupInstallation(dbClient.db, SETUP);
   const admin = await createServerAdmin(dbClient.db, KEY, { email: "admin@x.it", name: "Admin", password: PW });
+  const sim = options?.dockerExecutor ?? new InMemoryDockerSimulatorAdapter();
+  const installed = options?.runtimeBackend === "linux-systemd";
   const app = await createControlPlaneApp({
     listen: true,
     host: "127.0.0.1",
     port: 0,
     databaseClient: dbClient,
     secretsMasterKey: KEY,
-    runtimeBackend: "local-simulator",
-    dockerExecutor: options?.dockerExecutor ?? new InMemoryDockerSimulatorAdapter(),
+    ...(installed
+      ? {
+          runtimeBackend: "linux-systemd" as const,
+          hostAgent: new InMemoryHostSimulatorAdapter(),
+          jwtSigningKeyPem: generateKeyPairSync("rsa", { modulusLength: 2048 })
+            .privateKey.export({ type: "pkcs8", format: "pem" })
+            .toString(),
+          domainReconcileIntervalMs: null,
+          mailRelayRetryIntervalMs: null,
+          sftpRetryIntervalMs: null,
+          backupScheduleIntervalMs: null,
+        }
+      : { runtimeBackend: "local-simulator" as const }),
+    dockerExecutor: sim,
     autoProcessOutbox: false,
     outboxPollIntervalMs: null,
     driftReconcileIntervalMs: null,
@@ -196,6 +219,7 @@ export async function startAppStackHarness(options?: {
   return {
     app,
     dbClient,
+    sim,
     adminToken,
     admin: { userId: admin.userId, totpSecret: admin.totpSecretBase32 },
     a,

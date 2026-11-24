@@ -77,6 +77,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0024_site_templates.sql",
       "0025_app_stacks.sql",
       "0026_app_routing_options.sql",
+      "0027_app_stack_backups.sql",
       "0030_app_terminal_sessions.sql",
     ]);
     await seedPhase1Dataset(client.db);
@@ -115,6 +116,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0024_site_templates.sql",
       "0025_app_stacks.sql",
       "0026_app_routing_options.sql",
+      "0027_app_stack_backups.sql",
       "0030_app_terminal_sessions.sql",
     ]);
 
@@ -149,6 +151,7 @@ describe("@hosting-panel/database — Phase 2 Runtime, AES-256-GCM Secrets, Outb
       "0024_site_templates.sql",
       "0025_app_stacks.sql",
       "0026_app_routing_options.sql",
+      "0027_app_stack_backups.sql",
       "0030_app_terminal_sessions.sql",
     ]);
 

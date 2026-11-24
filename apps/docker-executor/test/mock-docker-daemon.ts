@@ -69,6 +69,8 @@ export interface MockDockerDaemon {
   readonly failExecStarts: { remaining: number };
   /** The next `remaining` container deletes answer 409 (optionally removing from containers so inspect 404s). */
   readonly deleteConflicts: { remaining: number; removeFromMap?: boolean };
+  /** The next `remaining` container deletes answer 500 and remove nothing. */
+  readonly failDeletes: { remaining: number };
   close(): Promise<void>;
 }
 
@@ -122,6 +124,7 @@ export async function startMockDockerDaemon(options?: {
   const execReplies: MockDockerDaemon["execReplies"] = [];
   const execExitCodes = new Map<string, number>();
   const deleteConflicts: { remaining: number; removeFromMap?: boolean } = { remaining: 0 };
+  const failDeletes = { remaining: 0 };
   const pulledImages = new Set<string>();
   let seq = 1;
 
@@ -612,6 +615,12 @@ export async function startMockDockerDaemon(options?: {
           res.end(JSON.stringify({ message: "removal of container is already in progress" }));
           return;
         }
+        if (failDeletes.remaining > 0) {
+          failDeletes.remaining -= 1;
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ message: "mock delete failure" }));
+          return;
+        }
         if (target) {
           containers.delete(target.id);
         }
@@ -682,6 +691,7 @@ export async function startMockDockerDaemon(options?: {
     execReplies,
     failExecStarts,
     deleteConflicts,
+    failDeletes,
     async close() {
       for (const s of execStreams) s.socket.destroy();
       server.closeAllConnections();
