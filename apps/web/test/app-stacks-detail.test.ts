@@ -102,6 +102,7 @@ const DETAIL: AppStackDetailDto = {
   ],
   volumes: [{ key: "notes", status: "present", retentionPolicy: "retain" }],
   ingress: [{ componentKey: "web", port: 8080 }],
+  pathTargets: [{ componentKey: "web", port: 8080 }],
   routesPending: false,
   cpuMilli: 750,
   memoryBytes: String(384 * MIB),
@@ -501,7 +502,16 @@ describe("web addresses", () => {
     { componentKey: "web", port: 8080 },
     { componentKey: "admin", port: 9000 },
   ];
-  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN], ingress: INGRESS, pending: false, ...over });
+  const props = (over: Record<string, unknown> = {}) => ({
+    orgId: ORG,
+    stackId: "stk_a1",
+    csrfToken: "csrf",
+    initial: [DOMAIN],
+    ingress: INGRESS,
+    pathTargets: INGRESS,
+    pending: false,
+    ...over,
+  });
   const SECOND: AppStackDomainDto = { ...DOMAIN, id: "sdom_2", hostname: "notes2.example.test", componentKey: "admin", port: 9000, status: "pending", certificateStatus: "requested", certificateExpiresAt: null };
 
   it("rows show the address, its target, its status and certificate in words; the add form has its labels and hint", () => {
@@ -589,7 +599,16 @@ describe("address options (ADR-0037)", () => {
   const PLAIN = { redirectTo: "", compression: false, protect: false, username: "", password: "", paths: [] };
   const API_PATH = { pathPrefix: "/api", target: "admin:9000", stripPrefix: true };
   const o = en.apps.domains.options;
-  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN, SECOND], ingress: INGRESS, pending: false, ...over });
+  const props = (over: Record<string, unknown> = {}) => ({
+    orgId: ORG,
+    stackId: "stk_a1",
+    csrfToken: "csrf",
+    initial: [DOMAIN, SECOND],
+    ingress: INGRESS,
+    pathTargets: INGRESS,
+    pending: false,
+    ...over,
+  });
   const dialogProps = (over: Record<string, unknown> = {}) => ({
     domain: DOMAIN,
     rows: [DOMAIN, SECOND],
@@ -715,6 +734,17 @@ describe("address options (ADR-0037)", () => {
     expect(gone).not.toContain("<h2>");
     expect(alerts(gone)).toHaveLength(1);
     (dialog.props.onClose as () => void)();
+  });
+
+  it("offers as path targets only those the application takes now, not every entry point of the version asked for", () => {
+    const withPath = { ...DOMAIN, pathRoutes: [{ pathPrefix: "/w", componentKey: "web", port: 8080, stripPrefix: false }] };
+    const { out } = callHooks(AppStackDomains, props({ initial: [withPath, SECOND], pathTargets: INGRESS.slice(0, 1) }), en, { 6: "sdom_1" });
+    expect(dialogOf(out)!.props.ingress).toEqual(INGRESS.slice(0, 1));
+    const h = html(out);
+    expect(h).toMatch(/<option[^>]*value="web:8080"/);
+    expect(h).not.toMatch(/<option[^>]*value="admin:9000"/);
+    // the new address form still offers every entry point of the version asked for
+    expect(byId(out, "app-domain-target")).toBeDefined();
   });
 
   it("offers as destinations only the other addresses that show the application; a destination cannot redirect in turn", () => {

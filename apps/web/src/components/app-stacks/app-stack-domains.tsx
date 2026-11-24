@@ -27,6 +27,7 @@ export function AppStackDomains({
   csrfToken,
   initial,
   ingress,
+  pathTargets,
   pending,
 }: {
   orgId: string;
@@ -34,6 +35,7 @@ export function AppStackDomains({
   csrfToken: string;
   initial: AppStackDomainDto[] | null;
   ingress: AppStackDetailDto["ingress"];
+  pathTargets: AppStackDetailDto["pathTargets"];
   pending: boolean;
 }) {
   const m = useMessages();
@@ -214,7 +216,7 @@ export function AppStackDomains({
           key={edited.id}
           domain={edited}
           rows={rows}
-          ingress={ingress}
+          ingress={pathTargets}
           busy={busy}
           error={error}
           onSave={(body) => saveOptions(edited.id, body)}

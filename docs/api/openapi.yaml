@@ -13589,7 +13589,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -13683,6 +13683,13 @@ components:
                     $ref: "#/components/schemas/AppStackRetentionPolicy"
             ingress:
               type: array
+              items:
+                $ref: "#/components/schemas/AppStackPlanIngress"
+            pathTargets:
+              type: array
+              description: >-
+                ADR-0037: the entry points a path of an address may point at now, those of both the revision that runs
+                and the desired one (the routing options refuse any other with `unknown_ingress`)
               items:
                 $ref: "#/components/schemas/AppStackPlanIngress"
             routesPending:

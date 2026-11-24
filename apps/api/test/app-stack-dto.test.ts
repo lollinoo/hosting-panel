@@ -270,6 +270,21 @@ describe("appStackDetailDto", () => {
     expect(appStackDetailDto(detailInput({ domains: [protectedShop] })).routesPending).toBe(false);
   });
 
+  it("offers as path targets the entry points of both the revision that runs and the desired one, as the API accepts them", () => {
+    const app = { componentKey: "app", port: 8080 };
+    const cache = { componentKey: "cache", port: 6379 };
+    const withIngress = (ingress: ApprovedStackPlan["ingress"]): ApprovedStackPlan => ({ ...PLAN, ingress });
+    const stack = stackRow({ status: "running", desiredRevisionId: REVISION, appliedRevisionId: "srev_old" });
+    const of = (desired: ApprovedStackPlan, applied: ApprovedStackPlan | null) =>
+      appStackDetailDto(deployed([], { stack, desired: { revision, plan: desired }, appliedPlan: applied }));
+    // An upgrade asked for and not installed adds an entry point: the address can take it, a path cannot yet.
+    expect(of(withIngress([app, cache]), withIngress([app]))).toMatchObject({ ingress: [app, cache], pathTargets: [app] });
+    // It removes one: neither can.
+    expect(of(withIngress([app]), withIngress([app, cache]))).toMatchObject({ ingress: [app], pathTargets: [app] });
+    expect(appStackDetailDto(deployed([])).pathTargets).toEqual(PLAN.ingress);
+    expect(appStackDetailDto(detailInput())).toMatchObject({ ingress: [app], pathTargets: [app] });
+  });
+
   it("passes volumes, the active operation, upgrade and rollback through", () => {
     const dto = appStackDetailDto(
       deployed([], {
