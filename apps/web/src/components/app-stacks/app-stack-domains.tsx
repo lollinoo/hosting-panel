@@ -96,7 +96,7 @@ export function AppStackDomains({
     setEditing(id);
   }
 
-  // A refusal stays in the dialog, with what was typed (the password field is emptied on every send).
+  // A refusal stays in the dialog, with what was typed (the password field too); success closes it.
   async function saveOptions(id: string, body: UpdateAppStackDomainInput) {
     if (busy) return;
     const answer = await send(`options:${id}`, "PATCH", `${base}/${id}`, body);

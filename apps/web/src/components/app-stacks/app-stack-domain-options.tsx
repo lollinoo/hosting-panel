@@ -64,7 +64,7 @@ export function buildDomainOptions(
 
 /**
  * Options of one web address: redirect, password, compression, paths. The four are sent together. The password is
- * write-only: it lives in its field until it is sent and is never shown again.
+ * write-only: it lives in its field until the dialog closes and is never shown again.
  */
 export function AppStackDomainOptions({
   domain,
@@ -112,7 +112,8 @@ export function AppStackDomainOptions({
     const built = buildDomainOptions({ redirectTo, compression, protect, username, password: passwordRef.current?.value ?? "", paths }, hasPassword);
     if (!built.ok) return setProblems(built.problems);
     setProblems({});
-    if (passwordRef.current) passwordRef.current.value = "";
+    // The page closes this dialog when the save is accepted, which takes the field with it; after a refusal the field
+    // keeps what was typed, so the next Save sends the same password.
     await onSave(built.body);
   }
 
