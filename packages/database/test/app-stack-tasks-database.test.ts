@@ -1005,6 +1005,48 @@ describe("@hosting-panel/database — tasks of applications", () => {
     });
   });
 
+  describe("a skip note ahead of the clock", () => {
+    const STACK = "stk_tk_notes";
+    const NOW = at("2032-01-10T10:20:00.000Z");
+    const PAST = at("2032-01-09T10:20:00.000Z");
+    /** A schedule set at `changedAt` and served at `served`, with the note of a refusal (`note`: its time and reason). */
+    async function written(taskKey: string, served: Date | null, note: { slot: Date; reason: "busy" | "missed" } | null): Promise<void> {
+      await setAppStackTaskScheduleTransactional(db(), {
+        organizationId: orgA,
+        stackId: STACK,
+        taskKey,
+        schedule: { frequency: "hourly" },
+        changedBy: USER,
+        now: PAST,
+      });
+      await db()
+        .update(appStackTaskSchedules)
+        .set({ servedSlotAt: served, skippedSlotAt: note?.slot ?? null, skipReason: note?.reason ?? null })
+        .where(and(eq(appStackTaskSchedules.stackId, STACK), eq(appStackTaskSchedules.taskKey, taskKey)));
+    }
+
+    it("goes with the repair, and a note that is not ahead stays on a schedule that is repaired", async () => {
+      await stack(STACK);
+      // The note of a time the clock which ran ahead refused, on a schedule that is otherwise in the past.
+      await written("noteahead", at("2032-01-10T10:00:00.000Z"), { slot: at("2032-01-12T09:00:00.000Z"), reason: "busy" });
+      // A repaired schedule keeps the note of yesterday.
+      await written("yesterday", at("2032-01-12T09:00:00.000Z"), { slot: at("2032-01-09T09:00:00.000Z"), reason: "missed" });
+      // A note ahead by less than a minute is not taken for a clock that ran ahead.
+      await written("small", null, { slot: new Date(NOW.getTime() + 30_000), reason: "busy" });
+      const small = (await scheduleOf(STACK, "small"))!;
+
+      await repairAppStackTaskSchedulesAheadOfClock(db(), NOW);
+      expect(await scheduleOf(STACK, "noteahead")).toMatchObject({ servedSlotAt: null, changedAt: NOW, skippedSlotAt: null, skipReason: null });
+      expect(await scheduleOf(STACK, "yesterday")).toMatchObject({
+        servedSlotAt: null,
+        changedAt: NOW,
+        skippedSlotAt: at("2032-01-09T09:00:00.000Z"),
+        skipReason: "missed",
+      });
+      expect(await scheduleOf(STACK, "small")).toEqual(small);
+    });
+  });
+
   describe("a time that already has a run", () => {
     const STACK = "stk_tk_ran";
     const scope = { organizationId: orgA, stackId: STACK, taskKey: "cleanup" };
