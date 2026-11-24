@@ -498,6 +498,14 @@ describe("AppStackDelete", () => {
     expect(sets).toContainEqual([4, m.apps.reasons.notNow]);
   });
 
+  it.each(locales)("issue #106: a listed delete can still be refused for its own reason, and the dialog says it: a database in use (%s)", async (_l, m) => {
+    keyedSend.mockResolvedValue({ ok: false, code: "VALIDATION_ERROR", reason: "database_in_use" });
+    const { out, sets } = callHooks(AppStackDelete, props(), m, { 0: true, 1: "team-notes" });
+    expect(button(out, m.apps.delete.open)!.props.disabled).toBe(false);
+    await submit(out);
+    expect(sets).toContainEqual([4, m.apps.reasons.database_in_use]);
+  });
+
   it.each(locales)("asks the typed name and a separate, unticked data checkbox with its keep note (%s)", (_l, m) => {
     const t = m.apps.delete;
     const { out } = callHooks(AppStackDelete, props(), m, { 0: true });
