@@ -175,6 +175,7 @@ export const AppStackDetailDtoSchema = AppStackSummaryDtoSchema.extend({
     z.object({ key: AppStackKeySchema, status: z.enum(APP_STACK_VOLUME_STATUSES), retentionPolicy: z.enum(APP_STACK_RETENTION_POLICIES) }),
   ),
   ingress: z.array(AppStackPlanIngressSchema),
+  routesPending: z.boolean(), // ADR-0037: the saved addresses/options are not what the last published route file holds
   cpuMilli: z.number().int().nonnegative(),
   memoryBytes: MemoryBytesText,
   upgrade: z.object({ templateVersionId: AppEntityIdSchema, versionNumber: z.number().int().positive() }).nullable(),

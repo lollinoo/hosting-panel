@@ -261,12 +261,15 @@ sub-path such as `/api` to another component and port of the same stack. A custo
 of the organisation (`app.update`) changes them on the application page, **Opzioni** next to the address. The server
 administrator's console has no such action, and nobody writes proxy configuration.
 
-1. **When a change applies.** Saving stores the options and asks for a route refresh of that stack at once; the
-   panel's periodic check of the applications (every minute by default) asks again when the first try could not.
+1. **When a change applies.** Saving stores the options and, when the routes of the stack follow its addresses (first
+   case below), queues the route refresh in the same transaction, so no other action can be queued in between; adding
+   or removing an address does the same. The panel's periodic check of the applications (every minute by default)
+   queues it again when that refresh failed and the addresses changed since it was queued.
    The refresh is a short action on the stack that rewrites `app_<stackId>.yml` for the revision that runs, also
    when a newer version was asked for and not installed (an upgrade that failed before it changed anything): the
    proxy reads the file again by itself and no container is restarted. An option change waits neither the five
-   minutes of a health-only change nor the ten minutes after a failed action. A change either reaches every route
+   minutes of a health-only change nor the ten minutes after a failed action; after a failed refresh the periodic
+   check waits those ten minutes only for the addresses that refresh was queued with. A change either reaches every route
    file of the stack that may be in place or is refused, so the panel never shows an option the live file lacks:
    - running or partly running, with no action in progress and the last action not a stop: saved, and the page says
      «Opzioni salvate: valgono tra qualche istante» (the API answers `applies: shortly`);
@@ -275,6 +278,11 @@ administrator's console has no such action, and nobody writes proxy configuratio
    - any other state (an action in progress, failed, outcome to be verified, or a stop the customer asked for that did
      not finish): refused with `409 RESOURCE_LOCKED` and nothing is saved, because a route file may be in place that
      nothing would rewrite. Let the action finish, or start or restart the application, then save again.
+
+   When the refresh itself fails (the executor does not answer) and an action fails after it, the live file keeps
+   what it had: the application's detail then has `routesPending: true` and the page shows «Opzioni non ancora attive»
+   next to every address that shows an option, never the option as active. The next successful start, restart or
+   refresh publishes what is saved.
 2. **See the options of a stack** (read-only; the query leaves the verifier column out on purpose):
    ```bash
    cd / && sudo -u postgres psql -X -d hosting_panel -c "select id, hostname, redirect_to_domain_id, compression, access_username, path_routes from app_stack_domains where stack_id = '<stackId>' order by hostname"

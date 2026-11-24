@@ -139,6 +139,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
       secretParameters: [{ key: "app_secret", label: "App secret", required: true, isSet: true, version: 1, setAt: AT }],
       volumes: [{ key: "data", status: "present", retentionPolicy: "retain" }],
       ingress: [{ componentKey: "app", port: 8080 }],
+      routesPending: false,
       cpuMilli: 1500, memoryBytes: "805306368",
       upgrade: { templateVersionId: "atv_demo_2", versionNumber: 2 },
       rollback: { revisionId: "astr_1", revisionNumber: 1, templateVersionNumber: 1 },

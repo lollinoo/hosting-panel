@@ -36,6 +36,7 @@ import {
   sql,
   updateAppStackDomainState,
   type AppStackDomainRow,
+  type AppStackRow,
   type DatabaseClient,
   type HostingPanelDatabase,
 } from "@hosting-panel/database";
@@ -62,6 +63,7 @@ import {
   appStackRoutesFollowAddresses,
   appStackRoutesHash,
   appStackRoutesHealthOnly,
+  appStackRoutesPending,
 } from "./app-stack-runtime-policy.js";
 
 const FAILURE_WINDOW_MS = 10 * 60_000;
@@ -131,18 +133,42 @@ export class AppStackObserverService {
   }
 
   /**
-   * After a domain add/remove/check/update; `forceDnsIds` looks those addresses up now even when not due, and
-   * `optionsChanged` (ADR-0037) queues the refresh without waiting out the pause after a failed action.
+   * After a domain add/remove/check/update; `forceDnsIds` looks those addresses up now even when not due,
+   * `optionsChanged` (ADR-0037) queues the refresh without waiting out the pause after a failed action, and
+   * `routesQueued` wakes the worker for the refresh the caller queued in its own transaction.
    */
   public reconcileStack(
     organizationId: string,
     stackId: string,
     now: Date,
-    opts: { readonly forceDnsIds?: readonly string[]; readonly optionsChanged?: boolean } = {},
+    opts: { readonly forceDnsIds?: readonly string[]; readonly optionsChanged?: boolean; readonly routesQueued?: boolean } = {},
   ): Promise<void> {
+    if (opts.routesQueued === true) this.outboxWorker.triggerAsync();
     return this.#queue(() =>
       this.#run({ organizationId, stackId }, now, (id) => opts.forceDnsIds?.includes(id) ?? false, opts.optionsChanged === true),
     );
+  }
+
+  /**
+   * ADR-0037: queues the route refresh in the caller's transaction, which holds the stack row, so no action can be
+   * queued between a change of the addresses and their refresh. Only when the saved addresses are not what the route
+   * file holds; the caller has checked that the routes of the stack follow its addresses. True when one was queued.
+   */
+  public async queueRoutesRefresh(
+    tx: HostingPanelDatabase,
+    stack: Pick<AppStackRow, "id" | "organizationId" | "appliedRevisionId" | "appliedRoutesHash">,
+    now: Date,
+  ): Promise<boolean> {
+    if (this.config.runtimeBackend === "disabled" || stack.appliedRevisionId === null) return false;
+    const ref = { organizationId: stack.organizationId, stackId: stack.id };
+    const revision = await getAppStackRevision(tx, { ...ref, revisionId: stack.appliedRevisionId });
+    const parsed = ApprovedStackPlanSchema.safeParse(revision?.plan);
+    if (!parsed.success) return false;
+    const domains = await listAppStackDomains(tx, ref);
+    if (!appStackRoutesPending({ plan: parsed.data, domains, now, appliedRoutesHash: stack.appliedRoutesHash })) return false;
+    await this.#enqueueRefresh(tx, { ...ref, appliedRevisionId: stack.appliedRevisionId });
+    this.#routesQueuedAt.set(stack.id, { at: now.getTime(), addresses: addressesKey(parsed.data, domains, now) });
+    return true;
   }
 
   #queue(work: () => Promise<void>): Promise<void> {
@@ -428,17 +454,23 @@ export class AppStackObserverService {
       .orderBy(desc(operations.submittedAt))
       .limit(1);
     if (!appStackRoutesFollowAddresses(stack, last)) return false;
-    // A change of the options is the customer's own request, made once: it is not a retry of the failed action.
+    const plan = await this.#appliedPlan(stack);
+    if (plan === null) return false;
+    const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
+    // The routes with every target in move only with the addresses and their options, never with health.
+    const addresses = addressesKey(plan, routes.domains, now);
+    const queued = this.#routesQueuedAt.get(stack.stackId);
+    // A change of the options is the customer's own request, made once, and addresses changed since the last refresh
+    // was queued are not a retry of it: neither waits out the pause after a failed action.
     if (
       !optionsChanged &&
+      (queued === undefined || queued.addresses === addresses) &&
       last?.status === "failed" &&
       last.completedAt &&
       now.getTime() - last.completedAt.getTime() < APP_STACK_ROUTE_REFRESH_BACKOFF_MS
     ) {
       return false;
     }
-    const plan = await this.#appliedPlan(stack);
-    if (plan === null) return false;
     // The refresh publishes the addresses of the targets that are healthy.
     const healthy = await db
       .select({ componentKey: appStackComponents.componentKey })
@@ -450,14 +482,10 @@ export class AppStackObserverService {
           eq(appStackComponents.health, "healthy"),
         ),
       );
-    const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
     const { entries } = appStackRoutePlan({ ...routes, include: new Set(healthy.map((c) => c.componentKey)) });
     if ((entries.length > 0 ? appStackRoutesHash(entries) : null) === stack.appliedRoutesHash) return false;
     // A flapping target is refreshed at most every five minutes; a change of the addresses (one removed) or of their
-    // options never waits. The routes with every target in tell the two apart: they move only with the addresses (a new
-    // path to a target the published routes leave out would otherwise read as a health change).
-    const addresses = appStackRoutesHash(appStackRoutePlan({ ...routes, include: new Set(plan.ingress.map((r) => r.componentKey)) }).entries);
-    const queued = this.#routesQueuedAt.get(stack.stackId);
+    // options never waits (a new path to a target the published routes leave out would otherwise read as a health change).
     if (
       queued !== undefined &&
       queued.addresses === addresses &&
@@ -469,41 +497,7 @@ export class AppStackObserverService {
 
     const { organizationId, stackId } = stack;
     try {
-      await db.transaction(async (tx) => {
-        const queued = await enqueueAppStackOperationTransactional(tx as unknown as HostingPanelDatabase, {
-          organizationId,
-          stackId,
-          kind: "stack.deploy",
-          requestedByUserId: null,
-          idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}${randomUUID().replace(/-/g, "")}`,
-          requestHash: canonicalRequestHash({
-            route: "app.stack.deploy",
-            organizationId,
-            stackId,
-            body: { revisionId: appliedRevisionId, trigger: "routes" },
-          }),
-          revision: null,
-          routesOnly: true,
-          destroyData: false,
-        });
-        if (queued.idempotentReplay) return;
-        await appendAuditEvent(tx, {
-          actorType: "system",
-          actorId: null,
-          organizationId,
-          action: APP_AUDIT_ACTIONS.stackDeploy,
-          targetType: APP_AUDIT_TARGET_TYPES.stack,
-          targetId: stackId,
-          details: {
-            operationId: queued.operation?.id ?? null,
-            deploymentId: queued.deployment?.id ?? null,
-            revisionId: appliedRevisionId,
-            templateVersionId: queued.revision?.templateVersionId ?? null,
-            status: queued.stack.status,
-            trigger: "routes",
-          },
-        });
-      });
+      await db.transaction((tx) => this.#enqueueRefresh(tx as unknown as HostingPanelDatabase, { organizationId, stackId, appliedRevisionId }));
       this.#routesQueuedAt.set(stackId, { at: now.getTime(), addresses });
       return true;
     } catch (err) {
@@ -512,4 +506,54 @@ export class AppStackObserverService {
       throw err;
     }
   }
+
+  /** The routes-only system stack.deploy of the applied revision and its audit row, in the given transaction. */
+  async #enqueueRefresh(
+    tx: HostingPanelDatabase,
+    stack: { readonly organizationId: string; readonly stackId: string; readonly appliedRevisionId: string | null },
+  ): Promise<void> {
+    const { organizationId, stackId, appliedRevisionId } = stack;
+    const queued = await enqueueAppStackOperationTransactional(tx, {
+      organizationId,
+      stackId,
+      kind: "stack.deploy",
+      requestedByUserId: null,
+      idempotencyKey: `${APP_STACK_ROUTES_KEY_PREFIX}${randomUUID().replace(/-/g, "")}`,
+      requestHash: canonicalRequestHash({
+        route: "app.stack.deploy",
+        organizationId,
+        stackId,
+        body: { revisionId: appliedRevisionId, trigger: "routes" },
+      }),
+      revision: null,
+      routesOnly: true,
+      destroyData: false,
+    });
+    if (queued.idempotentReplay) return;
+    await appendAuditEvent(tx, {
+      actorType: "system",
+      actorId: null,
+      organizationId,
+      action: APP_AUDIT_ACTIONS.stackDeploy,
+      targetType: APP_AUDIT_TARGET_TYPES.stack,
+      targetId: stackId,
+      details: {
+        operationId: queued.operation?.id ?? null,
+        deploymentId: queued.deployment?.id ?? null,
+        revisionId: appliedRevisionId,
+        templateVersionId: queued.revision?.templateVersionId ?? null,
+        status: queued.stack.status,
+        trigger: "routes",
+      },
+    });
+  }
+}
+
+/**
+ * The routes of the addresses with every target in, as the key the observer remembers with a queued refresh. ACME is
+ * taken as on: it is not stored, and a request that queues a refresh in its own transaction cannot ask the executor.
+ */
+function addressesKey(plan: Pick<ApprovedStackPlan, "ingress">, domains: readonly AppStackDomainRow[], now: Date): string {
+  const include = new Set(plan.ingress.map((r) => r.componentKey));
+  return appStackRoutesHash(appStackRoutePlan({ plan, domains, now, acmeEnabled: true, include }).entries);
 }

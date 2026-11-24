@@ -798,5 +798,32 @@ describe("AppStackObserverService (PGlite)", () => {
       expect(await allDeploys(stack.id)).toHaveLength(2);
       expect(mutatingCalls()).toEqual([]);
     });
+
+    it("after a failed refresh the loop waits the 10 minutes only for the addresses that refresh was queued with", async () => {
+      const obs = observer();
+      const stack = await seedStack({ status: "running", domains: [{ hostname: "pause.example.com" }] });
+      /** The refresh fails a minute later: the stack reads degraded and the old routes (none) stay. */
+      const fail = async (minute: number) => {
+        await db().update(operations).set({ status: "failed", completedAt: at(minute) }).where(eq(operations.resourceId, stack.id));
+        await db().update(appStacks).set({ status: "degraded" }).where(eq(appStacks.id, stack.id));
+      };
+
+      await obs.reconcileOnce(NOW);
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+      await fail(1);
+      await obs.reconcileOnce(at(2));
+      expect(await allDeploys(stack.id)).toHaveLength(1);
+
+      // An option saved meanwhile (accepted while that refresh was queued) is not a retry of it: no wait.
+      await db().update(appStackDomains).set({ compression: true }).where(eq(appStackDomains.stackId, stack.id));
+      await obs.reconcileOnce(at(3));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+
+      // That one fails too: the same addresses wait again.
+      await fail(4);
+      await obs.reconcileOnce(at(5));
+      expect(await allDeploys(stack.id)).toHaveLength(2);
+      expect(mutatingCalls()).toEqual([]);
+    });
   });
 });

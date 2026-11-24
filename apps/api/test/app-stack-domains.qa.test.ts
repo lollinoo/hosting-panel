@@ -83,6 +83,8 @@ describe("B3: application web addresses touch only the application's own route f
   let otherToken: string;
   let otherStackId: string;
   let lookup: Map<string, string[]>;
+  /** While true the executor does not answer the certificate read (its socket is briefly unreachable). */
+  let certificateReadFails = false;
 
   async function call(method: string, p: string, body?: unknown, token?: string) {
     const res = await fetch(`${app.baseUrl!}${p}`, {
@@ -211,6 +213,7 @@ describe("B3: application web addresses touch only the application's own route f
         if (typeof v !== "function" || typeof prop !== "string") return v;
         return (...args: unknown[]) => {
           calls.push(prop);
+          if (prop === "getCertificateStatus" && certificateReadFails) return Promise.reject(new Error("executor unreachable"));
           if (prop === "publishAppStackRoutes") routeRequests.push(structuredClone(args[0]) as (typeof routeRequests)[number]);
           return (v as (...a: unknown[]) => unknown).apply(target, args);
         };
@@ -889,6 +892,97 @@ describe("B3: application web addresses touch only the application's own route f
       for (const refresh of refreshes) expect(refresh).toMatchObject({ revisionId: appliedRevisionId, status: "succeeded" });
       expect(await appRow()).toMatchObject({ status: "running", appliedRevisionId });
       expect(res.body.applies).toBe("shortly");
+    });
+  });
+
+  // Applications of their own, after every count above.
+  describe("an address change reaches the published routes, or the application says it did not (ADR-0037)", () => {
+    const PASSWORD = "Unreachable-Canary-Pass-0001";
+    let versionId: string;
+
+    const appPath = (appId: string, verb = "") => `/v1/organizations/${orgId}/app-stacks/${appId}${verb === "" ? "" : `/${verb}`}`;
+    const appRow = async (appId: string) => (await dbClient.db.select().from(appStacks).where(eq(appStacks.id, appId)))[0]!;
+    const address = async (hostname: string) => (await dbClient.db.select().from(appStackDomains).where(eq(appStackDomains.hostname, hostname)))[0]!;
+    const refreshesOf = async (appId: string) =>
+      (await dbClient.db.select().from(operations).where(eq(operations.resourceId, appId))).filter(
+        (o) => o.kind === "stack.deploy" && (o.idempotencyKey ?? "").startsWith("sys_routes_") && o.requestedByUserId === null,
+      );
+    const protect = (appId: string, domainId: string) =>
+      owner("PATCH", `${base(appId)}/${domainId}`, { redirectToDomainId: null, compression: false, protection: { username: "guest", password: PASSWORD }, pathRoutes: [] });
+
+    beforeAll(async () => {
+      const tpl = await call("POST", "/v1/admin/app-templates", { slug: `rt-${randomUUID().slice(0, 8)}`, source: APP_BUILT_IN_TEMPLATES[0]!.source }, adminToken);
+      expect(tpl.status, tpl.raw).toBe(201);
+      expect((await call("PATCH", `/v1/admin/app-templates/${tpl.body.data.id as string}`, { enabled: true }, adminToken)).status).toBe(200);
+      versionId = tpl.body.data.defaultVersionId as string;
+    });
+
+    /** A running application of organisation A with `hostname` published; DNS elsewhere, so no certificate moves its file. */
+    async function published(hostname: string, minutes: number): Promise<{ appId: string; domainId: string }> {
+      const dep = await owner("POST", `/v1/organizations/${orgId}/app-stacks`, { templateVersionId: versionId, name: `app-${randomUUID().slice(0, 8)}`, deploy: true });
+      expect(dep.status, dep.raw).toBe(202);
+      const appId = dep.body.data.stackId as string;
+      await drain();
+      expect((await appRow(appId)).status).toBe("running");
+      lookup.set(hostname, []);
+      const added = await addHost(hostname, appId);
+      expect(added.status, added.raw).toBe(201);
+      await pass(minutes);
+      expect((await files()).get(`app_${appId}.yml`)).toContain(hostname);
+      return { appId, domainId: (added.body.data as Json[]).find((d) => d.hostname === hostname)!.id as string };
+    }
+
+    it("a password saved while the executor cannot be reached queues the route refresh in the same request: no action starts before it", async () => {
+      const { appId, domainId } = await published("unreachable-a.example.test", 700);
+      const before = (await refreshesOf(appId)).length;
+      certificateReadFails = true;
+      try {
+        const res = await protect(appId, domainId);
+        expect(res.status, res.raw).toBe(200);
+        expect(res.body.applies).toBe("shortly");
+        const refreshes = await refreshesOf(appId);
+        expect(refreshes).toHaveLength(before + 1);
+        expect(refreshes.filter((o) => o.status === "queued")).toHaveLength(1);
+        const restart = await owner("POST", appPath(appId, "restart"), {});
+        expect(restart.status, restart.raw).toBe(409);
+        expect(restart.body.error.code).toBe("RESOURCE_LOCKED");
+      } finally {
+        certificateReadFails = false;
+      }
+      await drain();
+      expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${(await address("unreachable-a.example.test")).accessPasswordHash!}"`);
+      expect((await appRow(appId)).status).toBe("running");
+    });
+
+    it("when that refresh fails and a restart fails after it, the file has no password and the application says its options are not published", async () => {
+      const { appId, domainId } = await published("unreachable-b.example.test", 701);
+      const detail = async () => {
+        const res = await owner("GET", appPath(appId));
+        expect(res.status, res.raw).toBe(200);
+        return res.body.data as Json;
+      };
+      certificateReadFails = true;
+      try {
+        expect((await protect(appId, domainId)).status).toBe(200);
+        await drain();
+        sim.appStacks.failNextAppStackStep("restart", "engine_unavailable");
+        const restart = await owner("POST", appPath(appId, "restart"), {});
+        expect(restart.status, restart.raw).toBe(202);
+        await drain();
+        expect((await appRow(appId)).status).toBe("failed");
+        const verifier = (await address("unreachable-b.example.test")).accessPasswordHash!;
+        const text = (await files()).get(`app_${appId}.yml`)!;
+        expect(text).toContain("unreachable-b.example.test");
+        expect(text).not.toContain(verifier);
+        expect((await detail()).routesPending).toBe(true);
+      } finally {
+        certificateReadFails = false;
+      }
+      // A restart that works publishes what was saved, and nothing is pending any more.
+      expect((await owner("POST", appPath(appId, "restart"), {})).status).toBe(202);
+      await drain();
+      expect((await files()).get(`app_${appId}.yml`)).toContain(`- "guest:${(await address("unreachable-b.example.test")).accessPasswordHash!}"`);
+      expect((await detail()).routesPending).toBe(false);
     });
   });
 });

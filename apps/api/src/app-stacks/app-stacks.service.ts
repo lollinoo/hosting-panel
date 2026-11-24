@@ -350,6 +350,7 @@ export class AppStacksService {
       templateVersionNumber: version.versionNumber,
       spec: this.#displaySpec(version),
       desired,
+      appliedPlan: await this.#appliedPlan(stack, desired),
       components,
       volumes,
       domains,
@@ -684,5 +685,19 @@ export class AppStacksService {
     const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
     if (!revision || !plan?.success) throw damaged("The stored revision is damaged.");
     return { revision, plan: plan.data };
+  }
+
+  /** The plan of the revision that runs, whose routes are published (ADR-0037); null when none was applied. */
+  async #appliedPlan(stack: AppStackRow, desired: { revision: AppStackRevisionRow; plan: ApprovedStackPlan } | null): Promise<ApprovedStackPlan | null> {
+    if (stack.appliedRevisionId === null) return null;
+    if (desired?.revision.id === stack.appliedRevisionId) return desired.plan;
+    const revision = await getAppStackRevision(this.dbClient.db, {
+      organizationId: stack.organizationId,
+      stackId: stack.id,
+      revisionId: stack.appliedRevisionId,
+    });
+    const plan = revision ? ApprovedStackPlanSchema.safeParse(revision.plan) : null;
+    if (!plan?.success) throw damaged("The stored revision is damaged.");
+    return plan.data;
   }
 }

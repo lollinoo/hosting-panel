@@ -17,6 +17,7 @@ import {
   getAppStackRevision,
   getAppTemplateVersion,
   listAppStackDomains,
+  lockAppStackLimitUsage,
   operations,
   removeAppStackDomainTransactional,
   updateAppStackDomainRoutingTransactional,
@@ -37,7 +38,7 @@ import { validatedSpec } from "./app-stack-compile.js";
 import { appStackDomainDto, assignedAddressDetails } from "./app-stack-dto.js";
 import { mapAppStackError } from "./app-stack-errors.js";
 import { AppStackObserverService } from "./app-stack-observer.service.js";
-import { appStackOptionsApply } from "./app-stack-runtime-policy.js";
+import { appStackOptionsApply, appStackRoutesFollowAddresses } from "./app-stack-runtime-policy.js";
 import { apr1Verifier } from "./apr1.js";
 import type { AppStackRequestContext } from "./app-stacks.service.js";
 
@@ -71,16 +72,18 @@ export class AppStackDomainsService {
   public async add(ctx: AppStackRequestContext, stack: AppStackRow, input: AppStackDomainEntry): Promise<AppStackDomainDto[]> {
     assertNotLeaving(stack);
     await this.#assertTarget(this.dbClient.db, stack, input);
-    const inserted = await guardedApp(mapAppStackError, () =>
+    const { inserted, queued } = await guardedApp(mapAppStackError, () =>
       this.dbClient.db.transaction(async (tx) => {
         const t = tx as unknown as HostingPanelDatabase;
+        await lockAppStackLimitUsage(t, ctx.organizationId);
         const rows = await addAppStackDomainsTransactional(t, {
           organizationId: ctx.organizationId,
           stackId: stack.id,
           entries: [{ hostname: input.hostname, componentKey: input.componentKey, internalPort: input.port, compression: input.compression }],
         });
         // The stack row is locked now: an upgrade or rollback committed since the first check is the plan to match.
-        await this.#assertTarget(t, (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack, input);
+        const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
+        await this.#assertTarget(t, locked, input);
         for (const row of rows) {
           await ctx.audit(t, {
             action: APP_AUDIT_ACTIONS.domainAssign,
@@ -89,10 +92,10 @@ export class AppStackDomainsService {
             details: assignedAddressDetails(row),
           });
         }
-        return rows;
+        return { inserted: rows, queued: rows.length > 0 && (await this.#queueRefresh(t, locked)) };
       }),
     );
-    if (inserted.length > 0) await this.#reconcile(stack, inserted.map((row) => row.id));
+    if (inserted.length > 0) await this.#reconcile(stack, inserted.map((row) => row.id), false, queued);
     return this.list(stack);
   }
 
@@ -114,9 +117,10 @@ export class AppStackDomainsService {
       input.protection === null
         ? null
         : { username: input.protection.username, ...(password === undefined ? {} : { passwordHash: apr1Verifier(password) }) };
-    const applies = await guardedApp(mapAppStackError, () =>
+    const { applies, queued } = await guardedApp(mapAppStackError, () =>
       this.dbClient.db.transaction(async (tx) => {
         const t = tx as unknown as HostingPanelDatabase;
+        await lockAppStackLimitUsage(t, ctx.organizationId);
         const { after } = await updateAppStackDomainRoutingTransactional(t, {
           organizationId: ctx.organizationId,
           stackId: stack.id,
@@ -126,12 +130,7 @@ export class AppStackDomainsService {
         // The stack row is locked now: an upgrade or rollback committed since the first check is the plan to match, and
         // no action can start or settle before this answer is committed.
         const locked = (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack;
-        const [last] = await t
-          .select({ kind: operations.kind, status: operations.status })
-          .from(operations)
-          .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stack.id)))
-          .orderBy(desc(operations.submittedAt))
-          .limit(1);
+        const last = await lastOperation(t, stack.id);
         const when = appStackOptionsApply(locked, last);
         if (when === null) {
           const message = `This change cannot reach the web address while the application is ${locked.status}.`;
@@ -152,29 +151,33 @@ export class AppStackDomainsService {
             pathRoutes: after.pathRoutes,
           },
         });
-        return when;
+        return { applies: when, queued: when === "shortly" && (await this.#queueRefresh(t, locked)) };
       }),
     );
-    await this.#reconcile(stack, [], true);
+    await this.#reconcile(stack, [], true, queued);
     return { domains: await this.list(stack), applies };
   }
 
-  /** The observer withdraws the route. */
+  /** The route refresh queued in the same transaction withdraws the route. */
   public async remove(ctx: AppStackRequestContext, stack: AppStackRow, domainId: string): Promise<AppStackDomainDto[]> {
     const row = await this.#row(stack, domainId);
-    await this.dbClient.db.transaction(async (tx) => {
-      const t = tx as unknown as HostingPanelDatabase;
-      if (!(await removeAppStackDomainTransactional(t, { organizationId: ctx.organizationId, stackId: stack.id, domainId }))) {
-        throw appNotFound();
-      }
-      await ctx.audit(t, {
-        action: APP_AUDIT_ACTIONS.domainRemove,
-        targetType: "app_stack",
-        targetId: stack.id,
-        details: { domainId, hostname: row.hostname },
-      });
-    });
-    await this.#reconcile(stack);
+    const queued = await guardedApp(mapAppStackError, () =>
+      this.dbClient.db.transaction(async (tx) => {
+        const t = tx as unknown as HostingPanelDatabase;
+        await lockAppStackLimitUsage(t, ctx.organizationId);
+        if (!(await removeAppStackDomainTransactional(t, { organizationId: ctx.organizationId, stackId: stack.id, domainId }))) {
+          throw appNotFound();
+        }
+        await ctx.audit(t, {
+          action: APP_AUDIT_ACTIONS.domainRemove,
+          targetType: "app_stack",
+          targetId: stack.id,
+          details: { domainId, hostname: row.hostname },
+        });
+        return this.#queueRefresh(t, (await getAppStack(t, { organizationId: ctx.organizationId, stackId: stack.id })) ?? stack);
+      }),
+    );
+    await this.#reconcile(stack, [], false, queued);
     return this.list(stack);
   }
 
@@ -239,9 +242,29 @@ export class AppStackDomainsService {
     return row;
   }
 
+  /**
+   * ADR-0037: the route refresh, in the caller's transaction, when the routes of the stack follow its addresses now:
+   * no action can then be queued before the change reaches the route file.
+   */
+  async #queueRefresh(t: HostingPanelDatabase, locked: AppStackRow): Promise<boolean> {
+    if (!appStackRoutesFollowAddresses(locked, await lastOperation(t, locked.id))) return false;
+    return (await this.observer?.queueRoutesRefresh(t, locked, new Date())) ?? false;
+  }
+
   /** Best effort: the change is committed and the observer's loop retries. */
-  async #reconcile(stack: AppStackRow, forceDnsIds: readonly string[] = [], optionsChanged = false): Promise<void> {
-    const opts = optionsChanged ? { forceDnsIds, optionsChanged } : { forceDnsIds };
+  async #reconcile(stack: AppStackRow, forceDnsIds: readonly string[] = [], optionsChanged = false, routesQueued = false): Promise<void> {
+    const opts = { forceDnsIds, ...(optionsChanged ? { optionsChanged } : {}), ...(routesQueued ? { routesQueued } : {}) };
     await this.observer?.reconcileStack(stack.organizationId, stack.id, new Date(), opts).catch(() => undefined);
   }
+}
+
+/** The latest operation of the stack; the caller holds the stack row. */
+async function lastOperation(db: DatabaseExecutor, stackId: string) {
+  const [last] = await db
+    .select({ kind: operations.kind, status: operations.status })
+    .from(operations)
+    .where(and(eq(operations.resourceType, APP_STACK_RESOURCE_TYPE), eq(operations.resourceId, stackId)))
+    .orderBy(desc(operations.submittedAt))
+    .limit(1);
+  return last;
 }

@@ -102,6 +102,7 @@ const DETAIL: AppStackDetailDto = {
   ],
   volumes: [{ key: "notes", status: "present", retentionPolicy: "retain" }],
   ingress: [{ componentKey: "web", port: 8080 }],
+  routesPending: false,
   cpuMilli: 750,
   memoryBytes: String(384 * MIB),
   upgrade: null,
@@ -281,6 +282,16 @@ describe("detail page", () => {
     const h = await page();
     expect(h.split(en.apps.detail.sectionError)).toHaveLength(3);
     expect(h).toContain(en.apps.detail.section.danger);
+  });
+
+  it("an address whose saved options are not published yet says so on the page", async () => {
+    const shown = [{ ...DOMAIN, protection: { username: "guest" } }];
+    answer({ [UP]: ok({ ...DETAIL, routesPending: true }), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok(shown) });
+    expect(await page()).toContain(en.apps.domains.options.summary.pending);
+    answer({ [UP]: ok(DETAIL), [`${UP}/deployments?limit=20`]: ok([]), [`${UP}/domains`]: ok(shown) });
+    const published = await page();
+    expect(published).toContain(en.apps.domains.options.summary.protected);
+    expect(published).not.toContain(en.apps.domains.options.summary.pending);
   });
 
   it("an operation in progress is followed on the page", async () => {
@@ -490,7 +501,7 @@ describe("web addresses", () => {
     { componentKey: "web", port: 8080 },
     { componentKey: "admin", port: 9000 },
   ];
-  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN], ingress: INGRESS, ...over });
+  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN], ingress: INGRESS, pending: false, ...over });
   const SECOND: AppStackDomainDto = { ...DOMAIN, id: "sdom_2", hostname: "notes2.example.test", componentKey: "admin", port: 9000, status: "pending", certificateStatus: "requested", certificateExpiresAt: null };
 
   it("rows show the address, its target, its status and certificate in words; the add form has its labels and hint", () => {
@@ -578,7 +589,7 @@ describe("address options (ADR-0037)", () => {
   const PLAIN = { redirectTo: "", compression: false, protect: false, username: "", password: "", paths: [] };
   const API_PATH = { pathPrefix: "/api", target: "admin:9000", stripPrefix: true };
   const o = en.apps.domains.options;
-  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN, SECOND], ingress: INGRESS, ...over });
+  const props = (over: Record<string, unknown> = {}) => ({ orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: [DOMAIN, SECOND], ingress: INGRESS, pending: false, ...over });
   const dialogProps = (over: Record<string, unknown> = {}) => ({
     domain: DOMAIN,
     rows: [DOMAIN, SECOND],
@@ -675,6 +686,19 @@ describe("address options (ADR-0037)", () => {
       [7, null],
       [6, "sdom_2"],
     ]);
+  });
+
+  it("while the saved options are not published yet, every address that shows one says they are not active yet", () => {
+    const rows = [
+      { ...DOMAIN, protection: { username: "guest" } },
+      { ...SECOND, redirectToDomainId: "sdom_1" },
+      { ...DOMAIN, id: "sdom_3", hostname: "paths.example.test", pathRoutes: [{ pathPrefix: "/api", componentKey: "admin", port: 9000, stripPrefix: true }] },
+      { ...DOMAIN, id: "sdom_4", hostname: "plain.example.test", compression: true },
+    ];
+    const pending = html(callHooks(AppStackDomains, props({ initial: rows, pending: true })).out);
+    expect(pending.split(o.summary.pending)).toHaveLength(4);
+    expect(html(callHooks(AppStackDomains, props({ initial: rows })).out)).not.toContain(o.summary.pending);
+    expect(itMsgs.apps.domains.options.summary.pending).not.toBe(o.summary.pending);
   });
 
   it("the dialog is for the chosen address; a refusal is shown once, inside it", () => {

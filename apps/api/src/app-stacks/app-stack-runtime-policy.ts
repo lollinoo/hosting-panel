@@ -322,6 +322,22 @@ export function appStackRoutesHealthOnly(input: {
   return false;
 }
 
+/**
+ * ADR-0037: the saved addresses and options are not what the route file last published successfully holds, whatever
+ * the health of the targets and whether ACME is on (neither is stored). Nothing published (no applied plan, no hash)
+ * holds nothing back.
+ */
+export function appStackRoutesPending(input: {
+  readonly plan: Pick<ApprovedStackPlan, "ingress"> | null;
+  readonly domains: readonly AppStackDomainRow[];
+  readonly now: Date;
+  readonly appliedRoutesHash: string | null;
+}): boolean {
+  const { plan } = input;
+  if (plan === null) return input.appliedRoutesHash !== null;
+  return ![false, true].some((acmeEnabled) => appStackRoutesHealthOnly({ ...input, plan, acmeEnabled }));
+}
+
 /** The observer's route refresh: a system stack.deploy under the routes key prefix (a customer request carries a user id). */
 export function appStackRoutesRefresh(op: {
   readonly kind: string;

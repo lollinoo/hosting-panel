@@ -17,19 +17,24 @@ import { appStackRefusalText } from "./app-stack-view";
 
 const tone = (s: string) => (s === "active" ? "success" : s === "failed" ? "destructive" : "secondary");
 
-/** Web addresses: adding, removing and changing the options are synchronous, the answer is the whole list. */
+/**
+ * Web addresses: adding, removing and changing the options are synchronous, the answer is the whole list. `pending`
+ * (ADR-0037): what is saved is not yet what the published routes hold, so no option is shown as active on its own.
+ */
 export function AppStackDomains({
   orgId,
   stackId,
   csrfToken,
   initial,
   ingress,
+  pending,
 }: {
   orgId: string;
   stackId: string;
   csrfToken: string;
   initial: AppStackDomainDto[] | null;
   ingress: AppStackDetailDto["ingress"];
+  pending: boolean;
 }) {
   const m = useMessages();
   const t = m.apps.domains;
@@ -126,6 +131,9 @@ export function AppStackDomains({
                   <Badge variant={tone(d.certificateStatus)}>{t.certificate[d.certificateStatus]}</Badge>
                   {d.protection !== null && <Badge variant="secondary">{t.options.summary.protected}</Badge>}
                   {d.pathRoutes.length > 0 && <Badge variant="secondary">{format(t.options.summary.paths, { n: d.pathRoutes.length })}</Badge>}
+                  {pending && (d.redirectToDomainId !== null || d.protection !== null || d.pathRoutes.length > 0) && (
+                    <Badge variant="outline">{t.options.summary.pending}</Badge>
+                  )}
                   {d.certificateStatus === "active" && d.certificateExpiresAt && (
                     <time dateTime={d.certificateExpiresAt} className="text-muted-foreground">
                       {format(t.expires, { date: date.format(new Date(d.certificateExpiresAt)) })}

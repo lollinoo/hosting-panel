@@ -3197,6 +3197,7 @@ x-hp-ingress:
           redirect: "Redirects to {hostname}",
           protected: "Password protected",
           paths: "Paths: {n}",
+          pending: "Options not active yet",
         },
       },
     },

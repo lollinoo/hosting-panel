@@ -3225,6 +3225,7 @@ x-hp-ingress:
           redirect: "Reindirizza a {hostname}",
           protected: "Protetto da password",
           paths: "Percorsi: {n}",
+          pending: "Opzioni non ancora attive",
         },
       },
     },

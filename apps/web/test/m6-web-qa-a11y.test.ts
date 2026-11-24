@@ -231,6 +231,7 @@ const DETAIL: AppStackDetailDto = {
     { componentKey: "web", port: 8080 },
     { componentKey: "admin", port: 9000 },
   ],
+  routesPending: false,
   cpuMilli: 750,
   memoryBytes: String(384 * MIB),
   upgrade: { templateVersionId: "atv_notes_3", versionNumber: 3 },
@@ -422,7 +423,7 @@ const wizard = (m: Messages, state: Record<number, unknown>, entry: CustomerAppT
   withState(AppWizard, { orgId: ORG, csrfToken: "csrf", entry }, m, state);
 const deleteProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", stackName: "team-notes", hasData: true };
 const secretsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", secrets: DETAIL.secretParameters };
-const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress };
+const domainsProps = { orgId: ORG, stackId: "stk_a1", csrfToken: "csrf", initial: DOMAINS, ingress: DETAIL.ingress, pending: false };
 const optionsProps = { domain: DOMAIN, rows: DOMAINS, ingress: DETAIL.ingress, busy: false, error: null as string | null, onSave: async () => undefined, onClose: () => undefined };
 const editor = (m: Messages, target: AppEditorTarget, state: Record<number, unknown> = {}) =>
   withState(AppTemplateEditor, { csrfToken: "csrf", initialSource: SOURCE, target }, m, state);

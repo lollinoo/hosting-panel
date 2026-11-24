@@ -21,7 +21,7 @@ import type {
   AppStackVolumeRow,
   AppStackWriteResult,
 } from "@hosting-panel/database";
-import { appStackDisplayStatus } from "./app-stack-runtime-policy.js";
+import { appStackDisplayStatus, appStackRoutesPending } from "./app-stack-runtime-policy.js";
 
 const iso = (at: Date | null): string | null => at?.toISOString() ?? null;
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
@@ -63,6 +63,8 @@ export function appStackDetailDto(input: {
   templateVersionNumber: number;
   spec: AppTemplateSpec;
   desired: { revision: AppStackRevisionRow; plan: ApprovedStackPlan } | null;
+  /** The plan of the revision that runs, whose routes are published; null when none was applied. */
+  appliedPlan: ApprovedStackPlan | null;
   components: readonly AppStackComponentRow[];
   volumes: readonly AppStackVolumeRow[];
   domains: readonly AppStackDomainRow[];
@@ -133,6 +135,12 @@ export function appStackDetailDto(input: {
     }),
     volumes: input.volumes.map((v) => ({ key: v.volumeKey, status: v.status, retentionPolicy: v.retentionPolicy })),
     ingress,
+    routesPending: appStackRoutesPending({
+      plan: input.appliedPlan,
+      domains: input.domains,
+      now,
+      appliedRoutesHash: stack.appliedRoutesHash,
+    }),
     cpuMilli: totals.cpuMilli,
     memoryBytes: totals.memoryBytes,
     upgrade: input.upgrade,
