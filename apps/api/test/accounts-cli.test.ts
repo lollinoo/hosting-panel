@@ -1,4 +1,13 @@
-import { auditEvents, createDatabaseClient, eq, hosts, userSessions, users, type DatabaseClient } from "@hosting-panel/database";
+import {
+  auditEvents,
+  createDatabaseClient,
+  eq,
+  hosts,
+  platformInstallations,
+  userSessions,
+  users,
+  type DatabaseClient,
+} from "@hosting-panel/database";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   runCli,
@@ -47,6 +56,93 @@ describe("accounts CLI", () => {
     expect(await count()).toBe(1);
     await setupInstallation(db(), { ...SETUP, hostIpv4: "203.0.113.20" });
     expect(await count()).toBe(1);
+  });
+
+  describe("the server's IPv6", () => {
+    const PUBLIC = { ...SETUP, hostIpv4: "203.0.113.10" };
+    const host = async () => (await db().select().from(hosts))[0];
+    const audits = async () => (await db().select().from(auditEvents)).length;
+    const changes = async () =>
+      (await db().select().from(auditEvents).where(eq(auditEvents.action, "host.address.change"))).map((e) => e.details);
+
+    it("a first setup with an IPv6 records it in Node's compressed lower-case form", async () => {
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:DB8:0:0:0:0:0:1" });
+      expect((await host())!.ipv6Address).toBe("2001:db8::1");
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      expect(await changes()).toEqual([]);
+    });
+
+    it("a rerun without one keeps it; another one replaces it with one audit row", async () => {
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      await setupInstallation(db(), PUBLIC);
+      expect((await host())!.ipv6Address).toBe("2001:db8::1");
+      expect(await changes()).toEqual([]);
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::2" });
+      expect((await host())!.ipv6Address).toBe("2001:db8::2");
+      expect(await changes()).toEqual([
+        { from: "203.0.113.10", to: "203.0.113.10", ipv6From: "2001:db8::1", ipv6To: "2001:db8::2" },
+      ]);
+    });
+
+    it("null removes it, and an IPv4 change alone carries no IPv6 fields", async () => {
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: null });
+      expect((await host())!.ipv6Address).toBeNull();
+      await setupInstallation(db(), { ...PUBLIC, hostIpv4: "203.0.113.20" });
+      const rows = await changes();
+      expect(rows).toHaveLength(2);
+      expect(rows).toContainEqual({ from: "203.0.113.10", to: "203.0.113.10", ipv6From: "2001:db8::1", ipv6To: null });
+      expect(rows).toContainEqual({ from: "203.0.113.10", to: "203.0.113.20" });
+    });
+
+    it("refuses an address the server cannot have before it writes anything", async () => {
+      const refused = [
+        { hostIpv4: "203.0.113.05" },
+        { hostIpv4: "2001:db8::5" },
+        ...["[2001:db8::5]", "fe80::1%eth0", "2001:db8::/64", "hello", "203.0.113.5", "::1", "::", "fe80::1", "febf::1", "::ffff:203.0.113.5"].map(
+          (hostIpv6) => ({ hostIpv6 }),
+        ),
+      ];
+      const first = await audits();
+      for (const bad of refused) {
+        await expect(setupInstallation(db(), { ...PUBLIC, ...bad }), JSON.stringify(bad)).rejects.toThrow(/^Invalid --ipv[46]: /);
+      }
+      expect(await db().select().from(platformInstallations)).toEqual([]);
+      expect(await host()).toBeUndefined();
+      expect(await audits()).toBe(first);
+
+      await setupInstallation(db(), { ...PUBLIC, hostIpv6: "2001:db8::1" });
+      const before = await host();
+      const rerun = await audits();
+      for (const bad of refused) {
+        await expect(setupInstallation(db(), { ...PUBLIC, hostIpv4: "203.0.113.20", ...bad }), JSON.stringify(bad)).rejects.toThrow(
+          /^Invalid --ipv[46]: /,
+        );
+      }
+      expect(await host()).toEqual(before);
+      expect(await audits()).toBe(rerun);
+    });
+
+    it("runCli setup reads --ipv6 <address> and --ipv6 none", async () => {
+      // runCli closes its client; this one stays open so the row can be read afterwards.
+      const open: DatabaseClient = { mode: dbClient.mode, db: dbClient.db, migrate: () => dbClient.migrate(), close: () => Promise.resolve() };
+      const setup = (...extra: string[]) =>
+        runCli(["setup", "--name", "Test", "--hostname", "host.test", "--ipv4", "203.0.113.10", ...extra], open);
+      const write = process.stdout.write.bind(process.stdout);
+      process.stdout.write = (() => true) as typeof process.stdout.write;
+      try {
+        await setup("--ipv6", "2001:DB8::1");
+        expect((await host())!.ipv6Address).toBe("2001:db8::1");
+        await setup();
+        expect((await host())!.ipv6Address).toBe("2001:db8::1");
+        await setup("--ipv6", "none");
+        expect((await host())!.ipv6Address).toBeNull();
+        await expect(setup("--ipv6")).rejects.toThrow("Missing required --ipv6.");
+        await expect(runCli(["help"], open)).rejects.toThrow("--ipv6 IP|none");
+      } finally {
+        process.stdout.write = write;
+      }
+    });
   });
 
   it("createServerAdmin enrols TOTP and can log in", async () => {

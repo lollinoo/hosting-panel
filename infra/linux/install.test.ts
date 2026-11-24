@@ -185,6 +185,84 @@ describe("install.sh shared database and memory", () => {
   });
 });
 
+describe("install.sh public addresses", () => {
+  /** A fake `ip` whose default route leaves from `src`: no case reads this machine's routes. */
+  const routeFrom = (src: string) => {
+    const bin = tmp();
+    writeFileSync(join(bin, "ip"), `#!/usr/bin/env bash\nprintf '1.1.1.1 via 198.51.100.1 dev eth0 src ${src} uid 0\\n'\n`, { mode: 0o755 });
+    return { PATH: `${bin}:${fakeDpkg()}:${process.env.PATH}` };
+  };
+  /** The state an earlier run left: the IPv4 it recorded and its administrator. */
+  const savedState = (ipv4: string) => {
+    const state = tmp();
+    writeFileSync(join(state, "executor.env"), `HP_PANEL_HOSTNAME=panel.example.com\nHP_PANEL_IPV4=${ipv4}\n`);
+    writeFileSync(join(state, "admin-created"), "");
+    return { HP_INSTALL_STATE_DIR: state };
+  };
+  const SETUP = "would run hp-accounts setup --name panel.example.com --hostname panel.example.com";
+
+  it("a rerun without --ipv4 keeps the IPv4 the last run recorded and records it again", () => {
+    const r = dry({ ...routeFrom("198.51.100.7"), ...savedState("203.0.113.7") });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Panel IPv4: 203.0.113.7 (kept from the last run");
+    expect(r.out).toContain("HP_PANEL_IPV4=203.0.113.7 ");
+    expect(r.out).toContain(`${SETUP} --ipv4 203.0.113.7`);
+    expect(r.out).toMatch(/skip.*administrator already created/i);
+    expect(r.out).not.toContain("198.51.100.7");
+  });
+
+  it("--ipv4 wins over the IPv4 the last run recorded", () => {
+    const r = dry({ ...routeFrom("198.51.100.7"), ...savedState("203.0.113.7") }, ["--ipv4", "203.0.113.8"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Panel IPv4: 203.0.113.8 (given with --ipv4)");
+    expect(r.out).toContain(`${SETUP} --ipv4 203.0.113.8`);
+    expect(r.out).not.toContain("203.0.113.7");
+  });
+
+  it("without a recorded IPv4 the installer takes the source of the default route and says so", () => {
+    const r = dry(routeFrom("198.51.100.7"));
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Panel IPv4: 198.51.100.7 (source address of the default route;");
+    // A recorded value that is not an IPv4 is not kept.
+    const bad = dry({ ...routeFrom("198.51.100.7"), ...savedState("203.0.113.07") });
+    expect(bad.code).toBe(0);
+    expect(bad.out).toContain("Panel IPv4: 198.51.100.7 (source address of the default route,");
+  });
+
+  it("refuses an IPv4 with a leading zero with exit 2", () => {
+    for (const a of ["203.0.113.05", "203.0.113.005", "203.0.113.00", "023.0.113.5", "203.0.113.256"]) {
+      const r = dry({}, ["--ipv4", a]);
+      expect(r.code, a).toBe(2);
+      expect(r.err).toContain("Invalid --ipv4");
+    }
+    for (const a of ["203.0.113.0", "203.0.113.9", "203.0.113.99", "203.0.113.199", "203.0.113.255"]) {
+      expect(dry({}, ["--ipv4", a]).code, a).toBe(0);
+    }
+  });
+
+  it("--ipv6 hands the address to hp-accounts setup, --ipv6 none removes the recorded one", () => {
+    expect(install(["--help"]).out).toContain("--ipv6 <addr> | --ipv6 none");
+    const given = dry({}, ["--ipv4", "203.0.113.7", "--ipv6", "2001:db8::1"]);
+    expect(given.code).toBe(0);
+    expect(given.out).toContain("Panel IPv6: 2001:db8::1 (given with --ipv6)");
+    expect(given.out).toContain(`${SETUP} --ipv4 203.0.113.7 --ipv6 2001:db8::1`);
+    const none = dry({}, ["--ipv4", "203.0.113.7", "--ipv6", "none"]);
+    expect(none.code).toBe(0);
+    expect(none.out).toContain(`${SETUP} --ipv4 203.0.113.7 --ipv6 none (removes the recorded IPv6)`);
+    const left = dry({}, ["--ipv4", "203.0.113.7"]);
+    expect(left.code).toBe(0);
+    expect(left.out).toContain(`${SETUP} --ipv4 203.0.113.7 (the recorded IPv6 stays as it is)`);
+  });
+
+  it("refuses with exit 2 what can never be an IPv6", () => {
+    for (const a of ["[2001:db8::1]", "fe80::1%eth0", "2001:db8::/64", "hello", "203.0.113.7", ""]) {
+      const r = dry({}, ["--ipv4", "203.0.113.7", "--ipv6", a]);
+      expect(r.code, a).toBe(2);
+      expect(r.err, a).toContain("Invalid --ipv6");
+    }
+  });
+});
+
 describe("install.sh SSH-safe firewall", () => {
   it("refuses with exit 7 when SSH is not on port 22", () => {
     const r = dry({ HP_SSHD_PORTS: "2222" });
