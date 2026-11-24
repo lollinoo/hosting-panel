@@ -797,6 +797,98 @@ describe("AppStackRuntime (RT3)", () => {
     });
   });
 
+  // #98: the executor refuses an image that declares a folder no volume covers, at the image step, with its own reason.
+  // The image step is a pre-flight one: nothing is created or removed, so the status each application had is kept.
+  describe("an image that declares a folder no volume covers (#98)", () => {
+    const UNCOVERED = "STACK_IMAGE_VOLUME_UNCOVERED";
+    const WEB_V2 = { ...WEB, environment: [{ name: "CACHE_HOST", value: "cache" }] };
+    const touched = () => trace().filter((c) => /^(create|start|restart|remove)AppStack|^publishAppStackRoutes/.test(c));
+
+    it("a first deploy fails with its own sentence and reason; nothing after the pull, no revision applied", async () => {
+      const { stackId, write } = await create([CACHE, WEB]);
+      fake.failNext("pullAppStackImage", "definite", UNCOVERED);
+
+      expectFailure(await run(write), UNCOVERED);
+
+      expect(trace()).toEqual(["pullAppStackImage"]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "failed", appliedRevisionId: null });
+      expect(await deploymentOf(write)).toMatchObject({ status: "failed", problem: UNCOVERED });
+      expect(await opOf(write.operation!.id)).toMatchObject({
+        status: "failed",
+        errorCode: "HOST_POLICY_DENIED",
+        errorMessage: APP_STACK_FAILURE.STACK_IMAGE_VOLUME_UNCOVERED.text,
+      });
+      const steps = await stepsOf(write);
+      expect(steps["pull"]).toEqual(["failed", APP_STACK_STEP_FAILED_TEXT]);
+      expect(steps["prepare"]![0]).toBe("skipped");
+    });
+
+    it("an upgrade of a running application keeps it running on the revision it had and takes its target back", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.failNext("pullAppStackImage", "definite", UNCOVERED);
+
+      expectFailure(await run(upgrade), UNCOVERED);
+
+      expect(trace()).toEqual(["pullAppStackImage", "getAppStackStatus"]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+      expect(await healthOf(stackId)).toEqual({ cache: "healthy", web: "healthy" });
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", revisionId: v2.revisionId, problem: UNCOVERED });
+      expect(fake.stack(stackId).routes).toHaveLength(1);
+    });
+
+    it("a rollback of a running application is taken back the same way", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      expect(await run(await enqueue(stackId, "stack.upgrade", v2))).toBeUndefined();
+      fake.calls.length = 0;
+      const rollback = await enqueue(stackId, "stack.rollback", revision(stackId, rev.plan.components as AppStackPlanComponent[]));
+      fake.failNext("pullAppStackImage", "definite", UNCOVERED);
+
+      expectFailure(await run(rollback), UNCOVERED);
+
+      expect(trace()).toEqual(["pullAppStackImage", "getAppStackStatus"]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "running", appliedRevisionId: v2.revisionId, desiredRevisionId: v2.revisionId });
+      expect(await deploymentOf(rollback)).toMatchObject({ status: "failed", problem: UNCOVERED });
+    });
+
+    it("a stopped application stays stopped, after an upgrade and after a plain redeploy", async () => {
+      const { stackId, rev } = await running([CACHE, WEB]);
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      const v2 = revision(stackId, [CACHE, WEB_V2]);
+      const upgrade = await enqueue(stackId, "stack.upgrade", v2);
+      fake.calls.length = 0;
+      fake.failNext("pullAppStackImage", "definite", UNCOVERED);
+
+      expectFailure(await run(upgrade), UNCOVERED);
+
+      expect(touched()).toEqual([]);
+      expect(await stackOf(stackId)).toMatchObject({ status: "stopped", appliedRevisionId: rev.revisionId, desiredRevisionId: rev.revisionId });
+      expect(await healthOf(stackId)).toEqual({ cache: "stopped", web: "stopped" });
+      expect(await deploymentOf(upgrade)).toMatchObject({ status: "failed", problem: UNCOVERED, replacedStatus: "stopped" });
+
+      fake.calls.length = 0;
+      const again = await enqueue(stackId, "stack.deploy");
+      fake.failNext("pullAppStackImage", "definite", UNCOVERED);
+      expectFailure(await run(again), UNCOVERED);
+      expect(touched()).toEqual([]);
+      expect((await stackOf(stackId)).status).toBe("stopped");
+    });
+
+    it("stop, start and restart never pull an image: a refusing executor changes nothing for them", async () => {
+      const { stackId } = await running([CACHE, WEB]);
+      fake.failNext("pullAppStackImage", "definite", UNCOVERED);
+
+      expect(await run(await enqueue(stackId, "stack.stop"))).toBeUndefined();
+      expect(await run(await enqueue(stackId, "stack.start"))).toBeUndefined();
+      expect(await run(await enqueue(stackId, "stack.restart"))).toBeUndefined();
+
+      expect(trace()).not.toContain("pullAppStackImage");
+      expect((await stackOf(stackId)).status).toBe("running");
+    });
+  });
+
   describe("start, restart, stop, delete (13)", () => {
     it("stop withdraws the routes then stops; start brings it back and republishes", async () => {
       const { stackId } = await running();
