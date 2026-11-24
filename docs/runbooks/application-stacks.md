@@ -104,12 +104,14 @@ cd / && sudo -u postgres psql -X -d hosting_panel -c "<query>"
 
    An upgrade or a rollback that fails before its components are created (download, preparation) leaves the application
    as it was: the same version, settings, components and quota, the upgrade on offer again, and the failed attempt in
-   the history. One that fails later leaves the stack `failed`: the page and the list show the version still installed
-   and the page says which one was not (while they differ, the status shown follows the components of the installed
-   one); **Reinstalla** tries that one again, the way back reinstalls the previous one. The way back only offers a
-   version that ran (an install, upgrade or rollback of it succeeded), never a failed attempt. A start of a stopped
-   application refused before anything is touched leaves it `stopped`; any other start or restart refused that way
-   takes the status the containers show; the history names the reason.
+   the history. Not so when a web address or one of its paths was meanwhile pointed at a part only the new version has:
+   the new version stays the one asked for and **Reinstalla** installs it. One that fails later leaves the stack
+   `failed`: the page and the list show the version still installed and the page says which one was not (while they
+   differ, the status shown follows the components of the installed one); **Reinstalla** tries that one again, the way
+   back reinstalls the previous one. The way back only offers a version that ran (an install, upgrade or rollback of it
+   succeeded), never a failed attempt. A start of a stopped application refused before anything is touched leaves it
+   `stopped`; any other start or restart refused that way takes the status the containers show; the history names the
+   reason.
 
    **Reinstalla** (`stack.deploy`) recreates what differs from the plan; **Avvia** only starts components that exist.
    At API start, a stack left busy without an active operation becomes `failed` (`delete_failed` when it was deleting,

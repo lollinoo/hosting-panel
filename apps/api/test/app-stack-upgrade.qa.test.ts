@@ -57,6 +57,10 @@ const WORKER_DROPPED =
   BASE.slice(0, BASE.indexOf("x-hp-parameters:")) +
   BASE.slice(BASE.indexOf("services:"), BASE.indexOf("  worker:")) +
   BASE.slice(BASE.indexOf("volumes:\n  data: {}"));
+/** A web part (entry point web:8080) and a cache it reaches. */
+const HTTP_CACHE = APP_BUILT_IN_TEMPLATES[0]!.source;
+/** The cache reachable from the web too: a second entry point, cache:11211. */
+const CACHE_DOOR = `${HTTP_CACHE}  - service: cache\n    port: 11211\n    protocol: http\n`;
 const BUDGET_MS = 10 * 60_000;
 const POLL_MS = 5_000;
 
@@ -169,6 +173,25 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
     expect(up.status, up.raw).toBe(202);
     return diff.body.data as Json;
   }
+
+  /** A draft of `source`, not installed, with one web address on web:8080. */
+  async function draftWithAddress(source: string): Promise<{ templateId: string; stackId: string; domainId: string }> {
+    const { templateId, versionId } = await h.publish(source);
+    const res = await h.call(
+      h.a.token,
+      "POST",
+      `/v1/organizations/${h.a.orgId}/app-stacks`,
+      { templateVersionId: versionId, name: `app-${randomUUID().slice(0, 8)}`, deploy: false },
+      { "Idempotency-Key": randomUUID() },
+    );
+    expect(res.status, res.raw).toBe(201);
+    const stackId = res.body.data.stackId as string;
+    const hostname = `app-${randomUUID().slice(0, 8)}.example.test`;
+    const added = await h.call(h.a.token, "POST", orgPath(stackId, "domains"), { hostname, componentKey: "web", port: 8080 });
+    expect(added.status, added.raw).toBe(201);
+    return { templateId, stackId, domainId: (added.body.data as Json[]).find((d) => d.hostname === hostname)!.id as string };
+  }
+  const reinstall = (stackId: string) => h.call(h.a.token, "POST", orgPath(stackId, "deploy"), {}, { "Idempotency-Key": randomUUID() });
 
   /** A container payload without the label that names the revision that created it. */
   const sameSoftware = (payload: Json): Json => ({
@@ -515,6 +538,48 @@ describe("application stack upgrade then rollback end to end on the simulator (Q
       expect(all.map((r) => r.revisionNumber)).toEqual([1, 2, 3]);
       expect(await stackRow(stackId)).toMatchObject({ status: "running", appliedRevisionId: all[2]!.id, templateVersionId: v2 });
       expect(await shown(stackId)).toMatchObject({ version: 2, revision: 3, upgrade: null, rollback: { revisionId: rev1!.id, templateVersionNumber: 1 } });
+    });
+
+    it("a path added during the upgrade to a part only version 2 has: the upgrade failing at pull is not taken back, and a reinstall installs version 2", async () => {
+      const { templateId, stackId, domainId } = await draftWithAddress(HTTP_CACHE);
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      expect((await reinstall(stackId)).status).toBe(202);
+      await drain(stackId);
+      const [rev1] = await revisions(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "failed", desiredRevisionId: rev1!.id, appliedRevisionId: null });
+
+      const v2 = await addVersion(templateId, CACHE_DOOR);
+      await upgradeTo(stackId, v2);
+      // Nothing is installed, so the path is checked against the version asked for only, and accepted while it waits.
+      const cache = { pathPrefix: "/cache", componentKey: "cache", port: 11211, stripPrefix: false };
+      const set = await h.call(h.a.token, "PATCH", `${orgPath(stackId, "domains")}/${domainId}`, {
+        redirectToDomainId: null,
+        compression: false,
+        protection: null,
+        pathRoutes: [cache],
+      });
+      expect(set.status, set.raw).toBe(200);
+      expect(set.body.applies).toBe("at_start");
+      sim.appStacks.failNextAppStackStep("pull", "pull_failed");
+      await drain(stackId);
+
+      // Revision 1 has no entry point cache:11211: taken back, it would be installed by the next reinstall with a path to a
+      // part it lacks. So version 2 stays the one asked for, with its path; nothing is installed and nothing is offered as
+      // a way back (revision 1 never ran).
+      const [, rev2] = await revisions(stackId);
+      expect((await opsOf(stackId)).map((o) => [o.kind, o.status])).toEqual([
+        ["stack.deploy", "failed"],
+        ["stack.upgrade", "failed"],
+      ]);
+      expect(await stackRow(stackId)).toMatchObject({ status: "failed", desiredRevisionId: rev2!.id, templateVersionId: v2, appliedRevisionId: null });
+      expect(await shown(stackId)).toMatchObject({ status: "failed", version: 2, revision: 2, installed: null, upgrade: null, rollback: null });
+      const [address] = (await h.call(h.a.token, "GET", orgPath(stackId, "domains"))).body.data as Json[];
+      expect(address!.pathRoutes).toEqual([cache]);
+
+      // The way out: Reinstalla installs version 2, whose plan has the path's target.
+      expect((await reinstall(stackId)).status).toBe(202);
+      await drain(stackId);
+      expect(await stackRow(stackId)).toMatchObject({ status: "running", desiredRevisionId: rev2!.id, appliedRevisionId: rev2!.id });
     });
   });
 

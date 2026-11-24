@@ -282,8 +282,8 @@ const planKeys = (plan: Readonly<Record<string, unknown>>) => planList(plan, "co
 /**
  * Takes back what enqueueing an upgrade or a rollback wrote, to the desired revision that request replaced: parameters,
  * component rows and quota (the caller writes desired_revision_id and template_version_id). Null, and nothing written,
- * when the deployment replaced no revision, when its revision is no longer the desired one, or when a web address now
- * targets a pair only the desired plan has.
+ * when the deployment replaced no revision, when its revision is no longer the desired one, or when a web address or one
+ * of its paths now targets a pair only the desired plan has.
  */
 async function restoreReplacedRevision(
   db: DatabaseExecutor,
@@ -296,10 +296,14 @@ async function restoreReplacedRevision(
   if (!replaced) return null;
   const ingress = planList(replaced.plan, "ingress");
   const domains = await db
-    .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort })
+    .select({ componentKey: appStackDomains.componentKey, internalPort: appStackDomains.internalPort, pathRoutes: appStackDomains.pathRoutes })
     .from(appStackDomains)
     .where(eq(appStackDomains.stackId, stack.id));
-  if (domains.some((d) => !ingress.some((route) => route.componentKey === d.componentKey && route.port === d.internalPort))) return null;
+  const isIngress = (componentKey: string, port: number) => ingress.some((route) => route.componentKey === componentKey && route.port === port);
+  // ADR-0037: a path saved while the operation ran was checked against the desired plan only.
+  if (domains.some((d) => !isIngress(d.componentKey, d.internalPort) || d.pathRoutes.some((path) => !isIngress(path.componentKey, path.port)))) {
+    return null;
+  }
 
   const scope = { organizationId: stack.organizationId, stackId: stack.id };
   await db.delete(appStackParameters).where(eq(appStackParameters.stackId, stack.id));
