@@ -7,7 +7,10 @@ async function forward(req: Request, context: Ctx, method: "GET" | "POST") {
   const { siteId } = await context.params;
   const segmentError = validatePathSegments({ siteId });
   if (segmentError) return segmentError;
-  return forwardToUpstream(req, `v1/admin/sites/${siteId}/domains`, method);
+  // An address added with a certificate needs the key at the API; a plain address goes without one.
+  return forwardToUpstream(req, `v1/admin/sites/${siteId}/domains`, method, undefined, {
+    idempotencyKey: method === "POST",
+  });
 }
 
 export const GET = (req: Request, context: Ctx) => forward(req, context, "GET");

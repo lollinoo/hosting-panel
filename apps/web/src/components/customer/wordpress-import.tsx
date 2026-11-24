@@ -25,6 +25,7 @@ import { Label } from "@/components/ui/label";
 import { format, type Messages } from "@/i18n";
 import { useLocale, useMessages } from "@/i18n/provider";
 import { formatDate, formatSize, isValidRelativePath } from "@/lib/file-browser";
+import type { KeptKeys } from "@/lib/keyed-send";
 
 type ImportTexts = Messages["site"]["wordpress"]["import"];
 type RunningImport = NonNullable<SiteWordpressImportDto["runningOperation"]>;
@@ -397,7 +398,7 @@ function ImportSlot(props: {
       return;
     }
     setPicking(true);
-    const r = await postJson(`${chunkUrl}/pick`, csrfToken, { path: p }, false);
+    const r = await postJson(`${chunkUrl}/pick`, csrfToken, { path: p });
     setPicking(false);
     if (r.status >= 200 && r.status < 300) {
       setPath("");
@@ -497,12 +498,19 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
   const focusRunRef = useRef(false);
   const outcomeRef = useRef<HTMLDivElement>(null);
   const followedRef = useRef(initial.runningOperation !== null);
-  const onChanged = useCallback(() => void reload(), [reload]);
+  // The start's key, kept until answered; a reload forgets it. Any change to the files ends it too: the API
+  // replays a start by its key before it looks at the files, so a kept key would follow the old import.
+  const startKeysRef = useRef<KeptKeys>({});
+  const onChanged = useCallback(() => {
+    startKeysRef.current = {};
+    void reload();
+  }, [reload]);
   const [sendingSlots, setSendingSlots] = useState<Record<WordpressImportSlot, boolean>>({ archive: false, dump: false });
-  const onSending = useCallback(
-    (name: WordpressImportSlot, active: boolean) => setSendingSlots((prev) => (prev[name] === active ? prev : { ...prev, [name]: active })),
-    [],
-  );
+  const onSending = useCallback((name: WordpressImportSlot, active: boolean) => {
+    // An upload or a pick that begins may replace the file even when it then fails.
+    if (active) startKeysRef.current = {};
+    setSendingSlots((prev) => (prev[name] === active ? prev : { ...prev, [name]: active }));
+  }, []);
 
   const op = data.runningOperation;
   const slots = data.slots;
@@ -526,7 +534,7 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
     if (busy || !canConfirmRestore(typed, siteName)) return;
     setBusy(true);
     setError(null);
-    const r = await postJson(basePath, csrf, { confirm: true }, true);
+    const r = await postJson(basePath, csrf, { confirm: true }, startKeysRef.current);
     setBusy(false);
     if (r.status >= 200 && r.status < 300) {
       const body = r.body;
@@ -551,6 +559,7 @@ function Wizard({ basePath, siteName, csrfToken, backupsHref, initial }: WizardP
       // status 0: no answer reached the browser.
     }
     if (status >= 200 && status < 300) {
+      startKeysRef.current = {};
       setFilesNote({ text: t.discardDone, failed: false });
       await reload();
     } else {
