@@ -4,7 +4,7 @@
  * lets through is published with the template, while one it takes for a secret by mistake is replaced or dropped with a
  * note. Pure, synchronous and never throws.
  */
-import { envNameProblem } from "./site-template-env.js";
+import { envNameProblem, envValueProblem } from "./site-template-env.js";
 
 /** A word of a name that ends in one of these holds a secret: PGPASSWORD, SMTP_PASS, MYSQL_PWD, CLIENTSECRET. */
 const SECRET_ENDINGS = [
@@ -162,6 +162,29 @@ export function urlCredentials(text: string): UrlCredentials[] {
   }
   return found;
 }
+
+/** True when an address of the text has a password the importer reads (R2). */
+export const holdsUrlPassword = (text: string): boolean => urlCredentials(text).some((found) => found.password !== null);
+
+/**
+ * True when an address of the text cannot be read one way only (R3) and the template check does not see credentials in
+ * the text either (a user with an '@'): it may hold a password that nothing would stop, and the importer guesses none.
+ */
+export const hidesUrlPassword = (text: string): boolean =>
+  urlCredentials(text).some((found) => found.password === null) && envValueProblem(text) !== "ENV_VALUE_SECRET_LIKE";
+
+/** What a note adds about an address the importer reads one way, or not at all, when it could be read another way. */
+export const checkByHand = (why: string): string =>
+  ` An address of the value can be read in more than one way (${why}): check by hand that it keeps its host and holds no part of the password.`;
+
+/**
+ * The note on an address that cannot be read safely (R3): `where` names the value; `seen` when the template check sees
+ * credentials there and refuses the draft, else the importer refuses the entry itself.
+ */
+export const unreadableAddress = (where: string, seen: boolean): string =>
+  `An address in ${where} cannot be read safely and may hold a password: the importer takes nothing out of it, and ${
+    seen ? "the template check refuses the draft" : "the file gives no draft until it is written otherwise"
+  }.${checkByHand("a '?' or a '#' stands before its '@'")} Write the password as a variable of its own, or percent-encode its '?', '#' and '@'.`;
 
 /**
  * `urlCredentials` over a value made of literal text and of variables, the password as the pieces it covers: `first`

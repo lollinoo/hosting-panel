@@ -17,7 +17,7 @@ import { isImageLookup, isMapping, isPort, own, type Mapping } from "./compose-i
 import { checkComposeKeys } from "./compose-import-keys.js";
 import type { ParameterRegistry, VariableCensus } from "./compose-import-parameters.js";
 import { clip, type ImportReport } from "./compose-import-report.js";
-import { commandOption, isPlainSetting, looksSecretName, urlCredentials } from "./compose-import-secrets.js";
+import { commandOption, hidesUrlPassword, holdsUrlPassword, isPlainSetting, looksSecretName, unreadableAddress } from "./compose-import-secrets.js";
 import { scanComposeValue } from "./compose-import-variables.js";
 import { parseImageReference } from "./image-reference.js";
 import { envValueProblem } from "./site-template-env.js";
@@ -373,7 +373,7 @@ function carriesSecret(registry: ParameterRegistry, literal: string, option: str
   const set = commandOption(literal);
   if (option !== null && set === null && !isPlainSetting(option, literal)) return true;
   if (set !== null && set.inline !== null && set.inline !== "" && looksSecretName(set.name) && !isPlainSetting(set.name, set.inline)) return true;
-  return urlCredentials(literal).length > 0 || envValueProblem(literal) === "ENV_VALUE_SECRET_LIKE" || registry.holdsSecret(literal);
+  return holdsUrlPassword(literal) || envValueProblem(literal) === "ENV_VALUE_SECRET_LIKE" || registry.holdsSecret(literal);
 }
 
 /**
@@ -411,6 +411,7 @@ export function convertCommand(report: ImportReport, registry: ParameterRegistry
       const [only] = scan.pieces;
       if (scan.pieces.length !== 1 || only === undefined || !("variable" in only)) return refuse(at, "A variable must be a whole command item, alone: split the item.");
       if (index === 0) return refuse(at, "The program of a command (its first item) cannot be a variable.");
+      if (only.fallback !== null && hidesUrlPassword(only.fallback)) return report.refused("SECRET_ADDRESS_REFUSED", at, unreadableAddress("this command item", false));
       const parameter = registry.forVariable(only.variable);
       if (parameter === null || parameter.secret) return refuse(at, "A command cannot carry a secret or the address of the service: only an environment variable can.");
       keys.push(parameter.key);
@@ -426,6 +427,7 @@ export function convertCommand(report: ImportReport, registry: ParameterRegistry
           "An item of the command is a secret, or follows an option that takes one: a template is published as it is written, so a command cannot carry a secret. Pass it in an environment variable.",
         );
       }
+      if (hidesUrlPassword(literal)) return report.refused("SECRET_ADDRESS_REFUSED", at, unreadableAddress("this command item", false));
       written = literal.split("$").join("$$");
     }
     if (written === "" || written.length > LIMITS.argvItemLength || appStackTextProblem(written) !== null) {

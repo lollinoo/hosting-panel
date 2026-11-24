@@ -14,7 +14,17 @@ import {
 import { isMapping } from "./compose-import-document.js";
 import { describeGenerate, type DraftParameter, type ParameterRegistry, type VariableCensus } from "./compose-import-parameters.js";
 import type { ImportReport } from "./compose-import-report.js";
-import { isPlainSetting, looksSecretName, urlCredentials, urlPasswordName, urlPasswordsIn } from "./compose-import-secrets.js";
+import {
+  checkByHand,
+  hidesUrlPassword,
+  holdsUrlPassword,
+  isPlainSetting,
+  looksSecretName,
+  unreadableAddress,
+  urlCredentials,
+  urlPasswordName,
+  urlPasswordsIn,
+} from "./compose-import-secrets.js";
 import { classifyComposeVariable, scanComposeValue, type ComposeScan } from "./compose-import-variables.js";
 import { envNameProblem, envValueProblem } from "./site-template-env.js";
 
@@ -33,10 +43,6 @@ export interface DraftEnvironment {
   /** One per platform URL variable met: the port its name asks for (null when it names none) and where it stands. */
   readonly ingress: readonly { readonly port: number | null; readonly path: TemplatePath }[];
 }
-
-/** What a note adds about an address the importer reads one way, or leaves as written, when it could be read another way. */
-const checkByHand = (why: string): string =>
-  ` An address of the value can be read in more than one way (${why}): check by hand that it keeps its host and holds no part of the password.`;
 
 /** A stretch of a value: text as the container receives it, or the parameter that stands there. */
 type Part = { readonly literal: string } | { readonly parameter: DraftParameter };
@@ -221,7 +227,7 @@ export function convertComposeEnvironment(
     // The template check keeps a narrower list of secret-looking names than the importer, and refuses a plain value under one of them.
     const reserved = envNameProblem(name) === "ENV_NAME_SECRET_LIKE";
     if (!scan.ok) {
-      if (looksSecretName(name) || envValueProblem(entry.written) === "ENV_VALUE_SECRET_LIKE" || urlCredentials(entry.written).length > 0) replaceBySecret(entry);
+      if (looksSecretName(name) || envValueProblem(entry.written) === "ENV_VALUE_SECRET_LIKE" || holdsUrlPassword(entry.written)) replaceBySecret(entry);
       else report.dropped("ENV_VARIABLE_SYNTAX", entry.path, `The value of ${name} uses a '$' form the importer cannot read: the variable is dropped. Write a literal dollar as '$$'.`);
       continue;
     }
@@ -250,6 +256,11 @@ export function convertComposeEnvironment(
     // Under a name that looks like a secret, only a value that names a secret parameter may stay as written.
     if (scan.pieces.length > 0 && isSecretEntry(entry) && !parts.some((part) => "parameter" in part && part.parameter.secret)) {
       replaceBySecret(entry);
+      continue;
+    }
+    // A default the parameter would carry as written: the same rule as for the text of the value, below.
+    if (scan.pieces.some((piece) => "variable" in piece && piece.fallback !== null && hidesUrlPassword(piece.fallback))) {
+      report.refused("SECRET_ADDRESS_REFUSED", entry.path, unreadableAddress(`the value of ${name}`, false));
       continue;
     }
 
@@ -328,9 +339,7 @@ export function convertComposeEnvironment(
     const checked = secrets > 0 ? around : [value, ...around];
     const problems = checked.map((text) => envValueProblem(text) ?? (appStackTextProblem(text) === "metadata_endpoint" ? "METADATA" : null));
     const secretLike = problems.includes("ENV_VALUE_SECRET_LIKE");
-    // An address left as written goes to the template check, which refuses the draft for the credentials it sees there.
-    // One the check would let through (a user with an '@') is not kept in clear either.
-    if (asWritten ? !secretLike : secretLike) {
+    if (secretLike && !asWritten) {
       replaceBySecret(entry);
       continue;
     }
@@ -340,6 +349,12 @@ export function convertComposeEnvironment(
         entry.path,
         `The value of ${name} holds something a template cannot carry (a control character, the Docker socket or a cloud metadata address): the variable is dropped.`,
       );
+      continue;
+    }
+    // An address left as written goes to the template check, which refuses the draft for the credentials it sees there.
+    // One the check would let through (a user with an '@') refuses the entry here: no secret is made of a value not read.
+    if (asWritten && !secretLike) {
+      report.refused("SECRET_ADDRESS_REFUSED", entry.path, unreadableAddress(`the value of ${name}`, false));
       continue;
     }
     if (value.length > LIMITS.envValueLength || worstCase > LIMITS.envValueLength) {
@@ -363,13 +378,7 @@ export function convertComposeEnvironment(
         `A part of the value of ${name} is a secret (the password of an address, or a secret the file also writes elsewhere): that part is replaced by the generated secret parameter '${key}', and the rest of the value is kept.${check}`,
       );
     }
-    if (asWritten) {
-      report.info(
-        "SECRET_ADDRESS_UNCLEAR",
-        entry.path,
-        `Nothing is taken out of an address in the value of ${name}, and the template check refuses the draft for a password left in it.${checkByHand("a '?' or a '#' stands before its '@'")}`,
-      );
-    }
+    if (asWritten) report.info("SECRET_ADDRESS_UNCLEAR", entry.path, unreadableAddress(`the value of ${name}`, true));
     out.push({ name, value });
   }
 

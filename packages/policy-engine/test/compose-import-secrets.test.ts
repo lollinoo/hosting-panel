@@ -33,6 +33,7 @@ const run = (compose: string): ComposeImportResult =>
 const notes = (result: ComposeImportResult): string[] => result.report.map((note) => `${note.level} ${note.code} ${note.path}`);
 /** The notes about secrets and about the environment, which are the ones these tests are about. */
 const secretNotes = (result: ComposeImportResult): string[] => notes(result).filter((note) => /SECRET|ENV_|PARAMETER/.test(note));
+const refusalsOf = (result: ComposeImportResult): string[] => notes(result).filter((note) => note.startsWith("refused "));
 const messagesOf = (result: ComposeImportResult, code: string): string[] => result.report.filter((note) => note.code === code).map((note) => note.message);
 
 /** The draft as the validator reads it; fails the test when the importer refused the file or the draft is not valid. */
@@ -252,8 +253,11 @@ describe("a secret in the password of an address", () => {
 });
 
 describe("the rule that reads the password of an address (ADR-0036 §8.4)", () => {
-  /** The value in the draft: its text, a secret parameter that replaces it whole, or the value kept for the template check to refuse. */
-  type Draft = string | { readonly secret: string } | "refused";
+  /**
+   * The value in the draft: its text, a secret parameter that replaces it whole, the value kept for the template check
+   * to refuse, or an entry the importer refuses itself.
+   */
+  type Draft = string | { readonly secret: string } | "refused" | "unreadable";
   /**
    * The value of ADDR; its draft; the parameters its passwords became, first address first; the passwords the rule reads
    * there, each taken out when a parameter is given for it and left where it is otherwise; whether the report asks for a
@@ -296,8 +300,8 @@ describe("the rule that reads the password of an address (ADR-0036 §8.4)", () =
     ["postgres://app:pa?ss@db/app", "refused", [], ["pa?ss"], true],
     ["postgres://app:pa#ss@db/app", "refused", [], ["pa#ss"], true],
     ["redis://:pa?ss1234@cache:6379", "refused", [], ["pa?ss1234"], true],
-    // Decided: an address the template check would let through (a user with an '@') is replaced whole.
-    ["smtp://me@x.org:pa#ss1234@mail:587", { secret: "addr" }, [], ["pa#ss1234"], false],
+    // One the template check cannot see (a user with an '@') refuses its entry: no secret is made of a value not read.
+    ["smtp://me@x.org:pa#ss1234@mail:587", "unreadable", [], ["pa#ss1234"], true],
     // No host after the '@': no password is read, and the template check's credentials make the value a secret whole.
     ["redis://:pw@/0", { secret: "addr" }, [], ["pw"], false],
     // R4: another '@' after the host and before a '?', ',' or ';' asks for a check; after a '/' it is in the path (decided).
@@ -339,14 +343,49 @@ describe("the rule that reads the password of an address (ADR-0036 §8.4)", () =
 
     if (draft === "refused") {
       // The safety net: the template check refuses a draft that still holds credentials in an address, at its line.
-      expect(notes(result).filter((note) => note.startsWith("refused "))).toEqual([`refused DRAFT_INVALID services.web.environment[${echoes.length}].value`]);
+      expect(refusalsOf(result)).toEqual([`refused DRAFT_INVALID services.web.environment[${echoes.length}].value`]);
       expect(messagesOf(result, "DRAFT_INVALID")).toEqual(["The draft does not pass the template check (ENV_VALUE_SECRET_LIKE) and is not returned."]);
       expect(converted(environment)).toEqual([...echoes, { name: "ADDR", value }]);
+      return;
+    }
+    if (draft === "unreadable") {
+      expect(refusalsOf(result)).toEqual(["refused SECRET_ADDRESS_REFUSED services.web.environment.ADDR"]);
+      expect(converted(environment)).toEqual(echoes);
       return;
     }
     expect(environmentOf(result)).toEqual([...echoes, typeof draft === "string" ? { name: "ADDR", value: draft } : { name: "ADDR", secretParameter: draft.secret }]);
     const secrets = specOf(result).parameters.flatMap((parameter) => (parameter.type === "secret" ? [parameter.key] : []));
     expect(secrets).toEqual(expect.arrayContaining([...keys]));
+  });
+
+  describe("an address it cannot read one way only, which the template check cannot see either", () => {
+    const REPO = "ssh://git@host:repo?ref=a@b";
+    const refused = (path: string): string => `refused SECRET_ADDRESS_REFUSED ${path}`;
+
+    it.each([REPO, "smtp://alerts@example.com:starttls?from=ops@example.com"])("refuses its entry with a check by hand, and makes no secret of it: %s", (value) => {
+      const result = run(webWith({ REPO: value }));
+      expect(result.ok).toBe(false);
+      expect(secretNotes(result)).toEqual([refused("services.web.environment.REPO")]);
+      expect(messagesOf(result, "SECRET_ADDRESS_REFUSED")[0]).toContain(CHECK_BY_HAND);
+    });
+
+    it("looks for none of its text elsewhere: a value that repeats it is refused too, not cut", () => {
+      const result = run(webWith({ REPO, NOTE: `see ${REPO}` }));
+      expect(secretNotes(result)).toEqual([refused("services.web.environment.REPO"), refused("services.web.environment.NOTE")]);
+    });
+
+    it("makes no secret of a variable whose default holds one, and keeps that default", () => {
+      const environment = { A: `\${REPO:-${REPO}}`, B: "${REPO}" };
+      const result = run(webWith(environment));
+      expect(secretNotes(result)).toEqual([refused("services.web.environment.A"), "info PARAMETER_FROM_VARIABLE services.web.environment.B"]);
+      expect(converted(environment)).toEqual([{ name: "B", value: "${repo}" }]);
+    });
+
+    it("refuses a command item that holds one with the same note, and not as a secret", () => {
+      const result = run(web(`command: ["serve", "${REPO}"]`));
+      expect(refusalsOf(result)).toEqual(["refused SECRET_ADDRESS_REFUSED services.web.command[1]"]);
+      expect(messagesOf(result, "SECRET_ADDRESS_REFUSED")[0]).toContain(CHECK_BY_HAND);
+    });
   });
 
   it.each([

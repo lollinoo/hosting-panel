@@ -37,6 +37,7 @@ export const COMPOSE_IMPORT_CODES = Object.freeze([
   "SECRET_GENERATED", // changed
   "SECRET_EXTRACTED", // changed: a part of a value was a secret
   "SECRET_ADDRESS_UNCLEAR", // info: an address kept as written, for the template check to refuse and a person to check
+  "SECRET_ADDRESS_REFUSED", // refused: an address kept as written that the template check cannot see, for a person to rewrite
   "SECRET_FROM_VARIABLE", // info
   "SECRET_KIND_ADJUSTED", // changed
   "SECRET_EMPTY_DROPPED", // dropped
