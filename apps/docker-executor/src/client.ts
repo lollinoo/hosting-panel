@@ -273,7 +273,8 @@ type UnreadableAnswerClass = "change" | "read" | "kept";
 
 const BACKUPS_ANSWER_CLASS: Readonly<Record<BackupsRequest["action"], UnreadableAnswerClass>> = {
   test: "read",
-  // Writes a marker and probes the volume, and doing it again is harmless; the admin is told the outcome is unknown.
+  // Writes a marker and probes the volume. No test result is recorded, the API answers with its existing "connectivity
+  // test timed out" error, and running the set-up again is safe (ADR-0032).
   localInit: "change",
   // See #202: the start holds the site's lock while a recovery read can fail for ever (#183).
   start: "kept",
@@ -840,9 +841,10 @@ export class SignedDockerExecutorIpcClient implements DockerExecutorPort, StackE
 
   /**
    * A call of the closed list of changes (an application's: ADR-0035, ADR-0038, ADR-0042; a site's, a service's and
-   * the test mail: #182), whose request may have changed the server once sent. An answer that cannot be read is a lost
-   * one (`ambiguousOutcome`), so the caller settles from a read and never sends the change again: a 2xx that fails the
-   * schema (an empty body included), a body that is not JSON, a 5xx without the executor's error envelope. A refusal
+   * the test mail: #182), whose request may have changed the server once sent. An answer that cannot be read (a 2xx that
+   * fails the schema, an empty body included; a body that is not JSON; a 5xx without the executor's error envelope) is a
+   * lost one (`ambiguousOutcome`): the caller handles it as a lost connection and never sends the change again by itself.
+   * The outbox settles it from a read; the site provisioner fails its operation and leaves the site degraded. A refusal
    * with the envelope, whatever its status, and a 4xx stay refusals. No `timeoutMs` is the client's default wait.
    */
   private async sendChange<S extends z.ZodTypeAny>(
