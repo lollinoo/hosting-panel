@@ -1384,6 +1384,25 @@ describe("tasks in the simulator", () => {
     expect((await sim.runAppStackTask(run(6, { componentKey: "worker" }))).output).toBe("key [REDACTED]");
   });
 
+  it("answers unknown, as the executor does, for a command whose kill is not confirmed and that has no exit code (#158)", async () => {
+    const sim = await deployed();
+    sim.appStackTasks.setNextAppStackTaskRun({ timedOut: true, notStopped: true, lines: ["slow"] });
+    sim.appStackTasks.setNextAppStackTaskRun({ exitCode: null, notStopped: true, lines: ["half"] });
+    // A command that ended by itself keeps its outcome and exit code, whatever its kill; a stop that is confirmed too.
+    sim.appStackTasks.setNextAppStackTaskRun({ exitCode: 3, notStopped: true });
+    sim.appStackTasks.setNextAppStackTaskRun({ timedOut: true, notStopped: false });
+    const results = [];
+    for (let n = 1; n <= 4; n += 1) results.push(await sim.runAppStackTask(run(n, { componentKey: "worker" })));
+    expect(results.map((r) => [r.outcome, r.problem, r.exitCode, r.output])).toEqual([
+      ["unknown", null, null, "slow"],
+      ["unknown", null, null, "half"],
+      ["failed", null, 3, ""],
+      ["timed_out", null, null, ""],
+    ]);
+    for (const result of results) expect(AppStackTaskRunIpcResultSchema.safeParse(result).success).toBe(true);
+    expect(await sim.getAppStackTaskRun(readOf(1))).toEqual({ state: "finished", result: results[0] });
+  });
+
   describe("when the private values of the component cannot be established (#188)", () => {
     // Booleans only: a failure must never print the output of a run.
     const shown = (result: AppStackTaskRunIpcResult) => ({

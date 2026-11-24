@@ -22,6 +22,11 @@ export interface AppStackTaskSimBehaviour {
   readonly timedOut?: boolean;
   /** The component has no shell: the run does not start. */
   readonly noShell?: boolean;
+  /**
+   * The kill of what the command started is not confirmed (every try failed). A command with no exit code (ended at its
+   * time limit, or the engine did not tell) is then `unknown`; one that ended with an exit code keeps its outcome.
+   */
+  readonly notStopped?: boolean;
 }
 
 /**
@@ -139,9 +144,10 @@ export class SimulatedAppStackTasks implements StackTaskExecutorPort {
       }
       const lines = behaviour.lines ?? [];
       const exitCode = behaviour.timedOut === true ? null : behaviour.exitCode === undefined ? 0 : behaviour.exitCode;
+      const unknown = behaviour.notStopped === true && exitCode === null;
       const answer = (output: string, outputTruncated: boolean): AppStackTaskRunIpcResult => ({
         runId: req.runId,
-        outcome: behaviour.timedOut === true ? "timed_out" : exitCode === 0 ? "succeeded" : "failed",
+        outcome: unknown ? "unknown" : behaviour.timedOut === true ? "timed_out" : exitCode === 0 ? "succeeded" : "failed",
         problem: null,
         exitCode,
         startedAt,
