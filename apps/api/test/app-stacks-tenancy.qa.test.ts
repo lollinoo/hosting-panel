@@ -103,13 +103,15 @@ describe("application stacks: tenancy, quota race and replays (QA M4)", () => {
         ["GET", "/components/app/logs"],
         ["GET", "/components/app/health"],
         ["POST", "/secrets", { parameterKey: "app_secret", value: "v" }],
+        ["GET", "/backups"],
         ["POST", "/backups", {}],
+        ["POST", `/backups/sbak_${"0".repeat(24)}/restore`, { confirmName: "x" }],
         ["GET", "/domains"],
         ["POST", "/domains", { hostname: "qa-b.example.test", componentKey: "app", port: 8080 }],
         ["DELETE", `/domains/${domainId}`, {}],
         ["POST", `/domains/${domainId}/check`, {}],
       ];
-      expect(routes).toHaveLength(18); // 16 stack routes minus create and list (no stack id), plus the 4 domain routes
+      expect(routes).toHaveLength(20); // 18 stack routes minus create and list (no stack id), plus the 4 domain routes
       const before = await h.counts();
       for (const [method, suffix, body] of routes) {
         for (const path of [`${base(h.b)}/${ownStack}${suffix}`, `${base(h.a)}/${ownStack}${suffix}`]) {
@@ -130,6 +132,9 @@ describe("application stacks: tenancy, quota race and replays (QA M4)", () => {
         ["POST", "/stop", {}],
         ["DELETE", "", { confirmName: "x", destroyData: false }],
         ["GET", "/components/app/health"],
+        ["GET", "/backups"],
+        ["POST", "/backups", {}],
+        ["POST", `/backups/sbak_${"0".repeat(24)}/restore`, { confirmName: "x" }],
         ["GET", "/domains"],
         ["POST", `/domains/adm_${"0".repeat(24)}/check`, {}],
       ] as const) {

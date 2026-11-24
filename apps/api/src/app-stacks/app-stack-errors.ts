@@ -1,5 +1,11 @@
 import { MAX_APP_STACK_DOMAINS, type AppTemplateIssue, type ErrorDetail } from "@hosting-panel/contracts";
-import { AppStackDomainError, AppStackRepositoryError, AppStackSecretError, TlsCoverageError } from "@hosting-panel/database";
+import {
+  AppStackBackupRepositoryError,
+  AppStackDomainError,
+  AppStackRepositoryError,
+  AppStackSecretError,
+  TlsCoverageError,
+} from "@hosting-panel/database";
 import { appNotFound, appRefusal } from "../app-templates/app-template-errors.js";
 import { ControlPlaneError } from "../common/control-plane.error.js";
 import { coverageError } from "../sites/site-domains.service.js";
@@ -120,10 +126,39 @@ function mapSecretError(err: AppStackSecretError): ControlPlaneError {
   }
 }
 
+/** Backups (ADR-0038): one detail each, because the web reads `details[0].reason`. */
+function mapBackupError(err: AppStackBackupRepositoryError): ControlPlaneError {
+  switch (err.code) {
+    case "BACKUP_NOT_FOUND":
+      return appNotFound();
+    case "NO_DATA": {
+      const message = "This application has no data to save.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "backup", message, reason: "no_data" });
+    }
+    case "NO_DESTINATION": {
+      const message = "No backup destination is set up on this server. Ask your administrator.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "backup", message, reason: "no_destination" });
+    }
+    case "NOT_RESTORABLE": {
+      const message = "This backup cannot be restored.";
+      return appRefusal("VALIDATION_ERROR", message, { field: "backupId", message, reason: "not_restorable" });
+    }
+    case "TOO_MANY": {
+      const retryAt = err.retryAt ?? new Date();
+      const iso = retryAt.toISOString();
+      return new ControlPlaneError("QUOTA_EXCEEDED", `Too many backup actions on this application; try again at ${iso}`, {
+        details: [{ field: "retryAt", reason: "too_many_requests", message: iso }],
+        retryAfterMs: Math.max(1_000, retryAt.getTime() - Date.now()),
+      });
+    }
+  }
+}
+
 /** Repository and domain errors → public errors; anything else is returned unchanged (caller rethrows). */
 export function mapAppStackError(err: unknown): unknown {
   if (err instanceof ControlPlaneError) return err;
   if (err instanceof AppStackRepositoryError) return mapRepositoryError(err);
+  if (err instanceof AppStackBackupRepositoryError) return mapBackupError(err);
   if (err instanceof AppStackDomainError) return mapDomainError(err);
   if (err instanceof AppStackSecretError) return mapSecretError(err);
   if (err instanceof TlsCoverageError) return coverageError(err);

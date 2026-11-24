@@ -4,6 +4,17 @@ Written automatically after every merge on the main branch. Do not edit by hand.
 
 ---
 
+### Backup and restore of applications (2026-11-24)
+*hosting-panel v0.12.0*
+
+**New Features**
+- **apps**: Backup and restore of applications
+
+**Bug Fixes & Stability**
+- **web**: The sign-in route refuses a cross-site or non-JSON post
+
+---
+
 ### Routing options for application addresses (2026-11-24)
 *hosting-panel v0.11.0*
 

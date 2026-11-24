@@ -31,6 +31,51 @@ export function timingSafeCompare(a: string, b: string): boolean {
   return timingSafeEqual(hashA, hashB);
 }
 
+/**
+ * The Origin must be the panel's own. A missing one passes unless `required`: the session routes
+ * check the CSRF token next, while a route without a session (sign-in, sign-out, password reset) has
+ * nothing else, and the panel's own fetch always sends Origin on a POST.
+ */
+export function validateOrigin(
+  req: Request,
+  opts?: { required?: boolean }
+): NextResponse | null {
+  const origin = req.headers.get("origin");
+  if (!origin) {
+    return opts?.required
+      ? bffErrorResponse("PERMISSION_DENIED", "Intestazione Origin mancante", 403)
+      : null;
+  }
+
+  let reqOrigin: string;
+  try {
+    reqOrigin = new URL(req.url).origin;
+  } catch {
+    // Invalid request URL
+    return bffErrorResponse(
+      "PERMISSION_DENIED",
+      "URL richiesta non valido",
+      403
+    );
+  }
+
+  if (origin.toLowerCase() !== reqOrigin.toLowerCase()) {
+    // Also allow forwarded host if behind proxy
+    const forwardedHost = req.headers.get("x-forwarded-host");
+    const host = req.headers.get("host");
+    // An Origin that is no URL ("null" from a sandboxed frame) gives undefined, which matches no header.
+    const originHost = URL.parse(origin)?.host;
+    if (originHost !== host && originHost !== forwardedHost) {
+      return bffErrorResponse(
+        "PERMISSION_DENIED",
+        "Origine della richiesta non consentita",
+        403
+      );
+    }
+  }
+  return null;
+}
+
 export function validateCsrfAndOrigin(
   req: Request,
   session: SessionData | null
@@ -44,35 +89,8 @@ export function validateCsrfAndOrigin(
   }
 
   // 1. Validate Origin header
-  const origin = req.headers.get("origin");
-  if (origin) {
-    let reqOrigin: string;
-    try {
-      reqOrigin = new URL(req.url).origin;
-    } catch {
-      // Invalid request URL
-      return bffErrorResponse(
-        "PERMISSION_DENIED",
-        "URL richiesta non valido",
-        403
-      );
-    }
-
-    if (origin.toLowerCase() !== reqOrigin.toLowerCase()) {
-      // Also allow forwarded host if behind proxy
-      const forwardedHost = req.headers.get("x-forwarded-host");
-      const host = req.headers.get("host");
-      // An Origin that is no URL ("null" from a sandboxed frame) gives undefined, which matches no header.
-      const originHost = URL.parse(origin)?.host;
-      if (originHost !== host && originHost !== forwardedHost) {
-        return bffErrorResponse(
-          "PERMISSION_DENIED",
-          "Origine della richiesta non consentita",
-          403
-        );
-      }
-    }
-  }
+  const originError = validateOrigin(req);
+  if (originError) return originError;
 
   // 2. Validate X-CSRF-Token
   const csrfHeader = req.headers.get("x-csrf-token");

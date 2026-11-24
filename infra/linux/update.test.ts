@@ -135,11 +135,37 @@ describe("update.sh downgrade gate (features in use)", () => {
     expect(readFileSync(f.log, "utf8")).toBe("");
   });
 
+  it("refuses a downgrade while an application backup exists (exit 8), naming only that feature", () => {
+    const known = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options";
+    const f = gated("echo app-stack-backups", `${known} app-stack-backups`);
+    // the target knows everything but the backups of applications
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", known), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(8);
+    for (const t of ["0.1.0 does not know app-stack-backups,", "--allow-feature-loss", "backups of applications", "retention period"]) {
+      expect(r.err).toContain(t);
+    }
+    for (const t of ["manual-tls", "backup-targets", "site-templates", "app-stacks", "app-format-v2", "app-routing-options"]) {
+      expect(r.err).not.toContain(t);
+    }
+    expect(cur(f.root)).toBe("releases/0.2.0");
+    expect(readFileSync(f.log, "utf8")).toBe("");
+    expect(existsSync(join(f.root, "releases/0.1.0"))).toBe(false);
+  });
+
+  it("a target that knows the backups of applications is not held back by them", () => {
+    const all = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups";
+    const f = gated("echo app-stack-backups", all);
+    const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", all), "--allow-downgrade"], f.env);
+    expect(r.code, r.err).toBe(0);
+    expect(cur(f.root)).toBe("releases/0.1.0");
+    expect(asked(f)).toBe(false);
+  });
+
   it("refuses a downgrade while a notification channel exists (exit 8), naming only that feature", () => {
-    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options notifications";
+    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups notifications";
     const f = gated("echo notifications", ALL);
     // The target knows everything but the notifications.
-    const target = makeArchive("0.1.0", "0.1.0", "", "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options");
+    const target = makeArchive("0.1.0", "0.1.0", "", "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups");
     const r = update(["--archive", target, "--allow-downgrade"], f.env);
     expect(r.code, r.err).toBe(8);
     for (const t of ["notifications", "--allow-feature-loss", "remove the notification channels"]) expect(r.err).toContain(t);
@@ -149,7 +175,7 @@ describe("update.sh downgrade gate (features in use)", () => {
   });
 
   it("a target that knows the notifications is not held back by a channel", () => {
-    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options notifications";
+    const ALL = "manual-tls backup-targets site-templates app-stacks app-format-v2 app-routing-options app-stack-backups notifications";
     const f = gated("echo notifications", ALL);
     const r = update(["--archive", makeArchive("0.1.0", "0.1.0", "", ALL), "--allow-downgrade"], f.env);
     expect(r.code, r.err).toBe(0);

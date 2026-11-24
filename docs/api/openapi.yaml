@@ -6213,17 +6213,30 @@ paths:
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-stacks/{stackId}/backups:
-    post:
+    get:
       tags: [App Stacks]
-      operationId: backupAppStack
-      summary: Back up an application; not available yet (app.control)
+      operationId: listAppStackBackups
+      summary: List the backups of an application, newest first (app.read)
       description: >-
-        Always refused with 422 NOT_SUPPORTED ("Application backups are not available yet.", reason
-        STACK_UNSUPPORTED_FEATURE), after the permission check and the application lookup; the body is never read.
+        Each backup says whether it is good and whether it can be restored, never where its copies are: a copy is
+        known by its priority only. `unavailableReason` says why a new backup cannot be asked for now:
+        `not_available` (this server makes no backups), `no_data` (the application keeps no data) or `no_destination`
+        (the server has no usable backup destination); `null` when it can. Returns 422 NOT_SUPPORTED (reason
+        STACK_UNSUPPORTED_FEATURE) while the capability flag `applicationStacksAvailable` is false.
       parameters:
         - $ref: "#/components/parameters/OrgIdParam"
         - $ref: "#/components/parameters/AppStackIdParam"
       responses:
+        "200":
+          description: The backups
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AppStackBackupsDto"
         "401":
           $ref: "#/components/responses/ErrorResponse"
         "403":
@@ -6231,7 +6244,110 @@ paths:
         "404":
           $ref: "#/components/responses/ErrorResponse"
         "422":
-          description: "Application backups are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          description: "Applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+    post:
+      tags: [App Stacks]
+      operationId: backupAppStack
+      summary: Back up the data of an application (app.control; audited as app.stack.backup.create)
+      description: >-
+        Queued: follow the returned operation (kind `stack.backup`). The application is stopped while its data are
+        copied to every backup destination of the server and started again afterwards, also when the copy fails; an
+        application that was stopped stays stopped. Refused with 400 when the application keeps no data
+        (`details[0].reason: no_data`) or the server has no usable destination (`no_destination`). A customer starts
+        at most six backups and restores per application per hour: beyond that the answer is 409 `QUOTA_EXCEEDED`,
+        with the time to retry from in `details[0].message` (`field: retryAt`) and in the `Retry-After` header.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) on a server that makes no backups, and while the
+        capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppStackBackupInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), too many backups and restores in the last hour (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Backups are not available on this server, or applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
+          $ref: "#/components/responses/ErrorResponse"
+
+  /v1/organizations/{orgId}/app-stacks/{stackId}/backups/{backupId}/restore:
+    post:
+      tags: [App Stacks]
+      operationId: restoreAppStackBackup
+      summary: Restore a backup into the application it was made from (app.control; audited as app.stack.backup.restore)
+      description: >-
+        Queued: follow the returned operation (kind `stack.restore`). `confirmName` is the name of the application,
+        typed again (`details[0].reason: confirmation_mismatch` otherwise). The application is stopped, the data it
+        holds now are saved first as a safety backup (kind `pre_restore`), then the data of the chosen backup replace
+        them and the application is started again if it was running. A backup without a good copy, or whose data no
+        longer belong to the application, is refused with 400 (`details[0].reason: not_restorable`); an unknown
+        backup, and one of another application, is a 404. The hourly limit of `POST .../backups` counts restores too.
+        Returns 422 NOT_SUPPORTED (reason STACK_UNSUPPORTED_FEATURE) on a server that makes no backups, and while the
+        capability flag `applicationStacksAvailable` is false.
+      parameters:
+        - $ref: "#/components/parameters/OrgIdParam"
+        - $ref: "#/components/parameters/AppStackIdParam"
+        - in: path
+          name: backupId
+          required: true
+          schema:
+            type: string
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestoreAppStackBackupInput"
+      responses:
+        "202":
+          description: Accepted; follow the returned operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStackAcceptedEnvelope"
+        "400":
+          $ref: "#/components/responses/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/ErrorResponse"
+        "403":
+          $ref: "#/components/responses/ErrorResponse"
+        "404":
+          $ref: "#/components/responses/ErrorResponse"
+        "409":
+          description: Another operation is running or the status does not allow it (`RESOURCE_LOCKED`), too many backups and restores in the last hour (`QUOTA_EXCEEDED`), or the Idempotency-Key was used for another request (`IDEMPOTENCY_CONFLICT`)
+          $ref: "#/components/responses/ErrorResponse"
+        "422":
+          description: "Backups are not available on this server, or applications are not available yet (`NOT_SUPPORTED`, `details[0].reason: STACK_UNSUPPORTED_FEATURE`)"
           $ref: "#/components/responses/ErrorResponse"
 
   /v1/organizations/{orgId}/app-stacks/{stackId}/domains:
@@ -13925,6 +14041,21 @@ components:
           type: boolean
           description: "`true` also removes the volumes and the secrets; `false` keeps them"
 
+    CreateAppStackBackupInput:
+      type: object
+      additionalProperties: false
+      description: Empty. The data of every volume go to every backup destination of the server; nothing is chosen here
+
+    RestoreAppStackBackupInput:
+      type: object
+      additionalProperties: false
+      required: [confirmName]
+      properties:
+        confirmName:
+          type: string
+          maxLength: 64
+          description: The name of the application, exactly
+
     SetAppStackSecretInput:
       type: object
       additionalProperties: false
@@ -14068,7 +14199,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/AppStackSummaryDto"
         - type: object
-          required: [templateVersionId, createdAt, activeOperationId, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
+          required: [templateVersionId, createdAt, activeOperationId, platformWork, revisionNumber, components, parameters, secretParameters, volumes, ingress, pathTargets, routesPending, cpuMilli, memoryBytes, upgrade, rollback]
           properties:
             templateVersionId:
               $ref: "#/components/schemas/AppEntityId"
@@ -14078,6 +14209,15 @@ components:
             activeOperationId:
               type: string
               nullable: true
+              description: The organisation's own operation that holds the application, to follow; `null` otherwise
+            platformWork:
+              type: string
+              enum: [backups_cleanup]
+              nullable: true
+              description: >-
+                The application is held by work of the platform (`backups_cleanup`: the nightly clean-up of its
+                backups, ADR-0038). Only the kind of work is given, never the operation, which the organisation cannot
+                read; its actions answer `409 RESOURCE_LOCKED` until it ends
             revisionNumber:
               type: integer
               minimum: 1
@@ -14253,6 +14393,109 @@ components:
           type: string
           format: date-time
           nullable: true
+
+    AppStackBackupDto:
+      type: object
+      required: [id, kind, status, problem, sizeBytes, volumeKeys, copies, startedAt, finishedAt, restore, restorable, incompleteData]
+      properties:
+        id:
+          $ref: "#/components/schemas/AppEntityId"
+        kind:
+          type: string
+          enum: [manual, pre_restore]
+          description: "`pre_restore` is the safety backup a restore makes of the data it is about to replace"
+        status:
+          type: string
+          enum: [running, succeeded, partial, failed]
+          description: "`partial`: good on at least one destination, failed on another"
+        problem:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: A problem class or an error code, never free text
+        sizeBytes:
+          type: integer
+          minimum: 0
+          nullable: true
+        volumeKeys:
+          type: array
+          items:
+            $ref: "#/components/schemas/AppStackKey"
+        copies:
+          type: array
+          description: One per backup destination, by priority; no destination name, address or path
+          items:
+            type: object
+            required: [priority, status, problem]
+            properties:
+              priority:
+                type: integer
+                minimum: 1
+              status:
+                type: string
+                enum: [running, succeeded, failed]
+              problem:
+                type: string
+                maxLength: 64
+                nullable: true
+        startedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        restore:
+          type: object
+          nullable: true
+          description: The last restore that read this backup
+          required: [status, problem, at]
+          properties:
+            status:
+              type: string
+              enum: [running, succeeded, failed]
+            problem:
+              type: string
+              maxLength: 64
+              nullable: true
+            at:
+              type: string
+              format: date-time
+              nullable: true
+        restorable:
+          type: boolean
+          description: At least one good copy, of data that still belong to the application
+        incompleteData:
+          type: boolean
+          description: >-
+            A backup, `manual` or `pre_restore`, taken while the application's data were half written (see
+            `goBackTo`): writing it back leaves them so
+
+    AppStackBackupsDto:
+      type: object
+      required: [backups, unavailableReason, goBackTo]
+      properties:
+        backups:
+          type: array
+          description: Newest first
+          items:
+            $ref: "#/components/schemas/AppStackBackupDto"
+        unavailableReason:
+          type: string
+          enum: [not_available, no_destination, no_data]
+          nullable: true
+          description: Why a new backup cannot be asked for now; `null` when it can
+        goBackTo:
+          allOf:
+            - $ref: "#/components/schemas/AppEntityId"
+          nullable: true
+          description: >-
+            While the application's data are half written, that is while the newest action of it that decides (a
+            restore that was not cancelled, or another action that succeeded; never a backup or a clean-up) is a
+            restore that left them so: the newest good `pre_restore` backup of whole data, the one to restore to go
+            back (the nightly clean-up never removes it meanwhile). `null` otherwise, and from the moment any other
+            action, a start above all, has succeeded: it took the data as they are. An action under way or failed, and
+            a restore cancelled before it ran, change nothing
 
     AppStackDomainDto:
       type: object
@@ -15371,7 +15614,7 @@ components:
               required: [operationId, kind, siteId, siteName]
               properties:
                 operationId: { type: string }
-                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply, site.tls.apply, stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete] }
+                kind: { type: string, enum: [service.deploy, service.restart, service.stop, site.deploy, site.provision, site.delete, site.reassign, site.domains, site.files.archive, site.files.extract, host.maintenance, host.security, host.allocate, site.backups.create, site.backups.prune, site.backups.restore, site.backups.download, panel.backups.create, panel.container.restart, site.wordpress.inspect, site.wordpress.update, site.wordpress.import, host.job, panel.container.apply, site.tls.apply, stack.deploy, stack.start, stack.stop, stack.restart, stack.upgrade, stack.rollback, stack.delete, stack.backup, stack.restore, stack.prune] }
                 siteId: { type: string, nullable: true }
                 siteName: { type: string, nullable: true }
 
@@ -15999,6 +16242,9 @@ components:
             - stack.upgrade
             - stack.rollback
             - stack.delete
+            - stack.backup
+            - stack.restore
+            - stack.prune
         status:
           type: string
           enum:

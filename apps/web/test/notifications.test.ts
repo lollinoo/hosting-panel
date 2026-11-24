@@ -76,7 +76,8 @@ const BOT_TOKEN = `123456789:${"A".repeat(35)}`;
 const req = (method: string, headers: Record<string, string> = {}, body: unknown = {}) =>
   new Request("http://localhost:3000/x", {
     method,
-    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", ...headers },
+    // What the page sends (components/shared/notification-settings.tsx): a string body alone would go as text/plain.
+    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", "Content-Type": "application/json", ...headers },
     body: method === "GET" ? undefined : JSON.stringify(body),
   });
 const admin = (channel: string) => ({ params: Promise.resolve({ channel }) });

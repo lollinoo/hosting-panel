@@ -257,6 +257,9 @@ export function scriptBackupExecutor(sim: InMemoryDockerSimulatorAdapter): Backu
       case "panelStart":
       case "siteState":
       case "localInit":
+      case "stackStart":
+      case "stackRestore":
+      case "stackForget":
         throw new Error(`Unexpected backup action in test stub: ${req.action}`);
     }
   }) as DockerExecutorPort["backups"];

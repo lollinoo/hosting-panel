@@ -36,7 +36,7 @@ const dp = { params: Promise.resolve({ orgId: "org-1", siteId: "s1", domainId: "
 const req = (method: string, headers: Record<string, string> = {}, body?: unknown) =>
   new Request("http://localhost:3000/x", {
     method,
-    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", ...headers },
+    headers: { Host: "localhost:3000", Origin: "http://localhost:3000", "X-CSRF-Token": "csrf", "Content-Type": "application/json", ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 
