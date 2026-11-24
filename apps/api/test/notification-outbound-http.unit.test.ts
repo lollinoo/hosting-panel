@@ -3,13 +3,24 @@ import { createServer as createPlainServer, type Server as PlainServer } from "n
 import { createServer, type Server } from "node:https";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { createOutboundHttp, isPublicAddress, type OutboundHttpTestOptions } from "../src/notifications/outbound-http.js";
+import { createOutboundHttp, isPublicAddress, type OutboundHttpTestOptions, type RecordedAddresses } from "../src/notifications/outbound-http.js";
 import type { DnsLookup } from "../src/sites/dns-check.js";
 import { issuePki } from "./fixtures/tls-certgen.js";
 
 const NAME = "hook.example.test";
 const PUBLIC_V4 = "93.184.216.34";
 const PUBLIC_V6 = "2606:2800:220:1:248:1893:25c8:1946";
+// The addresses of a server behind address translation and of someone else: documentation ranges, taken as public.
+const SELF_V4 = "203.0.113.10";
+const SELF_V6 = "2001:db8::10";
+const OTHER_V4 = "198.51.100.20";
+const OTHER_V6 = "2001:db8::20";
+
+/** A panel whose host rows record no address (a fresh install). */
+const nothingRecorded: RecordedAddresses = async () => [];
+const unreadable: RecordedAddresses = async () => {
+  throw new Error("database down");
+};
 
 /** A resolver that answers from a table and remembers what it was asked. */
 function resolver(table: Record<string, { a?: string[]; aaaa?: string[] } | Error>): DnsLookup & { asked: string[] } {
@@ -65,13 +76,13 @@ describe("the address check", () => {
 
   it("accepts an https address whose name resolves only to public addresses", async () => {
     const dns = resolver({ [NAME]: { a: [PUBLIC_V4], aaaa: [PUBLIC_V6] } });
-    expect(await createOutboundHttp(dns, none).check(`https://${NAME}/in/abc?x=1`)).toBeNull();
+    expect(await createOutboundHttp(dns, nothingRecorded, none).check(`https://${NAME}/in/abc?x=1`)).toBeNull();
     expect(dns.asked).toEqual([NAME]);
   });
 
   it("refuses, without asking the resolver, what is not https to a DNS name", async () => {
     const dns = resolver({});
-    const out = createOutboundHttp(dns, none);
+    const out = createOutboundHttp(dns, nothingRecorded, none);
     for (const url of [
       "not a url", "http://hook.example.test/", "ftp://hook.example.test/", "https://user:pw@hook.example.test/",
       "https://user@hook.example.test/", "https://127.0.0.1/", "https://8.8.8.8/", "https://[::1]/",
@@ -95,28 +106,66 @@ describe("the address check", () => {
       { a: ["not-an-address"] },
     ];
     for (const answer of cases) {
-      const out = createOutboundHttp(resolver({ [NAME]: answer }), none);
+      const out = createOutboundHttp(resolver({ [NAME]: answer }), nothingRecorded, none);
       expect(await out.check(`https://${NAME}/`), JSON.stringify(answer)).toBe("address_not_allowed");
     }
   });
 
   it("refuses a name that resolves to one of this server's own addresses", async () => {
     const dns = resolver({ [NAME]: { a: [PUBLIC_V4] }, "six.example.test": { aaaa: [PUBLIC_V6] } });
-    const out = createOutboundHttp(dns, { localAddresses: () => ["10.0.0.2", PUBLIC_V4, "2606:2800:220:1:248:1893:25c8:1946"] });
+    const out = createOutboundHttp(dns, nothingRecorded, { localAddresses: () => ["10.0.0.2", PUBLIC_V4, "2606:2800:220:1:248:1893:25c8:1946"] });
     expect(await out.check(`https://${NAME}/`)).toBe("address_not_allowed");
     // The same address spelled another way is still this server's.
     expect(await out.check("https://six.example.test/")).toBe("address_not_allowed");
-    expect(await createOutboundHttp(dns, { localAddresses: () => ["10.0.0.2"] }).check(`https://${NAME}/`)).toBeNull();
+    expect(await createOutboundHttp(dns, nothingRecorded, { localAddresses: () => ["10.0.0.2"] }).check(`https://${NAME}/`)).toBeNull();
+  });
+
+  it("refuses a name that resolves to an address the panel records for this server, also when no interface has it", async () => {
+    const documentation = { treatAsPublic: () => true, localAddresses: () => [] } satisfies OutboundHttpTestOptions;
+    const dns = resolver({
+      [NAME]: { a: [SELF_V4] },
+      "six.example.test": { aaaa: [SELF_V6] },
+      "both.example.test": { a: [OTHER_V4, SELF_V4] },
+      "mixed.example.test": { a: [OTHER_V4], aaaa: [SELF_V6] },
+      "other.example.test": { a: [OTHER_V4], aaaa: [OTHER_V6] },
+    });
+    // The row may write an address otherwise than the resolver does: long form, capitals, an IPv4 inside an IPv6.
+    for (const row of [[SELF_V4, SELF_V6], ["::ffff:203.0.113.10", "2001:DB8:0:0:0:0:0:10"]]) {
+      const out = createOutboundHttp(dns, async () => row, documentation);
+      for (const name of [NAME, "six.example.test", "both.example.test", "mixed.example.test"]) {
+        expect(await out.check(`https://${name}/`), `${name} ${row.join(" ")}`).toBe("address_not_allowed");
+      }
+      expect(await out.check("https://other.example.test/")).toBeNull();
+    }
+    // Read at every call: an address the installer records again counts at once.
+    let recorded: string[] = [];
+    const out = createOutboundHttp(dns, async () => recorded, documentation);
+    expect(await out.check("https://other.example.test/")).toBeNull();
+    recorded = [OTHER_V6];
+    expect(await out.check("https://other.example.test/")).toBe("address_not_allowed");
+    // What is not an address is ignored.
+    const odd = createOutboundHttp(dns, async () => ["", " ", "not-an-address", "203.0.113.0/24"], documentation);
+    expect(await odd.check(`https://${NAME}/`)).toBeNull();
+  });
+
+  it("calls nothing while the addresses the panel records cannot be read", async () => {
+    const dns = resolver({ "other.example.test": { a: [OTHER_V4] } });
+    const documentation = { treatAsPublic: () => true, localAddresses: () => [] } satisfies OutboundHttpTestOptions;
+    expect(await createOutboundHttp(dns, unreadable, documentation).check("https://other.example.test/")).toBe("unreachable");
+    const stuck = createOutboundHttp(dns, () => new Promise(() => undefined), { ...documentation, timeoutMs: 300 });
+    const started = Date.now();
+    expect(await stuck.check("https://other.example.test/")).toBe("unreachable");
+    expect(Date.now() - started).toBeLessThan(3_000);
   });
 
   it("reads this server's interfaces when nothing replaces them: loopback is one of them", async () => {
-    const out = createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), { treatAsPublic: () => true });
+    const out = createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), nothingRecorded, { treatAsPublic: () => true });
     expect(await out.check(`https://${NAME}/`)).toBe("address_not_allowed");
   });
 
   it("calls a name that does not resolve, or a resolver that fails, unreachable", async () => {
     const dns = resolver({ "gone.example.test": {}, "down.example.test": new Error("ETIMEOUT") });
-    const out = createOutboundHttp(dns, none);
+    const out = createOutboundHttp(dns, nothingRecorded, none);
     expect(await out.check("https://gone.example.test/")).toBe("unreachable");
     expect(await out.check("https://down.example.test/")).toBe("unreachable");
     expect(await out.postJson("https://down.example.test/", "{}")).toEqual({ problem: "unreachable", httpStatus: null });
@@ -124,7 +173,7 @@ describe("the address check", () => {
 
   it("gives up after its time on a resolver that never answers", async () => {
     const silent: DnsLookup = { lookup: () => new Promise(() => undefined) };
-    const out = createOutboundHttp(silent, { ...none, timeoutMs: 300 });
+    const out = createOutboundHttp(silent, nothingRecorded, { ...none, timeoutMs: 300 });
     const started = Date.now();
     expect(await out.postJson(`https://${NAME}/`, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
     expect(await out.check(`https://${NAME}/`)).toBe("unreachable");
@@ -156,8 +205,8 @@ describe("the request", () => {
     return (server.address() as AddressInfo).port;
   }
 
-  const outbound = (extra: OutboundHttpTestOptions = {}) =>
-    createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), { treatAsPublic: () => true, localAddresses: () => [], ca: pki.root.pem, ...extra });
+  const outbound = (extra: OutboundHttpTestOptions = {}, recorded: RecordedAddresses = nothingRecorded) =>
+    createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), recorded, { treatAsPublic: () => true, localAddresses: () => [], ca: pki.root.pem, ...extra });
 
   async function stop(): Promise<void> {
     const running = server;
@@ -220,7 +269,7 @@ describe("the request", () => {
     expect(seen).toEqual([]);
     await stop();
     port = await listen(200);
-    const untrusting = createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), { treatAsPublic: () => true, localAddresses: () => [] });
+    const untrusting = createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), nothingRecorded, { treatAsPublic: () => true, localAddresses: () => [] });
     expect(await untrusting.postJson(`https://${NAME}:${String(port)}/`, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
     expect(seen).toEqual([]);
   });
@@ -237,7 +286,7 @@ describe("the request", () => {
     lookup: () => new Promise((done) => setTimeout(() => done({ a: ["127.0.0.1"], aaaa: [] }), ms)),
   });
   const slow = (ms: number, timeoutMs: number) =>
-    createOutboundHttp(slowResolver(ms), { treatAsPublic: () => true, localAddresses: () => [], ca: pki.root.pem, timeoutMs });
+    createOutboundHttp(slowResolver(ms), nothingRecorded, { treatAsPublic: () => true, localAddresses: () => [], ca: pki.root.pem, timeoutMs });
 
   it("counts the resolution in its time: a slow resolver leaves only the rest to a side that says nothing", async () => {
     const port = await listen(200, { silent: true });
@@ -274,9 +323,24 @@ describe("the request", () => {
 
   it("sends nothing to an address it refuses", async () => {
     const port = await listen(200);
-    const guarded = createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), { localAddresses: () => [], ca: pki.root.pem });
+    const guarded = createOutboundHttp(resolver({ [NAME]: { a: ["127.0.0.1"] } }), nothingRecorded, { localAddresses: () => [], ca: pki.root.pem });
     expect(await guarded.postJson(`https://${NAME}:${String(port)}/`, "{}")).toEqual({ problem: "address_not_allowed", httpStatus: null });
     expect(await guarded.postJson(`http://${NAME}:${String(port)}/`, "{}")).toEqual({ problem: "address_not_allowed", httpStatus: null });
     expect(seen).toEqual([]);
+  });
+
+  it("sends nothing to an address the panel records for this server, nor while those addresses cannot be read", async () => {
+    const port = await listen(200);
+    const url = `https://${NAME}:${String(port)}/`;
+    // The test server stands for this server: its address is recorded and is on no interface (none is read here).
+    expect(await outbound({}, async () => ["127.0.0.1"]).postJson(url, "{}")).toEqual({ problem: "address_not_allowed", httpStatus: null });
+    expect(await outbound({}, unreadable).postJson(url, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
+    const started = Date.now();
+    expect(await outbound({ timeoutMs: 300 }, () => new Promise(() => undefined)).postJson(url, "{}")).toEqual({ problem: "unreachable", httpStatus: null });
+    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(seen).toEqual([]);
+    // Readable, and not this server's: it goes.
+    expect(await outbound({}, async () => [SELF_V4, SELF_V6]).postJson(url, "{}")).toEqual({ problem: null, httpStatus: 200 });
+    expect(seen).toHaveLength(1);
   });
 });

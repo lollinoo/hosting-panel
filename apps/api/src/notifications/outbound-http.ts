@@ -1,10 +1,12 @@
 // The only place where the API makes an HTTP request to the outside (ADR-0040 N7).
 // One rule for every call, also the ones to Telegram: https only, to a DNS name whose every resolved address is public
-// and is not one of this server's own; the connection goes to the address that was checked; no redirect is followed
-// and the body of the answer is never read. Nothing here logs: an address often holds a key.
+// and is not one of this server's own (those of its interfaces and those the panel records for it); the connection
+// goes to the address that was checked; no redirect is followed and the body of the answer is never read. Nothing here
+// logs: an address often holds a key.
 import { request } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { networkInterfaces } from "node:os";
+import { hosts, type HostingPanelDatabase } from "@hosting-panel/database";
 import type { DnsLookup } from "../sites/dns-check.js";
 
 export type OutboundProblem = "address_not_allowed" | "unreachable" | "redirect" | "rejected" | "server_error";
@@ -70,6 +72,15 @@ function interfaceAddresses(): string[] {
   return Object.values(networkInterfaces()).flatMap((list) => (list ?? []).map((i) => i.address.split("%", 1)[0]!));
 }
 
+/** The public addresses the panel records for its servers: behind address translation no interface has them. */
+export type RecordedAddresses = () => Promise<readonly string[]>;
+
+/** Every IPv4 and IPv6 address of every host row. What is not an address is left to the check, which ignores it. */
+export async function recordedServerAddresses(db: HostingPanelDatabase): Promise<string[]> {
+  const rows = await db.select({ ipv4: hosts.ipv4Address, ipv6: hosts.ipv6Address }).from(hosts);
+  return rows.flatMap((row) => (row.ipv6 === null ? [row.ipv4] : [row.ipv4, row.ipv6]));
+}
+
 interface Target {
   readonly url: URL;
   readonly name: string;
@@ -98,7 +109,7 @@ function resultOf(status: number): OutboundResult {
   return failed("rejected", status >= 100 && status <= 599 ? status : null);
 }
 
-export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions = {}): OutboundHttpPort {
+export function createOutboundHttp(dns: DnsLookup, recorded: RecordedAddresses, test: OutboundHttpTestOptions = {}): OutboundHttpPort {
   const timeoutMs = test.timeoutMs ?? OUTBOUND_TIMEOUT_MS;
 
   async function target(raw: string, endsAt: number): Promise<Target | OutboundProblem> {
@@ -121,8 +132,17 @@ export function createOutboundHttp(dns: DnsLookup, test: OutboundHttpTestOptions
     if (found === null) return "unreachable";
     const addresses = [...found.a, ...found.aaaa];
     if (addresses.length === 0) return "unreachable";
+    // Read at every call, as the interfaces are: an address the installer records again counts at the next send.
+    let kept: readonly string[] | null;
+    try {
+      kept = await beforeEnd(recorded(), endsAt);
+    } catch {
+      return "unreachable";
+    }
+    // Fail closed: nothing is called while it is not known which addresses are this server's.
+    if (kept === null) return "unreachable";
     const own = new BlockList();
-    for (const address of test.localAddresses ? test.localAddresses() : interfaceAddresses()) {
+    for (const address of [...(test.localAddresses ? test.localAddresses() : interfaceAddresses()), ...kept]) {
       const family = isIP(address);
       if (family !== 0) own.addAddress(address, family === 4 ? "ipv4" : "ipv6");
     }
