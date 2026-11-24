@@ -156,8 +156,9 @@ export class AppStackDomainsService {
   }
 
   /**
-   * The route refresh queued in the same transaction withdraws the route. Removing frees the host name for anyone, so
-   * unless that refresh withdraws it now or nothing is published (ADR-0037) the address is kept and the removal refused.
+   * The route refresh queued in the same transaction withdraws the route. With a route file published the address stays,
+   * marked as being removed and holding its host name, until a file without it is (issue #112); with none it goes now.
+   * Unless that refresh withdraws it now or nothing is published (ADR-0037) the address is kept and the removal refused.
    */
   public async remove(ctx: AppStackRequestContext, stack: AppStackRow, domainId: string): Promise<AppStackDomainDto[]> {
     const row = await this.#row(stack, domainId);
@@ -235,8 +236,9 @@ export class AppStackDomainsService {
     return plan.data.ingress;
   }
 
+  /** With the addresses being removed: the customer sees them go. */
   #rows(stack: AppStackRow): Promise<AppStackDomainRow[]> {
-    return listAppStackDomains(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id });
+    return listAppStackDomains(this.dbClient.db, { organizationId: stack.organizationId, stackId: stack.id, includeRemoving: true });
   }
 
   async #row(stack: AppStackRow, domainId: string): Promise<AppStackDomainRow> {

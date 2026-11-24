@@ -139,6 +139,13 @@ describe("mapAppStackError", () => {
     );
   });
 
+  it("an address being removed is neither changed nor removed again (issue #112)", () => {
+    expect(mapped(new AppStackDomainError("REMOVING", "x"))).toMatchObject({
+      ...one(409, "RESOURCE_LOCKED", "This web address is being removed.", { field: "domainId", reason: "address_removing" }),
+      retryable: false,
+    });
+  });
+
   it("maps a TLS coverage refusal like a site domain add", () => {
     expect(mapped(new TlsCoverageError("DOMAIN_CONFLICT", "foreign_coverage", "x"))).toMatchObject({
       code: "DOMAIN_CONFLICT",

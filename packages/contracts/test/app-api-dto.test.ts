@@ -173,6 +173,7 @@ const SAMPLES: [string, z.ZodType, unknown][] = [
       id: "asd_1", hostname: "notes.example.com", componentKey: "app", port: 8080, status: "active", certificateStatus: "active",
       certificateProblem: null, certificateExpiresAt: AT, checkedAt: AT, redirectToDomainId: null, compression: true,
       protection: { username: "team" }, pathRoutes: [{ pathPrefix: "/api", componentKey: "api", port: 3000, stripPrefix: true }],
+      removing: false,
     },
   ],
   [
@@ -200,7 +201,7 @@ destroyData parameterKey value limit cursor tail stackId operationId deploymentI
 templateVersionNumber unhealthyCount primaryHostname activeOperationId platformWork revisionNumber health healthObservedAt dependsOn label
 secretParameters required isSet version setAt volumes retentionPolicy upgrade rollback kind problem startedAt endedAt certificateStatus
 certificateProblem certificateExpiresAt checkedAt fromRevisionId fromVersionNumber toTemplateVersionId toVersionNumber newRevision
-change restart downtime dataRisk lines at stream text observedAt stale`.split(/\s+/);
+change restart downtime dataRisk lines at stream text observedAt stale removing`.split(/\s+/);
 
 describe("app API DTO keys pass the public-DTO and plaintext-secret guards", () => {
   it.each(SAMPLES)("%s: a full sample parses and has no forbidden key", (_name, schema, sample) => {

@@ -138,6 +138,11 @@ function mapDomainError(err: AppStackDomainError): ControlPlaneError {
       const message = "Choose a password for this web address.";
       return appRefusal("VALIDATION_ERROR", message, { field: "protection.password", message, reason: "password_required" });
     }
+    case "REMOVING": {
+      // It ends by itself once its route is withdrawn (issue #112): asking again changes nothing.
+      const message = "This web address is being removed.";
+      return appRefusal("RESOURCE_LOCKED", message, { field: "domainId", message, reason: "address_removing" }, false);
+    }
   }
 }
 

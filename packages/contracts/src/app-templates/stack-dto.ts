@@ -221,6 +221,7 @@ export const AppStackDomainDtoSchema = z.object({
   certificateExpiresAt: IsoDateTimeSchema.nullable(),
   checkedAt: IsoDateTimeSchema.nullable(), // dns_checked_at
   ...AppStackDomainRoutingDtoShape, // ADR-0037
+  removing: z.boolean(), // being removed: it keeps its name until its route is withdrawn, and takes no change (issue #112)
 });
 export type AppStackDomainDto = z.infer<typeof AppStackDomainDtoSchema>;
 export const APP_STACK_DIFF_CHANGES = ["added", "updated", "removed", "unchanged"] as const;

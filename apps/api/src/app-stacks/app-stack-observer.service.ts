@@ -164,7 +164,8 @@ export class AppStackObserverService {
   /**
    * ADR-0037: queues the route refresh in the caller's transaction, which holds the stack row, so no action can be
    * queued between a change of the addresses and their refresh. Only when the saved addresses are not what the route
-   * file holds; the caller has checked that the routes of the stack follow its addresses. True when one was queued.
+   * file holds, or one is being removed; the caller has checked that the routes of the stack follow its addresses. True
+   * when one was queued.
    */
   public async queueRoutesRefresh(
     tx: HostingPanelDatabase,
@@ -173,8 +174,10 @@ export class AppStackObserverService {
   ): Promise<boolean> {
     if (this.config.runtimeBackend === "disabled" || stack.appliedRevisionId === null) return false;
     const ref = { organizationId: stack.organizationId, stackId: stack.id };
-    const domains = await listAppStackDomains(tx, ref);
-    if (!appStackRoutesPending({ ...stack, domains })) return false;
+    const every = await listAppStackDomains(tx, { ...ref, includeRemoving: true });
+    const domains = every.filter((row) => row.removalRequestedAt === null);
+    // An address being removed frees its host name only with a route file published without it (issue #112).
+    if (!appStackRoutesPending({ ...stack, domains }) && domains.length === every.length) return false;
     await this.#enqueueRefresh(tx, { ...ref, appliedRevisionId: stack.appliedRevisionId });
     this.#routesQueuedAt.set(stack.id, { at: now.getTime(), addresses: appStackAddressesHash(domains, null) });
     return true;
@@ -470,7 +473,11 @@ export class AppStackObserverService {
     if (!appStackRoutesFollowAddresses(stack, last)) return false;
     const plan = await this.#appliedPlan(stack);
     if (plan === null) return false;
-    const routes = { plan, domains: await listAppStackDomains(db, stack), now, acmeEnabled };
+    const every = await listAppStackDomains(db, { ...stack, includeRemoving: true });
+    // Issue #112: an address being removed keeps its host name until a route file without it is published, so the
+    // refresh is retried after one that failed even when the routes it would publish are the stored ones.
+    const removing = every.some((row) => row.removalRequestedAt !== null);
+    const routes = { plan, domains: every.filter((row) => row.removalRequestedAt === null), now, acmeEnabled };
     // The saved addresses and options: they move only when the customer changes them, never with health.
     const addresses = appStackAddressesHash(routes.domains, null);
     const queued = this.#routesQueuedAt.get(stack.stackId);
@@ -500,7 +507,7 @@ export class AppStackObserverService {
         ),
       );
     const { entries } = appStackRoutePlan({ ...routes, include: new Set(healthy.map((c) => c.componentKey)) });
-    if ((entries.length > 0 ? appStackRoutesHash(entries) : null) === stack.appliedRoutesHash) return false;
+    if (!removing && (entries.length > 0 ? appStackRoutesHash(entries) : null) === stack.appliedRoutesHash) return false;
     // A flapping target is refreshed at most every five minutes; a change of the addresses (one removed) or of their
     // options never waits (a new path to a target the published routes leave out would otherwise read as a health change).
     if (

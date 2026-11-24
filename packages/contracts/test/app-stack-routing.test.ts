@@ -123,7 +123,7 @@ describe("application routing options (ADR-0037)", () => {
     const dto = {
       id: "sdom_0123456789abcdef01234567", hostname: "shop.example.org", componentKey: "web", port: 8080, status: "active",
       certificateStatus: "active", certificateProblem: null, certificateExpiresAt: null, checkedAt: null, redirectToDomainId: null,
-      compression: true, protection: { username: "team" }, pathRoutes: [RULE],
+      compression: true, protection: { username: "team" }, pathRoutes: [RULE], removing: false,
     };
     expect(AppStackDomainDtoSchema.parse(dto)).toEqual(dto);
     expect(findForbiddenPublicDtoKeys(dto)).toEqual([]);

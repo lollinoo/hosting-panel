@@ -57,6 +57,7 @@ import {
   getPublishedAppTemplateVersion,
   inArray,
   insertGeneratedAppStackSecrets,
+  isNull,
   listAppStackComponents,
   listAppStackDeployments,
   listAppStackDomains,
@@ -322,7 +323,14 @@ export class AppStacksService {
       db
         .select()
         .from(appStackDomains)
-        .where(and(eq(appStackDomains.organizationId, organizationId), inArray(appStackDomains.stackId, stackIds))),
+        // An address being removed is no usable address (issue #112).
+        .where(
+          and(
+            eq(appStackDomains.organizationId, organizationId),
+            inArray(appStackDomains.stackId, stackIds),
+            isNull(appStackDomains.removalRequestedAt),
+          ),
+        ),
     ]);
     const names = new Map(templates.map((t) => [t.id, t.name]));
     const numbers = new Map(versions.map((v) => [v.id, v.versionNumber]));

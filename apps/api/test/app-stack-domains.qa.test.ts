@@ -1022,6 +1022,58 @@ describe("B3: application web addresses touch only the application's own route f
       expect((await files()).get(`app_${otherStackId}.yml`)).toContain(name);
       expect((await files()).get(`app_${appId}.yml`) ?? "").not.toContain(name);
     });
+
+    it("a removal whose route refresh fails keeps the name, marked and unchangeable, until a later refresh withdraws it (issue #112)", async () => {
+      const name = "leaving.example.test";
+      const theirs = () => call("POST", `/v1/organizations/${otherOrgId}/app-stacks/${otherStackId}/domains`, { hostname: name, ...WEB }, otherToken);
+      const options = { redirectToDomainId: null, compression: false, protection: null, pathRoutes: [] };
+      const { appId, domainId } = await published(name, 710);
+      lookup.set("staying.example.test", []);
+      const kept = await addHost("staying.example.test", appId);
+      expect(kept.status, kept.raw).toBe(201);
+      const keptId = (kept.body.data as Json[]).find((d) => d.hostname === "staying.example.test")!.id as string;
+      await pass(711);
+
+      sim.appStacks.failNextAppStackStep("routes", "engine_unavailable");
+      const removed = await owner("DELETE", `${base(appId)}/${domainId}`);
+      expect(removed.status, removed.raw).toBe(200);
+      expect(removed.body.data).toContainEqual(expect.objectContaining({ id: domainId, hostname: name, removing: true }));
+      expect(removed.body.data).toContainEqual(expect.objectContaining({ id: keptId, removing: false }));
+      await drain();
+      expect((await appRow(appId)).status).toBe("degraded");
+      expect((await files()).get(`app_${appId}.yml`)).toContain(name);
+      expect((await address(name)).removalRequestedAt).not.toBeNull();
+
+      // The file still serves it: the name stays this application's, and the address takes no change.
+      const taken = await theirs();
+      expect(taken.status, taken.raw).toBe(409);
+      expect(taken.body.error.code).toBe("DOMAIN_CONFLICT");
+      const again = await addHost(name, appId);
+      expect(again.status, again.raw).toBe(409);
+      expect(again.body.error.code).toBe("DOMAIN_CONFLICT");
+      for (const res of [await owner("PATCH", `${base(appId)}/${domainId}`, options), await owner("DELETE", `${base(appId)}/${domainId}`)]) {
+        expect(res.status, res.raw).toBe(409);
+        expect(res.body.error.code).toBe("RESOURCE_LOCKED");
+        expect(res.body.error.details).toContainEqual(expect.objectContaining({ field: "domainId", reason: "address_removing" }));
+      }
+      const redirect = await owner("PATCH", `${base(appId)}/${keptId}`, { ...options, redirectToDomainId: domainId });
+      expect(redirect.status, redirect.raw).toBe(400);
+      expect(redirect.body.error.details).toContainEqual(expect.objectContaining({ field: "redirectToDomainId", reason: "redirect_target" }));
+      const listed = await owner("GET", base(appId));
+      expect(listed.body.data).toContainEqual(expect.objectContaining({ id: domainId, removing: true }));
+
+      // The periodic pass retries the refresh; the file it publishes has no such name, and only then does it change hands.
+      await pass(712);
+      expect((await appRow(appId)).status).toBe("running");
+      expect((await files()).get(`app_${appId}.yml`)).not.toContain(name);
+      expect((await files()).get(`app_${appId}.yml`)).toContain("staying.example.test");
+      expect(await dbClient.db.select().from(appStackDomains).where(eq(appStackDomains.hostname, name))).toEqual([]);
+      expect(((await owner("GET", base(appId))).body.data as Json[]).map((d) => d.hostname)).toEqual(["staying.example.test"]);
+      const free = await theirs();
+      expect(free.status, free.raw).toBe(201);
+      await pass(713);
+      expect((await files()).get(`app_${otherStackId}.yml`)).toContain(name);
+    });
   });
 
   // ADR-0037: "pending" is exact. Two entry points, web:8080 and cache:11211; the addresses are on web unless said.
